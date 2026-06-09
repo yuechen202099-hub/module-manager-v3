@@ -48,3 +48,25 @@ def test_validation_error_uses_contract_shape() -> None:
     assert payload["error"]["code"] == "validation_error"
     assert isinstance(payload["request_id"], str)
 
+
+def test_local_test_task_and_review_flow() -> None:
+    client.post("/local-test/bootstrap")
+
+    tasks_response = client.get("/local-test/tasks")
+    assert tasks_response.status_code == 200
+    task = tasks_response.json()["data"]["items"][0]
+
+    claim_response = client.post(f"/local-test/tasks/{task['id']}/claim", json={"reviewer": "api-test"})
+    assert claim_response.status_code == 200
+    assert claim_response.json()["data"]["claimed_by"] == "api-test"
+
+    groups_response = client.get("/local-test/groups?limit=1")
+    assert groups_response.status_code == 200
+    group = groups_response.json()["data"]["items"][0]
+
+    review_response = client.patch(
+        f"/local-test/groups/{group['id']}/review",
+        json={"status": "approved", "reviewer": "api-test", "note": "api smoke"},
+    )
+    assert review_response.status_code == 200
+    assert review_response.json()["data"]["status"] == "approved"

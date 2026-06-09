@@ -3,255 +3,815 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>模块更换项目管理器 V2.01 测试版</title>
+    <title>模块更换项目管理器 V2.1 本地工作台</title>
     <style>
       :root {
-        --bg: #f5f7fa;
+        --bg: #eef2f6;
+        --bg-top: #f8fafc;
         --panel: #ffffff;
-        --line: #d8e0e8;
-        --text: #17212b;
-        --muted: #667085;
-        --primary: #1f6f9f;
+        --panel-soft: #f7f9fc;
+        --ink: #17212b;
+        --muted: #647386;
+        --muted-strong: #475569;
+        --line: #d7dee8;
+        --line-strong: #bac6d4;
+        --primary: #256f9f;
+        --primary-dark: #155d87;
+        --primary-soft: #e7f2f8;
         --danger: #b42318;
-        --warning: #b7791f;
-        --success: #16815d;
+        --danger-soft: #fff0ed;
+        --warning: #a86112;
+        --warning-soft: #fff6db;
+        --success: #147a5a;
+        --success-soft: #e8f7f1;
+        --neutral: #526071;
+        --neutral-soft: #f1f5f9;
+        --violet: #62549f;
+        --violet-soft: #f1eef9;
+        --shadow: 0 14px 34px rgba(23, 32, 42, 0.08);
+        --radius: 8px;
+        --header-h: 56px;
       }
-      * {
-        box-sizing: border-box;
+      * { box-sizing: border-box; }
+      html {
+        min-width: 0;
+        background: var(--bg);
       }
       body {
         margin: 0;
-        font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
-        background: var(--bg);
-        color: var(--text);
+        min-width: 0;
+        font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+        font-size: 13px;
+        line-height: 1.45;
+        background: linear-gradient(180deg, var(--bg-top), var(--bg) 230px);
+        color: var(--ink);
+        overflow-x: hidden;
       }
       header {
-        height: 60px;
-        padding: 0 22px;
+        min-height: var(--header-h);
+        padding: 8px 20px;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        background: #101820;
+        gap: 16px;
+        background: #16202a;
         color: #fff;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
       }
-      header h1 {
-        margin: 0;
-        font-size: 18px;
+      h1, h2, h3, p { margin: 0; }
+      h1 {
+        min-width: 0;
+        overflow: hidden;
+        font-size: 17px;
+        font-weight: 800;
+        letter-spacing: 0;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
-      main {
-        padding: 18px;
-      }
-      .toolbar {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        margin-bottom: 14px;
-      }
+      h2 { font-size: 14px; font-weight: 800; color: var(--muted-strong); }
+      h3 { font-size: 13px; font-weight: 800; color: var(--muted-strong); }
+      button, input, select, textarea { font: inherit; }
       button {
-        border: 1px solid var(--primary);
+        height: 32px;
+        min-width: 74px;
+        border: 1px solid var(--primary-dark);
+        border-radius: 6px;
+        padding: 0 12px;
         background: var(--primary);
         color: #fff;
-        border-radius: 6px;
-        height: 34px;
-        padding: 0 14px;
         cursor: pointer;
+        font-weight: 700;
+        letter-spacing: 0;
+        white-space: nowrap;
       }
-      button.secondary {
+      button:hover { background: var(--primary-dark); }
+      button.secondary { background: #fff; color: var(--primary); }
+      button.secondary:hover { background: var(--primary-soft); }
+      button.ghost { border-color: var(--line); background: #fff; color: var(--ink); }
+      button.danger { border-color: var(--danger); background: var(--danger); }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+      button:focus-visible,
+      input:focus-visible,
+      select:focus-visible,
+      textarea:focus-visible {
+        outline: 2px solid rgba(37, 111, 159, 0.28);
+        outline-offset: 2px;
+      }
+      input, select, textarea {
+        border: 1px solid var(--line);
+        border-radius: 6px;
         background: #fff;
-        color: var(--primary);
+        color: var(--ink);
+        min-width: 0;
       }
-      .grid {
+      input, select { height: 32px; padding: 0 9px; }
+      textarea {
+        width: 100%;
+        min-height: 104px;
+        resize: vertical;
+        padding: 9px;
+        line-height: 1.5;
+      }
+      main {
+        width: min(100%, 1760px);
+        margin: 0 auto;
+        padding: 12px 16px 18px;
+      }
+      .topbar {
         display: grid;
-        grid-template-columns: repeat(4, minmax(140px, 1fr));
-        gap: 12px;
-        margin-bottom: 14px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        min-height: 44px;
+        margin-bottom: 12px;
+        padding: 6px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(255, 255, 255, 0.82);
       }
-      .metric,
-      .panel {
+      .actions, .reviewer, .review-actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .muted { color: var(--muted); }
+      .small { font-size: 12px; }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(9, minmax(96px, 1fr));
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .metric, .panel, .task-card {
         background: var(--panel);
         border: 1px solid var(--line);
-        border-radius: 8px;
+        border-radius: var(--radius);
       }
       .metric {
-        padding: 14px;
+        min-width: 0;
+        min-height: 62px;
+        padding: 9px 11px;
+        display: grid;
+        align-content: space-between;
+        box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
       }
       .metric span {
         display: block;
         color: var(--muted);
         font-size: 12px;
+        font-weight: 600;
+        overflow-wrap: anywhere;
       }
       .metric strong {
         display: block;
-        margin-top: 8px;
-        font-size: 26px;
+        margin-top: 4px;
+        color: #0f172a;
+        font-size: 24px;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+      }
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(230px, 260px) minmax(560px, 1fr) minmax(330px, 380px);
+        gap: 12px;
+        min-height: calc(100vh - var(--header-h) - 154px);
+        align-items: stretch;
       }
       .panel {
-        padding: 14px;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+        box-shadow: var(--shadow);
       }
-      .layout {
+      .panel-head {
+        min-height: 42px;
+        padding: 0 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, #ffffff, var(--panel-soft));
+      }
+      .panel-body { padding: 10px; }
+      .task-card { padding: 10px; }
+      .task-card + .task-card { margin-top: 8px; }
+      .task-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .task-grid {
         display: grid;
-        grid-template-columns: minmax(540px, 1fr) 360px;
-        gap: 14px;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin: 8px 0;
+      }
+      .task-grid div { padding: 8px; border-radius: 6px; background: #f5f7f9; min-width: 0; overflow-wrap: anywhere; }
+      .task-grid span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+      .queue-tools {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 140px auto;
+        gap: 8px;
+        padding: 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      .queue {
+        max-height: calc(100vh - var(--header-h) - 250px);
+        min-height: 360px;
+        overflow: auto;
+        scrollbar-gutter: stable;
       }
       table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 13px;
+        table-layout: fixed;
+        font-size: 12.5px;
       }
-      th,
-      td {
+      th, td {
         border-bottom: 1px solid var(--line);
-        padding: 8px 10px;
+        padding: 7px 10px;
         text-align: left;
-        vertical-align: top;
+        vertical-align: middle;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }
       th {
-        color: var(--muted);
-        background: #f8fafc;
+        height: 34px;
         position: sticky;
         top: 0;
+        z-index: 1;
+        color: var(--muted-strong);
+        background: var(--panel-soft);
+        font-size: 12px;
+        font-weight: 800;
+        border-bottom-color: var(--line-strong);
       }
-      tr {
+      tbody tr {
+        height: 40px;
         cursor: pointer;
       }
-      tr:hover td {
-        background: #eef6fb;
+      tbody tr:nth-child(even) td {
+        background: #fbfcfe;
       }
-      .status-incomplete {
-        color: var(--warning);
+      tbody tr:hover td, tbody tr.active td { background: var(--primary-soft); }
+      .col-meter { width: 118px; }
+      .col-terminal { width: 106px; }
+      .col-photo { width: 64px; }
+      .col-status { width: 92px; }
+      .truncate {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+      .badge {
+        display: inline-flex;
+        max-width: 100%;
+        min-height: 24px;
+        align-items: center;
+        border: 1px solid currentColor;
+        border-radius: 6px;
+        padding: 2px 8px;
+        font-size: 12px;
         font-weight: 700;
-      }
-      .status-unmatched {
-        color: var(--danger);
-        font-weight: 700;
-      }
-      .status-pending {
-        color: var(--success);
-        font-weight: 700;
-      }
-      .muted {
+        line-height: 1.2;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        background: var(--neutral-soft);
         color: var(--muted);
       }
-      .scroll {
-        max-height: calc(100vh - 260px);
-        overflow: auto;
+      .status-pending { background: var(--neutral-soft); color: var(--neutral); }
+      .status-in_review { background: var(--primary-soft); color: var(--primary); }
+      .status-incomplete { background: var(--warning-soft); color: var(--warning); }
+      .status-unmatched, .status-exception { background: var(--danger-soft); color: var(--danger); }
+      .status-approved { background: var(--success-soft); color: var(--success); }
+      .status-released, .status-published { background: var(--violet-soft); color: var(--violet); }
+      .detail-empty {
+        min-height: 300px;
+        display: grid;
+        place-items: center;
+        color: var(--muted);
+        text-align: center;
       }
-      pre {
-        white-space: pre-wrap;
-        word-break: break-all;
-        background: #f8fafc;
+      .detail-grid {
+        display: grid;
+        grid-template-columns: 86px minmax(0, 1fr);
+        gap: 8px 12px;
+        margin-bottom: 14px;
+        font-size: 12.5px;
+      }
+      .detail-grid dt { color: var(--muted); }
+      .detail-grid dd {
+        min-width: 0;
+        margin: 0;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .photo-list {
+        max-height: 200px;
+        overflow: auto;
+        margin: 10px 0 14px;
         border: 1px solid var(--line);
-        padding: 10px;
         border-radius: 6px;
+      }
+      .photo-row {
+        display: grid;
+        grid-template-columns: 54px minmax(0, 1fr);
+        gap: 8px;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--line);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      .photo-row:last-child { border-bottom: 0; }
+      .review-box { padding-top: 14px; border-top: 1px solid var(--line); }
+      .review-row {
+        display: grid;
+        grid-template-columns: 108px minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        min-width: 260px;
+        max-width: 440px;
+        padding: 12px 14px;
+        border-radius: 8px;
+        background: #16202a;
+        color: #fff;
+        box-shadow: var(--shadow);
+        opacity: 0;
+        transform: translateY(10px);
+        pointer-events: none;
+        transition: 0.18s ease;
+      }
+      .toast.show { opacity: 1; transform: translateY(0); }
+      .error { color: var(--danger); }
+      ::selection {
+        background: rgba(37, 111, 159, 0.22);
+      }
+      @media (max-width: 1180px) {
+        .stats { grid-template-columns: repeat(5, minmax(112px, 1fr)); }
+        .workspace {
+          grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+        }
+        .workspace > aside.panel:last-child {
+          grid-column: 1 / -1;
+        }
+        .queue { max-height: 440px; }
+      }
+      @media (max-width: 840px) {
+        header {
+          align-items: flex-start;
+          padding: 10px 12px;
+          flex-direction: column;
+        }
+        main { padding: 10px; }
+        .topbar,
+        .actions,
+        .reviewer,
+        .review-actions {
+          align-items: stretch;
+        }
+        .topbar,
+        .workspace,
+        .queue-tools {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .workspace > aside.panel:last-child {
+          grid-column: auto;
+        }
+        .queue {
+          min-height: 320px;
+          max-height: 52vh;
+        }
       }
     </style>
   </head>
   <body>
     <header>
-      <h1>模块更换项目管理器 V2.01 测试版</h1>
-      <span>本地模拟运行</span>
-    </header>
-    <main>
-      <div class="toolbar">
-        <button id="bootstrap">重新导入三份测试数据</button>
-        <button class="secondary" id="refresh">刷新结果</button>
-        <span class="muted" id="paths"></span>
+      <div>
+        <h1>模块更换项目管理器 V2.1 本地工作台</h1>
+        <div class="small muted">调用 /local-test API，面向本地三表联调和审阅演示</div>
       </div>
-      <section class="grid" id="metrics"></section>
-      <section class="layout">
-        <div class="panel">
-          <h2>资料组匹配结果</h2>
-          <div class="scroll">
+      <div class="reviewer">
+        <span class="small">审阅人</span>
+        <input id="reviewer" value="local-reviewer" aria-label="审阅人" />
+      </div>
+    </header>
+
+    <main>
+      <section class="topbar">
+        <div class="actions">
+          <button id="bootstrap">重新导入测试数据</button>
+          <button class="secondary" id="refresh">刷新工作台</button>
+          <span class="muted small" id="paths"></span>
+        </div>
+        <span class="muted small" id="lastUpdated">尚未加载</span>
+      </section>
+
+      <section class="stats" id="metrics"></section>
+
+      <section class="workspace">
+        <aside class="panel">
+          <div class="panel-head">
+            <h2>任务大厅</h2>
+            <span class="badge" id="taskCount">0 个任务</span>
+          </div>
+          <div class="panel-body" id="tasks"></div>
+        </aside>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>资料组队列</h2>
+            <span class="muted small" id="queueCount">0 条</span>
+          </div>
+          <div class="queue-tools">
+            <input id="keyword" placeholder="搜索表号、终端、地址" />
+            <select id="statusFilter" aria-label="状态筛选">
+              <option value="">全部状态</option>
+              <option value="pending">待审阅</option>
+              <option value="incomplete">资料不完整</option>
+              <option value="unmatched">未匹配</option>
+              <option value="approved">已通过</option>
+              <option value="exception">异常</option>
+            </select>
+            <button class="ghost" id="clearFilter">清空</button>
+          </div>
+          <div class="queue">
             <table>
               <thead>
                 <tr>
-                  <th>表号</th>
-                  <th>终端</th>
+                  <th class="col-meter">表号</th>
+                  <th class="col-terminal">终端</th>
                   <th>地址</th>
-                  <th>照片数</th>
-                  <th>状态</th>
+                  <th class="col-photo">照片</th>
+                  <th class="col-status">状态</th>
                 </tr>
               </thead>
               <tbody id="groups"></tbody>
             </table>
           </div>
-        </div>
+        </section>
+
         <aside class="panel">
-          <h2>资料组详情</h2>
-          <pre id="detail">点击左侧资料组查看详情</pre>
+          <div class="panel-head">
+            <h2>详情审阅</h2>
+            <span class="badge" id="detailStatus">未选择</span>
+          </div>
+          <div class="panel-body" id="detail">
+            <div class="detail-empty">从左侧资料组队列选择一条记录</div>
+          </div>
         </aside>
       </section>
     </main>
-    <script>
-      const metricsEl = document.querySelector("#metrics");
-      const groupsEl = document.querySelector("#groups");
-      const detailEl = document.querySelector("#detail");
-      const pathsEl = document.querySelector("#paths");
 
-      const labels = {
-        total_catalog_rows: "总清单",
-        stage_catalog_rows: "阶段清单",
-        scan_rows: "扫码记录",
-        groups: "资料组",
-        matched_groups: "已匹配",
-        incomplete_groups: "资料不完整",
-        stage_unmatched: "阶段未匹配",
-        scan_unmatched: "扫码未匹配",
-        photo_rows_linked: "关联照片行",
+    <div class="toast" id="toast"></div>
+
+    <script>
+      const state = {
+        tasks: [],
+        groups: [],
+        selectedGroup: null,
+        reviewer: localStorage.getItem("v21.reviewer") || "local-reviewer",
+        statusFilter: localStorage.getItem("v21.statusFilter") || "",
+        keyword: localStorage.getItem("v21.keyword") || "",
       };
 
-      async function api(path, options) {
-        const response = await fetch(path, options);
+      const statusText = {
+        pending: "待审阅",
+        incomplete: "资料不完整",
+        unmatched: "未匹配",
+        approved: "已通过",
+        exception: "异常",
+        published: "待领取",
+        in_review: "审阅中",
+        released: "已释放",
+      };
+
+      const metricLabels = [
+        ["groups", "资料组"],
+        ["matched_groups", "已匹配"],
+        ["unreviewed_groups", "待处理"],
+        ["approved_groups", "已通过"],
+        ["exception_groups", "异常"],
+        ["incomplete_groups", "不完整"],
+        ["stage_unmatched", "阶段未匹配"],
+        ["scan_unmatched", "扫码未匹配"],
+        ["photo_rows_linked", "关联照片行"],
+      ];
+
+      const $ = (selector) => document.querySelector(selector);
+      const metricsEl = $("#metrics");
+      const groupsEl = $("#groups");
+      const tasksEl = $("#tasks");
+      const detailEl = $("#detail");
+      const detailStatusEl = $("#detailStatus");
+      const toastEl = $("#toast");
+
+      $("#reviewer").value = state.reviewer;
+      $("#keyword").value = state.keyword;
+      $("#statusFilter").value = state.statusFilter;
+
+      async function api(path, options = {}) {
+        const response = await fetch(path, {
+          headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+          ...options,
+        });
         const payload = await response.json();
         if (!response.ok || payload.error) {
-          throw new Error(payload.error?.message || response.statusText);
+          const detail = payload.detail || payload.error?.message || response.statusText;
+          throw new Error(detail);
         }
         return payload.data;
       }
 
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function showToast(message, isError = false) {
+        toastEl.textContent = message;
+        toastEl.style.background = isError ? "#b42318" : "#16202a";
+        toastEl.classList.add("show");
+        window.clearTimeout(showToast.timer);
+        showToast.timer = window.setTimeout(() => toastEl.classList.remove("show"), 2600);
+      }
+
+      function badge(status) {
+        return `<span class="badge status-${escapeHtml(status)}">${statusText[status] || status || "-"}</span>`;
+      }
+
       function renderMetrics(summary) {
-        metricsEl.innerHTML = Object.entries(labels)
+        metricsEl.innerHTML = metricLabels
           .map(([key, label]) => `<div class="metric"><span>${label}</span><strong>${summary[key] ?? 0}</strong></div>`)
           .join("");
       }
 
-      function renderGroups(result) {
-        groupsEl.innerHTML = result.items
+      function renderTasks() {
+        $("#taskCount").textContent = `${state.tasks.length} 个任务`;
+        if (!state.tasks.length) {
+          tasksEl.innerHTML = `<div class="detail-empty">暂无任务</div>`;
+          return;
+        }
+        tasksEl.innerHTML = state.tasks
+          .map(
+            (task) => `
+              <article class="task-card">
+                <div class="task-title">
+                  <h3>${escapeHtml(task.name)}</h3>
+                  ${badge(task.status)}
+                </div>
+                <div class="small muted">任务 #${task.id} · ${task.claimed_by ? `当前审阅人：${escapeHtml(task.claimed_by)}` : "未领取"}</div>
+                <div class="task-grid">
+                  <div><span>总资料组</span><strong>${task.total_groups ?? 0}</strong></div>
+                  <div><span>已通过</span><strong>${task.completed_groups ?? 0}</strong></div>
+                  <div><span>异常</span><strong>${task.exception_groups ?? 0}</strong></div>
+                  <div><span>不完整</span><strong>${task.incomplete_groups ?? 0}</strong></div>
+                </div>
+                <div class="actions">
+                  <button data-task="${task.id}" data-action="claim">领取</button>
+                  <button class="secondary" data-task="${task.id}" data-action="release">释放</button>
+                </div>
+              </article>
+            `,
+          )
+          .join("");
+
+        tasksEl.querySelectorAll("button[data-task]").forEach((button) => {
+          button.addEventListener("click", () => updateTask(button.dataset.task, button.dataset.action));
+        });
+      }
+
+      function getFilteredGroups() {
+        const keyword = state.keyword.trim().toLowerCase();
+        return state.groups.filter((item) => {
+          const statusMatched = !state.statusFilter || item.status === state.statusFilter;
+          const haystack = [item.meter_no, item.terminal, item.address, item.stage_meter_no, item.stage_terminal]
+            .join(" ")
+            .toLowerCase();
+          return statusMatched && (!keyword || haystack.includes(keyword));
+        });
+      }
+
+      function renderGroups() {
+        const rows = getFilteredGroups();
+        $("#queueCount").textContent = `${rows.length} / ${state.groups.length} 条`;
+        groupsEl.innerHTML = rows
           .map(
             (item) => `
-              <tr data-id="${item.id}">
-                <td>${item.meter_no}</td>
-                <td>${item.terminal || "-"}</td>
-                <td>${item.address || "未匹配地址"}</td>
-                <td>${item.photo_count}</td>
-                <td class="status-${item.status}">${item.status}</td>
+              <tr data-id="${escapeHtml(item.id)}" class="${state.selectedGroup?.id === item.id ? "active" : ""}">
+                <td class="truncate col-meter" title="${escapeHtml(item.meter_no)}">${escapeHtml(item.meter_no)}</td>
+                <td class="truncate col-terminal" title="${escapeHtml(item.terminal || "-")}">${escapeHtml(item.terminal || "-")}</td>
+                <td class="truncate" title="${escapeHtml(item.address || "未匹配地址")}">${escapeHtml(item.address || "未匹配地址")}</td>
+                <td>${item.photo_count ?? 0}</td>
+                <td>${badge(item.status)}</td>
               </tr>
             `,
           )
           .join("");
-        groupsEl.querySelectorAll("tr").forEach((row) => {
-          row.addEventListener("click", async () => {
-            const data = await api(`/local-test/groups/${row.dataset.id}`);
-            detailEl.textContent = JSON.stringify(data, null, 2);
-          });
+
+        if (!rows.length) {
+          groupsEl.innerHTML = `<tr><td colspan="5" class="muted">没有符合条件的资料组</td></tr>`;
+        }
+
+        groupsEl.querySelectorAll("tr[data-id]").forEach((row) => {
+          row.addEventListener("click", () => loadGroup(row.dataset.id));
         });
       }
 
-      async function refresh() {
-        const data = await api("/local-test/summary");
-        renderMetrics(data.summary);
-        pathsEl.textContent = "数据源：" + Object.values(data.paths).join(" | ");
-        renderGroups(await api("/local-test/groups?limit=300"));
+      function renderDetail(group) {
+        state.selectedGroup = group;
+        detailStatusEl.innerHTML = badge(group.status);
+        detailEl.innerHTML = `
+          <dl class="detail-grid">
+            <dt>资料组</dt><dd>${escapeHtml(group.id)}</dd>
+            <dt>显示表号</dt><dd>${escapeHtml(group.meter_no)}</dd>
+            <dt>阶段表号</dt><dd>${escapeHtml(group.stage_meter_no || "-")}</dd>
+            <dt>终端</dt><dd>${escapeHtml(group.terminal || group.stage_terminal || "-")}</dd>
+            <dt>匹配键</dt><dd>${escapeHtml(group.meter_match_key || "-")}</dd>
+            <dt>安装地址</dt><dd>${escapeHtml(group.address || "未从总清单匹配到地址")}</dd>
+            <dt>审阅人</dt><dd>${escapeHtml(group.reviewer || "-")}</dd>
+          </dl>
+
+          <h3>照片扫码记录</h3>
+          <div class="photo-list">
+            ${
+              group.photos?.length
+                ? group.photos
+                    .map(
+                      (photo) => `
+                        <div class="photo-row">
+                          <strong>#${photo.row_number ?? "-"}</strong>
+                          <div>
+                            <div class="truncate" title="${escapeHtml(photo.barcode)}">${escapeHtml(photo.barcode || "-")}</div>
+                            <div class="muted">${escapeHtml(photo.source_file || "-")} · ${escapeHtml(photo.created_at || "-")}</div>
+                          </div>
+                        </div>
+                      `,
+                    )
+                    .join("")
+                : `<div class="photo-row"><strong>0</strong><div class="muted">没有关联到照片扫码记录</div></div>`
+            }
+          </div>
+
+          <div class="review-box">
+            <div class="review-row">
+              <label for="reviewStatus">审阅状态</label>
+              <select id="reviewStatus">
+                <option value="pending">待审阅</option>
+                <option value="incomplete">资料不完整</option>
+                <option value="unmatched">未匹配</option>
+                <option value="approved">已通过</option>
+                <option value="exception">异常</option>
+              </select>
+            </div>
+            <label for="reviewNote" class="small muted">异常备注 / 审阅说明</label>
+            <textarea id="reviewNote" placeholder="填写缺图、地址不一致、表号异常等备注">${escapeHtml(group.review_note || "")}</textarea>
+            <div class="review-actions">
+              <button id="saveReview">保存状态</button>
+              <button class="secondary" data-quick="approved">通过</button>
+              <button class="danger" data-quick="exception">标记异常</button>
+            </div>
+          </div>
+        `;
+
+        $("#reviewStatus").value = group.status;
+        $("#saveReview").addEventListener("click", saveReview);
+        detailEl.querySelectorAll("button[data-quick]").forEach((button) => {
+          button.addEventListener("click", () => {
+            $("#reviewStatus").value = button.dataset.quick;
+            saveReview();
+          });
+        });
+        renderGroups();
       }
 
-      document.querySelector("#bootstrap").addEventListener("click", async () => {
-        await api("/local-test/bootstrap", { method: "POST" });
-        await refresh();
+      async function loadGroup(id) {
+        try {
+          const group = await api(`/local-test/groups/${encodeURIComponent(id)}`);
+          renderDetail(group);
+        } catch (error) {
+          showToast(`加载资料组失败：${error.message}`, true);
+        }
+      }
+
+      async function saveReview() {
+        if (!state.selectedGroup) return;
+        const payload = {
+          status: $("#reviewStatus").value,
+          reviewer: state.reviewer,
+          note: $("#reviewNote").value.trim(),
+        };
+        try {
+          const group = await api(`/local-test/groups/${encodeURIComponent(state.selectedGroup.id)}/review`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
+          const index = state.groups.findIndex((item) => item.id === group.id);
+          if (index >= 0) state.groups[index] = group;
+          renderDetail(group);
+          await refreshSummaryAndTasks();
+          showToast("状态和备注已保存");
+        } catch (error) {
+          showToast(`保存失败：${error.message}`, true);
+        }
+      }
+
+      async function updateTask(taskId, action) {
+        try {
+          await api(`/local-test/tasks/${taskId}/${action}`, {
+            method: "POST",
+            body: JSON.stringify({ reviewer: state.reviewer }),
+          });
+          await refreshSummaryAndTasks();
+          showToast(action === "claim" ? "任务已领取" : "任务已释放");
+        } catch (error) {
+          showToast(`任务操作失败：${error.message}`, true);
+        }
+      }
+
+      async function refreshSummaryAndTasks() {
+        const [summaryData, taskData] = await Promise.all([api("/local-test/summary"), api("/local-test/tasks")]);
+        renderMetrics(summaryData.summary);
+        state.tasks = taskData.items || [];
+        renderTasks();
+        $("#paths").textContent = `数据源：${Object.values(summaryData.paths || {}).join(" | ")}`;
+        $("#lastUpdated").textContent = `最后刷新：${new Date().toLocaleString("zh-CN")}`;
+      }
+
+      async function refreshAll() {
+        try {
+          await refreshSummaryAndTasks();
+          const groupData = await api("/local-test/groups?limit=1000");
+          state.groups = groupData.items || [];
+          renderGroups();
+          if (state.selectedGroup) {
+            const exists = state.groups.some((item) => item.id === state.selectedGroup.id);
+            if (exists) await loadGroup(state.selectedGroup.id);
+          }
+        } catch (error) {
+          detailEl.innerHTML = `<div class="detail-empty error">加载失败：${escapeHtml(error.message)}</div>`;
+          showToast(`刷新失败：${error.message}`, true);
+        }
+      }
+
+      $("#reviewer").addEventListener("input", (event) => {
+        state.reviewer = event.target.value.trim() || "local-reviewer";
+        localStorage.setItem("v21.reviewer", state.reviewer);
       });
-      document.querySelector("#refresh").addEventListener("click", refresh);
-      refresh().catch((error) => {
-        detailEl.textContent = error.stack || String(error);
+
+      $("#keyword").addEventListener("input", (event) => {
+        state.keyword = event.target.value;
+        localStorage.setItem("v21.keyword", state.keyword);
+        renderGroups();
       });
+
+      $("#statusFilter").addEventListener("change", (event) => {
+        state.statusFilter = event.target.value;
+        localStorage.setItem("v21.statusFilter", state.statusFilter);
+        renderGroups();
+      });
+
+      $("#clearFilter").addEventListener("click", () => {
+        state.keyword = "";
+        state.statusFilter = "";
+        $("#keyword").value = "";
+        $("#statusFilter").value = "";
+        localStorage.removeItem("v21.keyword");
+        localStorage.removeItem("v21.statusFilter");
+        renderGroups();
+      });
+
+      $("#bootstrap").addEventListener("click", async () => {
+        try {
+          await api("/local-test/bootstrap", { method: "POST" });
+          state.selectedGroup = null;
+          detailStatusEl.textContent = "未选择";
+          detailEl.innerHTML = `<div class="detail-empty">已重新导入测试数据，请选择资料组开始审阅</div>`;
+          await refreshAll();
+          showToast("测试数据已重新导入");
+        } catch (error) {
+          showToast(`导入失败：${error.message}`, true);
+        }
+      });
+
+      $("#refresh").addEventListener("click", refreshAll);
+      refreshAll();
     </script>
   </body>
 </html>

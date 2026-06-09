@@ -1,3 +1,8 @@
+param(
+    [int]$Port = 8000,
+    [switch]$NoOpen
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -11,10 +16,25 @@ if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
 
 $env:PYTHONPATH = Join-Path $root "v2-api"
 Start-Process -FilePath ".\.venv\Scripts\python.exe" `
-    -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--reload" `
+    -ArgumentList "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "$Port", "--reload" `
     -WorkingDirectory (Join-Path $root "v2-api") `
     -WindowStyle Hidden
 
-Start-Sleep -Seconds 2
-Start-Process "http://127.0.0.1:8000/v201"
+$url = "http://127.0.0.1:$Port/v201"
+$healthUrl = "http://127.0.0.1:$Port/health"
 
+for ($i = 0; $i -lt 30; $i++) {
+    try {
+        Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 1 | Out-Null
+        break
+    }
+    catch {
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+Write-Host "V2.1 local workbench: $url"
+
+if (-not $NoOpen) {
+    Start-Process $url
+}

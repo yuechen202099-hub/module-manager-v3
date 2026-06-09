@@ -64,3 +64,11 @@ Additional operational indexes are included for job polling, exception queues, r
 - `photos(group_id, sha256)` is unique to deduplicate photos inside one group.
 - Catalog tables intentionally do not unique-constrain installation address.
 - Task ownership fields are nullable with `SET NULL` user references so historical data survives account removal.
+- `total_catalog_rows.installation_address` is the only authoritative installation-address source.
+- `material_groups.installation_address` must be copied from the selected total catalog row and must not be overwritten by stage catalog, scan data, review comments, or frontend edits.
+- A group with fewer than 4 valid uploaded photos remains `incomplete`; supplemental photos append to the same group and then recalculate `photo_count`.
+- Local simulation task status `in_review` is a V2.1 local alias for production task status `claimed`.
+
+## V2.1 Data Rules
+
+Detailed V2.1 mapping, status flow, photo-insufficient rules, supplemental-photo rules, and risks are recorded in `docs/database/v2.1-data-rules.md`.

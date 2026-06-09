@@ -34,6 +34,19 @@ This document is the contract boundary between frontend and backend.
 - `GET /tasks/{task_id}`
 - `GET /tasks/{task_id}/groups`
 
+Task status values returned by production APIs must use the database enum: `draft`, `published`, `claimed`, `released`, `completed`, `cancelled`.
+The V2.1 local simulation value `in_review` is a local-only alias and must be normalized to `claimed` before persistence or production API response.
+
+Allowed task transitions:
+
+| From | Endpoint/action | To |
+| --- | --- | --- |
+| `draft` | `POST /projects/{project_id}/tasks/publish` | `published` |
+| `published` | `POST /tasks/{task_id}/claim` | `claimed` |
+| `released` | `POST /tasks/{task_id}/claim` | `claimed` |
+| `claimed` | `POST /tasks/{task_id}/release` by current claimant | `released` |
+| `claimed` | complete workflow | `completed` |
+
 ## Review
 
 - `GET /groups/{group_id}`
@@ -41,6 +54,21 @@ This document is the contract boundary between frontend and backend.
 - `POST /groups/{group_id}/exceptions`
 - `POST /groups/{group_id}/photos/sign-upload`
 - `POST /groups/{group_id}/photos/complete-upload`
+
+Group status values returned by production APIs must use the database enum: `unreviewed`, `in_review`, `incomplete`, `approved`, `rejected`.
+Local simulation aliases are normalized as follows: `pending` to `unreviewed`, `unmatched` to `rejected` with an exception, and `exception` to `rejected` with an exception.
+
+Photo rules:
+
+- A group requires at least 4 valid uploaded photos to leave `incomplete`.
+- `POST /groups/{group_id}/photos/complete-upload` appends a photo to the existing group and deduplicates by `group_id + sha256`.
+- After supplemental-photo completion, the backend recalculates `photo_count`. If the count is at least 4 and no other blocking exception remains, the group returns to `unreviewed`.
+- Review approval must reject groups whose current `photo_count` is below 4.
+
+Address rule:
+
+- Group address fields returned by `GET /groups/{group_id}` and task group listings must be sourced from `material_groups.installation_address`, which is copied only from `total_catalog_rows.installation_address`.
+- Stage catalog, scan data, and review payloads must not be accepted as installation-address updates.
 
 ## Exports and Jobs
 
@@ -71,4 +99,3 @@ Errors use this shape:
   "request_id": "string"
 }
 ```
-

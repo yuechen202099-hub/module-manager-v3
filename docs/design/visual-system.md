@@ -64,6 +64,16 @@ The CSS is split by responsibility:
 
 The layout uses fixed side widths and a fluid center to protect image visibility. Below `1080px`, the inspector moves under the queue and stage. Below `760px`, panes stack vertically.
 
+## V2.1 Static Local Workbench
+
+`v2-api/app/static/v201.html` mirrors the same operational language without importing the Vue CSS bundle.
+
+- Desktop layout: `260px / fluid / 380px` working columns for task hall, data queue, and review inspector.
+- Density target: 34px table headers, 40px body rows, 42px panel headers, and compact metric tiles.
+- Text containment: table cells, task metadata, photo records, and detail fields use wrapping safeguards so Chinese addresses and notes do not overflow.
+- Status palette: pending is neutral gray, incomplete is amber, unmatched and exception are red, approved is green.
+- Responsive behavior: below `1180px`, the inspector moves under the first two columns; below `840px`, all work zones stack vertically.
+
 ## Component Usage
 
 ```vue
