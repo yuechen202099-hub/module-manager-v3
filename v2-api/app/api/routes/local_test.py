@@ -12,6 +12,7 @@ from app.services.local_simulation import (
     get_group,
     get_task_progress,
     get_state,
+    import_url_scan_rows,
     list_groups,
     list_task_groups,
     list_tasks,
@@ -44,6 +45,10 @@ class PhotoClassifyRequest(BaseModel):
     reviewer: str = "local-reviewer"
 
 
+class UrlImportRequest(BaseModel):
+    rows: list[dict]
+
+
 @router.post("/bootstrap")
 def bootstrap(request: Request):
     state = bootstrap_local_simulation()
@@ -54,6 +59,12 @@ def bootstrap(request: Request):
 def clear_scan(request: Request):
     state = clear_scan_data()
     return ok(request, {"summary": state["summary"], "paths": state["paths"]})
+
+
+@router.post("/scan/import-url-rows")
+def import_url_rows(payload: UrlImportRequest, request: Request):
+    result = import_url_scan_rows(payload.rows)
+    return ok(request, result)
 
 
 @router.get("/summary")

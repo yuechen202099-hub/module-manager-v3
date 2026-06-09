@@ -87,7 +87,10 @@ def test_task_hall_page_is_available() -> None:
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "archivePhoto" in response.text
-    assert 'id="syncNow"' in response.text
+    assert 'id="openImport"' in response.text
+    assert 'id="csvFile"' in response.text
+    assert 'id="importPayload"' in response.text
+    assert 'id="syncNow"' not in response.text
     assert 'id="scanFilter"' not in response.text
 
 
@@ -109,3 +112,29 @@ def test_clear_scan_data_route_resets_local_scan_state() -> None:
     assert payload["summary"]["scan_rows"] == 0
     assert payload["summary"]["downloaded_photos"] == 0
     assert payload["summary"]["unclassified_photos"] == 0
+
+
+def test_url_row_import_route_updates_local_tasks() -> None:
+    client.post("/local-test/bootstrap")
+    first_group = client.get("/local-test/groups?limit=1").json()["data"]["items"][0]
+    client.post("/local-test/scan/clear")
+
+    response = client.post(
+        "/local-test/scan/import-url-rows",
+        json={
+            "rows": [
+                {
+                    "meter_no": first_group["meter_no"],
+                    "terminal": first_group["terminal"],
+                    "collector": "C-001",
+                    "module_asset_no": "M-001",
+                    "photo_urls": "https://example.test/1.jpg,https://example.test/2.jpg",
+                }
+            ]
+        },
+    )
+    tasks = client.get("/local-test/tasks").json()["data"]["items"]
+
+    assert response.status_code == 200
+    assert response.json()["data"]["applied_records"] == 2
+    assert any(task["can_claim"] for task in tasks)

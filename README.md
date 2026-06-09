@@ -4,12 +4,21 @@ V2.0 upgrades the V1.3 desktop workflow into a low-cost multi-user web system.
 
 ## Scope
 
+- Before any change, read `AGENTS.md` first. It is the project required reading and collaboration contract.
 - 4 reviewers working at the same time.
 - About 23,000 meter groups.
 - About 100,000 photos.
 - Reviewers claim published tasks themselves.
 - Review progress is saved per meter group, so partial work can be uploaded.
 - Admin users can see all tasks. Reviewers only see available tasks and their own claimed tasks.
+
+## Required V2 Direction
+
+- V2 main workflow is spreadsheet import. It must not depend on the Ezcodes backend API.
+- Photo records save and load URL references only. The system must not download photos to local storage.
+- Review classification must be keyboard-first. Shortcut operations are a primary acceptance criterion.
+- UI must be rebuilt to an advanced workstation standard: dense, calm, precise, fast, and suitable for repeated review work.
+- Future development must use multi-agent collaboration. Frontend, backend, database, product, test, and visual/CSS responsibilities are separated in `AGENTS.md`; overlapping edits are forbidden unless explicitly coordinated.
 
 ## Stack
 
@@ -27,7 +36,7 @@ V2.0 upgrades the V1.3 desktop workflow into a low-cost multi-user web system.
 - Total catalog short meter match key: remove the first 2 chars.
 - Display meter number must use the original meter number from the total catalog.
 - Installation address must not be deduplicated because it is one-to-one with meter rows.
-- Photos are deduplicated by SHA-256.
+- Photos are stored as URL references with metadata only.
 - If a reviewed group is incomplete and new valid photos are imported, the group returns to unreviewed state.
 
 ## Directory Layout

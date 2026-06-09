@@ -25,6 +25,8 @@ This document is the contract boundary between frontend and backend.
 - `GET /projects/{project_id}/scan/imports/{job_id}`
 - `GET /projects/{project_id}/groups`
 
+`POST /projects/{project_id}/scan/import` is the primary scan/photo ingestion path. It accepts spreadsheet uploads once the final template is confirmed. Parsed rows must support terminal, collector, meter number, module number, address, one or more photo URLs, and classification naming. Photo URLs are stored as URL references; the import endpoint must not download photo binaries.
+
 ## Tasks
 
 - `GET /projects/{project_id}/tasks`

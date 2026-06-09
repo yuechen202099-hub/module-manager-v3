@@ -15,7 +15,6 @@ from app.services.ezcodes_scheduler import sync_manager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    sync_manager.start_periodic()
     try:
         yield
     finally:

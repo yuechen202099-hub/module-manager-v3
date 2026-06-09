@@ -1,6 +1,8 @@
-# Ezcodes Backend Sync
+# Ezcodes Backend Sync Historical Reference
 
-V2.0 does not automate the Ezcodes frontend for production sync. It uses a backend-to-backend integration against the authorized Ezcodes CloudBase data layer.
+This document is historical/debug reference only. Per the current project decision, V2.0 main workflow is spreadsheet import and must not depend on the Ezcodes backend API.
+
+Do not use this integration as the primary product flow, release blocker, or acceptance baseline. If retained, it is compatibility support for investigation only.
 
 ## Source
 
@@ -10,7 +12,7 @@ V2.0 does not automate the Ezcodes frontend for production sync. It uses a backe
 - File tree collection: `BGFiles`
 - Barcode data collection: `BGBarcodes`
 - Query action: `database.queryDocument`
-- Photo URL action: `storage.batchGetDownloadUrl`
+- Photo URL action: `storage.batchGetDownloadUrl` for resolving URL references only.
 - Root folder: `批量扫码 / 模块改造`
 - Installer folders:
   - `罗爱民`
@@ -25,7 +27,7 @@ V2.0 does not automate the Ezcodes frontend for production sync. It uses a backe
 3. Recursively traverse each installer folder.
 4. Treat `type == 0` as folder and non-zero rows as scan files.
 5. Query `BGBarcodes` by `fileId` for each scan file.
-6. Resolve `images` through CloudBase temporary file URLs before local/OSS storage.
+6. Resolve `images` through CloudBase temporary file URLs for reference only. Do not download photos to local disk.
 
 ## Baseline Fields
 
@@ -44,6 +46,6 @@ These fields are project-critical and must stay stable:
 
 - `POST /projects/{project_id}/scan/ezcodes/preview`
 
-This endpoint builds a sync plan from backend data access. It does not click or scrape frontend UI.
+This endpoint, if retained, builds a debug sync plan from backend data access. It does not click or scrape frontend UI and must not replace the spreadsheet-import workflow.
 
-The active implementation uses backend CloudBase requests only. Credentials are accepted at request time and are not embedded in source code, tests, or documentation.
+Any active implementation must treat backend CloudBase requests as optional compatibility/debug behavior. Credentials are accepted at request time and are not embedded in source code, tests, or documentation.

@@ -118,6 +118,67 @@ def apply_synced_scan_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def import_url_scan_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    records = [normalize_url_import_row(row, index) for index, row in enumerate(rows, start=1)]
+    return apply_synced_scan_records(records)
+
+
+def normalize_url_import_row(row: dict[str, Any], index: int) -> dict[str, Any]:
+    barcode = pick_first(row, "barcode", "scan_code", "扫码内容", "条形码", "长条码")
+    meter_no = pick_first(row, "meter_no", "表号", "短表号")
+    meter_match_key = pick_first(row, "meter_match_key", "匹配键")
+    if not meter_match_key:
+        if barcode:
+            try:
+                meter_match_key = build_long_scan_match_key(barcode)
+            except ValueError:
+                meter_match_key = ""
+        elif meter_no:
+            meter_match_key = build_total_catalog_match_key(meter_no)
+    return {
+        "file_id": f"import-row-{index}",
+        "source_file": pick_first(row, "source_file", "来源文件", "批次") or "url-import",
+        "installer": pick_first(row, "installer", "安装人员", "创建者"),
+        "barcode": barcode or meter_no or f"row-{index}",
+        "meter_match_key": meter_match_key,
+        "terminal": pick_first(row, "terminal", "终端"),
+        "collector": pick_first(row, "collector", "采集器"),
+        "meter_no": meter_no,
+        "module_asset_no": pick_first(row, "module_asset_no", "module", "模块", "模块资产编号"),
+        "address": pick_first(row, "address", "地址"),
+        "asset_type": pick_first(row, "asset_type", "资产类型"),
+        "creator": pick_first(row, "creator", "创建者"),
+        "created_at": pick_first(row, "created_at", "创建时间"),
+        "image_count": len(split_urls(pick_first(row, "photo_urls", "image_urls", "照片URL", "图片URL", "url", "URL"))),
+        "image_urls": split_urls(pick_first(row, "photo_urls", "image_urls", "照片URL", "图片URL", "url", "URL")),
+        "image_file_ids": [],
+    }
+
+
+def pick_first(row: dict[str, Any], *keys: str) -> str:
+    normalized = {str(key).strip().lower(): value for key, value in row.items()}
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            value = normalized.get(key.lower())
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def split_urls(value: str) -> list[str]:
+    if not value:
+        return []
+    normalized = value.replace("\r", "\n").replace("；", ";").replace("，", ",")
+    parts = []
+    for block in normalized.split("\n"):
+        for segment in block.replace(";", ",").split(","):
+            item = segment.strip()
+            if item:
+                parts.append(item)
+    return parts
+
+
 def scan_record_to_photo_rows(record: dict[str, Any], index: int) -> list[dict[str, Any]]:
     image_urls = record.get("image_urls") or []
     image_file_ids = record.get("image_file_ids") or []
