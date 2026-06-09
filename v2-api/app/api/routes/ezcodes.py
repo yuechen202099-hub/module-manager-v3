@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 
 from app.core.responses import ok
 from app.services.ezcodes_sync import (
@@ -12,6 +12,7 @@ from app.services.ezcodes_sync import (
     build_target_sync_plan,
     download_scan_data_preview,
 )
+from app.services.ezcodes_scheduler import EzcodesSyncOptions, sync_manager
 
 router = APIRouter(prefix="/projects/{project_id}/scan/ezcodes")
 
@@ -39,6 +40,7 @@ _backend: EzcodesBackend = EzcodesCloudBaseBackend()
 def set_ezcodes_backend(backend: EzcodesBackend) -> None:
     global _backend
     _backend = backend
+    sync_manager.set_backend(backend)
 
 
 def build_credentials(payload: EzcodesCredentialsRequest) -> EzcodesCredentials:
@@ -75,3 +77,28 @@ def download_ezcodes_scan_test(project_id: int, payload: EzcodesDownloadTestRequ
     except EzcodesError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, {"project_id": project_id, "result": result})
+
+
+@router.get("/sync/status")
+def ezcodes_sync_status(project_id: int, request: Request):
+    return ok(request, {"project_id": project_id, "sync": sync_manager.status()})
+
+
+@router.post("/sync")
+def trigger_ezcodes_sync(
+    project_id: int,
+    request: Request,
+    payload: EzcodesDownloadTestRequest | None = Body(default=None),
+):
+    credentials = build_credentials(payload.credentials) if payload else None
+    options = None
+    if payload:
+        options = EzcodesSyncOptions(
+            max_files=payload.max_files,
+            max_records_per_file=payload.max_records_per_file,
+        )
+    try:
+        result = sync_manager.trigger(credentials=credentials, options=options, trigger="manual")
+    except EzcodesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, {"project_id": project_id, "sync": result})

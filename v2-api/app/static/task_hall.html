@@ -159,19 +159,16 @@
       <h1>&#20219;&#21153;&#22823;&#21381;</h1>
       <div>
         <input id="reviewer" value="local-reviewer" aria-label="reviewer" />
+        <button class="secondary" id="syncNow">&#31435;&#21363;&#21516;&#27493;&#25195;&#30721;</button>
         <button class="secondary" id="clearScan">&#28165;&#31354;&#25195;&#30721;&#25968;&#25454;</button>
         <button id="reload">&#21047;&#26032;</button>
       </div>
     </header>
     <main>
       <section class="panel">
-        <div class="head"><h2>&#20219;&#21153;</h2><span class="badge" id="taskCount">0</span></div>
+        <div class="head"><h2>&#20219;&#21153;</h2><span class="badge" id="syncState">&#26410;&#21516;&#27493;</span><span class="badge" id="taskCount">0</span></div>
         <div class="filters">
-          <select id="scanFilter">
-            <option value="">&#20840;&#37096;&#25195;&#30721;&#29366;&#24577;</option>
-            <option value="with_scan">&#26377;&#25195;&#30721;&#25968;&#25454;</option>
-            <option value="without_scan">&#26080;&#25195;&#30721;&#25968;&#25454;</option>
-          </select>
+          <span class="badge ok">&#20165;&#26174;&#31034;&#26377;&#25195;&#30721;&#25968;&#25454;&#30340;&#20219;&#21153;</span>
           <select id="claimFilter">
             <option value="">&#20840;&#37096;&#39046;&#21462;&#29366;&#24577;</option>
             <option value="available">&#21487;&#39046;&#21462;</option>
@@ -223,12 +220,11 @@
       }
       function pct(value) { return `${Math.round((Number(value) || 0) * 100)}%`; }
       function filteredTasks() {
-        const scan = $("#scanFilter").value;
         const claim = $("#claimFilter").value;
         const complete = $("#completeFilter").value;
         return state.tasks.filter((task) => {
           const c = Number(task.completeness_rate) || 0;
-          return (!scan || (scan === "with_scan" ? task.has_scan_info : !task.has_scan_info))
+          return task.has_scan_info
             && (!claim || (claim === "available" ? task.can_claim && !task.claimed_by : claim === "mine" ? task.claimed_by === state.reviewer : Boolean(task.claimed_by)))
             && (!complete || (complete === "complete" ? c >= 1 : complete === "partial" ? c > 0 && c < 1 : c === 0));
         });
@@ -333,16 +329,53 @@
         state.tasks = (await api("/local-test/tasks")).items || [];
         renderTasks();
       }
+      async function refreshSyncState() {
+        const data = await api("/projects/1/scan/ezcodes/sync/status");
+        const sync = data.sync || {};
+        if (sync.running) {
+          $("#syncState").textContent = "\u540c\u6b65\u4e2d";
+          $("#syncState").className = "badge warn";
+          return;
+        }
+        if (sync.last_error) {
+          $("#syncState").textContent = "\u540c\u6b65\u5931\u8d25";
+          $("#syncState").className = "badge err";
+          return;
+        }
+        if (sync.last_finished_at) {
+          $("#syncState").textContent = `\u5df2\u540c\u6b65 ${sync.last_downloaded_records || 0}`;
+          $("#syncState").className = "badge ok";
+          return;
+        }
+        $("#syncState").textContent = sync.configured ? "\u5f85\u540c\u6b65" : "\u672a\u914d\u7f6e";
+        $("#syncState").className = sync.configured ? "badge warn" : "badge";
+      }
       async function reloadAll() {
-        await refreshTasks();
+        await Promise.all([refreshTasks(), refreshSyncState()]);
         if (!state.taskId) {
-          const first = state.tasks.find((task) => task.can_claim) || state.tasks[0];
+          const visibleTasks = filteredTasks();
+          const first = visibleTasks.find((task) => task.can_claim) || visibleTasks[0];
           if (first) await handleTask(first.id, "view");
         }
       }
       $("#reviewer").addEventListener("input", (event) => { state.reviewer = event.target.value.trim() || "local-reviewer"; });
-      ["scanFilter", "claimFilter", "completeFilter"].forEach((id) => $("#" + id).addEventListener("change", renderTasks));
+      ["claimFilter", "completeFilter"].forEach((id) => $("#" + id).addEventListener("change", renderTasks));
       $("#reload").addEventListener("click", reloadAll);
+      $("#syncNow").addEventListener("click", async () => {
+        try {
+          $("#syncNow").disabled = true;
+          $("#syncState").textContent = "\u540c\u6b65\u4e2d";
+          $("#syncState").className = "badge warn";
+          await api("/projects/1/scan/ezcodes/sync", { method: "POST", body: "null" });
+          await refreshSyncState();
+          toast("\u626b\u7801\u6570\u636e\u5df2\u89e6\u53d1\u540c\u6b65");
+        } catch (error) {
+          toast(error.message, true);
+          await refreshSyncState();
+        } finally {
+          $("#syncNow").disabled = false;
+        }
+      });
       $("#clearScan").addEventListener("click", async () => {
         await api("/local-test/scan/clear", { method: "POST" });
         state.groups = [];

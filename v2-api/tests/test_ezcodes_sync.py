@@ -191,6 +191,28 @@ def test_ezcodes_download_test_endpoint_uses_backend_without_frontend() -> None:
     assert payload["result"]["resolved_image_urls"] == 2
 
 
+def test_ezcodes_manual_sync_endpoint_records_status() -> None:
+    set_ezcodes_backend(FakeEzcodesBackend())
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/projects/1/scan/ezcodes/sync",
+        json={
+            "credentials": {"access_token": "token", "team_id": "team"},
+            "max_files": 2,
+            "max_records_per_file": 10,
+        },
+    )
+    status_response = client.get("/projects/1/scan/ezcodes/sync/status")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["sync"]["last_trigger"] == "manual"
+    assert response.json()["data"]["sync"]["last_downloaded_records"] == 1
+    assert response.json()["data"]["sync"]["last_resolved_image_urls"] == 2
+    assert status_response.status_code == 200
+    assert status_response.json()["data"]["sync"]["last_downloaded_records"] == 1
+
+
 def test_cloudbase_backend_queries_files_and_barcodes(monkeypatch: pytest.MonkeyPatch) -> None:
     requests = []
 

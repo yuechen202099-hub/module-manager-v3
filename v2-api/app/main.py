@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -9,10 +10,20 @@ from fastapi.staticfiles import StaticFiles
 from app.api.router import api_router
 from app.core.request_id import RequestIdMiddleware
 from app.core.responses import error_response, ok
+from app.services.ezcodes_scheduler import sync_manager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    sync_manager.start_periodic()
+    try:
+        yield
+    finally:
+        sync_manager.stop_periodic()
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Module Manager V2 API", version="2.0.1")
+    app = FastAPI(title="Module Manager V2 API", version="2.0.1", lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
