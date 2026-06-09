@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import html
+import hashlib
+import json
 import re
 import urllib.request
 from collections import defaultdict
@@ -46,10 +48,13 @@ _state: dict[str, Any] = {
     "projects": [],
     "tasks": [],
     "groups": [],
+    "total_catalog": [],
+    "stage_catalog": [],
     "scan_unmatched": [],
     "stage_unmatched": [],
     "review_events": [],
     "photo_events": [],
+    "audit_events": [],
 }
 
 
@@ -92,7 +97,7 @@ def apply_synced_scan_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         match_key = str(record.get("meter_match_key") or "")
         group = groups_by_key.get(match_key)
         if group is None:
-            unmatched.append(record)
+            unmatched.append(ensure_unmatched_record(record))
             continue
         rows = scan_record_to_photo_rows(record, index)
         group_changed = False
@@ -113,7 +118,7 @@ def apply_synced_scan_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             group["review_note"] = ""
             group["exception_note"] = ""
             group["reviewed_at"] = None
-    state["scan_unmatched"] = unmatched
+    state["scan_unmatched"] = merge_unmatched_records(state.get("scan_unmatched", []), unmatched)
     state["summary"]["scan_rows"] = sum(group["photo_count"] for group in state["groups"]) + len(unmatched)
     refresh_summary()
     return {
@@ -377,6 +382,134 @@ def make_photo_unique_key(photo: dict[str, Any]) -> str:
     )
 
 
+def make_unmatched_id(record: dict[str, Any]) -> str:
+    payload = {
+        "barcode": record.get("barcode") or record.get("meter_no") or "",
+        "source_file": record.get("source_file") or "",
+        "terminal": record.get("terminal") or "",
+        "meter_match_key": record.get("meter_match_key") or "",
+        "image_urls": record.get("image_urls") or [],
+        "photo_urls": record.get("photo_urls") or "",
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def ensure_unmatched_record(record: dict[str, Any]) -> dict[str, Any]:
+    item = dict(record)
+    item["unmatched_id"] = str(item.get("unmatched_id") or make_unmatched_id(item))
+    item["record_type"] = str(item.get("record_type") or "scan")
+    item["created_at"] = str(item.get("created_at") or now_iso())
+    item["text_index"] = build_record_text_index(item)
+    return item
+
+
+def merge_unmatched_records(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for record in existing + incoming:
+        item = ensure_unmatched_record(record)
+        merged[item["unmatched_id"]] = {**merged.get(item["unmatched_id"], {}), **item}
+    return list(merged.values())
+
+
+def build_record_text_index(record: dict[str, Any]) -> str:
+    values: list[str] = []
+    for value in record.values():
+        if isinstance(value, list):
+            values.extend(str(item) for item in value)
+        elif not isinstance(value, dict):
+            values.append(str(value))
+    return " ".join(values).lower()
+
+
+def list_unmatched_records(query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    state = get_state()
+    records = [ensure_unmatched_record(item) for item in state.get("scan_unmatched", [])]
+    q = query.strip().lower()
+    if q:
+        terms = [item for item in re.split(r"\s+", q) if item]
+        records = [item for item in records if all(term in item.get("text_index", "") for term in terms)]
+    records = sorted(records, key=lambda item: (str(item.get("terminal") or ""), str(item.get("barcode") or "")))
+    return {"total": len(records), "items": records[offset : offset + limit]}
+
+
+def get_unmatched_record(unmatched_id: str) -> dict[str, Any] | None:
+    state = get_state()
+    for record in state.get("scan_unmatched", []):
+        item = ensure_unmatched_record(record)
+        if item["unmatched_id"] == unmatched_id:
+            return item
+    return None
+
+
+def delete_unmatched_record(unmatched_id: str, actor: str, reason: str = "") -> dict[str, Any]:
+    state = get_state()
+    kept = []
+    deleted = None
+    for record in state.get("scan_unmatched", []):
+        item = ensure_unmatched_record(record)
+        if item["unmatched_id"] == unmatched_id:
+            deleted = item
+        else:
+            kept.append(item)
+    if deleted is None:
+        raise KeyError(unmatched_id)
+    state["scan_unmatched"] = kept
+    append_audit_event("delete_unmatched", actor, {"unmatched_id": unmatched_id, "reason": reason, "record": deleted})
+    refresh_summary()
+    return deleted
+
+
+def associate_unmatched_record(
+    unmatched_id: str,
+    actor: str,
+    target_group_id: str = "",
+    target_meter_no: str = "",
+    updates: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    state = get_state()
+    record = get_unmatched_record(unmatched_id)
+    if record is None:
+        raise KeyError(unmatched_id)
+    group = None
+    if target_group_id:
+        group = get_group(target_group_id)
+    if group is None and target_meter_no:
+        group = next((item for item in state["groups"] if item["meter_no"] == target_meter_no), None)
+    if group is None:
+        raise ValueError("Target data group was not found")
+
+    payload = {**record, **(updates or {})}
+    payload["meter_match_key"] = group["meter_match_key"]
+    payload["meter_no"] = group["meter_no"]
+    payload["terminal"] = group["terminal"]
+    result = apply_synced_scan_records([payload])
+    delete_unmatched_record(unmatched_id, actor, "associated to data group")
+    append_audit_event(
+        "associate_unmatched",
+        actor,
+        {"unmatched_id": unmatched_id, "group_id": group["id"], "meter_no": group["meter_no"], "applied": result},
+    )
+    return {"group": group, "import_result": result}
+
+
+def append_audit_event(action: str, actor: str, payload: dict[str, Any]) -> dict[str, Any]:
+    event = {
+        "id": f"audit-{len(_state.get('audit_events', [])) + 1:06d}",
+        "action": action,
+        "actor": actor,
+        "payload": payload,
+        "created_at": now_iso(),
+    }
+    _state.setdefault("audit_events", []).append(event)
+    return event
+
+
+def list_audit_events(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    events = list(reversed(get_state().get("audit_events", [])))
+    return {"total": len(events), "items": events[offset : offset + limit]}
+
+
 def apply_group_photo_urls(group_id: str, urls: dict[str, str]) -> dict[str, Any]:
     group = get_group(group_id)
     if group is None:
@@ -409,7 +542,7 @@ def bootstrap_local_simulation(paths: LocalTestPaths | None = None) -> dict[str,
         if row["meter_match_key"] in total_by_key:
             scans_by_key[row["meter_match_key"]].append(row)
         else:
-            scan_unmatched.append(row)
+            scan_unmatched.append(ensure_unmatched_record(row))
 
     terminal_task_ids = build_terminal_task_ids(stage_rows)
     groups = []
@@ -468,12 +601,16 @@ def bootstrap_local_simulation(paths: LocalTestPaths | None = None) -> dict[str,
             ],
             "tasks": tasks,
             "groups": groups,
+            "total_catalog": total_rows,
+            "stage_catalog": stage_rows,
             "scan_unmatched": scan_unmatched,
             "stage_unmatched": stage_unmatched,
             "review_events": [],
             "photo_events": [],
+            "audit_events": [],
         }
     )
+    refresh_group_exceptions()
     return _state
 
 
@@ -581,6 +718,7 @@ def build_summary(
 
 def refresh_summary() -> None:
     state = get_state()
+    refresh_group_exceptions()
     summary = build_summary([], [], [], state["groups"], state["stage_unmatched"], state["scan_unmatched"])
     summary["total_catalog_rows"] = state["summary"].get("total_catalog_rows", 0)
     summary["stage_catalog_rows"] = state["summary"].get("stage_catalog_rows", 0)
@@ -649,6 +787,52 @@ def calculate_completeness_rate(groups: list[dict[str, Any]], scan_only: bool = 
     collected_slots = sum(min(item["photo_count"], 4) for item in scoped_groups)
     required_slots = len(scoped_groups) * 4
     return round(collected_slots / required_slots, 4)
+
+
+def collect_module_group_map() -> dict[str, set[str]]:
+    module_groups: dict[str, set[str]] = defaultdict(set)
+    for group in get_state()["groups"]:
+        for photo in group.get("photos", []):
+            asset_no = str(photo.get("asset_no") or "").strip()
+            if asset_no:
+                module_groups[asset_no].add(group["id"])
+    return module_groups
+
+
+def validate_group_archive(group: dict[str, Any]) -> list[str]:
+    photos = group.get("photos", [])
+    reasons: list[str] = []
+    if len(photos) < 4:
+        reasons.append("资料组照片不足 4 张")
+    if photos and not any(str(photo.get("collector") or "").strip() for photo in photos):
+        reasons.append("缺少采集器信息")
+    if photos and not any(str(photo.get("asset_no") or "").strip() for photo in photos):
+        reasons.append("缺少模块资产编号")
+    module_groups = collect_module_group_map()
+    duplicate_modules = sorted(
+        {
+            str(photo.get("asset_no") or "").strip()
+            for photo in photos
+            if str(photo.get("asset_no") or "").strip()
+            and len(module_groups.get(str(photo.get("asset_no") or "").strip(), set()) - {group["id"]}) > 0
+        }
+    )
+    if duplicate_modules:
+        reasons.append(f"模块号重复: {', '.join(duplicate_modules[:3])}")
+    return reasons
+
+
+def set_group_exception_flags(group: dict[str, Any], reasons: list[str]) -> None:
+    group["exception_flags"] = reasons
+    group["exception_reasons"] = reasons
+    group["has_archive_blocker"] = bool(reasons)
+
+
+def refresh_group_exceptions() -> None:
+    if not _state.get("loaded"):
+        return
+    for group in _state.get("groups", []):
+        set_group_exception_flags(group, validate_group_archive(group))
 
 
 def read_catalog_rows(path: Path, source: str) -> list[dict[str, Any]]:
@@ -725,6 +909,38 @@ def list_groups(limit: int = 100, offset: int = 0, status: str | None = None) ->
     if status:
         groups = [item for item in groups if item["status"] == status]
     return {"total": len(groups), "items": groups[offset : offset + limit]}
+
+
+def list_catalog_rows(
+    catalog_type: str,
+    query: str = "",
+    terminal: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    state = get_state()
+    if catalog_type not in {"total", "stage"}:
+        raise ValueError("Unsupported catalog type")
+    rows = list(state["total_catalog"] if catalog_type == "total" else state["stage_catalog"])
+    if terminal:
+        rows = [item for item in rows if str(item.get("terminal") or "") == terminal]
+    q = query.strip().lower()
+    if q:
+        terms = [item for item in re.split(r"\s+", q) if item]
+        rows = [
+            item
+            for item in rows
+            if all(
+                term
+                in " ".join(
+                    str(item.get(field) or "")
+                    for field in ["terminal", "meter_no", "address", "meter_match_key", "source"]
+                ).lower()
+                for term in terms
+            )
+        ]
+    terminals = sorted({str(item.get("terminal") or "") for item in rows if item.get("terminal")})
+    return {"total": len(rows), "terminals": terminals, "items": rows[offset : offset + limit]}
 
 
 def list_task_groups(
@@ -870,7 +1086,6 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
         raise KeyError(photo_id)
     if photo.get("download_status") != "downloaded":
         raise ValueError("Photo must be downloaded before classification")
-
     previous = photo["category"]
     photo["category"] = category
     photo["category_label"] = PHOTO_CATEGORIES[category]
@@ -908,6 +1123,13 @@ def is_group_fully_archived(group: dict[str, Any]) -> bool:
 def update_group_archive_status(group: dict[str, Any], reviewer: str) -> None:
     if not is_group_fully_archived(group):
         return
+    reasons = validate_group_archive(group)
+    set_group_exception_flags(group, reasons)
+    if reasons:
+        group["status"] = "exception"
+        group["exception_note"] = "; ".join(reasons)
+        append_audit_event("archive_blocked", reviewer, {"group_id": group["id"], "reasons": reasons})
+        return
     group["status"] = "approved"
     group["reviewer"] = reviewer
     group["review_note"] = "分类完成"
@@ -928,7 +1150,19 @@ def normalize_cell(value: Any) -> str:
         return ""
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
-    return str(value).strip()
+    return repair_mojibake(str(value).strip())
+
+
+def repair_mojibake(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        repaired = value.encode("latin1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value
+    if repaired != value and any("\u4e00" <= char <= "\u9fff" for char in repaired):
+        return repaired
+    return value
 
 
 def assert_file_exists(path: Path) -> None:

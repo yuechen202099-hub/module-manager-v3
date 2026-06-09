@@ -58,9 +58,17 @@ def create_app() -> FastAPI:
     def task_hall_page():
         return FileResponse(static_dir / "task_hall.html")
 
+    @app.get("/claim-tasks")
+    def claim_tasks_page():
+        return FileResponse(static_dir / "claim_tasks.html")
+
     @app.get("/project-board")
     def project_board_page():
         return FileResponse(static_dir / "project_board.html")
+
+    @app.get("/unmatched")
+    def unmatched_page():
+        return FileResponse(static_dir / "unmatched.html")
 
     @app.get("/sync-config")
     def sync_config_page():

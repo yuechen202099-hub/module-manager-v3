@@ -6,17 +6,22 @@ from app.core.responses import ok
 from app.services.ezcodes_scheduler import sync_manager
 from app.services.local_simulation import (
     bootstrap_local_simulation,
+    associate_unmatched_record,
     claim_task,
     classify_photo,
     clear_scan_data,
+    delete_unmatched_record,
     get_group,
     get_task_progress,
     get_state,
     import_scan_template_xlsx,
     import_url_scan_rows,
+    list_audit_events,
+    list_catalog_rows,
     list_groups,
     list_task_groups,
     list_tasks,
+    list_unmatched_records,
     release_task,
     review_group,
     save_exception_note,
@@ -48,6 +53,18 @@ class PhotoClassifyRequest(BaseModel):
 
 class UrlImportRequest(BaseModel):
     rows: list[dict]
+
+
+class UnmatchedAssociateRequest(BaseModel):
+    actor: str = "local-reviewer"
+    target_group_id: str = ""
+    target_meter_no: str = ""
+    updates: dict = {}
+
+
+class UnmatchedDeleteRequest(BaseModel):
+    actor: str = "local-reviewer"
+    reason: str = ""
 
 
 @router.post("/bootstrap")
@@ -90,6 +107,67 @@ def groups(
     status: str | None = None,
 ):
     return ok(request, list_groups(limit=limit, offset=offset, status=status))
+
+
+@router.get("/catalog/{catalog_type}")
+def catalog_rows(
+    catalog_type: str,
+    request: Request,
+    query: str = "",
+    terminal: str = "",
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    try:
+        result = list_catalog_rows(catalog_type, query=query, terminal=terminal, limit=limit, offset=offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, result)
+
+
+@router.get("/unmatched")
+def unmatched_records(
+    request: Request,
+    query: str = "",
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    return ok(request, list_unmatched_records(query=query, limit=limit, offset=offset))
+
+
+@router.post("/unmatched/{unmatched_id}/associate")
+def associate_unmatched(unmatched_id: str, payload: UnmatchedAssociateRequest, request: Request):
+    try:
+        result = associate_unmatched_record(
+            unmatched_id,
+            actor=payload.actor,
+            target_group_id=payload.target_group_id,
+            target_meter_no=payload.target_meter_no,
+            updates=payload.updates,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, result)
+
+
+@router.post("/unmatched/{unmatched_id}/delete")
+def delete_unmatched(unmatched_id: str, payload: UnmatchedDeleteRequest, request: Request):
+    try:
+        record = delete_unmatched_record(unmatched_id, actor=payload.actor, reason=payload.reason)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    return ok(request, record)
+
+
+@router.get("/audit-log")
+def audit_log(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    return ok(request, list_audit_events(limit=limit, offset=offset))
 
 
 @router.get("/tasks")

@@ -3,18 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>&#39033;&#30446;&#30475;&#26495;</title>
+    <title>项目看板</title>
     <style>
       :root {
-        --bg: #f3f5f7;
+        --bg: #edf1f4;
         --surface: #fff;
-        --surface-2: #f8fafb;
+        --surface-2: #f7f9fb;
         --ink: #111827;
         --muted: #687386;
         --line: #d8dee6;
         --accent: #0f6f8f;
-        --ok: #12664f;
+        --accent-2: #275e4f;
         --warn: #956012;
+        --bad: #a32920;
         --shadow: 0 18px 45px rgba(22, 34, 48, .08);
       }
       * { box-sizing: border-box; }
@@ -25,16 +26,18 @@
         background: var(--bg);
       }
       .topbar {
-        height: 58px;
+        height: 60px;
         display: flex;
         align-items: center;
         justify-content: space-between;
+        gap: 12px;
         padding: 0 18px;
         border-bottom: 1px solid var(--line);
-        background: rgba(255, 255, 255, .9);
+        background: rgba(255, 255, 255, .92);
       }
-      h1 { margin: 0; font-size: 17px; }
+      h1 { margin: 0; font-size: 18px; }
       .muted { color: var(--muted); font-size: 12px; }
+      .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
       .button {
         height: 34px;
         display: inline-flex;
@@ -51,63 +54,182 @@
       .stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
       .stat, .panel {
         border: 1px solid var(--line);
-        border-radius: 10px;
+        border-radius: 12px;
         background: var(--surface);
         box-shadow: var(--shadow);
       }
-      .stat { padding: 12px; }
+      .stat { min-height: 92px; padding: 12px; display: grid; align-content: space-between; }
       .stat span { display: block; color: var(--muted); font-size: 12px; font-weight: 800; }
-      .stat strong { display: block; margin-top: 6px; font-size: 24px; }
+      .stat strong { display: block; font-size: 26px; letter-spacing: 0; }
+      .grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 14px; align-items: stretch; }
       .panel { overflow: hidden; }
       .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
         padding: 12px;
         border-bottom: 1px solid var(--line);
         background: var(--surface-2);
         font-weight: 900;
       }
-      table { width: 100%; border-collapse: collapse; font-size: 13px; }
-      th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
-      th { color: var(--muted); background: var(--surface-2); font-size: 12px; }
-      .bar { height: 7px; width: 120px; border-radius: 99px; background: #e8edf2; overflow: hidden; }
+      .panel-body { padding: 12px; }
+      .chart-strip { display: grid; grid-template-columns: 220px 1fr; gap: 14px; align-items: center; }
+      .donut { width: 190px; height: 190px; display: block; margin: 0 auto; }
+      .donut text { font-family: inherit; font-weight: 900; fill: var(--ink); }
+      .carousel {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+      .slide {
+        min-height: 114px;
+        display: grid;
+        align-content: space-between;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: linear-gradient(180deg, #fff, #f7fafb);
+      }
+      .slide span { color: var(--muted); font-size: 12px; font-weight: 900; }
+      .slide strong { font-size: 28px; letter-spacing: 0; }
+      .slide .bar { height: 8px; }
+      .bar-list { display: grid; gap: 10px; }
+      .bar-row { display: grid; grid-template-columns: 120px 1fr 48px; gap: 10px; align-items: center; font-size: 12px; }
+      .bar { height: 9px; border-radius: 99px; background: #e8edf2; overflow: hidden; }
       .bar i { display: block; height: 100%; width: var(--value); background: var(--accent); }
-      .ok { color: var(--ok); font-weight: 900; }
+      .table-scroll { max-height: 310px; overflow: auto; }
+      .table-scroll thead th { position: sticky; top: 0; z-index: 1; }
+      .catalog-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .catalog-row { display: grid; gap: 10px; }
+      .catalog-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .catalog-tools input, .catalog-tools select {
+        height: 32px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0 9px;
+        background: #fff;
+        color: var(--ink);
+        font: inherit;
+      }
+      .catalog-tools input { width: 220px; }
+      .catalog-table { max-height: 176px; overflow: auto; border-top: 1px solid var(--line); }
+      .catalog {
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface-2);
+      }
+      .catalog strong { display: block; margin-top: 5px; font-size: 24px; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+      th { color: var(--muted); background: var(--surface-2); font-size: 12px; }
+      .ok { color: var(--accent-2); font-weight: 900; }
       .warn { color: var(--warn); font-weight: 900; }
-      @media (max-width: 980px) {
+      iframe { width: 100%; height: 720px; border: 0; background: #fff; }
+      @media (max-width: 1100px) {
         .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        main { padding: 10px; }
+        .grid { grid-template-columns: 1fr; }
+        .chart-strip { grid-template-columns: 1fr; }
+        .carousel { grid-template-columns: 1fr; }
       }
     </style>
   </head>
   <body>
     <header class="topbar">
       <div>
-        <h1>&#39033;&#30446;&#30475;&#26495;</h1>
-        <div class="muted">&#21482;&#35835;&#36827;&#24230;&#21644;&#20219;&#21153;&#39046;&#21462;&#24773;&#20917;</div>
+        <h1>项目看板</h1>
+        <div class="muted">总清单、阶段清单、终端任务、审阅进度和异常入口</div>
       </div>
-      <a class="button" href="/task-hall">&#36820;&#22238;&#23457;&#38405;</a>
+      <div class="actions">
+        <a class="button" href="/task-hall">审阅工作台</a>
+        <a class="button" href="/unmatched">未匹配资料</a>
+      </div>
     </header>
     <main>
       <section class="stats" id="stats"></section>
+      <section class="grid">
+        <div class="panel">
+          <div class="panel-head">项目进度轮播</div>
+          <div class="panel-body">
+            <div class="carousel" id="progressCarousel"></div>
+            <div class="chart-strip">
+              <svg class="donut" viewBox="0 0 120 120" aria-label="项目进度">
+                <circle cx="60" cy="60" r="46" fill="none" stroke="#e3e9ee" stroke-width="13" />
+                <circle id="donutArc" cx="60" cy="60" r="46" fill="none" stroke="#0f6f8f" stroke-width="13" stroke-linecap="round" transform="rotate(-90 60 60)" />
+                <text id="donutText" x="60" y="58" text-anchor="middle" font-size="18">0%</text>
+                <text x="60" y="75" text-anchor="middle" font-size="8" fill="#687386">项目进度</text>
+              </svg>
+              <div class="bar-list" id="topTasks"></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">清单口径</div>
+          <div class="panel-body">
+            <div class="catalog-grid" id="catalogs"></div>
+          </div>
+        </div>
+      </section>
+      <section class="panel catalog-row">
+        <div class="panel-head">
+          <span>总清单</span>
+          <div class="catalog-tools">
+            <input id="totalQuery" placeholder="筛选终端、表号、地址" />
+            <select id="totalTerminal"><option value="">全部终端</option></select>
+          </div>
+        </div>
+        <div class="catalog-table">
+          <table>
+            <thead><tr><th>终端</th><th>表号</th><th>安装地址</th></tr></thead>
+            <tbody id="totalRows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel catalog-row">
+        <div class="panel-head">
+          <span>阶段清单</span>
+          <div class="catalog-tools">
+            <input id="stageQuery" placeholder="筛选终端、表号、地址" />
+            <select id="stageTerminal"><option value="">全部终端</option></select>
+          </div>
+        </div>
+        <div class="catalog-table">
+          <table>
+            <thead><tr><th>终端</th><th>表号</th><th>安装地址</th></tr></thead>
+            <tbody id="stageRows"></tbody>
+          </table>
+        </div>
+      </section>
       <section class="panel">
-        <div class="panel-head">&#32456;&#31471;&#20219;&#21153;&#36827;&#24230;</div>
-        <table>
-          <thead>
-            <tr>
-              <th>&#32456;&#31471;</th>
-              <th>&#25913;&#36896;&#25968;&#37327;</th>
-              <th>&#24050;&#19978;&#20256;</th>
-              <th>&#26410;&#23457;&#38405;</th>
-              <th>&#23436;&#25104;&#29575;</th>
-              <th>&#23457;&#38405;&#29575;</th>
-              <th>&#39046;&#21462;&#20154;</th>
-            </tr>
-          </thead>
-          <tbody id="taskRows"></tbody>
-        </table>
+        <div class="panel-head">终端任务进度</div>
+        <div class="panel-body table-scroll" style="padding:0;">
+          <table>
+            <thead>
+              <tr>
+                <th>终端</th>
+                <th>改造数量</th>
+                <th>已上传</th>
+                <th>未审阅</th>
+                <th>上传率</th>
+                <th>审阅率</th>
+                <th>领取人</th>
+              </tr>
+            </thead>
+            <tbody id="taskRows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">终端任务领取</div>
+        <iframe src="/claim-tasks?embedded=1" title="终端任务领取"></iframe>
       </section>
     </main>
     <script>
       const pct = (value) => `${Math.round((Number(value) || 0) * 100)}%`;
+      const barWidth = (value) => `${Math.max(1, Math.round((Number(value) || 0) * 100))}%`;
+      const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
       async function api(path) {
         const response = await fetch(path);
         const payload = await response.json();
@@ -115,16 +237,57 @@
         return payload.data;
       }
       function renderStats(summary) {
+        const scanRate = summary.groups ? (summary.photo_rows_linked || 0) / (summary.groups * 4) : 0;
+        const reviewRate = Number(summary.review_progress) || 0;
+        const projectRate = (scanRate * 0.55) + (reviewRate * 0.45);
         const items = [
-          ["\u603b\u6e05\u5355", summary.total_catalog_rows],
-          ["\u9636\u6bb5\u6e05\u5355", summary.stage_catalog_rows],
-          ["\u8d44\u6599\u7ec4", summary.groups],
-          ["\u5df2\u94fe\u63a5\u7167\u7247", summary.photo_rows_linked],
-          ["\u672a\u5206\u7c7b\u7167\u7247", summary.unclassified_photos],
-          ["\u5ba1\u9605\u8fdb\u5ea6", pct(summary.review_progress)],
+          ["总清单", summary.total_catalog_rows],
+          ["阶段清单", summary.stage_catalog_rows],
+          ["资料组", summary.groups],
+          ["已链接照片", summary.photo_rows_linked],
+          ["未匹配扫码", summary.scan_unmatched],
+          ["审阅进度", pct(summary.review_progress)],
         ];
         document.querySelector("#stats").innerHTML = items.map(([label, value]) => `
           <article class="stat"><span>${label}</span><strong>${value ?? 0}</strong></article>
+        `).join("");
+        const circumference = 2 * Math.PI * 46;
+        const arc = document.querySelector("#donutArc");
+        arc.style.strokeDasharray = `${circumference}`;
+        arc.style.strokeDashoffset = `${circumference * (1 - projectRate)}`;
+        document.querySelector("#donutText").textContent = pct(projectRate);
+        document.querySelector("#progressCarousel").innerHTML = [
+          ["已扫码", `${summary.photo_rows_linked || 0} 张`, scanRate, "按资料组 4 张照片折算"],
+          ["已审阅", `${summary.reviewed_groups || 0} 组`, reviewRate, "完成归档或异常处理"],
+          ["项目进度", pct(projectRate), projectRate, "扫码 55% + 审阅 45%"],
+        ].map(([label, value, rate, hint]) => `
+          <article class="slide">
+            <span>${label}</span>
+            <strong>${value}</strong>
+            <div>
+              <div class="bar"><i style="--value:${barWidth(rate)}"></i></div>
+              <div class="muted" style="margin-top:6px;">${hint} · ${pct(rate)}</div>
+            </div>
+          </article>
+        `).join("");
+        document.querySelector("#catalogs").innerHTML = `
+          <article class="catalog"><span class="muted">总清单</span><strong>${summary.total_catalog_rows || 0}</strong><div class="muted">安装地址唯一来源</div></article>
+          <article class="catalog"><span class="muted">阶段清单</span><strong>${summary.stage_catalog_rows || 0}</strong><div class="muted">终端任务划分来源</div></article>
+          <article class="catalog"><span class="muted">清单未匹配</span><strong>${summary.stage_unmatched || 0}</strong><div class="muted">阶段清单缺总清单地址</div></article>
+          <article class="catalog"><span class="muted">扫码未匹配</span><strong>${summary.scan_unmatched || 0}</strong><div class="muted">进入人工处理池</div></article>
+        `;
+      }
+      function renderTopTasks(tasks) {
+        const top = [...tasks].filter((task) => task.has_scan_info).sort((a, b) => (b.uploaded_count || 0) - (a.uploaded_count || 0)).slice(0, 8);
+        document.querySelector("#topTasks").innerHTML = top.map((task) => `
+          <div class="bar-row">
+            <strong>${task.terminal || "-"}</strong>
+            <div>
+              <div class="bar"><i style="--value:${barWidth(task.upload_rate)}"></i></div>
+              <div class="bar" style="height:5px;margin-top:4px;"><i style="--value:${barWidth(task.review_rate)};background:#275e4f;"></i></div>
+            </div>
+            <span>${pct(task.upload_rate)}</span>
+          </div>
         `).join("");
       }
       function renderTasks(tasks) {
@@ -134,17 +297,44 @@
             <td>${task.renovation_count || 0}</td>
             <td>${task.uploaded_count || 0}</td>
             <td>${task.unreviewed_count || 0}</td>
-            <td><div class="bar"><i style="--value:${pct(task.upload_rate)}"></i></div>${pct(task.upload_rate)}</td>
-            <td><div class="bar"><i style="--value:${pct(task.review_rate)}"></i></div>${pct(task.review_rate)}</td>
-            <td class="${task.claimed_by ? "ok" : "warn"}">${task.claimed_by || "\u672a\u9886\u53d6"}</td>
+            <td><div class="bar"><i style="--value:${barWidth(task.upload_rate)}"></i></div>${pct(task.upload_rate)}</td>
+            <td><div class="bar"><i style="--value:${barWidth(task.review_rate)}"></i></div>${pct(task.review_rate)}</td>
+            <td class="${task.claimed_by ? "ok" : "warn"}">${task.claimed_by || "未领取"}</td>
+          </tr>
+        `).join("");
+      }
+      function fillTerminalOptions(select, terminals) {
+        const current = select.value;
+        select.innerHTML = `<option value="">全部终端</option>` + terminals.map((terminal) => `<option value="${esc(terminal)}">${esc(terminal)}</option>`).join("");
+        select.value = terminals.includes(current) ? current : "";
+      }
+      async function loadCatalog(type) {
+        const query = encodeURIComponent(document.querySelector(`#${type}Query`).value.trim());
+        const terminal = encodeURIComponent(document.querySelector(`#${type}Terminal`).value.trim());
+        const data = await api(`/local-test/catalog/${type}?limit=80&query=${query}&terminal=${terminal}`);
+        fillTerminalOptions(document.querySelector(`#${type}Terminal`), data.terminals || []);
+        document.querySelector(`#${type}Rows`).innerHTML = (data.items || []).map((row) => `
+          <tr>
+            <td><strong>${esc(row.terminal || "-")}</strong></td>
+            <td>${esc(row.meter_no || "-")}</td>
+            <td>${esc(row.address || "-")}</td>
           </tr>
         `).join("");
       }
       async function init() {
         const [summary, tasks] = await Promise.all([api("/local-test/summary"), api("/local-test/tasks")]);
         renderStats(summary.summary);
+        renderTopTasks(tasks.items || []);
         renderTasks(tasks.items || []);
+        await Promise.all([loadCatalog("total"), loadCatalog("stage")]);
       }
+      ["total", "stage"].forEach((type) => {
+        document.querySelector(`#${type}Query`).addEventListener("input", () => {
+          clearTimeout(loadCatalog[`${type}Timer`]);
+          loadCatalog[`${type}Timer`] = setTimeout(() => loadCatalog(type), 180);
+        });
+        document.querySelector(`#${type}Terminal`).addEventListener("change", () => loadCatalog(type));
+      });
       init().catch((error) => {
         document.body.insertAdjacentHTML("beforeend", `<pre>${error.message}</pre>`);
       });

@@ -93,6 +93,9 @@ def test_task_hall_page_is_available() -> None:
     assert 'id="openImport"' in response.text
     assert 'id="csvFile"' in response.text
     assert 'id="clearScan"' not in response.text
+    assert 'id="claimFilter"' not in response.text
+    assert 'id="completeFilter"' not in response.text
+    assert "/claim-tasks" in response.text
     assert 'id="importPayload"' in response.text
     assert 'id="syncNow"' not in response.text
     assert 'id="scanFilter"' not in response.text
@@ -104,7 +107,44 @@ def test_project_board_page_is_available() -> None:
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "taskRows" in response.text
-    assert "/task-hall" in response.text
+    assert "donutArc" in response.text
+    assert "progressCarousel" in response.text
+    assert "table-scroll" in response.text
+    assert "/unmatched" in response.text
+    assert "/claim-tasks?embedded=1" in response.text
+    assert "totalRows" in response.text
+    assert "stageRows" in response.text
+
+
+def test_claim_tasks_page_is_available() -> None:
+    response = client.get("/claim-tasks")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "claimedCount" in response.text
+    assert "/local-test/tasks" in response.text
+
+
+def test_unmatched_page_is_available() -> None:
+    response = client.get("/unmatched")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "associateRecord" in response.text
+    assert "/local-test/unmatched" in response.text
+
+
+def test_catalog_routes_are_filterable() -> None:
+    client.post("/local-test/bootstrap")
+
+    response = client.get("/local-test/catalog/total?limit=5")
+    filtered = client.get("/local-test/catalog/stage?query=350&limit=5")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["total"] > 0
+    assert len(response.json()["data"]["items"]) <= 5
+    assert filtered.status_code == 200
+    assert "items" in filtered.json()["data"]
 
 
 def test_sync_config_page_is_available() -> None:

@@ -124,14 +124,42 @@
       .panel-title { font-size: 14px; font-weight: 900; }
       .panel-subtitle { color: var(--muted); font-size: 12px; }
       .panel-body { min-height: 0; overflow: auto; padding: 10px; }
+      .task-panel {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        padding: 0;
+      }
+      .task-list {
+        min-height: 0;
+        overflow: auto;
+        padding: 10px;
+        border-top: 1px solid var(--line);
+        background: linear-gradient(180deg, #fff 0, var(--surface-2) 100%);
+      }
       .filters {
         display: grid;
         grid-template-columns: 1fr;
-        gap: 6px;
-        padding: 8px;
-        border-bottom: 1px solid var(--line);
+        gap: 8px;
+        padding: 10px;
       }
       .filters .span { grid-column: 1 / -1; }
+      .task-board {
+        display: grid;
+        gap: 8px;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: linear-gradient(180deg, #fff, var(--surface-2));
+      }
+      .task-board-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .task-board-title strong { font-size: 13px; }
+      .mini-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+      .mini-stat { min-height: 54px; padding: 7px; border-radius: 8px; background: #fff; border: 1px solid var(--line); }
+      .mini-stat span { display: block; color: var(--muted); font-size: 11px; }
+      .mini-stat strong { display: block; margin-top: 2px; font-size: 16px; }
+      .mini-chart { display: grid; gap: 6px; padding-top: 2px; }
+      .mini-chart-row { display: grid; grid-template-columns: 58px 1fr 38px; gap: 7px; align-items: center; font-size: 11px; color: var(--muted); }
+      .mini-chart-row .progress { margin: 0; height: 7px; }
       .badge {
         display: inline-flex;
         align-items: center;
@@ -155,6 +183,11 @@
         padding: 10px;
         margin-bottom: 8px;
         cursor: pointer;
+      }
+      .task {
+        min-height: 188px;
+        display: grid;
+        align-content: space-between;
       }
       .task:hover, .group:hover, .photo-card:hover { border-color: var(--line-strong); }
       .task.active, .group.active {
@@ -329,6 +362,9 @@
         z-index: 20;
       }
       .toast.show { opacity: 1; transform: translateY(0); }
+      body.embedded .topbar { display: none; }
+      body.embedded .app { height: 100vh; }
+      body.embedded .workspace { padding: 8px; grid-template-columns: 260px minmax(280px, 360px) minmax(0, 1fr); }
       @media (max-width: 1180px) {
         .app { height: auto; min-height: 100vh; }
         .topbar { align-items: flex-start; flex-direction: column; height: auto; padding: 12px; gap: 10px; }
@@ -361,6 +397,8 @@
         <div class="actions">
           <input class="reviewer" id="reviewer" value="local-reviewer" aria-label="reviewer" />
           <a class="button secondary" href="/project-board">&#39033;&#30446;&#30475;&#26495;</a>
+          <a class="button secondary" href="/claim-tasks">&#20219;&#21153;&#39046;&#21462;</a>
+          <a class="button secondary" href="/unmatched">&#26410;&#21305;&#37197;&#36164;&#26009;</a>
           <button class="secondary" id="openImport">&#23548;&#20837;&#34920;&#26684;&#25968;&#25454;</button>
           <button id="reload">&#21047;&#26032;</button>
         </div>
@@ -370,25 +408,16 @@
           <div class="panel-head">
             <div>
               <h2 class="panel-title">&#20219;&#21153;</h2>
-              <p class="panel-subtitle">&#20165;&#26174;&#31034;&#24050;&#23548;&#20837;&#29031;&#29255; URL &#30340;&#20219;&#21153;</p>
+              <p class="panel-subtitle">&#20165;&#26174;&#31034;&#25105;&#24050;&#39046;&#21462;&#30340;&#20219;&#21153;</p>
             </div>
             <span class="badge" id="taskCount">0</span>
           </div>
+          <div class="panel-body task-panel">
           <div class="filters">
-            <select id="claimFilter">
-              <option value="">&#20840;&#37096;&#39046;&#21462;&#29366;&#24577;</option>
-              <option value="available">&#21487;&#39046;&#21462;</option>
-              <option value="mine">&#25105;&#39046;&#21462;&#30340;</option>
-              <option value="claimed">&#24050;&#34987;&#39046;&#21462;</option>
-            </select>
-            <select id="completeFilter">
-              <option value="">&#20840;&#37096;&#23436;&#25972;&#24230;</option>
-              <option value="complete">&#24050;&#23436;&#25972;</option>
-              <option value="partial">&#37096;&#20998;&#23436;&#25972;</option>
-              <option value="empty">&#26080;&#29031;&#29255;</option>
-            </select>
+            <div class="task-board" id="taskBoard"></div>
           </div>
-          <div class="panel-body" id="tasks"></div>
+          <div class="task-list" id="tasks"></div>
+          </div>
         </section>
         <section class="panel">
           <div class="panel-head">
@@ -435,6 +464,7 @@
     </div>
     <div class="toast" id="toast"></div>
     <script>
+      if (new URLSearchParams(location.search).get("embedded") === "1") document.body.classList.add("embedded");
       const state = { tasks: [], groups: [], group: null, photo: null, reviewer: "local-reviewer", taskId: null, task: null };
       const categories = {
         before_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u524d",
@@ -464,22 +494,44 @@
       function currentTask() { return state.task || state.tasks.find((task) => task.id === state.taskId) || null; }
       function canReviewCurrentTask() { return currentTask()?.claimed_by === state.reviewer; }
       function groupDone(group) { return Boolean(group?.photos?.length) && group.photos.every((photo) => photo.archive_status === "archived"); }
+      function renderTaskBoard() {
+        const claimed = state.tasks.filter((task) => task.claimed_by);
+        const mine = claimed.filter((task) => task.claimed_by === state.reviewer);
+        const totals = claimed.reduce((acc, task) => {
+          acc.renovation += Number(task.renovation_count || task.total_groups || 0);
+          acc.uploaded += Number(task.uploaded_count || 0);
+          acc.reviewed += Number(task.reviewed_count || 0);
+          return acc;
+        }, { renovation: 0, uploaded: 0, reviewed: 0 });
+        const uploadRate = totals.renovation ? totals.uploaded / totals.renovation : 0;
+        const reviewRate = totals.renovation ? totals.reviewed / totals.renovation : 0;
+        $("#taskBoard").innerHTML = `
+          <div class="task-board-title">
+            <strong>\u4efb\u52a1\u8fdb\u5ea6\u770b\u677f</strong>
+            <span class="badge">${mine.length}/${claimed.length}</span>
+          </div>
+          <div class="mini-stats">
+            <div class="mini-stat"><span>\u5df2\u9886</span><strong>${claimed.length}</strong></div>
+            <div class="mini-stat"><span>\u6211\u7684</span><strong>${mine.length}</strong></div>
+            <div class="mini-stat"><span>\u6539\u9020</span><strong>${totals.renovation}</strong></div>
+            <div class="mini-stat"><span>\u5df2\u5ba1</span><strong>${totals.reviewed}</strong></div>
+          </div>
+          <div class="mini-chart">
+            <div class="mini-chart-row"><span>\u4e0a\u4f20</span><div class="progress"><i style="--value:${pct(uploadRate)}"></i></div><b>${pct(uploadRate)}</b></div>
+            <div class="mini-chart-row"><span>\u5ba1\u9605</span><div class="progress"><i style="--value:${pct(reviewRate)}"></i></div><b>${pct(reviewRate)}</b></div>
+          </div>
+        `;
+      }
       function filteredTasks() {
-        const claim = $("#claimFilter").value;
-        const complete = $("#completeFilter").value;
-        return state.tasks.filter((task) => {
-          const c = Number(task.completeness_rate) || 0;
-          return task.has_scan_info
-            && (!claim || (claim === "available" ? task.can_claim && !task.claimed_by : claim === "mine" ? task.claimed_by === state.reviewer : Boolean(task.claimed_by)))
-            && (!complete || (complete === "complete" ? c >= 1 : complete === "partial" ? c > 0 && c < 1 : c === 0));
-        });
+        return state.tasks.filter((task) => task.has_scan_info && task.claimed_by === state.reviewer);
       }
       function renderTasks() {
+        renderTaskBoard();
         const tasks = filteredTasks();
         $("#taskCount").textContent = `${tasks.length}/${state.tasks.length}`;
         $("#tasks").innerHTML = tasks.length ? tasks.map((task) => `
           <article class="task ${state.taskId === task.id ? "active" : ""}" data-task="${task.id}">
-            <div class="name-row"><strong class="name">${esc(task.name)}</strong><span class="badge ${task.can_claim ? "ok" : "warn"}">${task.can_claim ? "\u53ef\u9886\u53d6" : "\u672a\u5c31\u7eea"}</span></div>
+              <div class="name-row"><strong class="name">${esc(task.name)}</strong><span class="badge ok">\u5df2\u9886\u53d6</span></div>
             <div class="small">\u7ec8\u7aef ${esc(task.terminal || "-")} / ${task.claimed_by ? `\u5df2\u7531 ${esc(task.claimed_by)} \u9886\u53d6` : "\u672a\u9886\u53d6"}</div>
             <div class="metric-grid">
               <div class="metric"><span>\u6539\u9020\u6570\u91cf</span><strong>${task.renovation_count || task.total_groups || 0}</strong></div>
@@ -492,10 +544,10 @@
             <div class="tool-row">
               <button class="secondary" data-action="view" data-id="${task.id}">\u67e5\u770b</button>
               <button class="secondary" data-action="stash" data-id="${task.id}" ${task.claimed_by === state.reviewer ? "" : "disabled"}>\u6682\u5b58</button>
-              <button data-action="claim" data-id="${task.id}" ${task.can_claim ? "" : "disabled"}>\u9886\u53d6</button>
+              <a class="button" href="/claim-tasks">\u4efb\u52a1\u9886\u53d6</a>
             </div>
           </article>
-        `).join("") : `<div class="empty">\u6682\u65e0\u5df2\u5bfc\u5165 URL \u7167\u7247\u7684\u4efb\u52a1</div>`;
+        `).join("") : `<div class="empty">\u6682\u65e0\u5df2\u9886\u53d6\u4efb\u52a1<br /><a class="button" href="/claim-tasks">\u53bb\u9886\u53d6\u7ec8\u7aef\u4efb\u52a1</a></div>`;
         $("#tasks").querySelectorAll("[data-task]").forEach((card) => card.addEventListener("click", () => handleTask(card.dataset.task, "view")));
         $("#tasks").querySelectorAll("button[data-action]").forEach((button) => button.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -511,9 +563,10 @@
         $("#groupCount").textContent = `${state.groups.length}`;
         $("#groups").innerHTML = state.groups.length ? state.groups.map((group) => `
           <article class="group ${state.group?.id === group.id ? "active" : ""}" data-group="${group.id}">
-            <div class="name-row"><strong class="name">${esc(group.meter_no)}</strong><span class="badge ${groupDone(group) ? "ok" : group.photo_count >= 4 ? "ok" : "warn"}">${groupDone(group) ? "\u5df2\u5206\u7c7b\u5b8c\u6210" : `${group.photo_count || 0} \u5f20`}</span></div>
+            <div class="name-row"><strong class="name">${esc(group.meter_no)}</strong><span class="badge ${group.has_archive_blocker ? "warn" : groupDone(group) ? "ok" : group.photo_count >= 4 ? "ok" : "warn"}">${group.has_archive_blocker ? "\u5f02\u5e38" : groupDone(group) ? "\u5df2\u5206\u7c7b\u5b8c\u6210" : `${group.photo_count || 0} \u5f20`}</span></div>
             <div class="small">${esc(group.terminal)} / ${esc(group.address || "\u672a\u5339\u914d\u5730\u5740")}</div>
             <div class="small">${group.reviewer ? `\u5ba1\u9605\u4eba ${esc(group.reviewer)}` : "\u672a\u5ba1\u9605"}</div>
+            ${group.exception_reasons?.length ? `<div class="small warn">${esc(group.exception_reasons.join("\uff1b"))}</div>` : ""}
           </article>
         `).join("") : `<div class="empty">${task ? "\u8bf7\u5148\u9886\u53d6\u8be5\u7ec8\u7aef\u4efb\u52a1" : "\u9009\u62e9\u4e00\u4e2a\u7ec8\u7aef\u4efb\u52a1"}</div>`;
         $("#groups").querySelectorAll("[data-group]").forEach((row) => row.addEventListener("click", () => loadGroup(row.dataset.group)));
@@ -620,29 +673,45 @@
         const photos = state.group.photos || [];
         const currentIndex = activePhotoIndex();
         const nextPhoto = photos[currentIndex + 1] || photos[currentIndex - 1] || state.photo;
-        await api(`/local-test/groups/${encodeURIComponent(state.group.id)}/photos/${encodeURIComponent(state.photo.id)}/category`, {
-          method: "PATCH",
-          body: JSON.stringify({ category, reviewer: state.reviewer }),
-        });
-        await loadGroup(state.group.id, nextPhoto?.id);
-        await refreshCurrentGroups(state.group.id);
-        toast("\u5f53\u524d\u56fe\u7247\u5df2\u5f52\u6863");
+        try {
+          await api(`/local-test/groups/${encodeURIComponent(state.group.id)}/photos/${encodeURIComponent(state.photo.id)}/category`, {
+            method: "PATCH",
+            body: JSON.stringify({ category, reviewer: state.reviewer }),
+          });
+          await loadGroup(state.group.id, nextPhoto?.id);
+          await refreshCurrentGroups(state.group.id);
+          toast("\u5f53\u524d\u56fe\u7247\u5df2\u5f52\u6863");
+        } catch (error) {
+          await loadGroup(state.group.id, state.photo.id);
+          await refreshCurrentGroups(state.group.id);
+          toast(error.message, true);
+        }
       }
       async function archiveGroup() {
         if (!state.group) return;
         const photos = state.group.photos || [];
-        for (let index = 0; index < photos.length; index += 1) {
-          const photo = photos[index];
-          if (photo.archive_status === "archived") continue;
-          const category = photo.category && photo.category !== "unclassified" ? photo.category : categoryKeys[Math.min(index, categoryKeys.length - 1)];
-          await api(`/local-test/groups/${encodeURIComponent(state.group.id)}/photos/${encodeURIComponent(photo.id)}/category`, {
-            method: "PATCH",
-            body: JSON.stringify({ category, reviewer: state.reviewer }),
-          });
+        try {
+          for (let index = 0; index < photos.length; index += 1) {
+            const photo = photos[index];
+            if (photo.archive_status === "archived") continue;
+            const category = photo.category && photo.category !== "unclassified" ? photo.category : categoryKeys[Math.min(index, categoryKeys.length - 1)];
+            await api(`/local-test/groups/${encodeURIComponent(state.group.id)}/photos/${encodeURIComponent(photo.id)}/category`, {
+              method: "PATCH",
+              body: JSON.stringify({ category, reviewer: state.reviewer }),
+            });
+          }
+          await loadGroup(state.group.id);
+          await refreshCurrentGroups(state.group.id);
+          if (state.group?.has_archive_blocker) {
+            toast(`\u8d44\u6599\u7ec4\u5df2\u6807\u8bb0\u5f02\u5e38\uff1a${(state.group.exception_reasons || []).join("\uff1b")}`, true);
+          } else {
+            toast("\u5f53\u524d\u8d44\u6599\u7ec4\u5df2\u5f52\u6863");
+          }
+        } catch (error) {
+          await loadGroup(state.group.id);
+          await refreshCurrentGroups(state.group.id);
+          toast(error.message, true);
         }
-        await loadGroup(state.group.id);
-        await refreshCurrentGroups(state.group.id);
-        toast("\u5f53\u524d\u8d44\u6599\u7ec4\u5df2\u5f52\u6863");
       }
       async function refreshCurrentGroups(preferredGroupId = null) {
         if (!state.taskId || !canReviewCurrentTask()) return;
@@ -763,7 +832,6 @@
         loadGroup(state.groups[next].id);
       }
       $("#reviewer").addEventListener("input", (event) => { state.reviewer = event.target.value.trim() || "local-reviewer"; });
-      ["claimFilter", "completeFilter"].forEach((id) => $("#" + id).addEventListener("change", renderTasks));
       $("#reload").addEventListener("click", reloadAll);
       $("#openImport").addEventListener("click", () => $("#importDrawer").classList.add("show"));
       $("#closeImport").addEventListener("click", () => $("#importDrawer").classList.remove("show"));

@@ -17,12 +17,16 @@ from app.services.local_simulation import (
     classify_photo,
     claim_task,
     clear_scan_data,
+    delete_unmatched_record,
     get_task_progress,
     get_group,
     import_scan_template_xlsx,
+    list_audit_events,
     list_task_groups,
     list_groups,
+    list_unmatched_records,
     list_tasks,
+    normalize_cell,
     release_task,
     review_group,
     save_exception_note,
@@ -180,6 +184,13 @@ def test_tasks_are_split_by_terminal_and_require_scan_info(synthetic_state: dict
         claim_task(tasks[2]["id"], reviewer="alice")
 
 
+def test_normalize_cell_repairs_latin1_mojibake() -> None:
+    mojibake = "\u00e5\u00ae\u009d\u00e5\u00b1\u00b1\u00e5\u008c\u00ba\u00e9\u0094\u00a6\u00e7\u00a7\u008b\u00e8\u00b7\u00af1152\u00e5\u008f\u00b7"
+
+    assert normalize_cell(mojibake) == "\u5b9d\u5c71\u533a\u9526\u79cb\u8def1152\u53f7"
+    assert normalize_cell("\u4e0a\u6d77\u5e02\u5b9d\u5c71\u533a") == "\u4e0a\u6d77\u5e02\u5b9d\u5c71\u533a"
+
+
 def test_review_group_updates_status_and_summary(synthetic_state: dict) -> None:
     state = synthetic_state
     first_id = state["groups"][0]["id"]
@@ -326,6 +337,45 @@ def test_apply_synced_scan_records_matches_catalog_and_refreshes_tasks(synthetic
     assert duplicate["applied_records"] == 0
     assert duplicate["skipped_duplicates"] == 2
     assert group["photo_count"] == 2
+
+
+def test_unmatched_records_are_searchable_and_audited(synthetic_state: dict) -> None:
+    result = apply_synced_scan_records(
+        [
+            {
+                "file_id": "remote-unmatched-1",
+                "source_file": "remote-source",
+                "barcode": "NO-MATCH-001",
+                "meter_match_key": "no-match",
+                "terminal": "T-404",
+                "collector": "collector-x",
+                "module_asset_no": "module-x",
+                "image_urls": ["https://download.example/unmatched.jpg"],
+            }
+        ]
+    )
+
+    records = list_unmatched_records(query="NO-MATCH")
+    deleted = delete_unmatched_record(records["items"][0]["unmatched_id"], actor="alice", reason="bad source")
+    audits = list_audit_events()
+
+    assert result["unmatched_records"] == 1
+    assert records["total"] == 1
+    assert deleted["barcode"] == "NO-MATCH-001"
+    assert audits["items"][0]["action"] == "delete_unmatched"
+    assert audits["items"][0]["actor"] == "alice"
+
+
+def test_incomplete_group_is_marked_exception_after_last_photo_archived(synthetic_state: dict) -> None:
+    group = synthetic_state["groups"][1]
+    photo = group["photos"][0]
+
+    claim_task(2, reviewer="alice")
+    classify_photo(group["id"], photo["id"], "collector_barcode", reviewer="alice")
+
+    assert group["status"] == "exception"
+    assert group["has_archive_blocker"] is True
+    assert "照片不足" in group["exception_note"]
 
 
 @pytest.mark.skipif(find_spec("openpyxl") is None, reason="openpyxl is not available")

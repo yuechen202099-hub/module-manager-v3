@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>未匹配资料</title>
+    <style>
+      :root {
+        --bg: #eef2f5;
+        --surface: #fff;
+        --surface-2: #f7f9fb;
+        --ink: #101820;
+        --muted: #667280;
+        --line: #d8e0e7;
+        --accent: #0c6f88;
+        --danger: #a32920;
+        --shadow: 0 18px 50px rgba(16, 31, 45, .08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+      }
+      .topbar {
+        height: 58px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 18px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 255, 255, .92);
+      }
+      h1 { margin: 0; font-size: 18px; }
+      .muted { color: var(--muted); font-size: 12px; }
+      .actions, .filters, .form-row { display: flex; align-items: center; gap: 8px; }
+      a, button {
+        height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0 12px;
+        color: #06384a;
+        background: #fff;
+        font-weight: 800;
+        text-decoration: none;
+        cursor: pointer;
+      }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button.danger { background: #fff; border-color: #efc3bd; color: var(--danger); }
+      input, textarea {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        color: var(--ink);
+        font: inherit;
+      }
+      input { height: 34px; padding: 0 10px; }
+      textarea { width: 100%; min-height: 130px; padding: 10px; resize: vertical; }
+      main { display: grid; grid-template-columns: minmax(420px, 1fr) 420px; gap: 14px; padding: 14px; height: calc(100vh - 58px); }
+      .panel {
+        min-width: 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-2);
+      }
+      .panel-title { margin: 0; font-size: 15px; font-weight: 900; }
+      .panel-body { height: calc(100% - 58px); overflow: auto; padding: 10px; }
+      .record {
+        display: grid;
+        gap: 8px;
+        padding: 11px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #fff;
+        cursor: pointer;
+      }
+      .record + .record { margin-top: 8px; }
+      .record.active { border-color: #178bb0; box-shadow: inset 3px 0 0 #178bb0; background: #f4fbfd; }
+      .record strong { font-size: 14px; }
+      .meta-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .meta {
+        min-width: 0;
+        padding: 9px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--surface-2);
+      }
+      .meta span { display: block; color: var(--muted); font-size: 11px; font-weight: 800; }
+      .meta b { display: block; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+      .url-list { display: grid; gap: 6px; max-height: 210px; overflow: auto; }
+      .url-list a { height: auto; min-height: 30px; align-items: center; display: flex; overflow-wrap: anywhere; line-height: 1.35; padding: 6px 8px; font-size: 12px; font-weight: 700; }
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        opacity: 0;
+        transform: translateY(8px);
+        transition: .16s ease;
+        z-index: 20;
+        padding: 12px 14px;
+        border-radius: 9px;
+        color: #fff;
+        background: #17212b;
+      }
+      .toast.show { opacity: 1; transform: translateY(0); }
+      @media (max-width: 980px) {
+        main { grid-template-columns: 1fr; height: auto; }
+        .panel-body { height: auto; max-height: 70vh; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>未匹配资料</h1>
+        <div class="muted">扫码表格未能自动匹配清单的数据，人工补全后可关联到资料组</div>
+      </div>
+      <div class="actions">
+        <a href="/project-board">项目看板</a>
+        <a href="/task-hall">任务大厅</a>
+      </div>
+    </header>
+    <main>
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">待处理记录</h2>
+            <div class="muted" id="count">0 条</div>
+          </div>
+          <div class="filters">
+            <input id="query" placeholder="表号、终端、采集器、模块、地址" />
+            <button class="primary" id="search">搜索</button>
+          </div>
+        </div>
+        <div class="panel-body" id="records"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2 class="panel-title">详情与处理</h2>
+            <div class="muted" id="selectedMeta">未选择</div>
+          </div>
+        </div>
+        <div class="panel-body" id="detail"></div>
+      </section>
+    </main>
+    <div class="toast" id="toast"></div>
+    <script>
+      const state = { records: [], selected: null, reviewer: "local-reviewer" };
+      const $ = (selector) => document.querySelector(selector);
+      const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+      async function api(path, options = {}) {
+        const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+        const payload = await response.json();
+        if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
+        return payload.data;
+      }
+      function toast(message, bad = false) {
+        $("#toast").textContent = message;
+        $("#toast").style.background = bad ? "#a32920" : "#17212b";
+        $("#toast").classList.add("show");
+        clearTimeout(toast.timer);
+        toast.timer = setTimeout(() => $("#toast").classList.remove("show"), 2400);
+      }
+      function getPhotoUrls(record) {
+        return record.image_urls || String(record.photo_urls || "").split(/\r?\n|,|;/).map((item) => item.trim()).filter(Boolean);
+      }
+      function renderRecords() {
+        $("#count").textContent = `${state.records.length} 条`;
+        $("#records").innerHTML = state.records.length ? state.records.map((record) => `
+          <article class="record ${state.selected?.unmatched_id === record.unmatched_id ? "active" : ""}" data-id="${esc(record.unmatched_id)}">
+            <strong>${esc(record.barcode || record.meter_no || record.unmatched_id)}</strong>
+            <div class="muted">${esc(record.terminal || "未知终端")} / ${esc(record.address || "未匹配地址")}</div>
+            <div class="muted">${esc(record.collector || "-")} · ${esc(record.module_asset_no || record.asset_no || "-")} · ${getPhotoUrls(record).length} 张图</div>
+          </article>
+        `).join("") : `<div class="muted">暂无未匹配资料</div>`;
+        $("#records").querySelectorAll("[data-id]").forEach((item) => item.addEventListener("click", () => {
+          state.selected = state.records.find((record) => record.unmatched_id === item.dataset.id);
+          renderRecords();
+          renderDetail();
+        }));
+      }
+      function renderDetail() {
+        const record = state.selected;
+        if (!record) {
+          $("#selectedMeta").textContent = "未选择";
+          $("#detail").innerHTML = `<div class="muted">选择左侧记录后处理</div>`;
+          return;
+        }
+        $("#selectedMeta").textContent = record.unmatched_id;
+        const urls = getPhotoUrls(record);
+        $("#detail").innerHTML = `
+          <div class="meta-grid">
+            <div class="meta"><span>扫码内容</span><b title="${esc(record.barcode || "")}">${esc(record.barcode || "-")}</b></div>
+            <div class="meta"><span>匹配键</span><b>${esc(record.meter_match_key || "-")}</b></div>
+            <div class="meta"><span>终端</span><b>${esc(record.terminal || "-")}</b></div>
+            <div class="meta"><span>采集器</span><b>${esc(record.collector || "-")}</b></div>
+            <div class="meta"><span>模块</span><b>${esc(record.module_asset_no || record.asset_no || "-")}</b></div>
+            <div class="meta"><span>安装人员</span><b>${esc(record.creator || record.installer || "-")}</b></div>
+          </div>
+          <h3 class="panel-title" style="margin:14px 0 8px;">照片 URL</h3>
+          <div class="url-list">${urls.length ? urls.map((url) => `<a href="${esc(url)}" target="_blank" rel="noreferrer">${esc(url)}</a>`).join("") : `<div class="muted">没有照片 URL</div>`}</div>
+          <h3 class="panel-title" style="margin:14px 0 8px;">人工关联</h3>
+          <div class="form-row">
+            <input id="targetMeter" placeholder="目标表号" />
+            <input id="targetGroup" placeholder="或资料组 ID" />
+          </div>
+          <textarea id="updates" spellcheck="false" placeholder='{"collector":"采集器","module_asset_no":"模块号"}'></textarea>
+          <div class="form-row" style="justify-content:flex-end;margin-top:10px;">
+            <button class="danger" id="deleteRecord">删除并记审计</button>
+            <button class="primary" id="associateRecord">关联到资料组</button>
+          </div>`;
+        $("#associateRecord").addEventListener("click", associateRecord);
+        $("#deleteRecord").addEventListener("click", deleteRecord);
+      }
+      async function associateRecord() {
+        const updatesText = $("#updates").value.trim();
+        const updates = updatesText ? JSON.parse(updatesText) : {};
+        await api(`/local-test/unmatched/${encodeURIComponent(state.selected.unmatched_id)}/associate`, {
+          method: "POST",
+          body: JSON.stringify({
+            actor: state.reviewer,
+            target_meter_no: $("#targetMeter").value.trim(),
+            target_group_id: $("#targetGroup").value.trim(),
+            updates,
+          }),
+        });
+        toast("已关联资料组");
+        state.selected = null;
+        await load();
+      }
+      async function deleteRecord() {
+        await api(`/local-test/unmatched/${encodeURIComponent(state.selected.unmatched_id)}/delete`, {
+          method: "POST",
+          body: JSON.stringify({ actor: state.reviewer, reason: "人工确认无效" }),
+        });
+        toast("已删除并记录审计");
+        state.selected = null;
+        await load();
+      }
+      async function load() {
+        const query = encodeURIComponent($("#query").value.trim());
+        const data = await api(`/local-test/unmatched?limit=500&query=${query}`);
+        state.records = data.items || [];
+        renderRecords();
+        renderDetail();
+      }
+      $("#search").addEventListener("click", () => load().catch((error) => toast(error.message, true)));
+      $("#query").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") load().catch((error) => toast(error.message, true));
+      });
+      load().catch((error) => toast(error.message, true));
+    </script>
+  </body>
+</html>
