@@ -6,8 +6,11 @@ V2.0 does not automate the Ezcodes frontend for production sync. It uses a backe
 
 - Site: `https://app.ezcodes.cn/web#/home/batch-scan-files`
 - CloudBase env: `cloud1-8g4k4khc04701207`
+- CloudBase Web API endpoint: `https://cloud1-8g4k4khc04701207.ap-shanghai.tcb-api.tencentcloudapi.com/web`
 - File tree collection: `BGFiles`
 - Barcode data collection: `BGBarcodes`
+- Query action: `database.queryDocument`
+- Photo URL action: `storage.batchGetDownloadUrl`
 - Root folder: `批量扫码 / 模块改造`
 - Installer folders:
   - `罗爱民`
@@ -43,5 +46,4 @@ These fields are project-critical and must stay stable:
 
 This endpoint builds a sync plan from backend data access. It does not click or scrape frontend UI.
 
-The active implementation keeps the CloudBase transport injectable so credentials are not logged or embedded in code.
-
+The active implementation uses backend CloudBase requests only. Credentials are accepted at request time and are not embedded in source code, tests, or documentation.

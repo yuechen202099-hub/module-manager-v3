@@ -6,9 +6,9 @@ from app.core.responses import ok
 from app.services.ezcodes_sync import (
     EZCODES_ENV_ID,
     EzcodesBackend,
+    EzcodesCloudBaseBackend,
     EzcodesCredentials,
     EzcodesError,
-    EzcodesFile,
     build_target_sync_plan,
 )
 
@@ -19,24 +19,14 @@ class EzcodesCredentialsRequest(BaseModel):
     access_token: str = Field(min_length=1)
     team_id: str = Field(min_length=1)
     env_id: str = EZCODES_ENV_ID
+    endpoint: str | None = None
 
 
 class EzcodesSyncPreviewRequest(BaseModel):
     credentials: EzcodesCredentialsRequest
 
 
-class NotConfiguredEzcodesBackend:
-    def list_files(self, credentials: EzcodesCredentials, parent_id: str) -> list[EzcodesFile]:
-        raise EzcodesError("Ezcodes backend transport is not configured.")
-
-    def list_barcodes(self, credentials: EzcodesCredentials, file_id: str) -> list[dict]:
-        raise EzcodesError("Ezcodes backend transport is not configured.")
-
-    def get_temp_file_urls(self, credentials: EzcodesCredentials, file_ids: list[str]) -> dict[str, str]:
-        raise EzcodesError("Ezcodes backend transport is not configured.")
-
-
-_backend: EzcodesBackend = NotConfiguredEzcodesBackend()
+_backend: EzcodesBackend = EzcodesCloudBaseBackend()
 
 
 def set_ezcodes_backend(backend: EzcodesBackend) -> None:
@@ -46,11 +36,14 @@ def set_ezcodes_backend(backend: EzcodesBackend) -> None:
 
 @router.post("/preview")
 def preview_ezcodes_sync(project_id: int, payload: EzcodesSyncPreviewRequest, request: Request):
-    credentials = EzcodesCredentials(
-        access_token=payload.credentials.access_token,
-        team_id=payload.credentials.team_id,
-        env_id=payload.credentials.env_id,
-    )
+    credential_kwargs = {
+        "access_token": payload.credentials.access_token,
+        "team_id": payload.credentials.team_id,
+        "env_id": payload.credentials.env_id,
+    }
+    if payload.credentials.endpoint:
+        credential_kwargs["endpoint"] = payload.credentials.endpoint
+    credentials = EzcodesCredentials(**credential_kwargs)
     try:
         plan = build_target_sync_plan(_backend, credentials)
     except EzcodesError as exc:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -7,8 +10,16 @@ from app.services.matching import build_long_scan_match_key
 
 
 EZCODES_ENV_ID = "cloud1-8g4k4khc04701207"
-EZCODES_ROOT_FOLDER = "模块改造"
-EZCODES_INSTALLERS = ("罗爱民", "龙翔", "张海军", "邓卓")
+EZCODES_CLOUD_API_ENDPOINT = "https://cloud1-8g4k4khc04701207.ap-shanghai.tcb-api.tencentcloudapi.com/web"
+EZCODES_DATA_VERSION = "2020-01-10"
+EZCODES_ROOT_FOLDER = "\u6a21\u5757\u6539\u9020"
+EZCODES_ROOT_PARENT_NAME = "\u6279\u91cf\u626b\u7801"
+EZCODES_INSTALLERS = (
+    "\u7f57\u7231\u6c11",
+    "\u9f99\u7fd4",
+    "\u5f20\u6d77\u519b",
+    "\u9093\u5353",
+)
 
 
 class EzcodesError(ValueError):
@@ -20,6 +31,7 @@ class EzcodesCredentials:
     access_token: str
     team_id: str
     env_id: str = EZCODES_ENV_ID
+    endpoint: str = EZCODES_CLOUD_API_ENDPOINT
 
 
 @dataclass(frozen=True)
@@ -67,8 +79,114 @@ class EzcodesBackend(Protocol):
         ...
 
 
+class EzcodesCloudBaseBackend:
+    def __init__(self, page_size: int = 1000, timeout_seconds: int = 30) -> None:
+        self.page_size = page_size
+        self.timeout_seconds = timeout_seconds
+
+    def list_files(self, credentials: EzcodesCredentials, parent_id: str) -> list[EzcodesFile]:
+        docs = self._query_all(
+            credentials,
+            collection_name="BGFiles",
+            query={
+                "teamId": {"$eq": credentials.team_id},
+                "parentId": parent_id,
+                "moduleType": {"$ne": 1},
+                "delete": {"$ne": True},
+            },
+            order=[{"field": "createTime", "direction": "desc"}],
+        )
+        return [parse_file_document(item) for item in docs]
+
+    def list_barcodes(self, credentials: EzcodesCredentials, file_id: str) -> list[dict[str, Any]]:
+        return self._query_all(
+            credentials,
+            collection_name="BGBarcodes",
+            query={
+                "teamId": {"$eq": credentials.team_id},
+                "fileId": {"$eq": file_id},
+                "delete": {"$ne": True},
+            },
+            order=[{"field": "createTime", "direction": "asc"}],
+        )
+
+    def get_temp_file_urls(self, credentials: EzcodesCredentials, file_ids: list[str]) -> dict[str, str]:
+        if not file_ids:
+            return {}
+        payload = {
+            "action": "storage.batchGetDownloadUrl",
+            "dataVersion": EZCODES_DATA_VERSION,
+            "env": credentials.env_id,
+            "file_list": [{"fileid": file_id, "max_age": 7200} for file_id in file_ids],
+            "access_token": credentials.access_token,
+        }
+        response = self._request(credentials, payload)
+        download_list = response.get("data", {}).get("download_list") or response.get("fileList") or []
+        result: dict[str, str] = {}
+        for item in download_list:
+            file_id = str(item.get("fileid") or item.get("fileID") or "")
+            url = str(item.get("download_url") or item.get("tempFileURL") or item.get("url") or "")
+            if file_id and url:
+                result[file_id] = url
+        return result
+
+    def _query_all(
+        self,
+        credentials: EzcodesCredentials,
+        collection_name: str,
+        query: dict[str, Any],
+        order: list[dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            payload = {
+                "action": "database.queryDocument",
+                "dataVersion": EZCODES_DATA_VERSION,
+                "env": credentials.env_id,
+                "collectionName": collection_name,
+                "queryType": "WHERE",
+                "query": query,
+                "order": order,
+                "limit": self.page_size,
+                "offset": offset,
+                "access_token": credentials.access_token,
+            }
+            response = self._request(credentials, payload)
+            docs = parse_document_list(response)
+            result.extend(docs)
+            if len(docs) < self.page_size:
+                break
+            offset += self.page_size
+        return result
+
+    def _request(self, credentials: EzcodesCredentials, payload: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            credentials.endpoint,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raise EzcodesError(f"CloudBase request failed with HTTP {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise EzcodesError("CloudBase request failed") from exc
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise EzcodesError("CloudBase returned invalid JSON") from exc
+        if data.get("code"):
+            raise EzcodesError(str(data.get("message") or data.get("msg") or data.get("code")))
+        return data
+
+
 def build_target_sync_plan(backend: EzcodesBackend, credentials: EzcodesCredentials) -> dict[str, Any]:
-    root = find_single_folder(backend.list_files(credentials, "0"), EZCODES_ROOT_FOLDER, parent_name="批量扫码")
+    root = find_single_folder(backend.list_files(credentials, "0"), EZCODES_ROOT_FOLDER, parent_name=EZCODES_ROOT_PARENT_NAME)
     installer_folders = backend.list_files(credentials, root.id)
 
     files_by_installer: dict[str, list[EzcodesFile]] = {}
@@ -113,13 +231,13 @@ def collect_scan_files(backend: EzcodesBackend, credentials: EzcodesCredentials,
 
 
 def normalize_barcode_record(raw: dict[str, Any], file: EzcodesFile, installer: str) -> EzcodesScanRecord:
-    barcode = pick_text(raw, "txtValue", "barcode", "扫码内容")
+    barcode = pick_text(raw, "txtValue", "barcode", "\u626b\u7801\u5185\u5bb9")
     if not barcode:
-        raise EzcodesError("扫码记录缺少扫码内容")
+        raise EzcodesError("Barcode record is missing txtValue.")
     try:
         meter_match_key = build_long_scan_match_key(barcode)
     except ValueError as exc:
-        raise EzcodesError(f"扫码内容无法生成匹配键: {barcode}") from exc
+        raise EzcodesError(f"Barcode cannot produce match key: {barcode}") from exc
 
     return EzcodesScanRecord(
         file_id=file.id,
@@ -127,15 +245,15 @@ def normalize_barcode_record(raw: dict[str, Any], file: EzcodesFile, installer: 
         installer=installer,
         barcode=barcode,
         meter_match_key=meter_match_key,
-        terminal=pick_text(raw, "terminal", "终端"),
-        collector=pick_text(raw, "collector", "采集器"),
-        meter_no=pick_text(raw, "meterNo", "meter_no", "表号"),
-        module_asset_no=pick_text(raw, "asset_no", "assetNo", "moduleAssetNo", "模块资产编号"),
-        address=pick_text(raw, "address", "地址"),
-        asset_type=pick_text(raw, "assetType", "asset_type", "资产类型"),
-        creator=pick_text(raw, "creator", "创建者"),
-        created_at=pick_text(raw, "createTime", "created_at", "创建时间"),
-        image_file_ids=tuple(normalize_images(raw.get("images") or raw.get("图片") or [])),
+        terminal=pick_text(raw, "terminal", "\u7ec8\u7aef"),
+        collector=pick_text(raw, "collector", "\u91c7\u96c6\u5668"),
+        meter_no=pick_text(raw, "meterNo", "meter_no", "\u8868\u53f7"),
+        module_asset_no=pick_text(raw, "asset_no", "assetNo", "moduleAssetNo", "\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7"),
+        address=pick_text(raw, "address", "\u5730\u5740"),
+        asset_type=pick_text(raw, "assetType", "asset_type", "\u8d44\u4ea7\u7c7b\u578b"),
+        creator=pick_text(raw, "creator", "\u521b\u5efa\u8005"),
+        created_at=pick_text(raw, "createTime", "created_at", "\u521b\u5efa\u65f6\u95f4"),
+        image_file_ids=tuple(normalize_images(raw.get("images") or raw.get("\u56fe\u7247") or [])),
         raw=raw,
     )
 
@@ -167,9 +285,32 @@ def pick_text(data: dict[str, Any], *keys: str) -> str:
 def find_single_folder(files: list[EzcodesFile], name: str, parent_name: str) -> EzcodesFile:
     folder = find_folder(files, name)
     if folder is None:
-        raise EzcodesError(f"未找到目录: {parent_name}/{name}")
+        raise EzcodesError(f"Folder not found: {parent_name}/{name}")
     return folder
 
 
 def find_folder(files: list[EzcodesFile], name: str) -> EzcodesFile | None:
     return next((item for item in files if item.is_folder and item.name == name), None)
+
+
+def parse_document_list(response: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_list = response.get("data", {}).get("list", [])
+    docs = []
+    for item in raw_list:
+        if isinstance(item, str):
+            docs.append(json.loads(item))
+        elif isinstance(item, dict):
+            docs.append(item)
+    return docs
+
+
+def parse_file_document(item: dict[str, Any]) -> EzcodesFile:
+    return EzcodesFile(
+        id=str(item.get("_id") or item.get("id") or ""),
+        name=str(item.get("name") or ""),
+        type=int(item.get("type") or 0),
+        parent_id=str(item.get("parentId") or ""),
+        creator=str(item.get("creator") or item.get("userId") or ""),
+        created_at=str(item.get("createTime") or ""),
+        raw=item,
+    )
