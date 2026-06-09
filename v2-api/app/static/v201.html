@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>模块更换项目管理器 V2.01 测试版</title>
+    <style>
+      :root {
+        --bg: #f5f7fa;
+        --panel: #ffffff;
+        --line: #d8e0e8;
+        --text: #17212b;
+        --muted: #667085;
+        --primary: #1f6f9f;
+        --danger: #b42318;
+        --warning: #b7791f;
+        --success: #16815d;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header {
+        height: 60px;
+        padding: 0 22px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: #101820;
+        color: #fff;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+      }
+      main {
+        padding: 18px;
+      }
+      .toolbar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 14px;
+      }
+      button {
+        border: 1px solid var(--primary);
+        background: var(--primary);
+        color: #fff;
+        border-radius: 6px;
+        height: 34px;
+        padding: 0 14px;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #fff;
+        color: var(--primary);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(140px, 1fr));
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      .metric,
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      .metric {
+        padding: 14px;
+      }
+      .metric span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .metric strong {
+        display: block;
+        margin-top: 8px;
+        font-size: 26px;
+      }
+      .panel {
+        padding: 14px;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(540px, 1fr) 360px;
+        gap: 14px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 8px 10px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        color: var(--muted);
+        background: #f8fafc;
+        position: sticky;
+        top: 0;
+      }
+      tr {
+        cursor: pointer;
+      }
+      tr:hover td {
+        background: #eef6fb;
+      }
+      .status-incomplete {
+        color: var(--warning);
+        font-weight: 700;
+      }
+      .status-unmatched {
+        color: var(--danger);
+        font-weight: 700;
+      }
+      .status-pending {
+        color: var(--success);
+        font-weight: 700;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .scroll {
+        max-height: calc(100vh - 260px);
+        overflow: auto;
+      }
+      pre {
+        white-space: pre-wrap;
+        word-break: break-all;
+        background: #f8fafc;
+        border: 1px solid var(--line);
+        padding: 10px;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>模块更换项目管理器 V2.01 测试版</h1>
+      <span>本地模拟运行</span>
+    </header>
+    <main>
+      <div class="toolbar">
+        <button id="bootstrap">重新导入三份测试数据</button>
+        <button class="secondary" id="refresh">刷新结果</button>
+        <span class="muted" id="paths"></span>
+      </div>
+      <section class="grid" id="metrics"></section>
+      <section class="layout">
+        <div class="panel">
+          <h2>资料组匹配结果</h2>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>表号</th>
+                  <th>终端</th>
+                  <th>地址</th>
+                  <th>照片数</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody id="groups"></tbody>
+            </table>
+          </div>
+        </div>
+        <aside class="panel">
+          <h2>资料组详情</h2>
+          <pre id="detail">点击左侧资料组查看详情</pre>
+        </aside>
+      </section>
+    </main>
+    <script>
+      const metricsEl = document.querySelector("#metrics");
+      const groupsEl = document.querySelector("#groups");
+      const detailEl = document.querySelector("#detail");
+      const pathsEl = document.querySelector("#paths");
+
+      const labels = {
+        total_catalog_rows: "总清单",
+        stage_catalog_rows: "阶段清单",
+        scan_rows: "扫码记录",
+        groups: "资料组",
+        matched_groups: "已匹配",
+        incomplete_groups: "资料不完整",
+        stage_unmatched: "阶段未匹配",
+        scan_unmatched: "扫码未匹配",
+        photo_rows_linked: "关联照片行",
+      };
+
+      async function api(path, options) {
+        const response = await fetch(path, options);
+        const payload = await response.json();
+        if (!response.ok || payload.error) {
+          throw new Error(payload.error?.message || response.statusText);
+        }
+        return payload.data;
+      }
+
+      function renderMetrics(summary) {
+        metricsEl.innerHTML = Object.entries(labels)
+          .map(([key, label]) => `<div class="metric"><span>${label}</span><strong>${summary[key] ?? 0}</strong></div>`)
+          .join("");
+      }
+
+      function renderGroups(result) {
+        groupsEl.innerHTML = result.items
+          .map(
+            (item) => `
+              <tr data-id="${item.id}">
+                <td>${item.meter_no}</td>
+                <td>${item.terminal || "-"}</td>
+                <td>${item.address || "未匹配地址"}</td>
+                <td>${item.photo_count}</td>
+                <td class="status-${item.status}">${item.status}</td>
+              </tr>
+            `,
+          )
+          .join("");
+        groupsEl.querySelectorAll("tr").forEach((row) => {
+          row.addEventListener("click", async () => {
+            const data = await api(`/local-test/groups/${row.dataset.id}`);
+            detailEl.textContent = JSON.stringify(data, null, 2);
+          });
+        });
+      }
+
+      async function refresh() {
+        const data = await api("/local-test/summary");
+        renderMetrics(data.summary);
+        pathsEl.textContent = "数据源：" + Object.values(data.paths).join(" | ");
+        renderGroups(await api("/local-test/groups?limit=300"));
+      }
+
+      document.querySelector("#bootstrap").addEventListener("click", async () => {
+        await api("/local-test/bootstrap", { method: "POST" });
+        await refresh();
+      });
+      document.querySelector("#refresh").addEventListener("click", refresh);
+      refresh().catch((error) => {
+        detailEl.textContent = error.stack || String(error);
+      });
+    </script>
+  </body>
+</html>

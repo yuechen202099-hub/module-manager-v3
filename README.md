@@ -1,4 +1,4 @@
-# Module Replacement Project Manager V2.0
+# Module Replacement Project Manager V2.01
 
 V2.0 upgrades the V1.3 desktop workflow into a low-cost multi-user web system.
 
@@ -51,3 +51,24 @@ The first milestone is a runnable skeleton:
 - Docker Compose boot path.
 - Basic tests for barcode matching and task status flow.
 
+## V2.01 Local Simulation
+
+V2.01 includes a local no-npm test entry for the three provided workbooks:
+
+- `C:\Users\Administrator\Desktop\总体数据.xlsx`
+- `C:\Users\Administrator\Desktop\第一批数据.xlsx`
+- `C:\Users\Administrator\Desktop\批量扫码_20260608125555.xlsx`
+
+Run:
+
+```powershell
+.\scripts\run-v201-local.ps1
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000/v201
+```
+
+The page imports the three workbooks, applies the V1.3 barcode matching rule, and shows matched groups, missing photos, and unmatched rows.

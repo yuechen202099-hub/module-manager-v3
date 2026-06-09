@@ -1,6 +1,10 @@
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
 from app.core.request_id import RequestIdMiddleware
@@ -8,7 +12,7 @@ from app.core.responses import error_response, ok
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Module Manager V2 API", version="2.0.0")
+    app = FastAPI(title="Module Manager V2 API", version="2.0.1")
 
     app.add_middleware(
         CORSMiddleware,
@@ -32,6 +36,13 @@ def create_app() -> FastAPI:
     @app.get("/health")
     def health(request: Request):
         return ok(request, {"status": "ok"})
+
+    static_dir = Path(__file__).resolve().parent / "static"
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.get("/v201")
+    def v201_page():
+        return FileResponse(static_dir / "v201.html")
 
     app.include_router(api_router)
     return app
