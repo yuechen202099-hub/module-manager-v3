@@ -184,6 +184,7 @@ def test_review_group_updates_status_and_summary(synthetic_state: dict) -> None:
     state = synthetic_state
     first_id = state["groups"][0]["id"]
 
+    claim_task(1, reviewer="alice")
     reviewed = review_group(first_id, status="approved", reviewer="alice", note="sample passed")
     tasks = list_tasks()
 
@@ -215,6 +216,7 @@ def test_review_group_blocks_non_claiming_reviewer(synthetic_state: dict) -> Non
 def test_exception_note_marks_group_and_progress(synthetic_state: dict) -> None:
     second_id = synthetic_state["groups"][1]["id"]
 
+    claim_task(2, reviewer="alice")
     reviewed = save_exception_note(second_id, reviewer="alice", note="missing required photos")
     progress = get_task_progress(2)
 
@@ -244,6 +246,10 @@ def test_downloaded_photo_can_be_classified(synthetic_state: dict) -> None:
     first_group = synthetic_state["groups"][0]
     photo = first_group["photos"][0]
 
+    with pytest.raises(ValueError, match="must be claimed"):
+        classify_photo(first_group["id"], photo["id"], "collector_barcode", reviewer="alice")
+
+    claim_task(1, reviewer="alice")
     classified = classify_photo(first_group["id"], photo["id"], "collector_barcode", reviewer="alice")
 
     assert classified["category"] == "collector_barcode"

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>&#39033;&#30446;&#30475;&#26495;</title>
+    <style>
+      :root {
+        --bg: #f3f5f7;
+        --surface: #fff;
+        --surface-2: #f8fafb;
+        --ink: #111827;
+        --muted: #687386;
+        --line: #d8dee6;
+        --accent: #0f6f8f;
+        --ok: #12664f;
+        --warn: #956012;
+        --shadow: 0 18px 45px rgba(22, 34, 48, .08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+      }
+      .topbar {
+        height: 58px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 18px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255, 255, 255, .9);
+      }
+      h1 { margin: 0; font-size: 17px; }
+      .muted { color: var(--muted); font-size: 12px; }
+      .button {
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0 12px;
+        color: #06384a;
+        background: #fff;
+        font-weight: 800;
+        text-decoration: none;
+      }
+      main { padding: 14px; display: grid; gap: 14px; }
+      .stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
+      .stat, .panel {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      .stat { padding: 12px; }
+      .stat span { display: block; color: var(--muted); font-size: 12px; font-weight: 800; }
+      .stat strong { display: block; margin-top: 6px; font-size: 24px; }
+      .panel { overflow: hidden; }
+      .panel-head {
+        padding: 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-2);
+        font-weight: 900;
+      }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+      th { color: var(--muted); background: var(--surface-2); font-size: 12px; }
+      .bar { height: 7px; width: 120px; border-radius: 99px; background: #e8edf2; overflow: hidden; }
+      .bar i { display: block; height: 100%; width: var(--value); background: var(--accent); }
+      .ok { color: var(--ok); font-weight: 900; }
+      .warn { color: var(--warn); font-weight: 900; }
+      @media (max-width: 980px) {
+        .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        main { padding: 10px; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>&#39033;&#30446;&#30475;&#26495;</h1>
+        <div class="muted">&#21482;&#35835;&#36827;&#24230;&#21644;&#20219;&#21153;&#39046;&#21462;&#24773;&#20917;</div>
+      </div>
+      <a class="button" href="/task-hall">&#36820;&#22238;&#23457;&#38405;</a>
+    </header>
+    <main>
+      <section class="stats" id="stats"></section>
+      <section class="panel">
+        <div class="panel-head">&#32456;&#31471;&#20219;&#21153;&#36827;&#24230;</div>
+        <table>
+          <thead>
+            <tr>
+              <th>&#32456;&#31471;</th>
+              <th>&#25913;&#36896;&#25968;&#37327;</th>
+              <th>&#24050;&#19978;&#20256;</th>
+              <th>&#26410;&#23457;&#38405;</th>
+              <th>&#23436;&#25104;&#29575;</th>
+              <th>&#23457;&#38405;&#29575;</th>
+              <th>&#39046;&#21462;&#20154;</th>
+            </tr>
+          </thead>
+          <tbody id="taskRows"></tbody>
+        </table>
+      </section>
+    </main>
+    <script>
+      const pct = (value) => `${Math.round((Number(value) || 0) * 100)}%`;
+      async function api(path) {
+        const response = await fetch(path);
+        const payload = await response.json();
+        if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
+        return payload.data;
+      }
+      function renderStats(summary) {
+        const items = [
+          ["\u603b\u6e05\u5355", summary.total_catalog_rows],
+          ["\u9636\u6bb5\u6e05\u5355", summary.stage_catalog_rows],
+          ["\u8d44\u6599\u7ec4", summary.groups],
+          ["\u5df2\u94fe\u63a5\u7167\u7247", summary.photo_rows_linked],
+          ["\u672a\u5206\u7c7b\u7167\u7247", summary.unclassified_photos],
+          ["\u5ba1\u9605\u8fdb\u5ea6", pct(summary.review_progress)],
+        ];
+        document.querySelector("#stats").innerHTML = items.map(([label, value]) => `
+          <article class="stat"><span>${label}</span><strong>${value ?? 0}</strong></article>
+        `).join("");
+      }
+      function renderTasks(tasks) {
+        document.querySelector("#taskRows").innerHTML = tasks.map((task) => `
+          <tr>
+            <td><strong>${task.terminal || "-"}</strong></td>
+            <td>${task.renovation_count || 0}</td>
+            <td>${task.uploaded_count || 0}</td>
+            <td>${task.unreviewed_count || 0}</td>
+            <td><div class="bar"><i style="--value:${pct(task.upload_rate)}"></i></div>${pct(task.upload_rate)}</td>
+            <td><div class="bar"><i style="--value:${pct(task.review_rate)}"></i></div>${pct(task.review_rate)}</td>
+            <td class="${task.claimed_by ? "ok" : "warn"}">${task.claimed_by || "\u672a\u9886\u53d6"}</td>
+          </tr>
+        `).join("");
+      }
+      async function init() {
+        const [summary, tasks] = await Promise.all([api("/local-test/summary"), api("/local-test/tasks")]);
+        renderStats(summary.summary);
+        renderTasks(tasks.items || []);
+      }
+      init().catch((error) => {
+        document.body.insertAdjacentHTML("beforeend", `<pre>${error.message}</pre>`);
+      });
+    </script>
+  </body>
+</html>

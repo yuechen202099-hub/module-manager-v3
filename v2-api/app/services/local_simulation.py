@@ -741,6 +741,14 @@ def list_task_groups(
         groups = [item for item in groups if item["photo_count"] > 0]
     if status:
         groups = [item for item in groups if item["status"] == status]
+    groups = sorted(
+        groups,
+        key=lambda group: (
+            is_group_fully_archived(group),
+            str(group.get("meter_no", "")),
+            group["id"],
+        ),
+    )
     return {"total": len(groups), "items": groups[offset : offset + limit]}
 
 
@@ -821,10 +829,7 @@ def review_group(
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
-    task = find_task(group["task_id"])
-    claimed_by = task.get("claimed_by")
-    if claimed_by and claimed_by != reviewer:
-        raise ValueError("Only the current reviewer can review this task")
+    ensure_task_claimed_by(group, reviewer)
     if status == "exception" and not (note or exception_note):
         raise ValueError("Exception review requires a note")
     previous = group["status"]
@@ -859,6 +864,7 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
+    ensure_task_claimed_by(group, reviewer)
     photo = next((item for item in group["photos"] if item["id"] == photo_id), None)
     if photo is None:
         raise KeyError(photo_id)
@@ -883,8 +889,30 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
             "created_at": now_iso(),
         }
     )
+    update_group_archive_status(group, reviewer)
     refresh_summary()
     return photo
+
+
+def ensure_task_claimed_by(group: dict[str, Any], reviewer: str) -> None:
+    task = find_task(group["task_id"])
+    if task.get("claimed_by") != reviewer:
+        raise ValueError("Task must be claimed by the current reviewer before review or classification")
+
+
+def is_group_fully_archived(group: dict[str, Any]) -> bool:
+    photos = group.get("photos", [])
+    return bool(photos) and all(photo.get("archive_status") == "archived" for photo in photos)
+
+
+def update_group_archive_status(group: dict[str, Any], reviewer: str) -> None:
+    if not is_group_fully_archived(group):
+        return
+    group["status"] = "approved"
+    group["reviewer"] = reviewer
+    group["review_note"] = "分类完成"
+    group["exception_note"] = ""
+    group["reviewed_at"] = now_iso()
 
 
 def find_task(task_id: int) -> dict[str, Any]:

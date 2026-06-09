@@ -60,7 +60,7 @@ def test_local_test_task_and_review_flow() -> None:
     assert claim_response.status_code == 200
     assert claim_response.json()["data"]["claimed_by"] == "api-test"
 
-    groups_response = client.get("/local-test/groups?limit=1")
+    groups_response = client.get(f"/local-test/tasks/{task['id']}/groups?limit=1")
     assert groups_response.status_code == 200
     group = groups_response.json()["data"]["items"][0]
 
@@ -92,9 +92,19 @@ def test_task_hall_page_is_available() -> None:
     assert "renovation_count" in response.text
     assert 'id="openImport"' in response.text
     assert 'id="csvFile"' in response.text
+    assert 'id="clearScan"' not in response.text
     assert 'id="importPayload"' in response.text
     assert 'id="syncNow"' not in response.text
     assert 'id="scanFilter"' not in response.text
+
+
+def test_project_board_page_is_available() -> None:
+    response = client.get("/project-board")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "taskRows" in response.text
+    assert "/task-hall" in response.text
 
 
 def test_sync_config_page_is_available() -> None:

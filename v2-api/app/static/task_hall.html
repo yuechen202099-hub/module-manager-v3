@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="preconnect" href="https://cloud1-8g4k4khc04701207-1324829234.ap-shanghai.app.tcloudbase.com" />
     <title>&#20219;&#21153;&#23457;&#38405;&#24037;&#20316;&#21488;</title>
     <style>
       :root {
@@ -125,9 +126,9 @@
       .panel-body { min-height: 0; overflow: auto; padding: 10px; }
       .filters {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-        padding: 10px;
+        grid-template-columns: 1fr;
+        gap: 6px;
+        padding: 8px;
         border-bottom: 1px solid var(--line);
       }
       .filters .span { grid-column: 1 / -1; }
@@ -359,8 +360,8 @@
         </div>
         <div class="actions">
           <input class="reviewer" id="reviewer" value="local-reviewer" aria-label="reviewer" />
+          <a class="button secondary" href="/project-board">&#39033;&#30446;&#30475;&#26495;</a>
           <button class="secondary" id="openImport">&#23548;&#20837;&#34920;&#26684;&#25968;&#25454;</button>
-          <button class="secondary" id="clearScan">&#28165;&#31354;&#23548;&#20837;&#25968;&#25454;</button>
           <button id="reload">&#21047;&#26032;</button>
         </div>
       </header>
@@ -392,8 +393,8 @@
         <section class="panel">
           <div class="panel-head">
             <div>
-              <h2 class="panel-title">&#36164;&#26009;&#32452;</h2>
-              <p class="panel-subtitle">&#25353;&#32456;&#31471;&#20219;&#21153;&#31579;&#36873;</p>
+              <h2 class="panel-title" id="groupTitle">&#36873;&#25321;&#32456;&#31471;</h2>
+              <p class="panel-subtitle" id="groupSubtitle">&#39046;&#21462;&#20219;&#21153;&#21518;&#26174;&#31034;&#36164;&#26009;&#32452;</p>
             </div>
             <span class="badge" id="groupCount">0</span>
           </div>
@@ -403,7 +404,7 @@
           <div class="panel-head">
             <div>
               <h2 class="panel-title">&#22270;&#29255;&#23457;&#38405;</h2>
-              <p class="panel-subtitle">1-5 &#36873;&#20998;&#31867;&#65292;Enter &#24402;&#26723;&#65292;&#26041;&#21521;&#38190;&#20999;&#25442;</p>
+              <p class="panel-subtitle">1-4 &#36873;&#20998;&#31867;&#65292;Enter &#24402;&#26723;&#65292;&#26041;&#21521;&#38190;&#20999;&#25442;</p>
             </div>
             <span class="badge" id="photoState">&#26410;&#36873;&#25321;</span>
           </div>
@@ -434,13 +435,12 @@
     </div>
     <div class="toast" id="toast"></div>
     <script>
-      const state = { tasks: [], groups: [], group: null, photo: null, reviewer: "local-reviewer", taskId: null };
+      const state = { tasks: [], groups: [], group: null, photo: null, reviewer: "local-reviewer", taskId: null, task: null };
       const categories = {
         before_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u524d",
         after_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u540e",
         module_meter: "\u6a21\u5757\u4e0e\u7535\u80fd\u8868",
         collector_barcode: "\u91c7\u96c6\u5668\u6761\u5f62\u7801",
-        other: "\u5176\u4ed6",
       };
       const categoryKeys = Object.keys(categories);
       const $ = (selector) => document.querySelector(selector);
@@ -461,6 +461,9 @@
       function pct(value) { return `${Math.round((Number(value) || 0) * 100)}%`; }
       function activePhotoIndex() { return (state.group?.photos || []).findIndex((photo) => photo.id === state.photo?.id); }
       function activeGroupIndex() { return state.groups.findIndex((group) => group.id === state.group?.id); }
+      function currentTask() { return state.task || state.tasks.find((task) => task.id === state.taskId) || null; }
+      function canReviewCurrentTask() { return currentTask()?.claimed_by === state.reviewer; }
+      function groupDone(group) { return Boolean(group?.photos?.length) && group.photos.every((photo) => photo.archive_status === "archived"); }
       function filteredTasks() {
         const claim = $("#claimFilter").value;
         const complete = $("#completeFilter").value;
@@ -500,16 +503,27 @@
         }));
       }
       function renderGroups() {
+        const task = currentTask();
+        $("#groupTitle").textContent = task ? `\u7ec8\u7aef ${task.terminal || "-"}` : "\u9009\u62e9\u7ec8\u7aef";
+        $("#groupSubtitle").textContent = task
+          ? (canReviewCurrentTask() ? `\u5df2\u7531 ${state.reviewer} \u9886\u53d6\uff0c\u53ef\u5f00\u59cb\u5ba1\u9605` : "\u9700\u8981\u5148\u9886\u53d6\u4efb\u52a1")
+          : "\u9886\u53d6\u4efb\u52a1\u540e\u663e\u793a\u8d44\u6599\u7ec4";
         $("#groupCount").textContent = `${state.groups.length}`;
         $("#groups").innerHTML = state.groups.length ? state.groups.map((group) => `
           <article class="group ${state.group?.id === group.id ? "active" : ""}" data-group="${group.id}">
-            <div class="name-row"><strong class="name">${esc(group.meter_no)}</strong><span class="badge ${group.photo_count >= 4 ? "ok" : "warn"}">${group.photo_count || 0} \u5f20</span></div>
+            <div class="name-row"><strong class="name">${esc(group.meter_no)}</strong><span class="badge ${groupDone(group) ? "ok" : group.photo_count >= 4 ? "ok" : "warn"}">${groupDone(group) ? "\u5df2\u5206\u7c7b\u5b8c\u6210" : `${group.photo_count || 0} \u5f20`}</span></div>
             <div class="small">${esc(group.terminal)} / ${esc(group.address || "\u672a\u5339\u914d\u5730\u5740")}</div>
+            <div class="small">${group.reviewer ? `\u5ba1\u9605\u4eba ${esc(group.reviewer)}` : "\u672a\u5ba1\u9605"}</div>
           </article>
-        `).join("") : `<div class="empty">\u9009\u62e9\u4e00\u4e2a\u6709\u6570\u636e\u7684\u4efb\u52a1</div>`;
+        `).join("") : `<div class="empty">${task ? "\u8bf7\u5148\u9886\u53d6\u8be5\u7ec8\u7aef\u4efb\u52a1" : "\u9009\u62e9\u4e00\u4e2a\u7ec8\u7aef\u4efb\u52a1"}</div>`;
         $("#groups").querySelectorAll("[data-group]").forEach((row) => row.addEventListener("click", () => loadGroup(row.dataset.group)));
       }
       function renderReview() {
+        if (state.taskId && !canReviewCurrentTask()) {
+          $("#review").innerHTML = `<div class="empty">\u8bf7\u5148\u9886\u53d6\u5f53\u524d\u7ec8\u7aef\uff0c\u518d\u8fdb\u884c\u5206\u7c7b\u5ba1\u9605</div>`;
+          $("#photoState").textContent = "\u672a\u9886\u53d6";
+          return;
+        }
         if (!state.group) {
           $("#review").innerHTML = `<div class="empty">\u9009\u62e9\u8d44\u6599\u7ec4\u540e\u5f00\u59cb\u5ba1\u9605</div>`;
           $("#photoState").textContent = "\u672a\u9009\u62e9";
@@ -527,7 +541,7 @@
         $("#review").innerHTML = `
           <div class="review-shell">
             <div class="review-main">
-              <div class="viewer">${url ? `<img src="${esc(url)}" alt="\u5ba1\u9605\u56fe\u7247" />` : `<div class="placeholder">\u56fe\u7247 URL \u672a\u52a0\u8f7d<br />${esc(state.photo.barcode || "")}</div>`}</div>
+              <div class="viewer">${url ? `<img src="${esc(url)}" alt="\u5ba1\u9605\u56fe\u7247" loading="eager" decoding="async" fetchpriority="high" />` : `<div class="placeholder">\u56fe\u7247 URL \u672a\u52a0\u8f7d<br />${esc(state.photo.barcode || "")}</div>`}</div>
               <div class="photo-list">${photos.map((photo, index) => `
                 <article class="photo-card ${state.photo.id === photo.id ? "active" : ""}" data-photo="${photo.id}">
                   <div class="name-row"><strong>#${index + 1}</strong><span class="badge ${photo.archive_status === "archived" ? "ok" : "warn"}">${photo.archive_status === "archived" ? "\u5df2\u5f52\u6863" : "\u5f85\u5206\u7c7b"}</span></div>
@@ -550,6 +564,7 @@
               `).join("")}</div>
               <div class="tool-row">
                 <span class="kbd-note">&#8592;/&#8594; &#20999;&#22270;&#65292;&#8593;/&#8595; &#20999;&#36164;&#26009;&#32452;&#65292;Enter &#24402;&#26723;</span>
+                <button class="secondary" id="archiveGroup">\u5f52\u6863\u5f53\u524d\u8d44\u6599\u7ec4</button>
                 <button id="archivePhoto">Enter &#24402;&#26723;&#24403;&#21069;&#22270;</button>
               </div>
             </div>
@@ -563,6 +578,7 @@
           renderReview();
         }));
         $("#archivePhoto").addEventListener("click", archivePhoto);
+        $("#archiveGroup").addEventListener("click", archiveGroup);
       }
       async function handleTask(id, action) {
         if (action === "claim") await api(`/local-test/tasks/${id}/claim`, { method: "POST", body: JSON.stringify({ reviewer: state.reviewer }) });
@@ -571,19 +587,30 @@
           toast("\u5df2\u6682\u5b58\u5e76\u91ca\u653e\u4efb\u52a1");
         }
         state.taskId = Number(id);
-        const data = await api(`/local-test/tasks/${id}/groups?limit=1000&scan_only=true`);
-        state.groups = data.items || [];
+        await refreshTasks();
+        state.task = state.tasks.find((task) => task.id === state.taskId) || null;
+        if (action === "stash" || !canReviewCurrentTask()) {
+          state.groups = [];
+        } else {
+          const data = await api(`/local-test/tasks/${id}/groups?limit=1000&scan_only=true`);
+          state.groups = data.items || [];
+        }
         state.group = null;
         state.photo = null;
-        await refreshTasks();
         renderGroups();
         renderReview();
       }
       async function loadGroup(id, preferredPhotoId = null) {
+        if (!canReviewCurrentTask()) {
+          renderReview();
+          return;
+        }
         $("#photoState").textContent = "\u52a0\u8f7d URL";
         state.group = await api(`/local-test/groups/${encodeURIComponent(id)}`);
         const photos = state.group.photos || [];
         state.photo = photos.find((photo) => photo.id === preferredPhotoId) || photos[0] || null;
+        state.groups = state.groups.map((group) => group.id === state.group.id ? state.group : group);
+        preloadImages(photos);
         renderGroups();
         renderReview();
       }
@@ -598,17 +625,52 @@
           body: JSON.stringify({ category, reviewer: state.reviewer }),
         });
         await loadGroup(state.group.id, nextPhoto?.id);
+        await refreshCurrentGroups(state.group.id);
         toast("\u5f53\u524d\u56fe\u7247\u5df2\u5f52\u6863");
+      }
+      async function archiveGroup() {
+        if (!state.group) return;
+        const photos = state.group.photos || [];
+        for (let index = 0; index < photos.length; index += 1) {
+          const photo = photos[index];
+          if (photo.archive_status === "archived") continue;
+          const category = photo.category && photo.category !== "unclassified" ? photo.category : categoryKeys[Math.min(index, categoryKeys.length - 1)];
+          await api(`/local-test/groups/${encodeURIComponent(state.group.id)}/photos/${encodeURIComponent(photo.id)}/category`, {
+            method: "PATCH",
+            body: JSON.stringify({ category, reviewer: state.reviewer }),
+          });
+        }
+        await loadGroup(state.group.id);
+        await refreshCurrentGroups(state.group.id);
+        toast("\u5f53\u524d\u8d44\u6599\u7ec4\u5df2\u5f52\u6863");
+      }
+      async function refreshCurrentGroups(preferredGroupId = null) {
+        if (!state.taskId || !canReviewCurrentTask()) return;
+        const data = await api(`/local-test/tasks/${state.taskId}/groups?limit=1000&scan_only=true`);
+        state.groups = data.items || [];
+        if (preferredGroupId) {
+          state.group = state.groups.find((group) => group.id === preferredGroupId) || state.group;
+        }
+        renderGroups();
+      }
+      function preloadImages(photos) {
+        photos.forEach((photo) => {
+          if (!photo.image_url) return;
+          const image = new Image();
+          image.decoding = "async";
+          image.src = photo.image_url;
+        });
       }
       async function refreshTasks() {
         state.tasks = (await api("/local-test/tasks")).items || [];
+        state.task = state.tasks.find((task) => task.id === state.taskId) || state.task;
         renderTasks();
       }
       async function reloadAll() {
         await refreshTasks();
         if (!state.taskId) {
           const visibleTasks = filteredTasks();
-          const first = visibleTasks.find((task) => task.can_claim) || visibleTasks[0];
+          const first = visibleTasks.find((task) => task.claimed_by === state.reviewer) || visibleTasks[0];
           if (first) await handleTask(first.id, "view");
         }
       }
@@ -710,24 +772,13 @@
         const file = event.target.files?.[0];
         if (file) loadCsvFile(file).catch((error) => toast(error.message, true));
       });
-      $("#clearScan").addEventListener("click", async () => {
-        await api("/local-test/scan/clear", { method: "POST" });
-        state.taskId = null;
-        state.groups = [];
-        state.group = null;
-        state.photo = null;
-        await refreshTasks();
-        renderGroups();
-        renderReview();
-        toast("\u5df2\u6e05\u7a7a\u5bfc\u5165\u6570\u636e");
-      });
       document.addEventListener("keydown", (event) => {
         if (event.target.matches("input, textarea, select")) return;
-        if (/^[1-5]$/.test(event.key) && state.photo) {
+        if (/^[1-4]$/.test(event.key) && state.photo && canReviewCurrentTask()) {
           state.photo.category = categoryKeys[Number(event.key) - 1];
           renderReview();
           event.preventDefault();
-        } else if (event.key === "Enter") {
+        } else if (event.key === "Enter" && canReviewCurrentTask()) {
           archivePhoto().catch((error) => toast(error.message, true));
           event.preventDefault();
         } else if (event.key === "ArrowRight") {
