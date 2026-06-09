@@ -91,6 +91,14 @@ def test_task_hall_page_is_available() -> None:
     assert 'id="scanFilter"' not in response.text
 
 
+def test_sync_config_page_is_available() -> None:
+    response = client.get("/sync-config")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert 'id="payload"' in response.text
+
+
 def test_clear_scan_data_route_resets_local_scan_state() -> None:
     client.post("/local-test/bootstrap")
 

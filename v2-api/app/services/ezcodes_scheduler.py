@@ -39,12 +39,19 @@ class EzcodesSyncManager:
         self._last_started_at: str = ""
         self._last_finished_at: str = ""
         self._last_trigger: str = ""
+        self._runtime_credentials: EzcodesCredentials | None = None
 
     def set_backend(self, backend: EzcodesBackend) -> None:
         with self._lock:
             self.backend = backend
 
+    def configure_credentials(self, credentials: EzcodesCredentials) -> None:
+        with self._lock:
+            self._runtime_credentials = credentials
+
     def configured_credentials(self) -> EzcodesCredentials | None:
+        if self._runtime_credentials is not None:
+            return self._runtime_credentials
         if not settings.ezcodes_access_token or not settings.ezcodes_team_id:
             return None
         return EzcodesCredentials(

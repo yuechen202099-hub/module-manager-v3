@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>&#21516;&#27493;&#37197;&#32622;</title>
+    <style>
+      :root {
+        --bg: #edf2f7;
+        --panel: #fff;
+        --ink: #17212b;
+        --muted: #647386;
+        --line: #d8e0ea;
+        --primary: #256f9f;
+        --danger: #b42318;
+        --success: #147a5a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+      }
+      header {
+        height: 56px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 18px;
+        background: #16202a;
+        color: #fff;
+      }
+      main { max-width: 1080px; margin: 18px auto; padding: 0 14px; }
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        overflow: hidden;
+      }
+      .head {
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+        background: #f8fafc;
+      }
+      .body { padding: 16px; display: grid; gap: 12px; }
+      h1, h2, p { margin: 0; }
+      h1 { font-size: 17px; }
+      h2 { font-size: 16px; }
+      p { color: var(--muted); line-height: 1.7; }
+      textarea {
+        width: 100%;
+        min-height: 430px;
+        resize: vertical;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        font: 13px/1.55 Consolas, "Courier New", monospace;
+      }
+      button, a.button {
+        height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--primary);
+        border-radius: 6px;
+        padding: 0 12px;
+        background: var(--primary);
+        color: #fff;
+        font-weight: 700;
+        text-decoration: none;
+        cursor: pointer;
+      }
+      button.secondary, a.secondary { background: #fff; color: var(--primary); }
+      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+      .status {
+        min-height: 42px;
+        padding: 11px 12px;
+        border-radius: 8px;
+        background: #f5f7f9;
+        color: var(--muted);
+      }
+      .status.ok { color: var(--success); background: #e8f7f1; }
+      .status.err { color: var(--danger); background: #fff0ed; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>&#21516;&#27493;&#37197;&#32622;</h1>
+      <a class="button secondary" href="/task-hall">&#36820;&#22238;&#20219;&#21153;&#22823;&#21381;</a>
+    </header>
+    <main>
+      <section class="panel">
+        <div class="head">
+          <h2>&#24405;&#20837; Ezcodes &#21518;&#21488;&#35831;&#27714; JSON</h2>
+        </div>
+        <div class="body">
+          <p>&#25353;&#20320;&#32473;&#30340;&#26684;&#24335;&#30452;&#25509;&#31896;&#36148;&#25972;&#27573; JSON&#12290;&#31995;&#32479;&#20250;&#25552;&#21462; <strong>query.teamId.$eq</strong>&#12289;<strong>access_token</strong>&#12289;<strong>env</strong>&#65292;&#24182;&#20889;&#20837;&#26412;&#22320;&#37197;&#32622;&#12290;</p>
+          <textarea id="payload" spellcheck="false" placeholder='{"action":"database.queryDocument","env":"cloud1-...","query":{"teamId":{"$eq":"..."}},"access_token":"..."}'></textarea>
+          <div class="row">
+            <button id="save">&#20445;&#23384;&#24182;&#21551;&#29992;</button>
+            <button class="secondary" id="test">&#20445;&#23384;&#21518;&#31435;&#21363;&#21516;&#27493;</button>
+          </div>
+          <div class="status" id="status">&#24453;&#24405;&#20837;</div>
+        </div>
+      </section>
+    </main>
+    <script>
+      const statusBox = document.querySelector("#status");
+      const payloadBox = document.querySelector("#payload");
+      function show(message, kind = "") {
+        statusBox.className = `status ${kind}`;
+        statusBox.textContent = message;
+      }
+      async function api(path, options = {}) {
+        const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+        const payload = await response.json();
+        if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
+        return payload.data;
+      }
+      async function saveConfig() {
+        let raw;
+        try {
+          raw = JSON.parse(payloadBox.value);
+        } catch (error) {
+          throw new Error("\u8bf7\u8f93\u5165\u5408\u6cd5\u7684 JSON");
+        }
+        const result = await api("/projects/1/scan/ezcodes/config/raw", {
+          method: "POST",
+          body: JSON.stringify({ payload: raw, persist: true }),
+        });
+        show(`\u5df2\u914d\u7f6e teamId=${result.team_id} env=${result.env_id} token=${result.token}`, "ok");
+        return result;
+      }
+      document.querySelector("#save").addEventListener("click", async () => {
+        try {
+          await saveConfig();
+        } catch (error) {
+          show(error.message, "err");
+        }
+      });
+      document.querySelector("#test").addEventListener("click", async () => {
+        try {
+          await saveConfig();
+          show("\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u89e6\u53d1\u540c\u6b65...", "ok");
+          const result = await api("/projects/1/scan/ezcodes/sync", { method: "POST", body: "null" });
+          show(`\u540c\u6b65\u5b8c\u6210\uff1a\u626b\u7801 ${result.sync.last_downloaded_records}\uff0c\u5339\u914d ${result.sync.last_applied_records}`, "ok");
+        } catch (error) {
+          show(error.message, "err");
+        }
+      });
+    </script>
+  </body>
+</html>

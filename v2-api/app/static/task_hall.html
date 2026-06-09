@@ -38,6 +38,18 @@
       h1, h2, h3, p { margin: 0; }
       h1 { font-size: 17px; }
       button, input, select { font: inherit; }
+      a.nav-link {
+        height: 32px;
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid #9fc5dc;
+        border-radius: 6px;
+        padding: 0 12px;
+        background: #fff;
+        color: var(--primary);
+        font-weight: 700;
+        text-decoration: none;
+      }
       button {
         height: 32px;
         border: 1px solid var(--primary);
@@ -159,6 +171,7 @@
       <h1>&#20219;&#21153;&#22823;&#21381;</h1>
       <div>
         <input id="reviewer" value="local-reviewer" aria-label="reviewer" />
+        <a class="nav-link" href="/sync-config">&#37197;&#32622;&#21516;&#27493;</a>
         <button class="secondary" id="syncNow">&#31435;&#21363;&#21516;&#27493;&#25195;&#30721;</button>
         <button class="secondary" id="clearScan">&#28165;&#31354;&#25195;&#30721;&#25968;&#25454;</button>
         <button id="reload">&#21047;&#26032;</button>

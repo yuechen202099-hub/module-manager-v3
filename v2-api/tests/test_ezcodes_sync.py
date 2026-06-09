@@ -3,7 +3,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.routes.ezcodes import set_ezcodes_backend
+from app.api.routes.ezcodes import credentials_from_raw_payload, set_ezcodes_backend
 from app.main import create_app
 from app.services.ezcodes_sync import (
     EZCODES_INSTALLERS,
@@ -234,6 +234,47 @@ def test_ezcodes_manual_sync_endpoint_records_status() -> None:
     assert response.json()["data"]["sync"]["last_resolved_image_urls"] == 0
     assert status_response.status_code == 200
     assert status_response.json()["data"]["sync"]["last_downloaded_records"] == 1
+
+
+def test_ezcodes_raw_config_endpoint_accepts_copied_request_payload() -> None:
+    set_ezcodes_backend(FakeEzcodesBackend())
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/projects/1/scan/ezcodes/config/raw",
+        json={
+            "persist": False,
+            "payload": {
+                "env": "cloud1-8g4k4khc04701207",
+                "query": {"teamId": {"$eq": "team-1"}},
+                "access_token": "secret-token-value",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["configured"] is True
+    assert payload["team_id"] == "team-1"
+    assert payload["token"] == "secret...-value"
+    assert "secret-token-value" not in response.text
+
+
+def test_credentials_from_raw_payload_requires_expected_fields() -> None:
+    credentials = credentials_from_raw_payload(
+        {
+            "env": "env-1",
+            "query": {"teamId": {"$eq": "team-1"}},
+            "access_token": "token-1",
+        }
+    )
+
+    assert credentials.team_id == "team-1"
+    assert credentials.access_token == "token-1"
+    assert credentials.env_id == "env-1"
+
+    with pytest.raises(EzcodesError):
+        credentials_from_raw_payload({"query": {"teamId": {"$eq": "team-1"}}})
 
 
 def test_cloudbase_backend_queries_files_and_barcodes(monkeypatch: pytest.MonkeyPatch) -> None:

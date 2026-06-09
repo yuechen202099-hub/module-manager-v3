@@ -59,6 +59,10 @@ def create_app() -> FastAPI:
     def task_hall_page():
         return FileResponse(static_dir / "task_hall.html")
 
+    @app.get("/sync-config")
+    def sync_config_page():
+        return FileResponse(static_dir / "sync_config.html")
+
     app.include_router(api_router)
     return app
 
