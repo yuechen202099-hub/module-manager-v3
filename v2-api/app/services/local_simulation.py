@@ -188,10 +188,13 @@ def build_terminal_tasks(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "pending_groups": count_groups(terminal_groups, OPEN_STATUSES),
             "scan_rows": scan_rows,
             "groups_with_scan": sum(1 for group in terminal_groups if group["photo_count"] > 0),
+            "complete_groups": count_complete_groups(terminal_groups),
+            "partial_groups": count_partial_groups(terminal_groups),
             "has_scan_info": has_scan_info,
             "can_claim": has_scan_info,
             "claim_block_reason": "" if has_scan_info else "该终端暂无扫码信息，不能领取",
             "progress": calculate_progress(terminal_groups),
+            "completeness_rate": calculate_completeness_rate(terminal_groups, scan_only=True),
         }
         tasks.append(task)
     return tasks
@@ -246,10 +249,13 @@ def refresh_summary() -> None:
         task["pending_groups"] = count_groups(task_groups, OPEN_STATUSES)
         task["scan_rows"] = sum(group["photo_count"] for group in task_groups)
         task["groups_with_scan"] = sum(1 for group in task_groups if group["photo_count"] > 0)
+        task["complete_groups"] = count_complete_groups(task_groups)
+        task["partial_groups"] = count_partial_groups(task_groups)
         task["has_scan_info"] = task["scan_rows"] > 0
         task["can_claim"] = task["has_scan_info"]
         task["claim_block_reason"] = "" if task["can_claim"] else "该终端暂无扫码信息，不能领取"
         task["progress"] = calculate_progress(task_groups)
+        task["completeness_rate"] = calculate_completeness_rate(task_groups, scan_only=True)
 
 
 def calculate_progress(groups: list[dict[str, Any]]) -> float:
@@ -261,6 +267,23 @@ def calculate_progress(groups: list[dict[str, Any]]) -> float:
 
 def count_groups(groups: list[dict[str, Any]], statuses: set[str]) -> int:
     return sum(1 for item in groups if item["status"] in statuses)
+
+
+def count_complete_groups(groups: list[dict[str, Any]]) -> int:
+    return sum(1 for item in groups if item["photo_count"] >= 4)
+
+
+def count_partial_groups(groups: list[dict[str, Any]]) -> int:
+    return sum(1 for item in groups if 0 < item["photo_count"] < 4)
+
+
+def calculate_completeness_rate(groups: list[dict[str, Any]], scan_only: bool = False) -> float:
+    scoped_groups = [item for item in groups if item["photo_count"] > 0] if scan_only else groups
+    if not scoped_groups:
+        return 0.0
+    collected_slots = sum(min(item["photo_count"], 4) for item in scoped_groups)
+    required_slots = len(scoped_groups) * 4
+    return round(collected_slots / required_slots, 4)
 
 
 def read_catalog_rows(path: Path, source: str) -> list[dict[str, Any]]:
@@ -344,10 +367,13 @@ def list_task_groups(
     limit: int = 100,
     offset: int = 0,
     status: str | None = None,
+    scan_only: bool = False,
 ) -> dict[str, Any]:
     find_task(task_id)
     state = get_state()
     groups = [item for item in state["groups"] if item["task_id"] == task_id]
+    if scan_only:
+        groups = [item for item in groups if item["photo_count"] > 0]
     if status:
         groups = [item for item in groups if item["status"] == status]
     return {"total": len(groups), "items": groups[offset : offset + limit]}
@@ -385,8 +411,11 @@ def get_task_progress(task_id: int) -> dict[str, Any]:
         "approved_groups": by_status.get("approved", 0),
         "exception_groups": by_status.get("exception", 0),
         "incomplete_groups": by_status.get("incomplete", 0),
+        "complete_groups": count_complete_groups(groups),
+        "partial_groups": count_partial_groups(groups),
         "by_status": by_status,
         "progress": calculate_progress(groups),
+        "completeness_rate": calculate_completeness_rate(groups, scan_only=True),
     }
 
 

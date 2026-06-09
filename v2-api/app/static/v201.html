@@ -213,6 +213,27 @@
       }
       .task-grid div { padding: 8px; border-radius: 6px; background: #f5f7f9; min-width: 0; overflow-wrap: anywhere; }
       .task-grid span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+      .task-filters {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+        padding: 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      .task-filters select { width: 100%; }
+      .progress-line {
+        margin-top: 8px;
+        height: 7px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: #e8edf2;
+      }
+      .progress-line span {
+        display: block;
+        height: 100%;
+        width: var(--value, 0%);
+        background: linear-gradient(90deg, #2f6f9f, #38a169);
+      }
       .queue-tools {
         display: grid;
         grid-template-columns: minmax(0, 1fr) 140px auto;
@@ -434,6 +455,26 @@
             <h2>任务大厅</h2>
             <span class="badge" id="taskCount">0 个任务</span>
           </div>
+          <div class="task-filters">
+            <select id="taskScanFilter" aria-label="任务扫码筛选">
+              <option value="">全部扫码状态</option>
+              <option value="with_scan">有扫码数据</option>
+              <option value="without_scan">无扫码数据</option>
+            </select>
+            <select id="taskClaimFilter" aria-label="任务领取筛选">
+              <option value="">全部领取状态</option>
+              <option value="available">可领取</option>
+              <option value="mine">我领取的</option>
+              <option value="claimed">已被领取</option>
+              <option value="unclaimed">未领取</option>
+            </select>
+            <select id="taskCompletenessFilter" aria-label="任务完整度筛选">
+              <option value="">全部完整度</option>
+              <option value="complete">已完整</option>
+              <option value="partial">部分完整</option>
+              <option value="empty">无照片</option>
+            </select>
+          </div>
           <div class="panel-body" id="tasks"></div>
         </aside>
 
@@ -492,6 +533,9 @@
         selectedTaskId: null,
         reviewer: localStorage.getItem("v21.reviewer") || "local-reviewer",
         statusFilter: localStorage.getItem("v21.statusFilter") || "",
+        taskScanFilter: localStorage.getItem("v21.taskScanFilter") || "",
+        taskClaimFilter: localStorage.getItem("v21.taskClaimFilter") || "",
+        taskCompletenessFilter: localStorage.getItem("v21.taskCompletenessFilter") || "",
         keyword: localStorage.getItem("v21.keyword") || "",
       };
 
@@ -537,6 +581,9 @@
       $("#reviewer").value = state.reviewer;
       $("#keyword").value = state.keyword;
       $("#statusFilter").value = state.statusFilter;
+      $("#taskScanFilter").value = state.taskScanFilter;
+      $("#taskClaimFilter").value = state.taskClaimFilter;
+      $("#taskCompletenessFilter").value = state.taskCompletenessFilter;
 
       async function api(path, options = {}) {
         const response = await fetch(path, {
@@ -578,15 +625,44 @@
           .join("");
       }
 
+      function formatPercent(value) {
+        return `${Math.round((Number(value) || 0) * 100)}%`;
+      }
+
+      function getFilteredTasks() {
+        return state.tasks.filter((task) => {
+          const scanMatched =
+            !state.taskScanFilter ||
+            (state.taskScanFilter === "with_scan" && task.has_scan_info) ||
+            (state.taskScanFilter === "without_scan" && !task.has_scan_info);
+          const claimMatched =
+            !state.taskClaimFilter ||
+            (state.taskClaimFilter === "available" && task.can_claim && !task.claimed_by) ||
+            (state.taskClaimFilter === "mine" && task.claimed_by === state.reviewer) ||
+            (state.taskClaimFilter === "claimed" && Boolean(task.claimed_by)) ||
+            (state.taskClaimFilter === "unclaimed" && !task.claimed_by);
+          const completeness = Number(task.completeness_rate) || 0;
+          const completenessMatched =
+            !state.taskCompletenessFilter ||
+            (state.taskCompletenessFilter === "complete" && completeness >= 1) ||
+            (state.taskCompletenessFilter === "partial" && completeness > 0 && completeness < 1) ||
+            (state.taskCompletenessFilter === "empty" && completeness === 0);
+          return scanMatched && claimMatched && completenessMatched;
+        });
+      }
+
       function renderTasks() {
-        $("#taskCount").textContent = `${state.tasks.length} 个任务`;
-        if (!state.tasks.length) {
-          tasksEl.innerHTML = `<div class="detail-empty">暂无任务</div>`;
+        const tasks = getFilteredTasks();
+        $("#taskCount").textContent = `${tasks.length} / ${state.tasks.length} 个任务`;
+        if (!tasks.length) {
+          tasksEl.innerHTML = `<div class="detail-empty">没有符合筛选条件的任务</div>`;
           return;
         }
-        tasksEl.innerHTML = state.tasks
+        tasksEl.innerHTML = tasks
           .map(
-            (task) => `
+            (task) => {
+              const completenessRate = Number(task.completeness_rate) || 0;
+              return `
               <article class="task-card ${state.selectedTaskId === task.id ? "active" : ""}" data-task-card="${task.id}">
                 <div class="task-title">
                   <h3>${escapeHtml(task.name)}</h3>
@@ -597,10 +673,13 @@
                   ${task.claimed_by ? `当前审阅人：${escapeHtml(task.claimed_by)}` : "未领取"}
                 </div>
                 <div class="task-grid">
-                  <div><span>总资料组</span><strong>${task.total_groups ?? 0}</strong></div>
+                  <div><span>有扫码组</span><strong>${task.groups_with_scan ?? 0}</strong></div>
                   <div><span>扫码记录</span><strong>${task.scan_rows ?? 0}</strong></div>
-                  <div><span>已通过</span><strong>${task.completed_groups ?? 0}</strong></div>
-                  <div><span>不完整</span><strong>${task.incomplete_groups ?? 0}</strong></div>
+                  <div><span>完整组</span><strong>${task.complete_groups ?? 0}</strong></div>
+                  <div><span>完成率</span><strong>${formatPercent(completenessRate)}</strong></div>
+                </div>
+                <div class="progress-line" aria-label="任务完成率 ${formatPercent(completenessRate)}">
+                  <span style="--value: ${formatPercent(completenessRate)}"></span>
                 </div>
                 ${task.can_claim ? "" : `<div class="small error">${escapeHtml(task.claim_block_reason || "无扫码信息，不能领取")}</div>`}
                 <div class="actions">
@@ -609,7 +688,8 @@
                   <button class="secondary" data-task="${task.id}" data-action="release">释放</button>
                 </div>
               </article>
-            `,
+            `;
+            },
           )
           .join("");
 
@@ -846,7 +926,7 @@
 
       async function loadTaskGroups() {
         const endpoint = state.selectedTaskId
-          ? `/local-test/tasks/${state.selectedTaskId}/groups?limit=1000`
+          ? `/local-test/tasks/${state.selectedTaskId}/groups?limit=1000&scan_only=true`
           : "/local-test/groups?limit=1000";
         const groupData = await api(endpoint);
         state.groups = groupData.items || [];
@@ -869,13 +949,41 @@
         renderGroups();
       });
 
+      $("#taskScanFilter").addEventListener("change", (event) => {
+        state.taskScanFilter = event.target.value;
+        localStorage.setItem("v21.taskScanFilter", state.taskScanFilter);
+        renderTasks();
+      });
+
+      $("#taskClaimFilter").addEventListener("change", (event) => {
+        state.taskClaimFilter = event.target.value;
+        localStorage.setItem("v21.taskClaimFilter", state.taskClaimFilter);
+        renderTasks();
+      });
+
+      $("#taskCompletenessFilter").addEventListener("change", (event) => {
+        state.taskCompletenessFilter = event.target.value;
+        localStorage.setItem("v21.taskCompletenessFilter", state.taskCompletenessFilter);
+        renderTasks();
+      });
+
       $("#clearFilter").addEventListener("click", () => {
         state.keyword = "";
         state.statusFilter = "";
+        state.taskScanFilter = "";
+        state.taskClaimFilter = "";
+        state.taskCompletenessFilter = "";
         $("#keyword").value = "";
         $("#statusFilter").value = "";
+        $("#taskScanFilter").value = "";
+        $("#taskClaimFilter").value = "";
+        $("#taskCompletenessFilter").value = "";
         localStorage.removeItem("v21.keyword");
         localStorage.removeItem("v21.statusFilter");
+        localStorage.removeItem("v21.taskScanFilter");
+        localStorage.removeItem("v21.taskClaimFilter");
+        localStorage.removeItem("v21.taskCompletenessFilter");
+        renderTasks();
         renderGroups();
       });
 

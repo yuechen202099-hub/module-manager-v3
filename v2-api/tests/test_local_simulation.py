@@ -159,8 +159,13 @@ def test_tasks_are_split_by_terminal_and_require_scan_info(synthetic_state: dict
     assert [task["terminal"] for task in tasks] == ["T-001", "T-002", "T-003"]
     assert tasks[0]["scan_rows"] == 4
     assert tasks[0]["can_claim"] is True
+    assert tasks[0]["complete_groups"] == 1
+    assert tasks[0]["completeness_rate"] == 1.0
+    assert tasks[1]["partial_groups"] == 1
+    assert tasks[1]["completeness_rate"] == 0.25
     assert tasks[2]["scan_rows"] == 0
     assert tasks[2]["can_claim"] is False
+    assert tasks[2]["completeness_rate"] == 0.0
 
     with pytest.raises(ValueError):
         claim_task(tasks[2]["id"], reviewer="alice")
@@ -218,6 +223,14 @@ def test_task_groups_can_be_filtered_by_status(synthetic_state: dict) -> None:
     assert result["items"][0]["photo_count"] == 1
 
 
+def test_task_groups_can_be_limited_to_scanned_groups(synthetic_state: dict) -> None:
+    scanned = list_task_groups(3, scan_only=True)
+    all_groups = list_task_groups(3, scan_only=False)
+
+    assert scanned["total"] == 0
+    assert all_groups["total"] == 1
+
+
 def test_downloaded_photo_can_be_classified(synthetic_state: dict) -> None:
     first_group = synthetic_state["groups"][0]
     photo = first_group["photos"][0]
@@ -244,9 +257,11 @@ def test_local_test_routes_cover_review_flow(synthetic_state: dict) -> None:
 
     assert claim_response.status_code == 200
     assert groups_response.status_code == 200
+    assert groups_response.json()["data"]["total"] == 1
     assert review_response.status_code == 200
     assert review_response.json()["data"]["status"] == "approved"
     assert progress_response.json()["data"]["reviewed_groups"] == 1
+    assert progress_response.json()["data"]["completeness_rate"] == 1.0
 
 
 @requires_sample_workbooks

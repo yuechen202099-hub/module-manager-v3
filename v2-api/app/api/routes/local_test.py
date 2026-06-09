@@ -76,9 +76,10 @@ def task_groups(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     status: str | None = None,
+    scan_only: bool = Query(default=True),
 ):
     try:
-        result = list_task_groups(task_id, limit=limit, offset=offset, status=status)
+        result = list_task_groups(task_id, limit=limit, offset=offset, status=status, scan_only=scan_only)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
     return ok(request, result)
