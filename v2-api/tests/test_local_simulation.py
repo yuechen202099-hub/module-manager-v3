@@ -165,8 +165,13 @@ def test_tasks_are_split_by_terminal_and_require_scan_info(synthetic_state: dict
     assert tasks[0]["can_claim"] is True
     assert tasks[0]["complete_groups"] == 1
     assert tasks[0]["completeness_rate"] == 1.0
+    assert tasks[0]["renovation_count"] == 1
+    assert tasks[0]["uploaded_count"] == 1
+    assert tasks[0]["upload_rate"] == 1.0
+    assert tasks[0]["review_rate"] == 0.0
     assert tasks[1]["partial_groups"] == 1
-    assert tasks[1]["completeness_rate"] == 0.25
+    assert tasks[1]["completeness_rate"] == 1.0
+    assert tasks[1]["unreviewed_count"] == 1
     assert tasks[2]["scan_rows"] == 0
     assert tasks[2]["can_claim"] is False
     assert tasks[2]["completeness_rate"] == 0.0
@@ -318,12 +323,20 @@ def test_apply_synced_scan_records_matches_catalog_and_refreshes_tasks(synthetic
 
 
 @pytest.mark.skipif(find_spec("openpyxl") is None, reason="openpyxl is not available")
-def test_import_scan_template_xlsx_reads_business_fields_and_hyperlink(synthetic_state: dict) -> None:
+def test_import_scan_template_xlsx_reads_business_fields_and_hyperlink(synthetic_state: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     from io import BytesIO
 
     from openpyxl import Workbook
 
     clear_scan_data()
+    monkeypatch.setattr(
+        local_simulation,
+        "resolve_detail_image_urls",
+        lambda url: [
+            "https://example.test/barcodeImgDetail?downloadImg=cloud://photo-a.jpg",
+            "https://example.test/barcodeImgDetail?downloadImg=cloud://photo-b.jpg",
+        ],
+    )
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "合并"
@@ -352,12 +365,13 @@ def test_import_scan_template_xlsx_reads_business_fields_and_hyperlink(synthetic
     photo = group["photos"][0]
 
     assert result["template_rows"] == 1
-    assert result["applied_records"] == 1
+    assert result["applied_records"] == 2
     assert photo["barcode"] == "ABCDEFGHIJK1001X"
     assert photo["collector"] == "COLLECTOR-01"
     assert photo["asset_no"] == "MODULE-01"
     assert photo["creator"] == "安装员A"
-    assert photo["image_url"] == "https://example.test/barcodeImgDetail?itemIdentifer=abc"
+    assert photo["image_url"] == "https://example.test/barcodeImgDetail?downloadImg=cloud://photo-a.jpg"
+    assert group["photos"][1]["image_url"] == "https://example.test/barcodeImgDetail?downloadImg=cloud://photo-b.jpg"
 
 
 def test_synced_photo_urls_can_be_loaded_per_group(synthetic_state: dict) -> None:

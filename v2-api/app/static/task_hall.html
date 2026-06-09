@@ -164,10 +164,10 @@
       .name-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .name { font-weight: 900; }
       .small { color: var(--muted); font-size: 12px; line-height: 1.55; }
-      .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 9px; }
+      .metric-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
       .metric { padding: 8px; border-radius: 8px; background: var(--surface-2); }
       .metric span { display: block; color: var(--muted); font-size: 11px; }
-      .metric strong { display: block; margin-top: 2px; font-size: 18px; }
+      .metric strong { display: block; margin-top: 2px; font-size: 15px; }
       .progress { height: 6px; margin-top: 9px; border-radius: 99px; background: #e8edf2; overflow: hidden; }
       .progress i { display: block; width: var(--value); height: 100%; background: var(--accent); }
       .empty {
@@ -334,12 +334,14 @@
         .actions { width: 100%; flex-wrap: wrap; }
         .workspace { grid-template-columns: 320px minmax(0, 1fr); }
         .workspace .panel:last-child { grid-column: 1 / -1; min-height: 620px; }
+        .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       }
       @media (max-width: 760px) {
         .workspace { grid-template-columns: 1fr; }
         .workspace .panel:last-child { grid-column: auto; }
         .review-main { grid-template-columns: 1fr; }
         .photo-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 210px; }
+        .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .meta-grid { grid-template-columns: 1fr 1fr; }
         .category-grid { grid-template-columns: 1fr; }
       }
@@ -473,21 +475,29 @@
         const tasks = filteredTasks();
         $("#taskCount").textContent = `${tasks.length}/${state.tasks.length}`;
         $("#tasks").innerHTML = tasks.length ? tasks.map((task) => `
-          <article class="task ${state.taskId === task.id ? "active" : ""}">
+          <article class="task ${state.taskId === task.id ? "active" : ""}" data-task="${task.id}">
             <div class="name-row"><strong class="name">${esc(task.name)}</strong><span class="badge ${task.can_claim ? "ok" : "warn"}">${task.can_claim ? "\u53ef\u9886\u53d6" : "\u672a\u5c31\u7eea"}</span></div>
             <div class="small">\u7ec8\u7aef ${esc(task.terminal || "-")} / ${task.claimed_by ? `\u5df2\u7531 ${esc(task.claimed_by)} \u9886\u53d6` : "\u672a\u9886\u53d6"}</div>
             <div class="metric-grid">
-              <div class="metric"><span>\u6709\u56fe\u8d44\u6599\u7ec4</span><strong>${task.groups_with_scan || 0}</strong></div>
-              <div class="metric"><span>\u5b8c\u6574\u7387</span><strong>${pct(task.completeness_rate)}</strong></div>
+              <div class="metric"><span>\u6539\u9020\u6570\u91cf</span><strong>${task.renovation_count || task.total_groups || 0}</strong></div>
+              <div class="metric"><span>\u5df2\u4e0a\u4f20\u6570\u91cf</span><strong>${task.uploaded_count || task.groups_with_scan || 0}</strong></div>
+              <div class="metric"><span>\u672a\u5ba1\u9605\u6570\u91cf</span><strong>${task.unreviewed_count || 0}</strong></div>
+              <div class="metric"><span>\u5b8c\u6210\u7387</span><strong>${pct(task.upload_rate)}</strong></div>
+              <div class="metric"><span>\u5ba1\u9605\u7387</span><strong>${pct(task.review_rate)}</strong></div>
             </div>
-            <div class="progress"><i style="--value:${pct(task.completeness_rate)}"></i></div>
+            <div class="progress"><i style="--value:${pct(task.upload_rate)}"></i></div>
             <div class="tool-row">
               <button class="secondary" data-action="view" data-id="${task.id}">\u67e5\u770b</button>
+              <button class="secondary" data-action="stash" data-id="${task.id}" ${task.claimed_by === state.reviewer ? "" : "disabled"}>\u6682\u5b58</button>
               <button data-action="claim" data-id="${task.id}" ${task.can_claim ? "" : "disabled"}>\u9886\u53d6</button>
             </div>
           </article>
         `).join("") : `<div class="empty">\u6682\u65e0\u5df2\u5bfc\u5165 URL \u7167\u7247\u7684\u4efb\u52a1</div>`;
-        $("#tasks").querySelectorAll("button[data-action]").forEach((button) => button.addEventListener("click", () => handleTask(button.dataset.id, button.dataset.action)));
+        $("#tasks").querySelectorAll("[data-task]").forEach((card) => card.addEventListener("click", () => handleTask(card.dataset.task, "view")));
+        $("#tasks").querySelectorAll("button[data-action]").forEach((button) => button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          handleTask(button.dataset.id, button.dataset.action);
+        }));
       }
       function renderGroups() {
         $("#groupCount").textContent = `${state.groups.length}`;
@@ -556,6 +566,10 @@
       }
       async function handleTask(id, action) {
         if (action === "claim") await api(`/local-test/tasks/${id}/claim`, { method: "POST", body: JSON.stringify({ reviewer: state.reviewer }) });
+        if (action === "stash") {
+          await api(`/local-test/tasks/${id}/release`, { method: "POST", body: JSON.stringify({ reviewer: state.reviewer }) });
+          toast("\u5df2\u6682\u5b58\u5e76\u91ca\u653e\u4efb\u52a1");
+        }
         state.taskId = Number(id);
         const data = await api(`/local-test/tasks/${id}/groups?limit=1000&scan_only=true`);
         state.groups = data.items || [];

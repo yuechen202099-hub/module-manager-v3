@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from io import BytesIO
+import html
+import re
+import urllib.request
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key
 
@@ -24,6 +29,7 @@ PHOTO_CATEGORIES = {
     "collector_barcode": "\u91c7\u96c6\u5668\u6761\u5f62\u7801",
     "other": "\u5176\u4ed6",
 }
+IMAGE_SRC_RE = re.compile(r"<img\b[^>]*(?:src|data-src)=['\"]([^'\"]+)['\"]", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -126,8 +132,10 @@ def import_url_scan_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def import_scan_template_xlsx(content: bytes) -> dict[str, Any]:
     rows = read_scan_template_xlsx_rows(content)
+    detail_stats = expand_detail_pages_for_rows(rows)
     result = import_url_scan_rows(rows)
     result["template_rows"] = len(rows)
+    result.update(detail_stats)
     return result
 
 
@@ -149,7 +157,7 @@ def read_scan_template_xlsx_rows(content: bytes) -> list[dict[str, Any]]:
             values[header] = value
             if cell.hyperlink and cell.hyperlink.target:
                 values[f"{header}_url"] = cell.hyperlink.target
-                if "图片" in header:
+                if "\u56fe\u7247" in header:
                     values["photo_urls"] = cell.hyperlink.target
         if not any(str(value).strip() for key, value in values.items() if key != "row_number"):
             blank_run += 1
@@ -159,6 +167,62 @@ def read_scan_template_xlsx_rows(content: bytes) -> list[dict[str, Any]]:
         blank_run = 0
         rows.append(values)
     return rows
+
+
+def expand_detail_pages_for_rows(rows: list[dict[str, Any]], max_workers: int = 16) -> dict[str, int]:
+    detail_urls: set[str] = set()
+    for row in rows:
+        for url in split_urls(pick_photo_url_field(row)):
+            if is_photo_detail_page(url):
+                detail_urls.add(url)
+    if not detail_urls:
+        return {"detail_pages": 0, "resolved_detail_pages": 0, "resolved_image_urls": 0}
+
+    resolved_by_url: dict[str, list[str]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(resolve_detail_image_urls, url): url for url in detail_urls}
+        for future in as_completed(futures):
+            url = futures[future]
+            try:
+                resolved_by_url[url] = future.result()
+            except OSError:
+                resolved_by_url[url] = []
+
+    resolved_image_urls = 0
+    resolved_detail_pages = 0
+    for row in rows:
+        expanded: list[str] = []
+        seen: set[str] = set()
+        for url in split_urls(pick_photo_url_field(row)):
+            candidates = resolved_by_url.get(url) if is_photo_detail_page(url) else None
+            if candidates:
+                resolved_detail_pages += 1
+                resolved_image_urls += len(candidates)
+            for candidate in candidates or [url]:
+                if candidate not in seen:
+                    expanded.append(candidate)
+                    seen.add(candidate)
+        if expanded:
+            row["photo_urls"] = "\n".join(expanded)
+    return {
+        "detail_pages": len(detail_urls),
+        "resolved_detail_pages": resolved_detail_pages,
+        "resolved_image_urls": resolved_image_urls,
+    }
+
+
+def pick_photo_url_field(row: dict[str, Any]) -> str:
+    return pick_first(
+        row,
+        "photo_urls",
+        "image_urls",
+        "\u7167\u7247URL",
+        "\u56fe\u7247URL",
+        "\u56fe\u7247 (\u7535\u8111\u67e5\u770b)_url",
+        "\u56fe\u7247(\u7535\u8111\u67e5\u770b)_url",
+        "url",
+        "URL",
+    )
 
 
 def normalize_url_import_row(row: dict[str, Any], index: int) -> dict[str, Any]:
@@ -175,6 +239,7 @@ def normalize_url_import_row(row: dict[str, Any], index: int) -> dict[str, Any]:
                 meter_match_key = ""
         elif meter_no:
             meter_match_key = build_total_catalog_match_key(meter_no)
+    image_urls = expand_photo_urls(split_urls(pick_photo_url_field(row)))
     return {
         "file_id": f"import-row-{index}",
         "source_file": pick_first(row, "source_file", "来源文件", "来自文件", "批次") or "url-import",
@@ -189,8 +254,8 @@ def normalize_url_import_row(row: dict[str, Any], index: int) -> dict[str, Any]:
         "asset_type": pick_first(row, "asset_type", "资产类型"),
         "creator": pick_first(row, "creator", "创建者"),
         "created_at": pick_first(row, "created_at", "创建时间"),
-        "image_count": len(split_urls(pick_first(row, "photo_urls", "image_urls", "照片URL", "图片URL", "图片 (电脑查看)_url", "图片(电脑查看)_url", "url", "URL"))),
-        "image_urls": split_urls(pick_first(row, "photo_urls", "image_urls", "照片URL", "图片URL", "图片 (电脑查看)_url", "图片(电脑查看)_url", "url", "URL")),
+        "image_count": len(image_urls),
+        "image_urls": image_urls,
         "image_file_ids": [],
     }
 
@@ -217,6 +282,50 @@ def split_urls(value: str) -> list[str]:
             if item:
                 parts.append(item)
     return parts
+
+
+def expand_photo_urls(urls: list[str]) -> list[str]:
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        resolved = resolve_detail_image_urls(url) if is_photo_detail_page(url) else []
+        candidates = resolved or [url]
+        for candidate in candidates:
+            if candidate not in seen:
+                expanded.append(candidate)
+                seen.add(candidate)
+    return expanded
+
+
+def is_photo_detail_page(url: str) -> bool:
+    return "barcodeImgDetail" in url and "itemIdentifer=" in url
+
+
+def resolve_detail_image_urls(detail_url: str, timeout: int = 10) -> list[str]:
+    try:
+        request = urllib.request.Request(detail_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(2_000_000)
+    except OSError:
+        return []
+    text = body.decode("utf-8", errors="replace")
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw_src in IMAGE_SRC_RE.findall(text):
+        src = html.unescape(raw_src.strip())
+        if not src or src.startswith("data:"):
+            continue
+        image_url = urljoin(detail_url, src)
+        if not looks_like_review_photo(image_url) or image_url in seen:
+            continue
+        urls.append(image_url)
+        seen.add(image_url)
+    return urls
+
+
+def looks_like_review_photo(url: str) -> bool:
+    lower = url.lower()
+    return "downloadimg=" in lower or "scan_photos" in lower or lower.split("?", 1)[0].endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp"))
 
 
 def scan_record_to_photo_rows(record: dict[str, Any], index: int) -> list[dict[str, Any]]:
@@ -407,6 +516,7 @@ def build_terminal_tasks(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     tasks = []
     for task_id, terminal in enumerate(sorted(by_terminal), start=1):
         terminal_groups = by_terminal[terminal]
+        metrics = calculate_task_metrics(terminal_groups)
         scan_rows = sum(group["photo_count"] for group in terminal_groups)
         has_scan_info = scan_rows > 0
         task = {
@@ -425,13 +535,14 @@ def build_terminal_tasks(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "pending_groups": count_groups(terminal_groups, OPEN_STATUSES),
             "scan_rows": scan_rows,
             "groups_with_scan": sum(1 for group in terminal_groups if group["photo_count"] > 0),
+            **metrics,
             "complete_groups": count_complete_groups(terminal_groups),
             "partial_groups": count_partial_groups(terminal_groups),
             "has_scan_info": has_scan_info,
             "can_claim": has_scan_info,
             "claim_block_reason": "" if has_scan_info else "该终端暂无扫码信息，不能领取",
             "progress": calculate_progress(terminal_groups),
-            "completeness_rate": calculate_completeness_rate(terminal_groups, scan_only=True),
+            "completeness_rate": metrics["upload_rate"],
         }
         tasks.append(task)
     return tasks
@@ -479,6 +590,7 @@ def refresh_summary() -> None:
         state["projects"][0]["summary"] = summary
     for task in state["tasks"]:
         task_groups = [group for group in state["groups"] if group["task_id"] == task["id"]]
+        metrics = calculate_task_metrics(task_groups)
         task["total_groups"] = len(task_groups)
         task["completed_groups"] = count_groups(task_groups, DONE_STATUSES)
         task["exception_groups"] = count_groups(task_groups, {"exception"})
@@ -486,13 +598,14 @@ def refresh_summary() -> None:
         task["pending_groups"] = count_groups(task_groups, OPEN_STATUSES)
         task["scan_rows"] = sum(group["photo_count"] for group in task_groups)
         task["groups_with_scan"] = sum(1 for group in task_groups if group["photo_count"] > 0)
+        task.update(metrics)
         task["complete_groups"] = count_complete_groups(task_groups)
         task["partial_groups"] = count_partial_groups(task_groups)
         task["has_scan_info"] = task["scan_rows"] > 0
         task["can_claim"] = task["has_scan_info"]
         task["claim_block_reason"] = "" if task["can_claim"] else "该终端暂无扫码信息，不能领取"
         task["progress"] = calculate_progress(task_groups)
-        task["completeness_rate"] = calculate_completeness_rate(task_groups, scan_only=True)
+        task["completeness_rate"] = metrics["upload_rate"]
 
 
 def calculate_progress(groups: list[dict[str, Any]]) -> float:
@@ -500,6 +613,21 @@ def calculate_progress(groups: list[dict[str, Any]]) -> float:
         return 0.0
     reviewed = sum(1 for item in groups if item["status"] in DONE_STATUSES)
     return round(reviewed / len(groups), 4)
+
+
+def calculate_task_metrics(groups: list[dict[str, Any]]) -> dict[str, Any]:
+    renovation_count = len(groups)
+    uploaded_count = sum(1 for group in groups if group["photo_count"] > 0)
+    reviewed_count = sum(1 for group in groups if group["status"] in DONE_STATUSES)
+    unreviewed_count = sum(1 for group in groups if group["photo_count"] > 0 and group["status"] in OPEN_STATUSES)
+    return {
+        "renovation_count": renovation_count,
+        "uploaded_count": uploaded_count,
+        "reviewed_count": reviewed_count,
+        "unreviewed_count": unreviewed_count,
+        "upload_rate": round(uploaded_count / renovation_count, 4) if renovation_count else 0.0,
+        "review_rate": round(reviewed_count / renovation_count, 4) if renovation_count else 0.0,
+    }
 
 
 def count_groups(groups: list[dict[str, Any]], statuses: set[str]) -> int:
