@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 
 from app.core.responses import ok
 from app.services.ezcodes_scheduler import sync_manager
@@ -12,6 +12,7 @@ from app.services.local_simulation import (
     get_group,
     get_task_progress,
     get_state,
+    import_scan_template_xlsx,
     import_url_scan_rows,
     list_groups,
     list_task_groups,
@@ -64,6 +65,14 @@ def clear_scan(request: Request):
 @router.post("/scan/import-url-rows")
 def import_url_rows(payload: UrlImportRequest, request: Request):
     result = import_url_scan_rows(payload.rows)
+    return ok(request, result)
+
+
+@router.post("/scan/import-template-xlsx")
+async def import_template_xlsx(request: Request, file: UploadFile = File(...)):
+    content = await file.read()
+    result = import_scan_template_xlsx(content)
+    result["filename"] = file.filename
     return ok(request, result)
 
 

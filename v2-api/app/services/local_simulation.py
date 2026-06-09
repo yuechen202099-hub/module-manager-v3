@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -123,9 +124,48 @@ def import_url_scan_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return apply_synced_scan_records(records)
 
 
+def import_scan_template_xlsx(content: bytes) -> dict[str, Any]:
+    rows = read_scan_template_xlsx_rows(content)
+    result = import_url_scan_rows(rows)
+    result["template_rows"] = len(rows)
+    return result
+
+
+def read_scan_template_xlsx_rows(content: bytes) -> list[dict[str, Any]]:
+    load_workbook = get_workbook_loader()
+    workbook = load_workbook(BytesIO(content), read_only=False, data_only=True)
+    sheet = workbook.worksheets[0]
+    header_cells = next(sheet.iter_rows(min_row=1, max_row=1, values_only=False))
+    headers = [normalize_cell(cell.value) for cell in header_cells]
+    rows: list[dict[str, Any]] = []
+    blank_run = 0
+    for row_number, cells in enumerate(sheet.iter_rows(min_row=2, values_only=False), start=2):
+        values: dict[str, Any] = {"row_number": row_number}
+        for index, cell in enumerate(cells):
+            if index >= len(headers) or not headers[index]:
+                continue
+            header = headers[index]
+            value = normalize_cell(cell.value)
+            values[header] = value
+            if cell.hyperlink and cell.hyperlink.target:
+                values[f"{header}_url"] = cell.hyperlink.target
+                if "图片" in header:
+                    values["photo_urls"] = cell.hyperlink.target
+        if not any(str(value).strip() for key, value in values.items() if key != "row_number"):
+            blank_run += 1
+            if blank_run >= 20:
+                break
+            continue
+        blank_run = 0
+        rows.append(values)
+    return rows
+
+
 def normalize_url_import_row(row: dict[str, Any], index: int) -> dict[str, Any]:
     barcode = pick_first(row, "barcode", "scan_code", "扫码内容", "条形码", "长条码")
     meter_no = pick_first(row, "meter_no", "表号", "短表号")
+    if not meter_no and barcode:
+        meter_no = barcode
     meter_match_key = pick_first(row, "meter_match_key", "匹配键")
     if not meter_match_key:
         if barcode:
@@ -137,7 +177,7 @@ def normalize_url_import_row(row: dict[str, Any], index: int) -> dict[str, Any]:
             meter_match_key = build_total_catalog_match_key(meter_no)
     return {
         "file_id": f"import-row-{index}",
-        "source_file": pick_first(row, "source_file", "来源文件", "批次") or "url-import",
+        "source_file": pick_first(row, "source_file", "来源文件", "来自文件", "批次") or "url-import",
         "installer": pick_first(row, "installer", "安装人员", "创建者"),
         "barcode": barcode or meter_no or f"row-{index}",
         "meter_match_key": meter_match_key,
@@ -149,8 +189,8 @@ def normalize_url_import_row(row: dict[str, Any], index: int) -> dict[str, Any]:
         "asset_type": pick_first(row, "asset_type", "资产类型"),
         "creator": pick_first(row, "creator", "创建者"),
         "created_at": pick_first(row, "created_at", "创建时间"),
-        "image_count": len(split_urls(pick_first(row, "photo_urls", "image_urls", "照片URL", "图片URL", "url", "URL"))),
-        "image_urls": split_urls(pick_first(row, "photo_urls", "image_urls", "照片URL", "图片URL", "url", "URL")),
+        "image_count": len(split_urls(pick_first(row, "photo_urls", "image_urls", "照片URL", "图片URL", "图片 (电脑查看)_url", "图片(电脑查看)_url", "url", "URL"))),
+        "image_urls": split_urls(pick_first(row, "photo_urls", "image_urls", "照片URL", "图片URL", "图片 (电脑查看)_url", "图片(电脑查看)_url", "url", "URL")),
         "image_file_ids": [],
     }
 

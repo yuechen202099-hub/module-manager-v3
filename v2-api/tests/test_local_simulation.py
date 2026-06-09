@@ -19,6 +19,7 @@ from app.services.local_simulation import (
     clear_scan_data,
     get_task_progress,
     get_group,
+    import_scan_template_xlsx,
     list_task_groups,
     list_groups,
     list_tasks,
@@ -314,6 +315,49 @@ def test_apply_synced_scan_records_matches_catalog_and_refreshes_tasks(synthetic
     assert duplicate["applied_records"] == 0
     assert duplicate["skipped_duplicates"] == 2
     assert group["photo_count"] == 2
+
+
+@pytest.mark.skipif(find_spec("openpyxl") is None, reason="openpyxl is not available")
+def test_import_scan_template_xlsx_reads_business_fields_and_hyperlink(synthetic_state: dict) -> None:
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    clear_scan_data()
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "合并"
+    sheet.append(["编号", "扫码内容", "数量", "采集器", "地址", "模块资产编号", "资产类型", "创建者", "创建时间", "图片 (电脑查看)", "来自文件"])
+    sheet.append(
+        [
+            1,
+            "ABCDEFGHIJK1001X",
+            1,
+            "COLLECTOR-01",
+            "scan address",
+            "MODULE-01",
+            "单相双模",
+            "安装员A",
+            "2026-06-09 23:08:30",
+            "查看图片",
+            "installer-folder",
+        ]
+    )
+    sheet["J2"].hyperlink = "https://example.test/barcodeImgDetail?itemIdentifer=abc"
+    stream = BytesIO()
+    workbook.save(stream)
+
+    result = import_scan_template_xlsx(stream.getvalue())
+    group = synthetic_state["groups"][0]
+    photo = group["photos"][0]
+
+    assert result["template_rows"] == 1
+    assert result["applied_records"] == 1
+    assert photo["barcode"] == "ABCDEFGHIJK1001X"
+    assert photo["collector"] == "COLLECTOR-01"
+    assert photo["asset_no"] == "MODULE-01"
+    assert photo["creator"] == "安装员A"
+    assert photo["image_url"] == "https://example.test/barcodeImgDetail?itemIdentifer=abc"
 
 
 def test_synced_photo_urls_can_be_loaded_per_group(synthetic_state: dict) -> None:

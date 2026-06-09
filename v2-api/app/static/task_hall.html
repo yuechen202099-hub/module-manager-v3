@@ -225,6 +225,33 @@
         border-radius: 10px;
         background: var(--surface-2);
       }
+      .meta-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .meta-item {
+        min-width: 0;
+        padding: 9px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #fff;
+      }
+      .meta-item span {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+      }
+      .meta-item strong {
+        display: block;
+        margin-top: 3px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+      }
       .category-grid {
         display: grid;
         grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -313,6 +340,7 @@
         .workspace .panel:last-child { grid-column: auto; }
         .review-main { grid-template-columns: 1fr; }
         .photo-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 210px; }
+        .meta-grid { grid-template-columns: 1fr 1fr; }
         .category-grid { grid-template-columns: 1fr; }
       }
     </style>
@@ -390,8 +418,8 @@
         <div class="drawer-body">
           <div class="file-import">
             <strong>&#20174; CSV &#34920;&#26684;&#35835;&#21462;</strong>
-            <input id="csvFile" type="file" accept=".csv,text/csv" />
-            <p class="small">&#36873;&#25321; CSV &#21518;&#20250;&#33258;&#21160;&#36716;&#25104;&#19979;&#26041; JSON &#39044;&#35272;&#65292;&#30830;&#35748;&#21518;&#20877;&#28857;&#20987;&#23548;&#20837;&#12290;</p>
+            <input id="csvFile" type="file" accept=".xlsx,.xls,.csv,text/csv" />
+            <p class="small">&#36873;&#25321; Excel &#20250;&#30452;&#25509;&#23548;&#20837;&#65307;&#36873;&#25321; CSV &#20250;&#33258;&#21160;&#36716;&#25104;&#19979;&#26041; JSON &#39044;&#35272;&#65292;&#30830;&#35748;&#21518;&#20877;&#28857;&#20987;&#23548;&#20837;&#12290;</p>
           </div>
           <textarea id="importPayload" spellcheck="false" placeholder='[{"meter_no":"120000784940","terminal":"350000434929","collector":"A","module_asset_no":"M-001","address":"...","photo_urls":"https://example/1.jpg,https://example/2.jpg"}]'></textarea>
           <p class="small">&#21487;&#35782;&#21035;&#23383;&#27573;&#65306;&#32456;&#31471;&#12289;&#37319;&#38598;&#22120;&#12289;&#34920;&#21495;&#12289;&#27169;&#22359;&#12289;&#22320;&#22336;&#12289;&#29031;&#29255;URL&#12290;&#29031;&#29255; URL &#21482;&#20445;&#23384;&#38142;&#25509;&#65292;&#19981;&#19979;&#36733;&#26412;&#22320;&#12290;</p>
@@ -499,6 +527,12 @@
               `).join("")}</div>
             </div>
             <div class="review-tools">
+              <div class="meta-grid">
+                <div class="meta-item"><span>\u8868\u53f7 / \u626b\u7801\u5185\u5bb9</span><strong title="${esc(state.photo.barcode || state.group.meter_no || "")}">${esc(state.photo.barcode || state.group.meter_no || "-")}</strong></div>
+                <div class="meta-item"><span>\u91c7\u96c6\u5668</span><strong title="${esc(state.photo.collector || "")}">${esc(state.photo.collector || "-")}</strong></div>
+                <div class="meta-item"><span>\u6a21\u5757</span><strong title="${esc(state.photo.asset_no || "")}">${esc(state.photo.asset_no || "-")}</strong></div>
+                <div class="meta-item"><span>\u5b89\u88c5\u4eba\u5458</span><strong title="${esc(state.photo.creator || "")}">${esc(state.photo.creator || "-")}</strong></div>
+              </div>
               <div class="category-grid">${categoryKeys.map((key, index) => `
                 <button class="category-key ${state.photo.category === key ? "active" : ""}" data-category="${key}">
                   <span class="keycap">${index + 1}</span>${categories[key]}
@@ -584,6 +618,20 @@
         await reloadAll();
         toast(`\u5df2\u5339\u914d ${result.applied_records || 0} \u5f20\u56fe`);
       }
+      async function importXlsxFile(file) {
+        const formData = new FormData();
+        formData.append("file", file);
+        const response = await fetch("/local-test/scan/import-template-xlsx", { method: "POST", body: formData });
+        const payload = await response.json();
+        if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
+        $("#importDrawer").classList.remove("show");
+        state.taskId = null;
+        state.groups = [];
+        state.group = null;
+        state.photo = null;
+        await reloadAll();
+        toast(`\u5df2\u8bfb\u53d6 ${payload.data.template_rows || 0} \u884c\uff0c\u5339\u914d ${payload.data.applied_records || 0} \u5f20\u56fe`);
+      }
       function parseCsv(text) {
         const rows = [];
         let row = [];
@@ -616,6 +664,10 @@
         return rows.map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] || ""])));
       }
       async function loadCsvFile(file) {
+        if (/\.xlsx?$/i.test(file.name)) {
+          await importXlsxFile(file);
+          return;
+        }
         const text = await file.text();
         const rows = parseCsv(text);
         $("#importPayload").value = JSON.stringify(rows, null, 2);

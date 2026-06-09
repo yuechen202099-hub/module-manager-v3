@@ -87,6 +87,7 @@ def test_task_hall_page_is_available() -> None:
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "archivePhoto" in response.text
+    assert "meta-grid" in response.text
     assert 'id="openImport"' in response.text
     assert 'id="csvFile"' in response.text
     assert 'id="importPayload"' in response.text
