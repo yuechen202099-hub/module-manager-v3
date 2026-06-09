@@ -113,6 +113,12 @@ class EzcodesCloudBaseBackend:
     def get_temp_file_urls(self, credentials: EzcodesCredentials, file_ids: list[str]) -> dict[str, str]:
         if not file_ids:
             return {}
+        result: dict[str, str] = {}
+        for batch in chunked(file_ids, 50):
+            result.update(self._get_temp_file_url_batch(credentials, batch))
+        return result
+
+    def _get_temp_file_url_batch(self, credentials: EzcodesCredentials, file_ids: list[str]) -> dict[str, str]:
         payload = {
             "action": "storage.batchGetDownloadUrl",
             "dataVersion": EZCODES_DATA_VERSION,
@@ -185,19 +191,30 @@ class EzcodesCloudBaseBackend:
         return data
 
 
-def build_target_sync_plan(backend: EzcodesBackend, credentials: EzcodesCredentials) -> dict[str, Any]:
+def build_target_sync_plan(
+    backend: EzcodesBackend,
+    credentials: EzcodesCredentials,
+    max_total_files: int | None = None,
+) -> dict[str, Any]:
     root = find_single_folder(backend.list_files(credentials, "0"), EZCODES_ROOT_FOLDER, parent_name=EZCODES_ROOT_PARENT_NAME)
     installer_folders = backend.list_files(credentials, root.id)
 
     files_by_installer: dict[str, list[EzcodesFile]] = {}
     missing_installers: list[str] = []
+    remaining_files = max_total_files
     for installer in EZCODES_INSTALLERS:
         folder = find_folder(installer_folders, installer)
         if folder is None:
             missing_installers.append(installer)
             files_by_installer[installer] = []
             continue
-        files_by_installer[installer] = collect_scan_files(backend, credentials, folder.id)
+        if remaining_files is not None and remaining_files <= 0:
+            files_by_installer[installer] = []
+            continue
+        files = collect_scan_files(backend, credentials, folder.id, max_files=remaining_files)
+        files_by_installer[installer] = files
+        if remaining_files is not None:
+            remaining_files -= len(files)
 
     total_files = sum(len(files) for files in files_by_installer.values())
     return {
@@ -223,7 +240,7 @@ def download_scan_data_preview(
     max_files: int = 5,
     max_records_per_file: int = 20,
 ) -> dict[str, Any]:
-    plan = build_target_sync_plan(backend, credentials)
+    plan = build_target_sync_plan(backend, credentials, max_total_files=max_files)
     files_to_read = []
     for installer in plan["installers"]:
         for file_info in installer["files"]:
@@ -266,17 +283,25 @@ def download_scan_data_preview(
     }
 
 
-def collect_scan_files(backend: EzcodesBackend, credentials: EzcodesCredentials, parent_id: str) -> list[EzcodesFile]:
+def collect_scan_files(
+    backend: EzcodesBackend,
+    credentials: EzcodesCredentials,
+    parent_id: str,
+    max_files: int | None = None,
+) -> list[EzcodesFile]:
     result: list[EzcodesFile] = []
     pending = [parent_id]
     while pending:
         current_parent = pending.pop()
-        for item in backend.list_files(credentials, current_parent):
+        children = sorted(backend.list_files(credentials, current_parent), key=lambda item: (item.created_at, item.name, item.id))
+        for item in children:
             if item.is_folder:
                 pending.append(item.id)
             else:
                 result.append(item)
-    return sorted(result, key=lambda item: (item.created_at, item.name, item.id))
+                if max_files is not None and len(result) >= max_files:
+                    return result
+    return result
 
 
 def normalize_barcode_record(raw: dict[str, Any], file: EzcodesFile, installer: str) -> EzcodesScanRecord:
@@ -393,3 +418,7 @@ def unique_preserve_order(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def chunked(values: list[str], size: int) -> list[list[str]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]

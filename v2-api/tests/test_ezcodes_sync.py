@@ -122,6 +122,28 @@ def test_download_scan_data_preview_reads_barcodes_and_image_urls() -> None:
     ]
 
 
+def test_download_scan_data_preview_limits_remote_file_reads() -> None:
+    backend = FakeEzcodesBackend()
+    calls = []
+    original = backend.list_barcodes
+
+    def track_barcodes(credentials: EzcodesCredentials, file_id: str) -> list[dict]:
+        calls.append(file_id)
+        return original(credentials, file_id)
+
+    backend.list_barcodes = track_barcodes
+
+    result = download_scan_data_preview(
+        backend,
+        EzcodesCredentials(access_token="token", team_id="team"),
+        max_files=1,
+        max_records_per_file=10,
+    )
+
+    assert result["tested_files"] == 1
+    assert calls == ["luo-file-1"]
+
+
 def test_normalize_barcode_record_preserves_project_baseline_fields() -> None:
     file = EzcodesFile(id="f1", name="20260608110259", type=1, parent_id="luo")
     record = normalize_barcode_record(
@@ -282,3 +304,30 @@ def test_cloudbase_backend_resolves_temp_file_urls(monkeypatch: pytest.MonkeyPat
     assert captured["action"] == "storage.batchGetDownloadUrl"
     assert captured["file_list"] == [{"fileid": "cloud://photo-1.jpg", "max_age": 7200}]
     assert urls == {"cloud://photo-1.jpg": "https://download.example/photo-1.jpg"}
+
+
+def test_cloudbase_backend_chunks_temp_file_url_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    batch_sizes = []
+
+    def fake_urlopen(request, timeout):
+        body = json.loads(request.data.decode("utf-8"))
+        batch_sizes.append(len(body["file_list"]))
+        return FakeHttpResponse(
+            {
+                "data": {
+                    "download_list": [
+                        {"fileid": item["fileid"], "download_url": f"https://download.example/{item['fileid']}"}
+                        for item in body["file_list"]
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    backend = EzcodesCloudBaseBackend()
+    file_ids = [f"cloud://photo-{index}.jpg" for index in range(125)]
+
+    urls = backend.get_temp_file_urls(EzcodesCredentials(access_token="token", team_id="team"), file_ids)
+
+    assert batch_sizes == [50, 50, 25]
+    assert len(urls) == 125
