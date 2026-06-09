@@ -131,6 +131,8 @@ def test_unmatched_page_is_available() -> None:
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "associateRecord" in response.text
+    assert "auditLog" in response.text
+    assert "/local-test/audit-log" in response.text
     assert "/local-test/unmatched" in response.text
 
 
