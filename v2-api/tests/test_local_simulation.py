@@ -11,6 +11,7 @@ from app.services.local_simulation import (
     DEFAULT_STAGE_CATALOG,
     DEFAULT_TOTAL_CATALOG,
     LocalTestPaths,
+    apply_group_photo_urls,
     apply_synced_scan_records,
     bootstrap_local_simulation,
     classify_photo,
@@ -313,6 +314,39 @@ def test_apply_synced_scan_records_matches_catalog_and_refreshes_tasks(synthetic
     assert duplicate["applied_records"] == 0
     assert duplicate["skipped_duplicates"] == 2
     assert group["photo_count"] == 2
+
+
+def test_synced_photo_urls_can_be_loaded_per_group(synthetic_state: dict) -> None:
+    clear_scan_data()
+    result = apply_synced_scan_records(
+        [
+            {
+                "file_id": "remote-file-1",
+                "source_file": "remote-source",
+                "barcode": "ABCDEFGHIJK000001001X",
+                "meter_match_key": "1001",
+                "image_file_ids": ["cloud://photo-1.jpg", "cloud://photo-2.jpg"],
+                "image_urls": [],
+            }
+        ]
+    )
+    group = synthetic_state["groups"][0]
+
+    assert result["applied_records"] == 2
+    assert group["photos"][0]["image_file_id"] == "cloud://photo-1.jpg"
+    assert group["photos"][0]["image_url"] == ""
+
+    loaded = apply_group_photo_urls(
+        group["id"],
+        {
+            "cloud://photo-1.jpg": "https://download.example/photo-1.jpg",
+            "cloud://photo-2.jpg": "https://download.example/photo-2.jpg",
+        },
+    )
+
+    assert loaded["loaded_photo_urls"] == 2
+    assert group["photos"][0]["image_url"] == "https://download.example/photo-1.jpg"
+    assert group["photos"][1]["image_url"] == "https://download.example/photo-2.jpg"
 
 
 def test_local_test_routes_cover_review_flow(synthetic_state: dict) -> None:

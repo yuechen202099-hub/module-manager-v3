@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.core.responses import ok
+from app.services.ezcodes_scheduler import sync_manager
 from app.services.local_simulation import (
     bootstrap_local_simulation,
     claim_task,
@@ -121,9 +122,17 @@ def release(task_id: int, payload: ClaimRequest, request: Request):
 
 @router.get("/groups/{group_id}")
 def group_detail(group_id: str, request: Request):
-    group = get_group(group_id)
-    if group is None:
-        raise HTTPException(status_code=404, detail="Group not found")
+    try:
+        loaded = sync_manager.load_group_photo_urls(group_id)
+        group = loaded["group"]
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ValueError as exc:
+        if "not configured" not in str(exc):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        group = get_group(group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail="Group not found")
     return ok(request, group)
 
 

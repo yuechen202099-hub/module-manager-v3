@@ -231,7 +231,7 @@ def test_ezcodes_manual_sync_endpoint_records_status() -> None:
     assert response.json()["data"]["sync"]["last_trigger"] == "manual"
     assert response.json()["data"]["sync"]["running"] is False
     assert response.json()["data"]["sync"]["last_downloaded_records"] == 1
-    assert response.json()["data"]["sync"]["last_resolved_image_urls"] == 2
+    assert response.json()["data"]["sync"]["last_resolved_image_urls"] == 0
     assert status_response.status_code == 200
     assert status_response.json()["data"]["sync"]["last_downloaded_records"] == 1
 

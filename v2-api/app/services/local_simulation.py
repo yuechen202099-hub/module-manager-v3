@@ -120,10 +120,12 @@ def apply_synced_scan_records(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 def scan_record_to_photo_rows(record: dict[str, Any], index: int) -> list[dict[str, Any]]:
     image_urls = record.get("image_urls") or []
-    if not image_urls:
-        image_urls = [""]
+    image_file_ids = record.get("image_file_ids") or []
+    photo_slots = max(len(image_urls), len(image_file_ids), 1)
     rows = []
-    for photo_index, image_url in enumerate(image_urls, start=1):
+    for photo_index in range(1, photo_slots + 1):
+        image_url = str(image_urls[photo_index - 1]) if photo_index <= len(image_urls) else ""
+        image_file_id = str(image_file_ids[photo_index - 1]) if photo_index <= len(image_file_ids) else ""
         rows.append(
             {
                 "row_number": f"ez-{record.get('file_id') or index}-{index}-{photo_index}",
@@ -135,7 +137,8 @@ def scan_record_to_photo_rows(record: dict[str, Any], index: int) -> list[dict[s
                 "asset_type": str(record.get("asset_type") or ""),
                 "creator": str(record.get("creator") or record.get("installer") or ""),
                 "created_at": str(record.get("created_at") or ""),
-                "has_image": bool(image_url),
+                "has_image": bool(image_url or image_file_id),
+                "image_file_id": image_file_id,
                 "image_url": str(image_url),
             }
         )
@@ -147,6 +150,7 @@ def make_scan_unique_key(row: dict[str, Any]) -> str:
         [
             str(row.get("barcode") or ""),
             str(row.get("source_file") or ""),
+            str(row.get("image_file_id") or ""),
             str(row.get("image_url") or ""),
         ]
     )
@@ -157,9 +161,26 @@ def make_photo_unique_key(photo: dict[str, Any]) -> str:
         [
             str(photo.get("barcode") or ""),
             str(photo.get("source_file") or ""),
+            str(photo.get("image_file_id") or ""),
             str(photo.get("image_url") or ""),
         ]
     )
+
+
+def apply_group_photo_urls(group_id: str, urls: dict[str, str]) -> dict[str, Any]:
+    group = get_group(group_id)
+    if group is None:
+        raise KeyError(group_id)
+    applied = 0
+    for photo in group.get("photos", []):
+        file_id = str(photo.get("image_file_id") or "")
+        if file_id and not photo.get("image_url") and file_id in urls:
+            photo["image_url"] = urls[file_id]
+            photo["download_status"] = "downloaded"
+            photo["downloaded_at"] = now_iso()
+            applied += 1
+    refresh_summary()
+    return {"group_id": group_id, "loaded_photo_urls": applied, "group": group}
 
 
 def bootstrap_local_simulation(paths: LocalTestPaths | None = None) -> dict[str, Any]:
@@ -267,6 +288,7 @@ def build_photo_record(photo_index: int, row: dict[str, Any]) -> dict[str, Any]:
         "has_image": has_image,
         "download_status": "downloaded" if has_image else "missing",
         "downloaded_at": now_iso() if has_image else None,
+        "image_file_id": row.get("image_file_id", ""),
         "image_url": row.get("image_url", ""),
         "category": "unclassified",
         "category_label": PHOTO_CATEGORIES["unclassified"],

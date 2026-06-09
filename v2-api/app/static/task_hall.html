@@ -195,7 +195,7 @@
     </main>
     <div class="toast" id="toast"></div>
     <script>
-      const state = { tasks: [], groups: [], group: null, photo: null, reviewer: "local-reviewer" };
+      const state = { tasks: [], groups: [], group: null, photo: null, reviewer: "local-reviewer", syncFinishedAt: "" };
       const categories = {
         before_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u524d",
         after_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u540e",
@@ -308,6 +308,7 @@
         renderReview();
       }
       async function loadGroup(id, preferredPhotoId = null) {
+        $("#photoState").textContent = "\u52a0\u8f7d\u56fe\u7247";
         state.group = await api(`/local-test/groups/${encodeURIComponent(id)}`);
         const photos = state.group.photos || [];
         state.photo = photos.find((photo) => photo.id === preferredPhotoId) || photos[0] || null;
@@ -335,23 +336,25 @@
         if (sync.running) {
           $("#syncState").textContent = "\u540c\u6b65\u4e2d";
           $("#syncState").className = "badge warn";
-          return;
+          return sync;
         }
         if (sync.last_error) {
           $("#syncState").textContent = "\u540c\u6b65\u5931\u8d25";
           $("#syncState").className = "badge err";
-          return;
+          return sync;
         }
         if (sync.last_finished_at) {
           $("#syncState").textContent = `\u5df2\u5339\u914d ${sync.last_applied_records || 0}`;
           $("#syncState").className = "badge ok";
-          return;
+          return sync;
         }
         $("#syncState").textContent = sync.configured ? "\u5f85\u540c\u6b65" : "\u672a\u914d\u7f6e";
         $("#syncState").className = sync.configured ? "badge warn" : "badge";
+        return sync;
       }
       async function reloadAll() {
-        await Promise.all([refreshTasks(), refreshSyncState()]);
+        const [, sync] = await Promise.all([refreshTasks(), refreshSyncState()]);
+        state.syncFinishedAt = sync?.last_finished_at || state.syncFinishedAt;
         if (!state.taskId) {
           const visibleTasks = filteredTasks();
           const first = visibleTasks.find((task) => task.can_claim) || visibleTasks[0];
@@ -390,6 +393,24 @@
         renderReview();
         toast("\u626b\u7801\u6570\u636e\u5df2\u6e05\u7a7a");
       });
+      setInterval(async () => {
+        try {
+          const sync = await refreshSyncState();
+          if (sync.last_finished_at && sync.last_finished_at !== state.syncFinishedAt) {
+            state.syncFinishedAt = sync.last_finished_at;
+            state.taskId = null;
+            state.groups = [];
+            state.group = null;
+            state.photo = null;
+            await refreshTasks();
+            renderGroups();
+            renderReview();
+            toast("\u540c\u6b65\u5b8c\u6210\uff0c\u4efb\u52a1\u5df2\u5237\u65b0");
+          }
+        } catch (error) {
+          // Keep the review page usable when a transient status request fails.
+        }
+      }, 5000);
       reloadAll().catch((error) => toast(error.message, true));
     </script>
   </body>

@@ -14,7 +14,7 @@ from app.services.ezcodes_sync import (
     EzcodesError,
     download_scan_data_preview,
 )
-from app.services.local_simulation import apply_synced_scan_records
+from app.services.local_simulation import apply_group_photo_urls, apply_synced_scan_records, get_group
 
 
 def utc_now() -> str:
@@ -83,6 +83,7 @@ class EzcodesSyncManager:
                 credentials,
                 max_files=options.max_files,
                 max_records_per_file=options.max_records_per_file,
+                resolve_image_urls=False,
             )
             apply_result = apply_synced_scan_records(result.get("records", []))
             result["apply_result"] = apply_result
@@ -98,6 +99,24 @@ class EzcodesSyncManager:
             with self._lock:
                 self._running = False
         return self.status()
+
+    def load_group_photo_urls(self, group_id: str) -> dict[str, Any]:
+        credentials = self.configured_credentials()
+        if credentials is None:
+            raise EzcodesError("Ezcodes credentials are not configured.")
+        group = get_group(group_id)
+        if group is None:
+            raise KeyError(group_id)
+        file_ids = [
+            str(photo.get("image_file_id"))
+            for photo in group.get("photos", [])
+            if photo.get("image_file_id") and not photo.get("image_url")
+        ]
+        unique_file_ids = list(dict.fromkeys(file_ids))
+        urls = self.backend.get_temp_file_urls(credentials, unique_file_ids)
+        result = apply_group_photo_urls(group_id, urls)
+        result["requested_file_ids"] = len(unique_file_ids)
+        return result
 
     def start_periodic(self) -> None:
         if not settings.ezcodes_sync_enabled:

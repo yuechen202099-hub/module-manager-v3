@@ -240,6 +240,7 @@ def download_scan_data_preview(
     credentials: EzcodesCredentials,
     max_files: int = 5,
     max_records_per_file: int = 20,
+    resolve_image_urls: bool = True,
 ) -> dict[str, Any]:
     plan = build_target_sync_plan(backend, credentials, max_total_files=max_files)
     files_to_read = []
@@ -272,7 +273,9 @@ def download_scan_data_preview(
             records.append(record)
             image_file_ids.extend(record.image_file_ids)
 
-    temp_urls = backend.get_temp_file_urls(credentials, unique_preserve_order(image_file_ids))
+    temp_urls = {}
+    if resolve_image_urls:
+        temp_urls = backend.get_temp_file_urls(credentials, unique_preserve_order(image_file_ids))
     return {
         "plan": plan,
         "tested_files": len(files_to_read),
@@ -408,6 +411,7 @@ def serialize_scan_record(record: EzcodesScanRecord, temp_urls: dict[str, str]) 
         "creator": record.creator,
         "created_at": record.created_at,
         "image_count": len(record.image_file_ids),
+        "image_file_ids": list(record.image_file_ids),
         "image_urls": [temp_urls[file_id] for file_id in record.image_file_ids if file_id in temp_urls],
     }
 
