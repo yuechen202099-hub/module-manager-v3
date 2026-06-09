@@ -12,6 +12,7 @@ from app.services.ezcodes_sync import (
     EzcodesError,
     EzcodesFile,
     build_target_sync_plan,
+    download_scan_data_preview,
     normalize_barcode_record,
 )
 
@@ -52,10 +53,28 @@ class FakeEzcodesBackend:
         return self.files.get(parent_id, [])
 
     def list_barcodes(self, credentials: EzcodesCredentials, file_id: str) -> list[dict]:
+        if file_id == "luo-file-1":
+            return [
+                {
+                    "_id": "barcode-1",
+                    "txtValue": "ABCDEFGHIJK123456789X",
+                    "terminal": "350000434929",
+                    "collector": "collector-1",
+                    "meterNo": "120000784940",
+                    "moduleAssetNo": "M-001",
+                    "address": "address-1",
+                    "assetType": "module",
+                    "creator": LUO,
+                    "createTime": "2026-06-08 11:02:59",
+                    "images": ["cloud://photo-1.jpg", "cloud://photo-2.jpg"],
+                }
+            ]
+        if file_id == "luo-file-2":
+            return [{"_id": "bad-barcode"}]
         return []
 
     def get_temp_file_urls(self, credentials: EzcodesCredentials, file_ids: list[str]) -> dict[str, str]:
-        return {}
+        return {file_id: f"https://download.example/{index}.jpg" for index, file_id in enumerate(file_ids, start=1)}
 
 
 class FakeHttpResponse:
@@ -80,6 +99,27 @@ def test_build_target_sync_plan_recurses_installer_folders() -> None:
     assert plan["installers"][0]["file_count"] == 2
     assert plan["total_files"] == 2
     assert plan["missing_installers"] == []
+
+
+def test_download_scan_data_preview_reads_barcodes_and_image_urls() -> None:
+    result = download_scan_data_preview(
+        FakeEzcodesBackend(),
+        EzcodesCredentials(access_token="token", team_id="team"),
+        max_files=2,
+        max_records_per_file=10,
+    )
+
+    assert result["tested_files"] == 2
+    assert result["downloaded_records"] == 1
+    assert len(result["invalid_records"]) == 1
+    assert result["image_file_ids"] == 2
+    assert result["resolved_image_urls"] == 2
+    assert result["sample_records"][0]["meter_match_key"] == "123456789"
+    assert result["sample_records"][0]["image_count"] == 2
+    assert result["sample_records"][0]["image_urls"] == [
+        "https://download.example/1.jpg",
+        "https://download.example/2.jpg",
+    ]
 
 
 def test_normalize_barcode_record_preserves_project_baseline_fields() -> None:
@@ -129,6 +169,26 @@ def test_ezcodes_preview_endpoint_uses_backend_without_frontend() -> None:
     assert payload["project_id"] == 1
     assert payload["plan"]["root_folder"]["name"] == MODULE_FOLDER
     assert payload["plan"]["total_files"] == 2
+
+
+def test_ezcodes_download_test_endpoint_uses_backend_without_frontend() -> None:
+    set_ezcodes_backend(FakeEzcodesBackend())
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/projects/1/scan/ezcodes/download-test",
+        json={
+            "credentials": {"access_token": "token", "team_id": "team"},
+            "max_files": 2,
+            "max_records_per_file": 10,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["project_id"] == 1
+    assert payload["result"]["downloaded_records"] == 1
+    assert payload["result"]["resolved_image_urls"] == 2
 
 
 def test_cloudbase_backend_queries_files_and_barcodes(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -44,6 +44,10 @@ def create_app() -> FastAPI:
     def v201_page():
         return FileResponse(static_dir / "v201.html")
 
+    @app.get("/task-hall")
+    def task_hall_page():
+        return FileResponse(static_dir / "task_hall.html")
+
     app.include_router(api_router)
     return app
 

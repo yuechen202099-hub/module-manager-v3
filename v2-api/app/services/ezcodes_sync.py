@@ -217,6 +217,55 @@ def build_target_sync_plan(backend: EzcodesBackend, credentials: EzcodesCredenti
     }
 
 
+def download_scan_data_preview(
+    backend: EzcodesBackend,
+    credentials: EzcodesCredentials,
+    max_files: int = 5,
+    max_records_per_file: int = 20,
+) -> dict[str, Any]:
+    plan = build_target_sync_plan(backend, credentials)
+    files_to_read = []
+    for installer in plan["installers"]:
+        for file_info in installer["files"]:
+            files_to_read.append({"installer": installer["name"], **file_info})
+            if len(files_to_read) >= max_files:
+                break
+        if len(files_to_read) >= max_files:
+            break
+
+    records: list[EzcodesScanRecord] = []
+    invalid_records: list[dict[str, str]] = []
+    image_file_ids: list[str] = []
+    for file_info in files_to_read:
+        file = EzcodesFile(
+            id=file_info["id"],
+            name=file_info["name"],
+            type=1,
+            parent_id="",
+            created_at=file_info.get("created_at", ""),
+        )
+        raw_rows = backend.list_barcodes(credentials, file.id)[:max_records_per_file]
+        for raw in raw_rows:
+            try:
+                record = normalize_barcode_record(raw, file=file, installer=file_info["installer"])
+            except EzcodesError as exc:
+                invalid_records.append({"file_id": file.id, "reason": str(exc)})
+                continue
+            records.append(record)
+            image_file_ids.extend(record.image_file_ids)
+
+    temp_urls = backend.get_temp_file_urls(credentials, unique_preserve_order(image_file_ids))
+    return {
+        "plan": plan,
+        "tested_files": len(files_to_read),
+        "downloaded_records": len(records),
+        "invalid_records": invalid_records,
+        "image_file_ids": len(unique_preserve_order(image_file_ids)),
+        "resolved_image_urls": len(temp_urls),
+        "sample_records": [serialize_scan_record(record, temp_urls) for record in records[:10]],
+    }
+
+
 def collect_scan_files(backend: EzcodesBackend, credentials: EzcodesCredentials, parent_id: str) -> list[EzcodesFile]:
     result: list[EzcodesFile] = []
     pending = [parent_id]
@@ -314,3 +363,33 @@ def parse_file_document(item: dict[str, Any]) -> EzcodesFile:
         created_at=str(item.get("createTime") or ""),
         raw=item,
     )
+
+
+def serialize_scan_record(record: EzcodesScanRecord, temp_urls: dict[str, str]) -> dict[str, Any]:
+    return {
+        "file_id": record.file_id,
+        "source_file": record.source_file,
+        "installer": record.installer,
+        "barcode": record.barcode,
+        "meter_match_key": record.meter_match_key,
+        "terminal": record.terminal,
+        "collector": record.collector,
+        "meter_no": record.meter_no,
+        "module_asset_no": record.module_asset_no,
+        "address": record.address,
+        "asset_type": record.asset_type,
+        "creator": record.creator,
+        "created_at": record.created_at,
+        "image_count": len(record.image_file_ids),
+        "image_urls": [temp_urls[file_id] for file_id in record.image_file_ids if file_id in temp_urls],
+    }
+
+
+def unique_preserve_order(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result

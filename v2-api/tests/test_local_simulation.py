@@ -14,6 +14,7 @@ from app.services.local_simulation import (
     bootstrap_local_simulation,
     classify_photo,
     claim_task,
+    clear_scan_data,
     get_task_progress,
     get_group,
     list_task_groups,
@@ -240,7 +241,22 @@ def test_downloaded_photo_can_be_classified(synthetic_state: dict) -> None:
     assert classified["category"] == "collector_barcode"
     assert classified["category_label"] == "采集器条形码"
     assert classified["classified_by"] == "alice"
+    assert classified["archive_status"] == "archived"
+    assert classified["archived_at"]
     assert synthetic_state["summary"]["unclassified_photos"] == 4
+
+
+def test_clear_scan_data_resets_downloaded_photos_and_claimable_tasks(synthetic_state: dict) -> None:
+    state = clear_scan_data()
+    tasks = list_tasks()
+
+    assert state["summary"]["scan_rows"] == 0
+    assert state["summary"]["downloaded_photos"] == 0
+    assert state["summary"]["unclassified_photos"] == 0
+    assert state["scan_unmatched"] == []
+    assert all(group["photos"] == [] for group in state["groups"])
+    assert all(group["photo_count"] == 0 for group in state["groups"])
+    assert all(task["can_claim"] is False for task in tasks)
 
 
 def test_local_test_routes_cover_review_flow(synthetic_state: dict) -> None:

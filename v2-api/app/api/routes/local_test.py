@@ -7,6 +7,7 @@ from app.services.local_simulation import (
     bootstrap_local_simulation,
     claim_task,
     classify_photo,
+    clear_scan_data,
     get_group,
     get_task_progress,
     get_state,
@@ -45,6 +46,12 @@ class PhotoClassifyRequest(BaseModel):
 @router.post("/bootstrap")
 def bootstrap(request: Request):
     state = bootstrap_local_simulation()
+    return ok(request, {"summary": state["summary"], "paths": state["paths"]})
+
+
+@router.post("/scan/clear")
+def clear_scan(request: Request):
+    state = clear_scan_data()
     return ok(request, {"summary": state["summary"], "paths": state["paths"]})
 
 

@@ -52,6 +52,24 @@ def get_state() -> dict[str, Any]:
     return _state
 
 
+def clear_scan_data() -> dict[str, Any]:
+    state = get_state()
+    for group in state["groups"]:
+        group["photos"] = []
+        group["photo_count"] = 0
+        if group["status"] != "unmatched":
+            group["status"] = "incomplete"
+        group["reviewer"] = None
+        group["review_note"] = ""
+        group["exception_note"] = ""
+        group["reviewed_at"] = None
+    state["scan_unmatched"] = []
+    state["photo_events"] = []
+    state["summary"]["scan_rows"] = 0
+    refresh_summary()
+    return state
+
+
 def bootstrap_local_simulation(paths: LocalTestPaths | None = None) -> dict[str, Any]:
     paths = paths or LocalTestPaths()
     total_rows = read_catalog_rows(paths.total_catalog, source="total")
@@ -157,8 +175,11 @@ def build_photo_record(photo_index: int, row: dict[str, Any]) -> dict[str, Any]:
         "has_image": has_image,
         "download_status": "downloaded" if has_image else "missing",
         "downloaded_at": now_iso() if has_image else None,
+        "image_url": row.get("image_url", ""),
         "category": "unclassified",
         "category_label": PHOTO_CATEGORIES["unclassified"],
+        "archive_status": "pending",
+        "archived_at": None,
     }
 
 
@@ -505,6 +526,8 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
     photo["category_label"] = PHOTO_CATEGORIES[category]
     photo["classified_by"] = reviewer
     photo["classified_at"] = now_iso()
+    photo["archive_status"] = "archived"
+    photo["archived_at"] = now_iso()
     _state["photo_events"].append(
         {
             "group_id": group_id,

@@ -10,6 +10,7 @@ from app.services.ezcodes_sync import (
     EzcodesCredentials,
     EzcodesError,
     build_target_sync_plan,
+    download_scan_data_preview,
 )
 
 router = APIRouter(prefix="/projects/{project_id}/scan/ezcodes")
@@ -26,6 +27,12 @@ class EzcodesSyncPreviewRequest(BaseModel):
     credentials: EzcodesCredentialsRequest
 
 
+class EzcodesDownloadTestRequest(BaseModel):
+    credentials: EzcodesCredentialsRequest
+    max_files: int = Field(default=3, ge=1, le=20)
+    max_records_per_file: int = Field(default=10, ge=1, le=100)
+
+
 _backend: EzcodesBackend = EzcodesCloudBaseBackend()
 
 
@@ -34,18 +41,37 @@ def set_ezcodes_backend(backend: EzcodesBackend) -> None:
     _backend = backend
 
 
+def build_credentials(payload: EzcodesCredentialsRequest) -> EzcodesCredentials:
+    credential_kwargs = {
+        "access_token": payload.access_token,
+        "team_id": payload.team_id,
+        "env_id": payload.env_id,
+    }
+    if payload.endpoint:
+        credential_kwargs["endpoint"] = payload.endpoint
+    return EzcodesCredentials(**credential_kwargs)
+
+
 @router.post("/preview")
 def preview_ezcodes_sync(project_id: int, payload: EzcodesSyncPreviewRequest, request: Request):
-    credential_kwargs = {
-        "access_token": payload.credentials.access_token,
-        "team_id": payload.credentials.team_id,
-        "env_id": payload.credentials.env_id,
-    }
-    if payload.credentials.endpoint:
-        credential_kwargs["endpoint"] = payload.credentials.endpoint
-    credentials = EzcodesCredentials(**credential_kwargs)
+    credentials = build_credentials(payload.credentials)
     try:
         plan = build_target_sync_plan(_backend, credentials)
     except EzcodesError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, {"project_id": project_id, "plan": plan})
+
+
+@router.post("/download-test")
+def download_ezcodes_scan_test(project_id: int, payload: EzcodesDownloadTestRequest, request: Request):
+    credentials = build_credentials(payload.credentials)
+    try:
+        result = download_scan_data_preview(
+            _backend,
+            credentials,
+            max_files=payload.max_files,
+            max_records_per_file=payload.max_records_per_file,
+        )
+    except EzcodesError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, {"project_id": project_id, "result": result})

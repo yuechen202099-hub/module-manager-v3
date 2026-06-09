@@ -79,3 +79,23 @@ def test_local_test_task_and_review_flow() -> None:
     )
     assert category_response.status_code == 200
     assert category_response.json()["data"]["category"] == "collector_barcode"
+
+
+def test_task_hall_page_is_available() -> None:
+    response = client.get("/task-hall")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "archivePhoto" in response.text
+
+
+def test_clear_scan_data_route_resets_local_scan_state() -> None:
+    client.post("/local-test/bootstrap")
+
+    response = client.post("/local-test/scan/clear")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["summary"]["scan_rows"] == 0
+    assert payload["summary"]["downloaded_photos"] == 0
+    assert payload["summary"]["unclassified_photos"] == 0

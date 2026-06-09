@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>&#20219;&#21153;&#22823;&#21381;</title>
+    <style>
+      :root {
+        --bg: #edf2f7;
+        --panel: #fff;
+        --ink: #17212b;
+        --muted: #647386;
+        --line: #d8e0ea;
+        --primary: #256f9f;
+        --primary-soft: #e7f2f8;
+        --success: #147a5a;
+        --warning: #a86112;
+        --danger: #b42318;
+        --shadow: 0 12px 30px rgba(23, 32, 42, 0.08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-width: 1180px;
+        font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+      }
+      header {
+        height: 56px;
+        padding: 0 18px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: #16202a;
+        color: #fff;
+      }
+      h1, h2, h3, p { margin: 0; }
+      h1 { font-size: 17px; }
+      button, input, select { font: inherit; }
+      button {
+        height: 32px;
+        border: 1px solid var(--primary);
+        border-radius: 6px;
+        padding: 0 12px;
+        background: var(--primary);
+        color: #fff;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button.secondary { background: #fff; color: var(--primary); }
+      button:disabled { opacity: .55; cursor: not-allowed; }
+      input, select {
+        height: 32px;
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 9px;
+        background: #fff;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 320px 520px minmax(460px, 1fr);
+        gap: 12px;
+        padding: 12px;
+        height: calc(100vh - 56px);
+      }
+      .panel {
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }
+      .head {
+        height: 44px;
+        padding: 0 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--line);
+        background: #f8fafc;
+      }
+      .body { height: calc(100% - 44px); overflow: auto; padding: 10px; }
+      .filters { display: grid; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
+      .task, .group, .photo-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+      }
+      .task, .group { padding: 10px; margin-bottom: 8px; cursor: pointer; }
+      .task.active, .group.active { border-color: var(--primary); box-shadow: inset 3px 0 0 var(--primary); }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+      .cell { padding: 8px; border-radius: 6px; background: #f5f7f9; }
+      .label, .small { font-size: 12px; color: var(--muted); }
+      .value { display: block; margin-top: 3px; font-size: 18px; font-weight: 800; }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 22px;
+        border-radius: 6px;
+        padding: 2px 7px;
+        background: #eef2f7;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .badge.ok { background: #e8f7f1; color: var(--success); }
+      .badge.warn { background: #fff6db; color: var(--warning); }
+      .badge.err { background: #fff0ed; color: var(--danger); }
+      .progress { height: 7px; margin-top: 8px; border-radius: 999px; background: #e8edf2; overflow: hidden; }
+      .progress span { display: block; width: var(--value); height: 100%; background: linear-gradient(90deg, #256f9f, #38a169); }
+      .empty { min-height: 160px; display: grid; place-items: center; color: var(--muted); text-align: center; }
+      .photo-layout { display: grid; grid-template-columns: minmax(0, 1fr) 230px; gap: 12px; min-height: 100%; }
+      .viewer {
+        min-height: 420px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0f1720;
+        overflow: hidden;
+      }
+      .viewer img { max-width: 100%; max-height: calc(100vh - 210px); object-fit: contain; }
+      .placeholder {
+        width: min(92%, 560px);
+        aspect-ratio: 4 / 3;
+        display: grid;
+        place-items: center;
+        border: 1px dashed #7390a8;
+        border-radius: 8px;
+        color: #d8e7f3;
+        text-align: center;
+        padding: 18px;
+      }
+      .photo-list { display: grid; gap: 8px; align-content: start; }
+      .photo-card { padding: 8px; cursor: pointer; }
+      .photo-card.active { border-color: var(--primary); background: var(--primary-soft); }
+      .archive-box { margin-top: 12px; display: grid; gap: 8px; }
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        padding: 12px 14px;
+        border-radius: 8px;
+        background: #16202a;
+        color: #fff;
+        opacity: 0;
+        transform: translateY(8px);
+        transition: .16s ease;
+      }
+      .toast.show { opacity: 1; transform: translateY(0); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>&#20219;&#21153;&#22823;&#21381;</h1>
+      <div>
+        <input id="reviewer" value="local-reviewer" aria-label="reviewer" />
+        <button class="secondary" id="clearScan">&#28165;&#31354;&#25195;&#30721;&#25968;&#25454;</button>
+        <button id="reload">&#21047;&#26032;</button>
+      </div>
+    </header>
+    <main>
+      <section class="panel">
+        <div class="head"><h2>&#20219;&#21153;</h2><span class="badge" id="taskCount">0</span></div>
+        <div class="filters">
+          <select id="scanFilter">
+            <option value="">&#20840;&#37096;&#25195;&#30721;&#29366;&#24577;</option>
+            <option value="with_scan">&#26377;&#25195;&#30721;&#25968;&#25454;</option>
+            <option value="without_scan">&#26080;&#25195;&#30721;&#25968;&#25454;</option>
+          </select>
+          <select id="claimFilter">
+            <option value="">&#20840;&#37096;&#39046;&#21462;&#29366;&#24577;</option>
+            <option value="available">&#21487;&#39046;&#21462;</option>
+            <option value="mine">&#25105;&#39046;&#21462;&#30340;</option>
+            <option value="claimed">&#24050;&#34987;&#39046;&#21462;</option>
+          </select>
+          <select id="completeFilter">
+            <option value="">&#20840;&#37096;&#23436;&#25972;&#24230;</option>
+            <option value="complete">&#24050;&#23436;&#25972;</option>
+            <option value="partial">&#37096;&#20998;&#23436;&#25972;</option>
+            <option value="empty">&#26080;&#29031;&#29255;</option>
+          </select>
+        </div>
+        <div class="body" id="tasks"></div>
+      </section>
+      <section class="panel">
+        <div class="head"><h2>&#26377;&#25195;&#30721;&#28165;&#21333;</h2><span class="badge" id="groupCount">0</span></div>
+        <div class="body" id="groups"></div>
+      </section>
+      <section class="panel">
+        <div class="head"><h2>&#22270;&#29255;&#23457;&#38405;</h2><span class="badge" id="photoState">&#26410;&#36873;&#25321;</span></div>
+        <div class="body" id="review"></div>
+      </section>
+    </main>
+    <div class="toast" id="toast"></div>
+    <script>
+      const state = { tasks: [], groups: [], group: null, photo: null, reviewer: "local-reviewer" };
+      const categories = {
+        before_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u524d",
+        after_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u540e",
+        module_meter: "\u6a21\u5757\u4e0e\u7535\u80fd\u8868",
+        collector_barcode: "\u91c7\u96c6\u5668\u6761\u5f62\u7801",
+        other: "\u5176\u4ed6",
+      };
+      const $ = (selector) => document.querySelector(selector);
+      const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+      async function api(path, options = {}) {
+        const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+        const payload = await response.json();
+        if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
+        return payload.data;
+      }
+      function toast(message, bad = false) {
+        $("#toast").textContent = message;
+        $("#toast").style.background = bad ? "#b42318" : "#16202a";
+        $("#toast").classList.add("show");
+        clearTimeout(toast.timer);
+        toast.timer = setTimeout(() => $("#toast").classList.remove("show"), 2400);
+      }
+      function pct(value) { return `${Math.round((Number(value) || 0) * 100)}%`; }
+      function filteredTasks() {
+        const scan = $("#scanFilter").value;
+        const claim = $("#claimFilter").value;
+        const complete = $("#completeFilter").value;
+        return state.tasks.filter((task) => {
+          const c = Number(task.completeness_rate) || 0;
+          return (!scan || (scan === "with_scan" ? task.has_scan_info : !task.has_scan_info))
+            && (!claim || (claim === "available" ? task.can_claim && !task.claimed_by : claim === "mine" ? task.claimed_by === state.reviewer : Boolean(task.claimed_by)))
+            && (!complete || (complete === "complete" ? c >= 1 : complete === "partial" ? c > 0 && c < 1 : c === 0));
+        });
+      }
+      function renderTasks() {
+        const tasks = filteredTasks();
+        $("#taskCount").textContent = `${tasks.length}/${state.tasks.length}`;
+        $("#tasks").innerHTML = tasks.length ? tasks.map((task) => `
+          <article class="task ${state.taskId === task.id ? "active" : ""}" data-task="${task.id}">
+            <strong>${esc(task.name)}</strong>
+            <div class="small">\u7ec8\u7aef ${esc(task.terminal || "-")} · ${task.claimed_by ? `\u5df2\u7531 ${esc(task.claimed_by)} \u9886\u53d6` : "\u672a\u9886\u53d6"}</div>
+            <div class="grid">
+              <div class="cell"><span class="label">\u6709\u626b\u7801\u7ec4</span><span class="value">${task.groups_with_scan || 0}</span></div>
+              <div class="cell"><span class="label">\u5b8c\u6210\u7387</span><span class="value">${pct(task.completeness_rate)}</span></div>
+            </div>
+            <div class="progress"><span style="--value:${pct(task.completeness_rate)}"></span></div>
+            <p class="small">${task.can_claim ? "" : esc(task.claim_block_reason || "\u65e0\u626b\u7801\u4fe1\u606f\uff0c\u4e0d\u80fd\u9886\u53d6")}</p>
+            <button data-action="view" data-id="${task.id}">\u67e5\u770b</button>
+            <button data-action="claim" data-id="${task.id}" ${task.can_claim ? "" : "disabled"}>\u9886\u53d6</button>
+          </article>
+        `).join("") : `<div class="empty">\u6ca1\u6709\u7b26\u5408\u6761\u4ef6\u7684\u4efb\u52a1</div>`;
+        $("#tasks").querySelectorAll("button[data-action]").forEach((button) => button.addEventListener("click", () => handleTask(button.dataset.id, button.dataset.action)));
+      }
+      function renderGroups() {
+        $("#groupCount").textContent = `${state.groups.length}`;
+        $("#groups").innerHTML = state.groups.length ? state.groups.map((group) => `
+          <article class="group ${state.group?.id === group.id ? "active" : ""}" data-group="${group.id}">
+            <strong>${esc(group.meter_no)}</strong>
+            <div class="small">${esc(group.terminal)} · ${esc(group.address || "\u672a\u5339\u914d\u5730\u5740")}</div>
+            <span class="badge ${group.photo_count >= 4 ? "ok" : "warn"}">${group.photo_count || 0} \u5f20\u56fe</span>
+          </article>
+        `).join("") : `<div class="empty">\u8be5\u4efb\u52a1\u6682\u65e0\u6709\u626b\u7801\u8d44\u6599</div>`;
+        $("#groups").querySelectorAll("[data-group]").forEach((row) => row.addEventListener("click", () => loadGroup(row.dataset.group)));
+      }
+      function renderReview() {
+        if (!state.group) {
+          $("#review").innerHTML = `<div class="empty">\u9009\u62e9\u4e00\u6761\u6e05\u5355\u540e\u5f00\u59cb\u56fe\u7247\u5ba1\u9605</div>`;
+          return;
+        }
+        const photos = state.group.photos || [];
+        if (!photos.length) {
+          $("#review").innerHTML = `<div class="empty">\u8be5\u8d44\u6599\u7ec4\u6ca1\u6709\u56fe\u7247</div>`;
+          $("#photoState").textContent = "\u65e0\u56fe\u7247";
+          return;
+        }
+        if (!state.photo || !photos.some((photo) => photo.id === state.photo.id)) state.photo = photos[0];
+        $("#photoState").textContent = state.photo.archive_status === "archived" ? "\u5df2\u5f52\u6863" : "\u5f85\u5f52\u6863";
+        const url = state.photo.image_url || "";
+        $("#review").innerHTML = `
+          <div class="photo-layout">
+            <div>
+              <div class="viewer">${url ? `<img src="${esc(url)}" alt="\u5ba1\u9605\u56fe\u7247" />` : `<div class="placeholder">\u672c\u5730\u6a21\u62df\u56fe\u7247<br />${esc(state.photo.barcode || "")}</div>`}</div>
+              <div class="archive-box">
+                <select id="category">${Object.entries(categories).map(([value, label]) => `<option value="${value}" ${state.photo.category === value ? "selected" : ""}>${label}</option>`).join("")}</select>
+                <button id="archivePhoto">\u5f52\u6863\u5e76\u5206\u7c7b;&#65288;&#24403;&#21069;&#22270;&#65289;</button>
+              </div>
+            </div>
+            <div class="photo-list">${photos.map((photo) => `
+              <article class="photo-card ${state.photo.id === photo.id ? "active" : ""}" data-photo="${photo.id}">
+                <strong>#${photo.row_number || "-"}</strong>
+                <div class="small">${esc(photo.category_label || "\u672a\u5206\u7c7b")}</div>
+                <span class="badge ${photo.archive_status === "archived" ? "ok" : "warn"}">${photo.archive_status === "archived" ? "\u5df2\u5f52\u6863" : "\u5f85\u5f52\u6863"}</span>
+              </article>
+            `).join("")}</div>
+          </div>`;
+        $("#review").querySelectorAll("[data-photo]").forEach((item) => item.addEventListener("click", () => {
+          state.photo = photos.find((photo) => photo.id === item.dataset.photo);
+          renderReview();
+        }));
+        $("#archivePhoto").addEventListener("click", archivePhoto);
+      }
+      async function handleTask(id, action) {
+        if (action === "claim") await api(`/local-test/tasks/${id}/claim`, { method: "POST", body: JSON.stringify({ reviewer: state.reviewer }) });
+        state.taskId = Number(id);
+        const data = await api(`/local-test/tasks/${id}/groups?limit=1000&scan_only=true`);
+        state.groups = data.items || [];
+        state.group = null;
+        state.photo = null;
+        await refreshTasks();
+        renderGroups();
+        renderReview();
+      }
+      async function loadGroup(id, preferredPhotoId = null) {
+        state.group = await api(`/local-test/groups/${encodeURIComponent(id)}`);
+        const photos = state.group.photos || [];
+        state.photo = photos.find((photo) => photo.id === preferredPhotoId) || photos[0] || null;
+        renderGroups();
+        renderReview();
+      }
+      async function archivePhoto() {
+        if (!state.group || !state.photo) return;
+        const category = $("#category").value;
+        const currentPhotoId = state.photo.id;
+        await api(`/local-test/groups/${encodeURIComponent(state.group.id)}/photos/${encodeURIComponent(state.photo.id)}/category`, {
+          method: "PATCH",
+          body: JSON.stringify({ category, reviewer: state.reviewer }),
+        });
+        await loadGroup(state.group.id, currentPhotoId);
+        toast("\u5f53\u524d\u56fe\u7247\u5df2\u5f52\u6863");
+      }
+      async function refreshTasks() {
+        state.tasks = (await api("/local-test/tasks")).items || [];
+        renderTasks();
+      }
+      async function reloadAll() {
+        await refreshTasks();
+        if (!state.taskId) {
+          const first = state.tasks.find((task) => task.can_claim) || state.tasks[0];
+          if (first) await handleTask(first.id, "view");
+        }
+      }
+      $("#reviewer").addEventListener("input", (event) => { state.reviewer = event.target.value.trim() || "local-reviewer"; });
+      ["scanFilter", "claimFilter", "completeFilter"].forEach((id) => $("#" + id).addEventListener("change", renderTasks));
+      $("#reload").addEventListener("click", reloadAll);
+      $("#clearScan").addEventListener("click", async () => {
+        await api("/local-test/scan/clear", { method: "POST" });
+        state.groups = [];
+        state.group = null;
+        state.photo = null;
+        await refreshTasks();
+        renderGroups();
+        renderReview();
+        toast("\u626b\u7801\u6570\u636e\u5df2\u6e05\u7a7a");
+      });
+      reloadAll().catch((error) => toast(error.message, true));
+    </script>
+  </body>
+</html>
