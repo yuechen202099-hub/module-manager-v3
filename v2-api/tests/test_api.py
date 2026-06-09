@@ -54,7 +54,7 @@ def test_local_test_task_and_review_flow() -> None:
 
     tasks_response = client.get("/local-test/tasks")
     assert tasks_response.status_code == 200
-    task = tasks_response.json()["data"]["items"][0]
+    task = next(item for item in tasks_response.json()["data"]["items"] if item["can_claim"])
 
     claim_response = client.post(f"/local-test/tasks/{task['id']}/claim", json={"reviewer": "api-test"})
     assert claim_response.status_code == 200
@@ -70,3 +70,12 @@ def test_local_test_task_and_review_flow() -> None:
     )
     assert review_response.status_code == 200
     assert review_response.json()["data"]["status"] == "approved"
+
+    photo_group = next(item for item in client.get(f"/local-test/tasks/{task['id']}/groups").json()["data"]["items"] if item["photos"])
+    photo = photo_group["photos"][0]
+    category_response = client.patch(
+        f"/local-test/groups/{photo_group['id']}/photos/{photo['id']}/category",
+        json={"category": "collector_barcode", "reviewer": "api-test"},
+    )
+    assert category_response.status_code == 200
+    assert category_response.json()["data"]["category"] == "collector_barcode"

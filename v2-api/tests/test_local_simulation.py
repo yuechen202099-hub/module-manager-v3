@@ -12,6 +12,7 @@ from app.services.local_simulation import (
     DEFAULT_TOTAL_CATALOG,
     LocalTestPaths,
     bootstrap_local_simulation,
+    classify_photo,
     claim_task,
     get_task_progress,
     get_group,
@@ -50,6 +51,14 @@ def fake_catalog_rows(source: str) -> list[dict]:
             "meter_no": "ZZ1002",
             "address": "B road",
             "meter_match_key": "1002",
+        },
+        {
+            "source": source,
+            "row_number": 4,
+            "terminal": "T-003",
+            "meter_no": "ZZ1003",
+            "address": "C road",
+            "meter_match_key": "1003",
         },
     ]
 
@@ -144,6 +153,19 @@ def test_task_can_be_claimed_and_released(synthetic_state: dict) -> None:
     assert released["released_at"]
 
 
+def test_tasks_are_split_by_terminal_and_require_scan_info(synthetic_state: dict) -> None:
+    tasks = list_tasks()
+
+    assert [task["terminal"] for task in tasks] == ["T-001", "T-002", "T-003"]
+    assert tasks[0]["scan_rows"] == 4
+    assert tasks[0]["can_claim"] is True
+    assert tasks[2]["scan_rows"] == 0
+    assert tasks[2]["can_claim"] is False
+
+    with pytest.raises(ValueError):
+        claim_task(tasks[2]["id"], reviewer="alice")
+
+
 def test_review_group_updates_status_and_summary(synthetic_state: dict) -> None:
     state = synthetic_state
     first_id = state["groups"][0]["id"]
@@ -155,9 +177,9 @@ def test_review_group_updates_status_and_summary(synthetic_state: dict) -> None:
     assert reviewed["review_note"] == "sample passed"
     assert state["summary"]["approved_groups"] == 1
     assert state["summary"]["reviewed_groups"] == 1
-    assert state["summary"]["review_progress"] == 0.5
+    assert state["summary"]["review_progress"] == 0.3333
     assert tasks[0]["completed_groups"] == 1
-    assert tasks[0]["progress"] == 0.5
+    assert tasks[0]["progress"] == 1.0
 
 
 def test_review_group_rejects_unknown_status(synthetic_state: dict) -> None:
@@ -180,20 +202,32 @@ def test_exception_note_marks_group_and_progress(synthetic_state: dict) -> None:
     second_id = synthetic_state["groups"][1]["id"]
 
     reviewed = save_exception_note(second_id, reviewer="alice", note="missing required photos")
-    progress = get_task_progress(1)
+    progress = get_task_progress(2)
 
     assert reviewed["status"] == "exception"
     assert reviewed["exception_note"] == "missing required photos"
     assert progress["exception_groups"] == 1
     assert progress["reviewed_groups"] == 1
-    assert progress["pending_groups"] == 1
+    assert progress["pending_groups"] == 0
 
 
 def test_task_groups_can_be_filtered_by_status(synthetic_state: dict) -> None:
-    result = list_task_groups(1, status="incomplete")
+    result = list_task_groups(2, status="incomplete")
 
     assert result["total"] == 1
     assert result["items"][0]["photo_count"] == 1
+
+
+def test_downloaded_photo_can_be_classified(synthetic_state: dict) -> None:
+    first_group = synthetic_state["groups"][0]
+    photo = first_group["photos"][0]
+
+    classified = classify_photo(first_group["id"], photo["id"], "collector_barcode", reviewer="alice")
+
+    assert classified["category"] == "collector_barcode"
+    assert classified["category_label"] == "采集器条形码"
+    assert classified["classified_by"] == "alice"
+    assert synthetic_state["summary"]["unclassified_photos"] == 4
 
 
 def test_local_test_routes_cover_review_flow(synthetic_state: dict) -> None:

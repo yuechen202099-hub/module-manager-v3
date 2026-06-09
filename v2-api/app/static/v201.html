@@ -197,6 +197,7 @@
       .panel-body { padding: 10px; }
       .task-card { padding: 10px; }
       .task-card + .task-card { margin-top: 8px; }
+      .task-card.active { border-color: var(--primary); box-shadow: inset 3px 0 0 var(--primary); }
       .task-title {
         display: flex;
         align-items: center;
@@ -329,6 +330,12 @@
         overflow-wrap: anywhere;
       }
       .photo-row:last-child { border-bottom: 0; }
+      .photo-category {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        margin-top: 6px;
+      }
       .review-box { padding-top: 14px; border-top: 1px solid var(--line); }
       .review-row {
         display: grid;
@@ -482,6 +489,7 @@
         tasks: [],
         groups: [],
         selectedGroup: null,
+        selectedTaskId: null,
         reviewer: localStorage.getItem("v21.reviewer") || "local-reviewer",
         statusFilter: localStorage.getItem("v21.statusFilter") || "",
         keyword: localStorage.getItem("v21.keyword") || "",
@@ -497,6 +505,14 @@
         in_review: "审阅中",
         released: "已释放",
       };
+      const photoCategoryText = {
+        unclassified: "未分类",
+        before_box: "表箱整体改造前",
+        after_box: "表箱整体改造后",
+        module_meter: "模块与电能表",
+        collector_barcode: "采集器条形码",
+        other: "其他",
+      };
 
       const metricLabels = [
         ["groups", "资料组"],
@@ -505,9 +521,9 @@
         ["approved_groups", "已通过"],
         ["exception_groups", "异常"],
         ["incomplete_groups", "不完整"],
-        ["stage_unmatched", "阶段未匹配"],
+        ["downloaded_photos", "已下载照片"],
+        ["unclassified_photos", "未分类照片"],
         ["scan_unmatched", "扫码未匹配"],
-        ["photo_rows_linked", "关联照片行"],
       ];
 
       const $ = (selector) => document.querySelector(selector);
@@ -571,20 +587,25 @@
         tasksEl.innerHTML = state.tasks
           .map(
             (task) => `
-              <article class="task-card">
+              <article class="task-card ${state.selectedTaskId === task.id ? "active" : ""}" data-task-card="${task.id}">
                 <div class="task-title">
                   <h3>${escapeHtml(task.name)}</h3>
                   ${badge(task.status)}
                 </div>
-                <div class="small muted">任务 #${task.id} · ${task.claimed_by ? `当前审阅人：${escapeHtml(task.claimed_by)}` : "未领取"}</div>
+                <div class="small muted">
+                  任务 #${task.id} · 终端：${escapeHtml(task.terminal || "-")}<br />
+                  ${task.claimed_by ? `当前审阅人：${escapeHtml(task.claimed_by)}` : "未领取"}
+                </div>
                 <div class="task-grid">
                   <div><span>总资料组</span><strong>${task.total_groups ?? 0}</strong></div>
+                  <div><span>扫码记录</span><strong>${task.scan_rows ?? 0}</strong></div>
                   <div><span>已通过</span><strong>${task.completed_groups ?? 0}</strong></div>
-                  <div><span>异常</span><strong>${task.exception_groups ?? 0}</strong></div>
                   <div><span>不完整</span><strong>${task.incomplete_groups ?? 0}</strong></div>
                 </div>
+                ${task.can_claim ? "" : `<div class="small error">${escapeHtml(task.claim_block_reason || "无扫码信息，不能领取")}</div>`}
                 <div class="actions">
-                  <button data-task="${task.id}" data-action="claim">领取</button>
+                  <button data-task="${task.id}" data-action="view">查看终端</button>
+                  <button data-task="${task.id}" data-action="claim" ${task.can_claim ? "" : "disabled"}>领取</button>
                   <button class="secondary" data-task="${task.id}" data-action="release">释放</button>
                 </div>
               </article>
@@ -594,6 +615,9 @@
 
         tasksEl.querySelectorAll("button[data-task]").forEach((button) => {
           button.addEventListener("click", () => updateTask(button.dataset.task, button.dataset.action));
+        });
+        tasksEl.querySelectorAll("[data-task-card]").forEach((card) => {
+          card.addEventListener("dblclick", () => selectTask(Number(card.dataset.taskCard)));
         });
       }
 
@@ -659,7 +683,18 @@
                           <strong>#${photo.row_number ?? "-"}</strong>
                           <div>
                             <div class="truncate" title="${escapeHtml(photo.barcode)}">${escapeHtml(photo.barcode || "-")}</div>
-                            <div class="muted">${escapeHtml(photo.source_file || "-")} · ${escapeHtml(photo.created_at || "-")}</div>
+                            <div class="muted">
+                              ${escapeHtml(photo.source_file || "-")} · ${escapeHtml(photo.created_at || "-")}
+                              · 下载：${escapeHtml(photo.download_status || "-")}
+                            </div>
+                            <div class="photo-category">
+                              <select data-photo-category="${escapeHtml(photo.id)}" ${photo.download_status === "downloaded" ? "" : "disabled"}>
+                                ${Object.entries(photoCategoryText)
+                                  .map(([value, label]) => `<option value="${value}" ${photo.category === value ? "selected" : ""}>${label}</option>`)
+                                  .join("")}
+                              </select>
+                              <button class="secondary" data-photo-save="${escapeHtml(photo.id)}" ${photo.download_status === "downloaded" ? "" : "disabled"}>保存分类</button>
+                            </div>
                           </div>
                         </div>
                       `,
@@ -692,6 +727,9 @@
 
         $("#reviewStatus").value = group.status;
         $("#saveReview").addEventListener("click", saveReview);
+        detailEl.querySelectorAll("button[data-photo-save]").forEach((button) => {
+          button.addEventListener("click", () => savePhotoCategory(button.dataset.photoSave));
+        });
         detailEl.querySelectorAll("button[data-quick]").forEach((button) => {
           button.addEventListener("click", () => {
             $("#reviewStatus").value = button.dataset.quick;
@@ -732,13 +770,36 @@
         }
       }
 
+      async function savePhotoCategory(photoId) {
+        if (!state.selectedGroup) return;
+        const select = detailEl.querySelector(`select[data-photo-category="${CSS.escape(photoId)}"]`);
+        try {
+          await api(`/local-test/groups/${encodeURIComponent(state.selectedGroup.id)}/photos/${encodeURIComponent(photoId)}/category`, {
+            method: "PATCH",
+            body: JSON.stringify({ category: select.value, reviewer: state.reviewer }),
+          });
+          await loadGroup(state.selectedGroup.id);
+          await refreshSummaryAndTasks();
+          showToast("照片分类已保存");
+        } catch (error) {
+          showToast(`照片分类失败：${error.message}`, true);
+        }
+      }
+
       async function updateTask(taskId, action) {
+        if (action === "view") {
+          await selectTask(Number(taskId));
+          return;
+        }
         try {
           await api(`/local-test/tasks/${taskId}/${action}`, {
             method: "POST",
             body: JSON.stringify({ reviewer: state.reviewer }),
           });
+          state.selectedTaskId = Number(taskId);
           await refreshSummaryAndTasks();
+          await loadTaskGroups();
+          renderGroups();
           showToast(action === "claim" ? "任务已领取" : "任务已释放");
         } catch (error) {
           showToast(`任务操作失败：${error.message}`, true);
@@ -749,6 +810,10 @@
         const [summaryData, taskData] = await Promise.all([api("/local-test/summary"), api("/local-test/tasks")]);
         renderMetrics(summaryData.summary);
         state.tasks = taskData.items || [];
+        if (!state.selectedTaskId && state.tasks.length) {
+          const firstClaimable = state.tasks.find((task) => task.can_claim) || state.tasks[0];
+          state.selectedTaskId = firstClaimable.id;
+        }
         renderTasks();
         $("#paths").textContent = `数据源：${Object.values(summaryData.paths || {}).join(" | ")}`;
         $("#lastUpdated").textContent = `最后刷新：${new Date().toLocaleString("zh-CN")}`;
@@ -757,8 +822,7 @@
       async function refreshAll() {
         try {
           await refreshSummaryAndTasks();
-          const groupData = await api("/local-test/groups?limit=1000");
-          state.groups = groupData.items || [];
+          await loadTaskGroups();
           renderGroups();
           if (state.selectedGroup) {
             const exists = state.groups.some((item) => item.id === state.selectedGroup.id);
@@ -768,6 +832,24 @@
           detailEl.innerHTML = `<div class="detail-empty error">加载失败：${escapeHtml(error.message)}</div>`;
           showToast(`刷新失败：${error.message}`, true);
         }
+      }
+
+      async function selectTask(taskId) {
+        state.selectedTaskId = taskId;
+        state.selectedGroup = null;
+        detailStatusEl.textContent = "未选择";
+        detailEl.innerHTML = `<div class="detail-empty">已切换终端任务，请选择资料组开始审阅</div>`;
+        renderTasks();
+        await loadTaskGroups();
+        renderGroups();
+      }
+
+      async function loadTaskGroups() {
+        const endpoint = state.selectedTaskId
+          ? `/local-test/tasks/${state.selectedTaskId}/groups?limit=1000`
+          : "/local-test/groups?limit=1000";
+        const groupData = await api(endpoint);
+        state.groups = groupData.items || [];
       }
 
       $("#reviewer").addEventListener("input", (event) => {

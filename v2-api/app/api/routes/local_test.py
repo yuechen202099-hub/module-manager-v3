@@ -6,6 +6,7 @@ from app.core.responses import ok
 from app.services.local_simulation import (
     bootstrap_local_simulation,
     claim_task,
+    classify_photo,
     get_group,
     get_task_progress,
     get_state,
@@ -34,6 +35,11 @@ class ReviewRequest(BaseModel):
 class ExceptionNoteRequest(BaseModel):
     reviewer: str = "local-reviewer"
     note: str
+
+
+class PhotoClassifyRequest(BaseModel):
+    category: str
+    reviewer: str = "local-reviewer"
 
 
 @router.post("/bootstrap")
@@ -139,3 +145,14 @@ def mark_exception(group_id: str, payload: ExceptionNoteRequest, request: Reques
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, group)
+
+
+@router.patch("/groups/{group_id}/photos/{photo_id}/category")
+def save_photo_category(group_id: str, photo_id: str, payload: PhotoClassifyRequest, request: Request):
+    try:
+        photo = classify_photo(group_id, photo_id, payload.category, payload.reviewer)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Photo or group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, photo)

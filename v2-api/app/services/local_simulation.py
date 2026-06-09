@@ -15,7 +15,14 @@ DEFAULT_SCAN_FILE = Path("C:/Users/Administrator/Desktop/\u6279\u91cf\u626b\u780
 REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatched"}
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
 DONE_STATUSES = {"approved", "exception"}
-TASK_ID = 1
+PHOTO_CATEGORIES = {
+    "unclassified": "未分类",
+    "before_box": "表箱整体改造前",
+    "after_box": "表箱整体改造后",
+    "module_meter": "模块与电能表",
+    "collector_barcode": "采集器条形码",
+    "other": "其他",
+}
 
 
 @dataclass(frozen=True)
@@ -35,6 +42,7 @@ _state: dict[str, Any] = {
     "scan_unmatched": [],
     "stage_unmatched": [],
     "review_events": [],
+    "photo_events": [],
 }
 
 
@@ -62,12 +70,14 @@ def bootstrap_local_simulation(paths: LocalTestPaths | None = None) -> dict[str,
         else:
             scan_unmatched.append(row)
 
+    terminal_task_ids = build_terminal_task_ids(stage_rows)
     groups = []
     stage_unmatched = []
     for index, stage in enumerate(stage_rows, start=1):
         total_matches = total_by_key.get(stage["meter_match_key"], [])
         total = total_matches[0] if total_matches else None
-        photos = scans_by_key.get(stage["meter_match_key"], [])
+        photos = [build_photo_record(photo_index, row) for photo_index, row in enumerate(scans_by_key.get(stage["meter_match_key"], []), start=1)]
+        terminal = total["terminal"] if total else stage["terminal"]
         status = "pending"
         if not total:
             status = "unmatched"
@@ -78,10 +88,10 @@ def bootstrap_local_simulation(paths: LocalTestPaths | None = None) -> dict[str,
         groups.append(
             {
                 "id": f"g-{index:05d}",
-                "task_id": TASK_ID,
+                "task_id": terminal_task_ids.get(terminal, 0),
                 "meter_match_key": stage["meter_match_key"],
                 "meter_no": total["meter_no"] if total else stage["meter_no"],
-                "terminal": total["terminal"] if total else stage["terminal"],
+                "terminal": terminal,
                 "address": total["address"] if total else "",
                 "stage_meter_no": stage["meter_no"],
                 "stage_terminal": stage["terminal"],
@@ -96,22 +106,7 @@ def bootstrap_local_simulation(paths: LocalTestPaths | None = None) -> dict[str,
         )
 
     summary = build_summary(total_rows, stage_rows, scan_rows, groups, stage_unmatched, scan_unmatched)
-
-    task = {
-        "id": 1,
-        "project_id": 1,
-        "name": "First batch local review",
-        "status": "published",
-        "claimed_by": None,
-        "claimed_at": None,
-        "released_at": None,
-        "total_groups": len(groups),
-        "completed_groups": summary["reviewed_groups"],
-        "exception_groups": summary["exception_groups"],
-        "incomplete_groups": summary["incomplete_groups"],
-        "pending_groups": summary["unreviewed_groups"],
-        "progress": summary["review_progress"],
-    }
+    tasks = build_terminal_tasks(groups)
 
     _state.update(
         {
@@ -130,14 +125,76 @@ def bootstrap_local_simulation(paths: LocalTestPaths | None = None) -> dict[str,
                     "summary": summary,
                 }
             ],
-            "tasks": [task],
+            "tasks": tasks,
             "groups": groups,
             "scan_unmatched": scan_unmatched,
             "stage_unmatched": stage_unmatched,
             "review_events": [],
+            "photo_events": [],
         }
     )
     return _state
+
+
+def build_terminal_task_ids(stage_rows: list[dict[str, Any]]) -> dict[str, int]:
+    terminals = sorted({row["terminal"] for row in stage_rows if row["terminal"]})
+    return {terminal: index for index, terminal in enumerate(terminals, start=1)}
+
+
+def build_photo_record(photo_index: int, row: dict[str, Any]) -> dict[str, Any]:
+    has_image = bool(row.get("has_image"))
+    return {
+        "id": f"p-{row['row_number']}-{photo_index}",
+        "row_number": row["row_number"],
+        "barcode": row["barcode"],
+        "meter_match_key": row["meter_match_key"],
+        "source_file": row.get("source_file", ""),
+        "collector": row.get("collector", ""),
+        "asset_no": row.get("asset_no", ""),
+        "asset_type": row.get("asset_type", ""),
+        "creator": row.get("creator", ""),
+        "created_at": row.get("created_at", ""),
+        "has_image": has_image,
+        "download_status": "downloaded" if has_image else "missing",
+        "downloaded_at": now_iso() if has_image else None,
+        "category": "unclassified",
+        "category_label": PHOTO_CATEGORIES["unclassified"],
+    }
+
+
+def build_terminal_tasks(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_terminal: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for group in groups:
+        by_terminal[group["terminal"] or "UNKNOWN"].append(group)
+
+    tasks = []
+    for task_id, terminal in enumerate(sorted(by_terminal), start=1):
+        terminal_groups = by_terminal[terminal]
+        scan_rows = sum(group["photo_count"] for group in terminal_groups)
+        has_scan_info = scan_rows > 0
+        task = {
+            "id": task_id,
+            "project_id": 1,
+            "terminal": terminal,
+            "name": f"终端 {terminal}",
+            "status": "published",
+            "claimed_by": None,
+            "claimed_at": None,
+            "released_at": None,
+            "total_groups": len(terminal_groups),
+            "completed_groups": count_groups(terminal_groups, DONE_STATUSES),
+            "exception_groups": count_groups(terminal_groups, {"exception"}),
+            "incomplete_groups": count_groups(terminal_groups, {"incomplete"}),
+            "pending_groups": count_groups(terminal_groups, OPEN_STATUSES),
+            "scan_rows": scan_rows,
+            "groups_with_scan": sum(1 for group in terminal_groups if group["photo_count"] > 0),
+            "has_scan_info": has_scan_info,
+            "can_claim": has_scan_info,
+            "claim_block_reason": "" if has_scan_info else "该终端暂无扫码信息，不能领取",
+            "progress": calculate_progress(terminal_groups),
+        }
+        tasks.append(task)
+    return tasks
 
 
 def build_summary(
@@ -162,6 +219,12 @@ def build_summary(
         "stage_unmatched": len(stage_unmatched),
         "scan_unmatched": len(scan_unmatched),
         "photo_rows_linked": sum(item["photo_count"] for item in groups),
+        "downloaded_photos": sum(
+            1 for group in groups for photo in group.get("photos", []) if photo.get("download_status") == "downloaded"
+        ),
+        "unclassified_photos": sum(
+            1 for group in groups for photo in group.get("photos", []) if photo.get("category") == "unclassified"
+        ),
         "review_progress": calculate_progress(groups),
     }
 
@@ -174,14 +237,19 @@ def refresh_summary() -> None:
     state["summary"] = summary
     if state["projects"]:
         state["projects"][0]["summary"] = summary
-    if state["tasks"]:
-        task = state["tasks"][0]
-        task["total_groups"] = summary["groups"]
-        task["completed_groups"] = summary["reviewed_groups"]
-        task["exception_groups"] = summary["exception_groups"]
-        task["incomplete_groups"] = summary["incomplete_groups"]
-        task["pending_groups"] = summary["unreviewed_groups"]
-        task["progress"] = summary["review_progress"]
+    for task in state["tasks"]:
+        task_groups = [group for group in state["groups"] if group["task_id"] == task["id"]]
+        task["total_groups"] = len(task_groups)
+        task["completed_groups"] = count_groups(task_groups, DONE_STATUSES)
+        task["exception_groups"] = count_groups(task_groups, {"exception"})
+        task["incomplete_groups"] = count_groups(task_groups, {"incomplete"})
+        task["pending_groups"] = count_groups(task_groups, OPEN_STATUSES)
+        task["scan_rows"] = sum(group["photo_count"] for group in task_groups)
+        task["groups_with_scan"] = sum(1 for group in task_groups if group["photo_count"] > 0)
+        task["has_scan_info"] = task["scan_rows"] > 0
+        task["can_claim"] = task["has_scan_info"]
+        task["claim_block_reason"] = "" if task["can_claim"] else "该终端暂无扫码信息，不能领取"
+        task["progress"] = calculate_progress(task_groups)
 
 
 def calculate_progress(groups: list[dict[str, Any]]) -> float:
@@ -189,6 +257,10 @@ def calculate_progress(groups: list[dict[str, Any]]) -> float:
         return 0.0
     reviewed = sum(1 for item in groups if item["status"] in DONE_STATUSES)
     return round(reviewed / len(groups), 4)
+
+
+def count_groups(groups: list[dict[str, Any]], statuses: set[str]) -> int:
+    return sum(1 for item in groups if item["status"] in statuses)
 
 
 def read_catalog_rows(path: Path, source: str) -> list[dict[str, Any]]:
@@ -287,7 +359,14 @@ def get_group(group_id: str) -> dict[str, Any] | None:
 
 
 def list_tasks() -> list[dict[str, Any]]:
-    return get_state()["tasks"]
+    return sorted(
+        get_state()["tasks"],
+        key=lambda task: (
+            not task.get("can_claim", False),
+            str(task.get("terminal", "")),
+            task["id"],
+        ),
+    )
 
 
 def get_task_progress(task_id: int) -> dict[str, Any]:
@@ -313,6 +392,8 @@ def get_task_progress(task_id: int) -> dict[str, Any]:
 
 def claim_task(task_id: int, reviewer: str) -> dict[str, Any]:
     task = find_task(task_id)
+    if not task.get("can_claim", False):
+        raise ValueError(task.get("claim_block_reason") or "Task has no scan information")
     if task["status"] not in {"published", "released", "in_review"}:
         raise ValueError(f"Task cannot be claimed from status {task['status']}")
     if task.get("claimed_by") and task["claimed_by"] != reviewer:
@@ -376,6 +457,37 @@ def review_group(
 
 def save_exception_note(group_id: str, reviewer: str, note: str) -> dict[str, Any]:
     return review_group(group_id, status="exception", reviewer=reviewer, exception_note=note)
+
+
+def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
+    if category not in PHOTO_CATEGORIES:
+        raise ValueError(f"Unsupported photo category: {category}")
+    group = get_group(group_id)
+    if group is None:
+        raise KeyError(group_id)
+    photo = next((item for item in group["photos"] if item["id"] == photo_id), None)
+    if photo is None:
+        raise KeyError(photo_id)
+    if photo.get("download_status") != "downloaded":
+        raise ValueError("Photo must be downloaded before classification")
+
+    previous = photo["category"]
+    photo["category"] = category
+    photo["category_label"] = PHOTO_CATEGORIES[category]
+    photo["classified_by"] = reviewer
+    photo["classified_at"] = now_iso()
+    _state["photo_events"].append(
+        {
+            "group_id": group_id,
+            "photo_id": photo_id,
+            "previous_category": previous,
+            "next_category": category,
+            "reviewer": reviewer,
+            "created_at": now_iso(),
+        }
+    )
+    refresh_summary()
+    return photo
 
 
 def find_task(task_id: int) -> dict[str, Any]:
