@@ -343,7 +343,7 @@
           return;
         }
         if (sync.last_finished_at) {
-          $("#syncState").textContent = `\u5df2\u540c\u6b65 ${sync.last_downloaded_records || 0}`;
+          $("#syncState").textContent = `\u5df2\u5339\u914d ${sync.last_applied_records || 0}`;
           $("#syncState").className = "badge ok";
           return;
         }
@@ -367,7 +367,11 @@
           $("#syncState").textContent = "\u540c\u6b65\u4e2d";
           $("#syncState").className = "badge warn";
           await api("/projects/1/scan/ezcodes/sync", { method: "POST", body: "null" });
-          await refreshSyncState();
+          state.taskId = null;
+          state.groups = [];
+          state.group = null;
+          state.photo = null;
+          await reloadAll();
           toast("\u626b\u7801\u6570\u636e\u5df2\u89e6\u53d1\u540c\u6b65");
         } catch (error) {
           toast(error.message, true);

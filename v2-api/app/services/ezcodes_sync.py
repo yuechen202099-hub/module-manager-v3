@@ -180,7 +180,8 @@ class EzcodesCloudBaseBackend:
         except urllib.error.HTTPError as exc:
             raise EzcodesError(f"CloudBase request failed with HTTP {exc.code}") from exc
         except urllib.error.URLError as exc:
-            raise EzcodesError("CloudBase request failed") from exc
+            reason = getattr(exc, "reason", exc)
+            raise EzcodesError(f"CloudBase request failed: {reason}") from exc
 
         try:
             data = json.loads(raw)
@@ -279,6 +280,7 @@ def download_scan_data_preview(
         "invalid_records": invalid_records,
         "image_file_ids": len(unique_preserve_order(image_file_ids)),
         "resolved_image_urls": len(temp_urls),
+        "records": [serialize_scan_record(record, temp_urls) for record in records],
         "sample_records": [serialize_scan_record(record, temp_urls) for record in records[:10]],
     }
 

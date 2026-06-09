@@ -11,6 +11,7 @@ from app.services.local_simulation import (
     DEFAULT_STAGE_CATALOG,
     DEFAULT_TOTAL_CATALOG,
     LocalTestPaths,
+    apply_synced_scan_records,
     bootstrap_local_simulation,
     classify_photo,
     claim_task,
@@ -239,9 +240,10 @@ def test_downloaded_photo_can_be_classified(synthetic_state: dict) -> None:
     classified = classify_photo(first_group["id"], photo["id"], "collector_barcode", reviewer="alice")
 
     assert classified["category"] == "collector_barcode"
-    assert classified["category_label"] == "采集器条形码"
+    assert classified["category_label"] == "\u91c7\u96c6\u5668\u6761\u5f62\u7801"
     assert classified["classified_by"] == "alice"
     assert classified["archive_status"] == "archived"
+    assert classified["archive_filename"] == "\u91c7\u96c6\u5668\u6761\u5f62\u7801.jpg"
     assert classified["archived_at"]
     assert synthetic_state["summary"]["unclassified_photos"] == 4
 
@@ -257,6 +259,60 @@ def test_clear_scan_data_resets_downloaded_photos_and_claimable_tasks(synthetic_
     assert all(group["photos"] == [] for group in state["groups"])
     assert all(group["photo_count"] == 0 for group in state["groups"])
     assert all(task["can_claim"] is False for task in tasks)
+
+
+def test_apply_synced_scan_records_matches_catalog_and_refreshes_tasks(synthetic_state: dict) -> None:
+    clear_scan_data()
+    before = list_tasks()
+    assert before[0]["can_claim"] is False
+
+    result = apply_synced_scan_records(
+        [
+            {
+                "file_id": "remote-file-1",
+                "source_file": "remote-source",
+                "installer": "installer",
+                "barcode": "ABCDEFGHIJK000001001X",
+                "meter_match_key": "1001",
+                "terminal": "T-001",
+                "collector": "collector",
+                "meter_no": "ZZ1001",
+                "module_asset_no": "asset-1",
+                "address": "A road",
+                "asset_type": "module",
+                "creator": "tester",
+                "created_at": "2026-06-09",
+                "image_count": 2,
+                "image_urls": ["https://download.example/photo-1.jpg", "https://download.example/photo-2.jpg"],
+            }
+        ]
+    )
+    after = list_tasks()
+    group = synthetic_state["groups"][0]
+
+    assert result["applied_records"] == 2
+    assert result["unmatched_records"] == 0
+    assert group["photo_count"] == 2
+    assert group["photos"][0]["image_url"] == "https://download.example/photo-1.jpg"
+    assert group["photos"][1]["image_url"] == "https://download.example/photo-2.jpg"
+    assert after[0]["can_claim"] is True
+    assert after[0]["scan_rows"] == 2
+
+    duplicate = apply_synced_scan_records(
+        [
+            {
+                "file_id": "remote-file-1",
+                "source_file": "remote-source",
+                "barcode": "ABCDEFGHIJK000001001X",
+                "meter_match_key": "1001",
+                "image_urls": ["https://download.example/photo-1.jpg", "https://download.example/photo-2.jpg"],
+            }
+        ]
+    )
+
+    assert duplicate["applied_records"] == 0
+    assert duplicate["skipped_duplicates"] == 2
+    assert group["photo_count"] == 2
 
 
 def test_local_test_routes_cover_review_flow(synthetic_state: dict) -> None:

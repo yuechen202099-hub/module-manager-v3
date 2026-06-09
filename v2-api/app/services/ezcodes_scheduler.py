@@ -14,6 +14,7 @@ from app.services.ezcodes_sync import (
     EzcodesError,
     download_scan_data_preview,
 )
+from app.services.local_simulation import apply_synced_scan_records
 
 
 def utc_now() -> str:
@@ -83,10 +84,11 @@ class EzcodesSyncManager:
                 max_files=options.max_files,
                 max_records_per_file=options.max_records_per_file,
             )
+            apply_result = apply_synced_scan_records(result.get("records", []))
+            result["apply_result"] = apply_result
             with self._lock:
                 self._last_result = result
                 self._last_finished_at = utc_now()
-            return self.status()
         except Exception as exc:
             with self._lock:
                 self._last_error = str(exc)
@@ -95,6 +97,7 @@ class EzcodesSyncManager:
         finally:
             with self._lock:
                 self._running = False
+        return self.status()
 
     def start_periodic(self) -> None:
         if not settings.ezcodes_sync_enabled:
@@ -129,6 +132,9 @@ class EzcodesSyncManager:
                 "last_downloaded_records": result.get("downloaded_records", 0),
                 "last_resolved_image_urls": result.get("resolved_image_urls", 0),
                 "last_tested_files": result.get("tested_files", 0),
+                "last_applied_records": (result.get("apply_result") or {}).get("applied_records", 0),
+                "last_unmatched_records": (result.get("apply_result") or {}).get("unmatched_records", 0),
+                "last_skipped_duplicates": (result.get("apply_result") or {}).get("skipped_duplicates", 0),
             }
 
     def _periodic_loop(self) -> None:

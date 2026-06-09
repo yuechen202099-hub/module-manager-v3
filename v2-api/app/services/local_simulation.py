@@ -16,12 +16,12 @@ REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatc
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
 DONE_STATUSES = {"approved", "exception"}
 PHOTO_CATEGORIES = {
-    "unclassified": "未分类",
-    "before_box": "表箱整体改造前",
-    "after_box": "表箱整体改造后",
-    "module_meter": "模块与电能表",
-    "collector_barcode": "采集器条形码",
-    "other": "其他",
+    "unclassified": "\u672a\u5206\u7c7b",
+    "before_box": "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u524d",
+    "after_box": "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u540e",
+    "module_meter": "\u6a21\u5757\u4e0e\u7535\u80fd\u8868",
+    "collector_barcode": "\u91c7\u96c6\u5668\u6761\u5f62\u7801",
+    "other": "\u5176\u4ed6",
 }
 
 
@@ -68,6 +68,98 @@ def clear_scan_data() -> dict[str, Any]:
     state["summary"]["scan_rows"] = 0
     refresh_summary()
     return state
+
+
+def apply_synced_scan_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    state = get_state()
+    groups_by_key = {group["meter_match_key"]: group for group in state["groups"]}
+    known_photo_keys = {
+        make_photo_unique_key(photo)
+        for group in state["groups"]
+        for photo in group.get("photos", [])
+    }
+    applied = 0
+    skipped_duplicates = 0
+    unmatched = []
+    for index, record in enumerate(records, start=1):
+        match_key = str(record.get("meter_match_key") or "")
+        group = groups_by_key.get(match_key)
+        if group is None:
+            unmatched.append(record)
+            continue
+        rows = scan_record_to_photo_rows(record, index)
+        group_changed = False
+        for row in rows:
+            unique_key = make_scan_unique_key(row)
+            if unique_key in known_photo_keys:
+                skipped_duplicates += 1
+                continue
+            photo = build_photo_record(group["photo_count"] + 1, row)
+            group["photos"].append(photo)
+            group["photo_count"] = len(group["photos"])
+            known_photo_keys.add(unique_key)
+            applied += 1
+            group_changed = True
+        if group_changed and (group["status"] in DONE_STATUSES or group["status"] in OPEN_STATUSES):
+            group["status"] = "incomplete" if group["photo_count"] < 4 else "pending"
+            group["reviewer"] = None
+            group["review_note"] = ""
+            group["exception_note"] = ""
+            group["reviewed_at"] = None
+    state["scan_unmatched"] = unmatched
+    state["summary"]["scan_rows"] = sum(group["photo_count"] for group in state["groups"]) + len(unmatched)
+    refresh_summary()
+    return {
+        "received_records": len(records),
+        "applied_records": applied,
+        "skipped_duplicates": skipped_duplicates,
+        "unmatched_records": len(unmatched),
+        "summary": state["summary"],
+    }
+
+
+def scan_record_to_photo_rows(record: dict[str, Any], index: int) -> list[dict[str, Any]]:
+    image_urls = record.get("image_urls") or []
+    if not image_urls:
+        image_urls = [""]
+    rows = []
+    for photo_index, image_url in enumerate(image_urls, start=1):
+        rows.append(
+            {
+                "row_number": f"ez-{record.get('file_id') or index}-{index}-{photo_index}",
+                "barcode": str(record.get("barcode") or ""),
+                "meter_match_key": str(record.get("meter_match_key") or ""),
+                "source_file": str(record.get("source_file") or ""),
+                "collector": str(record.get("collector") or ""),
+                "asset_no": str(record.get("module_asset_no") or ""),
+                "asset_type": str(record.get("asset_type") or ""),
+                "creator": str(record.get("creator") or record.get("installer") or ""),
+                "created_at": str(record.get("created_at") or ""),
+                "has_image": bool(image_url),
+                "image_url": str(image_url),
+            }
+        )
+    return rows
+
+
+def make_scan_unique_key(row: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(row.get("barcode") or ""),
+            str(row.get("source_file") or ""),
+            str(row.get("image_url") or ""),
+        ]
+    )
+
+
+def make_photo_unique_key(photo: dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(photo.get("barcode") or ""),
+            str(photo.get("source_file") or ""),
+            str(photo.get("image_url") or ""),
+        ]
+    )
 
 
 def bootstrap_local_simulation(paths: LocalTestPaths | None = None) -> dict[str, Any]:
@@ -179,6 +271,7 @@ def build_photo_record(photo_index: int, row: dict[str, Any]) -> dict[str, Any]:
         "category": "unclassified",
         "category_label": PHOTO_CATEGORIES["unclassified"],
         "archive_status": "pending",
+        "archive_filename": "",
         "archived_at": None,
     }
 
@@ -527,6 +620,7 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
     photo["classified_by"] = reviewer
     photo["classified_at"] = now_iso()
     photo["archive_status"] = "archived"
+    photo["archive_filename"] = build_archive_filename(photo["category_label"], photo.get("image_url", ""))
     photo["archived_at"] = now_iso()
     _state["photo_events"].append(
         {
@@ -565,6 +659,17 @@ def assert_file_exists(path: Path) -> None:
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def build_archive_filename(category_label: str, image_url: str) -> str:
+    suffix = Path(image_url.split("?", 1)[0]).suffix.lower() if image_url else ".jpg"
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        suffix = ".jpg"
+    return f"{sanitize_filename(category_label)}{suffix}"
+
+
+def sanitize_filename(value: str) -> str:
+    return "".join("_" if char in '<>:"/\\|?*' else char for char in value).strip() or "photo"
 
 
 def get_workbook_loader():
