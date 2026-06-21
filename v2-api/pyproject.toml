@@ -1,7 +1,7 @@
 [project]
 name = "module-manager-v2-api"
-version = "2.0.1"
-description = "FastAPI backend for Module Replacement Project Manager V2.0"
+version = "2.4.10"
+description = "FastAPI backend for Module Replacement Project Manager V2.4.10"
 requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.13.0",
@@ -9,6 +9,7 @@ dependencies = [
     "psycopg[binary]>=3.2.0",
     "pydantic>=2.8.0",
     "pydantic-settings>=2.4.0",
+    "Pillow>=10.4.0",
     "python-jose[cryptography]>=3.3.0",
     "python-multipart>=0.0.9",
     "sqlalchemy>=2.0.0",

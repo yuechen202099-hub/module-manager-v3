@@ -7,6 +7,8 @@
     <style>
       :root {
         --bg: #f3f5f7;
+        --topbar: #111820;
+        --topbar-2: #182330;
         --surface: #fff;
         --surface-2: #f8fafb;
         --ink: #111827;
@@ -17,10 +19,12 @@
         --ok: #12664f;
         --warn: #956012;
         --shadow: 0 18px 45px rgba(22, 34, 48, .08);
+        --topbar-height: 64px;
+        --page-nav-width: 440px;
       }
       * { box-sizing: border-box; }
-      body { margin: 0; font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif; color: var(--ink); background: var(--bg); }
-      button, input { font: inherit; }
+      body { margin: 0; font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif; color: var(--ink); background: linear-gradient(180deg, rgba(17,24,32,.055), transparent 220px), var(--bg); }
+      h1, h2, p { margin: 0; }
       button, .button {
         height: 34px;
         display: inline-flex;
@@ -31,77 +35,121 @@
         padding: 0 12px;
         background: var(--accent);
         color: #fff;
-        font-weight: 800;
+        font-weight: 900;
         text-decoration: none;
         cursor: pointer;
+        white-space: nowrap;
       }
       button.secondary, .button.secondary { background: #fff; color: #06384a; border-color: var(--line-strong); }
       button:disabled { opacity: .52; cursor: not-allowed; }
-      input { height: 34px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; background: #fff; }
-      h1, h2, p { margin: 0; }
-      .app { min-height: 100vh; display: grid; grid-template-rows: 58px minmax(0, 1fr); }
+      .app { min-height: 100vh; display: grid; grid-template-rows: var(--topbar-height) minmax(0, 1fr); }
       .topbar {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 0 18px;
-        border-bottom: 1px solid var(--line);
-        background: rgba(255,255,255,.9);
-      }
-      .brand { display: flex; align-items: center; gap: 12px; }
-      .mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: #17212b; color: #d9f5ff; font-size: 13px; font-weight: 900; }
-      h1 { font-size: 17px; }
-      .muted { color: var(--muted); font-size: 12px; }
-      .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-      main { min-height: 0; display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 12px; padding: 12px; }
-      .panel {
-        min-width: 0;
-        min-height: 0;
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        height: var(--topbar-height);
+        min-height: var(--topbar-height);
         display: grid;
-        grid-template-rows: auto minmax(0, 1fr);
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        background: var(--surface);
-        box-shadow: var(--shadow);
+        grid-template-columns: 260px minmax(0, 1fr);
+        align-items: center;
+        gap: 12px;
+        padding: 0 20px;
+        border-bottom: 1px solid rgba(255,255,255,.08);
+        background: linear-gradient(180deg, var(--topbar), var(--topbar-2));
+        box-shadow: 0 14px 34px rgba(17,24,32,.16);
         overflow: hidden;
       }
-      .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+      .brand { min-width: 0; height: 40px; display: flex; align-items: center; gap: 10px; }
+      .mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 9px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); color: #d9f5ff; font-size: 13px; font-weight: 900; }
+      h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; line-height: 20px; color: #f7fbff; }
+      .muted { color: var(--muted); font-size: 12px; }
+      .topbar .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8fa0ad; line-height: 16px; }
+      .actions { min-width: 0; display: flex; justify-content: flex-end; gap: 6px; align-items: center; overflow-x: auto; scrollbar-width: none; }
+      .actions::-webkit-scrollbar { display: none; }
+      .topbar button.secondary, .topbar .button.secondary { border-color: rgba(255,255,255,.14); background: rgba(255,255,255,.08); color: #edf7fb; }
+      .topbar button.secondary:hover, .topbar .button.secondary:hover { background: rgba(255,255,255,.14); }
+      .page-nav { width: min(var(--page-nav-width), 100%); height: 38px; display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid rgba(255,255,255,.11); border-radius: 10px; background: rgba(255,255,255,.05); flex: 0 0 auto; }
+      .page-nav .button.secondary { min-width: 0; height: 30px; flex: 1 1 0; padding: 0 8px; border-color: transparent; background: transparent; color: #b9c8d3; overflow: hidden; text-overflow: ellipsis; }
+      .page-nav .button.secondary.active { background: #eaf7fb; color: #06384a; box-shadow: 0 8px 18px rgba(0,0,0,.16); }
+      .user-pill { min-height: 34px; display: inline-flex; align-items: center; border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 0 10px; color: #d7e3ec; background: rgba(255,255,255,.07); font-size: 12px; font-weight: 900; white-space: nowrap; }
+      .admin-only { display: none !important; }
+      body.can-admin .admin-only { display: inline-flex !important; }
+      #reviewer { display: none; }
+      main { width: min(1480px, 100%); margin: 0 auto; min-height: 0; display: grid; grid-template-columns: 330px minmax(0, 1fr); gap: 12px; padding: 12px; }
+      .panel { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); overflow: hidden; }
+      .panel-head { height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, #fff, var(--surface-2)); }
       .panel-title { font-size: 14px; font-weight: 900; }
       .panel-body { min-height: 0; overflow: auto; padding: 10px; }
-      .summary { display: grid; gap: 9px; }
-      .stat { padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+      .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; align-content: start; }
+      .stat { min-height: 84px; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: #fff; overflow: hidden; }
       .stat span { display: block; color: var(--muted); font-size: 12px; font-weight: 800; }
       .stat strong { display: block; margin-top: 4px; font-size: 24px; }
       .bar { height: 8px; border-radius: 99px; background: #e8edf2; overflow: hidden; }
       .bar i { display: block; height: 100%; width: var(--value); background: var(--accent); }
-      .task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 10px; align-content: start; }
-      .task {
-        min-height: 188px;
-        display: grid;
-        align-content: space-between;
-        gap: 9px;
-        padding: 11px;
+      .async-status { min-width: 54px; justify-content: center; }
+      .async-status.loading { color: var(--accent); background: #e5f3f6; }
+      .async-status.loading::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        margin-right: 5px;
+        border-radius: 999px;
+        border: 2px solid rgba(15,111,143,.25);
+        border-top-color: var(--accent);
+        animation: spin .8s linear infinite;
+      }
+      .skeleton-card, .skeleton-stat {
+        position: relative;
+        overflow: hidden;
         border: 1px solid var(--line);
-        border-radius: 10px;
+        border-radius: 9px;
         background: #fff;
       }
+      .skeleton-card { min-height: 154px; }
+      .skeleton-stat { min-height: 84px; }
+      .skeleton-card::after, .skeleton-stat::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        transform: translateX(-100%);
+        background: linear-gradient(90deg, transparent, rgba(15,111,143,.12), transparent);
+        animation: shimmer 1.15s ease-in-out infinite;
+      }
+      @keyframes shimmer { to { transform: translateX(100%); } }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 10px; align-content: start; }
+      .task { min-height: 154px; display: grid; align-content: space-between; gap: 9px; padding: 11px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+      .task:hover { border-color: var(--line-strong); box-shadow: 0 8px 18px rgba(22,34,48,.06); }
+      .empty-state { min-height: 220px; display: grid; align-content: center; justify-items: start; gap: 10px; padding: 22px; border: 1px dashed #c8d4dd; border-radius: 10px; background: linear-gradient(180deg, #fff, var(--surface-2)); color: var(--muted); }
+      .empty-state strong { color: var(--ink); font-size: 16px; }
+      .empty-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
       .name-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .name { font-weight: 900; }
       .badge { min-height: 22px; border-radius: 7px; padding: 2px 7px; background: #eef2f5; color: var(--muted); font-size: 12px; font-weight: 900; }
       .badge.ok { color: var(--ok); background: #e8f5ef; }
       .badge.warn { color: var(--warn); background: #fff4d8; }
-      .metric-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+      .metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
       .metric { padding: 7px; border-radius: 8px; background: var(--surface-2); }
       .metric span { display: block; color: var(--muted); font-size: 11px; }
-      .metric strong { display: block; margin-top: 2px; font-size: 14px; }
+      .metric strong { display: block; margin-top: 2px; font-size: 15px; }
       .tool-row { display: flex; justify-content: space-between; gap: 8px; }
       .toast { position: fixed; right: 18px; bottom: 18px; opacity: 0; transform: translateY(8px); transition: .16s ease; padding: 12px 14px; border-radius: 9px; color: #fff; background: #17212b; }
       .toast.show { opacity: 1; transform: translateY(0); }
       body.embedded .topbar { display: none; }
-      body.embedded .app { min-height: 100vh; grid-template-rows: minmax(0, 1fr); }
+      body.embedded .app { grid-template-rows: minmax(0, 1fr); }
       body.embedded main { grid-template-columns: 260px minmax(0, 1fr); padding: 8px; }
-      @media (max-width: 820px) { main, body.embedded main { grid-template-columns: 1fr; } }
+      @media (max-width: 1100px) {
+        .topbar { grid-template-columns: 210px minmax(0, 1fr); padding: 0 12px; }
+        .topbar .muted, .user-pill { display: none; }
+      }
+      @media (max-width: 820px) {
+        main, body.embedded main { grid-template-columns: 1fr; }
+        .panel-head { cursor: pointer; }
+        .panel-head::after { content: "收起"; flex: 0 0 auto; color: var(--muted); font-size: 12px; font-weight: 900; }
+        .panel.is-collapsed { grid-template-rows: auto; }
+        .panel.is-collapsed .panel-body { display: none; }
+        .panel.is-collapsed .panel-head::after { content: "展开"; color: var(--accent); }
+      }
     </style>
   </head>
   <body>
@@ -111,30 +159,43 @@
           <div class="mark">V2</div>
           <div>
             <h1>任务领取</h1>
-            <p class="muted">按终端领取任务，审阅工作台只显示自己已领取的任务</p>
+            <p class="muted">按终端领取任务，审阅台只显示自己已领取的任务</p>
           </div>
         </div>
         <div class="actions">
-          <input id="reviewer" value="local-reviewer" aria-label="reviewer" />
-          <a class="button secondary" href="/task-hall">审阅工作台</a>
-          <a class="button secondary" href="/project-board">项目看板</a>
-          <button id="reload">刷新</button>
+          <nav class="page-nav" aria-label="页面切换">
+            <a class="button secondary" href="/project-board">项目看板</a>
+            <a class="button secondary active" href="/claim-tasks">任务领取</a>
+            <a class="button secondary" href="/task-hall">审阅工作台</a>
+          </nav>
+          <span class="user-pill" id="sessionUser">未登录</span>
+          <input id="reviewer" type="hidden" value="reviewer" aria-label="reviewer" />
+          <button class="secondary" id="logout" type="button">退出</button>
         </div>
       </header>
       <main>
         <section class="panel">
           <div class="panel-head">
             <h2 class="panel-title">领取概览</h2>
-            <span class="badge" id="claimedCount">0</span>
+            <div class="name-row">
+              <span class="badge async-status" id="loadState">等待</span>
+              <span class="badge" id="claimedCount">0</span>
+              <button class="secondary" id="reload">刷新</button>
+            </div>
           </div>
           <div class="panel-body">
-            <div class="summary" id="summary"></div>
+            <div class="summary" id="summary">
+              <article class="stat"><span>数据状态</span><strong>加载中</strong></article>
+            </div>
           </div>
         </section>
         <section class="panel">
           <div class="panel-head">
             <h2 class="panel-title">可领取终端</h2>
-            <span class="badge" id="taskCount">0</span>
+            <div class="tool-row">
+              <button class="secondary admin-only" id="releaseAll" type="button">收回全部</button>
+              <span class="badge" id="taskCount">0</span>
+            </div>
           </div>
           <div class="panel-body">
             <div class="task-grid" id="tasks"></div>
@@ -145,12 +206,32 @@
     <div class="toast" id="toast"></div>
     <script>
       if (new URLSearchParams(location.search).get("embedded") === "1") document.body.classList.add("embedded");
-      const state = { tasks: [], reviewer: "local-reviewer" };
+      const session = JSON.parse(localStorage.getItem("module_manager_session") || "null");
+      if (!document.body.classList.contains("embedded") && !session?.access_token) location.href = "/login";
+      const teamId = session?.team_id || session?.user?.team_id || localStorage.getItem("module_manager_team_id") || "default-team";
+      const roles = session?.user?.roles || [];
+      const isAdmin = roles.includes("admin");
+      if (isAdmin) document.body.classList.add("can-admin");
+      localStorage.setItem("module_manager_team_id", teamId);
+      const sessionUser = document.querySelector("#sessionUser");
+      if (sessionUser) sessionUser.textContent = session?.user?.name || session?.user?.username || "用户";
+      document.querySelector("#logout")?.addEventListener("click", () => {
+        localStorage.removeItem("module_manager_session");
+        localStorage.removeItem("module_manager_reviewer");
+        location.href = "/login";
+      });
+      function initialReviewerIdentity() {
+        if (session?.user?.username) return session.user.username;
+        return localStorage.getItem("module_manager_reviewer") || "reviewer";
+      }
+      const state = { tasks: [], reviewer: initialReviewerIdentity(), loading: false, loaded: false, requestSeq: 0 };
       const $ = (selector) => document.querySelector(selector);
       const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
       const pct = (value) => `${Math.round((Number(value) || 0) * 100)}%`;
+      const authHeaders = () => session?.access_token ? { Authorization: `${session.token_type || "bearer"} ${session.access_token}` } : {};
+      const teamHeaders = (extra = {}) => ({ "X-Team-Id": teamId, ...authHeaders(), ...extra });
       async function api(path, options = {}) {
-        const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+        const response = await fetch(path, { ...options, headers: teamHeaders({ "Content-Type": "application/json", ...(options.headers || {}) }) });
         const payload = await response.json();
         if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
         return payload.data;
@@ -162,70 +243,170 @@
         clearTimeout(toast.timer);
         toast.timer = setTimeout(() => $("#toast").classList.remove("show"), 2200);
       }
-      function visibleTasks() { return state.tasks.filter((task) => task.has_scan_info); }
+      function notifyParentRefresh(reason, payload = {}) {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: "module-manager:data-mutated", reason, payload }, location.origin);
+        }
+      }
+      function visibleTasks() {
+        const tasks = isAdmin ? [...state.tasks] : state.tasks.filter((task) => task.has_scan_info);
+        if (isAdmin) {
+          tasks.sort((left, right) => Number(right.uploaded_count || 0) - Number(left.uploaded_count || 0) || String(left.terminal || "").localeCompare(String(right.terminal || "")));
+        }
+        return tasks;
+      }
       function renderSummary() {
+        $("#loadState").textContent = state.loading ? "同步中" : state.loaded ? "已同步" : "等待";
+        $("#loadState").classList.toggle("loading", state.loading);
+        if (state.loading && !state.loaded) {
+          $("#claimedCount").textContent = "0/0";
+          $("#summary").innerHTML = Array.from({ length: 4 }, () => `<article class="skeleton-stat"></article>`).join("");
+          return;
+        }
         const claimed = state.tasks.filter((task) => task.claimed_by);
         const mine = claimed.filter((task) => task.claimed_by === state.reviewer);
         const totals = claimed.reduce((acc, task) => {
           acc.renovation += Number(task.renovation_count || task.total_groups || 0);
-          acc.uploaded += Number(task.uploaded_count || 0);
           acc.reviewed += Number(task.reviewed_count || 0);
+          acc.unreviewed += Number(task.unreviewed_count || 0);
           return acc;
-        }, { renovation: 0, uploaded: 0, reviewed: 0 });
-        const uploadRate = totals.renovation ? totals.uploaded / totals.renovation : 0;
+        }, { renovation: 0, reviewed: 0, unreviewed: 0 });
         const reviewRate = totals.renovation ? totals.reviewed / totals.renovation : 0;
         $("#claimedCount").textContent = `${mine.length}/${claimed.length}`;
         $("#summary").innerHTML = `
           <article class="stat"><span>已领取任务</span><strong>${claimed.length}</strong></article>
           <article class="stat"><span>我的任务</span><strong>${mine.length}</strong></article>
-          <article class="stat"><span>已领取改造总数</span><strong>${totals.renovation}</strong></article>
-          <article class="stat"><span>已上传 / 审阅</span><strong>${totals.uploaded} / ${totals.reviewed}</strong></article>
-          <article class="stat"><span>上传率</span><strong>${pct(uploadRate)}</strong><div class="bar"><i style="--value:${pct(uploadRate)}"></i></div></article>
-          <article class="stat"><span>审阅率</span><strong>${pct(reviewRate)}</strong><div class="bar"><i style="--value:${pct(reviewRate)}"></i></div></article>
+          <article class="stat"><span>改造总数</span><strong>${totals.renovation}</strong></article>
+          <article class="stat"><span>未审阅数</span><strong>${totals.unreviewed}</strong></article>
+          <article class="stat" style="grid-column: 1 / -1;"><span>审阅进度</span><strong>${pct(reviewRate)}</strong><div class="bar"><i style="--value:${pct(reviewRate)}"></i></div></article>
         `;
       }
+      function taskStatusLabel(task) {
+        if (task.claimed_by === state.reviewer) return "我已领取";
+        if (task.claimed_by) return "已被领取";
+        return "可领取";
+      }
+      function constructionStatusLabel(task) {
+        if (task.construction_claimed_by) return `施工 ${task.construction_claimed_by}`;
+        if (task.construction_enabled) return "施工已开放";
+        return "施工未开放";
+      }
       function renderTasks() {
+        if (state.loading && !state.loaded) {
+          $("#taskCount").textContent = "同步中";
+          $("#tasks").innerHTML = Array.from({ length: 4 }, () => `<article class="skeleton-card"></article>`).join("");
+          return;
+        }
         const tasks = visibleTasks();
         $("#taskCount").textContent = `${tasks.length}/${state.tasks.length}`;
         $("#tasks").innerHTML = tasks.length ? tasks.map((task) => `
           <article class="task">
             <div>
-              <div class="name-row"><strong class="name">终端 ${esc(task.terminal || "-")}</strong><span class="badge ${task.claimed_by ? "warn" : "ok"}">${task.claimed_by ? `已领取` : "可领取"}</span></div>
+              <div class="name-row"><strong class="name">终端 ${esc(task.terminal || "-")}</strong><span class="badge ${task.claimed_by ? "warn" : "ok"}">${taskStatusLabel(task)}</span></div>
               <div class="muted">${task.claimed_by ? `领取人 ${esc(task.claimed_by)}` : "尚未领取"}</div>
+              <div class="muted">${esc(constructionStatusLabel(task))}</div>
             </div>
             <div class="metric-grid">
-              <div class="metric"><span>改造</span><strong>${task.renovation_count || 0}</strong></div>
-              <div class="metric"><span>上传</span><strong>${task.uploaded_count || 0}</strong></div>
-              <div class="metric"><span>未审</span><strong>${task.unreviewed_count || 0}</strong></div>
-              <div class="metric"><span>上传率</span><strong>${pct(task.upload_rate)}</strong></div>
-              <div class="metric"><span>审阅率</span><strong>${pct(task.review_rate)}</strong></div>
+              <div class="metric"><span>改造数量</span><strong>${task.renovation_count || task.total_groups || 0}</strong></div>
+              <div class="metric"><span>已上传</span><strong>${task.uploaded_count || 0}</strong></div>
+              <div class="metric"><span>未审阅</span><strong>${task.unreviewed_count || 0}</strong></div>
             </div>
-            <div class="bar"><i style="--value:${pct(task.upload_rate)}"></i></div>
+            <div class="bar"><i style="--value:${pct(task.review_rate)}"></i></div>
             <div class="tool-row">
-              <button class="secondary" data-action="release" data-id="${task.id}" ${task.claimed_by === state.reviewer ? "" : "disabled"}>暂存释放</button>
+              <button class="secondary" data-action="release" data-id="${task.id}" ${task.claimed_by === state.reviewer || isAdmin ? "" : "disabled"}>暂存释放</button>
               <button data-action="claim" data-id="${task.id}" ${task.can_claim && (!task.claimed_by || task.claimed_by === state.reviewer) ? "" : "disabled"}>${task.claimed_by === state.reviewer ? "继续持有" : "领取"}</button>
             </div>
+            ${isAdmin ? `<div class="tool-row"><button class="secondary" data-action="${task.construction_enabled ? "construction-close" : "construction-open"}" data-id="${task.id}">${task.construction_enabled ? "关闭施工" : "开放施工"}</button></div>` : ""}
           </article>
-        `).join("") : `<div class="muted">暂无已导入扫码数据的终端任务</div>`;
+        `).join("") : `
+          <div class="empty-state">
+            <strong>暂无可领取终端</strong>
+            <span>只有导入清单并匹配到扫码照片的终端，才会出现在这里。</span>
+            <div class="empty-actions">
+              <a class="button" href="/project-board">项目看板</a>
+            </div>
+          </div>`;
         $("#tasks").querySelectorAll("button[data-action]").forEach((button) => button.addEventListener("click", () => handleTask(button.dataset.id, button.dataset.action)));
       }
       async function handleTask(id, action) {
         if (action === "claim") {
           await api(`/local-test/tasks/${id}/claim`, { method: "POST", body: JSON.stringify({ reviewer: state.reviewer }) });
           toast("已领取任务");
-        } else {
+        } else if (action === "release") {
           await api(`/local-test/tasks/${id}/release`, { method: "POST", body: JSON.stringify({ reviewer: state.reviewer }) });
           toast("已暂存释放");
+        } else if (action === "construction-open") {
+          await api(`/local-test/construction/tasks/${id}/open`, { method: "PATCH", body: JSON.stringify({ actor: state.reviewer }) });
+          toast("已开放施工领取");
+        } else if (action === "construction-close") {
+          await api(`/local-test/construction/tasks/${id}/close`, { method: "PATCH", body: JSON.stringify({ actor: state.reviewer }) });
+          toast("已关闭施工领取");
         }
         await reload();
+        notifyParentRefresh(action, { task_id: Number(id) });
+      }
+      async function releaseAllTasks() {
+        if (!isAdmin) return;
+        if (!window.confirm("确认收回全部已领取任务？")) return;
+        const result = await api("/local-test/tasks/release-all", {
+          method: "POST",
+          body: JSON.stringify({ reviewer: state.reviewer }),
+        });
+        toast(`已收回 ${result.released || 0} 个任务`);
+        await reload();
+        notifyParentRefresh("tasks-released-all", { released: result.released || 0 });
       }
       async function reload() {
-        state.tasks = (await api("/local-test/tasks")).items || [];
+        const requestSeq = ++state.requestSeq;
+        state.loading = true;
         renderSummary();
         renderTasks();
+        try {
+          const data = await api("/local-test/tasks");
+          if (requestSeq !== state.requestSeq) return;
+          state.tasks = data.items || [];
+          state.loaded = true;
+        } finally {
+          if (requestSeq === state.requestSeq) {
+            state.loading = false;
+            renderSummary();
+            renderTasks();
+          }
+        }
       }
-      $("#reviewer").addEventListener("input", (event) => { state.reviewer = event.target.value.trim() || "local-reviewer"; renderSummary(); renderTasks(); });
+      function syncReviewerIdentity() {
+        const reviewer = state.reviewer || initialReviewerIdentity();
+        localStorage.setItem("module_manager_reviewer", reviewer);
+      }
+      function setupMobilePanelCollapse() {
+        const mobile = window.matchMedia("(max-width: 820px)");
+        document.querySelectorAll(".panel").forEach((panel) => {
+          const head = panel.querySelector(".panel-head");
+          if (!head || panel.dataset.collapseReady) return;
+          panel.dataset.collapseReady = "1";
+          head.addEventListener("click", (event) => {
+            if (!mobile.matches || event.target.closest("button,a,input,select,label")) return;
+            panel.classList.toggle("is-collapsed");
+          });
+        });
+        mobile.addEventListener?.("change", () => {
+          if (!mobile.matches) document.querySelectorAll(".panel.is-collapsed").forEach((panel) => panel.classList.remove("is-collapsed"));
+        });
+      }
+      syncReviewerIdentity();
+      setupMobilePanelCollapse();
       $("#reload").addEventListener("click", () => reload().catch((error) => toast(error.message, true)));
+      $("#releaseAll")?.addEventListener("click", () => releaseAllTasks().catch((error) => toast(error.message, true)));
+      let refreshTimer = null;
+      function scheduleRefresh() {
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => reload().catch((error) => toast(error.message, true)), 180);
+      }
+      window.addEventListener("message", (event) => {
+        if (event.origin !== location.origin) return;
+        if (event.data?.type === "module-manager:data-refresh") scheduleRefresh();
+      });
+      setInterval(scheduleRefresh, 10000);
       reload().catch((error) => toast(error.message, true));
     </script>
   </body>

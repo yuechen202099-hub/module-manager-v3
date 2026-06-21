@@ -1,0 +1,2285 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>施工采集</title>
+    <style>
+      :root {
+        --bg: #eef2f5;
+        --topbar: #111820;
+        --topbar-2: #182330;
+        --surface: #ffffff;
+        --surface-2: #f8fafb;
+        --ink: #111827;
+        --muted: #687386;
+        --line: #d8dee6;
+        --line-strong: #bdc7d2;
+        --accent: #0f6f8f;
+        --accent-ink: #06384a;
+        --accent-soft: #e4f2f6;
+        --ok: #12664f;
+        --warn: #956012;
+        --bad: #a32920;
+        --shadow: 0 18px 45px rgba(22, 34, 48, .08);
+        --topbar-height: 64px;
+      }
+      * { box-sizing: border-box; }
+      html, body { min-height: 100%; margin: 0; }
+      body {
+        font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
+        color: var(--ink);
+        background: linear-gradient(180deg, rgba(17,24,32,.055), transparent 220px), var(--bg);
+      }
+      button, input, select { font: inherit; }
+      button, .button {
+        height: 38px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        padding: 0 12px;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 900;
+        text-decoration: none;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button.secondary, .button.secondary { background: #fff; color: var(--accent-ink); border-color: var(--line-strong); }
+      button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+      button.danger { border-color: var(--bad); background: var(--bad); }
+      button:disabled { opacity: .48; cursor: not-allowed; }
+      input, select {
+        width: 100%;
+        height: 40px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 0 10px;
+        background: #fff;
+        color: var(--ink);
+      }
+      h1, h2, h3, p { margin: 0; }
+      .app { min-height: 100dvh; display: grid; grid-template-rows: var(--topbar-height) minmax(0, 1fr); }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        height: var(--topbar-height);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 0 20px;
+        border-bottom: 1px solid rgba(255,255,255,.08);
+        background: linear-gradient(180deg, var(--topbar), var(--topbar-2));
+        box-shadow: 0 14px 34px rgba(17,24,32,.16);
+      }
+      .brand { min-width: 0; display: flex; align-items: center; gap: 10px; }
+      .mark {
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 9px;
+        background: rgba(255,255,255,.08);
+        color: #d9f5ff;
+        font-size: 13px;
+        font-weight: 900;
+      }
+      h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #f7fbff; font-size: 17px; line-height: 20px; }
+      .top-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8fa0ad; font-size: 12px; line-height: 16px; }
+      .actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+      .actions::-webkit-scrollbar { display: none; }
+      .topbar .button.secondary, .topbar button.secondary { border-color: rgba(255,255,255,.14); background: rgba(255,255,255,.08); color: #edf7fb; }
+      .page-nav { height: 38px; display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid rgba(255,255,255,.11); border-radius: 10px; background: rgba(255,255,255,.05); }
+      .page-nav .button.secondary { height: 30px; border-color: transparent; background: transparent; color: #b9c8d3; }
+      .page-nav .button.secondary.active { background: #eaf7fb; color: var(--accent-ink); box-shadow: 0 8px 18px rgba(0,0,0,.16); }
+      .user-pill { min-height: 34px; display: inline-flex; align-items: center; border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 0 10px; color: #d7e3ec; background: rgba(255,255,255,.07); font-size: 12px; font-weight: 900; white-space: nowrap; }
+      .workspace {
+        width: min(1680px, 100%);
+        min-height: 0;
+        margin: 0 auto;
+        display: grid;
+        grid-template-columns: minmax(260px, 320px) minmax(320px, 420px) minmax(0, 1fr);
+        gap: 12px;
+        padding: 12px;
+      }
+      .panel {
+        min-width: 0;
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+      .capture-panel { scroll-margin-top: 8px; }
+      .panel-head {
+        min-height: 52px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, #fff, var(--surface-2));
+      }
+      .panel-title { font-size: 14px; font-weight: 900; }
+      .panel-subtitle { color: var(--muted); font-size: 12px; line-height: 1.35; }
+      .panel-body { min-height: 0; overflow: auto; padding: 10px; }
+      body[data-construction-view="tasks"] .workspace {
+        grid-template-columns: minmax(280px, 520px);
+        justify-content: center;
+      }
+      body[data-construction-view="tasks"] #groupPanel,
+      body[data-construction-view="tasks"] #editorPanel {
+        display: none;
+      }
+      body[data-construction-view="work"] .workspace {
+        grid-template-columns: minmax(360px, 520px) minmax(0, 1fr);
+      }
+      body[data-construction-view="work"] #taskPanel {
+        display: none;
+      }
+      body[data-construction-view="work"] #groupPanel,
+      body[data-construction-view="work"] #editorPanel {
+        min-height: calc(100dvh - var(--topbar-height) - 24px);
+      }
+      body.embedded[data-construction-view="work"] #groupPanel,
+      body.embedded[data-construction-view="work"] #editorPanel {
+        min-height: calc(100dvh - 24px);
+      }
+      .head-actions {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      .cache-actions {
+        display: none;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin: 0 0 8px;
+        padding: 10px;
+        border: 1px solid rgba(18,102,79,.24);
+        border-radius: 10px;
+        background: #f3fbf7;
+      }
+      .cache-actions.show { display: flex; }
+      .cache-actions span { min-width: 0; color: var(--ok); font-size: 12px; font-weight: 900; }
+      #backToTasks {
+        height: 32px;
+        min-height: 32px;
+        padding: 0 10px;
+      }
+      body[data-construction-view="tasks"] #backToTasks {
+        display: none;
+      }
+      .group-search {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        gap: 8px;
+        margin: -10px -10px 8px;
+        padding: 10px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(255,255,255,.96);
+        backdrop-filter: blur(8px);
+      }
+      .group-search button { min-width: 68px; }
+      .badge { min-height: 22px; display: inline-flex; align-items: center; border-radius: 7px; padding: 2px 7px; background: #eef2f5; color: var(--muted); font-size: 12px; font-weight: 900; }
+      .badge.ok { color: var(--ok); background: #e8f5ef; }
+      .badge.warn { color: var(--warn); background: #fff4d8; }
+      .badge.bad { color: var(--bad); background: #fff0ee; }
+      .list { display: grid; gap: 8px; align-content: start; }
+      .card {
+        display: grid;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px;
+        background: #fff;
+        cursor: pointer;
+      }
+      .card:hover { border-color: var(--line-strong); box-shadow: 0 8px 18px rgba(22,34,48,.06); }
+      .card.active { border-color: var(--accent); background: linear-gradient(90deg, var(--accent-soft), #fff 48%); box-shadow: inset 3px 0 0 var(--accent); }
+      .card.cached { border-color: rgba(18,102,79,.32); background: linear-gradient(90deg, #f3fbf7, #fff 50%); }
+      .name-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .name { font-weight: 900; }
+      .small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+      .terminal-line,
+      .address-line {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .cache-line { color: var(--ok); font-weight: 800; }
+      .group-filters {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+        margin: 0 0 8px;
+      }
+      .group-filters button {
+        min-width: 0;
+        height: 34px;
+        border-color: var(--line);
+        background: #fff;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .group-filters button.active {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent-ink);
+      }
+      .metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+      .metric { padding: 8px; border-radius: 8px; background: var(--surface-2); }
+      .metric span { display: block; color: var(--muted); font-size: 11px; }
+      .metric strong { display: block; margin-top: 2px; font-size: 16px; }
+      .tool-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+      .form-grid { display: grid; gap: 10px; }
+      .readonly-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .readonly {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 9px;
+        background: var(--surface-2);
+      }
+      .readonly span { display: block; color: var(--muted); font-size: 11px; font-weight: 800; }
+      .readonly strong { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+      .field { display: grid; gap: 6px; }
+      .field label { color: var(--muted); font-size: 12px; font-weight: 900; }
+      .scan-row { display: grid; grid-template-columns: minmax(0, 1fr) 92px; gap: 8px; }
+      .slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .slot {
+        min-height: 140px;
+        display: grid;
+        align-content: start;
+        gap: 8px;
+        border: 1px dashed #c8d4dd;
+        border-radius: 10px;
+        padding: 10px;
+        background: linear-gradient(180deg, #fff, var(--surface-2));
+      }
+      .slot input[type=file] { display: none; }
+      .slot-note { color: var(--muted); font-size: 11px; line-height: 1.45; }
+      .slot-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+      .slot-actions button { min-height: 36px; }
+      .required { margin-left: 3px; color: #a32920; font-weight: 900; }
+      .preview {
+        position: relative;
+        min-height: 88px;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        border-radius: 8px;
+        background: #0c1117;
+        color: #dce9f2;
+        font-size: 12px;
+      }
+      .preview img { width: 100%; height: 120px; object-fit: cover; display: block; }
+      .preview.has-image { min-height: 120px; }
+      .slot-tag {
+        position: absolute;
+        left: 7px;
+        bottom: 7px;
+        min-height: 22px;
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 0 8px;
+        background: rgba(6, 56, 74, .84);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 900;
+      }
+      .slot-tag.local { background: rgba(18, 102, 79, .9); }
+      .existing { display: grid; gap: 8px; }
+      .existing-list { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+      .existing-list img { width: 96px; height: 76px; object-fit: cover; border-radius: 8px; background: #0c1117; }
+      .sticky-actions {
+        position: sticky;
+        bottom: 0;
+        z-index: 8;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        margin: 10px -10px -10px;
+        padding: 10px max(10px, env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
+        border-top: 1px solid var(--line);
+        background: rgba(248,250,251,.96);
+        backdrop-filter: blur(10px);
+      }
+      .empty {
+        min-height: 170px;
+        display: grid;
+        align-content: center;
+        justify-items: center;
+        gap: 8px;
+        padding: 18px;
+        border: 1px dashed #c8d4dd;
+        border-radius: 10px;
+        color: var(--muted);
+        text-align: center;
+        background: linear-gradient(180deg, #fff, var(--surface-2));
+      }
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 40;
+        padding: 12px 14px;
+        border-radius: 9px;
+        background: #17212b;
+        color: #fff;
+        opacity: 0;
+        transform: translateY(8px);
+        transition: .16s ease;
+      }
+      .toast.show { opacity: 1; transform: translateY(0); }
+      body.modal-open { overflow: hidden; }
+      .collect-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 45;
+        display: none;
+        align-items: flex-end;
+        justify-content: center;
+        padding: 10px;
+        background: rgba(8, 14, 20, .56);
+      }
+      .collect-backdrop.show { display: flex; }
+      .collect-dialog {
+        width: min(620px, 100%);
+        max-height: calc(100dvh - 22px);
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        overflow: hidden;
+        border: 1px solid rgba(255,255,255,.24);
+        border-radius: 18px 18px 12px 12px;
+        background: var(--surface);
+        box-shadow: 0 28px 80px rgba(0,0,0,.28);
+      }
+      .collect-head {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        padding: 14px 14px 12px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, #fff, var(--surface-2));
+      }
+      .collect-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 16px;
+        font-weight: 900;
+      }
+      .collect-subtitle {
+        margin-top: 3px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .collect-body {
+        min-height: 0;
+        overflow: auto;
+        padding: 10px;
+        -webkit-overflow-scrolling: touch;
+      }
+      .collect-body .sticky-actions {
+        position: static;
+        bottom: auto;
+        z-index: auto;
+      }
+      .scanner {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: none;
+        place-items: center;
+        background: rgba(17,24,39,.76);
+      }
+      .scanner.show { display: grid; }
+      .scanner-panel {
+        width: min(560px, calc(100vw - 28px));
+        display: grid;
+        gap: 10px;
+        border-radius: 14px;
+        padding: 14px;
+        background: #fff;
+      }
+      .scanner-camera {
+        position: relative;
+        min-height: 260px;
+        overflow: hidden;
+        border-radius: 10px;
+        background: #0c1117;
+      }
+      .scanner-camera video,
+      .scanner-camera canvas {
+        width: 100%;
+        max-height: 64dvh;
+        display: block;
+      }
+      .scanner-camera canvas.drawingBuffer {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+      .scan-frame {
+        position: absolute;
+        left: 10%;
+        right: 10%;
+        top: 39%;
+        height: 86px;
+        z-index: 4;
+        border: 2px solid rgba(220, 249, 255, .95);
+        border-radius: 12px;
+        box-shadow: 0 0 0 999px rgba(0,0,0,.18), inset 0 0 28px rgba(15,111,143,.26);
+        pointer-events: none;
+      }
+      .scan-frame::before {
+        content: "";
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        top: 50%;
+        height: 2px;
+        border-radius: 999px;
+        background: #22d3ee;
+        box-shadow: 0 0 18px rgba(34,211,238,.85);
+      }
+      .scanner-hint {
+        position: absolute;
+        left: 10px;
+        right: 10px;
+        bottom: 10px;
+        z-index: 5;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(12,17,23,.72);
+        color: #eef9ff;
+        font-size: 12px;
+        text-align: center;
+        pointer-events: none;
+      }
+      .scanner-status { color: var(--muted); font-size: 12px; line-height: 1.45; }
+      body.embedded .topbar { display: none; }
+      body.embedded .app { min-height: 100%; grid-template-rows: minmax(0, 1fr); }
+      body.embedded .workspace { height: 100dvh; overflow: hidden; }
+      @media (max-width: 1080px) {
+        .workspace { grid-template-columns: 300px minmax(0, 1fr); }
+        .workspace .panel:last-child { grid-column: 1 / -1; min-height: 620px; }
+      }
+      @media (max-width: 760px) {
+        body {
+          background:
+            radial-gradient(circle at 18% 0%, rgba(15,111,143,.12), transparent 28%),
+            linear-gradient(180deg, #e6edf3 0, #f4f7fa 42%, #eef3f6 100%);
+        }
+        .app { min-height: 100dvh; grid-template-rows: auto minmax(0, 1fr); }
+        .topbar { height: auto; min-height: 58px; padding: 8px 10px; }
+        .top-meta, .page-nav, .user-pill { display: none; }
+        .workspace, body.embedded .workspace {
+          width: 100%;
+          height: auto;
+          min-height: 100dvh;
+          grid-template-columns: 1fr;
+          gap: 10px;
+          overflow: visible;
+          padding: 10px 10px calc(12px + env(safe-area-inset-bottom));
+        }
+        .panel {
+          min-height: auto;
+          border-color: rgba(139, 154, 170, .38);
+          border-radius: 18px;
+          background: rgba(255,255,255,.96);
+          box-shadow: 0 16px 36px rgba(25, 39, 52, .09);
+        }
+        .panel-body { max-height: none; overflow: visible; padding: 12px; }
+        .capture-panel { display: none; }
+        .readonly-grid, .slots { grid-template-columns: 1fr; }
+        .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .panel-head {
+          min-height: 54px;
+          padding: 12px 14px;
+          background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(245,248,250,.98));
+        }
+        .panel-title { font-size: 16px; }
+        .panel-subtitle {
+          max-width: 250px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 12px;
+        }
+        .workspace > .panel:first-child .panel-body {
+          max-height: none;
+          overflow: visible;
+        }
+        .workspace > .panel:first-child .empty {
+          min-height: 104px;
+          padding: 14px;
+        }
+        body[data-construction-view="work"] .workspace,
+        body.embedded[data-construction-view="work"] .workspace {
+          min-height: 100dvh;
+          padding: 8px 8px calc(10px + env(safe-area-inset-bottom));
+        }
+        body[data-construction-view="work"] #groupPanel {
+          height: calc(100dvh - 16px);
+          min-height: 0;
+          grid-template-rows: auto minmax(0, 1fr);
+          overflow: hidden;
+        }
+        body[data-construction-view="work"] #groupPanel .panel-head::after {
+          content: "";
+          display: none;
+        }
+        body[data-construction-view="work"] #groupPanel .panel-title {
+          max-width: 160px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        body[data-construction-view="work"] #groupPanel .panel-subtitle {
+          max-width: 180px;
+        }
+        body[data-construction-view="work"] .head-actions {
+          gap: 6px;
+        }
+        .head-actions .badge {
+          display: none;
+        }
+        .construction-logout {
+          height: 40px;
+          min-height: 40px;
+          border-radius: 14px;
+        }
+        body[data-construction-view="work"] #backToTasks {
+          height: 40px;
+          min-height: 40px;
+          border-radius: 14px;
+          padding: 0 12px;
+        }
+        body:not(.embedded)[data-construction-view="work"] #groupPanel {
+          height: calc(100dvh - 76px);
+        }
+        body[data-construction-view="work"] #groupPanel .panel-body {
+          min-height: 0;
+          overflow: hidden;
+          display: grid;
+          grid-template-rows: auto auto minmax(0, 1fr);
+        }
+        body[data-construction-view="tasks"] #taskPanel {
+          min-height: auto;
+        }
+        body[data-construction-view="tasks"] #taskPanel .panel-body {
+          max-height: none;
+          overflow: visible;
+        }
+        .workspace > .panel:nth-child(2) {
+          height: auto;
+          min-height: 0;
+          grid-template-rows: auto minmax(0, 1fr);
+          overflow: hidden;
+        }
+        .workspace > .panel:nth-child(2) .panel-body {
+          min-height: 0;
+          overflow: hidden;
+          display: grid;
+          grid-template-rows: auto auto minmax(0, 1fr);
+        }
+        #tasks .card {
+          min-height: auto;
+          border-radius: 16px;
+          padding: 12px;
+        }
+        #tasks .tool-row {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        #tasks .tool-row button { width: 100%; }
+        #tasks .metric {
+          border-radius: 12px;
+          padding: 8px 7px;
+        }
+        #tasks .metric strong { font-size: 17px; }
+        .group-search {
+          grid-template-columns: minmax(0, 1fr) 76px 62px;
+          gap: 8px;
+          margin: -12px -12px 10px;
+          padding: 12px;
+          background: rgba(255,255,255,.94);
+        }
+        .group-search input {
+          height: 46px;
+          border-radius: 14px;
+          font-size: 15px;
+        }
+        .group-search button {
+          min-width: 0;
+          height: 46px;
+          border-radius: 14px;
+        }
+        .group-filters {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 8px;
+          margin-bottom: 10px;
+        }
+        .group-filters button {
+          height: 42px;
+          border-radius: 14px;
+          font-size: 13px;
+          background: rgba(255,255,255,.86);
+        }
+        .group-filters button.active {
+          background: #dff2f7;
+          box-shadow: inset 0 0 0 1px rgba(15,111,143,.12);
+        }
+        .cache-actions {
+          border-radius: 16px;
+          padding: 10px 12px;
+        }
+        .cache-actions button {
+          min-height: 42px;
+          border-radius: 14px;
+        }
+        #groups.list {
+          min-height: 0;
+          overflow-x: hidden;
+          overflow-y: auto;
+          overscroll-behavior: contain;
+          scrollbar-width: thin;
+          gap: 10px;
+          padding-right: 2px;
+        }
+        #groups .card {
+          min-height: auto;
+          gap: 7px;
+          border-color: rgba(139,154,170,.38);
+          border-radius: 18px;
+          padding: 14px;
+          background: linear-gradient(180deg, #fff, #f9fbfc);
+          box-shadow: 0 10px 24px rgba(24,39,52,.06);
+        }
+        #groups .card.active {
+          border-color: var(--accent);
+          background: linear-gradient(180deg, #edf8fb, #fff);
+          box-shadow: inset 4px 0 0 var(--accent), 0 10px 24px rgba(24,39,52,.08);
+        }
+        #groups .card.cached {
+          border-color: rgba(18,102,79,.28);
+          background: linear-gradient(180deg, #f4fbf7, #fff);
+        }
+        #groups .name-row {
+          align-items: flex-start;
+          gap: 10px;
+        }
+        #groups .name {
+          font-size: 18px;
+          line-height: 1.15;
+          letter-spacing: .2px;
+        }
+        #groups .badge {
+          flex: 0 0 auto;
+          min-height: 26px;
+          border-radius: 999px;
+          padding: 2px 8px;
+        }
+        #groups .terminal-line { display: none; }
+        #groups .address-line {
+          display: -webkit-box;
+          -webkit-box-orient: vertical;
+          -webkit-line-clamp: 2;
+          overflow: hidden;
+          white-space: normal;
+          color: #334155;
+          font-size: 14px;
+          line-height: 1.45;
+        }
+        #groups .cache-line {
+          margin-top: 2px;
+          font-size: 13px;
+        }
+        .scan-row { grid-template-columns: minmax(0, 1fr) 92px; }
+        button, .button, input { min-height: 44px; }
+        .sticky-actions { justify-content: stretch; }
+        .sticky-actions button { flex: 1 1 130px; }
+        .scanner-panel { width: calc(100vw - 16px); padding: 10px; }
+        .scanner-camera { min-height: 56dvh; }
+        .scan-frame { left: 6%; right: 6%; top: 42%; height: 78px; }
+        .panel-head { cursor: pointer; }
+        .panel-head::after { content: "收起"; flex: 0 0 auto; color: var(--muted); font-size: 12px; font-weight: 900; }
+        .panel.is-collapsed { grid-template-rows: auto; }
+        .panel.is-collapsed .panel-body { display: none; }
+        .panel.is-collapsed .panel-head::after { content: "展开"; color: var(--accent); }
+        .collect-backdrop {
+          align-items: flex-end;
+          padding: 8px 8px max(8px, env(safe-area-inset-bottom));
+          background: rgba(7, 15, 23, .58);
+        }
+        .collect-dialog {
+          width: 100%;
+          height: min(92dvh, 820px);
+          max-height: calc(100dvh - 12px);
+          border: 0;
+          border-radius: 24px 24px 0 0;
+          box-shadow: 0 -18px 60px rgba(7,15,23,.28);
+        }
+        .collect-head {
+          padding: 14px;
+          background: linear-gradient(180deg, #fff, #f6f9fb);
+        }
+        .collect-title { font-size: 18px; line-height: 1.2; }
+        .collect-subtitle { max-width: 250px; }
+        #closeCollectModal {
+          height: 40px;
+          min-height: 40px;
+          border-radius: 14px;
+        }
+        .collect-body { padding: 14px 12px; }
+        .collect-body .form-grid { gap: 12px; }
+        .collect-body .readonly-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .collect-body .readonly {
+          border-radius: 14px;
+          padding: 10px;
+        }
+        .collect-body .readonly[style*="grid-column"] strong {
+          display: -webkit-box;
+          -webkit-box-orient: vertical;
+          -webkit-line-clamp: 2;
+          overflow: hidden;
+          white-space: normal;
+          line-height: 1.35;
+        }
+        .collect-body .field label { font-size: 13px; }
+        .collect-body .scan-row {
+          grid-template-columns: minmax(0, 1fr) 84px;
+          gap: 8px;
+        }
+        .collect-body .scan-row input,
+        .collect-body .scan-row button {
+          height: 48px;
+          border-radius: 14px;
+        }
+        .collect-body .slots { gap: 10px; }
+        .collect-body .slot {
+          min-height: auto;
+          border-radius: 16px;
+          padding: 12px;
+        }
+        .collect-body .preview {
+          min-height: 154px;
+          border-radius: 14px;
+        }
+        .collect-body .preview img { height: 178px; }
+        .collect-body .sticky-actions {
+          position: static;
+          bottom: auto;
+          z-index: auto;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+          margin: 12px -12px -14px;
+          padding: 12px max(12px, env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+        }
+        .collect-body .sticky-actions .small { grid-column: 1 / -1; }
+        .collect-body .sticky-actions button,
+        .collect-body .sticky-actions .button {
+          width: 100%;
+          min-width: 0;
+          height: 46px;
+          min-height: 46px;
+          border-radius: 14px;
+          padding: 0 8px;
+          font-size: 14px;
+        }
+        .empty {
+          min-height: 132px;
+          border-radius: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body data-construction-view="tasks">
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="mark">V2</div>
+          <div>
+            <h1>施工采集</h1>
+            <p class="top-meta">按终端领取施工，现场缓存，联网统一上传</p>
+          </div>
+        </div>
+        <div class="actions">
+          <nav class="page-nav" aria-label="页面切换">
+            <a class="button secondary" href="/app?page=project-board">项目看板</a>
+            <a class="button secondary" href="/app?page=claim-tasks">任务领取</a>
+            <a class="button secondary" href="/app?page=task-hall">审阅工作台</a>
+            <a class="button secondary active" href="/app?page=construction">施工采集</a>
+          </nav>
+          <span class="user-pill" id="sessionUser">未登录</span>
+          <button class="secondary" id="logout" type="button">退出</button>
+        </div>
+      </header>
+      <main class="workspace" id="constructionWorkspace">
+        <section class="panel" id="taskPanel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">开放终端</h2>
+              <p class="panel-subtitle">管理员开放后施工员可领取</p>
+            </div>
+            <div class="head-actions">
+              <span class="badge" id="taskCount">0</span>
+              <button class="secondary construction-logout" type="button" data-construction-logout>退出</button>
+            </div>
+          </div>
+          <div class="panel-body"><div class="list" id="tasks"></div></div>
+        </section>
+        <section class="panel" id="groupPanel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title" id="groupTitle">资料组</h2>
+              <p class="panel-subtitle">未施工也会显示，便于现场逐户核对</p>
+            </div>
+            <div class="head-actions">
+              <button class="secondary" id="backToTasks" type="button">返回任务区</button>
+              <span class="badge" id="groupCount">0</span>
+              <button class="secondary construction-logout" type="button" data-construction-logout>退出</button>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="group-search">
+              <input id="groupSearch" type="search" placeholder="同终端内搜表号、地址，如 628 C297" autocomplete="off" />
+              <button class="secondary" id="scanMeterGroup" type="button">扫表号</button>
+              <button class="secondary" id="clearGroupSearch" type="button">清空</button>
+            </div>
+            <div class="group-filters" id="groupFilters" role="group" aria-label="资料组状态筛选">
+              <button class="active" type="button" data-group-filter="all">全部 <span id="groupFilterAll">0</span></button>
+              <button type="button" data-group-filter="unconstructed">未施工 <span id="groupFilterUnconstructed">0</span></button>
+              <button type="button" data-group-filter="cached">已缓存 <span id="groupFilterCached">0</span></button>
+              <button type="button" data-group-filter="exception">异常工单 <span id="groupFilterException">0</span></button>
+            </div>
+            <div class="cache-actions" id="cacheActions">
+              <span id="cacheActionText">已缓存资料组可统一上传</span>
+              <button id="uploadCachedGroups" type="button">一键上传</button>
+            </div>
+            <div class="list" id="groups"></div>
+          </div>
+        </section>
+        <section class="panel capture-panel" id="editorPanel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">采集表单</h2>
+              <p class="panel-subtitle" id="onlineState">检测网络中</p>
+            </div>
+            <span class="badge" id="draftCount">0</span>
+          </div>
+          <div class="panel-body" id="editor"></div>
+        </section>
+      </main>
+    </div>
+    <div class="collect-backdrop" id="collectModal" role="dialog" aria-modal="true" aria-hidden="true">
+      <section class="collect-dialog">
+        <div class="collect-head">
+          <div>
+            <div class="collect-title" id="collectModalTitle">施工采集</div>
+            <div class="collect-subtitle" id="collectModalSubtitle">选择资料组后填写</div>
+          </div>
+          <button class="secondary" id="closeCollectModal" type="button">关闭</button>
+        </div>
+        <div class="collect-body" id="collectModalEditor"></div>
+      </section>
+    </div>
+    <div class="scanner" id="scanner">
+      <div class="scanner-panel">
+        <strong id="scannerTitle">扫码</strong>
+        <div class="scanner-camera" id="scannerCamera">
+          <video id="scannerVideo" playsinline muted></video>
+          <div class="scan-frame" aria-hidden="true"></div>
+          <div class="scanner-hint" id="scannerHint">将条形码横向放入框内，保持稳定</div>
+        </div>
+        <div class="scanner-status" id="scannerStatus">优先使用 QuaggaJS 识别一维条形码。</div>
+        <input id="scannerFile" type="file" accept="image/*" capture="environment" hidden />
+        <div class="tool-row">
+          <button class="secondary" id="manualScan" type="button">手动输入</button>
+          <button class="danger" id="closeScanner" type="button">关闭</button>
+        </div>
+      </div>
+    </div>
+    <div class="toast" id="toast"></div>
+    <script src="/static/image_upload_utils.js?v=20260615-compress"></script>
+    <script src="/static/vendor/quagga.min.js?v=20260615-quagga2"></script>
+    <script>
+      if (new URLSearchParams(location.search).get("embedded") === "1") document.body.classList.add("embedded");
+      const session = JSON.parse(localStorage.getItem("module_manager_session") || "null");
+      if (!document.body.classList.contains("embedded") && !session?.access_token) location.href = "/login";
+      const roles = session?.user?.roles || [];
+      const isAdmin = roles.includes("admin");
+      const actor = session?.user?.username || localStorage.getItem("module_manager_constructor") || "constructor";
+      const teamId = session?.team_id || session?.user?.team_id || localStorage.getItem("module_manager_team_id") || "default-team";
+      localStorage.setItem("module_manager_team_id", teamId);
+      localStorage.setItem("module_manager_constructor", actor);
+      document.querySelector("#sessionUser").textContent = session?.user?.name || actor;
+      function logoutUser() {
+        localStorage.removeItem("module_manager_session");
+        location.href = "/login";
+      }
+      document.querySelector("#logout")?.addEventListener("click", logoutUser);
+      document.querySelectorAll("[data-construction-logout]").forEach((button) => button.addEventListener("click", logoutUser));
+      const slots = [
+        { key: "before_box", label: "改造前照片", required: true },
+        { key: "collector_barcode", label: "采集器照片", required: false },
+        { key: "module_meter", label: "模块与电表照片", required: true },
+        { key: "after_box", label: "改造后照片", required: true },
+      ];
+      const state = {
+        tasks: [],
+        groups: [],
+        exceptionOrders: [],
+        task: null,
+        group: null,
+        localPhotos: [],
+        drafts: [],
+        loading: false,
+        uploading: false,
+        scannerStream: null,
+        scannerTimer: 0,
+        scannerTarget: "",
+        quaggaActive: false,
+        quaggaDetectedHandler: null,
+        scanCandidate: "",
+        scanCandidateHits: 0,
+        scanLocked: false,
+        offlineMode: false,
+        offlineSnapshot: null,
+        groupQuery: "",
+        groupStatusFilter: "all",
+        groupCacheIds: new Set(),
+        groupCacheMeta: new Map(),
+        collectModalOpen: false,
+        view: "tasks",
+        formValues: { collector: "", module_asset_no: "" },
+      };
+      const QUAGGA_READERS = [
+        "code_128_reader",
+        "code_39_reader",
+        "code_93_reader",
+        "i2of5_reader",
+        "ean_reader",
+        "ean_8_reader",
+        "codabar_reader",
+      ];
+      const $ = (selector) => document.querySelector(selector);
+      const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+      const authHeaders = () => session?.access_token ? { Authorization: `${session.token_type || "bearer"} ${session.access_token}` } : {};
+      const teamHeaders = (extra = {}) => ({ "X-Team-Id": teamId, ...authHeaders(), ...extra });
+      const online = () => navigator.onLine;
+      function getQuagga() {
+        return window.Quagga || window.Quagga2 || window.exports?.Quagga || window.module?.exports?.Quagga || window.module?.exports || null;
+      }
+      function markQuaggaStatus() {
+        document.documentElement.dataset.quagga = getQuagga()?.init ? "ready" : "missing";
+      }
+      markQuaggaStatus();
+      window.addEventListener("load", markQuaggaStatus);
+      function toast(message, bad = false) {
+        $("#toast").textContent = message;
+        $("#toast").style.background = bad ? "#a32920" : "#17212b";
+        $("#toast").classList.add("show");
+        clearTimeout(toast.timer);
+        toast.timer = setTimeout(() => $("#toast").classList.remove("show"), 2400);
+      }
+      function notifyParentRefresh(reason, payload = {}) {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: "module-manager:data-mutated", reason, payload }, location.origin);
+        }
+      }
+      async function api(path, options = {}) {
+        const response = await fetch(path, { ...options, headers: teamHeaders({ "Content-Type": "application/json", ...(options.headers || {}) }) });
+        const payload = await response.json();
+        if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
+        return payload.data;
+      }
+      async function formApi(path, formData) {
+        const response = await fetch(path, { method: "POST", headers: teamHeaders(), body: formData });
+        const payload = await response.json();
+        if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
+        return payload.data;
+      }
+      function photoThumbnailUrl(photo) {
+        return photo?.thumbnail_url || photo?.preview_url || photo?.image_url || "";
+      }
+      function openDb() {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open("module-manager-construction-v1", 2);
+          request.onupgradeneeded = () => {
+            const db = request.result;
+            if (!db.objectStoreNames.contains("drafts")) db.createObjectStore("drafts", { keyPath: "client_batch_id" });
+            if (!db.objectStoreNames.contains("terminalSnapshots")) db.createObjectStore("terminalSnapshots", { keyPath: "key" });
+          };
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      }
+      async function dbStore(mode = "readonly") {
+        const db = await openDb();
+        return db.transaction("drafts", mode).objectStore("drafts");
+      }
+      async function getDrafts() {
+        const store = await dbStore();
+        return new Promise((resolve, reject) => {
+          const request = store.getAll();
+          request.onsuccess = () => resolve(request.result || []);
+          request.onerror = () => reject(request.error);
+        });
+      }
+      async function terminalSnapshotStore(mode = "readonly") {
+        const db = await openDb();
+        return db.transaction("terminalSnapshots", mode).objectStore("terminalSnapshots");
+      }
+      const terminalSnapshotKey = (taskId) => `terminal-snapshot:${teamId}:${actor}:${taskId || "task"}`;
+      async function putTerminalSnapshot(task, groups = [], exceptionOrders = []) {
+        if (!task?.id) return;
+        const store = await terminalSnapshotStore("readwrite");
+        const snapshot = {
+          key: terminalSnapshotKey(task.id),
+          teamId,
+          actor,
+          taskId: task.id,
+          task,
+          terminal: task.terminal || "",
+          groups,
+          exceptionOrders,
+          updated_at: new Date().toISOString(),
+        };
+        return new Promise((resolve, reject) => {
+          const request = store.put(snapshot);
+          request.onsuccess = () => resolve(snapshot);
+          request.onerror = () => reject(request.error);
+        });
+      }
+      async function getTerminalSnapshot(taskId) {
+        const store = await terminalSnapshotStore();
+        return new Promise((resolve, reject) => {
+          const request = store.get(terminalSnapshotKey(taskId));
+          request.onsuccess = () => resolve(request.result || null);
+          request.onerror = () => reject(request.error);
+        });
+      }
+      async function getTerminalSnapshots() {
+        const store = await terminalSnapshotStore();
+        return new Promise((resolve, reject) => {
+          const request = store.getAll();
+          request.onsuccess = () => resolve((request.result || []).filter((item) => item.teamId === teamId && item.actor === actor));
+          request.onerror = () => reject(request.error);
+        });
+      }
+      async function loadOfflineTasks() {
+        const snapshots = await getTerminalSnapshots();
+        return snapshots
+          .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
+          .slice(0, 1)
+          .map((snapshot) => ({
+            ...(snapshot.task || {}),
+            id: snapshot.taskId,
+            terminal: snapshot.terminal || snapshot.task?.terminal || "",
+            construction_claimed_by: snapshot.task?.construction_claimed_by || actor,
+            construction_enabled: true,
+            offline_cached: true,
+            offline_updated_at: snapshot.updated_at,
+            total_groups: snapshot.groups?.length || snapshot.task?.total_groups || 0,
+            renovation_count: snapshot.task?.renovation_count || snapshot.groups?.length || 0,
+            unconstructed_groups: snapshot.groups?.length || snapshot.task?.unconstructed_groups || 0,
+          }));
+      }
+      function findCachedGroup(groupId) {
+        return state.groups.find((group) => String(group.id) === String(groupId)) || null;
+      }
+      async function getDraft(clientBatchId) {
+        const store = await dbStore();
+        return new Promise((resolve, reject) => {
+          const request = store.get(clientBatchId);
+          request.onsuccess = () => resolve(request.result || null);
+          request.onerror = () => reject(request.error);
+        });
+      }
+      async function putDraft(draft) {
+        const store = await dbStore("readwrite");
+        return new Promise((resolve, reject) => {
+          const request = store.put(draft);
+          request.onsuccess = () => resolve();
+          request.onerror = () => reject(request.error);
+        });
+      }
+      async function deleteDraft(clientBatchId) {
+        const store = await dbStore("readwrite");
+        return new Promise((resolve, reject) => {
+          const request = store.delete(clientBatchId);
+          request.onsuccess = () => resolve();
+          request.onerror = () => reject(request.error);
+        });
+      }
+      async function refreshDrafts() {
+        const mine = (await getDrafts()).filter((draft) => draft.teamId === teamId && draft.actor === actor);
+        const meaningful = mine.filter(draftHasContent);
+        state.drafts = meaningful.filter((draft) => draft.kind !== "group-draft");
+        const groupDrafts = meaningful.filter((draft) => draft.kind === "group-draft");
+        state.groupCacheIds = new Set(meaningful.filter((draft) => draft.taskId && draft.groupId).map((draft) => groupCacheKey(draft.taskId, draft.groupId)));
+        state.groupCacheMeta = new Map(meaningful.filter((draft) => draft.taskId && draft.groupId).map((draft) => [groupCacheKey(draft.taskId, draft.groupId), draft]));
+        $("#draftCount").textContent = `${state.drafts.length + groupDrafts.length} 缓存`;
+        if (state.task) renderGroups();
+      }
+      const groupDraftKey = (taskId, groupId) => `group-draft:${teamId}:${actor}:${taskId || "task"}:${groupId || "group"}`;
+      const groupCacheKey = (taskId, groupId) => `${String(taskId || "task")}:${String(groupId || "group")}`;
+      function draftHasContent(draft = {}) {
+        return Boolean(
+          (draft.photos || []).length
+          || String(draft.collector || "").trim()
+          || String(draft.module_asset_no || "").trim()
+          || String(draft.work_order_id || "").trim()
+        );
+      }
+      function cleanPhotoForStore(photo) {
+        return { ...photo, previewUrl: "" };
+      }
+      function restoreStoredPhotos(photos = []) {
+        return photos.filter((photo) => photo.blob).map((photo) => ({
+          ...photo,
+          previewUrl: URL.createObjectURL(photo.blob),
+        }));
+      }
+      async function persistGroupDraft() {
+        if (!state.task || !state.group) return;
+        const collector = state.formValues.collector || $("#collectorInput")?.value.trim() || "";
+        const moduleAssetNo = state.formValues.module_asset_no || $("#moduleInput")?.value.trim() || "";
+        const photos = state.localPhotos.map(cleanPhotoForStore);
+        if (!photos.length && !collector && !moduleAssetNo && !state.group.exception_order_id) {
+          await deleteDraft(groupDraftKey(state.task.id, state.group.id));
+          return;
+        }
+        await putDraft({
+          kind: "group-draft",
+          client_batch_id: groupDraftKey(state.task.id, state.group.id),
+          teamId,
+          actor,
+          taskId: state.task.id,
+          groupId: state.group.id,
+          terminal: state.group.terminal,
+          meter_no: state.group.meter_no,
+          address: state.group.address,
+          collector,
+          module_asset_no: moduleAssetNo,
+          work_order_id: state.group.exception_order_id || "",
+          exception_category: state.group.exception_category || "",
+          exception_note: state.group.exception_note || "",
+          covered_slots: coveredSlotsForGroup(state.group),
+          photos,
+          status: "local",
+          updated_at: new Date().toISOString(),
+        });
+      }
+      let persistGroupDraftTimer = 0;
+      function scheduleGroupDraftPersist() {
+        clearTimeout(persistGroupDraftTimer);
+        persistGroupDraftTimer = setTimeout(() => {
+          persistGroupDraftTimer = 0;
+          persistGroupDraft()
+            .then(() => refreshDrafts())
+            .catch((error) => console.warn("缓存保存失败", error));
+        }, 650);
+      }
+      async function flushGroupDraftPersist() {
+        if (persistGroupDraftTimer) {
+          clearTimeout(persistGroupDraftTimer);
+          persistGroupDraftTimer = 0;
+        }
+        await persistGroupDraft();
+      }
+      async function deleteGroupDraft(taskId, groupId) {
+        await deleteDraft(groupDraftKey(taskId, groupId));
+      }
+      function updateOnlineState() {
+        $("#onlineState").textContent = online() ? "在线，可上传缓存" : "离线，已启用本机缓存";
+      }
+      const mobileMedia = window.matchMedia("(max-width: 760px)");
+      const isMobile = () => mobileMedia.matches;
+      function setConstructionView(view) {
+        state.view = view === "work" ? "work" : "tasks";
+        document.body.dataset.constructionView = state.view;
+        document.querySelectorAll(".panel.is-collapsed").forEach((panel) => panel.classList.remove("is-collapsed"));
+      }
+      async function returnToTaskView() {
+        await flushGroupDraftPersist();
+        state.group = null;
+        state.localPhotos = [];
+        state.collectModalOpen = false;
+        document.body.classList.remove("modal-open");
+        $("#collectModal").classList.remove("show");
+        $("#collectModal").setAttribute("aria-hidden", "true");
+        $("#collectModalEditor").innerHTML = "";
+        setConstructionView("tasks");
+        renderTasks();
+        renderGroups();
+        renderEditor();
+      }
+      function openCollectModal() {
+        if (!state.group) return;
+        state.collectModalOpen = true;
+        document.body.classList.add("modal-open");
+        $("#collectModal").classList.add("show");
+        $("#collectModal").setAttribute("aria-hidden", "false");
+        renderEditor();
+      }
+      async function closeCollectModal() {
+        if (state.collectModalOpen) {
+          await flushGroupDraftPersist();
+          await refreshDrafts();
+        }
+        state.collectModalOpen = false;
+        document.body.classList.remove("modal-open");
+        $("#collectModal").classList.remove("show");
+        $("#collectModal").setAttribute("aria-hidden", "true");
+        $("#collectModalEditor").innerHTML = "";
+        renderEditor();
+      }
+      const zhAddressCollator = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
+      function normalizeSearchText(value) {
+        return String(value || "")
+          .normalize("NFKC")
+          .toLowerCase()
+          .replace(/[^\u4e00-\u9fa5a-z0-9]+/g, "");
+      }
+      function normalizeCode(value) {
+        return String(value || "")
+          .normalize("NFKC")
+          .replace(/[^0-9a-zA-Z]/g, "")
+          .toUpperCase();
+      }
+      function totalMeterMatchKey(value) {
+        const normalized = normalizeCode(value);
+        return normalized.length > 2 ? normalized.slice(2) : normalized;
+      }
+      function scannedBarcodeMatchKey(value) {
+        const normalized = normalizeCode(value);
+        if (normalized.length >= 22) return normalized.slice(11, -1);
+        if (normalized.length >= 13) return normalized.slice(0, -1);
+        return totalMeterMatchKey(normalized);
+      }
+      function meterCodeCandidates(value) {
+        const normalized = normalizeCode(value);
+        const candidates = new Set([normalized, totalMeterMatchKey(normalized), scannedBarcodeMatchKey(normalized)]);
+        if (normalized.length > 2) candidates.add(normalized.slice(2));
+        if (normalized.length > 12) candidates.add(normalized.slice(0, -1));
+        if (normalized.length > 12) candidates.add(normalized.slice(11, -1));
+        candidates.delete("");
+        return candidates;
+      }
+      function groupMeterCandidates(group) {
+        const candidates = new Set();
+        [group?.meter_no, group?.meter_match_key, group?.id].forEach((value) => {
+          meterCodeCandidates(value).forEach((candidate) => candidates.add(candidate));
+        });
+        return candidates;
+      }
+      function findGroupByMeterCode(value) {
+        const scanned = meterCodeCandidates(value);
+        if (!scanned.size) return null;
+        const exact = state.groups.find((group) => {
+          const groupKeys = groupMeterCandidates(group);
+          return [...scanned].some((candidate) => groupKeys.has(candidate));
+        });
+        if (exact) return exact;
+        const normalized = normalizeSearchText(value);
+        const loose = state.groups.filter((group) => groupSearchBlob(group).includes(normalized));
+        return loose.length === 1 ? loose[0] : null;
+      }
+      async function openGroupByMeterCode(value) {
+        const code = String(value || "").trim();
+        if (!code) {
+          toast("未识别到有效表号", true);
+          return;
+        }
+        if (!state.task) {
+          toast("请先领取或进入一个终端任务", true);
+          return;
+        }
+        const group = findGroupByMeterCode(code);
+        state.groupQuery = code;
+        if ($("#groupSearch")) $("#groupSearch").value = code;
+        if (!group) {
+          renderGroups();
+          toast(`当前终端未找到表号：${code}`, true);
+          return;
+        }
+        state.groupStatusFilter = "all";
+        await selectGroup(group.id);
+        toast(`已打开施工单：${group.meter_no || code}`);
+      }
+      function queryTokens(value) {
+        const source = String(value || "").normalize("NFKC").toLowerCase();
+        const tokens = source.split(/[^\u4e00-\u9fa5a-z0-9]+/).map(normalizeSearchText).filter(Boolean);
+        return tokens.length ? tokens : (normalizeSearchText(source) ? [normalizeSearchText(source)] : []);
+      }
+      function fuzzyIncludes(haystack, needle) {
+        if (!needle) return true;
+        if (haystack.includes(needle)) return true;
+        let index = 0;
+        for (const char of haystack) {
+          if (char === needle[index]) index += 1;
+          if (index === needle.length) return true;
+        }
+        return false;
+      }
+      function groupSearchBlob(group) {
+        return normalizeSearchText(`${group.meter_no || ""} ${group.address || ""} ${group.terminal || ""} ${group.construction_collector || ""} ${group.construction_module_asset_no || ""}`);
+      }
+      function matchesGroupQuery(group, query) {
+        const tokens = queryTokens(query);
+        if (!tokens.length) return true;
+        const blob = groupSearchBlob(group);
+        return tokens.every((token) => fuzzyIncludes(blob, token));
+      }
+      function addressNumber(text, unitPattern) {
+        const match = String(text || "").match(new RegExp(`([a-z]?\\d+(?:-\\d+)?)(?=${unitPattern})`, "i"));
+        return match ? match[1] : "";
+      }
+      function addressSortKey(group) {
+        const address = normalizeSearchText(group.address || "");
+        return [
+          address ? 0 : 1,
+          address.replace(/\d+/g, ""),
+          addressNumber(address, "弄|巷|里"),
+          addressNumber(address, "号"),
+          addressNumber(address, "栋|幢|座|楼"),
+          addressNumber(address, "单元"),
+          addressNumber(address, "层|楼"),
+          addressNumber(address, "室|房"),
+          addressNumber(address, "车位"),
+          address,
+          normalizeSearchText(group.meter_no || group.id || ""),
+        ];
+      }
+      function compareGroupsByAddress(a, b) {
+        const ak = addressSortKey(a);
+        const bk = addressSortKey(b);
+        for (let index = 0; index < ak.length; index += 1) {
+          const diff = zhAddressCollator.compare(String(ak[index]), String(bk[index]));
+          if (diff) return diff;
+        }
+        return 0;
+      }
+      function sortGroupsByAddress(groups = []) {
+        return [...groups].sort(compareGroupsByAddress);
+      }
+      function groupCacheDraft(group) {
+        if (!state.task || !group) return null;
+        return state.groupCacheMeta.get(groupCacheKey(state.task.id, group.id)) || null;
+      }
+      function groupHasCache(group) {
+        return Boolean(groupCacheDraft(group));
+      }
+      function groupStatus(group) {
+        if (groupHasCache(group)) return "cached";
+        if (group?.exception_order_id) return "exception";
+        return "unconstructed";
+      }
+      function exceptionOrderAsGroup(order) {
+        const payload = order?.payload || {};
+        return {
+          id: order.group_id,
+          task_id: order.task_id,
+          terminal: order.terminal,
+          meter_no: payload.meter_no || "",
+          address: payload.address || "",
+          photo_count: 0,
+          status: "exception",
+          exception_order_id: order.id,
+          exception_category: order.category || "",
+          exception_note: order.note || "",
+          construction_collector: payload.collector || "",
+          construction_module_asset_no: payload.module_asset_no || "",
+        };
+      }
+      function visibleGroups() {
+        const exceptionGroups = state.exceptionOrders.map(exceptionOrderAsGroup).filter((group) => matchesGroupQuery(group, state.groupQuery));
+        if (state.groupStatusFilter === "exception") {
+          return exceptionGroups;
+        }
+        if (state.groupStatusFilter === "cached") {
+          const cachedNormalGroups = sortGroupsByAddress(state.groups).filter((group) => matchesGroupQuery(group, state.groupQuery) && groupHasCache(group));
+          const cachedExceptionGroups = exceptionGroups.filter(groupHasCache);
+          return sortGroupsByAddress([...cachedNormalGroups, ...cachedExceptionGroups]);
+        }
+        return sortGroupsByAddress(state.groups).filter((group) => {
+          if (!matchesGroupQuery(group, state.groupQuery)) return false;
+          if (state.groupStatusFilter === "unconstructed") return groupStatus(group) === "unconstructed";
+          return true;
+        });
+      }
+      function groupFilterCounts() {
+        const byQuery = sortGroupsByAddress(state.groups).filter((group) => matchesGroupQuery(group, state.groupQuery));
+        const exceptionGroups = state.exceptionOrders.map(exceptionOrderAsGroup).filter((group) => matchesGroupQuery(group, state.groupQuery));
+        const cached = byQuery.filter(groupHasCache).length + exceptionGroups.filter(groupHasCache).length;
+        const exception = exceptionGroups.length;
+        return {
+          all: byQuery.length,
+          cached,
+          unconstructed: byQuery.length - cached,
+          exception,
+        };
+      }
+      function renderGroupFilters() {
+        const counts = groupFilterCounts();
+        $("#groupFilterAll").textContent = `${counts.all}`;
+        $("#groupFilterUnconstructed").textContent = `${counts.unconstructed}`;
+        $("#groupFilterCached").textContent = `${counts.cached}`;
+        $("#groupFilterException").textContent = `${counts.exception}`;
+        $("#groupFilters")?.querySelectorAll("[data-group-filter]").forEach((button) => {
+          button.classList.toggle("active", button.dataset.groupFilter === state.groupStatusFilter);
+        });
+        const cacheActions = $("#cacheActions");
+        const uploadCached = $("#uploadCachedGroups");
+        if (cacheActions) cacheActions.classList.toggle("show", state.groupStatusFilter === "cached");
+        if ($("#cacheActionText")) $("#cacheActionText").textContent = counts.cached ? `当前终端有 ${counts.cached} 个已缓存资料组` : "当前终端暂无已缓存资料组";
+        if (uploadCached) uploadCached.disabled = !counts.cached || state.uploading || !online();
+      }
+      function taskLabel(task) {
+        if (task.offline_cached) return "离线缓存";
+        if (task.construction_claimed_by === actor) return "已指派给我";
+        if (task.construction_claimed_by) return `已指派 ${task.construction_claimed_by}`;
+        if (task.construction_enabled) return "待指派";
+        return "未开放";
+      }
+      function renderTasks() {
+        $("#taskCount").textContent = `${state.tasks.length}`;
+        $("#tasks").innerHTML = state.tasks.length ? state.tasks.map((task) => `
+          <article class="card ${state.task?.id === task.id ? "active" : ""}" data-task="${task.id}">
+            <div class="name-row">
+              <strong class="name">终端 ${esc(task.terminal || "-")}</strong>
+              <span class="badge ${task.construction_claimed_by ? "warn" : task.construction_enabled ? "ok" : ""}">${esc(taskLabel(task))}</span>
+            </div>
+            <div class="metric-grid">
+              <div class="metric"><span>改造数</span><strong>${task.renovation_count || task.total_groups || 0}</strong></div>
+              <div class="metric"><span>已上传</span><strong>${task.uploaded_count || 0}</strong></div>
+              <div class="metric"><span>未施工</span><strong>${task.unconstructed_groups || 0}</strong></div>
+            </div>
+            <div class="tool-row">
+              <button data-action="claim" data-id="${task.id}" ${task.construction_claimed_by === actor || task.offline_cached ? "" : "disabled"}>${task.construction_claimed_by === actor || task.offline_cached ? "进入施工" : "等待指派"}</button>
+              ${isAdmin ? `<button class="secondary" data-action="assign" data-id="${task.id}">${task.construction_claimed_by ? "改派" : "指派"}</button>` : ""}
+              ${isAdmin && task.construction_claimed_by ? `<button class="secondary" data-action="unassign" data-id="${task.id}">取消指派</button>` : ""}
+              ${isAdmin ? `<button class="secondary" data-action="${task.construction_enabled ? "close" : "open"}" data-id="${task.id}">${task.construction_enabled ? "关闭" : "开放"}</button>` : ""}
+            </div>
+          </article>
+        `).join("") : `<div class="empty"><strong>暂无施工终端</strong><span>施工员仅显示管理员指派给自己的终端。</span></div>`;
+        $("#tasks").querySelectorAll("[data-task]").forEach((card) => card.addEventListener("click", () => selectTask(Number(card.dataset.task))));
+        $("#tasks").querySelectorAll("button[data-action]").forEach((button) => button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          handleTaskAction(Number(button.dataset.id), button.dataset.action).catch((error) => toast(error.message, true));
+        }));
+      }
+      function groupBadge(group) {
+        if (groupHasCache(group)) return ["已缓存", "ok"];
+        if (group?.exception_order_id) return ["异常工单", "warn"];
+        const count = Number(group.photo_count || 0);
+        if (count === 0) return ["未施工", ""];
+        if (count < 4) return [`${count} 张`, "warn"];
+        if (group.status === "approved") return ["已归档", "ok"];
+        return [`${count} 张`, "ok"];
+      }
+      function existingPhotoForSlot(group, slotKey) {
+        const photos = (group?.photos || []).filter((photo) => photo.image_url);
+        return photos.find((photo) => photo.construction_slot === slotKey)
+          || photos.find((photo) => photo.category === slotKey)
+          || photos.find((photo) => {
+            const label = `${photo.category_label || ""}${photo.construction_slot_label || ""}`;
+            if (slotKey === "before_box") return label.includes("改造前");
+            if (slotKey === "collector_barcode") return label.includes("采集器");
+            if (slotKey === "module_meter") return label.includes("模块") || label.includes("电能表");
+            if (slotKey === "after_box") return label.includes("改造后");
+            return false;
+          })
+          || null;
+      }
+      function coveredSlotsForGroup(group) {
+        const covered = new Set();
+        slots.forEach((slot) => {
+          if (existingPhotoForSlot(group, slot.key)) covered.add(slot.key);
+        });
+        return [...covered];
+      }
+      function exceptionNeedsPhotoSlots(source = {}) {
+        if (!source.exception_order_id && !source.work_order_id) return true;
+        const text = `${source.exception_category || ""} ${source.exception_note || ""}`.toLowerCase();
+        if (!text.trim()) return true;
+        return /photo|image|missing|\u7167\u7247|\u7f3a|\u56fe|\u5716/.test(text);
+      }
+      function renderGroups() {
+        $("#groupTitle").textContent = state.task ? `终端 ${state.task.terminal || "-"}${state.offlineMode ? " / 离线包" : ""}` : "资料组";
+        const groups = visibleGroups();
+        renderGroupFilters();
+        const totalCount = state.groupStatusFilter === "exception" ? state.exceptionOrders.length : state.groups.length;
+        $("#groupCount").textContent = state.groupQuery ? `${groups.length}/${totalCount}` : `${totalCount}`;
+        $("#groups").innerHTML = state.task ? (groups.length ? groups.map((group) => {
+          const [label, tone] = groupBadge(group);
+          const cache = groupCacheDraft(group);
+          const cacheLine = cache ? `<div class="small cache-line">本机已缓存 ${cache.photos?.length || 0} 张${cache.module_asset_no ? ` / 模块 ${esc(cache.module_asset_no)}` : ""}</div>` : "";
+          return `
+          <article class="card ${state.group?.id === group.id ? "active" : ""} ${cache ? "cached" : ""}" data-group="${group.id}">
+            <div class="name-row"><strong class="name">${esc(group.meter_no || group.id)}</strong><span class="badge ${tone}">${label}</span></div>
+            <div class="small">
+              <span class="terminal-line">终端 ${esc(group.terminal || "-")}</span>
+              <span class="address-line" title="${esc(group.address || "")}">${esc(group.address || "未填写地址")}</span>
+            </div>
+            ${cacheLine}
+            ${group.exception_order_id ? `<div class="small warn">${esc(group.exception_category || "异常工单")} ${esc(group.exception_note || "")}</div>` : ""}
+          </article>`;
+        }).join("") : `<div class="empty"><strong>${state.groupQuery || state.groupStatusFilter !== "all" ? "没有匹配的资料组" : "该终端暂无未施工资料组"}</strong><span>${state.groupQuery || state.groupStatusFilter !== "all" ? "换个筛选、表号、弄号、车位号或地址关键词再试。" : "已上传、待审阅或异常的资料组不再出现在施工采集里。"}</span></div>`) : `<div class="empty"><strong>先领取一个终端</strong><span>领取后只显示该终端下尚未施工的资料组。</span></div>`;
+        $("#groups").querySelectorAll("[data-group]").forEach((card) => card.addEventListener("click", () => selectGroup(card.dataset.group)));
+      }
+      function renderEditor() {
+        const editor = state.collectModalOpen ? $("#collectModalEditor") : $("#editor");
+        if (!editor) return;
+        if (state.collectModalOpen) {
+          $("#editor").innerHTML = `<div class="empty"><strong>正在弹窗中采集</strong><span>关闭弹窗后可继续选择相邻地址。</span></div>`;
+          $("#collectModalTitle").textContent = state.group?.meter_no || "施工采集";
+          $("#collectModalSubtitle").textContent = `${state.group?.terminal || "-"} / ${state.group?.address || "未填写地址"}`;
+        } else {
+          $("#collectModalEditor").innerHTML = "";
+        }
+        if (!state.group) {
+          editor.innerHTML = `<div class="empty"><strong>选择资料组后开始采集</strong><span>可先拍照缓存，恢复网络后统一上传。</span></div>`;
+          return;
+        }
+        const group = state.group;
+        const existing = (group.photos || []).filter((photo) => photo.image_url);
+        const collectorValue = state.formValues.collector || group.construction_collector || existing[0]?.collector || "";
+        const moduleValue = state.formValues.module_asset_no || group.construction_module_asset_no || existing[0]?.asset_no || "";
+        editor.innerHTML = `
+          <div class="form-grid">
+            <div class="readonly-grid">
+              <div class="readonly"><span>表号</span><strong title="${esc(group.meter_no || "")}">${esc(group.meter_no || "-")}</strong></div>
+              <div class="readonly"><span>终端</span><strong>${esc(group.terminal || "-")}</strong></div>
+              <div class="readonly" style="grid-column:1/-1"><span>地址</span><strong title="${esc(group.address || "")}">${esc(group.address || "未填写地址")}</strong></div>
+            </div>
+            <div class="field">
+              <label>采集器</label>
+              <div class="scan-row"><input id="collectorInput" value="${esc(collectorValue)}" placeholder="扫码或手填采集器" /><button class="secondary" data-scan="collectorInput">扫码</button></div>
+            </div>
+            <div class="field">
+              <label>模块资产编号 <span class="required">*</span></label>
+              <div class="scan-row"><input id="moduleInput" value="${esc(moduleValue)}" placeholder="扫码或手填模块号" /><button class="secondary" data-scan="moduleInput">扫码</button></div>
+            </div>
+            ${existing.length ? `<div class="existing"><strong>已上传照片</strong><div class="existing-list">${existing.map((photo) => `<img src="${esc(photoThumbnailUrl(photo))}" alt="已上传照片" loading="lazy" decoding="async" />`).join("")}</div></div>` : ""}
+            <div class="slots">${slots.map((slot, index) => {
+              const staged = state.localPhotos.find((photo) => photo.slot === slot.key);
+              const existingPhoto = existingPhotoForSlot(group, slot.key);
+              const previewUrl = staged?.previewUrl || photoThumbnailUrl(existingPhoto) || "";
+              const tag = staged ? "本机待上传" : existingPhoto ? "系统已有" : "";
+              return `
+              <div class="slot">
+                <strong>${index + 1}. ${slot.label}${slot.required ? `<span class="required">*</span>` : ""}</strong>
+                <div class="preview ${previewUrl ? "has-image" : ""}">
+                  ${previewUrl ? `<img src="${esc(previewUrl)}" alt="${slot.label}" />${tag ? `<span class="slot-tag ${staged ? "local" : ""}">${tag}</span>` : ""}` : (slot.required ? "必填照片" : "选填照片")}
+                </div>
+                ${existingPhoto && !staged ? `<div class="slot-note">已存在对应照片，无需重复上传；如需替换可重新拍照或从相册选择。</div>` : ""}
+                <div class="slot-actions">
+                  <button class="secondary" type="button" data-photo-action="camera" data-slot="${slot.key}">拍照</button>
+                  <button class="secondary" type="button" data-photo-action="album" data-slot="${slot.key}">相册</button>
+                </div>
+                <input type="file" accept="image/*" capture="environment" data-slot="${slot.key}" data-photo-source="camera" />
+                <input type="file" accept="image/*" data-slot="${slot.key}" data-photo-source="album" />
+              </div>`;
+            }).join("")}</div>
+            <div class="sticky-actions">
+              <span class="small">${online() ? "在线" : "离线"} / 拉到表单底部可保存缓存 / ${state.localPhotos.length} 张待上传</span>
+              <button class="secondary" id="saveDraft">保存当前组缓存</button>
+              <button id="uploadCurrent">上传当前组</button>
+            </div>
+          </div>`;
+        editor.querySelectorAll("[data-scan]").forEach((button) => button.addEventListener("click", () => startScanner(button.dataset.scan)));
+        $("#collectorInput")?.addEventListener("input", (event) => { state.formValues.collector = event.target.value.trim(); scheduleGroupDraftPersist(); });
+        $("#moduleInput")?.addEventListener("input", (event) => { state.formValues.module_asset_no = event.target.value.trim(); scheduleGroupDraftPersist(); });
+        editor.querySelectorAll("[data-photo-action]").forEach((button) => button.addEventListener("click", () => {
+          const slot = button.dataset.slot || "other";
+          const source = button.dataset.photoAction || "album";
+          const input = editor.querySelector(`input[type=file][data-slot="${slot}"][data-photo-source="${source}"]`);
+          input?.click();
+        }));
+        editor.querySelectorAll("input[type=file]").forEach((input) => input.addEventListener("change", (event) => handleFile(event.target)));
+        $("#saveDraft").addEventListener("click", () => saveCurrentDraft().then(() => toast("已保存当前组缓存")).catch((error) => toast(error.message, true)));
+        $("#uploadCurrent").addEventListener("click", () => uploadCurrentDraft().catch((error) => toast(error.message, true)));
+        $("#uploadAll")?.addEventListener("click", () => uploadAllDrafts().catch((error) => toast(error.message, true)));
+      }
+      async function handleFile(input) {
+        const file = input.files?.[0];
+        if (!file) return;
+        const slot = input.dataset.slot || "other";
+        try {
+          await upsertLocalPhoto(file, slot, file.name || `${slot}.jpg`);
+          await persistGroupDraft();
+          await refreshDrafts();
+          toast("已保存到本机缓存");
+          renderEditor();
+        } finally {
+          input.value = "";
+        }
+      }
+      async function upsertLocalPhoto(source, slot, name = "") {
+        const compressed = source instanceof Blob
+          ? await window.ModuleImageUpload.compressImageFile(source, { name: name || `${slot}.jpg` })
+          : { blob: source, name };
+        const blob = compressed.blob || source;
+        const previewUrl = URL.createObjectURL(blob);
+        state.localPhotos = state.localPhotos.filter((photo) => photo.slot !== slot);
+        state.localPhotos.push({
+          slot,
+          client_photo_id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+          name: compressed.name || name || `${slot}.jpg`,
+          type: blob.type || "image/jpeg",
+          blob,
+          previewUrl,
+          originalSize: compressed.originalSize || blob.size || 0,
+          compressedSize: compressed.compressedSize || blob.size || 0,
+        });
+      }
+      function validateUploadReady() {
+        if (!state.group || !state.task) throw new Error("请先选择资料组");
+        const moduleValue = state.formValues.module_asset_no || $("#moduleInput")?.value.trim() || "";
+        if (!moduleValue) throw new Error("模块号为必填项");
+        if (!state.group.exception_order_id || exceptionNeedsPhotoSlots(state.group)) {
+          const missing = slots.filter((slot) => slot.required
+            && !state.localPhotos.some((photo) => photo.slot === slot.key)
+            && !existingPhotoForSlot(state.group, slot.key)).map((slot) => slot.label);
+          if (missing.length) throw new Error(`请补齐：${missing.join("、")}`);
+        }
+      }
+      function buildDraft() {
+        validateUploadReady();
+        return {
+          client_batch_id: groupDraftKey(state.task.id, state.group.id),
+          teamId,
+          actor,
+          taskId: state.task.id,
+          groupId: state.group.id,
+          terminal: state.group.terminal,
+          meter_no: state.group.meter_no,
+          address: state.group.address,
+          collector: $("#collectorInput")?.value.trim() || state.formValues.collector || "",
+          module_asset_no: $("#moduleInput")?.value.trim() || state.formValues.module_asset_no || "",
+          work_order_id: state.group.exception_order_id || "",
+          exception_category: state.group.exception_category || "",
+          exception_note: state.group.exception_note || "",
+          covered_slots: coveredSlotsForGroup(state.group),
+          photos: state.localPhotos.map((photo) => ({ ...photo, previewUrl: "" })),
+          status: "queued",
+          created_at: new Date().toISOString(),
+        };
+      }
+      async function saveCurrentDraft() {
+        await flushGroupDraftPersist();
+        await refreshDrafts();
+      }
+      async function uploadDraft(draft) {
+        if (!online()) throw new Error("当前离线，已保留本机缓存");
+        const submitExceptionOrder = async () => {
+          if (!draft.work_order_id) return null;
+          return api(`/local-test/construction/exception-orders/${encodeURIComponent(draft.work_order_id)}/submit`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              actor,
+              updates: {
+                meter_no: draft.meter_no || "",
+                collector: draft.collector || "",
+                module_asset_no: draft.module_asset_no || "",
+              },
+              note: "现场已处理异常工单",
+            }),
+          });
+        };
+        if (!draft.photos?.length) {
+          const result = await submitExceptionOrder();
+          await deleteDraft(draft.client_batch_id);
+          await deleteGroupDraft(draft.taskId, draft.groupId);
+          await refreshDrafts();
+          return result || { group: null, added: 0, skipped_duplicates: 0 };
+        }
+        const form = new FormData();
+        form.append("actor", draft.actor);
+        form.append("client_batch_id", draft.client_batch_id);
+        form.append("collector", draft.collector || "");
+        form.append("module_asset_no", draft.module_asset_no || "");
+        for (const photo of draft.photos) {
+          form.append("photo_slots", photo.slot);
+          form.append("client_photo_ids", photo.client_photo_id);
+          form.append("files", photo.blob, photo.name || `${photo.slot}.jpg`);
+        }
+        const result = await formApi(`/local-test/construction/groups/${encodeURIComponent(draft.groupId)}/upload-batch`, form);
+        if (draft.work_order_id) await submitExceptionOrder();
+        await deleteDraft(draft.client_batch_id);
+        await deleteGroupDraft(draft.taskId, draft.groupId);
+        await refreshDrafts();
+        return result;
+      }
+      async function uploadCurrentDraft() {
+        await flushGroupDraftPersist();
+        const draft = buildDraft();
+        await putDraft(draft);
+        await refreshDrafts();
+        toast("已先保存到缓存，开始上传");
+        state.uploading = true;
+        try {
+          const result = await uploadDraft(draft);
+          state.localPhotos = [];
+          await deleteGroupDraft(draft.taskId, draft.groupId);
+          await reloadAfterUpload(result.group?.id || draft.groupId);
+          toast(`已上传 ${result.added || 0} 张，重复 ${result.skipped_duplicates || 0} 张`);
+        } catch (error) {
+          toast(`上传失败，已保留在缓存中心：${error.message}`, true);
+        } finally {
+          state.uploading = false;
+        }
+      }
+      function draftMissingFields(draft = {}) {
+        const missing = [];
+        if (!String(draft.module_asset_no || "").trim()) missing.push("模块号");
+        const photoSlots = new Set([
+          ...(draft.covered_slots || []),
+          ...(draft.photos || []).filter((photo) => photo.blob).map((photo) => photo.slot),
+        ]);
+        if (exceptionNeedsPhotoSlots(draft)) {
+          slots.filter((slot) => slot.required).forEach((slot) => {
+            if (!photoSlots.has(slot.key)) missing.push(slot.label);
+          });
+        }
+        return missing;
+      }
+      async function uploadAllDrafts(options = {}) {
+        await flushGroupDraftPersist();
+        await refreshDrafts();
+        const allDrafts = (await getDrafts()).filter((draft) => (
+          draft.teamId === teamId && draft.actor === actor && draftHasContent(draft)
+        ));
+        const scopedDrafts = options.currentTaskOnly !== false && state.task
+          ? allDrafts.filter((draft) => String(draft.taskId || "") === String(state.task.id || ""))
+          : allDrafts;
+        const readyDrafts = scopedDrafts.filter((draft) => draftMissingFields(draft).length === 0);
+        if (!readyDrafts.length) {
+          toast("已缓存中没有可上传的完整资料组", true);
+          return;
+        }
+        let ok = 0;
+        let failed = 0;
+        state.uploading = true;
+        renderGroupFilters();
+        try {
+          for (const draft of [...readyDrafts]) {
+            try {
+              await uploadDraft(draft);
+              ok += 1;
+            } catch (error) {
+              failed += 1;
+            }
+          }
+        } finally {
+          state.uploading = false;
+          renderGroupFilters();
+        }
+        await reloadAfterUpload(state.group?.id);
+        toast(`缓存上传完成：成功 ${ok} 组，失败 ${failed} 组`, failed > 0);
+      }
+      async function reloadAfterUpload(preferredGroupId = "") {
+        await reloadTasks();
+        if (state.task) await loadGroups(state.task.id);
+        const nextGroup = state.groups[0] || null;
+        if (nextGroup) await selectGroup(nextGroup.id);
+        else {
+          state.group = null;
+          state.localPhotos = [];
+          state.formValues = { collector: "", module_asset_no: "" };
+          state.collectModalOpen = false;
+          document.body.classList.remove("modal-open");
+          $("#collectModal").classList.remove("show");
+          $("#collectModal").setAttribute("aria-hidden", "true");
+          $("#collectModalEditor").innerHTML = "";
+          renderGroups();
+          renderEditor();
+        }
+        notifyParentRefresh("construction-uploaded", { task_id: state.task?.id, group_id: preferredGroupId });
+      }
+      async function handleTaskAction(id, action) {
+        if (action === "claim") {
+          await api(`/local-test/construction/tasks/${id}/claim`, { method: "POST", body: JSON.stringify({ actor }) });
+          toast("已进入施工终端");
+        } else if (action === "release") {
+          await api(`/local-test/construction/tasks/${id}/release`, { method: "POST", body: JSON.stringify({ actor }) });
+          toast("已释放施工终端");
+        } else if (action === "assign") {
+          const task = state.tasks.find((item) => Number(item.id) === Number(id)) || {};
+          const constructor = window.prompt("请输入施工员账号", task.construction_claimed_by || "");
+          if (!constructor) return;
+          await api(`/local-test/construction/tasks/${id}/assign`, {
+            method: "PATCH",
+            body: JSON.stringify({ actor, constructor: constructor.trim() }),
+          });
+          toast("已指派施工终端");
+        } else if (action === "unassign") {
+          await api(`/local-test/construction/tasks/${id}/unassign`, { method: "PATCH", body: JSON.stringify({ actor }) });
+          toast("已取消指派");
+        } else if (action === "open") {
+          await api(`/local-test/construction/tasks/${id}/open`, { method: "PATCH", body: JSON.stringify({ actor }) });
+          toast("已开放施工");
+        } else if (action === "close") {
+          await api(`/local-test/construction/tasks/${id}/close`, { method: "PATCH", body: JSON.stringify({ actor }) });
+          toast("已关闭施工");
+        }
+        await reloadTasks();
+        if (action === "claim") {
+          const ownTask = state.tasks.find((item) => item.construction_claimed_by === actor || item.id === id);
+          if (ownTask) await selectTask(ownTask.id, { enterWork: true });
+          return;
+        }
+        if (action === "release") {
+          state.task = null;
+          state.group = null;
+          state.groups = [];
+          state.exceptionOrders = [];
+          state.localPhotos = [];
+          setConstructionView("tasks");
+          renderTasks();
+          renderGroups();
+          renderEditor();
+          return;
+        }
+        setConstructionView("tasks");
+        renderTasks();
+      }
+      async function selectTask(id, options = {}) {
+        await flushGroupDraftPersist();
+        state.task = state.tasks.find((task) => task.id === id) || null;
+        state.group = null;
+        state.localPhotos = [];
+        state.exceptionOrders = [];
+        state.offlineMode = Boolean(state.task?.offline_cached);
+        state.offlineSnapshot = null;
+        state.groupQuery = "";
+        state.groupStatusFilter = "all";
+        state.collectModalOpen = false;
+        document.body.classList.remove("modal-open");
+        $("#collectModal").classList.remove("show");
+        $("#collectModal").setAttribute("aria-hidden", "true");
+        $("#collectModalEditor").innerHTML = "";
+        if ($("#groupSearch")) $("#groupSearch").value = "";
+        if (options.enterWork !== false) setConstructionView("work");
+        renderTasks();
+        renderEditor();
+        if (state.task) await loadGroups(state.task.id);
+        else {
+          setConstructionView("tasks");
+          renderGroups();
+        }
+      }
+      async function loadGroups(taskId) {
+        const useSnapshot = async (reason = "") => {
+          const snapshot = await getTerminalSnapshot(taskId);
+          if (!snapshot) throw new Error(reason || "当前终端还没有离线缓存，请先在有网时打开一次终端");
+          state.offlineMode = true;
+          state.offlineSnapshot = snapshot;
+          state.groups = sortGroupsByAddress(snapshot.groups || []);
+          state.exceptionOrders = snapshot.exceptionOrders || [];
+          state.task = {
+            ...(snapshot.task || state.task || {}),
+            id: snapshot.taskId,
+            terminal: snapshot.terminal || snapshot.task?.terminal || state.task?.terminal || "",
+            construction_claimed_by: snapshot.task?.construction_claimed_by || actor,
+            construction_enabled: true,
+            offline_cached: true,
+          };
+          renderTasks();
+          renderGroups();
+          toast("已加载该终端离线包，可继续施工采集");
+        };
+        if (!online()) {
+          await useSnapshot("当前离线，且该终端尚未生成离线包");
+          return;
+        }
+        try {
+          const data = await api(`/local-test/construction/tasks/${taskId}/groups?limit=1000&summary=true`);
+          const exceptionActor = isAdmin ? "" : actor;
+          const exceptionData = await api(`/local-test/construction/exception-orders?actor=${encodeURIComponent(exceptionActor)}&task_id=${encodeURIComponent(taskId)}`);
+          state.groups = sortGroupsByAddress(data.items || []);
+          state.exceptionOrders = exceptionData.items || [];
+          state.offlineMode = false;
+          state.offlineSnapshot = null;
+          if (state.task) await putTerminalSnapshot(state.task, state.groups, state.exceptionOrders);
+          renderGroups();
+        } catch (error) {
+          await useSnapshot(error.message);
+        }
+      }
+      async function loadGroupDetail(id) {
+        if (online()) {
+          try {
+            return await api(`/local-test/groups/${encodeURIComponent(id)}`);
+          } catch (error) {
+            // Weak construction-site networks should not block local collection once a terminal package exists.
+          }
+        }
+        const cached = findCachedGroup(id);
+        if (!cached) throw new Error("离线包里没有找到该资料组，请恢复网络后重新打开终端");
+        return { ...cached, photos: cached.photos || [] };
+      }
+      async function selectGroup(id) {
+        await flushGroupDraftPersist();
+        const selectedListItem = visibleGroups().find((item) => String(item.id) === String(id));
+        const group = await loadGroupDetail(id);
+        if (selectedListItem?.exception_order_id) {
+          group.exception_order_id = selectedListItem.exception_order_id;
+          group.exception_category = selectedListItem.exception_category;
+          group.exception_note = selectedListItem.exception_note;
+        }
+        const existing = (group.photos || []).filter((photo) => photo.image_url);
+        const cached = state.task ? await getDraft(groupDraftKey(state.task.id, group.id)) : null;
+        state.group = group;
+        state.localPhotos = restoreStoredPhotos(cached?.photos || []);
+        state.formValues = {
+          collector: cached?.collector ?? group.construction_collector ?? existing[0]?.collector ?? "",
+          module_asset_no: cached?.module_asset_no ?? group.construction_module_asset_no ?? existing[0]?.asset_no ?? "",
+        };
+        renderGroups();
+        if (isMobile()) openCollectModal();
+        else {
+          state.collectModalOpen = false;
+          renderEditor();
+        }
+      }
+      async function reloadTasks() {
+        let items = [];
+        if (online()) {
+          try {
+            const data = await api(`/local-test/construction/tasks?actor=${encodeURIComponent(actor)}&include_closed=${isAdmin ? "true" : "false"}`);
+            items = data.items || [];
+            state.offlineMode = false;
+          } catch (error) {
+            items = await loadOfflineTasks();
+            state.offlineMode = items.length > 0;
+            if (!items.length) throw error;
+            toast("网络请求失败，已切换到终端离线包");
+          }
+        } else {
+          items = await loadOfflineTasks();
+          state.offlineMode = items.length > 0;
+        }
+        const ownTasks = items.filter((task) => task.construction_claimed_by === actor || task.offline_cached);
+        state.tasks = ownTasks.length ? ownTasks : items;
+        if (state.task) state.task = state.tasks.find((task) => task.id === state.task.id) || null;
+        if (!state.task) {
+          state.groups = [];
+          state.group = null;
+        }
+        renderTasks();
+      }
+      async function bootstrap() {
+        updateOnlineState();
+        setConstructionView("tasks");
+        await refreshDrafts();
+        await reloadTasks();
+        const mine = state.tasks.find((task) => task.construction_claimed_by === actor || task.offline_cached);
+        if (mine) await selectTask(mine.id, { enterWork: true });
+        else {
+          setConstructionView("tasks");
+          renderGroups();
+          renderEditor();
+        }
+      }
+      async function startScanner(target) {
+        state.scannerTarget = target;
+        state.scanCandidate = "";
+        state.scanCandidateHits = 0;
+        state.scanLocked = false;
+        showScanner(target);
+        const quagga = getQuagga();
+        markQuaggaStatus();
+        if (quagga?.init && navigator.mediaDevices?.getUserMedia) {
+          try {
+            await startQuaggaScanner(target);
+            return;
+          } catch (error) {
+            stopScanner();
+            await fallbackScanInput(target, "实时扫码不可用");
+            return;
+          }
+        }
+        if (!("BarcodeDetector" in window) || !navigator.mediaDevices?.getUserMedia) {
+          stopScanner();
+          await fallbackScanInput(target, "当前浏览器不支持实时扫码");
+          return;
+        }
+        startNativeScanner(target).catch(async () => {
+          stopScanner();
+          await fallbackScanInput(target, "实时识别失败");
+        });
+      }
+      function showScanner(target) {
+        $("#scanner").classList.add("show");
+        $("#scannerTitle").textContent = target === "collectorInput" ? "扫描采集器" : target === "moduleInput" ? "扫描模块号" : "扫描表号";
+        $("#scannerStatus").textContent = "将条形码横向放入框内，保持 1 秒稳定。";
+        $("#scannerHint").textContent = target === "collectorInput" ? "采集器扫码成功后只填入编号，照片仍需单独拍摄" : target === "moduleInput" ? "将模块条码横向放入框内" : "扫描表号条码后直接打开施工单";
+      }
+      async function startQuaggaScanner(target) {
+        resetScannerCamera();
+        const quagga = getQuagga();
+        if (!quagga?.init) throw new Error("Quagga is not loaded");
+        const camera = $("#scannerCamera");
+        await new Promise((resolve, reject) => {
+          quagga.init({
+            inputStream: {
+              name: "Live",
+              type: "LiveStream",
+              target: camera,
+              constraints: {
+                facingMode: "environment",
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+            },
+            locator: { patchSize: "medium", halfSample: true },
+            locate: true,
+            numOfWorkers: Math.min(2, Math.max(0, navigator.hardwareConcurrency || 0)),
+            frequency: 8,
+            decoder: { readers: QUAGGA_READERS },
+          }, (error) => error ? reject(error) : resolve());
+        });
+        state.quaggaActive = true;
+        state.quaggaDetectedHandler = (result) => handleDetectedCode(target, result?.codeResult?.code || "");
+        quagga.onDetected(state.quaggaDetectedHandler);
+        quagga.start();
+        $("#scannerStatus").textContent = "QuaggaJS 正在识别条形码。";
+      }
+      async function startNativeScanner(target) {
+        const targetInput = document.getElementById(target);
+        const video = $("#scannerVideo");
+        const detector = new BarcodeDetector({ formats: ["code_128", "code_39", "qr_code", "ean_13", "ean_8"] });
+        state.scannerStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        video.srcObject = state.scannerStream;
+        await video.play();
+        $("#scannerStatus").textContent = "正在使用浏览器原生识别。";
+        const tick = async () => {
+          try {
+            const codes = await detector.detect(video);
+            if (codes.length) {
+              await applyScanValue(target, codes[0].rawValue || "");
+              stopScanner();
+              return;
+            }
+          } catch {
+            stopScanner();
+            fallbackScanInput(target, "实时识别失败").catch(() => {});
+            return;
+          }
+          state.scannerTimer = window.setTimeout(tick, 320);
+        };
+        tick();
+      }
+      function handleDetectedCode(target, rawCode) {
+        const code = String(rawCode || "").trim();
+        if (!code || state.scanLocked) return;
+        if (state.scanCandidate === code) state.scanCandidateHits += 1;
+        else {
+          state.scanCandidate = code;
+          state.scanCandidateHits = 1;
+        }
+        $("#scannerStatus").textContent = state.scanCandidateHits < 2 ? `已捕捉 ${code}，请保持稳定` : `已识别 ${code}`;
+        if (state.scanCandidateHits < 2) return;
+        state.scanLocked = true;
+        Promise.resolve()
+          .then(() => applyScanValue(target, code))
+          .then(() => stopScanner())
+          .catch(() => stopScanner());
+      }
+      async function captureScannerFrameBlob() {
+        const video = Array.from($("#scannerCamera").querySelectorAll("video")).find((item) => item.videoWidth && item.videoHeight);
+        if (!video || !video.videoWidth || !video.videoHeight) return null;
+        const canvas = document.createElement("canvas");
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+        return await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.86));
+      }
+      async function decodeImageBarcode(file) {
+        const quagga = getQuagga();
+        if (quagga?.decodeSingle) {
+          const src = URL.createObjectURL(file);
+          try {
+            return await new Promise((resolve) => {
+              quagga.decodeSingle({
+                src,
+                inputStream: { size: 1600 },
+                locator: { patchSize: "medium", halfSample: false },
+                locate: true,
+                decoder: { readers: QUAGGA_READERS },
+              }, (result) => resolve(result?.codeResult?.code || ""));
+            });
+          } finally {
+            URL.revokeObjectURL(src);
+          }
+        }
+        if (!("BarcodeDetector" in window)) return "";
+        try {
+          const bitmap = await createImageBitmap(file);
+          const detector = new BarcodeDetector({ formats: ["code_128", "code_39", "qr_code", "ean_13", "ean_8"] });
+          const codes = await detector.detect(bitmap);
+          bitmap.close?.();
+          return codes[0]?.rawValue || "";
+        } catch {
+          return "";
+        }
+      }
+      async function fallbackScanInput(target, reason = "") {
+        const targetInput = document.getElementById(target);
+        const fileInput = $("#scannerFile");
+        toast(`${reason || "实时扫码不可用"}，已切换为拍照/手填模式`, true);
+        if (!fileInput) {
+          const value = window.prompt("请输入编号", targetInput?.value || "");
+          if (value !== null && targetInput) targetInput.value = value.trim();
+          return;
+        }
+        fileInput.value = "";
+        const file = await new Promise((resolve) => {
+          const onChange = () => resolve(fileInput.files?.[0] || null);
+          fileInput.addEventListener("change", onChange, { once: true });
+          fileInput.click();
+        });
+        if (!file) {
+          const value = window.prompt("请输入编号", targetInput?.value || "");
+          if (value !== null && targetInput) targetInput.value = value.trim();
+          return;
+        }
+        const decoded = await decodeImageBarcode(file);
+        if (decoded) {
+          await applyScanValue(target, decoded);
+          toast("已识别并填入编号");
+          return;
+        }
+        const manual = window.prompt("已拍照，但当前环境无法自动识别条码，请手动确认编号", targetInput?.value || "");
+        if (manual !== null) await applyScanValue(target, manual);
+      }
+      async function applyScanValue(target, value) {
+        const clean = String(value || "").trim();
+        const input = document.getElementById(target);
+        if (input) input.value = clean;
+        if (target === "groupSearch") {
+          await openGroupByMeterCode(clean);
+          return;
+        }
+        if (target === "collectorInput") {
+          state.formValues.collector = clean;
+        } else if (target === "moduleInput") {
+          state.formValues.module_asset_no = clean;
+        }
+        await persistGroupDraft();
+        await refreshDrafts();
+        toast(clean ? `已填入 ${clean}` : "未识别到有效编号", !clean);
+      }
+      function resetScannerCamera() {
+        $("#scannerCamera").querySelectorAll("canvas, video:not(#scannerVideo)").forEach((node) => node.remove());
+      }
+      function stopScanner() {
+        clearTimeout(state.scannerTimer);
+        const quagga = getQuagga();
+        if (state.quaggaActive && quagga) {
+          if (state.quaggaDetectedHandler) quagga.offDetected?.(state.quaggaDetectedHandler);
+          try { quagga.stop(); } catch {}
+        }
+        state.quaggaActive = false;
+        state.quaggaDetectedHandler = null;
+        state.scannerStream?.getTracks().forEach((track) => track.stop());
+        state.scannerStream = null;
+        $("#scannerVideo").srcObject = null;
+        resetScannerCamera();
+        $("#scanner").classList.remove("show");
+      }
+      $("#closeScanner").addEventListener("click", stopScanner);
+      $("#manualScan").addEventListener("click", () => {
+        const input = document.getElementById(state.scannerTarget);
+        const value = window.prompt("请输入编号", input?.value || "");
+        if (value !== null) applyScanValue(state.scannerTarget, value).catch((error) => toast(error.message, true));
+        stopScanner();
+      });
+      $("#closeCollectModal")?.addEventListener("click", () => closeCollectModal().catch((error) => toast(error.message, true)));
+      $("#backToTasks")?.addEventListener("click", () => returnToTaskView().catch((error) => toast(error.message, true)));
+      $("#collectModal")?.addEventListener("click", (event) => {
+        if (event.target === $("#collectModal")) closeCollectModal().catch((error) => toast(error.message, true));
+      });
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && state.collectModalOpen) closeCollectModal().catch((error) => toast(error.message, true));
+      });
+      $("#groupSearch")?.addEventListener("input", (event) => {
+        state.groupQuery = event.target.value || "";
+        renderGroups();
+      });
+      $("#scanMeterGroup")?.addEventListener("click", () => startScanner("groupSearch").catch((error) => toast(error.message, true)));
+      $("#clearGroupSearch")?.addEventListener("click", () => {
+        state.groupQuery = "";
+        if ($("#groupSearch")) $("#groupSearch").value = "";
+        renderGroups();
+      });
+      $("#groupFilters")?.querySelectorAll("[data-group-filter]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.groupStatusFilter = button.dataset.groupFilter || "all";
+          renderGroups();
+        });
+      });
+      $("#uploadCachedGroups")?.addEventListener("click", () => uploadAllDrafts({ currentTaskOnly: true }).catch((error) => toast(error.message, true)));
+      function setupMobilePanelCollapse() {
+        const mobile = window.matchMedia("(max-width: 760px)");
+        document.querySelectorAll(".panel").forEach((panel) => {
+          const head = panel.querySelector(".panel-head");
+          if (!head || panel.dataset.collapseReady) return;
+          panel.dataset.collapseReady = "1";
+          head.addEventListener("click", (event) => {
+            if (!mobile.matches || event.target.closest("button,a,input,select,label")) return;
+            if (document.body.dataset.constructionView === "work" && panel.id === "groupPanel") return;
+            panel.classList.toggle("is-collapsed");
+          });
+        });
+        mobile.addEventListener?.("change", () => {
+          if (!mobile.matches) document.querySelectorAll(".panel.is-collapsed").forEach((panel) => panel.classList.remove("is-collapsed"));
+        });
+      }
+      window.addEventListener("online", updateOnlineState);
+      window.addEventListener("offline", updateOnlineState);
+      window.addEventListener("message", (event) => {
+        if (event.origin !== location.origin) return;
+        if (event.data?.type === "module-manager:data-refresh") reloadTasks().catch((error) => toast(error.message, true));
+      });
+      setupMobilePanelCollapse();
+      bootstrap().catch((error) => toast(error.message, true));
+    </script>
+  </body>
+</html>

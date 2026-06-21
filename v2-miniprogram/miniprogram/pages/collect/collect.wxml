@@ -1,0 +1,61 @@
+<view class="page collect-page">
+  <view class="hero">
+    <view class="hero-title">{{group.meter_no || '资料组'}}</view>
+    <view class="hero-subtitle">{{group.terminal || '-'}} / {{group.address || '未填写地址'}}</view>
+  </view>
+
+  <view class="panel">
+    <view class="panel-head">
+      <view>
+        <view class="panel-title">扫码信息</view>
+        <view class="muted">模块号必填；采集器可扫码或手填</view>
+      </view>
+      <view class="badge">{{cacheText}}</view>
+    </view>
+    <view class="panel-body">
+      <view class="field">
+        <view class="label">采集器</view>
+        <view class="inline-field">
+          <input class="input" value="{{collector}}" bindinput="onCollectorInput" placeholder="扫码或手填采集器" />
+          <button class="btn ghost scan-btn" bindtap="scanCollector">扫码</button>
+        </view>
+      </view>
+      <view class="field">
+        <view class="label">模块资产编号 <text class="required">*</text></view>
+        <view class="inline-field">
+          <input class="input" value="{{moduleAssetNo}}" bindinput="onModuleInput" placeholder="扫码或手填模块号" />
+          <button class="btn ghost scan-btn" bindtap="scanModule">扫码</button>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="panel">
+    <view class="panel-head">
+      <view>
+        <view class="panel-title">照片槽位</view>
+        <view class="muted">顺序：改造前、采集器、模块与电表、改造后</view>
+      </view>
+    </view>
+    <view class="panel-body photo-grid">
+      <view wx:for="{{slots}}" wx:key="key" class="photo-slot {{item.filePath ? 'filled' : ''}}">
+        <view class="row">
+          <view class="slot-title">{{index + 1}}. {{item.label}}<text wx:if="{{item.required}}" class="required">*</text></view>
+          <view class="badge {{item.filePath ? 'ok' : item.required ? 'warn' : ''}}">{{item.filePath ? '已选' : item.required ? '必填' : '选填'}}</view>
+        </view>
+        <image wx:if="{{item.filePath}}" src="{{item.filePath}}" mode="aspectFill" class="preview"></image>
+        <view wx:else class="placeholder">未选择照片</view>
+        <view class="button-row slot-actions">
+          <button class="btn primary" data-key="{{item.key}}" bindtap="choosePhoto">拍照/选图</button>
+          <button class="btn" data-key="{{item.key}}" bindtap="removePhoto" wx:if="{{item.filePath}}">移除</button>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="bottom-bar">
+    <button class="btn ghost" bindtap="saveDraft">保存缓存</button>
+    <button class="btn primary" bindtap="uploadNow" loading="{{uploading}}">{{online ? '上传施工资料' : '离线保存'}}</button>
+  </view>
+  <view class="safe-bottom"></view>
+</view>

@@ -1,105 +1,64 @@
 import type { CurrentUser, MaterialGroup, Project, ReviewPhoto, ReviewTask } from './types'
 
 export const mockUser: CurrentUser = {
-  id: 'u-001',
+  id: 'reviewer',
+  username: 'reviewer',
   name: '资料审阅员',
   role: 'reviewer',
+  roles: ['reviewer'],
+  teamId: 'default-team',
 }
 
 export const mockProjects: Project[] = [
   {
-    id: 'p-001',
-    name: '聚丰园路模块更换',
+    id: 'local-test',
+    name: '模块更换项目',
     status: 'active',
-    totalGroups: 23000,
-    completedGroups: 12860,
-    exceptionGroups: 214,
-    updatedAt: '2026-06-09 10:20',
+    totalGroups: 0,
+    completedGroups: 0,
+    exceptionGroups: 0,
+    updatedAt: '2026-06-19',
   },
 ]
 
 export const mockTasks: ReviewTask[] = [
   {
-    id: 't-001',
-    projectId: 'p-001',
-    name: '聚丰园路188弄 第1批',
-    stage: '一期',
-    status: 'in_review',
-    totalGroups: 320,
-    claimedGroups: 80,
-    completedGroups: 53,
-    ownerName: '资料审阅员',
-  },
-  {
-    id: 't-002',
-    projectId: 'p-001',
-    name: '聚丰园路95弄 第2批',
-    stage: '二期',
+    id: '1',
+    projectId: 'local-test',
+    name: '终端示例',
+    stage: '本地测试',
+    terminal: 'T-001',
     status: 'pending',
-    totalGroups: 280,
+    totalGroups: 0,
     claimedGroups: 0,
     completedGroups: 0,
-  },
-  {
-    id: 't-003',
-    projectId: 'p-001',
-    name: '聚丰园路188弄 异常复核',
-    stage: '复核',
-    status: 'exception',
-    totalGroups: 46,
-    claimedGroups: 12,
-    completedGroups: 6,
-    ownerName: '管理员',
+    canClaim: false,
+    hasScanInfo: false,
+    renovationCount: 0,
+    uploadedCount: 0,
+    reviewedCount: 0,
+    unreviewedCount: 0,
+    reviewRate: 0,
   },
 ]
 
 export const mockGroups: MaterialGroup[] = [
   {
     id: 'g-001',
-    taskId: 't-001',
-    address: '聚丰园路188弄52号101室',
-    meterNo: '0012345678',
-    terminal: 'A-01',
-    status: 'in_review',
-    photoCount: 5,
-  },
-  {
-    id: 'g-002',
-    taskId: 't-001',
-    address: '聚丰园路188弄52号102室',
-    meterNo: '0012345679',
-    terminal: 'A-02',
+    taskId: '1',
+    address: '待导入总清单地址',
+    meterNo: '0000000000',
+    terminal: 'T-001',
     status: 'pending',
-    photoCount: 4,
-  },
-  {
-    id: 'g-003',
-    taskId: 't-001',
-    address: '聚丰园路188弄53号201室',
-    meterNo: '0012345680',
-    terminal: 'B-01',
-    status: 'incomplete',
-    photoCount: 2,
+    photoCount: 0,
   },
 ]
 
 export const mockPhotos: ReviewPhoto[] = [
   {
     id: 'ph-001',
-    name: '表前照片',
-    url: 'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?auto=format&fit=crop&w=1200&q=80',
-    status: 'valid',
-  },
-  {
-    id: 'ph-002',
-    name: '表后照片',
-    url: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=1200&q=80',
-    status: 'unclassified',
-  },
-  {
-    id: 'ph-003',
-    name: '铭牌照片',
-    url: 'https://images.unsplash.com/photo-1581092580497-e0d23cbdf1dc?auto=format&fit=crop&w=1200&q=80',
+    name: '示例照片',
+    url: '',
     status: 'unclassified',
   },
 ]

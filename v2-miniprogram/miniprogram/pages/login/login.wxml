@@ -1,0 +1,37 @@
+<view class="page login-page">
+  <view class="hero">
+    <view class="hero-title">施工采集</view>
+    <view class="hero-subtitle">扫码、拍照、弱网缓存，恢复网络后统一上传</view>
+  </view>
+
+  <view class="panel">
+    <view class="panel-head">
+      <view>
+        <view class="panel-title">账号登录</view>
+        <view class="muted">使用后台创建的施工员账号</view>
+      </view>
+    </view>
+    <view class="panel-body">
+      <view class="field">
+        <view class="label">团队 ID</view>
+        <input class="input" value="{{teamId}}" bindinput="onTeamInput" placeholder="default-team" />
+      </view>
+      <view class="field">
+        <view class="label">账号</view>
+        <input class="input" value="{{username}}" bindinput="onUsernameInput" placeholder="constructor" />
+      </view>
+      <view class="field">
+        <view class="label">密码</view>
+        <input class="input" value="{{password}}" password bindinput="onPasswordInput" placeholder="请输入密码" />
+      </view>
+      <button class="btn primary full" loading="{{loading}}" bindtap="login">登录施工端</button>
+    </view>
+  </view>
+
+  <view class="panel tip-panel">
+    <view class="panel-body">
+      <view class="muted">服务域名已固定为 www.sgcc.online。</view>
+    </view>
+  </view>
+  <view class="safe-bottom"></view>
+</view>

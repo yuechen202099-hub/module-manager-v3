@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900" role="img" aria-label="模块与电能表演示照片">
+  <rect width="1200" height="900" fill="#0f1720"/>
+  <rect x="260" y="90" width="680" height="700" rx="18" fill="#d9e2ea"/>
+  <rect x="325" y="155" width="550" height="280" rx="12" fill="#ffffff" stroke="#96a3b1" stroke-width="5"/>
+  <text x="600" y="230" text-anchor="middle" font-family="Microsoft YaHei, Arial, sans-serif" font-size="40" font-weight="900" fill="#172331">模块与电能表</text>
+  <text x="600" y="300" text-anchor="middle" font-family="Consolas, monospace" font-size="34" font-weight="800" fill="#0f6f8f">3130001201100200557603</text>
+  <rect x="380" y="480" width="440" height="170" rx="14" fill="#172331"/>
+  <circle cx="470" cy="565" r="46" fill="#0f6f8f"/>
+  <circle cx="600" cy="565" r="46" fill="#12664f"/>
+  <circle cx="730" cy="565" r="46" fill="#956012"/>
+  <text x="600" y="725" text-anchor="middle" font-family="Microsoft YaHei, Arial, sans-serif" font-size="34" font-weight="800" fill="#172331">资产编号 M-001</text>
+  <text x="600" y="850" text-anchor="middle" font-family="Microsoft YaHei, Arial, sans-serif" font-size="26" fill="#95a0ae">演示图像 URL 引用</text>
+</svg>

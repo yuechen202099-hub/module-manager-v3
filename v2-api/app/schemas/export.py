@@ -6,5 +6,11 @@ class TaskDetailExportRequest(BaseModel):
 
 
 class FinalDeliveryExportRequest(BaseModel):
-    project_id: int
+    project_id: int | None = None
+    task_id: int | None = None
+    terminal: str = ""
+    review_scope: str = "reviewed"
 
+
+class ExceptionMetersExportRequest(BaseModel):
+    reviewer: str = ""

@@ -1,0 +1,3 @@
+.login-page .tip-panel {
+  box-shadow: none;
+}

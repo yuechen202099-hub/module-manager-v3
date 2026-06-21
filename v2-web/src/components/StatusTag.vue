@@ -6,9 +6,13 @@ defineProps<{
 }>()
 
 const statusMap: Record<TaskStatus, { label: string; type: 'primary' | 'success' | 'warning' | 'danger' | 'info' }> = {
-  pending: { label: '待领取', type: 'info' },
+  pending: { label: '待处理', type: 'info' },
+  unreviewed: { label: '未审阅', type: 'info' },
+  published: { label: '已发布', type: 'primary' },
+  released: { label: '已释放', type: 'info' },
   in_review: { label: '审阅中', type: 'primary' },
   complete: { label: '已完成', type: 'success' },
+  approved: { label: '已归档', type: 'success' },
   exception: { label: '异常', type: 'danger' },
   incomplete: { label: '不完整', type: 'warning' },
   locked: { label: '锁定', type: 'info' },

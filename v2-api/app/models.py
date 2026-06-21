@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Enum as SAEnum,
     ForeignKey,
@@ -105,14 +106,25 @@ def pg_enum(enum_class: type[enum.Enum], name: str) -> SAEnum:
     return SAEnum(enum_class, name=name, values_callable=lambda items: [item.value for item in items])
 
 
+class Team(Base, TimestampMixin):
+    __tablename__ = "teams"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+
+
 class User(Base, TimestampMixin):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="SET NULL"), index=True)
     username: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    name: Mapped[str | None] = mapped_column(String(100))
     display_name: Mapped[str] = mapped_column(String(100), nullable=False)
     email: Mapped[str | None] = mapped_column(String(255), unique=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    home: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[UserStatus] = mapped_column(
         pg_enum(UserStatus, "user_status"), nullable=False, default=UserStatus.ACTIVE
     )
@@ -145,6 +157,7 @@ class Project(Base, TimestampMixin):
     __tablename__ = "projects"
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
     code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
@@ -160,6 +173,7 @@ class ImportJob(Base, TimestampMixin):
     __tablename__ = "import_jobs"
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     job_type: Mapped[ImportJobType] = mapped_column(pg_enum(ImportJobType, "import_job_type"), nullable=False)
     status: Mapped[JobStatus] = mapped_column(
@@ -179,12 +193,19 @@ class ImportJob(Base, TimestampMixin):
 
 class TotalCatalogRow(Base, TimestampMixin):
     __tablename__ = "total_catalog_rows"
-    __table_args__ = (Index("ix_total_catalog_rows_project_meter_key", "project_id", "meter_match_key"),)
+    __table_args__ = (
+        Index("ix_total_catalog_rows_project_meter_key", "project_id", "meter_match_key"),
+        Index("ix_total_catalog_rows_team_meter_key", "team_id", "meter_match_key"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     import_job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("import_jobs.id", ondelete="SET NULL"))
+    source_file: Mapped[str | None] = mapped_column(String(255))
     source_row_number: Mapped[int | None] = mapped_column(Integer)
+    terminal: Mapped[str | None] = mapped_column(String(128))
+    installer: Mapped[str | None] = mapped_column(String(128))
     original_meter_no: Mapped[str] = mapped_column(String(128), nullable=False)
     meter_match_key: Mapped[str] = mapped_column(String(128), nullable=False)
     installation_address: Mapped[str] = mapped_column(Text, nullable=False)
@@ -197,6 +218,7 @@ class StageCatalogRow(Base, TimestampMixin):
     __table_args__ = (Index("ix_stage_catalog_rows_project_meter_key", "project_id", "meter_match_key"),)
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     import_job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("import_jobs.id", ondelete="SET NULL"))
     source_row_number: Mapped[int | None] = mapped_column(Integer)
@@ -209,38 +231,62 @@ class StageCatalogRow(Base, TimestampMixin):
 
 class Task(Base, TimestampMixin):
     __tablename__ = "tasks"
-    __table_args__ = (Index("ix_tasks_project_status", "project_id", "status"),)
+    __table_args__ = (
+        UniqueConstraint("team_id", "legacy_id", name="uq_tasks_team_legacy_id"),
+        Index("ix_tasks_project_status", "project_id", "status"),
+        Index("ix_tasks_team_terminal", "team_id", "terminal"),
+        Index("ix_tasks_team_review_claimed_by", "team_id", "review_claimed_by"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    legacy_id: Mapped[int | None] = mapped_column(Integer)
+    terminal: Mapped[str | None] = mapped_column(String(128))
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     status: Mapped[TaskStatus] = mapped_column(
         pg_enum(TaskStatus, "task_status"), nullable=False, default=TaskStatus.DRAFT
     )
     claimed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    review_claimed_by: Mapped[str | None] = mapped_column(String(64))
     published_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
+    construction_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    construction_claimed_by: Mapped[str | None] = mapped_column(String(64))
+    construction_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    construction_released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    construction_opened_by: Mapped[str | None] = mapped_column(String(64))
+    construction_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    construction_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class MaterialGroup(Base, TimestampMixin):
     __tablename__ = "material_groups"
     __table_args__ = (
         UniqueConstraint("project_id", "meter_match_key", name="uq_material_groups_project_meter_key"),
+        UniqueConstraint("team_id", "legacy_id", name="uq_material_groups_team_legacy_id"),
         Index("ix_material_groups_project_meter_key", "project_id", "meter_match_key"),
+        Index("ix_material_groups_team_terminal_status", "team_id", "terminal", "status"),
+        Index("ix_material_groups_team_task_status", "team_id", "legacy_task_id", "status"),
         Index("ix_material_groups_task_status", "task_id", "status"),
     )
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    legacy_id: Mapped[str | None] = mapped_column(String(128))
+    legacy_task_id: Mapped[int | None] = mapped_column(Integer)
+    terminal: Mapped[str | None] = mapped_column(String(128))
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     total_catalog_row_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("total_catalog_rows.id", ondelete="SET NULL")
     )
     task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
-    meter_match_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    meter_match_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     display_meter_no: Mapped[str] = mapped_column(String(128), nullable=False)
     installation_address: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[GroupStatus] = mapped_column(
@@ -248,20 +294,62 @@ class MaterialGroup(Base, TimestampMixin):
     )
     photo_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    reviewer: Mapped[str | None] = mapped_column(String(64))
+    review_note: Mapped[str | None] = mapped_column(Text)
+    exception_status: Mapped[str | None] = mapped_column(String(32))
+    exception_note: Mapped[str | None] = mapped_column(Text)
+    has_archive_blocker: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    exception_reasons: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_photo_imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class Photo(Base, TimestampMixin):
     __tablename__ = "photos"
     __table_args__ = (
+        UniqueConstraint("team_id", "group_id", "legacy_id", name="uq_photos_team_group_legacy_id"),
         UniqueConstraint("group_id", "sha256", name="uq_photos_group_sha256"),
+        Index("ix_photos_team_group_category", "team_id", "group_id", "category"),
+        Index("ix_photos_team_active_group", "team_id", "group_id", "is_active"),
+        Index(
+            "uq_photos_team_group_source_fingerprint_active",
+            "team_id",
+            "group_id",
+            "source_fingerprint",
+            unique=True,
+            postgresql_where=text("source_fingerprint IS NOT NULL AND source_fingerprint <> '' AND is_active = true"),
+        ),
+        Index(
+            "ix_photos_team_source_url_hash",
+            "team_id",
+            "source_url_hash",
+            postgresql_where=text("source_url_hash IS NOT NULL AND source_url_hash <> ''"),
+        ),
+        Index("ix_photos_team_storage", "team_id", "storage_type", "storage_key"),
         Index("ix_photos_group_sha256", "group_id", "sha256"),
     )
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    legacy_id: Mapped[str | None] = mapped_column(String(128))
     group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("material_groups.id", ondelete="CASCADE"), nullable=False)
     import_job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("import_jobs.id", ondelete="SET NULL"))
+    source: Mapped[str | None] = mapped_column(String(64))
+    barcode: Mapped[str | None] = mapped_column(String(255))
+    collector: Mapped[str | None] = mapped_column(String(255))
+    asset_no: Mapped[str | None] = mapped_column(String(255))
+    creator: Mapped[str | None] = mapped_column(String(128))
+    image_url: Mapped[str | None] = mapped_column(Text)
+    image_file_id: Mapped[str | None] = mapped_column(Text)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    source_url_hash: Mapped[str | None] = mapped_column(String(64))
+    source_file_id: Mapped[str | None] = mapped_column(Text)
+    source_fingerprint: Mapped[str | None] = mapped_column(String(128))
+    import_batch_id: Mapped[str | None] = mapped_column(String(128))
+    storage_type: Mapped[str | None] = mapped_column(String(32))
+    storage_bucket: Mapped[str | None] = mapped_column(String(255))
+    storage_key: Mapped[str | None] = mapped_column(Text)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     original_filename: Mapped[str | None] = mapped_column(String(255))
     object_key: Mapped[str] = mapped_column(String(512), nullable=False)
@@ -275,7 +363,21 @@ class Photo(Base, TimestampMixin):
         nullable=False,
         default=PhotoUploadStatus.UPLOADED,
     )
+    category: Mapped[str | None] = mapped_column(String(64))
+    archive_status: Mapped[str | None] = mapped_column(String(32))
+    archive_filename: Mapped[str | None] = mapped_column(String(255))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    classified_by: Mapped[str | None] = mapped_column(String(64))
+    classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    client_batch_id: Mapped[str | None] = mapped_column(String(128))
+    client_photo_id: Mapped[str | None] = mapped_column(String(128))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by: Mapped[str | None] = mapped_column(String(64))
+    delete_reason: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    raw_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class TaskGroup(Base, TimestampMixin):
@@ -293,8 +395,14 @@ class TaskGroup(Base, TimestampMixin):
 
 class ReviewRecord(Base, TimestampMixin):
     __tablename__ = "review_records"
+    __table_args__ = (
+        UniqueConstraint("team_id", "legacy_id", name="uq_review_records_team_legacy_id"),
+        Index("ix_review_records_team_created", "team_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    legacy_id: Mapped[str | None] = mapped_column(String(128))
     group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("material_groups.id", ondelete="CASCADE"), nullable=False)
     task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
     reviewer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
@@ -309,6 +417,7 @@ class ExceptionItem(Base, TimestampMixin):
     __tablename__ = "exceptions"
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("material_groups.id", ondelete="SET NULL"))
     task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
@@ -326,6 +435,7 @@ class ExportJob(Base, TimestampMixin):
     __tablename__ = "export_jobs"
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     job_type: Mapped[ExportJobType] = mapped_column(pg_enum(ExportJobType, "export_job_type"), nullable=False)
     status: Mapped[JobStatus] = mapped_column(
@@ -344,8 +454,15 @@ class ExportJob(Base, TimestampMixin):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        UniqueConstraint("team_id", "legacy_id", name="uq_audit_logs_team_legacy_id"),
+        Index("ix_audit_logs_team_created", "team_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    legacy_id: Mapped[str | None] = mapped_column(String(128))
+    actor_username: Mapped[str | None] = mapped_column(String(64))
     actor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"))
     action: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -356,6 +473,66 @@ class AuditLog(Base):
     user_agent: Mapped[str | None] = mapped_column(String(512))
     before_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     after_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PhotoEvent(Base):
+    __tablename__ = "photo_events"
+    __table_args__ = (
+        UniqueConstraint("team_id", "legacy_id", name="uq_photo_events_team_legacy_id"),
+        Index("ix_photo_events_team_created", "team_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    legacy_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("material_groups.id", ondelete="SET NULL"))
+    photo_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("photos.id", ondelete="SET NULL"))
+    actor: Mapped[str | None] = mapped_column(String(64))
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    previous_category: Mapped[str | None] = mapped_column(String(64))
+    next_category: Mapped[str | None] = mapped_column(String(64))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class UnmatchedRecord(Base, TimestampMixin):
+    __tablename__ = "unmatched_records"
+    __table_args__ = (
+        UniqueConstraint("team_id", "legacy_id", name="uq_unmatched_records_team_legacy_id"),
+        Index("ix_unmatched_records_team_status", "team_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    legacy_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    record_type: Mapped[str] = mapped_column(String(64), nullable=False, default="scan")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    terminal: Mapped[str | None] = mapped_column(String(128))
+    meter_no: Mapped[str | None] = mapped_column(String(128))
+    meter_match_key: Mapped[str | None] = mapped_column(String(128))
+    barcode: Mapped[str | None] = mapped_column(String(255))
+    collector: Mapped[str | None] = mapped_column(String(255))
+    module_asset_no: Mapped[str | None] = mapped_column(String(255))
+    address: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class MigrationRun(Base):
+    __tablename__ = "migration_runs"
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    source_state_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_users_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    state_path: Mapped[str] = mapped_column(Text, nullable=False)
+    users_path: Mapped[str] = mapped_column(Text, nullable=False)
+    counts: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    report: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

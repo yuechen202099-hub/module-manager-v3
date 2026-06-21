@@ -17,14 +17,18 @@ dist/
 .env.local
 
 # Build and runtime
+build/
 uploads/
 exports/
 logs/
 tmp/
+v2-api/local-test-state.json
+v2-api/data/
+v2-api/uploads/
 
 # OS/editor
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
-
+project.private.config.json

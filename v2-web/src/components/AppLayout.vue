@@ -1,35 +1,47 @@
 <template>
-  <el-container class="app-shell">
-    <el-aside width="232px" class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">V2</div>
-        <div>
-          <div class="brand-title">模块更换项目管理器</div>
-          <div class="brand-subtitle">多人审阅版</div>
-        </div>
+  <div class="legacy-layout-shell">
+    <header class="legacy-layout-header">
+      <div>
+        <strong>模块更换项目管理器</strong>
+        <span>V2.4.10 云端协作</span>
       </div>
-      <el-menu router :default-active="$route.path" class="nav-menu">
-        <el-menu-item index="/dashboard">项目看板</el-menu-item>
-        <el-menu-item index="/catalog">清单管理</el-menu-item>
-        <el-menu-item index="/tasks">任务大厅</el-menu-item>
-        <el-menu-item index="/review">资料审阅</el-menu-item>
-        <el-menu-item index="/exceptions">异常处理</el-menu-item>
-        <el-menu-item index="/exports">完整数据</el-menu-item>
-        <el-menu-item index="/settings">系统设置</el-menu-item>
-      </el-menu>
-    </el-aside>
-    <el-container>
-      <el-header class="topbar">
-        <div>
-          <strong>V2.0 云端协作</strong>
-          <span class="muted">4 人同步审阅，进度实时保存</span>
-        </div>
-        <el-button type="primary" plain>发布任务</el-button>
-      </el-header>
-      <el-main class="main-panel">
-        <router-view />
-      </el-main>
-    </el-container>
-  </el-container>
+      <el-tag type="info" effect="plain">兼容布局</el-tag>
+    </header>
+    <main class="legacy-layout-main">
+      <router-view />
+    </main>
+  </div>
 </template>
 
+<style scoped>
+.legacy-layout-shell {
+  min-height: 100vh;
+  background: var(--color-bg, #f4f7fb);
+  color: var(--color-text, #111827);
+}
+
+.legacy-layout-header {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  background: var(--color-surface, #ffffff);
+  border-bottom: 1px solid var(--color-border, #d8e0ea);
+}
+
+.legacy-layout-header div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.legacy-layout-header span {
+  color: var(--color-text-muted, #667085);
+  font-size: 12px;
+}
+
+.legacy-layout-main {
+  padding: 16px;
+}
+</style>

@@ -8,6 +8,8 @@
     <style>
       :root {
         --bg: #f3f5f7;
+        --topbar: #111820;
+        --topbar-2: #182330;
         --surface: #ffffff;
         --surface-2: #f8fafb;
         --surface-3: #eef2f5;
@@ -24,6 +26,15 @@
         --bad: #a32920;
         --radius: 10px;
         --shadow: 0 18px 45px rgba(22, 34, 48, .08);
+        --topbar-height: 64px;
+        --topbar-brand-height: 40px;
+        --topbar-title-line: 20px;
+        --topbar-meta-line: 16px;
+        --page-nav-height: 38px;
+        --page-nav-width: 440px;
+        --panel-head-height: 48px;
+        --metric-card-height: 84px;
+        --summary-board-height: 268px;
       }
       * { box-sizing: border-box; }
       html, body { height: 100%; }
@@ -32,7 +43,7 @@
         font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
         color: var(--ink);
         background:
-          linear-gradient(180deg, #f8fafc 0, var(--bg) 220px),
+          linear-gradient(180deg, rgba(17,24,32,.055) 0, transparent 220px),
           var(--bg);
       }
       button, input, select, textarea { font: inherit; }
@@ -44,12 +55,13 @@
         gap: 6px;
         border: 1px solid var(--accent);
         border-radius: 8px;
-        padding: 0 12px;
+        padding: 0 10px;
         background: var(--accent);
         color: #fff;
         font-weight: 700;
         text-decoration: none;
         cursor: pointer;
+        white-space: nowrap;
       }
       button.secondary, .button.secondary { background: #fff; color: var(--accent-ink); border-color: var(--line-strong); }
       button.ghost { background: transparent; color: var(--muted); border-color: transparent; }
@@ -66,39 +78,108 @@
       .app {
         height: 100vh;
         display: grid;
-        grid-template-rows: 58px minmax(0, 1fr);
+        grid-template-rows: var(--topbar-height) auto minmax(0, 1fr);
       }
       .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 30;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 0 18px;
-        border-bottom: 1px solid var(--line);
-        background: rgba(255, 255, 255, .88);
-        backdrop-filter: blur(12px);
+        height: var(--topbar-height);
+        min-height: var(--topbar-height);
+        gap: 12px;
+        padding: 0 20px;
+        border-bottom: 1px solid rgba(255,255,255,.08);
+        background: linear-gradient(180deg, var(--topbar), var(--topbar-2));
+        box-shadow: 0 14px 34px rgba(17,24,32,.16);
+        overflow: hidden;
       }
-      .brand { display: flex; align-items: center; gap: 12px; }
+      .brand { min-width: 0; width: 230px; height: var(--topbar-brand-height); flex: 0 0 230px; display: flex; align-items: center; gap: 10px; }
       .mark {
-        width: 28px;
+        min-width: 38px;
+        padding: 0 6px;
         height: 28px;
         display: grid;
         place-items: center;
         border-radius: 9px;
-        background: #17212b;
+        background: rgba(255,255,255,.08);
+        border: 1px solid rgba(255,255,255,.12);
         color: #d9f5ff;
         font-size: 13px;
         font-weight: 900;
       }
-      h1 { font-size: 17px; letter-spacing: 0; }
-      .top-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
-      .actions { display: flex; align-items: center; gap: 8px; }
-      .reviewer { width: 150px; }
+      .brand > div:last-child { min-width: 0; display: grid; gap: 0; }
+      h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; line-height: var(--topbar-title-line); letter-spacing: 0; color: #f7fbff; }
+      .top-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8fa0ad; font-size: 12px; line-height: var(--topbar-meta-line); }
+      .actions { min-width: 0; max-width: 100%; flex: 1 1 0; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+      .actions::-webkit-scrollbar { display: none; }
+      .user-pill {
+        max-width: 106px;
+        min-height: 34px;
+        display: inline-flex;
+        align-items: center;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 8px;
+        padding: 0 10px;
+        color: #d7e3ec;
+        background: rgba(255,255,255,.07);
+        font-size: 12px;
+        font-weight: 900;
+      }
+      .topbar input { border-color: rgba(255,255,255,.16); background: rgba(255,255,255,.08); color: #f7fbff; }
+      .topbar input::placeholder { color: #9aabb9; }
+      .topbar .button.secondary, .topbar button.secondary {
+        border-color: rgba(255,255,255,.14);
+        background: rgba(255,255,255,.08);
+        color: #edf7fb;
+      }
+      .topbar .button.secondary:hover, .topbar button.secondary:hover { background: rgba(255,255,255,.14); }
+      .page-nav { width: min(var(--page-nav-width), 100%); height: var(--page-nav-height); min-height: var(--page-nav-height); display: inline-flex; align-items: center; justify-content: space-between; gap: 4px; padding: 3px; border: 1px solid rgba(255,255,255,.11); border-radius: 10px; background: rgba(255,255,255,.05); flex-shrink: 0; }
+      .page-nav .button.secondary { min-width: 0; flex: 1 1 0; justify-content: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; height: 30px; padding: 0 8px; border-color: transparent; background: transparent; color: #b9c8d3; }
+      .page-nav .button.secondary.active { background: #eaf7fb; color: var(--accent-ink); box-shadow: 0 8px 18px rgba(0,0,0,.16); }
+      .page-nav .button.secondary.strong { border-color: rgba(128,214,230,.36); color: #d7f7ff; }
+      .admin-only { display: none !important; }
+      body.can-admin .admin-only { display: inline-flex !important; }
+      .reviewer { display: none; }
+      .identity-pill { min-height: 34px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid rgba(128,214,230,.26); border-radius: 8px; padding: 0 10px; color: #d7f7ff; background: rgba(15,111,143,.18); font-size: 12px; font-weight: 900; white-space: nowrap; }
+      .identity-pill span { color: #9ab0bf; font-weight: 800; }
+      .workspace-tabs {
+        min-height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 10px;
+        padding: 8px 12px 0;
+      }
+      .workspace-version {
+        min-height: 30px;
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid rgba(15,111,143,.18);
+        border-radius: 999px;
+        padding: 0 10px;
+        color: var(--accent-ink);
+        background: var(--accent-soft);
+        font-size: 12px;
+        font-weight: 900;
+        white-space: nowrap;
+      }
+      .workbench-content {
+        min-height: 0;
+        display: grid;
+        grid-template-rows: minmax(0, 1fr);
+      }
       .workspace {
         min-height: 0;
         display: grid;
-        grid-template-columns: 330px 420px minmax(520px, 1fr);
+        grid-template-columns: minmax(280px, 320px) minmax(340px, 390px) minmax(0, 1fr);
         gap: 12px;
-        padding: 12px;
+        padding: 8px 12px 12px;
       }
       .panel {
         min-width: 0;
@@ -112,18 +193,65 @@
         overflow: hidden;
       }
       .panel-head {
-        min-height: 48px;
+        height: var(--panel-head-height);
+        min-height: var(--panel-head-height);
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 10px;
-        padding: 10px 12px;
+        padding: 7px 12px;
         border-bottom: 1px solid var(--line);
-        background: var(--surface-2);
+        background: linear-gradient(180deg, #fff, var(--surface-2));
+        overflow: hidden;
       }
-      .panel-title { font-size: 14px; font-weight: 900; }
-      .panel-subtitle { color: var(--muted); font-size: 12px; }
+      .panel-head > div:first-child { min-width: 0; }
+      .panel-title { font-size: 14px; font-weight: 900; line-height: 1.15; }
+      .panel-subtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; line-height: 1.2; }
       .panel-body { min-height: 0; overflow: auto; padding: 10px; }
+      .group-panel {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        padding: 0;
+        overflow: hidden;
+      }
+      .group-tools {
+        display: grid;
+        gap: 8px;
+        padding: 10px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, #fff, var(--surface-2));
+      }
+      .group-tools input { width: 100%; }
+      .group-filters {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .group-filters button {
+        min-height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 900;
+        cursor: pointer;
+      }
+      .group-filters button.active {
+        border-color: rgba(15, 111, 143, .45);
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+      }
+      .group-filters span {
+        margin-left: 4px;
+        color: inherit;
+        opacity: .72;
+      }
+      .group-list {
+        min-height: 0;
+        overflow: auto;
+        padding: 10px;
+      }
       .task-panel {
         display: grid;
         grid-template-rows: auto minmax(0, 1fr);
@@ -139,25 +267,64 @@
       .filters {
         display: grid;
         grid-template-columns: 1fr;
+        align-content: start;
         gap: 8px;
         padding: 10px;
       }
       .filters .span { grid-column: 1 / -1; }
       .task-board {
         display: grid;
+        align-self: start;
+        align-content: start;
         gap: 8px;
+        min-height: var(--summary-board-height);
         padding: 10px;
         border: 1px solid var(--line);
         border-radius: 10px;
         background: linear-gradient(180deg, #fff, var(--surface-2));
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.72);
       }
       .task-board-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .task-board-title strong { font-size: 13px; }
-      .mini-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-      .mini-stat { min-height: 54px; padding: 7px; border-radius: 8px; background: #fff; border: 1px solid var(--line); }
+      .task-board-main {
+        display: grid;
+        gap: 8px;
+      }
+      .mini-stats {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-auto-rows: 58px;
+        gap: 6px;
+      }
+      .mini-stat {
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 7px;
+        border-radius: 8px;
+        background: #fff;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,.75);
+        border: 1px solid var(--line);
+      }
       .mini-stat span { display: block; color: var(--muted); font-size: 11px; }
       .mini-stat strong { display: block; margin-top: 2px; font-size: 16px; }
-      .mini-chart { display: grid; gap: 6px; padding-top: 2px; }
+      .mini-progress-section {
+        display: grid;
+        gap: 8px;
+        margin-top: 2px;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+      }
+      .mini-progress-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+      }
+      .mini-chart { display: grid; gap: 6px; }
       .mini-chart-row { display: grid; grid-template-columns: 58px 1fr 38px; gap: 7px; align-items: center; font-size: 11px; color: var(--muted); }
       .mini-chart-row .progress { margin: 0; height: 7px; }
       .badge {
@@ -174,22 +341,54 @@
       .badge.ok { color: var(--ok); background: #e8f5ef; }
       .badge.warn { color: var(--warn); background: #fff4d8; }
       .badge.bad { color: var(--bad); background: #fff0ee; }
+      .async-status { min-width: 54px; justify-content: center; }
+      .async-status.loading { color: var(--accent); background: var(--accent-soft); }
+      .async-status.loading::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        margin-right: 5px;
+        border-radius: 999px;
+        border: 2px solid rgba(15,111,143,.25);
+        border-top-color: var(--accent);
+        animation: spin .8s linear infinite;
+      }
       .task, .group, .photo-card {
         border: 1px solid var(--line);
         border-radius: 9px;
         background: #fff;
       }
+      .skeleton-card, .skeleton-stat {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #fff;
+      }
+      .skeleton-card { min-height: 188px; margin-bottom: 8px; }
+      .skeleton-card.compact { min-height: 74px; }
+      .skeleton-stat { min-height: 58px; }
+      .skeleton-card::after, .skeleton-stat::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        transform: translateX(-100%);
+        background: linear-gradient(90deg, transparent, rgba(15,111,143,.12), transparent);
+        animation: shimmer 1.15s ease-in-out infinite;
+      }
+      @keyframes shimmer { to { transform: translateX(100%); } }
+      @keyframes spin { to { transform: rotate(360deg); } }
       .task, .group {
         padding: 10px;
         margin-bottom: 8px;
         cursor: pointer;
       }
       .task {
-        min-height: 188px;
+        min-height: 148px;
         display: grid;
         align-content: space-between;
       }
-      .task:hover, .group:hover, .photo-card:hover { border-color: var(--line-strong); }
+      .task:hover, .group:hover, .photo-card:hover { border-color: var(--line-strong); box-shadow: 0 8px 18px rgba(22,34,48,.06); }
       .task.active, .group.active {
         border-color: var(--accent);
         box-shadow: inset 3px 0 0 var(--accent);
@@ -198,7 +397,7 @@
       .name-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
       .name { font-weight: 900; }
       .small { color: var(--muted); font-size: 12px; line-height: 1.55; }
-      .metric-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
+      .metric-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 9px; }
       .metric { padding: 8px; border-radius: 8px; background: var(--surface-2); }
       .metric span { display: block; color: var(--muted); font-size: 11px; }
       .metric strong { display: block; margin-top: 2px; font-size: 15px; }
@@ -207,37 +406,84 @@
       .empty {
         min-height: 150px;
         display: grid;
-        place-items: center;
+        align-content: center;
+        justify-items: center;
+        gap: 10px;
         color: var(--muted);
         text-align: center;
         padding: 20px;
+      }
+      .empty-card {
+        width: 100%;
+        min-height: 180px;
+        display: grid;
+        align-content: center;
+        justify-items: center;
+        gap: 10px;
+        padding: 22px;
+        border: 1px dashed #c8d4dd;
+        border-radius: 10px;
+        background: linear-gradient(180deg, #fff, var(--surface-2));
+        color: var(--muted);
+      }
+      .empty-card strong { color: var(--ink); font-size: 16px; }
+      .empty-card span { max-width: 520px; font-size: 12px; line-height: 1.6; }
+      .empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 4px; }
+      .folded-note {
+        margin-bottom: 8px;
+        padding: 10px;
+        border: 1px dashed var(--line-strong);
+        border-radius: 9px;
+        background: #fbfdff;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
       }
       .review-shell {
         height: 100%;
         min-height: 0;
         display: grid;
         grid-template-rows: minmax(0, 1fr) auto;
+        gap: 10px;
       }
       .review-main {
         min-height: 0;
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 250px;
-        gap: 10px;
+        grid-template-columns: minmax(520px, 1fr) 196px;
+        gap: 12px;
       }
       .viewer {
         min-height: 0;
+        height: 100%;
         display: grid;
         place-items: center;
         border: 1px solid #111827;
-        border-radius: 10px;
+        border-radius: 8px;
         background: #0c1117;
         overflow: hidden;
+        position: relative;
+      }
+      .viewer.loading::after {
+        content: "图片加载中";
+        position: absolute;
+        inset: auto 16px 16px auto;
+        padding: 7px 10px;
+        border-radius: 999px;
+        background: rgba(15, 23, 42, .82);
+        color: #e6f0f7;
+        font-size: 12px;
+        font-weight: 800;
       }
       .viewer img {
-        max-width: 100%;
-        max-height: calc(100vh - 190px);
+        width: 100%;
+        height: 100%;
+        max-height: calc(100dvh - 285px);
         object-fit: contain;
+        transition: opacity .12s ease;
       }
+      .viewer img.is-loading { opacity: 0; }
+      .viewer img.is-error { opacity: .28; }
+      .viewer img, .photo-card { user-select: none; }
       .placeholder {
         width: min(92%, 560px);
         aspect-ratio: 4 / 3;
@@ -249,27 +495,110 @@
         text-align: center;
         padding: 18px;
       }
-      .photo-list { min-height: 0; overflow: auto; display: grid; gap: 8px; align-content: start; }
-      .photo-card { padding: 9px; cursor: pointer; }
+      .photo-list { min-height: 0; overflow: auto; display: grid; gap: 8px; align-content: start; padding-right: 2px; }
+      .photo-card { min-height: 82px; padding: 8px; cursor: pointer; display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; align-items: center; }
       .photo-card.active { border-color: var(--accent); background: var(--accent-soft); }
+      .photo-thumb {
+        width: 58px;
+        height: 58px;
+        border-radius: 7px;
+        object-fit: cover;
+        background: #0c1117;
+      }
+      .photo-card-body { min-width: 0; display: grid; gap: 4px; }
       .review-tools {
-        margin-top: 10px;
+        margin-top: 0;
         padding: 10px;
         border: 1px solid var(--line);
-        border-radius: 10px;
+        border-radius: 8px;
         background: var(--surface-2);
       }
+      .inline-exception-card {
+        margin-top: 10px;
+        display: grid;
+        gap: 10px;
+        padding: 10px;
+        border: 1px solid rgba(15, 111, 143, .18);
+        border-radius: 10px;
+        background: linear-gradient(180deg, #fff, #f7fbfd);
+      }
+      .inline-exception-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .inline-exception-title {
+        min-width: 0;
+        display: grid;
+        gap: 2px;
+      }
+      .inline-exception-title strong { font-size: 13px; }
+      .inline-exception-title span { color: var(--muted); font-size: 12px; }
+      .issue-row { display: flex; flex-wrap: wrap; gap: 6px; }
+      .issue-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        border-radius: 999px;
+        padding: 0 9px;
+        background: #fff4d8;
+        color: var(--warn);
+        font-size: 12px;
+        font-weight: 900;
+      }
+      .issue-chip.ok { background: #e8f5ef; color: var(--ok); }
+      .exception-form-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .field {
+        min-width: 0;
+        display: grid;
+        gap: 4px;
+      }
+      .field span {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 900;
+      }
+      .field input,
+      .field textarea {
+        width: 100%;
+        min-height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 7px 9px;
+        background: #fff;
+        color: var(--ink);
+      }
+      .field textarea {
+        min-height: 76px;
+        resize: vertical;
+        line-height: 1.45;
+      }
+      .field.wide { grid-column: span 2; }
+      .field.full { grid-column: 1 / -1; }
+      .exception-actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .exception-actions button { min-height: 36px; }
       .meta-grid {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 8px;
-        margin-bottom: 10px;
+        margin-bottom: 8px;
       }
       .meta-item {
         min-width: 0;
-        padding: 9px;
+        padding: 8px 9px;
         border: 1px solid var(--line);
-        border-radius: 9px;
+        border-radius: 8px;
         background: #fff;
       }
       .meta-item span {
@@ -286,22 +615,151 @@
         white-space: nowrap;
         font-size: 13px;
       }
+      .meta-item input {
+        width: 100%;
+        height: 24px;
+        min-height: 24px;
+        margin-top: 2px;
+        border: 0;
+        padding: 0;
+        background: transparent;
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 900;
+        outline: none;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .meta-item input:focus {
+        box-shadow: inset 0 -2px 0 var(--accent);
+      }
+      .photo-file-input { display: none; }
       .category-grid {
         display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 8px;
       }
       .category-key {
-        min-height: 54px;
+        min-height: 46px;
         border: 1px solid var(--line);
-        border-radius: 9px;
+        border-radius: 8px;
         background: #fff;
         color: var(--ink);
-        padding: 7px;
+        padding: 8px 9px;
         justify-content: flex-start;
         text-align: left;
       }
       .category-key.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+      .image-lightbox {
+        position: fixed;
+        inset: 0;
+        z-index: 80;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        gap: 10px;
+        padding: 16px;
+        background: rgba(8, 13, 19, .92);
+        color: #f7fbff;
+      }
+      .image-lightbox[hidden] { display: none; }
+      .lightbox-head,
+      .lightbox-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .lightbox-title { min-width: 0; display: grid; gap: 2px; }
+      .lightbox-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+      .lightbox-title span { color: #9fb0be; font-size: 12px; }
+      .lightbox-close {
+        min-width: 40px;
+        border-color: rgba(255,255,255,.22);
+        background: rgba(255,255,255,.08);
+        color: #f7fbff;
+      }
+      .lightbox-controls {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .lightbox-controls button {
+        min-width: 44px;
+        border-color: rgba(255,255,255,.22);
+        background: rgba(255,255,255,.08);
+        color: #f7fbff;
+      }
+      .lightbox-controls .scale-label {
+        min-width: 58px;
+        min-height: 34px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(255,255,255,.16);
+        border-radius: 8px;
+        color: #d7e3ec;
+        font-size: 12px;
+        font-weight: 900;
+      }
+      .lightbox-stage {
+        min-height: 0;
+        position: relative;
+        display: block;
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 10px;
+        background: #06090d;
+        overflow: hidden;
+        touch-action: none;
+        cursor: default;
+      }
+      .lightbox-stage.can-pan { cursor: grab; }
+      .lightbox-stage.is-panning { cursor: grabbing; }
+      .lightbox-pan {
+        width: 100%;
+        height: 100%;
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transform-origin: center center;
+        will-change: transform;
+      }
+      .lightbox-pan img {
+        display: block;
+        width: auto;
+        height: auto;
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
+        user-select: none;
+        -webkit-user-drag: none;
+      }
+      .lightbox-categories {
+        min-width: 0;
+        flex: 1 1 auto;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .lightbox-categories .category-key {
+        min-height: 40px;
+        border-color: rgba(255,255,255,.18);
+        background: rgba(255,255,255,.08);
+        color: #edf7fb;
+      }
+      .lightbox-categories .category-key.active {
+        border-color: #7ed4e7;
+        background: #eaf7fb;
+        color: var(--accent-ink);
+      }
+      .lightbox-hint {
+        flex: 0 0 auto;
+        color: #9fb0be;
+        font-size: 12px;
+        white-space: nowrap;
+      }
       .keycap {
         display: inline-flex;
         align-items: center;
@@ -314,8 +772,14 @@
         color: #fff;
         font-size: 12px;
       }
-      .tool-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
+      .tool-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+      .tool-row .kbd-note { margin-right: auto; }
       .kbd-note { color: var(--muted); font-size: 12px; }
+      button.danger {
+        background: var(--bad);
+        border-color: var(--bad);
+        color: #fff;
+      }
       .drawer {
         position: fixed;
         inset: 0;
@@ -338,10 +802,12 @@
       .file-import {
         display: grid;
         gap: 8px;
-        padding: 12px;
+        width: min(1680px, 100%);
+        margin: 0 auto;
+        padding: 14px;
         border: 1px solid var(--line);
         border-radius: 10px;
-        background: var(--surface-2);
+        background: linear-gradient(180deg, #fff, var(--surface-2));
       }
       .file-import input {
         width: 100%;
@@ -362,25 +828,93 @@
         z-index: 20;
       }
       .toast.show { opacity: 1; transform: translateY(0); }
+      body.embedded { height: 100%; overflow: hidden; }
       body.embedded .topbar { display: none; }
-      body.embedded .app { height: 100vh; }
-      body.embedded .workspace { padding: 8px; grid-template-columns: 260px minmax(280px, 360px) minmax(0, 1fr); }
+      body.embedded .app { height: 100%; grid-template-rows: auto minmax(0, 1fr); }
+      body.embedded .workspace-tabs { padding: 8px 8px 0; }
+      body.embedded .workspace { height: 100%; padding: 8px; grid-template-columns: 260px minmax(280px, 360px) minmax(0, 1fr); overflow: hidden; }
       @media (max-width: 1180px) {
         .app { height: auto; min-height: 100vh; }
-        .topbar { align-items: flex-start; flex-direction: column; height: auto; padding: 12px; gap: 10px; }
-        .actions { width: 100%; flex-wrap: wrap; }
+        .topbar { padding: 0 12px; }
+        .top-meta, .user-pill, .identity-pill { display: none; }
+        .actions { gap: 6px; }
         .workspace { grid-template-columns: 320px minmax(0, 1fr); }
+        .workspace-tabs { flex-wrap: wrap; }
+        .workspace-version { display: none; }
         .workspace .panel:last-child { grid-column: 1 / -1; min-height: 620px; }
         .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       }
       @media (max-width: 760px) {
-        .workspace { grid-template-columns: 1fr; }
-        .workspace .panel:last-child { grid-column: auto; }
-        .review-main { grid-template-columns: 1fr; }
-        .photo-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 210px; }
+        html, body { min-height: 100dvh; }
+        body.embedded { height: auto; min-height: 100dvh; overflow: auto; }
+        .app, body.embedded .app { height: auto; min-height: 100dvh; }
+        .workspace, body.embedded .workspace {
+          height: auto;
+          min-height: 100dvh;
+          grid-template-columns: 1fr;
+          gap: 8px;
+          overflow: visible;
+          padding: 8px;
+        }
+        .workspace .panel:last-child { grid-column: auto; min-height: 0; }
+        .workspace-tabs, body.embedded .workspace-tabs { padding: 8px; }
+        .panel { min-height: 0; }
+        .panel-body { overflow: visible; padding: 8px; }
+        .group-panel { overflow: hidden; padding: 0; }
+        .group-list { padding: 8px; }
+        .task-list { max-height: 42dvh; }
+        #groups { max-height: 44dvh; overflow: auto; }
+        .review-shell { min-height: 0; }
+        .review-main { grid-template-columns: 1fr; gap: 8px; }
+        .viewer { min-height: 46dvh; border-radius: 9px; }
+        .viewer img { max-height: 56dvh; }
+        .photo-list {
+          min-height: auto;
+          display: flex;
+          gap: 8px;
+          overflow-x: auto;
+          overflow-y: hidden;
+          padding-bottom: 4px;
+          max-height: none;
+          scroll-snap-type: x proximity;
+        }
+        .photo-card {
+          min-width: 138px;
+          grid-template-columns: 52px minmax(0, 1fr);
+          scroll-snap-align: start;
+        }
+        .photo-thumb { width: 52px; height: 52px; }
+        .review-tools {
+          position: sticky;
+          bottom: 0;
+          z-index: 8;
+          margin: 8px -8px -8px;
+          padding: 8px max(8px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+          border-radius: 10px 10px 0 0;
+          background: rgba(248,250,251,.97);
+          backdrop-filter: blur(10px);
+        }
         .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .meta-grid { grid-template-columns: 1fr 1fr; }
-        .category-grid { grid-template-columns: 1fr; }
+        .category-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .category-key { min-height: 48px; }
+        .image-lightbox { padding: 10px; gap: 8px; }
+        .lightbox-foot { align-items: stretch; flex-direction: column; }
+        .lightbox-categories { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .lightbox-hint { white-space: normal; }
+        .tool-row { align-items: stretch; flex-wrap: wrap; }
+        .tool-row button { min-height: 44px; flex: 1 1 136px; }
+        .kbd-note { flex: 1 0 100%; }
+        .exception-form-grid { grid-template-columns: 1fr; }
+        .field.wide, .field.full { grid-column: 1; }
+        .inline-exception-head { align-items: flex-start; }
+        .exception-actions { justify-content: stretch; }
+        .exception-actions button { flex: 1 1 138px; }
+        .panel-head { cursor: pointer; }
+        .panel-head::after { content: "收起"; flex: 0 0 auto; color: var(--muted); font-size: 12px; font-weight: 900; }
+        .panel.is-collapsed { grid-template-rows: auto; }
+        .panel.is-collapsed .panel-body { display: none; }
+        .panel.is-collapsed .panel-head::after { content: "展开"; color: var(--accent); }
       }
     </style>
   </head>
@@ -388,29 +922,39 @@
     <div class="app">
       <header class="topbar">
         <div class="brand">
-          <div class="mark">V2</div>
+          <div class="mark">V2.4.10</div>
           <div>
             <h1>&#20219;&#21153;&#23457;&#38405;&#24037;&#20316;&#21488;</h1>
-            <p class="top-meta">&#34920;&#26684;&#23548;&#20837; / URL &#22270;&#29255; / &#24555;&#25463;&#38190;&#20998;&#31867;</p>
+            <p class="top-meta">&#32456;&#31471;&#20219;&#21153; / &#29031;&#29255;&#23457;&#38405; / &#24555;&#25463;&#38190;&#20998;&#31867;</p>
           </div>
         </div>
         <div class="actions">
-          <input class="reviewer" id="reviewer" value="local-reviewer" aria-label="reviewer" />
-          <a class="button secondary" href="/project-board">&#39033;&#30446;&#30475;&#26495;</a>
-          <a class="button secondary" href="/claim-tasks">&#20219;&#21153;&#39046;&#21462;</a>
-          <a class="button secondary" href="/unmatched">&#26410;&#21305;&#37197;&#36164;&#26009;</a>
-          <button class="secondary" id="openImport">&#23548;&#20837;&#34920;&#26684;&#25968;&#25454;</button>
-          <button id="reload">&#21047;&#26032;</button>
+          <nav class="page-nav" aria-label="页面切换">
+            <a class="button secondary" href="/project-board">项目看板</a>
+            <a class="button secondary" href="/claim-tasks">任务领取</a>
+            <a class="button secondary active" href="/task-hall">审阅工作台</a>
+          </nav>
+          <span class="user-pill" id="sessionUser">&#26410;&#30331;&#24405;</span>
+          <input class="reviewer" id="reviewer" type="hidden" value="reviewer" aria-label="reviewer" />
+          <button class="secondary" id="logout" type="button">&#36864;&#20986;</button>
         </div>
       </header>
-      <main class="workspace">
+      <div class="workspace-tabs">
+        <span class="workspace-version">V2.4.10 生产环境</span>
+      </div>
+      <div class="workbench-content">
+      <main class="workspace review-workspace" id="reviewWorkspace">
         <section class="panel">
           <div class="panel-head">
             <div>
               <h2 class="panel-title">&#20219;&#21153;</h2>
               <p class="panel-subtitle">&#20165;&#26174;&#31034;&#25105;&#24050;&#39046;&#21462;&#30340;&#20219;&#21153;</p>
             </div>
-            <span class="badge" id="taskCount">0</span>
+            <div class="name-row">
+              <span class="badge async-status" id="taskLoadState">等待</span>
+              <span class="badge" id="taskCount">0</span>
+              <button class="secondary" id="reload">&#21047;&#26032;</button>
+            </div>
           </div>
           <div class="panel-body task-panel">
           <div class="filters">
@@ -425,9 +969,24 @@
               <h2 class="panel-title" id="groupTitle">&#36873;&#25321;&#32456;&#31471;</h2>
               <p class="panel-subtitle" id="groupSubtitle">&#39046;&#21462;&#20219;&#21153;&#21518;&#26174;&#31034;&#36164;&#26009;&#32452;</p>
             </div>
-            <span class="badge" id="groupCount">0</span>
+            <div class="name-row">
+              <span class="badge async-status" id="groupLoadState">等待</span>
+              <span class="badge" id="groupCount">0</span>
+            </div>
           </div>
-          <div class="panel-body" id="groups"></div>
+          <div class="panel-body group-panel">
+            <div class="group-tools">
+              <input id="groupSearch" type="search" placeholder="&#25628;&#32034;&#34920;&#21495;&#12289;&#22320;&#22336;&#25110;&#32456;&#31471;&#65288;&#21487;&#26597;&#25214;&#24050;&#25240;&#21472;&#26410;&#26045;&#24037;&#32452;&#65289;" />
+              <div class="group-filters" id="reviewGroupFilters" role="group" aria-label="资料组状态筛选">
+                <button class="active" type="button" data-review-group-filter="all">全部 <span id="reviewFilterAll">0</span></button>
+                <button type="button" data-review-group-filter="reviewable">可审阅 <span id="reviewFilterReviewable">0</span></button>
+                <button type="button" data-review-group-filter="exception">异常 <span id="reviewFilterException">0</span></button>
+                <button type="button" data-review-group-filter="archived">已归档 <span id="reviewFilterArchived">0</span></button>
+                <button type="button" data-review-group-filter="unconstructed">未施工 <span id="reviewFilterUnconstructed">0</span></button>
+              </div>
+            </div>
+            <div class="group-list" id="groups"></div>
+          </div>
         </section>
         <section class="panel">
           <div class="panel-head">
@@ -440,6 +999,31 @@
           <div class="panel-body" id="review"></div>
         </section>
       </main>
+      </div>
+    </div>
+    <div class="image-lightbox" id="imageLightbox" hidden>
+      <div class="lightbox-head">
+        <div class="lightbox-title">
+          <strong id="lightboxTitle">&#22823;&#22270;&#23457;&#38405;</strong>
+          <span id="lightboxMeta">1-4 &#20998;&#31867;&#65292;Enter &#24402;&#26723;&#65292;Esc &#20851;&#38381;</span>
+        </div>
+        <div class="lightbox-controls">
+          <button id="lightboxZoomOut" type="button">-</button>
+          <button id="lightboxReset" type="button">适屏</button>
+          <button id="lightboxZoomIn" type="button">+</button>
+          <span class="scale-label" id="lightboxScale">适屏</span>
+          <button class="lightbox-close" id="closeLightbox" type="button">Esc</button>
+        </div>
+      </div>
+      <div class="lightbox-stage" id="lightboxStage">
+        <div class="lightbox-pan" id="lightboxPan">
+          <img id="lightboxImage" alt="&#22823;&#22270;&#23457;&#38405;" />
+        </div>
+      </div>
+      <div class="lightbox-foot">
+        <div class="lightbox-categories" id="lightboxCategories"></div>
+        <div class="lightbox-hint">&#21452;&#20987;&#22270;&#29255;&#25171;&#24320;&#22823;&#22270;&#65292;&#21333;&#20987;&#32972;&#26223;&#25110; Esc &#36820;&#22238;&#23457;&#38405;&#21488;</div>
+      </div>
     </div>
     <div class="drawer" id="importDrawer">
       <div class="drawer-panel">
@@ -463,23 +1047,152 @@
       </div>
     </div>
     <div class="toast" id="toast"></div>
+    <script src="/static/image_upload_utils.js?v=20260615-compress"></script>
     <script>
-      if (new URLSearchParams(location.search).get("embedded") === "1") document.body.classList.add("embedded");
-      const state = { tasks: [], groups: [], group: null, photo: null, reviewer: "local-reviewer", taskId: null, task: null };
+      const routeParams = new URLSearchParams(location.search);
+      if (routeParams.get("embedded") === "1") document.body.classList.add("embedded");
+      const session = JSON.parse(localStorage.getItem("module_manager_session") || "null");
+      if (!document.body.classList.contains("embedded") && !session?.access_token) location.href = "/login";
+      const sessionRoles = session?.user?.roles || [];
+      const teamId = session?.team_id || session?.user?.team_id || localStorage.getItem("module_manager_team_id") || "default-team";
+      localStorage.setItem("module_manager_team_id", teamId);
+      if (sessionRoles.includes("admin")) document.body.classList.add("can-admin");
+      const sessionUser = document.querySelector("#sessionUser");
+      if (sessionUser) sessionUser.textContent = session?.user?.name || session?.user?.username || "用户";
+      syncPageNav();
+      document.querySelector("#logout")?.addEventListener("click", () => {
+        localStorage.removeItem("module_manager_session");
+        localStorage.removeItem("module_manager_reviewer");
+        location.href = "/login";
+      });
+      function initialReviewerIdentity() {
+        if (session?.user?.username) return session.user.username;
+        return localStorage.getItem("module_manager_reviewer") || "reviewer";
+      }
+      const state = {
+        tasks: [],
+        groups: [],
+        group: null,
+        photo: null,
+        reviewer: initialReviewerIdentity(),
+        taskId: null,
+        task: null,
+        groupQuery: "",
+        groupStatusFilter: "all",
+        tasksLoading: false,
+        tasksLoaded: false,
+        groupsLoading: false,
+        groupsLoaded: false,
+        groupLoading: false,
+        archiving: false,
+        archiveQueue: Promise.resolve(),
+        pendingArchives: new Set(),
+        completedGroupRefreshId: null,
+        lastInteractionAt: Date.now(),
+        taskRequestSeq: 0,
+        groupsRequestSeq: 0,
+        groupRequestSeq: 0,
+        imageCache: new Set(),
+        reviewImageObjectUrl: "",
+        lightboxImageObjectUrl: "",
+        largeViewerOpen: false,
+        largeViewerScale: 1,
+        largeViewerX: 0,
+        largeViewerY: 0,
+        largeViewerDragging: false,
+        largeViewerDragX: 0,
+        largeViewerDragY: 0,
+        largeViewerPhotoId: null,
+      };
       const categories = {
         before_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u524d",
-        after_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u540e",
-        module_meter: "\u6a21\u5757\u4e0e\u7535\u80fd\u8868",
         collector_barcode: "\u91c7\u96c6\u5668\u6761\u5f62\u7801",
+        module_meter: "\u6a21\u5757\u4e0e\u7535\u80fd\u8868",
+        after_box: "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u540e",
       };
       const categoryKeys = Object.keys(categories);
       const $ = (selector) => document.querySelector(selector);
       const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+      const authHeaders = () => session?.access_token ? { Authorization: `${session.token_type || "bearer"} ${session.access_token}` } : {};
+      const teamHeaders = (extra = {}) => ({ "X-Team-Id": teamId, ...authHeaders(), ...extra });
+      function syncPageNav() {
+        const currentPath = location.pathname;
+        document.querySelectorAll(".page-nav a").forEach((link) => {
+          const target = new URL(link.getAttribute("href"), location.origin);
+          link.classList.toggle("active", target.pathname === currentPath && !target.hash);
+        });
+      }
+      function syncReviewerIdentity() {
+        const reviewer = state.reviewer || initialReviewerIdentity();
+        const reviewerInput = $("#reviewer");
+        const reviewerLabel = $("#reviewerLabel");
+        if (reviewerInput) reviewerInput.value = reviewer;
+        if (reviewerLabel) reviewerLabel.textContent = reviewer;
+        localStorage.setItem("module_manager_reviewer", reviewer);
+      }
       async function api(path, options = {}) {
-        const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+        const response = await fetch(path, { ...options, headers: teamHeaders({ "Content-Type": "application/json", ...(options.headers || {}) }) });
         const payload = await response.json();
         if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
         return payload.data;
+      }
+      async function formApi(path, formData) {
+        const response = await fetch(path, { method: "POST", headers: teamHeaders(), body: formData });
+        const payload = await response.json();
+        if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
+        return payload.data;
+      }
+      function photoOriginalUrl(photo) {
+        return photo?.image_url || photo?.source_url || "";
+      }
+      function photoUrlVersion(photo) {
+        return encodeURIComponent(String(photo?.delivery_cache_version || photo?.sha256 || photo?.storage_key || photo?.id || "v1"));
+      }
+      function photoContentUrl(photo, kind = "preview") {
+        if (!state.group?.id || !photo?.id) return "";
+        return `/local-test/groups/${encodeURIComponent(state.group.id)}/photos/${encodeURIComponent(photo.id)}/content?kind=${encodeURIComponent(kind)}&v=${photoUrlVersion(photo)}`;
+      }
+      function photoDirectPreviewUrl(photo) {
+        return photo?.delivery_cache_url || photo?.preview_url || photo?.thumbnail_url || photoOriginalUrl(photo);
+      }
+      function photoDirectThumbnailUrl(photo) {
+        return photo?.thumbnail_url || photo?.delivery_cache_url || photo?.preview_url || photoOriginalUrl(photo);
+      }
+      function photoPreviewUrl(photo) {
+        return photoContentUrl(photo, "preview") || photoDirectPreviewUrl(photo);
+      }
+      function photoThumbnailUrl(photo) {
+        return photoContentUrl(photo, "thumbnail") || photoDirectThumbnailUrl(photo);
+      }
+      function hasPhotoSource(photo) {
+        return Boolean(photo?.image_url || photo?.source_url || photo?.storage_key || photo?.preview_url || photo?.thumbnail_url);
+      }
+      async function downloadExcel(path, body, fallbackName) {
+        const response = await fetch(path, {
+          method: "POST",
+          headers: teamHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify(body),
+        });
+        if (!response.ok) {
+          let message = response.statusText;
+          try {
+            const payload = await response.json();
+            message = payload.detail || payload.error?.message || message;
+          } catch {
+            message = await response.text() || message;
+          }
+          throw new Error(message);
+        }
+        const blob = await response.blob();
+        const disposition = response.headers.get("Content-Disposition") || "";
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(blob);
+        link.download = match?.[1] || fallbackName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(link.href);
       }
       function toast(message, bad = false) {
         $("#toast").textContent = message;
@@ -488,13 +1201,615 @@
         clearTimeout(toast.timer);
         toast.timer = setTimeout(() => $("#toast").classList.remove("show"), 2400);
       }
+      function notifyParentRefresh(reason, payload = {}) {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: "module-manager:data-mutated", reason, payload }, location.origin);
+        }
+      }
       function pct(value) { return `${Math.round((Number(value) || 0) * 100)}%`; }
       function activePhotoIndex() { return (state.group?.photos || []).findIndex((photo) => photo.id === state.photo?.id); }
-      function activeGroupIndex() { return state.groups.findIndex((group) => group.id === state.group?.id); }
+      function activeGroupIndex(groups = visibleReviewGroups()) { return groups.findIndex((group) => group.id === state.group?.id); }
       function currentTask() { return state.task || state.tasks.find((task) => task.id === state.taskId) || null; }
       function canReviewCurrentTask() { return currentTask()?.claimed_by === state.reviewer; }
-      function groupDone(group) { return Boolean(group?.photos?.length) && group.photos.every((photo) => photo.archive_status === "archived"); }
+      function groupHasDisplayablePhoto(group) { return (group?.photos || []).some(hasPhotoSource); }
+      function isPendingArchivePhoto(photo) { return Boolean(photo && state.pendingArchives.has(photo.id)); }
+      function isReviewablePhoto(photo) {
+        return hasPhotoSource(photo) && photo.archive_status !== "archived" && !isPendingArchivePhoto(photo);
+      }
+      function pickReviewPhoto(photos, preferredPhotoId = null) {
+        if (!photos.length) return null;
+        if (preferredPhotoId) {
+          const preferred = photos.find((photo) => photo.id === preferredPhotoId);
+          if (preferred && !isPendingArchivePhoto(preferred)) return preferred;
+        }
+        if (state.photo) {
+          const current = photos.find((photo) => photo.id === state.photo.id);
+          if (current?.image_url && !isPendingArchivePhoto(current)) return current;
+        }
+        return photos.find(isReviewablePhoto)
+          || photos.find((photo) => photo.image_url && !isPendingArchivePhoto(photo))
+          || photos.find((photo) => photo.image_url)
+          || photos[0];
+      }
+      function groupDone(group) { return group?.status === "approved" || (Boolean(group?.photos?.length) && group.photos.every((photo) => photo.archive_status === "archived")); }
+      function isUnclassifiedGroup(group) {
+        if (!group || groupDone(group) || group.has_archive_blocker) return false;
+        if (["approved", "exception", "unmatched"].includes(group.status)) return false;
+        return Number(group.photo_count || group.photos?.length || 0) > 0;
+      }
+      function isFoldedUnconstructedGroup(group) {
+        if (!group || group.has_archive_blocker) return false;
+        if (["exception", "approved", "unmatched"].includes(group.status)) return false;
+        return Number(group.photo_count || group.photos?.length || 0) === 0;
+      }
+      function reviewGroupStatus(group) {
+        if (!group) return "reviewable";
+        if (group.has_archive_blocker || group.status === "exception") return "exception";
+        if (groupDone(group)) return "archived";
+        if (Number(group.photo_count || group.photos?.length || 0) === 0) return "unconstructed";
+        return "reviewable";
+      }
+      function matchesGroupQuery(group, query = state.groupQuery) {
+        const keyword = String(query || "").trim().toLowerCase();
+        if (!keyword) return true;
+        return [
+          group?.meter_no,
+          group?.terminal,
+          group?.address,
+          group?.reviewer,
+          group?.collector,
+          group?.module_asset_no,
+        ].some((value) => String(value || "").toLowerCase().includes(keyword));
+      }
+      function visibleReviewGroups() {
+        const hasQuery = Boolean(String(state.groupQuery || "").trim());
+        return state.groups.filter((group) => {
+          if (!matchesGroupQuery(group)) return false;
+          const status = reviewGroupStatus(group);
+          if (state.groupStatusFilter !== "all" && status !== state.groupStatusFilter) return false;
+          return hasQuery || state.groupStatusFilter !== "all" || status !== "unconstructed";
+        });
+      }
+      function foldedReviewGroupCount() {
+        if (String(state.groupQuery || "").trim() || state.groupStatusFilter !== "all") return 0;
+        return state.groups.filter(isFoldedUnconstructedGroup).length;
+      }
+      function reviewGroupFilterCounts() {
+        const groups = state.groups.filter((group) => matchesGroupQuery(group));
+        const counts = { all: groups.length, reviewable: 0, exception: 0, archived: 0, unconstructed: 0 };
+        groups.forEach((group) => {
+          const status = reviewGroupStatus(group);
+          counts[status] = (counts[status] || 0) + 1;
+        });
+        return counts;
+      }
+      function renderReviewGroupFilters() {
+        const counts = reviewGroupFilterCounts();
+        const map = {
+          all: "#reviewFilterAll",
+          reviewable: "#reviewFilterReviewable",
+          exception: "#reviewFilterException",
+          archived: "#reviewFilterArchived",
+          unconstructed: "#reviewFilterUnconstructed",
+        };
+        Object.entries(map).forEach(([key, selector]) => {
+          const node = $(selector);
+          if (node) node.textContent = `${counts[key] || 0}`;
+        });
+        $("#reviewGroupFilters")?.querySelectorAll("[data-review-group-filter]").forEach((button) => {
+          button.classList.toggle("active", button.dataset.reviewGroupFilter === state.groupStatusFilter);
+        });
+      }
+      function scrollActiveGroupIntoView() {
+        requestAnimationFrame(() => {
+          const active = $("#groups .group.active");
+          if (active) active.scrollIntoView({ block: "nearest", inline: "nearest" });
+        });
+      }
+      function findFirstUnclassifiedGroup(excludeGroupId = null) {
+        return state.groups.find((group) => String(group.id) !== String(excludeGroupId) && isUnclassifiedGroup(group)) || null;
+      }
+      function markInteraction() { state.lastInteractionAt = Date.now(); }
+      function shouldDeferBackgroundRefresh() {
+        return state.archiving || state.pendingArchives.size > 0 || state.groupLoading || Date.now() - state.lastInteractionAt < 3200;
+      }
+      function fileExtensionFromUrl(url) {
+        try {
+          const path = new URL(url || "", location.href).pathname;
+          const match = path.match(/\.[a-zA-Z0-9]{1,8}$/);
+          return match ? match[0] : ".jpg";
+        } catch {
+          return ".jpg";
+        }
+      }
+      function statusLabel(group) {
+        const labels = {
+          pending: "\u5f85\u5ba1\u9605",
+          incomplete: "\u7f3a\u7167\u7247",
+          approved: "\u5df2\u5f52\u6863",
+          exception: "\u5f02\u5e38",
+          unmatched: "\u672a\u5339\u914d",
+        };
+        return labels[group?.status] || group?.status || "\u672a\u77e5";
+      }
+      function groupPhotoField(field) {
+        const photos = state.group?.photos || [];
+        const source = photos.find((photo) => photo?.[field]) || photos[0] || {};
+        return source[field] || "";
+      }
+      function groupIssueReasons(group = state.group) {
+        const reasons = [];
+        for (const value of group?.exception_reasons || []) {
+          if (value && !reasons.includes(value)) reasons.push(value);
+        }
+        for (const value of [group?.exception_note, group?.status === "exception" ? group?.review_note : ""]) {
+          const text = String(value || "").trim();
+          if (text && !reasons.includes(text)) reasons.push(text);
+        }
+        return reasons;
+      }
+      function renderInlineExceptionTools(options = {}) {
+        const group = state.group;
+        if (!group) return "";
+        const reasons = groupIssueReasons(group);
+        const photoCount = Number(group.photo_count || group.photos?.length || 0);
+        const note = group.exception_note || (group.status === "exception" ? group.review_note : "") || reasons.join("\uff1b");
+        const statusClass = group.status === "exception" || group.has_archive_blocker ? "warn" : group.status === "approved" ? "ok" : "";
+        const helperText = options.noPhotos
+          ? "\u8be5\u7ec4\u6682\u65e0\u7167\u7247\uff0c\u53ef\u5148\u4fee\u6b63\u8868\u53f7\u3001\u91c7\u96c6\u5668\u3001\u6a21\u5757\u53f7\uff0c\u518d\u70b9\u8865\u56fe\u3002"
+          : "\u8d44\u6599\u9879\u4fee\u6b63\u5df2\u5e76\u5165\u5ba1\u9605\u6d41\u7a0b\uff0c\u5730\u5740\u53ea\u6765\u81ea\u603b\u6e05\u5355\uff0c\u8fd9\u91cc\u4e0d\u518d\u4fee\u6539\u5730\u5740\u3002";
+        return `
+          <section class="inline-exception-card" aria-label="\u5ba1\u9605\u4e2d\u5f02\u5e38\u5904\u7406">
+            <div class="inline-exception-head">
+              <div class="inline-exception-title">
+                <strong>\u8d44\u6599\u7ec4\u4fee\u6b63</strong>
+                <span>${helperText}</span>
+              </div>
+              <span class="badge ${statusClass}">${esc(statusLabel(group))} / ${photoCount} \u5f20</span>
+            </div>
+            <div class="issue-row">
+              ${reasons.length
+                ? reasons.map((reason) => `<span class="issue-chip">${esc(reason)}</span>`).join("")
+                : `<span class="issue-chip ok">\u6682\u65e0\u7cfb\u7edf\u5f02\u5e38</span>`}
+            </div>
+            <div class="exception-form-grid">
+              <label class="field"><span>\u8868\u53f7</span><input id="inlineMeter" value="${esc(group.meter_no || "")}" /></label>
+              <label class="field"><span>\u91c7\u96c6\u5668</span><input id="inlineCollector" value="${esc(groupPhotoField("collector"))}" /></label>
+              <label class="field"><span>\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7</span><input id="inlineModule" value="${esc(groupPhotoField("asset_no"))}" /></label>
+              <label class="field"><span>\u5f02\u5e38\u7c7b\u578b</span><select id="inlineExceptionCategory">
+                <option value="meter_error">\u8868\u53f7\u9519\u8bef</option>
+                <option value="collector_error">\u91c7\u96c6\u5668\u53f7\u9519\u8bef</option>
+                <option value="module_error">\u6a21\u5757\u53f7\u9519\u8bef</option>
+                <option value="photo_error">\u7167\u7247\u9519\u8bef</option>
+                <option value="missing_photo">\u7167\u7247\u7f3a\u5931</option>
+                <option value="site_blocked">\u73b0\u573a\u65e0\u6cd5\u65bd\u5de5</option>
+                <option value="device_mismatch">\u8bbe\u5907\u4e0d\u7b26</option>
+                <option value="other">\u5176\u4ed6</option>
+              </select></label>
+              <label class="field wide"><span>\u5f02\u5e38\u8bf4\u660e</span><input id="inlineExceptionNote" value="${esc(note)}" placeholder="\u53ef\u9009\uff0c\u4ec5\u6807\u8bb0\u5f02\u5e38\u65f6\u4f7f\u7528" /></label>
+            </div>
+            <input class="photo-file-input" id="inlinePhotoFiles" type="file" accept="image/*" multiple />
+            <div class="exception-actions">
+              <button class="secondary" id="saveInlineMetadata" type="button">\u4fdd\u5b58\u8d44\u6599\u7ec4</button>
+              <button class="secondary" id="chooseInlinePhotos" type="button">\u8865\u56fe</button>
+              <button class="danger" id="markInlineException" type="button">\u8f6c\u5f02\u5e38\u5de5\u5355</button>
+              <button class="danger" id="resetInlineUnconstructed" type="button">\u56de\u9000\u672a\u65bd\u5de5</button>
+              <button class="secondary" id="restoreInlinePending" type="button">\u6062\u590d\u5f85\u5ba1</button>
+              <button id="exportInlineExceptions" type="button">\u5bfc\u51fa\u5f02\u5e38\u8868\u8ba1</button>
+            </div>
+          </section>`;
+      }
+      function optimisticArchivedPhoto(photo, category) {
+        const label = categories[category] || photo.category_label || "\u5df2\u5206\u7c7b";
+        return {
+          ...photo,
+          category,
+          category_label: label,
+          classified_by: state.reviewer,
+          classified_at: new Date().toISOString(),
+          archive_status: "archived",
+          archive_filename: `${label}${fileExtensionFromUrl(photo.image_url)}`,
+          archived_at: new Date().toISOString(),
+        };
+      }
+      function pickNextPendingPhoto(currentPhotoId) {
+        const photos = state.group?.photos || [];
+        if (!photos.length) return null;
+        const currentIndex = photos.findIndex((photo) => String(photo.id) === String(currentPhotoId));
+        const after = photos.slice(Math.max(0, currentIndex + 1)).find(isReviewablePhoto);
+        if (after) return after;
+        return photos.find(isReviewablePhoto) || null;
+      }
+      function syncActiveGroupSummary(summary) {
+        if (!state.group || !summary || String(state.group.id) !== String(summary.id)) return;
+        state.group = { ...state.group, ...summary, photos: state.group.photos || summary.photos || [] };
+      }
+      function syncGroupSummary(summary) {
+        if (!summary) return;
+        state.groups = state.groups.map((item) => (
+          String(item.id) === String(summary.id)
+            ? { ...item, ...summary, photos: item.photos || [] }
+            : item
+        ));
+        syncActiveGroupSummary(summary);
+      }
+      function syncGroupListEntry(group = state.group) {
+        if (!group) return;
+        state.groups = state.groups.map((item) => (
+          String(item.id) === String(group.id)
+            ? { ...item, ...group, photos: group.photos || item.photos || [] }
+            : item
+        ));
+      }
+      function applyPhotoUpdate(photo) {
+        if (!state.group || !photo) return;
+        const activePhotoId = state.photo?.id;
+        const photos = (state.group.photos || []).map((item) => (String(item.id) === String(photo.id) ? { ...item, ...photo } : item));
+        state.group = { ...state.group, photos };
+        state.photo = photos.find((item) => String(item.id) === String(activePhotoId)) || photos.find((item) => String(item.id) === String(photo.id)) || state.photo;
+        syncGroupListEntry();
+      }
+      function setReviewBusy(isBusy) {
+        state.archiving = isBusy;
+        $("#archivePhoto")?.toggleAttribute("disabled", isBusy);
+        $("#archiveGroup")?.toggleAttribute("disabled", isBusy);
+        $("#deletePhoto")?.toggleAttribute("disabled", isBusy);
+        $("#saveInlineMetadata")?.toggleAttribute("disabled", isBusy);
+        $("#chooseInlinePhotos")?.toggleAttribute("disabled", isBusy);
+        $("#markInlineException")?.toggleAttribute("disabled", isBusy);
+        $("#resetInlineUnconstructed")?.toggleAttribute("disabled", isBusy);
+        $("#restoreInlinePending")?.toggleAttribute("disabled", isBusy);
+        if (isBusy) $("#photoState").textContent = "\u5f52\u6863\u4e2d";
+      }
+      function refreshArchiveControls() {
+        const currentPhotoPending = state.photo ? state.pendingArchives.has(state.photo.id) : false;
+        $("#archivePhoto")?.toggleAttribute("disabled", state.archiving || currentPhotoPending);
+        $("#archiveGroup")?.toggleAttribute("disabled", state.archiving || state.pendingArchives.size > 0);
+        $("#deletePhoto")?.toggleAttribute("disabled", state.archiving || currentPhotoPending);
+        $("#saveInlineMetadata")?.toggleAttribute("disabled", state.archiving);
+        $("#chooseInlinePhotos")?.toggleAttribute("disabled", state.archiving);
+      }
+      function setDraftCategory(category) {
+        if (!state.photo) return;
+        state.photo.category = category;
+        $("#review").querySelectorAll("[data-category]").forEach((button) => {
+          button.classList.toggle("active", button.dataset.category === category);
+        });
+        renderLightbox();
+      }
+      async function fetchImageObjectUrl(url) {
+        const response = await fetch(url, { headers: teamHeaders() });
+        if (!response.ok) throw new Error(response.statusText || `HTTP ${response.status}`);
+        const blob = await response.blob();
+        if (!blob.type.startsWith("image/")) throw new Error("Response is not an image");
+        return URL.createObjectURL(blob);
+      }
+      function replaceReviewImageObjectUrl(url) {
+        if (state.reviewImageObjectUrl && state.reviewImageObjectUrl !== url) {
+          URL.revokeObjectURL(state.reviewImageObjectUrl);
+        }
+        state.reviewImageObjectUrl = url || "";
+      }
+      function replaceLightboxImageObjectUrl(url) {
+        if (state.lightboxImageObjectUrl && state.lightboxImageObjectUrl !== url) {
+          URL.revokeObjectURL(state.lightboxImageObjectUrl);
+        }
+        state.lightboxImageObjectUrl = url || "";
+      }
+      function bindReviewImageLoading() {
+        const image = $("#reviewImage");
+        const viewer = image?.closest(".viewer");
+        if (!image || !viewer) return;
+        const primary = image.dataset.src || "";
+        const fallback = image.dataset.fallback || "";
+        const token = `${state.group?.id || ""}:${state.photo?.id || ""}:${primary}`;
+        image.dataset.token = token;
+        viewer.classList.add("loading");
+        image.classList.add("is-loading");
+        image.onload = () => {
+          if (image.dataset.token !== token) return;
+          viewer.classList.remove("loading");
+          image.classList.remove("is-loading", "is-error");
+        };
+        image.onerror = () => {
+          if (image.dataset.token !== token) return;
+          if (fallback && image.src !== fallback) {
+            image.dataset.fallback = "";
+            image.src = fallback;
+            return;
+          }
+          viewer.classList.remove("loading");
+          image.classList.remove("is-loading");
+          image.classList.add("is-error");
+          toast("图片加载失败，请切换图片或刷新后重试", true);
+        };
+        fetchImageObjectUrl(primary)
+          .then((objectUrl) => {
+            if (image.dataset.token !== token) {
+              URL.revokeObjectURL(objectUrl);
+              return;
+            }
+            replaceReviewImageObjectUrl(objectUrl);
+            image.src = objectUrl;
+          })
+          .catch(() => {
+            if (image.dataset.token !== token) return;
+            replaceReviewImageObjectUrl("");
+            image.src = fallback || primary;
+          });
+      }
+      function clampLightboxScale(value) {
+        return Math.max(1, Math.min(5, Number(value) || 1));
+      }
+      function updateLightboxTransform() {
+        const pan = $("#lightboxPan");
+        const stage = $("#lightboxStage");
+        if (!pan || !stage) return;
+        if (state.largeViewerScale <= 1) {
+          state.largeViewerScale = 1;
+          state.largeViewerX = 0;
+          state.largeViewerY = 0;
+        } else {
+          const rect = stage.getBoundingClientRect();
+          const maxX = rect.width * (state.largeViewerScale - 1) / 2;
+          const maxY = rect.height * (state.largeViewerScale - 1) / 2;
+          state.largeViewerX = Math.max(-maxX, Math.min(maxX, state.largeViewerX));
+          state.largeViewerY = Math.max(-maxY, Math.min(maxY, state.largeViewerY));
+        }
+        pan.style.transform = `translate(${state.largeViewerX}px, ${state.largeViewerY}px) scale(${state.largeViewerScale})`;
+        stage.classList.toggle("can-pan", state.largeViewerScale > 1);
+        stage.classList.toggle("is-panning", state.largeViewerDragging);
+        const label = $("#lightboxScale");
+        if (label) label.textContent = state.largeViewerScale <= 1 ? "适屏" : `${Math.round(state.largeViewerScale * 100)}%`;
+      }
+      function resetLightboxView() {
+        state.largeViewerScale = 1;
+        state.largeViewerX = 0;
+        state.largeViewerY = 0;
+        state.largeViewerDragging = false;
+        updateLightboxTransform();
+      }
+      function zoomLightbox(delta) {
+        state.largeViewerScale = clampLightboxScale(state.largeViewerScale * delta);
+        updateLightboxTransform();
+      }
+      function renderLightbox() {
+        const box = $("#imageLightbox");
+        if (!box) return;
+        const photo = state.photo;
+        const url = photoPreviewUrl(photo);
+        if (!state.largeViewerOpen || !photo || !url) {
+          box.hidden = true;
+          return;
+        }
+        box.hidden = false;
+        const lightboxImage = $("#lightboxImage");
+        const fallbackUrl = photoDirectPreviewUrl(photo);
+        const lightboxToken = `${state.group?.id || ""}:${photo.id || ""}:${url}`;
+        lightboxImage.dataset.token = lightboxToken;
+        lightboxImage.onerror = () => {
+          if (fallbackUrl && lightboxImage.src !== fallbackUrl) {
+            replaceLightboxImageObjectUrl("");
+            lightboxImage.src = fallbackUrl;
+          }
+        };
+        fetchImageObjectUrl(url)
+          .then((objectUrl) => {
+            if (lightboxImage.dataset.token !== lightboxToken) {
+              URL.revokeObjectURL(objectUrl);
+              return;
+            }
+            replaceLightboxImageObjectUrl(objectUrl);
+            lightboxImage.src = objectUrl;
+          })
+          .catch(() => {
+            if (lightboxImage.dataset.token !== lightboxToken) return;
+            replaceLightboxImageObjectUrl("");
+            lightboxImage.src = fallbackUrl || url;
+          });
+        if (state.largeViewerPhotoId !== photo.id) {
+          state.largeViewerPhotoId = photo.id;
+          resetLightboxView();
+        }
+        $("#lightboxTitle").textContent = `${state.group?.meter_no || photo.barcode || "大图审阅"} / #${activePhotoIndex() + 1 || 1}`;
+        $("#lightboxMeta").textContent = `${photo.category_label || categories[photo.category] || "未分类"} · 1-4 分类，Enter 归档，Esc 关闭`;
+        $("#lightboxCategories").innerHTML = categoryKeys.map((key, index) => `
+          <button class="category-key ${photo.category === key ? "active" : ""}" data-lightbox-category="${key}" type="button">
+            <span class="keycap">${index + 1}</span>${categories[key]}
+          </button>
+        `).join("");
+        $("#lightboxCategories").querySelectorAll("[data-lightbox-category]").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.stopPropagation();
+            markInteraction();
+            setDraftCategory(button.dataset.lightboxCategory);
+          });
+        });
+        updateLightboxTransform();
+      }
+      function openLightbox(options = {}) {
+        if (!state.photo?.image_url) {
+          toast("当前图片还没有可预览的大图", true);
+          return;
+        }
+        if (options.reset !== false) resetLightboxView();
+        state.largeViewerOpen = true;
+        renderLightbox();
+      }
+      function closeLightbox() {
+        state.largeViewerOpen = false;
+        state.largeViewerDragging = false;
+        state.largeViewerPhotoId = null;
+        renderLightbox();
+      }
+      function bindInlineExceptionTools() {
+        $("#saveInlineMetadata")?.addEventListener("click", () => saveInlineMetadata().catch((error) => toast(error.message, true)));
+        $("#chooseInlinePhotos")?.addEventListener("click", () => $("#inlinePhotoFiles")?.click());
+        $("#inlinePhotoFiles")?.addEventListener("change", () => uploadInlinePhotos().catch((error) => toast(error.message, true)));
+        $("#uploadInlinePhotos")?.addEventListener("click", () => uploadInlinePhotos().catch((error) => toast(error.message, true)));
+        $("#markInlineException")?.addEventListener("click", () => markInlineException().catch((error) => toast(error.message, true)));
+        $("#resetInlineUnconstructed")?.addEventListener("click", () => resetInlineUnconstructed().catch((error) => toast(error.message, true)));
+        $("#restoreInlinePending")?.addEventListener("click", () => restoreInlinePending().catch((error) => toast(error.message, true)));
+        $("#exportInlineExceptions")?.addEventListener("click", () => exportExceptionMeters().catch((error) => toast(error.message, true)));
+      }
+      function inlineMetadataUpdates() {
+        return {
+          meter_no: $("#inlineMeter")?.value.trim() || "",
+          collector: $("#inlineCollector")?.value.trim() || "",
+          module_asset_no: $("#inlineModule")?.value.trim() || "",
+        };
+      }
+      async function saveInlineMetadata() {
+        if (!state.group) return;
+        markInteraction();
+        const groupId = state.group.id;
+        setReviewBusy(true);
+        try {
+          const result = await api(`/local-test/groups/${encodeURIComponent(groupId)}/metadata`, {
+            method: "PATCH",
+            body: JSON.stringify({ actor: state.reviewer, updates: inlineMetadataUpdates() }),
+          });
+          state.group = result.group;
+          syncGroupListEntry(state.group);
+          refreshTasks({ background: true }).catch(() => {});
+          notifyParentRefresh("group-metadata-updated", { group_id: groupId });
+          toast("\u5df2\u4fdd\u5b58\u8d44\u6599\u9879");
+        } finally {
+          setReviewBusy(false);
+          renderGroups();
+          renderReview();
+        }
+      }
+      async function markInlineException() {
+        if (!state.group) return;
+        markInteraction();
+        const groupId = state.group.id;
+        const note = $("#inlineExceptionNote")?.value.trim() || groupIssueReasons().join("\uff1b") || "\u4eba\u5de5\u6807\u8bb0\u5f02\u5e38";
+        const category = $("#inlineExceptionCategory")?.value || "other";
+        setReviewBusy(true);
+        try {
+          const result = await api(`/local-test/groups/${encodeURIComponent(groupId)}/return-exception`, {
+            method: "PATCH",
+            body: JSON.stringify({ actor: state.reviewer, category, note }),
+          });
+          const group = result.group;
+          state.group = group;
+          syncGroupListEntry(group);
+          await refreshCurrentGroups(groupId, { background: true });
+          refreshTasks({ background: true }).catch(() => {});
+          notifyParentRefresh("group-returned-exception", { group_id: groupId, order_id: result.order?.id || "" });
+          toast("\u5df2\u751f\u6210\u65bd\u5de5\u5f02\u5e38\u5de5\u5355", true);
+        } finally {
+          setReviewBusy(false);
+          renderGroups();
+          renderReview();
+        }
+      }
+      async function resetInlineUnconstructed() {
+        if (!state.group) return;
+        const groupId = state.group.id;
+        const ok = window.confirm("\u786e\u5b9a\u56de\u9000\u5230\u672a\u65bd\u5de5\uff1f\u5c06\u8f6f\u6e05\u7a7a\u91c7\u96c6\u5668\u3001\u6a21\u5757\u53f7\u548c\u5f53\u524d\u8d44\u6599\u7ec4\u7167\u7247\uff0cOSS \u539f\u6587\u4ef6\u4e0d\u7acb\u5373\u5220\u9664\u3002");
+        if (!ok) return;
+        markInteraction();
+        const reason = $("#inlineExceptionNote")?.value.trim() || "\u5ba1\u9605\u56de\u9000\u672a\u65bd\u5de5";
+        setReviewBusy(true);
+        try {
+          const result = await api(`/local-test/groups/${encodeURIComponent(groupId)}/reset-unconstructed`, {
+            method: "PATCH",
+            body: JSON.stringify({ actor: state.reviewer, reason }),
+          });
+          state.group = result.group;
+          state.photo = null;
+          syncGroupListEntry(result.group);
+          await refreshCurrentGroups("", { background: true });
+          refreshTasks({ background: true }).catch(() => {});
+          notifyParentRefresh("group-reset-unconstructed", { group_id: groupId });
+          toast("\u5df2\u56de\u9000\u672a\u65bd\u5de5\uff0c\u65bd\u5de5\u7aef\u53ef\u91cd\u65b0\u91c7\u96c6");
+        } finally {
+          setReviewBusy(false);
+          renderGroups();
+          renderReview();
+        }
+      }
+      async function restoreInlinePending() {
+        if (!state.group) return;
+        markInteraction();
+        const groupId = state.group.id;
+        const status = Number(state.group.photo_count || state.group.photos?.length || 0) < 4 ? "incomplete" : "pending";
+        setReviewBusy(true);
+        try {
+          const group = await api(`/local-test/groups/${encodeURIComponent(groupId)}/review`, {
+            method: "PATCH",
+            body: JSON.stringify({ status, reviewer: state.reviewer, note: "\u6062\u590d\u5f85\u5ba1", exception_note: "" }),
+          });
+          state.group = group;
+          syncGroupListEntry(group);
+          await refreshCurrentGroups(groupId, { background: true });
+          refreshTasks({ background: true }).catch(() => {});
+          notifyParentRefresh("group-restored-pending", { group_id: groupId });
+          toast("\u5df2\u6062\u590d\u4e3a\u5f85\u5ba1\u72b6\u6001");
+        } finally {
+          setReviewBusy(false);
+          renderGroups();
+          renderReview();
+        }
+      }
+      async function uploadInlinePhotos() {
+        if (!state.group) return;
+        markInteraction();
+        const files = Array.from($("#inlinePhotoFiles")?.files || []);
+        if (!files.length) throw new Error("\u8bf7\u5148\u9009\u62e9\u9700\u8981\u8865\u5145\u7684\u56fe\u7247");
+        const groupId = state.group.id;
+        setReviewBusy(true);
+        try {
+          const form = new FormData();
+          const updates = inlineMetadataUpdates();
+          form.append("actor", state.reviewer);
+          form.append("collector", updates.collector);
+          form.append("module_asset_no", updates.module_asset_no);
+          form.append("creator", groupPhotoField("creator") || state.photo?.creator || "\u4eba\u5de5\u8865\u56fe");
+          const compressedFiles = window.ModuleImageUpload?.compressImageFiles
+            ? await window.ModuleImageUpload.compressImageFiles(files)
+            : files.map((file) => ({ file, name: file.name }));
+          compressedFiles.forEach((item) => form.append("files", item.file, item.name));
+          const result = await formApi(`/local-test/groups/${encodeURIComponent(groupId)}/photos/upload-images`, form);
+          state.group = result.group;
+          syncGroupListEntry(result.group);
+          await loadGroup(groupId, { silent: true });
+          refreshTasks({ background: true }).catch(() => {});
+          notifyParentRefresh("group-photos-uploaded", { group_id: groupId });
+          toast(`\u5df2\u4e0a\u4f20 ${result.added || 0} \u5f20\u8865\u56fe`);
+        } finally {
+          setReviewBusy(false);
+          renderGroups();
+          renderReview();
+        }
+      }
+      async function exportExceptionMeters() {
+        await downloadExcel("/exports/exception-meters", { reviewer: state.reviewer }, `exception-meters-${Date.now()}.xlsx`);
+        toast("\u5f02\u5e38\u8868\u8ba1\u5df2\u5bfc\u51fa");
+      }
       function renderTaskBoard() {
+        if (state.tasksLoading && !state.tasksLoaded) {
+          $("#taskBoard").innerHTML = `
+            <div class="task-board-main">
+              <div class="task-board-title">
+                <strong>\u4efb\u52a1\u8fdb\u5ea6\u770b\u677f</strong>
+                <span class="badge async-status loading">\u540c\u6b65\u4e2d</span>
+              </div>
+              <div class="mini-stats">
+                ${Array.from({ length: 4 }, () => `<div class="skeleton-stat"></div>`).join("")}
+              </div>
+            </div>
+            <div class="mini-progress-section">
+              <div class="mini-progress-title"><span>\u8fdb\u5ea6\u6307\u6807</span><span>\u540e\u53f0\u8bfb\u53d6\u4efb\u52a1</span></div>
+              <div class="mini-chart">
+                <div class="mini-chart-row"><span>\u4e0a\u4f20</span><div class="progress"><i style="--value:1%"></i></div><b>0%</b></div>
+                <div class="mini-chart-row"><span>\u5ba1\u9605</span><div class="progress"><i style="--value:1%"></i></div><b>0%</b></div>
+              </div>
+            </div>`;
+          return;
+        }
         const claimed = state.tasks.filter((task) => task.claimed_by);
         const mine = claimed.filter((task) => task.claimed_by === state.reviewer);
         const totals = claimed.reduce((acc, task) => {
@@ -506,19 +1821,27 @@
         const uploadRate = totals.renovation ? totals.uploaded / totals.renovation : 0;
         const reviewRate = totals.renovation ? totals.reviewed / totals.renovation : 0;
         $("#taskBoard").innerHTML = `
-          <div class="task-board-title">
-            <strong>\u4efb\u52a1\u8fdb\u5ea6\u770b\u677f</strong>
-            <span class="badge">${mine.length}/${claimed.length}</span>
+          <div class="task-board-main">
+            <div class="task-board-title">
+              <strong>\u4efb\u52a1\u8fdb\u5ea6\u770b\u677f</strong>
+              <span class="badge">${mine.length}/${claimed.length}</span>
+            </div>
+            <div class="mini-stats">
+              <div class="mini-stat"><span>\u5df2\u9886\u4efb\u52a1</span><strong>${claimed.length}</strong></div>
+              <div class="mini-stat"><span>\u6211\u7684\u4efb\u52a1</span><strong>${mine.length}</strong></div>
+              <div class="mini-stat"><span>\u6539\u9020\u603b\u6570</span><strong>${totals.renovation}</strong></div>
+              <div class="mini-stat"><span>\u5df2\u5ba1\u9605</span><strong>${totals.reviewed}</strong></div>
+            </div>
           </div>
-          <div class="mini-stats">
-            <div class="mini-stat"><span>\u5df2\u9886</span><strong>${claimed.length}</strong></div>
-            <div class="mini-stat"><span>\u6211\u7684</span><strong>${mine.length}</strong></div>
-            <div class="mini-stat"><span>\u6539\u9020</span><strong>${totals.renovation}</strong></div>
-            <div class="mini-stat"><span>\u5df2\u5ba1</span><strong>${totals.reviewed}</strong></div>
-          </div>
-          <div class="mini-chart">
-            <div class="mini-chart-row"><span>\u4e0a\u4f20</span><div class="progress"><i style="--value:${pct(uploadRate)}"></i></div><b>${pct(uploadRate)}</b></div>
-            <div class="mini-chart-row"><span>\u5ba1\u9605</span><div class="progress"><i style="--value:${pct(reviewRate)}"></i></div><b>${pct(reviewRate)}</b></div>
+          <div class="mini-progress-section">
+            <div class="mini-progress-title">
+              <span>\u8fdb\u5ea6\u6307\u6807</span>
+              <span>\u5168\u90e8\u5df2\u9886\u53d6\u4efb\u52a1</span>
+            </div>
+            <div class="mini-chart">
+              <div class="mini-chart-row"><span>\u4e0a\u4f20</span><div class="progress"><i style="--value:${pct(uploadRate)}"></i></div><b>${pct(uploadRate)}</b></div>
+              <div class="mini-chart-row"><span>\u5ba1\u9605</span><div class="progress"><i style="--value:${pct(reviewRate)}"></i></div><b>${pct(reviewRate)}</b></div>
+            </div>
           </div>
         `;
       }
@@ -527,27 +1850,37 @@
       }
       function renderTasks() {
         renderTaskBoard();
+        $("#taskLoadState").textContent = state.tasksLoading ? "\u540c\u6b65\u4e2d" : state.tasksLoaded ? "\u5df2\u540c\u6b65" : "\u7b49\u5f85";
+        $("#taskLoadState").classList.toggle("loading", state.tasksLoading);
+        if (state.tasksLoading && !state.tasksLoaded) {
+          $("#taskCount").textContent = "\u540c\u6b65\u4e2d";
+          $("#tasks").innerHTML = Array.from({ length: 3 }, () => `<article class="skeleton-card"></article>`).join("");
+          return;
+        }
         const tasks = filteredTasks();
         $("#taskCount").textContent = `${tasks.length}/${state.tasks.length}`;
-        $("#tasks").innerHTML = tasks.length ? tasks.map((task) => `
+        $("#tasks").innerHTML = tasks.length ? tasks.map((task) => {
+          const renovationCount = Number(task.renovation_count || task.total_groups || 0);
+          return `
           <article class="task ${state.taskId === task.id ? "active" : ""}" data-task="${task.id}">
               <div class="name-row"><strong class="name">${esc(task.name)}</strong><span class="badge ok">\u5df2\u9886\u53d6</span></div>
             <div class="small">\u7ec8\u7aef ${esc(task.terminal || "-")} / ${task.claimed_by ? `\u5df2\u7531 ${esc(task.claimed_by)} \u9886\u53d6` : "\u672a\u9886\u53d6"}</div>
             <div class="metric-grid">
-              <div class="metric"><span>\u6539\u9020\u6570\u91cf</span><strong>${task.renovation_count || task.total_groups || 0}</strong></div>
-              <div class="metric"><span>\u5df2\u4e0a\u4f20\u6570\u91cf</span><strong>${task.uploaded_count || task.groups_with_scan || 0}</strong></div>
-              <div class="metric"><span>\u672a\u5ba1\u9605\u6570\u91cf</span><strong>${task.unreviewed_count || 0}</strong></div>
-              <div class="metric"><span>\u5b8c\u6210\u7387</span><strong>${pct(task.upload_rate)}</strong></div>
-              <div class="metric"><span>\u5ba1\u9605\u7387</span><strong>${pct(task.review_rate)}</strong></div>
+              <div class="metric"><span>\u6539\u9020\u6570\u91cf</span><strong>${renovationCount}</strong></div>
+              <div class="metric"><span>\u5df2\u4e0a\u4f20</span><strong>${task.uploaded_count || 0}</strong></div>
+              <div class="metric"><span>\u672a\u5ba1\u9605</span><strong>${task.unreviewed_count || 0}</strong></div>
             </div>
-            <div class="progress"><i style="--value:${pct(task.upload_rate)}"></i></div>
+            <div class="progress"><i style="--value:${pct(task.review_rate)}"></i></div>
             <div class="tool-row">
-              <button class="secondary" data-action="view" data-id="${task.id}">\u67e5\u770b</button>
               <button class="secondary" data-action="stash" data-id="${task.id}" ${task.claimed_by === state.reviewer ? "" : "disabled"}>\u6682\u5b58</button>
-              <a class="button" href="/claim-tasks">\u4efb\u52a1\u9886\u53d6</a>
             </div>
           </article>
-        `).join("") : `<div class="empty">\u6682\u65e0\u5df2\u9886\u53d6\u4efb\u52a1<br /><a class="button" href="/claim-tasks">\u53bb\u9886\u53d6\u7ec8\u7aef\u4efb\u52a1</a></div>`;
+        `}).join("") : `
+          <div class="empty-card">
+            <strong>\u6682\u65e0\u5df2\u9886\u53d6\u4efb\u52a1</strong>
+            <span>\u5ba1\u9605\u5de5\u4f5c\u53f0\u53ea\u663e\u793a\u5f53\u524d\u5ba1\u9605\u4eba\u5df2\u9886\u53d6\u4e14\u6709\u626b\u7801\u7167\u7247\u7684\u7ec8\u7aef\u3002\u8bf7\u5148\u5230\u4efb\u52a1\u9886\u53d6\u9875\u9886\u53d6\u7ec8\u7aef\u4efb\u52a1\u3002</span>
+            <div class="empty-actions"><a class="button" href="/claim-tasks">\u53bb\u9886\u53d6\u7ec8\u7aef\u4efb\u52a1</a></div>
+          </div>`;
         $("#tasks").querySelectorAll("[data-task]").forEach((card) => card.addEventListener("click", () => handleTask(card.dataset.task, "view")));
         $("#tasks").querySelectorAll("button[data-action]").forEach((button) => button.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -560,54 +1893,99 @@
         $("#groupSubtitle").textContent = task
           ? (canReviewCurrentTask() ? `\u5df2\u7531 ${state.reviewer} \u9886\u53d6\uff0c\u53ef\u5f00\u59cb\u5ba1\u9605` : "\u9700\u8981\u5148\u9886\u53d6\u4efb\u52a1")
           : "\u9886\u53d6\u4efb\u52a1\u540e\u663e\u793a\u8d44\u6599\u7ec4";
-        $("#groupCount").textContent = `${state.groups.length}`;
-        $("#groups").innerHTML = state.groups.length ? state.groups.map((group) => `
+        $("#groupLoadState").textContent = state.groupsLoading ? "\u540c\u6b65\u4e2d" : state.groupsLoaded ? "\u5df2\u540c\u6b65" : "\u7b49\u5f85";
+        $("#groupLoadState").classList.toggle("loading", state.groupsLoading);
+        if (state.groupsLoading && !state.groups.length) {
+          $("#groupCount").textContent = "\u540c\u6b65\u4e2d";
+          $("#groups").innerHTML = Array.from({ length: 7 }, () => `<article class="skeleton-card compact"></article>`).join("");
+          return;
+        }
+        renderReviewGroupFilters();
+        const visibleGroups = visibleReviewGroups();
+        const foldedCount = foldedReviewGroupCount();
+        $("#groupCount").textContent = state.groupQuery || foldedCount ? `${visibleGroups.length}/${state.groups.length}` : `${state.groups.length}`;
+        const foldedNotice = foldedCount
+          ? `<div class="folded-note">\u5df2\u6298\u53e0 ${foldedCount} \u4e2a\u672a\u65bd\u5de5\u8d44\u6599\u7ec4\u3002\u5982\u9700\u4eba\u5de5\u8865\u5b8c\u65bd\u5de5\uff0c\u53ef\u641c\u7d22\u8868\u53f7\u3001\u7ec8\u7aef\u6216\u5730\u5740\u6253\u5f00\u3002</div>`
+          : "";
+        const rows = visibleGroups.map((group) => `
           <article class="group ${state.group?.id === group.id ? "active" : ""}" data-group="${group.id}">
-            <div class="name-row"><strong class="name">${esc(group.meter_no)}</strong><span class="badge ${group.has_archive_blocker ? "warn" : groupDone(group) ? "ok" : group.photo_count >= 4 ? "ok" : "warn"}">${group.has_archive_blocker ? "\u5f02\u5e38" : groupDone(group) ? "\u5df2\u5206\u7c7b\u5b8c\u6210" : `${group.photo_count || 0} \u5f20`}</span></div>
+            <div class="name-row"><strong class="name">${esc(group.meter_no)}</strong><span class="badge ${group.has_archive_blocker ? "warn" : groupDone(group) ? "ok" : group.photo_count >= 4 ? "ok" : "warn"}">${group.has_archive_blocker ? "\u5f02\u5e38" : groupDone(group) ? "\u5df2\u5206\u7c7b\u5b8c\u6210" : Number(group.photo_count || 0) === 0 ? "\u672a\u65bd\u5de5" : `${group.photo_count || 0} \u5f20`}</span></div>
             <div class="small">${esc(group.terminal)} / ${esc(group.address || "\u672a\u5339\u914d\u5730\u5740")}</div>
             <div class="small">${group.reviewer ? `\u5ba1\u9605\u4eba ${esc(group.reviewer)}` : "\u672a\u5ba1\u9605"}</div>
             ${group.exception_reasons?.length ? `<div class="small warn">${esc(group.exception_reasons.join("\uff1b"))}</div>` : ""}
           </article>
-        `).join("") : `<div class="empty">${task ? "\u8bf7\u5148\u9886\u53d6\u8be5\u7ec8\u7aef\u4efb\u52a1" : "\u9009\u62e9\u4e00\u4e2a\u7ec8\u7aef\u4efb\u52a1"}</div>`;
+        `).join("");
+        const noVisibleGroups = state.groupQuery
+          ? `<div class="empty-card"><strong>\u6ca1\u6709\u5339\u914d\u7684\u8d44\u6599\u7ec4</strong><span>\u6362\u4e2a\u8868\u53f7\u3001\u7ec8\u7aef\u6216\u5730\u5740\u5173\u952e\u8bcd\u518d\u8bd5\u3002</span></div>`
+          : `<div class="empty-card"><strong>\u672a\u65bd\u5de5\u8d44\u6599\u7ec4\u5df2\u6298\u53e0</strong><span>\u5ba1\u9605\u5de5\u4f5c\u53f0\u9ed8\u8ba4\u53ea\u663e\u793a\u6709\u7167\u7247\u3001\u5f85\u5ba1\u6216\u5f02\u5e38\u7684\u8d44\u6599\u7ec4\u3002\u9700\u8981\u4eba\u5de5\u5904\u7406\u672a\u65bd\u5de5\u65f6\uff0c\u8bf7\u641c\u7d22\u6253\u5f00\u3002</span></div>`;
+        $("#groups").innerHTML = state.groups.length ? `${foldedNotice}${rows || noVisibleGroups}` : `<div class="empty-card"><strong>${task ? "\u8bf7\u5148\u9886\u53d6\u8be5\u7ec8\u7aef\u4efb\u52a1" : "\u9009\u62e9\u4e00\u4e2a\u7ec8\u7aef\u4efb\u52a1"}</strong><span>${task ? "\u672a\u9886\u53d6\u7684\u7ec8\u7aef\u4e0d\u80fd\u5206\u7c7b\uff0c\u8fd9\u6837\u53ef\u907f\u514d\u591a\u4eba\u540c\u65f6\u5ba1\u9605\u540c\u4e00\u7ec8\u7aef\u3002" : "\u9009\u4e2d\u5de6\u4fa7\u5df2\u9886\u53d6\u7684\u7ec8\u7aef\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u6709\u626b\u7801\u7167\u7247\u7684\u8d44\u6599\u7ec4\u3002"}</span></div>`;
         $("#groups").querySelectorAll("[data-group]").forEach((row) => row.addEventListener("click", () => loadGroup(row.dataset.group)));
+        scrollActiveGroupIntoView();
       }
       function renderReview() {
         if (state.taskId && !canReviewCurrentTask()) {
-          $("#review").innerHTML = `<div class="empty">\u8bf7\u5148\u9886\u53d6\u5f53\u524d\u7ec8\u7aef\uff0c\u518d\u8fdb\u884c\u5206\u7c7b\u5ba1\u9605</div>`;
+          closeLightbox();
+          $("#review").innerHTML = `<div class="empty-card"><strong>\u8bf7\u5148\u9886\u53d6\u5f53\u524d\u7ec8\u7aef</strong><span>\u7ec8\u7aef\u5fc5\u987b\u5148\u88ab\u5f53\u524d\u5ba1\u9605\u4eba\u9886\u53d6\uff0c\u624d\u80fd\u8fdb\u884c\u7167\u7247\u5206\u7c7b\u548c\u5f52\u6863\u3002</span></div>`;
           $("#photoState").textContent = "\u672a\u9886\u53d6";
           return;
         }
         if (!state.group) {
-          $("#review").innerHTML = `<div class="empty">\u9009\u62e9\u8d44\u6599\u7ec4\u540e\u5f00\u59cb\u5ba1\u9605</div>`;
+          closeLightbox();
+          $("#review").innerHTML = `<div class="empty-card"><strong>\u9009\u62e9\u8d44\u6599\u7ec4\u540e\u5f00\u59cb\u5ba1\u9605</strong><span>\u5de6\u4fa7\u9009\u7ec8\u7aef\uff0c\u4e2d\u95f4\u9009\u8d44\u6599\u7ec4\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u7167\u7247\u548c 1-4 \u5feb\u6377\u5206\u7c7b\u6309\u94ae\u3002</span></div>`;
           $("#photoState").textContent = "\u672a\u9009\u62e9";
+          return;
+        }
+        if (state.groupLoading) {
+          $("#review").innerHTML = `<div class="empty-card"><strong>\u6b63\u5728\u8bfb\u53d6\u8d44\u6599\u7ec4\u8be6\u60c5</strong><span>\u5df2\u9009\u4e2d ${esc(state.group.meter_no || state.group.id || "-")}\uff0c\u56fe\u7247\u548c\u5feb\u6377\u5206\u7c7b\u4f1a\u5728\u8be6\u60c5\u8fd4\u56de\u540e\u7acb\u5373\u663e\u793a\u3002</span></div>`;
+          $("#photoState").textContent = "\u8bfb\u53d6\u4e2d";
           return;
         }
         const photos = state.group.photos || [];
         if (!photos.length) {
-          $("#review").innerHTML = `<div class="empty">\u8be5\u8d44\u6599\u7ec4\u6ca1\u6709\u56fe\u7247 URL</div>`;
+          closeLightbox();
+          const emptyTitle = state.group.has_archive_blocker || state.group.status === "exception" ? "\u5f02\u5e38\u8d44\u6599\u7ec4" : "\u672a\u65bd\u5de5\u8d44\u6599\u7ec4";
+          const emptyText = state.group.has_archive_blocker || state.group.status === "exception"
+            ? "\u8be5\u8d44\u6599\u7ec4\u7684\u7167\u7247\u7f3a\u5931\u6216\u6587\u4ef6\u635f\u574f\uff0c\u9700\u73b0\u573a\u8865\u56fe\u540e\u518d\u5ba1\u9605\u3002"
+            : "\u8be5\u8868\u53f7\u5c1a\u65e0\u626b\u7801\u7167\u7247\uff0c\u6682\u4e0d\u8fdb\u5165\u5f02\u5e38\u8d44\u6599\u7ec4\u3002\u4fdd\u7559\u5728\u5df2\u9886\u53d6\u4efb\u52a1\u5185\uff0c\u7528\u4e8e\u5bfc\u51fa\u6e05\u5355\u548c\u73b0\u573a\u65bd\u5de5\u6838\u5bf9\u3002";
+          $("#review").innerHTML = `
+            <div class="empty-card"><strong>${emptyTitle}</strong><span>${emptyText}</span></div>
+            ${renderInlineExceptionTools({ noPhotos: true })}`;
           $("#photoState").textContent = "\u65e0\u56fe\u7247";
+          bindInlineExceptionTools();
           return;
         }
-        if (!state.photo || !photos.some((photo) => photo.id === state.photo.id)) state.photo = photos[0];
-        $("#photoState").textContent = `${activePhotoIndex() + 1}/${photos.length} ${state.photo.archive_status === "archived" ? "\u5df2\u5f52\u6863" : "\u5f85\u5f52\u6863"}`;
-        const url = state.photo.image_url || "";
+        state.photo = pickReviewPhoto(photos);
+        const currentPhotoPending = state.pendingArchives.has(state.photo.id);
+        $("#photoState").textContent = currentPhotoPending
+          ? `${activePhotoIndex() + 1}/${photos.length} \u540c\u6b65\u4e2d`
+          : state.archiving
+          ? "\u5f52\u6863\u4e2d"
+          : `${activePhotoIndex() + 1}/${photos.length} ${state.photo.archive_status === "archived" ? "\u5df2\u5f52\u6863" : "\u5f85\u5f52\u6863"}`;
+        const url = photoPreviewUrl(state.photo);
+        const fallbackUrl = photoDirectPreviewUrl(state.photo);
         $("#review").innerHTML = `
           <div class="review-shell">
             <div class="review-main">
-              <div class="viewer">${url ? `<img src="${esc(url)}" alt="\u5ba1\u9605\u56fe\u7247" loading="eager" decoding="async" fetchpriority="high" />` : `<div class="placeholder">\u56fe\u7247 URL \u672a\u52a0\u8f7d<br />${esc(state.photo.barcode || "")}</div>`}</div>
-              <div class="photo-list">${photos.map((photo, index) => `
+              <div class="viewer ${url ? "loading" : ""}" title="\u53cc\u51fb\u6253\u5f00\u5927\u56fe">${url ? `<img id="reviewImage" class="is-loading" data-src="${esc(url)}" data-fallback="${esc(fallbackUrl)}" alt="\u5ba1\u9605\u56fe\u7247" loading="eager" decoding="async" fetchpriority="high" />` : `<div class="placeholder">\u56fe\u7247\u672a\u52a0\u8f7d<br />${esc(state.photo.barcode || "")}</div>`}</div>
+              <div class="photo-list">${photos.map((photo, index) => {
+                const pending = state.pendingArchives.has(photo.id);
+                const thumb = photoThumbnailUrl(photo);
+                return `
                 <article class="photo-card ${state.photo.id === photo.id ? "active" : ""}" data-photo="${photo.id}">
-                  <div class="name-row"><strong>#${index + 1}</strong><span class="badge ${photo.archive_status === "archived" ? "ok" : "warn"}">${photo.archive_status === "archived" ? "\u5df2\u5f52\u6863" : "\u5f85\u5206\u7c7b"}</span></div>
-                  <div class="small">${esc(photo.category_label || "\u672a\u5206\u7c7b")}</div>
-                  <div class="small">${esc(photo.archive_filename || "")}</div>
+                  ${thumb ? `<img class="photo-thumb" src="${esc(thumb)}" alt="#${index + 1}" loading="lazy" decoding="async" />` : `<div class="photo-thumb"></div>`}
+                  <div class="photo-card-body">
+                    <div class="name-row"><strong>#${index + 1}</strong><span class="badge ${pending ? "warn" : photo.archive_status === "archived" ? "ok" : "warn"}">${pending ? "\u540c\u6b65\u4e2d" : photo.archive_status === "archived" ? "\u5df2\u5f52\u6863" : "\u5f85\u5206\u7c7b"}</span></div>
+                    <div class="small">${esc(photo.category_label || "\u672a\u5206\u7c7b")}</div>
+                    <div class="small">${esc(photo.archive_filename || "")}</div>
+                  </div>
                 </article>
-              `).join("")}</div>
+              `}).join("")}</div>
             </div>
             <div class="review-tools">
               <div class="meta-grid">
-                <div class="meta-item"><span>\u8868\u53f7 / \u626b\u7801\u5185\u5bb9</span><strong title="${esc(state.photo.barcode || state.group.meter_no || "")}">${esc(state.photo.barcode || state.group.meter_no || "-")}</strong></div>
-                <div class="meta-item"><span>\u91c7\u96c6\u5668</span><strong title="${esc(state.photo.collector || "")}">${esc(state.photo.collector || "-")}</strong></div>
-                <div class="meta-item"><span>\u6a21\u5757</span><strong title="${esc(state.photo.asset_no || "")}">${esc(state.photo.asset_no || "-")}</strong></div>
+                <label class="meta-item"><span>\u8868\u53f7 / \u626b\u7801\u5185\u5bb9</span><input id="inlineMeter" value="${esc(state.group.meter_no || state.photo.barcode || "")}" title="${esc(state.photo.barcode || state.group.meter_no || "")}" /></label>
+                <label class="meta-item"><span>\u91c7\u96c6\u5668</span><input id="inlineCollector" value="${esc(state.photo.collector || "")}" title="${esc(state.photo.collector || "")}" /></label>
+                <label class="meta-item"><span>\u6a21\u5757</span><input id="inlineModule" value="${esc(state.photo.asset_no || "")}" title="${esc(state.photo.asset_no || "")}" /></label>
                 <div class="meta-item"><span>\u5b89\u88c5\u4eba\u5458</span><strong title="${esc(state.photo.creator || "")}">${esc(state.photo.creator || "-")}</strong></div>
               </div>
               <div class="category-grid">${categoryKeys.map((key, index) => `
@@ -617,123 +1995,339 @@
               `).join("")}</div>
               <div class="tool-row">
                 <span class="kbd-note">&#8592;/&#8594; &#20999;&#22270;&#65292;&#8593;/&#8595; &#20999;&#36164;&#26009;&#32452;&#65292;Enter &#24402;&#26723;</span>
-                <button class="secondary" id="archiveGroup">\u5f52\u6863\u5f53\u524d\u8d44\u6599\u7ec4</button>
-                <button id="archivePhoto">Enter &#24402;&#26723;&#24403;&#21069;&#22270;</button>
+                <input class="photo-file-input" id="inlinePhotoFiles" type="file" accept="image/*" multiple />
+                <button class="secondary" id="saveInlineMetadata" type="button">\u4fdd\u5b58\u8d44\u6599\u7ec4</button>
+                <button class="secondary" id="chooseInlinePhotos" type="button">\u8865\u56fe</button>
+                <button class="secondary" id="restoreInlinePending" type="button">\u6062\u590d\u5f85\u5ba1</button>
+                <button class="danger" id="resetInlineUnconstructed" type="button">\u56de\u9000\u672a\u65bd\u5de5</button>
+                <button class="danger" id="markInlineException" type="button">\u8f6c\u5f02\u5e38\u5de5\u5355</button>
+                <button class="secondary" id="exportInlineExceptions" type="button">\u5bfc\u51fa\u5f02\u5e38\u8868\u8ba1</button>
+                <button class="secondary" id="archiveGroup" ${state.archiving || state.pendingArchives.size > 0 ? "disabled" : ""}>\u5f52\u6863\u5f53\u524d\u8d44\u6599\u7ec4</button>
+                <button class="danger" id="deletePhoto" type="button" ${state.archiving || currentPhotoPending ? "disabled" : ""}>\u5220\u9664\u5f53\u524d\u56fe</button>
+                <button id="archivePhoto" ${state.archiving || currentPhotoPending ? "disabled" : ""}>Enter &#24402;&#26723;&#24403;&#21069;&#22270;</button>
               </div>
             </div>
           </div>`;
+        bindReviewImageLoading();
         $("#review").querySelectorAll("[data-photo]").forEach((item) => item.addEventListener("click", () => {
+          markInteraction();
           state.photo = photos.find((photo) => photo.id === item.dataset.photo);
           renderReview();
         }));
-        $("#review").querySelectorAll("[data-category]").forEach((button) => button.addEventListener("click", () => {
-          state.photo.category = button.dataset.category;
+        $("#review").querySelectorAll("[data-photo]").forEach((item) => item.addEventListener("dblclick", () => {
+          markInteraction();
+          state.photo = photos.find((photo) => photo.id === item.dataset.photo);
           renderReview();
+          openLightbox();
+        }));
+        $("#review .viewer")?.addEventListener("dblclick", () => {
+          markInteraction();
+          openLightbox();
+        });
+        $("#review").querySelectorAll("[data-category]").forEach((button) => button.addEventListener("click", () => {
+          markInteraction();
+          setDraftCategory(button.dataset.category);
         }));
         $("#archivePhoto").addEventListener("click", archivePhoto);
         $("#archiveGroup").addEventListener("click", archiveGroup);
+        $("#deletePhoto").addEventListener("click", deletePhoto);
+        bindInlineExceptionTools();
+        renderLightbox();
       }
       async function handleTask(id, action) {
+        markInteraction();
+        const taskChanged = state.taskId !== Number(id);
         if (action === "claim") await api(`/local-test/tasks/${id}/claim`, { method: "POST", body: JSON.stringify({ reviewer: state.reviewer }) });
         if (action === "stash") {
           await api(`/local-test/tasks/${id}/release`, { method: "POST", body: JSON.stringify({ reviewer: state.reviewer }) });
           toast("\u5df2\u6682\u5b58\u5e76\u91ca\u653e\u4efb\u52a1");
         }
         state.taskId = Number(id);
+        if (taskChanged) {
+          state.groupQuery = "";
+          state.groupStatusFilter = "all";
+          if ($("#groupSearch")) $("#groupSearch").value = "";
+        }
         await refreshTasks();
         state.task = state.tasks.find((task) => task.id === state.taskId) || null;
-        if (action === "stash" || !canReviewCurrentTask()) {
-          state.groups = [];
-        } else {
-          const data = await api(`/local-test/tasks/${id}/groups?limit=1000&scan_only=true`);
-          state.groups = data.items || [];
-        }
         state.group = null;
         state.photo = null;
+        state.groups = [];
+        state.groupsLoaded = false;
+        if (action === "stash" || !canReviewCurrentTask()) {
+          state.groups = [];
+          state.groupsLoaded = true;
+          state.groupsLoading = false;
+        } else {
+          await refreshCurrentGroups();
+        }
+        if (action === "claim" || action === "stash") {
+          notifyParentRefresh(action === "stash" ? "task-released" : "task-claimed", { task_id: Number(id) });
+        }
+        const selectableGroups = visibleReviewGroups();
+        const firstGroup = selectableGroups.find(groupHasDisplayablePhoto) || selectableGroups.find((group) => Number(group.photo_count || 0) > 0) || selectableGroups[0];
+        if (firstGroup && action !== "stash" && canReviewCurrentTask()) {
+          await loadGroup(firstGroup.id);
+          return;
+        }
         renderGroups();
         renderReview();
       }
-      async function loadGroup(id, preferredPhotoId = null) {
+      async function loadGroup(id, options = {}) {
+        markInteraction();
+        const settings = typeof options === "object" && options !== null ? options : { preferredPhotoId: options };
+        const preferredPhotoId = settings.preferredPhotoId || null;
+        const silent = Boolean(settings.silent);
         if (!canReviewCurrentTask()) {
           renderReview();
           return;
         }
-        $("#photoState").textContent = "\u52a0\u8f7d URL";
-        state.group = await api(`/local-test/groups/${encodeURIComponent(id)}`);
+        const selectedId = String(id);
+        const cachedGroup = state.groups.find((group) => String(group.id) === selectedId);
+        const requestSeq = ++state.groupRequestSeq;
+        if (!silent) {
+          state.groupLoading = true;
+          state.group = cachedGroup ? { ...cachedGroup, photos: cachedGroup.photos || [] } : { id: selectedId, photos: [] };
+          state.photo = null;
+          renderGroups();
+          renderReview();
+        }
+        let loadedGroup;
+        try {
+          loadedGroup = await api(`/local-test/groups/${encodeURIComponent(selectedId)}`);
+        } catch (error) {
+          if (state.groupRequestSeq === requestSeq) {
+            state.groupLoading = false;
+            renderReview();
+            toast(error.message, true);
+          }
+          return;
+        }
+        if (state.groupRequestSeq !== requestSeq || String(state.group?.id) !== selectedId) return;
+        state.group = loadedGroup;
+        state.groupLoading = false;
         const photos = state.group.photos || [];
-        state.photo = photos.find((photo) => photo.id === preferredPhotoId) || photos[0] || null;
-        state.groups = state.groups.map((group) => group.id === state.group.id ? state.group : group);
+        state.photo = pickReviewPhoto(photos, preferredPhotoId);
+        syncGroupListEntry(state.group);
         preloadImages(photos);
         renderGroups();
         renderReview();
       }
+      async function refreshAndSelectFirstUnclassified(completedGroupId) {
+        if (!state.taskId || !canReviewCurrentTask()) return;
+        await refreshCurrentGroups(null, { background: false });
+        const nextGroup = findFirstUnclassifiedGroup(completedGroupId);
+        if (nextGroup) {
+          if (String(state.group?.id) !== String(nextGroup.id)) {
+            await loadGroup(nextGroup.id);
+          } else {
+            renderGroups();
+            renderReview();
+          }
+          return;
+        }
+        if (String(state.group?.id) === String(completedGroupId)) {
+          state.group = null;
+          state.photo = null;
+        }
+        renderGroups();
+        renderReview();
+      }
+      function enqueueArchiveRequest(job) {
+        state.pendingArchives.add(job.photoId);
+        refreshArchiveControls();
+        const run = async () => {
+          try {
+            const archiveResult = await api(`/local-test/groups/${encodeURIComponent(job.groupId)}/photos/${encodeURIComponent(job.photoId)}/category?include_group=true`, {
+              method: "PATCH",
+              body: JSON.stringify({ category: job.category, reviewer: state.reviewer }),
+            });
+            if (String(state.group?.id) === String(job.groupId)) {
+              const updatedPhoto = archiveResult.photo || archiveResult;
+              applyPhotoUpdate(updatedPhoto);
+              renderGroups();
+              renderReview();
+            }
+            syncGroupSummary(archiveResult.group);
+            refreshTasks({ background: true }).catch(() => {});
+            notifyParentRefresh("photo-archived", { group_id: job.groupId });
+            if (job.completesGroup) {
+              state.completedGroupRefreshId = job.groupId;
+              if (state.pendingArchives.size <= 1) {
+                const refreshId = state.completedGroupRefreshId;
+                state.completedGroupRefreshId = null;
+                await refreshAndSelectFirstUnclassified(refreshId);
+              }
+            }
+          } catch (error) {
+            if (String(state.group?.id) === String(job.groupId)) {
+              applyPhotoUpdate(job.previousPhoto);
+              state.photo = pickReviewPhoto(state.group.photos || [], job.photoId);
+              renderGroups();
+              renderReview();
+            }
+            toast(error.message, true);
+          } finally {
+            state.pendingArchives.delete(job.photoId);
+            refreshArchiveControls();
+            if (!state.pendingArchives.size && state.completedGroupRefreshId) {
+              const refreshId = state.completedGroupRefreshId;
+              state.completedGroupRefreshId = null;
+              refreshAndSelectFirstUnclassified(refreshId).catch((error) => toast(error.message, true));
+            }
+          }
+        };
+        state.archiveQueue = state.archiveQueue.then(run, run);
+        return state.archiveQueue;
+      }
       async function archivePhoto() {
-        if (!state.group || !state.photo) return;
+        if (!state.group || !state.photo || state.archiving || state.pendingArchives.has(state.photo.id)) return;
+        markInteraction();
         const category = state.photo.category && state.photo.category !== "unclassified" ? state.photo.category : categoryKeys[0];
         const photos = state.group.photos || [];
+        const previousPhoto = { ...state.photo };
+        const groupId = state.group.id;
+        const photoId = state.photo.id;
+        state.pendingArchives.add(photoId);
+        applyPhotoUpdate(optimisticArchivedPhoto(state.photo, category));
+        const nextPhoto = pickNextPendingPhoto(photoId);
+        const completesGroup = !nextPhoto;
+        state.photo = nextPhoto || pickReviewPhoto(state.group.photos || []);
+        syncGroupListEntry();
+        if (completesGroup) {
+          const nextGroup = findFirstUnclassifiedGroup(groupId);
+          if (nextGroup) {
+            state.groupLoading = true;
+            state.group = { ...nextGroup, photos: nextGroup.photos || [] };
+            state.photo = pickReviewPhoto(state.group.photos || []);
+            renderGroups();
+            renderReview();
+            loadGroup(nextGroup.id, { silent: true }).catch((error) => toast(error.message, true));
+          } else {
+            renderGroups();
+            renderReview();
+          }
+        } else {
+          renderGroups();
+          renderReview();
+        }
+        enqueueArchiveRequest({ groupId, photoId, category, previousPhoto, completesGroup });
+      }
+      async function deletePhoto() {
+        if (!state.group || !state.photo || state.archiving) return;
+        markInteraction();
+        const photos = state.group.photos || [];
         const currentIndex = activePhotoIndex();
-        const nextPhoto = photos[currentIndex + 1] || photos[currentIndex - 1] || state.photo;
+        const nextPhoto = photos[currentIndex + 1] || photos[currentIndex - 1] || null;
+        if (!window.confirm("\u786e\u8ba4\u5220\u9664\u5f53\u524d\u56fe\u7247\uff1f\u5220\u9664\u540e\u4f1a\u64a4\u56de\u8be5\u8d44\u6599\u7ec4\u7684\u5df2\u5ba1\u9605\u72b6\u6001\u3002")) return;
+        setReviewBusy(true);
         try {
-          await api(`/local-test/groups/${encodeURIComponent(state.group.id)}/photos/${encodeURIComponent(state.photo.id)}/category`, {
-            method: "PATCH",
-            body: JSON.stringify({ category, reviewer: state.reviewer }),
+          const groupId = state.group.id;
+          await api(`/local-test/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(state.photo.id)}`, {
+            method: "DELETE",
+            body: JSON.stringify({ reviewer: state.reviewer }),
           });
-          await loadGroup(state.group.id, nextPhoto?.id);
-          await refreshCurrentGroups(state.group.id);
-          toast("\u5f53\u524d\u56fe\u7247\u5df2\u5f52\u6863");
+          await loadGroup(groupId, { preferredPhotoId: nextPhoto?.id, silent: true });
+          refreshTasks({ background: true }).catch(() => {});
+          notifyParentRefresh("photo-deleted", { group_id: groupId });
+          toast("\u5df2\u5220\u9664\u5f53\u524d\u56fe\u7247");
         } catch (error) {
-          await loadGroup(state.group.id, state.photo.id);
-          await refreshCurrentGroups(state.group.id);
+          await loadGroup(state.group.id, { preferredPhotoId: state.photo?.id, silent: true });
           toast(error.message, true);
+        } finally {
+          setReviewBusy(false);
+          renderReview();
         }
       }
       async function archiveGroup() {
-        if (!state.group) return;
+        if (!state.group || state.archiving) return;
+        markInteraction();
         const photos = state.group.photos || [];
+        const groupId = state.group.id;
+        setReviewBusy(true);
         try {
           for (let index = 0; index < photos.length; index += 1) {
             const photo = photos[index];
             if (photo.archive_status === "archived") continue;
             const category = photo.category && photo.category !== "unclassified" ? photo.category : categoryKeys[Math.min(index, categoryKeys.length - 1)];
-            await api(`/local-test/groups/${encodeURIComponent(state.group.id)}/photos/${encodeURIComponent(photo.id)}/category`, {
+            const updatedPhoto = await api(`/local-test/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photo.id)}/category`, {
               method: "PATCH",
               body: JSON.stringify({ category, reviewer: state.reviewer }),
             });
+            applyPhotoUpdate(updatedPhoto);
           }
-          await loadGroup(state.group.id);
-          await refreshCurrentGroups(state.group.id);
+          await loadGroup(groupId, { silent: true });
+          refreshTasks({ background: true }).catch(() => {});
+          notifyParentRefresh("group-archived", { group_id: groupId });
           if (state.group?.has_archive_blocker) {
             toast(`\u8d44\u6599\u7ec4\u5df2\u6807\u8bb0\u5f02\u5e38\uff1a${(state.group.exception_reasons || []).join("\uff1b")}`, true);
           } else {
             toast("\u5f53\u524d\u8d44\u6599\u7ec4\u5df2\u5f52\u6863");
           }
         } catch (error) {
-          await loadGroup(state.group.id);
-          await refreshCurrentGroups(state.group.id);
+          await loadGroup(groupId, { silent: true });
           toast(error.message, true);
+        } finally {
+          setReviewBusy(false);
+          renderReview();
         }
       }
-      async function refreshCurrentGroups(preferredGroupId = null) {
+      async function refreshCurrentGroups(preferredGroupId = null, options = {}) {
         if (!state.taskId || !canReviewCurrentTask()) return;
-        const data = await api(`/local-test/tasks/${state.taskId}/groups?limit=1000&scan_only=true`);
-        state.groups = data.items || [];
-        if (preferredGroupId) {
-          state.group = state.groups.find((group) => group.id === preferredGroupId) || state.group;
+        const background = Boolean(options.background);
+        const requestSeq = ++state.groupsRequestSeq;
+        const taskId = state.taskId;
+        state.groupsLoading = true;
+        if (!background || !state.groups.length) renderGroups();
+        try {
+          const data = await api(`/local-test/tasks/${taskId}/groups?limit=1000&scan_only=false&summary=true`);
+          if (requestSeq !== state.groupsRequestSeq || taskId !== state.taskId) return;
+          const items = data.items || [];
+          state.groups = items.map((group) => {
+            if (state.group && String(state.group.id) === String(group.id)) {
+              return { ...group, photos: state.group.photos || [] };
+            }
+            return group;
+          });
+          if (preferredGroupId) {
+            syncActiveGroupSummary(state.groups.find((group) => String(group.id) === String(preferredGroupId)));
+          }
+          state.groupsLoaded = true;
+        } finally {
+          if (requestSeq === state.groupsRequestSeq && taskId === state.taskId) {
+            state.groupsLoading = false;
+            if (!background || !shouldDeferBackgroundRefresh()) renderGroups();
+          }
         }
-        renderGroups();
       }
       function preloadImages(photos) {
-        photos.forEach((photo) => {
-          if (!photo.image_url) return;
+        photos.slice(0, 8).forEach((photo) => {
+          const url = photoThumbnailUrl(photo);
+          if (!url || state.imageCache.has(url)) return;
+          state.imageCache.add(url);
           const image = new Image();
           image.decoding = "async";
-          image.src = photo.image_url;
+          image.loading = "eager";
+          image.src = url;
         });
       }
-      async function refreshTasks() {
-        state.tasks = (await api("/local-test/tasks")).items || [];
-        state.task = state.tasks.find((task) => task.id === state.taskId) || state.task;
-        renderTasks();
+      async function refreshTasks(options = {}) {
+        const background = Boolean(options.background);
+        const requestSeq = ++state.taskRequestSeq;
+        state.tasksLoading = true;
+        if (!background || !state.tasksLoaded) renderTasks();
+        try {
+          const data = await api("/local-test/tasks");
+          if (requestSeq !== state.taskRequestSeq) return;
+          state.tasks = data.items || [];
+          state.tasksLoaded = true;
+          state.task = state.tasks.find((task) => task.id === state.taskId) || state.task;
+        } finally {
+          if (requestSeq === state.taskRequestSeq) {
+            state.tasksLoading = false;
+            if (!background || !shouldDeferBackgroundRefresh()) renderTasks();
+          }
+        }
       }
       async function reloadAll() {
         await refreshTasks();
@@ -741,6 +2335,13 @@
           const visibleTasks = filteredTasks();
           const first = visibleTasks.find((task) => task.claimed_by === state.reviewer) || visibleTasks[0];
           if (first) await handleTask(first.id, "view");
+        }
+      }
+      async function externalRefresh() {
+        if (shouldDeferBackgroundRefresh()) return;
+        await refreshTasks({ background: true });
+        if (state.taskId && canReviewCurrentTask()) {
+          await refreshCurrentGroups(state.group?.id, { background: true });
         }
       }
       async function submitImport() {
@@ -761,12 +2362,13 @@
         state.group = null;
         state.photo = null;
         await reloadAll();
+        notifyParentRefresh("scan-json-imported");
         toast(`\u5df2\u5339\u914d ${result.applied_records || 0} \u5f20\u56fe`);
       }
       async function importXlsxFile(file) {
         const formData = new FormData();
         formData.append("file", file);
-        const response = await fetch("/local-test/scan/import-template-xlsx", { method: "POST", body: formData });
+        const response = await fetch("/local-test/scan/import-template-xlsx", { method: "POST", headers: teamHeaders(), body: formData });
         const payload = await response.json();
         if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
         $("#importDrawer").classList.remove("show");
@@ -819,6 +2421,7 @@
         toast(`CSV \u5df2\u8bfb\u53d6 ${rows.length} \u884c`);
       }
       function movePhoto(delta) {
+        markInteraction();
         const photos = state.group?.photos || [];
         if (!photos.length) return;
         const next = Math.max(0, Math.min(photos.length - 1, activePhotoIndex() + delta));
@@ -826,39 +2429,167 @@
         renderReview();
       }
       function moveGroup(delta) {
-        if (!state.groups.length) return;
-        const current = activeGroupIndex();
-        const next = Math.max(0, Math.min(state.groups.length - 1, (current < 0 ? 0 : current) + delta));
-        loadGroup(state.groups[next].id);
+        markInteraction();
+        const groups = visibleReviewGroups();
+        if (!groups.length) return;
+        const current = activeGroupIndex(groups);
+        const next = Math.max(0, Math.min(groups.length - 1, (current < 0 ? 0 : current) + delta));
+        loadGroup(groups[next].id);
       }
-      $("#reviewer").addEventListener("input", (event) => { state.reviewer = event.target.value.trim() || "local-reviewer"; });
+      syncReviewerIdentity();
+      function setupMobilePanelCollapse() {
+        const mobile = window.matchMedia("(max-width: 760px)");
+        document.querySelectorAll(".panel").forEach((panel) => {
+          const head = panel.querySelector(".panel-head");
+          if (!head || panel.dataset.collapseReady) return;
+          panel.dataset.collapseReady = "1";
+          head.addEventListener("click", (event) => {
+            if (!mobile.matches || event.target.closest("button,a,input,select,label")) return;
+            panel.classList.toggle("is-collapsed");
+          });
+        });
+        mobile.addEventListener?.("change", () => {
+          if (!mobile.matches) document.querySelectorAll(".panel.is-collapsed").forEach((panel) => panel.classList.remove("is-collapsed"));
+        });
+      }
+      setupMobilePanelCollapse();
+      $("#reviewer").addEventListener("input", (event) => { state.reviewer = event.target.value.trim() || initialReviewerIdentity(); syncReviewerIdentity(); });
+      $("#groupSearch")?.addEventListener("input", (event) => {
+        markInteraction();
+        state.groupQuery = event.target.value.trim();
+        renderGroups();
+      });
+      $("#reviewGroupFilters")?.querySelectorAll("[data-review-group-filter]").forEach((button) => {
+        button.addEventListener("click", () => {
+          markInteraction();
+          state.groupStatusFilter = button.dataset.reviewGroupFilter || "all";
+          renderGroups();
+          scrollActiveGroupIntoView();
+        });
+      });
+      $("#closeLightbox")?.addEventListener("click", closeLightbox);
+      $("#imageLightbox")?.addEventListener("click", (event) => {
+        if (event.target?.id === "imageLightbox") closeLightbox();
+      });
+      $("#lightboxZoomOut")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        zoomLightbox(1 / 1.25);
+      });
+      $("#lightboxZoomIn")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        zoomLightbox(1.25);
+      });
+      $("#lightboxReset")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        resetLightboxView();
+      });
+      $("#lightboxStage")?.addEventListener("wheel", (event) => {
+        if (!state.largeViewerOpen) return;
+        event.preventDefault();
+        zoomLightbox(event.deltaY < 0 ? 1.18 : 1 / 1.18);
+      }, { passive: false });
+      $("#lightboxStage")?.addEventListener("dblclick", (event) => {
+        event.stopPropagation();
+        if (state.largeViewerScale <= 1) {
+          state.largeViewerScale = 2;
+          updateLightboxTransform();
+        } else {
+          resetLightboxView();
+        }
+      });
+      $("#lightboxStage")?.addEventListener("pointerdown", (event) => {
+        if (!state.largeViewerOpen || state.largeViewerScale <= 1) return;
+        state.largeViewerDragging = true;
+        state.largeViewerDragX = event.clientX;
+        state.largeViewerDragY = event.clientY;
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        updateLightboxTransform();
+      });
+      $("#lightboxStage")?.addEventListener("pointermove", (event) => {
+        if (!state.largeViewerDragging) return;
+        const dx = event.clientX - state.largeViewerDragX;
+        const dy = event.clientY - state.largeViewerDragY;
+        state.largeViewerDragX = event.clientX;
+        state.largeViewerDragY = event.clientY;
+        state.largeViewerX += dx;
+        state.largeViewerY += dy;
+        updateLightboxTransform();
+      });
+      ["pointerup", "pointercancel", "pointerleave"].forEach((type) => {
+        $("#lightboxStage")?.addEventListener(type, () => {
+          state.largeViewerDragging = false;
+          updateLightboxTransform();
+        });
+      });
       $("#reload").addEventListener("click", reloadAll);
-      $("#openImport").addEventListener("click", () => $("#importDrawer").classList.add("show"));
+      $("#openImport")?.addEventListener("click", () => $("#importDrawer").classList.add("show"));
       $("#closeImport").addEventListener("click", () => $("#importDrawer").classList.remove("show"));
       $("#submitImport").addEventListener("click", () => submitImport().catch((error) => toast(error.message, true)));
       $("#csvFile").addEventListener("change", (event) => {
         const file = event.target.files?.[0];
         if (file) loadCsvFile(file).catch((error) => toast(error.message, true));
       });
+      let refreshTimer = null;
+      function scheduleExternalRefresh() {
+        clearTimeout(refreshTimer);
+        const delay = shouldDeferBackgroundRefresh() ? 1800 : 180;
+        refreshTimer = setTimeout(() => externalRefresh().catch((error) => toast(error.message, true)), delay);
+      }
+      window.addEventListener("message", (event) => {
+        if (event.origin !== location.origin) return;
+        if (event.data?.type === "module-manager:data-refresh") {
+          scheduleExternalRefresh();
+        }
+        if (event.data?.type === "module-manager:data-mutated") {
+          notifyParentRefresh(event.data.reason || "exception-data-mutated", event.data.payload || {});
+          scheduleExternalRefresh();
+        }
+      });
+      setInterval(scheduleExternalRefresh, 10000);
       document.addEventListener("keydown", (event) => {
+        if (state.largeViewerOpen && event.key === "Escape") {
+          closeLightbox();
+          event.preventDefault();
+          return;
+        }
+        if (state.largeViewerOpen && (event.key === "+" || event.key === "=")) {
+          zoomLightbox(1.25);
+          event.preventDefault();
+          return;
+        }
+        if (state.largeViewerOpen && event.key === "-") {
+          zoomLightbox(1 / 1.25);
+          event.preventDefault();
+          return;
+        }
+        if (state.largeViewerOpen && event.key === "0") {
+          resetLightboxView();
+          event.preventDefault();
+          return;
+        }
         if (event.target.matches("input, textarea, select")) return;
         if (/^[1-4]$/.test(event.key) && state.photo && canReviewCurrentTask()) {
-          state.photo.category = categoryKeys[Number(event.key) - 1];
-          renderReview();
+          markInteraction();
+          setDraftCategory(categoryKeys[Number(event.key) - 1]);
           event.preventDefault();
         } else if (event.key === "Enter" && canReviewCurrentTask()) {
+          markInteraction();
           archivePhoto().catch((error) => toast(error.message, true));
           event.preventDefault();
         } else if (event.key === "ArrowRight") {
+          markInteraction();
           movePhoto(1);
           event.preventDefault();
         } else if (event.key === "ArrowLeft") {
+          markInteraction();
           movePhoto(-1);
           event.preventDefault();
         } else if (event.key === "ArrowDown") {
+          markInteraction();
           moveGroup(1);
           event.preventDefault();
         } else if (event.key === "ArrowUp") {
+          markInteraction();
           moveGroup(-1);
           event.preventDefault();
         }

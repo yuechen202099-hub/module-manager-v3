@@ -8,10 +8,11 @@ V2.0 is a multi-user web review system. The main workflow is no longer backend E
 
 1. Import scan/photo data from spreadsheets.
 2. Match imported rows to the total catalog and stage catalog.
-3. Store photo URLs and metadata only.
-4. Load photos in the browser from URL when a reviewer opens a group.
-5. Generate archive/export names from backend classification metadata.
-6. Keep review classification keyboard-first.
+3. Store imported photo URLs and metadata.
+4. Load imported photos in the browser from URL when a reviewer opens a group.
+5. Allow administrators to upload manual missing-photo images for incomplete groups; the upload result becomes a normal photo URL record for review and export.
+6. Generate archive/export names from backend classification metadata.
+7. Keep review classification keyboard-first.
 
 The old Ezcodes backend sync code is compatibility/debug code only. Do not make it the primary user flow, do not add new product dependencies on Ezcodes backend API behavior, and do not design acceptance criteria around API availability.
 
@@ -22,7 +23,8 @@ The old Ezcodes backend sync code is compatibility/debug code only. Do not make 
 - Display meter number must use the total catalog original meter number.
 - Long scanned barcode match key: remove the first 11 chars and the last 1 char.
 - Total catalog short meter match key: remove the first 2 chars.
-- Imported photo rows keep URL references. Do not download photos to local disk.
+- Imported photo rows keep URL references. Do not download imported spreadsheet photos to local disk.
+- Manual missing-photo handling uses image upload because the operator will have local missing photos. Store the resulting served path or OSS key as the photo URL record.
 - Classification must be fast: keyboard shortcuts are a core requirement, not a nice-to-have.
 - Classified photo archive filename equals the category label, with a suitable file extension.
 
@@ -44,6 +46,35 @@ Future work must use multiple focused agents when the task is broad enough:
 - If a file is already changed by another agent, inspect and integrate with that change. Never revert blindly.
 - Product decisions belong in `README.md`, `AGENTS.md`, or `docs/*.md` before implementation begins.
 - Code changes that contradict this file are out of scope and must be stopped before review.
+
+## Product Evaluation Discipline
+
+- Product evaluation rules live in `docs/PRODUCT_EVALUATION_RULES.md`.
+- After any meaningful change to import, review, construction collection, exception orders, export, permissions, storage, deployment, or data persistence, generate or update an evaluation report under `docs/evaluations/`.
+- Run `powershell -ExecutionPolicy Bypass -File scripts\run-product-evaluation.ps1 -Change "change summary"` after each core workflow change.
+- The report must calculate the weighted score from the local rule file and include automatic checks, score caps, strengths, weaknesses, risks, and no-extra-budget upgrade steps.
+- Weekly production evaluation can be registered with `scripts\register-product-evaluation-task.ps1`; do not rely on memory for periodic review.
+- Small documentation or style-only changes may append a short note to the latest report instead of creating a new report.
+- Do not mark a production patch complete if it changes a core workflow and has no evaluation note or report.
+
+## Versioning Discipline
+
+- Current product version: `V2.4.10`.
+- Every shipped change must update the product version before completion.
+- Major workflow, architecture, database, deployment, or UI experience changes increment the minor version by `0.1`.
+  - Example: `V2.4.10` -> `V2.5.0`.
+- Small bug fixes, copy changes, focused UI adjustments, and low-risk patches increment the patch version by `0.0.1`.
+  - Example: `V2.4.10` -> `V2.4.11`.
+- Update all visible app version labels, release notes, and deployment notes consistently.
+- Do not finish a production update without stating the old version and new version in the final report.
+
+## Frontend Migration Rule
+
+- Vue is the target production frontend. Static HTML pages under `v2-api/app/static/*.html` are compatibility surfaces only.
+- Do not add new production static HTML pages.
+- Every remaining static production page must be registered in `v2-web/src/router/staticPages.ts` with a migration status.
+- Run `python scripts/verify_vue_migration_gate.py` after frontend routing changes.
+- Before claiming the frontend structure is production-complete, `python scripts/verify_vue_migration_gate.py --strict-native` must pass.
 
 ## UI Bar
 

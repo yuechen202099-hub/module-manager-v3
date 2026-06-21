@@ -1,30 +1,57 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import AppLayout from '@/layouts/AppLayout.vue'
+import { staticPages } from '@/router/staticPages'
 import { useAuthStore } from '@/stores/auth'
 
+const nativePageComponents = {
+  'project-board': () => import('@/views/ProjectBoardView.vue'),
+  'claim-tasks': () => import('@/views/ClaimTasksView.vue'),
+  'task-hall': () => import('@/views/TaskHallView.vue'),
+  construction: () => import('@/views/ConstructionView.vue'),
+  'sync-config': () => import('@/views/SyncConfigView.vue'),
+} as const
+
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHistory('/'),
   routes: [
     {
       path: '/',
-      redirect: '/dashboard',
+      redirect: '/project-board',
+    },
+    {
+      path: '/app',
+      redirect: (to) => {
+        const page = String(to.query.page || 'project-board')
+        if (page === 'construction-cache') return { path: '/construction', query: {} }
+        if (page === 'unmatched') return { path: '/task-hall', query: {} }
+        return `/${page}`
+      },
     },
     {
       path: '/login',
       name: 'login',
       component: () => import('@/views/LoginView.vue'),
-      meta: { public: true },
+      meta: { public: true, title: '登录' },
     },
     {
       path: '/',
       component: AppLayout,
       children: [
+        ...staticPages.map((page) => ({
+          path: page.routePath.replace(/^\//, ''),
+          name: page.key,
+          component: nativePageComponents[page.key],
+          meta: {
+            title: page.title,
+            staticPageKey: page.key,
+            roles: page.roles,
+            migrationStatus: page.migrationStatus,
+          },
+        })),
         {
           path: 'dashboard',
-          name: 'dashboard',
-          component: () => import('@/views/DashboardView.vue'),
-          meta: { title: '项目看板' },
+          redirect: '/project-board',
         },
         {
           path: 'projects',
@@ -40,9 +67,7 @@ const router = createRouter({
         },
         {
           path: 'tasks',
-          name: 'tasks',
-          component: () => import('@/views/TaskHallView.vue'),
-          meta: { title: '任务大厅' },
+          redirect: '/claim-tasks',
         },
         {
           path: 'review/:groupId',
@@ -62,7 +87,7 @@ router.beforeEach((to) => {
   }
 
   if (to.name === 'login' && auth.isAuthenticated) {
-    return { name: 'dashboard' }
+    return { name: 'project-board' }
   }
 
   return true

@@ -79,9 +79,13 @@ def test_photo_insufficient_threshold_is_four_valid_photos() -> None:
     ]
     summary = build_summary([], [], [], groups, [], [])
 
-    assert summary["incomplete_groups"] == 2
-    assert summary["unreviewed_groups"] == 3
+    assert summary["incomplete_groups"] == 0
+    assert summary["exception_groups"] == 1
+    assert summary["unconstructed_groups"] == 1
+    assert summary["unreviewed_groups"] == 2
+    assert summary["reviewed_groups"] == 0
     assert summary["photo_rows_linked"] == 7
+    assert summary["scanned_groups"] == 2
 
 
 def test_supplemental_photo_rule_returns_group_to_unreviewed_after_threshold() -> None:

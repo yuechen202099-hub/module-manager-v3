@@ -1,15 +1,76 @@
+﻿import html
+import importlib.util
+import time
+from io import BytesIO
+from uuid import uuid4
+from pathlib import Path
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.main import create_app
+from app.api.routes import auth
+from app.core.config import settings
+from app.core import security
+from app.services.ezcodes_scheduler import sync_manager
+from app.services import account_store
+from app.services.photo_storage import resolve_photo_for_response
 
 
 client = TestClient(create_app())
+
+
+def build_api_workbook(rows: list[list[str]]) -> bytes:
+    from io import BytesIO
+
+    import pytest
+
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in rows:
+        sheet.append(row)
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def load_static_page_verifier():
+    verifier_path = Path(__file__).resolve().parents[2] / "scripts" / "verify-static-pages.py"
+    spec = importlib.util.spec_from_file_location("verify_static_pages", verifier_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def assert_success_shape(payload: dict) -> None:
     assert "data" in payload
     assert payload["error"] is None
     assert isinstance(payload["request_id"], str)
+
+
+def assert_active_nav(html: str, href: str) -> None:
+    assert f'href="{href}"' in html
+    assert (
+        f'class="button active" href="{href}"' in html
+        or f'class="button secondary active" href="{href}"' in html
+        or f'class="nav-link active" href="{href}"' in html
+    )
+
+
+def assert_vue_shell_response(response) -> None:
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert '<div id="app"></div>' in response.text
+    assert 'type="module"' in response.text
+    assert "/vue/assets/" in response.text
+    assert 'id="workFrame"' not in response.text
+    assert 'embedded: "1"' not in response.text
+    assert "LegacyStaticPageView" not in response.text
 
 
 def test_health_check() -> None:
@@ -20,6 +81,246 @@ def test_health_check() -> None:
     payload = response.json()
     assert payload["data"] == {"status": "ok"}
     assert payload["request_id"] == "test-request"
+
+
+def test_system_status_requires_admin_and_reports_runtime_state() -> None:
+    admin = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    reviewer = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
+    admin_headers = {"Authorization": f"bearer {admin.json()['data']['access_token']}"}
+    reviewer_headers = {"Authorization": f"bearer {reviewer.json()['data']['access_token']}"}
+
+    denied = client.get("/local-test/system/status", headers=reviewer_headers)
+    response = client.get("/local-test/system/status", headers=admin_headers)
+
+    assert denied.status_code == 403
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["version"] == "2.4.10"
+    assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
+    assert "used_percent" in data["disk"]
+    assert "warn_bytes" in data["uploads"]
+    assert data["storage"]["backend"] in {"local", "oss"}
+
+
+def test_oss_photo_response_resolves_preview_url_without_rewriting_canonical(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "oss_public_base_url", "https://oss-preview.example.test/base")
+    monkeypatch.setattr(settings, "oss_thumbnail_process", "image/resize,w_120")
+    monkeypatch.setattr(settings, "oss_preview_process", "image/resize,w_800")
+    photo = {
+        "id": "p-oss",
+        "image_url": "oss://bucket-a/path/to/photo 1.jpg",
+        "storage_type": "oss",
+        "storage_key": "path/to/photo 1.jpg",
+        "storage_bucket": "bucket-a",
+    }
+
+    resolved = resolve_photo_for_response(photo)
+
+    assert resolved["canonical_image_url"] == "oss://bucket-a/path/to/photo 1.jpg"
+    assert resolved["image_url"] == "https://oss-preview.example.test/base/path/to/photo%201.jpg"
+    assert resolved["thumbnail_url"] == "https://oss-preview.example.test/base/path/to/photo%201.jpg?x-oss-process=image/resize,w_120"
+    assert resolved["preview_url"] == "https://oss-preview.example.test/base/path/to/photo%201.jpg?x-oss-process=image/resize,w_800"
+    assert photo["image_url"] == "oss://bucket-a/path/to/photo 1.jpg"
+
+
+def test_oss_photo_response_keeps_raw_reference_when_signing_config_missing(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "oss_public_base_url", "")
+    monkeypatch.setattr(settings, "oss_endpoint", "")
+    monkeypatch.setattr(settings, "oss_internal_endpoint", "")
+    monkeypatch.setattr(settings, "oss_bucket", "")
+    monkeypatch.setattr(settings, "oss_access_key_id", "")
+    monkeypatch.setattr(settings, "oss_access_key_secret", "")
+    photo = {
+        "id": "p-oss",
+        "image_url": "oss://bucket-a/path/to/photo.jpg",
+        "storage_type": "oss",
+        "storage_key": "path/to/photo.jpg",
+        "storage_bucket": "bucket-a",
+    }
+
+    resolved = resolve_photo_for_response(photo)
+
+    assert resolved["canonical_image_url"] == "oss://bucket-a/path/to/photo.jpg"
+    assert resolved["image_url"] == "oss://bucket-a/path/to/photo.jpg"
+    assert resolved["thumbnail_url"] == "oss://bucket-a/path/to/photo.jpg"
+    assert resolved["preview_url"] == "oss://bucket-a/path/to/photo.jpg"
+
+
+def test_broken_oss_processed_preview_falls_back_to_original(monkeypatch) -> None:
+    pytest = importlib.import_module("pytest")
+    pytest.importorskip("PIL")
+    from PIL import Image, ImageDraw
+
+    from app.api.routes import local_test
+
+    broken = Image.new("RGB", (320, 180), (128, 128, 128))
+    draw = ImageDraw.Draw(broken)
+    palette = [(20, 20, 20), (236, 236, 236), (70, 120, 60), (160, 120, 170)]
+    for x in range(84, 236):
+        draw.line((x, 0, x, 180), fill=palette[x % len(palette)])
+    broken_buffer = BytesIO()
+    broken.save(broken_buffer, format="JPEG", quality=95)
+
+    original = Image.new("RGB", (320, 180), (220, 230, 240))
+    original_buffer = BytesIO()
+    original.save(original_buffer, format="JPEG", quality=90)
+    original_bytes = original_buffer.getvalue()
+
+    def fake_sign_oss_server_url(_key: str, process: str = "") -> str:
+        return f"signed://{process or 'original'}"
+
+    def fake_read_remote_image(url: str, *, max_bytes: int = 30 * 1024 * 1024):
+        if url.endswith("original"):
+            return original_bytes, "image/jpeg"
+        return broken_buffer.getvalue(), "image/jpeg"
+
+    monkeypatch.setattr(local_test, "sign_oss_server_url", fake_sign_oss_server_url)
+    monkeypatch.setattr(local_test, "_read_remote_image", fake_read_remote_image)
+
+    content, media_type = local_test._read_oss_photo_or_repair(
+        "g-1",
+        {},
+        "module-manager-v2/default-team/photos/aa/photo.jpg",
+        "",
+        "image/resize,w_1280",
+    )
+
+    assert media_type == "image/jpeg"
+    assert content == original_bytes
+
+
+def test_login_page_and_demo_auth_are_available() -> None:
+    page = client.get("/login")
+    config = client.get("/auth/config")
+    admin = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    reviewer = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
+    constructor = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
+    bad = client.post("/auth/login", json={"username": "admin", "password": "bad"})
+
+    assert_vue_shell_response(page)
+    assert "admin / admin123" not in page.text
+    assert "reviewer / review123" not in page.text
+    assert 'value="admin"' not in page.text
+    assert 'value="admin123"' not in page.text
+    assert config.status_code == 200
+    assert config.json()["data"]["demo_auth_enabled"] is True
+    assert {item["username"] for item in config.json()["data"]["demo_accounts"]} == {"admin", "reviewer", "constructor"}
+    assert {item["team_id"] for item in config.json()["data"]["demo_accounts"]} == {"demo-team"}
+    assert admin.status_code == 200
+    assert admin.json()["data"]["team_id"] == "demo-team"
+    assert admin.json()["data"]["user"]["home"] == "/app"
+    assert admin.json()["data"]["user"]["team_id"] == "demo-team"
+    assert admin.json()["data"]["user"]["roles"] == ["admin"]
+    assert reviewer.status_code == 200
+    assert reviewer.json()["data"]["user"]["home"] == "/app"
+    assert constructor.status_code == 200
+    assert constructor.json()["data"]["user"]["roles"] == ["constructor"]
+    assert constructor.json()["data"]["user"]["home"] == "/app?page=construction"
+    assert bad.status_code == 401
+
+
+def test_demo_auth_is_disabled_by_default_in_production(monkeypatch) -> None:
+    production_settings = SimpleNamespace(
+        app_env="production",
+        demo_auth_enabled=None,
+        admin_username="real-admin",
+        admin_password="real-secret",
+    )
+    monkeypatch.setattr(auth, "settings", production_settings)
+
+    demo_admin = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    real_admin = client.post("/auth/login", json={"username": "real-admin", "password": "real-secret"})
+    production_config = client.get("/auth/config")
+
+    assert demo_admin.status_code == 401
+    assert real_admin.status_code == 200
+    assert real_admin.json()["data"]["user"]["roles"] == ["admin"]
+    assert production_config.status_code == 200
+    assert production_config.json()["data"]["demo_auth_enabled"] is False
+    assert production_config.json()["data"]["demo_accounts"] == []
+
+
+def test_production_account_config_and_api_token_gate(monkeypatch, tmp_path) -> None:
+    production_settings = SimpleNamespace(
+        app_env="production",
+        demo_auth_enabled=False,
+        admin_username="root-admin",
+        admin_password="RootPass12345",
+        admin_team_id="north-team-01",
+        auth_users_path=str(tmp_path / "users.json"),
+        jwt_secret="jwt-secret-for-production-test-12345",
+        jwt_expire_minutes=60,
+    )
+    monkeypatch.setattr(auth, "settings", production_settings)
+    monkeypatch.setattr(account_store, "settings", production_settings)
+    monkeypatch.setattr(security, "settings", production_settings)
+    monkeypatch.setattr(main_module, "settings", production_settings)
+    production_client = TestClient(main_module.create_app())
+
+    admin_login = production_client.post(
+        "/auth/login",
+        json={"username": "root-admin", "password": "RootPass12345"},
+    )
+    assert admin_login.status_code == 200
+    admin_token = admin_login.json()["data"]["access_token"]
+    admin_headers = {"Authorization": f"bearer {admin_token}"}
+
+    assert production_client.get("/local-test/summary").status_code == 401
+    assert production_client.get("/auth/users").status_code == 401
+
+    users = production_client.get("/auth/users", headers=admin_headers)
+    assert users.status_code == 200
+    assert {item["username"] for item in users.json()["data"]["items"]} == {"root-admin"}
+
+    created = production_client.post(
+        "/auth/users",
+        headers=admin_headers,
+        json={
+            "username": "reviewer-a",
+            "password": "ReviewPass12345",
+            "name": "Reviewer A",
+            "roles": ["reviewer"],
+            "team_id": "north-team-01",
+            "status": "active",
+        },
+    )
+    assert created.status_code == 200
+    reviewer_login = production_client.post(
+        "/auth/login",
+        json={"username": "reviewer-a", "password": "ReviewPass12345", "team_id": "other-team"},
+    )
+    assert reviewer_login.status_code == 200
+    assert reviewer_login.json()["data"]["team_id"] == "north-team-01"
+    reviewer_token = reviewer_login.json()["data"]["access_token"]
+
+    summary = production_client.get(
+        "/local-test/summary",
+        headers={"Authorization": f"bearer {reviewer_token}", "X-Team-Id": "other-team"},
+    )
+    assert summary.status_code == 200
+    assert summary.json()["data"]["summary"]["team_id"] == "north-team-01"
+
+    deleted = production_client.delete("/auth/users/reviewer-a", headers=admin_headers)
+    assert deleted.status_code == 200
+    assert deleted.json()["data"]["user"]["username"] == "reviewer-a"
+    users_after_delete = production_client.get("/auth/users", headers=admin_headers)
+    assert {item["username"] for item in users_after_delete.json()["data"]["items"]} == {"root-admin"}
+    deleted_login = production_client.post(
+        "/auth/login",
+        json={"username": "reviewer-a", "password": "ReviewPass12345"},
+    )
+    assert deleted_login.status_code == 401
+    delete_self = production_client.delete("/auth/users/root-admin", headers=admin_headers)
+    assert delete_self.status_code == 400
+
+
+def test_api_docs_are_disabled_in_production(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "settings", SimpleNamespace(app_env="production"))
+    production_client = TestClient(main_module.create_app())
+
+    assert production_client.get("/docs").status_code == 404
+    assert production_client.get("/redoc").status_code == 404
+    assert production_client.get("/openapi.json").status_code == 404
 
 
 def test_project_routes_return_contract_shape() -> None:
@@ -63,6 +364,14 @@ def test_local_test_task_and_review_flow() -> None:
     groups_response = client.get(f"/local-test/tasks/{task['id']}/groups?limit=1")
     assert groups_response.status_code == 200
     group = groups_response.json()["data"]["items"][0]
+    assert "photos" in group
+
+    summary_response = client.get(f"/local-test/tasks/{task['id']}/groups?limit=1&summary=true")
+    assert summary_response.status_code == 200
+    summary_group = summary_response.json()["data"]["items"][0]
+    assert "photos" not in summary_group
+    assert "photo_count" in summary_group
+    assert "reviewer" in summary_group
 
     review_response = client.patch(
         f"/local-test/groups/{group['id']}/review",
@@ -77,63 +386,547 @@ def test_local_test_task_and_review_flow() -> None:
         f"/local-test/groups/{photo_group['id']}/photos/{photo['id']}/category",
         json={"category": "collector_barcode", "reviewer": "api-test"},
     )
+    category_summary_response = client.patch(
+        f"/local-test/groups/{photo_group['id']}/photos/{photo['id']}/category?include_group=true",
+        json={"category": "module_meter", "reviewer": "api-test"},
+    )
+    delete_response = client.request(
+        "DELETE",
+        f"/local-test/groups/{photo_group['id']}/photos/{photo['id']}",
+        json={"reviewer": "api-test"},
+    )
     assert category_response.status_code == 200
     assert category_response.json()["data"]["category"] == "collector_barcode"
+    assert category_summary_response.status_code == 200
+    assert category_summary_response.json()["data"]["photo"]["category"] == "module_meter"
+    assert category_summary_response.json()["data"]["group"]["id"] == photo_group["id"]
+    assert "photos" not in category_summary_response.json()["data"]["group"]
+    assert delete_response.status_code == 200
+    assert delete_response.json()["data"]["deleted_photo"]["id"] == photo["id"]
+
+
+def test_local_test_team_header_isolates_review_state() -> None:
+    team_a = {"X-Team-Id": "team-a"}
+    team_b = {"X-Team-Id": "team-b"}
+
+    client.post("/local-test/bootstrap", headers=team_a)
+    client.post("/local-test/bootstrap", headers=team_b)
+    task_a = next(item for item in client.get("/local-test/tasks", headers=team_a).json()["data"]["items"] if item["can_claim"])
+    task_b = next(item for item in client.get("/local-test/tasks", headers=team_b).json()["data"]["items"] if item["id"] == task_a["id"])
+
+    claim_a = client.post(f"/local-test/tasks/{task_a['id']}/claim", headers=team_a, json={"reviewer": "alice"})
+    after_a = client.get("/local-test/tasks", headers=team_a).json()["data"]["items"]
+    after_b = client.get("/local-test/tasks", headers=team_b).json()["data"]["items"]
+    teams = client.get("/local-test/teams", headers=team_a).json()["data"]["items"]
+
+    assert claim_a.status_code == 200
+    assert next(item for item in after_a if item["id"] == task_a["id"])["claimed_by"] == "alice"
+    assert task_b["claimed_by"] is None
+    assert next(item for item in after_b if item["id"] == task_a["id"])["claimed_by"] is None
+    assert {"team-a", "team-b"}.issubset({item["team_id"] for item in teams})
+
+
+def test_async_scan_template_import_job_completes() -> None:
+    team = {"X-Team-Id": f"async-import-team-{uuid4().hex}"}
+    catalog = build_api_workbook(
+        [
+            ["terminal", "meter_no", "address"],
+            ["T-ASYNC", "ZZ1001", "Async road"],
+        ]
+    )
+    scan = build_api_workbook(
+        [
+            ["barcode", "meter_match_key", "terminal", "collector", "module_asset_no", "photo_urls"],
+            ["scan-1", "1001", "T-ASYNC", "collector", "asset-1", "https://example.invalid/1.jpg"],
+            ["scan-2", "1001", "T-ASYNC", "collector", "asset-2", "https://example.invalid/2.jpg"],
+        ]
+    )
+
+    catalog_response = client.post(
+        "/local-test/catalog/total/import-xlsx",
+        headers=team,
+        files={"file": ("catalog.xlsx", catalog, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    job_response = client.post(
+        "/local-test/scan/import-template-xlsx/jobs",
+        headers=team,
+        files={"file": ("scan.xlsx", scan, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert catalog_response.status_code == 200
+    assert job_response.status_code == 200
+    job_id = job_response.json()["data"]["job_id"]
+    payload = {}
+    for _ in range(50):
+        poll = client.get(f"/local-test/scan/import-template-xlsx/jobs/{job_id}", headers=team)
+        assert poll.status_code == 200
+        payload = poll.json()["data"]
+        if payload["status"] == "complete":
+            break
+        time.sleep(0.05)
+
+    assert payload["status"] == "complete"
+    assert payload["result"]["template_rows"] == 2
+    assert payload["result"]["applied_records"] == 2
+    assert payload["progress"]["phase"] == "complete"
 
 
 def test_task_hall_page_is_available() -> None:
-    response = client.get("/task-hall")
+    assert_vue_shell_response(client.get("/task-hall"))
+    assert_vue_shell_response(client.get("/task-hall?embedded=1"))
 
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-    assert "archivePhoto" in response.text
-    assert "meta-grid" in response.text
-    assert "data-action=\"stash\"" in response.text
-    assert "renovation_count" in response.text
-    assert 'id="openImport"' in response.text
-    assert 'id="csvFile"' in response.text
-    assert 'id="clearScan"' not in response.text
-    assert 'id="claimFilter"' not in response.text
-    assert 'id="completeFilter"' not in response.text
-    assert "/claim-tasks" in response.text
-    assert 'id="importPayload"' in response.text
-    assert 'id="syncNow"' not in response.text
-    assert 'id="scanFilter"' not in response.text
+def test_app_shell_page_is_available() -> None:
+    assert_vue_shell_response(client.get("/app"))
 
+def test_claim_tasks_page_exposes_admin_release_all_control() -> None:
+    assert_vue_shell_response(client.get("/claim-tasks"))
+    assert_vue_shell_response(client.get("/claim-tasks?embedded=1"))
+
+def test_admin_can_release_all_claimed_tasks() -> None:
+    admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    reviewer_login = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
+    admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
+    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
+
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    tasks = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"]
+    claimable = [task for task in tasks if task["can_claim"]][:2]
+    assert claimable
+    for index, task in enumerate(claimable):
+        claim = client.post(
+            f"/local-test/tasks/{task['id']}/claim",
+            headers=admin_headers,
+            json={"reviewer": f"reviewer-{index}"},
+        )
+        assert claim.status_code == 200
+
+    reviewer_denied = client.post(
+        "/local-test/tasks/release-all",
+        headers=reviewer_headers,
+        json={"reviewer": "reviewer"},
+    )
+    released = client.post(
+        "/local-test/tasks/release-all",
+        headers=admin_headers,
+        json={"reviewer": "admin"},
+    )
+
+    assert reviewer_denied.status_code == 403
+    assert released.status_code == 200
+    assert released.json()["data"]["released"] == len(claimable)
+    after = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"]
+    claimed_ids = {task["id"] for task in claimable}
+    assert not any(task.get("claimed_by") for task in after if task["id"] in claimed_ids)
+
+
+def test_construction_task_open_claim_and_upload_batch() -> None:
+    admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    reviewer_login = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
+    constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
+    admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
+    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
+    constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
+
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    client.post("/local-test/scan/clear", headers=admin_headers)
+    task = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][0]
+    hidden = client.get(
+        "/local-test/construction/tasks?actor=constructor",
+        headers=constructor_headers,
+    ).json()["data"]["items"]
+    denied_claim = client.post(
+        f"/local-test/construction/tasks/{task['id']}/claim",
+        headers=constructor_headers,
+        json={"actor": "constructor"},
+    )
+    opened = client.patch(
+        f"/local-test/construction/tasks/{task['id']}/open",
+        headers=admin_headers,
+        json={"actor": "admin"},
+    )
+    assigned = client.patch(
+        f"/local-test/construction/tasks/{task['id']}/assign",
+        headers=admin_headers,
+        json={"actor": "admin", "constructor": "constructor"},
+    )
+    claimed = client.post(
+        f"/local-test/construction/tasks/{task['id']}/claim",
+        headers=constructor_headers,
+        json={"actor": "constructor"},
+    )
+    groups = client.get(
+        f"/local-test/construction/tasks/{task['id']}/groups?limit=1&summary=true",
+        headers=constructor_headers,
+    ).json()["data"]["items"]
+    group = groups[0]
+    uploaded = client.post(
+        f"/local-test/construction/groups/{group['id']}/upload-batch",
+        headers=constructor_headers,
+        data={
+            "actor": "constructor",
+            "client_batch_id": "batch-api-1",
+            "collector": "collector-api",
+            "module_asset_no": "module-api",
+            "photo_slots": ["before_box", "after_box"],
+            "client_photo_ids": ["photo-a", "photo-b"],
+        },
+        files=[
+            ("files", ("before.jpg", b"same-image", "image/jpeg")),
+            ("files", ("after.jpg", b"same-image", "image/jpeg")),
+        ],
+    )
+
+    assert hidden == []
+    assert denied_claim.status_code == 400
+    assert opened.status_code == 200
+    assert opened.json()["data"]["construction_enabled"] is True
+    assert assigned.status_code == 200
+    assert assigned.json()["data"]["construction_claimed_by"] == "constructor"
+    assert claimed.status_code == 200
+    assert claimed.json()["data"]["construction_claimed_by"] == "constructor"
+    assert uploaded.status_code == 200
+    payload = uploaded.json()["data"]
+    assert payload["added"] == 1
+    assert payload["skipped_duplicates"] == 1
+    assert payload["group"]["photos"][0]["upload_source"] == "construction-mobile"
+    assert payload["group"]["photos"][0]["construction_slot"] == "before_box"
+    assert payload["group"]["photos"][0]["category"] == "unclassified"
+    assert payload["group"]["photos"][0]["sha256"]
+    assert payload["group"]["photos"][0]["storage_type"] == "local_upload"
+    assert payload["group"]["photos"][0]["storage_key"].startswith("construction/")
+    assert payload["uploaded_urls"][0].startswith("/static/uploads/construction/")
+
+    after_first_upload = client.get(
+        f"/local-test/construction/tasks/{task['id']}/groups?limit=1000&summary=true",
+        headers=constructor_headers,
+    ).json()["data"]["items"]
+    assert group["id"] not in {item["id"] for item in after_first_upload}
+    second_group = after_first_upload[0]
+    complete_upload = client.post(
+        f"/local-test/construction/groups/{second_group['id']}/upload-batch",
+        headers=constructor_headers,
+        data={
+            "actor": "constructor",
+            "client_batch_id": "batch-api-2",
+            "collector": "collector-api-2",
+            "module_asset_no": "module-api-2",
+            "photo_slots": ["before_box", "after_box", "module_meter", "collector_barcode"],
+            "client_photo_ids": ["photo-1", "photo-2", "photo-3", "photo-4"],
+        },
+        files=[
+            ("files", ("before.jpg", b"image-1", "image/jpeg")),
+            ("files", ("after.jpg", b"image-2", "image/jpeg")),
+            ("files", ("meter.jpg", b"image-3", "image/jpeg")),
+            ("files", ("collector.jpg", b"image-4", "image/jpeg")),
+        ],
+    )
+    assert complete_upload.status_code == 200
+    complete_payload = complete_upload.json()["data"]
+    assert complete_payload["added"] == 4
+    assert complete_payload["group"]["status"] == "pending"
+
+    client.post(
+        f"/local-test/tasks/{task['id']}/claim",
+        headers=reviewer_headers,
+        json={"reviewer": "reviewer"},
+    )
+    review_groups = client.get(
+        f"/local-test/tasks/{task['id']}/groups?limit=1000&scan_only=false&summary=true",
+        headers=reviewer_headers,
+    ).json()["data"]["items"]
+    assert second_group["id"] in {item["id"] for item in review_groups}
+    review_detail = client.get(f"/local-test/groups/{second_group['id']}", headers=reviewer_headers).json()["data"]
+    assert len(review_detail["photos"]) == 4
+    assert all(photo["image_url"].startswith("/static/uploads/construction/") for photo in review_detail["photos"])
+    assert all(photo["download_status"] == "downloaded" for photo in review_detail["photos"])
+    assert all(photo["category"] == "unclassified" for photo in review_detail["photos"])
+
+
+def test_constructor_can_only_see_and_keep_one_claimed_terminal() -> None:
+    admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
+    admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
+    constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
+
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    tasks = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][:2]
+    assert len(tasks) == 2
+    for task in tasks:
+        opened = client.patch(
+            f"/local-test/construction/tasks/{task['id']}/open",
+            headers=admin_headers,
+            json={"actor": "admin"},
+        )
+        assert opened.status_code == 200
+
+    first, second = tasks
+    assigned = client.patch(
+        f"/local-test/construction/tasks/{first['id']}/assign",
+        headers=admin_headers,
+        json={"actor": "admin", "constructor": "constructor"},
+    )
+    claimed = client.post(
+        f"/local-test/construction/tasks/{first['id']}/claim",
+        headers=constructor_headers,
+        json={"actor": "constructor"},
+    )
+    visible = client.get(
+        "/local-test/construction/tasks?actor=constructor",
+        headers=constructor_headers,
+    )
+    denied = client.post(
+        f"/local-test/construction/tasks/{second['id']}/claim",
+        headers=constructor_headers,
+        json={"actor": "constructor"},
+    )
+    denied_assign = client.patch(
+        f"/local-test/construction/tasks/{second['id']}/assign",
+        headers=admin_headers,
+        json={"actor": "admin", "constructor": "constructor"},
+    )
+
+    assert assigned.status_code == 200
+    assert claimed.status_code == 200
+    assert [task["id"] for task in visible.json()["data"]["items"]] == [first["id"]]
+    assert denied.status_code == 400
+    assert "assigned by an administrator" in denied.json()["detail"]
+    assert denied_assign.status_code == 400
+    assert "already has active terminal" in denied_assign.json()["detail"]
+
+
+def test_direct_workspace_routes_redirect_to_app_shell() -> None:
+    for path in ["/project-board", "/claim-tasks", "/task-hall", "/construction", "/sync-config"]:
+        assert_vue_shell_response(client.get(path, follow_redirects=False))
+    response = client.get("/construction-cache", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/construction"
+    response = client.get("/unmatched", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/task-hall"
 
 def test_project_board_page_is_available() -> None:
-    response = client.get("/project-board")
+    assert_vue_shell_response(client.get("/project-board"))
+    assert_vue_shell_response(client.get("/project-board?embedded=1"))
 
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-    assert "taskRows" in response.text
-    assert "donutArc" in response.text
-    assert "progressCarousel" in response.text
-    assert "table-scroll" in response.text
-    assert "/unmatched" in response.text
-    assert "/claim-tasks?embedded=1" in response.text
-    assert "totalRows" in response.text
-    assert "stageRows" in response.text
+def test_static_page_verifier_rejects_visible_mojibake(tmp_path, monkeypatch) -> None:
+    verifier = load_static_page_verifier()
+    page = tmp_path / "bad.html"
+    page.write_text("<!doctype html><html><body>椤圭洰鐪嬫澘 妞ゅ湱娲?/body></html>", encoding="utf-8")
+    monkeypatch.setattr(verifier, "STATIC_ROOT", tmp_path)
+
+    try:
+        verifier.verify_page("bad.html", ["椤圭洰鐪嬫澘"], node=None)
+    except AssertionError as exc:
+        assert "mojibake fragment" in str(exc)
+    else:
+        raise AssertionError("visible mojibake should be rejected")
+
+
+def test_legacy_static_html_pages_are_not_served() -> None:
+    for path in [
+        "/static/app_shell.html",
+        "/static/login.html",
+        "/static/project_board.html",
+        "/static/claim_tasks.html",
+        "/static/task_hall.html",
+        "/static/construction.html",
+        "/static/construction_cache.html",
+        "/static/unmatched.html",
+        "/static/sync_config.html",
+    ]:
+        response = client.get(path)
+        assert response.status_code == 404
+
+
+def test_demo_review_image_assets_are_available() -> None:
+    for index in range(1, 5):
+        response = client.get(f"/static/demo-assets/review-photo-{index}.svg")
+
+        assert response.status_code == 200
+        assert "image/svg+xml" in response.headers["content-type"]
 
 
 def test_claim_tasks_page_is_available() -> None:
-    response = client.get("/claim-tasks")
+    assert_vue_shell_response(client.get("/claim-tasks"))
+    assert_vue_shell_response(client.get("/claim-tasks?embedded=1"))
+
+def test_construction_page_is_available() -> None:
+    assert_vue_shell_response(client.get("/construction"))
+    assert_vue_shell_response(client.get("/construction?embedded=1"))
+
+def test_unmatched_page_redirects_to_review_workbench() -> None:
+    response = client.get("/unmatched?embedded=1", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/task-hall"
+
+def test_group_target_route_is_searchable() -> None:
+    client.post("/local-test/bootstrap")
+
+    response = client.get("/local-test/group-targets?query=350&limit=5")
 
     assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-    assert "claimedCount" in response.text
-    assert "/local-test/tasks" in response.text
+    payload = response.json()["data"]
+    assert "items" in payload
+    assert len(payload["items"]) <= 5
 
 
-def test_unmatched_page_is_available() -> None:
-    response = client.get("/unmatched")
+def test_unmatched_create_group_route_creates_terminal_task() -> None:
+    client.post("/local-test/bootstrap")
+    client.post(
+        "/local-test/scan/import-url-rows",
+        json={
+            "rows": [
+                {
+                    "meter_no": "NO-MATCH-API",
+                    "terminal": "",
+                    "collector": "collector-api",
+                    "module_asset_no": "module-api",
+                    "photo_urls": "https://example.test/api-a.jpg,https://example.test/api-b.jpg",
+                }
+            ]
+        },
+    )
+    unmatched = client.get("/local-test/unmatched?query=NO-MATCH-API").json()["data"]["items"][0]
+
+    response = client.post(
+        f"/local-test/unmatched/{unmatched['unmatched_id']}/create-group",
+        json={"actor": "api-test", "terminal": "T-API", "updates": {"address": "api manual address"}},
+    )
+    tasks = client.get("/local-test/tasks").json()["data"]["items"]
 
     assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-    assert "associateRecord" in response.text
-    assert "auditLog" in response.text
-    assert "/local-test/audit-log" in response.text
-    assert "/local-test/unmatched" in response.text
+    assert response.json()["data"]["group"]["terminal"] == "T-API"
+    assert response.json()["data"]["group"]["photo_count"] == 2
+    assert any(task["terminal"] == "T-API" and task["can_claim"] for task in tasks)
+
+
+def test_unmatched_blank_route_creates_unmatched_record() -> None:
+    client.post("/local-test/bootstrap")
+
+    response = client.post("/local-test/unmatched/blank", json={"actor": "api-test"})
+    record = response.json()["data"]["record"]
+    listed = client.get(f"/local-test/unmatched?query={record['unmatched_id']}").json()["data"]
+
+    assert response.status_code == 200
+    assert record["record_type"] == "blank_group"
+    assert listed["total"] == 1
+    assert listed["items"][0]["unmatched_id"] == record["unmatched_id"]
+
+
+def test_group_metadata_route_updates_form_fields() -> None:
+    client.post("/local-test/bootstrap")
+    created = client.post(
+        "/local-test/groups",
+        json={
+            "actor": "api-test",
+            "terminal": "T-FORM",
+            "meter_no": "M-FORM",
+            "address": "form address before",
+        },
+    ).json()["data"]["group"]
+    client.post(
+        f"/local-test/groups/{created['id']}/photos/import-urls",
+        json={
+            "actor": "api-test",
+            "photo_urls": ["https://example.test/form-1.jpg"],
+            "collector": "old collector",
+            "module_asset_no": "old module",
+            "creator": "old installer",
+        },
+    )
+
+    response = client.patch(
+        f"/local-test/groups/{created['id']}/metadata",
+        json={
+            "actor": "api-test",
+            "updates": {
+                "meter_no": "API-FORM",
+                "address": "api form address",
+                "collector": "api collector",
+                "module_asset_no": "api module",
+                "creator": "api installer",
+            },
+        },
+    )
+    updated = response.json()["data"]["group"]
+
+    assert response.status_code == 200
+    assert updated["meter_no"] == "API-FORM"
+    assert updated["address"] == "api form address"
+    assert updated["photos"][0]["collector"] == "api collector"
+    assert updated["photos"][0]["asset_no"] == "api module"
+    assert updated["photos"][0]["creator"] == "api installer"
+
+
+def test_manual_group_and_photo_import_routes() -> None:
+    client.post("/local-test/bootstrap")
+
+    created = client.post(
+        "/local-test/groups",
+        json={
+            "actor": "api-test",
+            "terminal": "T-MANUAL",
+            "meter_no": "M-MANUAL",
+            "address": "manual address",
+        },
+    )
+    group = created.json()["data"]["group"]
+
+    imported = client.post(
+        f"/local-test/groups/{group['id']}/photos/import-urls",
+        json={
+            "actor": "api-test",
+            "photo_urls": ["https://example.test/manual-1.jpg", "https://example.test/manual-2.jpg"],
+            "collector": "collector-manual",
+            "module_asset_no": "module-manual",
+            "creator": "installer-manual",
+        },
+    )
+
+    assert created.status_code == 200
+    assert group["terminal"] == "T-MANUAL"
+    assert group["photo_count"] == 0
+    assert imported.status_code == 200
+    assert imported.json()["data"]["added"] == 2
+    assert imported.json()["data"]["group"]["photo_count"] == 2
+    imported_photo = imported.json()["data"]["group"]["photos"][0]
+    assert imported_photo["storage_type"] == "external_url"
+    assert imported_photo["storage_key"] == "https://example.test/manual-1.jpg"
+
+
+def test_manual_group_photo_upload_route() -> None:
+    client.post("/local-test/bootstrap")
+
+    created = client.post(
+        "/local-test/groups",
+        json={
+            "actor": "api-test",
+            "terminal": "T-UPLOAD",
+            "meter_no": "M-UPLOAD",
+            "address": "manual upload address",
+        },
+    )
+    group = created.json()["data"]["group"]
+
+    uploaded = client.post(
+        f"/local-test/groups/{group['id']}/photos/upload-images",
+        data={"actor": "api-test", "collector": "collector-upload", "module_asset_no": "module-upload"},
+        files=[
+            ("files", ("upload-a.jpg", b"fake-image-a", "image/jpeg")),
+            ("files", ("upload-b.png", b"fake-image-b", "image/png")),
+        ],
+    )
+
+    assert uploaded.status_code == 200
+    payload = uploaded.json()["data"]
+    assert payload["added"] == 2
+    assert payload["group"]["photo_count"] == 2
+    assert payload["uploaded_urls"][0].startswith("/static/uploads/manual/")
+    uploaded_photo = payload["group"]["photos"][0]
+    assert uploaded_photo["storage_type"] == "local_upload"
+    assert uploaded_photo["storage_key"].startswith("manual/")
+    assert uploaded_photo["sha256"]
 
 
 def test_catalog_routes_are_filterable() -> None:
@@ -150,12 +943,7 @@ def test_catalog_routes_are_filterable() -> None:
 
 
 def test_sync_config_page_is_available() -> None:
-    response = client.get("/sync-config")
-
-    assert response.status_code == 200
-    assert "text/html" in response.headers["content-type"]
-    assert 'id="payload"' in response.text
-
+    assert_vue_shell_response(client.get("/sync-config"))
 
 def test_clear_scan_data_route_resets_local_scan_state() -> None:
     client.post("/local-test/bootstrap")
@@ -193,3 +981,112 @@ def test_url_row_import_route_updates_local_tasks() -> None:
     assert response.status_code == 200
     assert response.json()["data"]["applied_records"] == 2
     assert any(task["can_claim"] for task in tasks)
+
+
+def test_url_row_import_adds_incremental_photos_for_duplicate_meter_number() -> None:
+    client.post("/local-test/bootstrap")
+    first_group = client.get("/local-test/groups?limit=1").json()["data"]["items"][0]
+    client.post("/local-test/scan/clear")
+
+    rows = [
+        {
+            "meter_no": first_group["meter_no"],
+            "terminal": first_group["terminal"],
+            "collector": "C-001",
+            "module_asset_no": "M-001",
+            "photo_urls": "https://example.test/1.jpg",
+        },
+        {
+            "meter_no": first_group["meter_no"],
+            "terminal": first_group["terminal"],
+            "collector": "C-002",
+            "module_asset_no": "M-002",
+            "photo_urls": "https://example.test/2.jpg",
+        },
+    ]
+    response = client.post("/local-test/scan/import-url-rows", json={"rows": rows})
+    group = client.get(f"/local-test/groups/{first_group['id']}").json()["data"]
+
+    assert response.status_code == 200
+    assert response.json()["data"]["applied_records"] == 2
+    assert response.json()["data"]["skipped_duplicate_meters"] == 0
+    assert response.json()["data"]["photos_new"] == 2
+    assert group["photo_count"] == 2
+
+
+def test_excel_exports_return_real_workbooks() -> None:
+    client.post("/local-test/bootstrap")
+    task = client.get("/local-test/tasks").json()["data"]["items"][0]
+
+    task_export = client.post("/exports/task-detail", json={"task_id": task["id"]})
+    all_final_export = client.post("/exports/final-delivery", json={"project_id": 1})
+    terminal_final_export = client.post("/exports/final-delivery", json={"task_id": task["id"]})
+    exception_export = client.post("/exports/exception-meters", json={})
+
+    assert task_export.status_code == 200
+    assert task_export.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert "attachment" in task_export.headers["content-disposition"]
+    assert task_export.content.startswith(b"PK")
+    assert all_final_export.status_code == 400
+    assert terminal_final_export.status_code == 200
+    assert terminal_final_export.content.startswith(b"PK")
+    assert exception_export.status_code == 200
+    assert exception_export.content.startswith(b"PK")
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(exception_export.content), read_only=True)
+    sheet = workbook.active
+    headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
+    assert "\u5f02\u5e38\u539f\u56e0" in headers
+    assert "\u73b0\u573a\u5904\u7406\u5efa\u8bae" in headers
+
+
+def test_final_delivery_manifest_supports_frontend_zip_export() -> None:
+    client.post("/local-test/bootstrap")
+    task = client.get("/local-test/tasks").json()["data"]["items"][0]
+    client.post(f"/local-test/tasks/{task['id']}/claim", json={"reviewer": "api-test"})
+    group = client.get(f"/local-test/tasks/{task['id']}/groups?limit=1&scan_only=false").json()["data"]["items"][0]
+    client.patch(
+        f"/local-test/groups/{group['id']}/review",
+        json={"status": "approved", "reviewer": "api-test", "note": "done"},
+    )
+
+    all_response = client.get("/local-test/export-manifest/final-delivery")
+    response = client.get(f"/local-test/export-manifest/final-delivery?task_id={task['id']}")
+    all_scope_response = client.get(f"/local-test/export-manifest/final-delivery?task_id={task['id']}&review_scope=all")
+
+    assert all_response.status_code == 400
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["photo_limit_per_group"] == 4
+    assert payload["scope"]["task_id"] == task["id"]
+    assert payload["scope"]["review_scope"] == "reviewed"
+    assert payload["groups"]
+    assert all(item["status"] in {"approved", "exception"} or item.get("has_archive_blocker") for item in payload["groups"])
+    assert all_scope_response.status_code == 200
+    assert len(all_scope_response.json()["data"]["groups"]) >= len(payload["groups"])
+    first_group = payload["groups"][0]
+    assert {"terminal", "address", "meter_no", "photos"}.issubset(first_group)
+    if first_group["photos"]:
+        first_photo = first_group["photos"][0]
+        assert {"image_url", "category_label", "archive_filename"}.issubset(first_photo)
+
+
+def test_group_detail_uses_local_data_without_legacy_sync(monkeypatch) -> None:
+    client.post("/local-test/bootstrap")
+    first_group = client.get("/local-test/groups?limit=1").json()["data"]["items"][0]
+
+    def fail_if_called(group_id: str):
+        raise AssertionError(f"legacy sync should not run for group detail: {group_id}")
+
+    monkeypatch.setattr(sync_manager, "load_group_photo_urls", fail_if_called)
+
+    response = client.get(f"/local-test/groups/{first_group['id']}")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["id"] == first_group["id"]
+    assert "photos" in payload
+

@@ -16,16 +16,20 @@ branch_labels = None
 depends_on = None
 
 
-user_status = postgresql.ENUM("active", "disabled", name="user_status")
-project_status = postgresql.ENUM("draft", "active", "archived", name="project_status")
-group_status = postgresql.ENUM("unreviewed", "in_review", "incomplete", "approved", "rejected", name="group_status")
-photo_upload_status = postgresql.ENUM("pending", "uploaded", "invalid", name="photo_upload_status")
-task_status = postgresql.ENUM("draft", "published", "claimed", "completed", "released", "cancelled", name="task_status")
-review_result = postgresql.ENUM("approved", "incomplete", "rejected", name="review_result")
-exception_status = postgresql.ENUM("open", "resolved", "cancelled", name="exception_status")
-import_job_type = postgresql.ENUM("total_catalog", "stage_catalog", "scan_data", name="import_job_type")
-job_status = postgresql.ENUM("pending", "running", "succeeded", "failed", "cancelled", name="job_status")
-export_job_type = postgresql.ENUM("task_detail", "final_delivery", name="export_job_type")
+user_status = postgresql.ENUM("active", "disabled", name="user_status", create_type=False)
+project_status = postgresql.ENUM("draft", "active", "archived", name="project_status", create_type=False)
+group_status = postgresql.ENUM(
+    "unreviewed", "in_review", "incomplete", "approved", "rejected", name="group_status", create_type=False
+)
+photo_upload_status = postgresql.ENUM("pending", "uploaded", "invalid", name="photo_upload_status", create_type=False)
+task_status = postgresql.ENUM(
+    "draft", "published", "claimed", "completed", "released", "cancelled", name="task_status", create_type=False
+)
+review_result = postgresql.ENUM("approved", "incomplete", "rejected", name="review_result", create_type=False)
+exception_status = postgresql.ENUM("open", "resolved", "cancelled", name="exception_status", create_type=False)
+import_job_type = postgresql.ENUM("total_catalog", "stage_catalog", "scan_data", name="import_job_type", create_type=False)
+job_status = postgresql.ENUM("pending", "running", "succeeded", "failed", "cancelled", name="job_status", create_type=False)
+export_job_type = postgresql.ENUM("task_detail", "final_delivery", name="export_job_type", create_type=False)
 
 
 def uuid_pk() -> sa.Column:

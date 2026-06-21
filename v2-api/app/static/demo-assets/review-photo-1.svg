@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900" role="img" aria-label="表箱整体改造前演示照片">
+  <rect width="1200" height="900" fill="#111820"/>
+  <rect x="250" y="80" width="700" height="720" rx="18" fill="#dfe6ec"/>
+  <rect x="310" y="145" width="580" height="245" rx="10" fill="#f8fafb" stroke="#8b98a6" stroke-width="6"/>
+  <rect x="345" y="185" width="510" height="82" rx="8" fill="#0f1720"/>
+  <text x="600" y="240" text-anchor="middle" font-family="Microsoft YaHei, Arial, sans-serif" font-size="42" font-weight="700" fill="#d9f5ff">23515</text>
+  <rect x="340" y="430" width="520" height="250" rx="12" fill="#ffffff" stroke="#9aa7b5" stroke-width="5"/>
+  <text x="600" y="495" text-anchor="middle" font-family="Microsoft YaHei, Arial, sans-serif" font-size="38" font-weight="800" fill="#172331">表箱整体改造前</text>
+  <text x="600" y="558" text-anchor="middle" font-family="Consolas, monospace" font-size="34" font-weight="700" fill="#0f6f8f">110020055760</text>
+  <rect x="462" y="604" width="276" height="42" fill="#111820"/>
+  <g fill="#fff">
+    <rect x="476" y="612" width="8" height="26"/><rect x="493" y="612" width="15" height="26"/><rect x="517" y="612" width="6" height="26"/>
+    <rect x="535" y="612" width="18" height="26"/><rect x="564" y="612" width="10" height="26"/><rect x="590" y="612" width="22" height="26"/>
+    <rect x="625" y="612" width="8" height="26"/><rect x="647" y="612" width="16" height="26"/><rect x="681" y="612" width="7" height="26"/>
+    <rect x="704" y="612" width="20" height="26"/>
+  </g>
+  <circle cx="320" cy="735" r="34" fill="#d34836"/><circle cx="420" cy="735" r="34" fill="#1e8f6f"/><circle cx="520" cy="735" r="34" fill="#e0aa2b"/>
+  <text x="600" y="850" text-anchor="middle" font-family="Microsoft YaHei, Arial, sans-serif" font-size="26" fill="#95a0ae">演示图像 URL 引用</text>
+</svg>

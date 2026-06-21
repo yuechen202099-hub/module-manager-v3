@@ -3,152 +3,216 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>&#21516;&#27493;&#37197;&#32622;</title>
+    <title>&#21516;&#27493;&#26041;&#26696;&#24050;&#20572;&#29992;</title>
     <style>
       :root {
-        --bg: #edf2f7;
-        --panel: #fff;
-        --ink: #17212b;
-        --muted: #647386;
-        --line: #d8e0ea;
-        --primary: #256f9f;
-        --danger: #b42318;
-        --success: #147a5a;
+        --bg: #eef2f5;
+        --topbar: #111820;
+        --topbar-2: #182330;
+        --surface: #ffffff;
+        --surface-2: #f7f9fb;
+        --ink: #101820;
+        --muted: #667280;
+        --line: #d8e0e7;
+        --accent: #0f6f8f;
+        --warn: #956012;
+        --shadow: 0 18px 46px rgba(16, 31, 45, .08);
+        --topbar-height: 64px;
+        --topbar-brand-height: 40px;
+        --topbar-title-line: 20px;
+        --topbar-meta-line: 16px;
+        --page-nav-height: 38px;
+        --page-nav-width: 440px;
       }
       * { box-sizing: border-box; }
       body {
         margin: 0;
         font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
         color: var(--ink);
-        background: var(--bg);
+        background: linear-gradient(180deg, rgba(17,24,32,.055), transparent 220px), var(--bg);
       }
-      header {
-        height: 56px;
+      h1, h2, p { margin: 0; }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 30;
+        height: var(--topbar-height);
+        min-height: var(--topbar-height);
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 0 18px;
-        background: #16202a;
-        color: #fff;
-      }
-      main { max-width: 1080px; margin: 18px auto; padding: 0 14px; }
-      .panel {
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--panel);
+        gap: 12px;
+        padding: 0 20px;
+        border-bottom: 1px solid rgba(255,255,255,.08);
+        background: linear-gradient(180deg, var(--topbar), var(--topbar-2));
+        box-shadow: 0 14px 34px rgba(17,24,32,.16);
         overflow: hidden;
       }
-      .head {
-        padding: 14px 16px;
-        border-bottom: 1px solid var(--line);
-        background: #f8fafc;
+      .brand { min-width: 0; width: 230px; height: var(--topbar-brand-height); flex: 0 0 230px; display: flex; align-items: center; gap: 10px; }
+      .mark {
+        width: 28px;
+        height: 28px;
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto;
+        border-radius: 9px;
+        background: rgba(255,255,255,.08);
+        border: 1px solid rgba(255,255,255,.12);
+        color: #d9f5ff;
+        font-size: 13px;
+        font-weight: 900;
       }
-      .body { padding: 16px; display: grid; gap: 12px; }
-      h1, h2, p { margin: 0; }
-      h1 { font-size: 17px; }
-      h2 { font-size: 16px; }
-      p { color: var(--muted); line-height: 1.7; }
-      textarea {
-        width: 100%;
-        min-height: 430px;
-        resize: vertical;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 12px;
-        font: 13px/1.55 Consolas, "Courier New", monospace;
-      }
-      button, a.button {
+      .brand > div:last-child { min-width: 0; display: grid; gap: 0; }
+      h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #f7fbff; font-size: 17px; line-height: var(--topbar-title-line); }
+      .top-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8fa0ad; font-size: 12px; line-height: var(--topbar-meta-line); }
+      .actions { min-width: 0; max-width: 100%; flex: 1 1 0; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+      .actions::-webkit-scrollbar { display: none; }
+      .button {
         height: 34px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        border: 1px solid var(--primary);
-        border-radius: 6px;
-        padding: 0 12px;
-        background: var(--primary);
-        color: #fff;
-        font-weight: 700;
-        text-decoration: none;
-        cursor: pointer;
-      }
-      button.secondary, a.secondary { background: #fff; color: var(--primary); }
-      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-      .status {
-        min-height: 42px;
-        padding: 11px 12px;
+        flex-shrink: 0;
+        border: 1px solid rgba(255,255,255,.14);
         border-radius: 8px;
-        background: #f5f7f9;
-        color: var(--muted);
+        padding: 0 12px;
+        color: #edf7fb;
+        background: rgba(255,255,255,.08);
+        font-weight: 800;
+        text-decoration: none;
+        white-space: nowrap;
       }
-      .status.ok { color: var(--success); background: #e8f7f1; }
-      .status.err { color: var(--danger); background: #fff0ed; }
+      .button:hover { background: rgba(255,255,255,.14); }
+      .button.strong { border-color: rgba(128,214,230,.36); color: #d7f7ff; }
+      .page-nav {
+        width: min(var(--page-nav-width), 100%);
+        height: var(--page-nav-height);
+        min-height: var(--page-nav-height);
+        display: inline-flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 4px;
+        padding: 3px;
+        border: 1px solid rgba(255,255,255,.11);
+        border-radius: 10px;
+        background: rgba(255,255,255,.05);
+        flex-shrink: 0;
+      }
+      .page-nav .button {
+        min-width: 0;
+        flex: 1 1 0;
+        justify-content: center;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        height: 30px;
+        padding: 0 8px;
+        border-color: transparent;
+        background: transparent;
+        color: #b9c8d3;
+      }
+      .page-nav .button.strong {
+        border-color: rgba(128,214,230,.36);
+        color: #d7f7ff;
+      }
+      main { width: min(980px, 100%); margin: 0 auto; padding: 12px; }
+      .panel {
+        display: grid;
+        gap: 16px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 18px;
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      .status {
+        display: inline-flex;
+        width: fit-content;
+        min-height: 28px;
+        align-items: center;
+        border-radius: 8px;
+        padding: 0 9px;
+        color: var(--warn);
+        background: #fff5dc;
+        font-size: 12px;
+        font-weight: 900;
+      }
+      h2 { font-size: 22px; letter-spacing: 0; }
+      p { color: var(--muted); line-height: 1.75; }
+      .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+      .step {
+        min-height: 116px;
+        display: grid;
+        align-content: start;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 12px;
+        background: linear-gradient(180deg, #fff, var(--surface-2));
+      }
+      .step b {
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        border-radius: 8px;
+        color: #d9f5ff;
+        background: var(--topbar);
+        font-size: 12px;
+      }
+      .step strong { font-size: 14px; }
+      .step span { color: var(--muted); font-size: 12px; line-height: 1.5; }
+      .cta-row { display: flex; flex-wrap: wrap; gap: 10px; }
+      .cta-row .button {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #fff;
+      }
+      .cta-row .button.secondary {
+        border-color: var(--line);
+        background: #fff;
+        color: #06384a;
+      }
+      @media (max-width: 760px) {
+        .topbar { padding: 0 12px; }
+        .top-meta { display: none; }
+        .steps { grid-template-columns: 1fr; }
+      }
     </style>
   </head>
   <body>
-    <header>
-      <h1>&#21516;&#27493;&#37197;&#32622;</h1>
-      <a class="button secondary" href="/task-hall">&#36820;&#22238;&#20219;&#21153;&#22823;&#21381;</a>
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark">V2</div>
+        <div>
+          <h1>&#21516;&#27493;&#26041;&#26696;&#24050;&#20572;&#29992;</h1>
+          <p class="top-meta">&#24403;&#21069;&#29256;&#26412;&#20197;&#34920;&#26684;&#23548;&#20837;&#20026;&#27491;&#24335;&#25968;&#25454;&#20837;&#21475;</p>
+        </div>
+      </div>
+      <div class="actions">
+        <nav class="page-nav" aria-label="&#39029;&#38754;&#20999;&#25442;">
+          <a class="button" href="/project-board">&#39033;&#30446;&#30475;&#26495;</a>
+          <a class="button" href="/claim-tasks">&#20219;&#21153;&#39046;&#21462;</a>
+          <a class="button" href="/task-hall">&#23457;&#38405;&#24037;&#20316;&#21488;</a>
+        </nav>
+        <a class="button strong" href="/project-board">&#21435;&#34920;&#26684;&#23548;&#20837;</a>
+      </div>
     </header>
     <main>
       <section class="panel">
-        <div class="head">
-          <h2>&#24405;&#20837; Ezcodes &#21518;&#21488;&#35831;&#27714; JSON</h2>
+        <span class="status">&#20379;&#24212;&#21830; API &#19981;&#21487;&#29992;</span>
+        <h2>&#21518;&#21488;&#33258;&#21160;&#21516;&#27493;&#24050;&#20174;&#31532;&#19968;&#29256;&#20132;&#20184;&#27969;&#31243;&#20013;&#31227;&#38500;</h2>
+        <p>&#20379;&#24212;&#21830;&#24050;&#26126;&#30830;&#19981;&#25552;&#20379;&#27491;&#24335; API&#65292;&#25152;&#20197;&#31995;&#32479;&#19981;&#20877;&#24341;&#23548;&#36755;&#20837; token &#25110;&#35831;&#27714; JSON&#12290;&#30446;&#21069;&#30340;&#27491;&#24335;&#24037;&#20316;&#27969;&#26159;&#65306;&#20174;&#23548;&#20986;&#30340;&#34920;&#26684;&#23548;&#20837;&#25195;&#30721;&#25968;&#25454;&#65292;&#20445;&#23384;&#29031;&#29255; URL &#21644;&#20851;&#38190;&#23383;&#27573;&#65292;&#28982;&#21518;&#30001;&#23457;&#38405;&#21592;&#39046;&#21462;&#32456;&#31471;&#20219;&#21153;&#24182;&#29992;&#24555;&#25463;&#38190;&#23436;&#25104;&#20998;&#31867;&#24402;&#26723;&#12290;</p>
+        <div class="steps">
+          <article class="step"><b>1</b><strong>&#23548;&#20986;&#34920;&#26684;</strong><span>&#20174;&#20379;&#24212;&#21830;&#31995;&#32479;&#23548;&#20986;&#25195;&#30721;&#34920;&#26684;&#65292;&#21253;&#21547;&#34920;&#21495;&#12289;&#37319;&#38598;&#22120;&#12289;&#27169;&#22359;&#12289;&#29031;&#29255; URL &#21644;&#23433;&#35013;&#20154;&#21592;&#12290;</span></article>
+          <article class="step"><b>2</b><strong>&#23548;&#20837;&#23457;&#38405;&#24037;&#20316;&#21488;</strong><span>&#22312;&#23457;&#38405;&#24037;&#20316;&#21488;&#19978;&#20256; Excel/CSV&#65292;&#31995;&#32479;&#25353;&#34920;&#21495;&#21644;&#32456;&#31471;&#21305;&#37197;&#36164;&#26009;&#32452;&#12290;</span></article>
+          <article class="step"><b>3</b><strong>&#39046;&#21462;&#24182;&#20998;&#31867;</strong><span>&#20219;&#21153;&#25353;&#32456;&#31471;&#39046;&#21462;&#65292;&#22270;&#29255;&#20174; URL &#21152;&#36733;&#65292;&#20998;&#31867;&#21518;&#30001;&#21518;&#31471;&#29983;&#25104;&#24402;&#26723;&#21629;&#21517;&#12290;</span></article>
         </div>
-        <div class="body">
-          <p>&#25353;&#20320;&#32473;&#30340;&#26684;&#24335;&#30452;&#25509;&#31896;&#36148;&#25972;&#27573; JSON&#12290;&#31995;&#32479;&#20250;&#25552;&#21462; <strong>query.teamId.$eq</strong>&#12289;<strong>access_token</strong>&#12289;<strong>env</strong>&#65292;&#24182;&#20889;&#20837;&#26412;&#22320;&#37197;&#32622;&#12290;</p>
-          <textarea id="payload" spellcheck="false" placeholder='{"action":"database.queryDocument","env":"cloud1-...","query":{"teamId":{"$eq":"..."}},"access_token":"..."}'></textarea>
-          <div class="row">
-            <button id="save">&#20445;&#23384;&#24182;&#21551;&#29992;</button>
-            <button class="secondary" id="test">&#20445;&#23384;&#21518;&#31435;&#21363;&#21516;&#27493;</button>
-          </div>
-          <div class="status" id="status">&#24453;&#24405;&#20837;</div>
+        <div class="cta-row">
+          <a class="button" href="/project-board">&#21435;&#39033;&#30446;&#30475;&#26495;&#23548;&#20837;&#34920;&#26684;</a>
+          <a class="button secondary" href="/claim-tasks">&#26597;&#30475;&#32456;&#31471;&#20219;&#21153;</a>
         </div>
       </section>
     </main>
-    <script>
-      const statusBox = document.querySelector("#status");
-      const payloadBox = document.querySelector("#payload");
-      function show(message, kind = "") {
-        statusBox.className = `status ${kind}`;
-        statusBox.textContent = message;
-      }
-      async function api(path, options = {}) {
-        const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
-        const payload = await response.json();
-        if (!response.ok || payload.error) throw new Error(payload.detail || payload.error?.message || response.statusText);
-        return payload.data;
-      }
-      async function saveConfig() {
-        let raw;
-        try {
-          raw = JSON.parse(payloadBox.value);
-        } catch (error) {
-          throw new Error("\u8bf7\u8f93\u5165\u5408\u6cd5\u7684 JSON");
-        }
-        const result = await api("/projects/1/scan/ezcodes/config/raw", {
-          method: "POST",
-          body: JSON.stringify({ payload: raw, persist: true }),
-        });
-        show(`\u5df2\u914d\u7f6e teamId=${result.team_id} env=${result.env_id} token=${result.token}`, "ok");
-        return result;
-      }
-      document.querySelector("#save").addEventListener("click", async () => {
-        try {
-          await saveConfig();
-        } catch (error) {
-          show(error.message, "err");
-        }
-      });
-      document.querySelector("#test").addEventListener("click", async () => {
-        try {
-          await saveConfig();
-          show("\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u89e6\u53d1\u540c\u6b65...", "ok");
-          const result = await api("/projects/1/scan/ezcodes/sync", { method: "POST", body: "null" });
-          show(`\u540c\u6b65\u5b8c\u6210\uff1a\u626b\u7801 ${result.sync.last_downloaded_records}\uff0c\u5339\u914d ${result.sync.last_applied_records}`, "ok");
-        } catch (error) {
-          show(error.message, "err");
-        }
-      });
-    </script>
   </body>
 </html>

@@ -12,7 +12,8 @@ This document records the current user meeting decisions. Read `AGENTS.md` befor
 
 - Imported photo data stores URL references and metadata only.
 - The application loads photos from URL when reviewers inspect a group.
-- Do not download photos to local disk as part of the product workflow.
+- Do not download spreadsheet-imported photos to local disk as part of the product workflow.
+- Manual补图 uses administrator image upload because the missing photos are local operator files. Store the resulting served path or OSS object key as a normal photo reference.
 
 ## Review Experience
 

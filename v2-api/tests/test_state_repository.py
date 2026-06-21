@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import logging
+from types import SimpleNamespace
+
+import pytest
+
+from app.services import state_repository as repository
+
+
+def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repository.settings, "state_backend", "json")
+    monkeypatch.setattr(repository.local_simulation, "get_state", lambda: {"summary": {"groups": 2}, "paths": {}})
+    monkeypatch.setattr(repository.local_simulation, "list_tasks", lambda: [{"id": 7, "terminal": "T-007"}])
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "list_unmatched_records",
+        lambda query="", limit=100, offset=0: {"total": 1, "items": [{"unmatched_id": "u-1"}]},
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "list_exception_groups",
+        lambda reviewer="", limit=100, offset=0: {"total": 1, "items": [{"id": "g-1"}]},
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "update_group_metadata",
+        lambda group_id, actor, updates: {"group": {"id": group_id, "actor": actor, "updates": updates}},
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "claim_task",
+        lambda task_id, reviewer: {"id": task_id, "claimed_by": reviewer},
+    )
+
+    repo = repository.get_state_repository()
+
+    assert repo.list_tasks() == [{"id": 7, "terminal": "T-007"}]
+    assert repo.summary() == {"summary": {"groups": 2}, "paths": {}}
+    assert repo.list_unmatched_records(query="x") == {"total": 1, "items": [{"unmatched_id": "u-1"}]}
+    assert repo.list_exception_groups(reviewer="reviewer-a") == {"total": 1, "items": [{"id": "g-1"}]}
+    assert repo.update_group_metadata("g-1", actor="reviewer-a", updates={"collector": "c"}) == {
+        "group": {"id": "g-1", "actor": "reviewer-a", "updates": {"collector": "c"}}
+    }
+    assert repo.claim_task(7, "reviewer-a") == {"id": 7, "claimed_by": "reviewer-a"}
+
+
+def test_dual_backend_keeps_json_as_authoritative_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repository.settings, "state_backend", "dual")
+    monkeypatch.setattr(repository.local_simulation, "release_task", lambda task_id, reviewer, force=False: {"id": task_id, "force": force})
+
+    repo = repository.get_state_repository()
+
+    assert isinstance(repo, repository.DualWriteStateRepository)
+    assert repo.release_task(3, "admin", force=True) == {"id": 3, "force": True}
+
+
+def test_dual_backend_mirrors_core_writes_after_json_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, tuple, dict]] = []
+
+    class MirrorRepository:
+        def classify_photo(self, *args, **kwargs):
+            calls.append(("classify_photo", args, kwargs))
+
+        def update_group_metadata(self, *args, **kwargs):
+            calls.append(("update_group_metadata", args, kwargs))
+
+        def reset_group_to_unconstructed(self, *args, **kwargs):
+            calls.append(("reset_group_to_unconstructed", args, kwargs))
+
+    monkeypatch.setattr(repository.settings, "state_backend", "dual")
+    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", MirrorRepository)
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "classify_photo",
+        lambda group_id, photo_id, category, reviewer: {
+            "group_id": group_id,
+            "photo_id": photo_id,
+            "category": category,
+            "reviewer": reviewer,
+        },
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "update_group_metadata",
+        lambda group_id, actor, updates: {"group_id": group_id, "actor": actor, "updates": updates},
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "reset_group_to_unconstructed",
+        lambda group_id, actor, reason="", force=False: {
+            "group_id": group_id,
+            "actor": actor,
+            "reason": reason,
+            "force": force,
+        },
+    )
+
+    repo = repository.get_state_repository()
+
+    assert repo.classify_photo("g-1", "p-1", "after_box", "reviewer-a")["category"] == "after_box"
+    assert repo.update_group_metadata("g-1", actor="reviewer-a", updates={"collector": "c"})["updates"] == {
+        "collector": "c"
+    }
+    assert repo.reset_group_to_unconstructed("g-1", actor="reviewer-a", reason="wrong", force=True)["force"] is True
+    assert calls == [
+        ("classify_photo", ("g-1", "p-1", "after_box", "reviewer-a"), {}),
+        ("update_group_metadata", ("g-1",), {"actor": "reviewer-a", "updates": {"collector": "c"}}),
+        ("reset_group_to_unconstructed", ("g-1",), {"actor": "reviewer-a", "reason": "wrong", "force": True}),
+    ]
+
+
+def test_dual_backend_does_not_break_json_when_postgres_mirror_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BrokenMirrorRepository:
+        def release_task(self, *args, **kwargs):
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(repository.settings, "state_backend", "dual")
+    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", BrokenMirrorRepository)
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "release_task",
+        lambda task_id, reviewer, force=False: {"id": task_id, "reviewer": reviewer, "force": force},
+    )
+
+    repo = repository.get_state_repository()
+
+    with caplog.at_level(logging.WARNING):
+        assert repo.release_task(8, "reviewer-a", force=True) == {
+            "id": 8,
+            "reviewer": "reviewer-a",
+            "force": True,
+        }
+
+    assert "Dual write mirror failed for release_task" in caplog.text
+
+
+def test_postgres_classify_photo_persists_archive_fields() -> None:
+    photo = SimpleNamespace(
+        id="photo-uuid",
+        legacy_id="p-1",
+        image_url="https://example.test/photo.jpg",
+        source_url="",
+        storage_type="external_url",
+        storage_bucket="",
+        storage_key="",
+        sha256="a" * 64,
+        category="unclassified",
+        archive_filename="",
+        archive_status="pending",
+        archived_at=None,
+        classified_by="",
+        classified_at=None,
+        sort_order=1,
+        barcode="",
+        collector="",
+        asset_no="",
+        creator="",
+        raw_data={},
+    )
+    group = SimpleNamespace(id="group-uuid", team_id="alpha-team", task_id=None, legacy_task_id=1)
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, _statement):
+            return photo
+
+        def commit(self):
+            pass
+
+        def refresh(self, _obj):
+            pass
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+        def _group_by_legacy_id(self, session, group_id: str, *, lock: bool = False):
+            assert group_id == "g-1"
+            return group
+
+        def _ensure_task_claimed_by(self, session, checked_group, actor: str, *, force: bool = False) -> None:
+            assert checked_group is group
+            assert actor == "reviewer-a"
+
+    result = TestPostgresRepository().classify_photo("g-1", "p-1", "after_box", "reviewer-a")
+
+    assert result["category"] == "after_box"
+    assert result["archive_status"] == "archived"
+    assert result["archive_filename"]
+    assert photo.archive_status == "archived"
+    assert photo.archive_filename == result["archive_filename"]
+    assert photo.archived_at is not None
+    assert photo.raw_data["archive_status"] == "archived"
+    assert photo.raw_data["category_label"] == repository.local_simulation.PHOTO_CATEGORIES["after_box"]
+
+
+def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repository.settings, "state_backend", "json")
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "delete_group_photo",
+        lambda group_id, photo_id, reviewer: {"group_id": group_id, "photo_id": photo_id, "reviewer": reviewer},
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "reset_group_to_unconstructed",
+        lambda group_id, actor, reason="", force=False: {
+            "group_id": group_id,
+            "actor": actor,
+            "reason": reason,
+            "force": force,
+        },
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "return_group_to_exception_order",
+        lambda group_id, actor, category, note, force=False: {
+            "group_id": group_id,
+            "actor": actor,
+            "category": category,
+            "note": note,
+            "force": force,
+        },
+    )
+
+    repo = repository.get_state_repository()
+
+    assert repo.delete_photo("g-1", "p-1", "reviewer-a") == {
+        "group_id": "g-1",
+        "photo_id": "p-1",
+        "reviewer": "reviewer-a",
+    }
+    assert repo.reset_group_to_unconstructed("g-1", actor="reviewer-a", reason="wrong site", force=True) == {
+        "group_id": "g-1",
+        "actor": "reviewer-a",
+        "reason": "wrong site",
+        "force": True,
+    }
+    assert repo.return_group_to_exception_order("g-1", actor="reviewer-a", category="照片错误", note="补拍") == {
+        "group_id": "g-1",
+        "actor": "reviewer-a",
+        "category": "照片错误",
+        "note": "补拍",
+        "force": False,
+    }
+
+
+def test_unknown_state_backend_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repository.settings, "state_backend", "unsafe-mode")
+
+    with pytest.raises(repository.StateBackendNotReady):
+        repository.get_state_repository()

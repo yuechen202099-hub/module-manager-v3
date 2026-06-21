@@ -72,3 +72,126 @@ Additional operational indexes are included for job polling, exception queues, r
 ## V2.1 Data Rules
 
 Detailed V2.1 mapping, status flow, photo-insufficient rules, supplemental-photo rules, and risks are recorded in `docs/database/v2.1-data-rules.md`.
+
+## V2.3 JSON State Migration Bridge
+
+V2.3 adds a bridge layer for moving the current production JSON state into PostgreSQL without breaking the existing `/local-test/...` API surface.
+
+### New Operational Tables and Columns
+
+- `teams`: team workspace identity.
+- `migration_runs`: append-only record of each JSON-to-PostgreSQL migration run.
+- `photo_events`: photo category/delete/supplement events migrated from JSON state.
+- `unmatched_records`: unmatched scan rows, blank manual records, and pending association records.
+- `users.team_id`, `projects.team_id`, `tasks.team_id`, `material_groups.team_id`, `photos.team_id`, and event/job `team_id` columns make team isolation explicit.
+- `tasks.legacy_id` preserves the numeric terminal task id used by the current frontend APIs.
+- `material_groups.legacy_id` preserves the current group id such as `g-00001`.
+- `photos.legacy_id` preserves the current photo id such as `p-...`.
+- `raw_data` / `payload` JSONB columns keep the original JSON row for lossless rollback and auditing.
+
+### Status Mapping
+
+The production enum values remain canonical:
+
+- Local task `in_review` migrates to production `claimed`.
+- Local group `pending` migrates to production `unreviewed`.
+- Local group `exception` and `unmatched` migrate to production `rejected`.
+- The exact local status is still kept in `raw_data`.
+
+### Duplicate Meter Keys
+
+The production schema treats `meter_match_key` as the unique business identity for a team/project. During JSON migration:
+
+- The first material group for a non-empty `meter_match_key` keeps that key.
+- Later material groups with the same key are still migrated, but their database `meter_match_key` is set to `NULL`.
+- The original duplicate key and source group id are preserved in `material_groups.raw_data` as `migration_duplicate_meter_match_key` and `migration_duplicate_of_group_id`.
+- Duplicate total catalog rows are upserted by key, so database row counts may be lower than raw input rows when the source file contains duplicate table numbers.
+
+### State Backend Switch
+
+`STATE_BACKEND` controls the cutover:
+
+```text
+STATE_BACKEND=postgres  # default mode, PostgreSQL is the source of truth
+STATE_BACKEND=dual      # migration mode, reads JSON and mirrors core writes to PostgreSQL
+STATE_BACKEND=json      # compatibility and rollback mode only
+```
+
+Before claiming full JSON cutover, run the production-route audit:
+
+```powershell
+python scripts\verify_postgres_cutover_gate.py --strict
+```
+
+This gate fails if production API routes still call `local_simulation` business-state functions directly. A non-strict run is useful during migration because it lists the remaining API surfaces that still need repository-backed PostgreSQL implementations:
+
+```powershell
+python scripts\verify_postgres_cutover_gate.py
+```
+
+`STATE_BACKEND=postgres` is necessary but not sufficient; the strict cutover gate must also pass before the service can be treated as fully de-JSONized.
+
+### Migration Commands
+
+Dry-run first:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe scripts\migrate_json_to_postgres.py `
+  --state C:\path\to\local_state.json `
+  --users C:\path\to\users.json `
+  --dry-run `
+  --report C:\path\to\migration-report.json
+```
+
+Then apply schema and migrate:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m alembic upgrade head
+..\.venv\Scripts\python.exe scripts\migrate_json_to_postgres.py `
+  --state C:\path\to\local_state.json `
+  --users C:\path\to\users.json `
+  --report C:\path\to\migration-report.json
+```
+
+The real migration copies `local_state.json`, `users.json`, and `.env` into a timestamped backup folder before writing to PostgreSQL.
+
+### Full Photo Migration To OSS
+
+After JSON state has been migrated into PostgreSQL, run a separate photo migration. This downloads every external photo URL, reads every local `/static/uploads/...` photo, uploads the bytes to OSS, and updates the `photos` table to use `storage_type='oss'`.
+
+Dry-run first:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe scripts\migrate_photos_to_oss.py `
+  --database-url postgresql+psycopg://USER:PASSWORD@HOST:5432/DB `
+  --uploads-root C:\path\to\v2-api\app\static\uploads `
+  --dry-run `
+  --report C:\path\to\photo-oss-dry-run-report.json
+```
+
+Then upload and update PostgreSQL:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe scripts\migrate_photos_to_oss.py `
+  --database-url postgresql+psycopg://USER:PASSWORD@HOST:5432/DB `
+  --uploads-root C:\path\to\v2-api\app\static\uploads `
+  --max-workers 8 `
+  --report C:\path\to\photo-oss-report.json
+```
+
+Photo migration guarantees:
+
+- Already migrated OSS photos are skipped unless `--force` is passed.
+- Every successful row keeps the pre-OSS URL and storage fields in `photos.metadata_json`.
+- `photos.image_url` becomes `oss://bucket/key`.
+- `photos.storage_bucket` and `photos.storage_key` become the authoritative OSS location.
+- The final SQL check should show zero non-OSS photos:
+
+```sql
+select storage_type, count(*) from photos group by storage_type order by storage_type;
+select count(*) from photos where storage_type <> 'oss' or storage_type is null;
+```

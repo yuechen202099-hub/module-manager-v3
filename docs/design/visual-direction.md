@@ -27,6 +27,16 @@ The interface is an operational review tool, not a marketing site.
 - Long Chinese labels, addresses, notes, and file paths must wrap or ellipsize inside their own cell or control.
 - Review surfaces should remain readable for long sessions: restrained borders, low-noise backgrounds, tabular numerals, and compact row heights.
 
+## Client Demo Shell
+
+The first client-facing web build uses a dark application top bar across login-adjacent work surfaces and a calm light-gray operational canvas.
+
+- Top navigation must feel like a real deployed management system, not a prototype: dark shell, low-noise buttons, clear account state, and consistent exit behavior.
+- Dashboard cards use compact metric blocks with strong numeric hierarchy and restrained borders.
+- Review and claim pages keep three working zones visible on desktop. The left side is task context, the middle is the data/photo queue, and the right side is the current review workspace.
+- Manual recovery tools are visible to admins, but they should remain grouped as operations tools rather than floating forms.
+- Decorative gradients, oversized cards, and explanatory marketing text remain out of scope for this product.
+
 ## Status Semantics
 
 - Pending: neutral.
