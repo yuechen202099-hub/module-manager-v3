@@ -463,8 +463,25 @@ button {
 .construction-task-card .el-button span,
 .construction-group-card .el-button span {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: inherit;
   font-size: inherit;
+  line-height: 1;
+}
+
+.claim-task-card .el-tag span,
+.review-list-card .el-tag span,
+.construction-task-card .el-tag span,
+.construction-group-card .el-tag span,
+.task-card .el-tag span,
+.field-task-card .el-tag span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  font-size: inherit;
+  line-height: 1;
 }
 
 .claim-task-card strong,

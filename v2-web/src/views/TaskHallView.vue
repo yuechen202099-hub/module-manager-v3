@@ -51,6 +51,7 @@ const exceptionCategories = [
 ]
 
 type GroupFilter = 'reviewable' | 'exception' | 'unconstructed' | 'archived' | 'all'
+type ReviewTaskMode = 'terminal' | 'exception' | 'unmatched'
 
 const auth = useAuthStore()
 const actor = computed(() => auth.user?.username || auth.user?.id || currentActor())
@@ -64,6 +65,7 @@ const tasks = ref<ReviewTask[]>([])
 const groups = ref<MaterialGroup[]>([])
 const unmatchedRecords = ref<UnmatchedRecord[]>([])
 const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
+const activeTaskMode = ref<ReviewTaskMode>('terminal')
 const selectedTaskId = ref('')
 const selectedGroupId = ref('')
 const selectedPhotoId = ref('')
@@ -174,6 +176,28 @@ const fieldTaskCards = computed(() => {
     order,
   }))
   return [...unmatched, ...exception]
+})
+const unmatchedFieldTaskCards = computed(() => fieldTaskCards.value.filter((card) => card.kind === 'unmatched'))
+const exceptionFieldTaskCards = computed(() => fieldTaskCards.value.filter((card) => card.kind === 'exception'))
+const activeFieldTaskCards = computed(() => {
+  if (activeTaskMode.value === 'unmatched') return unmatchedFieldTaskCards.value
+  if (activeTaskMode.value === 'exception') return exceptionFieldTaskCards.value
+  return []
+})
+const selectedFieldModeTitle = computed(() => {
+  if (activeTaskMode.value === 'unmatched') return '未匹配任务'
+  if (activeTaskMode.value === 'exception') return '异常任务'
+  return ''
+})
+const selectedFieldModeHint = computed(() => {
+  if (activeTaskMode.value === 'unmatched') return '修改表号、换表、项目外施工与施工指派'
+  if (activeTaskMode.value === 'exception') return '异常组指派给施工员后回流审阅'
+  return ''
+})
+const selectedFieldModeEmpty = computed(() => {
+  if (activeTaskMode.value === 'unmatched') return '暂无未匹配任务'
+  if (activeTaskMode.value === 'exception') return '暂无异常任务'
+  return ''
 })
 const statusCounts = computed<Record<GroupFilter, number>>(() => {
   const counts: Record<GroupFilter, number> = { all: 0, reviewable: 0, exception: 0, unconstructed: 0, archived: 0 }
@@ -526,6 +550,14 @@ async function loadTasks() {
   try {
     tasks.value = await fetchTasks()
     void loadFieldTasks()
+    if (activeTaskMode.value !== 'terminal') {
+      selectedTaskId.value = ''
+      groups.value = []
+      activeGroup.value = null
+      photos.value = []
+      resetImageState()
+      return
+    }
     if (!myTasks.value.some((task) => task.id === selectedTaskId.value)) {
       selectedTaskId.value = myTasks.value[0]?.id || ''
     }
@@ -560,6 +592,7 @@ async function loadFieldTasks() {
 }
 
 async function loadGroups(taskId: string) {
+  activeTaskMode.value = 'terminal'
   selectedTaskId.value = taskId
   loadingGroups.value = true
   selectedGroupId.value = ''
@@ -623,6 +656,16 @@ function syncDraftsFromGroup() {
   metadataDraft.moduleAssetNo = photo?.moduleAssetNo || activeGroup.value?.constructionModuleAssetNo || ''
   exceptionDraft.category = defaultExceptionCategory
   exceptionDraft.note = activeGroup.value ? groupIssueReasonText(activeGroup.value) : ''
+}
+
+async function selectFieldTaskMode(mode: Exclude<ReviewTaskMode, 'terminal'>) {
+  activeTaskMode.value = mode
+  selectedTaskId.value = ''
+  selectedGroupId.value = ''
+  activeGroup.value = null
+  photos.value = []
+  resetImageState()
+  await loadFieldTasks()
 }
 
 async function scrollActiveGroupIntoView() {
@@ -750,6 +793,7 @@ async function refreshTasksSilently() {
   const currentTaskId = selectedTaskId.value
   const refreshed = await fetchTasks()
   tasks.value = refreshed
+  if (activeTaskMode.value !== 'terminal') return
   if (currentTaskId && !myTasks.value.some((task) => task.id === currentTaskId)) {
     selectedTaskId.value = myTasks.value[0]?.id || ''
     if (selectedTaskId.value) await loadGroups(selectedTaskId.value)
@@ -760,7 +804,7 @@ async function externalRefresh() {
   if (shouldDeferBackgroundRefresh()) return
   try {
     await refreshTasksSilently()
-    if (selectedTaskId.value) await refreshGroupsSilently()
+    if (activeTaskMode.value === 'terminal' && selectedTaskId.value) await refreshGroupsSilently()
     await loadFieldTasks()
   } catch {
     // 后台刷新失败不打断当前审阅动作，下一轮刷新再试。
@@ -1370,10 +1414,42 @@ onUnmounted(() => {
       </div>
       <div class="review-task-list">
         <button
+          class="review-list-card task-card-simple field-entry-card kind-exception"
+          :class="{ active: activeTaskMode === 'exception' }"
+          type="button"
+          @click="selectFieldTaskMode('exception')"
+        >
+          <div class="field-entry-title">
+            <strong>异常任务</strong>
+            <ElTag type="danger" effect="light">{{ exceptionFieldTaskCards.length }}</ElTag>
+          </div>
+          <span>异常组指派、回流施工处理</span>
+          <div class="task-mini-metrics">
+            <b>待处理 {{ exceptionFieldTaskCards.length }}</b>
+            <b>已指派 {{ exceptionOrders.filter((order) => order.assignedTo).length }}</b>
+          </div>
+        </button>
+        <button
+          class="review-list-card task-card-simple field-entry-card kind-unmatched"
+          :class="{ active: activeTaskMode === 'unmatched' }"
+          type="button"
+          @click="selectFieldTaskMode('unmatched')"
+        >
+          <div class="field-entry-title">
+            <strong>未匹配任务</strong>
+            <ElTag type="warning" effect="light">{{ unmatchedFieldTaskCards.length }}</ElTag>
+          </div>
+          <span>改表号、换表、项目外施工</span>
+          <div class="task-mini-metrics">
+            <b>待处理 {{ unmatchedFieldTaskCards.length }}</b>
+            <b>项目外 {{ unmatchedRecords.filter((record) => record.projectOutside).length }}</b>
+          </div>
+        </button>
+        <button
           v-for="task in myTasks"
           :key="task.id"
           class="review-list-card task-card-simple"
-          :class="{ active: task.id === selectedTaskId }"
+          :class="{ active: activeTaskMode === 'terminal' && task.id === selectedTaskId }"
           type="button"
           @click="loadGroups(task.id)"
         >
@@ -1391,24 +1467,25 @@ onUnmounted(() => {
     <aside class="panel review-group-panel">
       <div class="review-panel-head">
         <div>
-          <h3>{{ selectedTask ? `终端 ${selectedTask.terminal || selectedTask.id}` : '资料组' }}</h3>
-          <p class="muted">{{ selectedTask ? '按状态分类筛选' : '领取任务后显示资料组' }}</p>
+          <h3>{{ activeTaskMode === 'terminal' ? (selectedTask ? `终端 ${selectedTask.terminal || selectedTask.id}` : '资料组') : selectedFieldModeTitle }}</h3>
+          <p class="muted">{{ activeTaskMode === 'terminal' ? (selectedTask ? '按状态分类筛选' : '领取任务后显示资料组') : selectedFieldModeHint }}</p>
         </div>
-        <ElTag effect="plain">{{ visibleGroupCountLabel }}</ElTag>
+        <ElTag effect="plain">{{ activeTaskMode === 'terminal' ? visibleGroupCountLabel : activeFieldTaskCards.length }}</ElTag>
       </div>
-      <section v-if="fieldTaskCards.length || loadingFieldTasks" class="field-task-section">
+      <section v-if="activeTaskMode !== 'terminal'" class="field-task-section field-task-mode-panel">
         <div class="field-task-head">
           <div>
-            <strong>现场异常任务</strong>
-            <span>未匹配地址与异常组在这里统一处理</span>
+            <strong>{{ selectedFieldModeTitle }}</strong>
+            <span>{{ selectedFieldModeHint }}</span>
           </div>
           <div class="field-task-actions">
             <ElButton size="small" :loading="loadingFieldTasks" @click="loadFieldTasks">刷新</ElButton>
-            <ElButton size="small" @click="exportOutsideProjectRecords">导出项目外施工</ElButton>
+            <ElButton v-if="activeTaskMode === 'unmatched'" size="small" @click="exportOutsideProjectRecords">导出项目外施工</ElButton>
           </div>
         </div>
-        <div class="field-task-list">
-          <article v-for="card in fieldTaskCards" :key="card.key" class="field-task-card" :class="`kind-${card.kind}`">
+        <ElSkeleton v-if="loadingFieldTasks" :rows="6" animated />
+        <div v-else class="field-task-list field-task-list-full">
+          <article v-for="card in activeFieldTaskCards" :key="card.key" class="field-task-card" :class="`kind-${card.kind}`">
             <div class="field-task-title">
               <strong>{{ card.title }}</strong>
               <ElTag size="small" effect="light">{{ card.kind === 'unmatched' ? '未匹配' : '异常组' }}</ElTag>
@@ -1428,9 +1505,11 @@ onUnmounted(() => {
               <ElButton v-else size="small" type="primary" plain @click="assignExceptionOrder(card.order)">指派施工</ElButton>
             </div>
           </article>
+          <ElEmpty v-if="!activeFieldTaskCards.length" :description="selectedFieldModeEmpty" />
         </div>
       </section>
 
+      <template v-else>
       <div class="review-filter-row">
         <div class="review-status-tabs" role="group" aria-label="资料组状态筛选">
           <button
@@ -1482,6 +1561,7 @@ onUnmounted(() => {
         </button>
         <ElEmpty v-if="!visibleGroups.length" :description="groupEmptyDescription" />
       </div>
+      </template>
     </aside>
 
     <main class="panel review-stage-panel">
@@ -1687,12 +1767,47 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.field-entry-card {
+  position: relative;
+  border-left: 4px solid transparent;
+  background: linear-gradient(180deg, #ffffff, #fbfdff);
+}
+
+.field-entry-card.kind-exception {
+  border-left-color: #b42318;
+}
+
+.field-entry-card.kind-unmatched {
+  border-left-color: #d97706;
+}
+
+.field-entry-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-entry-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .field-task-section {
   display: grid;
   gap: 8px;
   padding: 10px;
   border-bottom: 1px solid var(--v2-border-soft);
   background: linear-gradient(180deg, rgba(245, 250, 252, 0.9), rgba(255, 255, 255, 0.88));
+}
+
+.field-task-mode-panel {
+  height: 100%;
+  grid-template-rows: auto minmax(0, 1fr);
+  border-bottom: 0;
 }
 
 .field-task-head {
@@ -1727,6 +1842,12 @@ onUnmounted(() => {
   max-height: 240px;
   overflow: auto;
   padding-right: 2px;
+}
+
+.field-task-list-full {
+  max-height: none;
+  min-height: 0;
+  align-content: start;
 }
 
 .field-task-card {

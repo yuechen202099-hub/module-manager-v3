@@ -330,3 +330,45 @@ This workflow feature version (`V2.5.0`) is now the combined release vehicle for
 - Backup: `/opt/module-manager-v2/backups/runtime/20260622_014459_before_v2.5.0_patch`
 - Release method: patch sync; production `.env`, `data`, uploads preserved; no Alembic migration.
 - Validation: service active; local server pages and public IP pages return `V2.5.0`; server-side `https://www.sgcc.online/login` returns 200.
+
+## 2026-06-22 - V2.5.1 permanent field-task cards and label centering
+
+### Reason
+
+The unmatched and exception workflows should behave like permanent task entries, not a temporary mixed section inside the material-group list. The same task-entry concept is needed on the construction collection page. Some compact labels/buttons also appeared visually off-center because card-level `span` rules overrode Element Plus label internals.
+
+### Changed files
+
+- `v2-web/src/views/TaskHallView.vue`
+- `v2-web/src/views/ConstructionView.vue`
+- `v2-web/src/styles/element-plus.css`
+- `v2-web/src/styles/main.css`
+- version metadata files
+
+### Changes
+
+- Added always-visible `异常任务` and `未匹配任务` cards to the review task column.
+- Selecting either review field-task card switches the material-group column into the corresponding task operation list.
+- Added always-visible `异常任务` and `未匹配任务` cards to the construction task picker.
+- Construction exception task cards can jump into the related terminal exception workflow when a terminal is available.
+- Construction unmatched task cards show the assigned/field-confirmation queue and can jump into the related terminal when a terminal is available.
+- Centered Element Plus button and tag content inside task cards to keep compact labels visually aligned.
+- Advanced version metadata to `V2.5.1`.
+
+### Impact
+
+- Frontend-only workflow and style update.
+- No database schema change.
+- No API path change.
+- No Alembic migration required.
+
+### Validation
+
+- `node vue-tsc --noEmit`: passed using bundled Node.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+- Browser QA:
+  - `/task-hall?qa=v251-field-cards` shows `V2.5.1` and one `异常任务` card plus one `未匹配任务` card.
+  - `/construction?qa=v251-field-cards` shows `V2.5.1` and one `异常任务` card plus one `未匹配任务` card.
+  - Sample Element Plus button/tag contents report centered flex display.

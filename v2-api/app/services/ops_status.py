@@ -17,7 +17,7 @@ LOCAL_UPLOAD_WARN_FILES = 30_000
 
 
 def app_version() -> str:
-    return "2.5.0"
+    return "2.5.1"
 
 
 def project_root() -> Path:
@@ -199,4 +199,3 @@ def build_system_status() -> dict[str, Any]:
         "warnings": warnings,
         "ok": not warnings,
     }
-

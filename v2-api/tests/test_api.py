@@ -95,7 +95,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "2.5.0"
+    assert data["version"] == "2.5.1"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -1089,4 +1089,3 @@ def test_group_detail_uses_local_data_without_legacy_sync(monkeypatch) -> None:
     payload = response.json()["data"]
     assert payload["id"] == first_group["id"]
     assert "photos" in payload
-

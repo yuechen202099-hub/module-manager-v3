@@ -54,3 +54,9 @@ Last updated: 2026-06-21
 | ID | Risk | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0116 | Unmatched address records and exception groups were passive records instead of assignable field tasks. | Reviewers/admins could see unmatched or exception data, but field handling required separate manual coordination and had no project-outside export or replacement-meter rematch workflow. | Covered by the combined `V2.5.0` release. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `local_test.py`, `exports.py`, `services.ts`, `types.ts`, `TaskHallView.vue` |
+
+## 2026-06-22 - V2.5.1 UX maintenance
+
+| ID | Bug / UX issue | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0117 | Review and construction field-task workflows were not exposed as stable task cards, and some Element Plus labels were vertically off-center inside cards. | Open `/task-hall` or `/construction`; unmatched/exception work was shown as a secondary mixed section or hidden behind terminal context, and compact tags such as `可审阅` could appear visually high/low in their pill. | Fixed in `V2.5.1`. | 2026-06-22 | `TaskHallView.vue`, `ConstructionView.vue`, `element-plus.css`, `main.css` |

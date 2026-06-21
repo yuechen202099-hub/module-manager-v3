@@ -2261,3 +2261,38 @@
   - `nginx -t`: successful
 - Note:
   - Local machine HTTPS request to `https://www.sgcc.online/login` returned `000`, but server-side domain HTTPS validation succeeded and Nginx listens on 443.
+
+### V2.5.1 permanent field-task cards
+
+- Date: 2026-06-22
+- Owner: project engineer thread
+- Scope:
+  - Review task column.
+  - Construction task picker.
+  - Compact button/tag text alignment.
+- Changed files:
+  - `v2-web/src/views/TaskHallView.vue`
+  - `v2-web/src/views/ConstructionView.vue`
+  - `v2-web/src/styles/element-plus.css`
+  - `v2-web/src/styles/main.css`
+  - version metadata files
+- Behavior:
+  - Review workspace now has two always-visible task cards: `异常任务` and `未匹配任务`.
+  - Clicking a review field-task card switches the middle panel away from terminal material groups and into the selected operation list.
+  - Construction collection task picker now also has `异常任务` and `未匹配任务` cards.
+  - Construction exception cards can enter the related terminal exception workflow when bound to a terminal.
+  - Construction unmatched cards expose the field-confirmation queue and enter the related terminal when possible.
+  - Element Plus button/tag contents are explicitly centered to avoid off-center text in compact pills.
+- Validation:
+  - Frontend typecheck passed with bundled Node.
+  - Vue production build passed with existing Rollup PURE/chunk-size warnings.
+  - Vue migration gate passed.
+  - Backend API tests passed: `43 passed, 1 warning`.
+  - Browser QA confirmed both cards on `/task-hall` and `/construction`, plus centered button/tag display.
+- Release note:
+  - This is a frontend-only patch. No API path change, no database migration, and no production data overwrite required.
+- Production deployment:
+  - Published to production by patch sync on 2026-06-22.
+  - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_075536_before_v2.5.1_patch`.
+  - Preserved production `.env`, `data`, uploads; no Alembic migration.
+  - Verified `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, `/claim-tasks`, `https://www.sgcc.online/login`, and `/openapi.json` 404.

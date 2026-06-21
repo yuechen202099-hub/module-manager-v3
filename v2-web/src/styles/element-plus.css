@@ -34,9 +34,21 @@
 }
 
 .el-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-width: 0;
   font-weight: 720;
   letter-spacing: 0;
+  line-height: 1;
+}
+
+.el-button > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1;
 }
 
 .el-button:not(.is-circle) {
@@ -69,9 +81,21 @@
 }
 
 .el-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border-radius: var(--v2-radius-sm);
   font-weight: 720;
   letter-spacing: 0;
+  line-height: 1;
+}
+
+.el-tag__content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1;
 }
 
 .el-alert {

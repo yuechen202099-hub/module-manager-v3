@@ -22,6 +22,7 @@ import {
   fetchConstructionTaskGroups,
   fetchConstructionTasks,
   fetchGroup,
+  fetchUnmatchedRecords,
   openConstructionTask,
   submitConstructionExceptionOrder,
   unassignConstructionTask,
@@ -33,12 +34,14 @@ import type {
   MaterialGroup,
   ReviewPhoto,
   ReviewTask,
+  UnmatchedRecord,
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
 type GroupFilter = 'unbuilt' | 'cached' | 'exception' | 'all'
 type PhotoSource = 'camera' | 'album'
 type ScannerTarget = 'quickMeter' | 'collector' | 'module'
+type TaskPickerMode = 'terminal' | 'exception' | 'unmatched'
 
 type DraftPhoto = {
   slot: string
@@ -133,7 +136,10 @@ const offlineMode = ref(false)
 const tasks = ref<ReviewTask[]>([])
 const groups = ref<MaterialGroup[]>([])
 const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
+const fieldExceptionOrders = ref<ConstructionExceptionOrder[]>([])
+const unmatchedRecords = ref<UnmatchedRecord[]>([])
 const drafts = ref<CacheDraft[]>([])
+const taskPickerMode = ref<TaskPickerMode>('terminal')
 const selectedTaskId = ref('')
 const selectedItemKey = ref('')
 const taskPickerOpen = ref(false)
@@ -191,6 +197,32 @@ const visibleTasks = computed(() => {
     if (isAdmin.value && leftUploaded !== rightUploaded) return rightUploaded - leftUploaded
     return collator.compare(String(left.terminal || left.id), String(right.terminal || right.id))
   })
+})
+
+const visibleExceptionTaskCards = computed(() => {
+  const source = fieldExceptionOrders.value.length ? fieldExceptionOrders.value : exceptionOrders.value
+  const map = new Map<string, ConstructionExceptionOrder>()
+  for (const order of source) {
+    if (!isAdmin.value && order.assignedTo && order.assignedTo !== actor.value) continue
+    map.set(order.id || `${order.taskId}-${order.groupId}`, order)
+  }
+  return [...map.values()]
+})
+
+const visibleUnmatchedTaskCards = computed(() =>
+  unmatchedRecords.value.filter((record) => isAdmin.value || !record.assignedTo || record.assignedTo === actor.value),
+)
+
+const taskPickerTitle = computed(() => {
+  if (taskPickerMode.value === 'exception') return '异常任务'
+  if (taskPickerMode.value === 'unmatched') return '未匹配任务'
+  return '开放终端'
+})
+
+const taskPickerSubtitle = computed(() => {
+  if (taskPickerMode.value === 'exception') return '被指派的异常组可直接进入施工处理'
+  if (taskPickerMode.value === 'unmatched') return '现场确认未匹配地址、换表或项目外施工'
+  return '管理员指派后施工员可进入施工'
 })
 
 const selectedTask = computed(() => visibleTasks.value.find((task) => task.id === selectedTaskId.value) || null)
@@ -1361,6 +1393,7 @@ async function handleTaskAdminAction(task: ReviewTask, action: 'assign' | 'unass
 
 async function selectTask(task: ReviewTask) {
   await flushCurrentDraftPersist()
+  taskPickerMode.value = 'terminal'
   selectedTaskId.value = task.id
   selectedItemKey.value = ''
   groupQuery.value = ''
@@ -1369,6 +1402,56 @@ async function selectTask(task: ReviewTask) {
   taskPickerOpen.value = false
   resetCollectorForm()
   await loadGroups()
+}
+
+async function loadFieldTaskCards() {
+  if (!online()) return
+  try {
+    const [orders, unmatched] = await Promise.all([
+      fetchConstructionExceptionOrders('', isAdmin.value ? '' : actor.value),
+      fetchUnmatchedRecords(''),
+    ])
+    fieldExceptionOrders.value = orders
+    unmatchedRecords.value = unmatched
+  } catch {
+    // Field task cards are auxiliary. Keep terminal collection available on weak networks.
+  }
+}
+
+async function selectTaskPickerMode(mode: TaskPickerMode) {
+  await flushCurrentDraftPersist()
+  taskPickerMode.value = mode
+  if (mode !== 'terminal') {
+    taskPickerOpen.value = true
+    selectedTaskId.value = ''
+    groups.value = []
+    exceptionOrders.value = []
+    resetCollectorForm()
+    await loadFieldTaskCards()
+  }
+}
+
+async function openExceptionTaskCard(order: ConstructionExceptionOrder) {
+  const taskId = String(order.taskId || '')
+  const task = visibleTasks.value.find((item) => String(item.id) === taskId)
+  if (!task) {
+    ElMessage.warning('该异常任务尚未绑定可进入的终端')
+    return
+  }
+  await selectTask(task)
+  groupFilter.value = 'exception'
+  const target = workItems.value.find((item) => item.order?.id === order.id || String(item.group.id) === String(order.groupId))
+  if (target) await openWorkItem(target)
+}
+
+async function openUnmatchedTaskCard(record: UnmatchedRecord) {
+  const task = visibleTasks.value.find((item) => String(item.terminal || '') === String(record.terminal || ''))
+  if (!task) {
+    ElMessage.info('该未匹配任务需要先由管理员补充或指派终端')
+    return
+  }
+  await selectTask(task)
+  groupQuery.value = record.barcode || record.meterNo || record.address || ''
 }
 
 async function useSnapshot(taskId: string, reason = '') {
@@ -1388,6 +1471,7 @@ async function loadTasks() {
     await loadDrafts()
     if (!online()) throw new Error('offline')
     tasks.value = await fetchConstructionTasks(isAdmin.value)
+    await loadFieldTaskCards()
     offlineMode.value = false
   } catch (error) {
     try {
@@ -1401,13 +1485,16 @@ async function loadTasks() {
       errorMessage.value = cacheError instanceof Error ? cacheError.message : '施工任务加载失败'
     }
   } finally {
-    if (!selectedTaskId.value || !visibleTasks.value.some((task) => task.id === selectedTaskId.value)) {
+    if (taskPickerMode.value !== 'terminal') {
+      selectedTaskId.value = ''
+      taskPickerOpen.value = true
+    } else if (!selectedTaskId.value || !visibleTasks.value.some((task) => task.id === selectedTaskId.value)) {
       selectedTaskId.value = visibleTasks.value[0]?.id || ''
       taskPickerOpen.value = isAdmin.value || visibleTasks.value.length !== 1
     }
     loadingTasks.value = false
   }
-  if (selectedTaskId.value) await loadGroups()
+  if (taskPickerMode.value === 'terminal' && selectedTaskId.value) await loadGroups()
 }
 
 async function loadGroups() {
@@ -1565,8 +1652,8 @@ onBeforeUnmount(() => {
       <aside v-show="inTaskPicker" class="panel task-panel">
         <div class="panel-head">
           <div>
-            <h3>开放终端</h3>
-            <span>管理员指派后施工员可进入施工</span>
+            <h3>{{ taskPickerTitle }}</h3>
+            <span>{{ taskPickerSubtitle }}</span>
           </div>
           <div class="head-actions">
             <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
@@ -1576,7 +1663,61 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div v-loading="loadingTasks" class="task-list">
+          <div class="task-mode-grid">
+            <button
+              class="task-card field-task-entry kind-exception"
+              :class="{ active: taskPickerMode === 'exception' }"
+              type="button"
+              @click="selectTaskPickerMode('exception')"
+            >
+              <div class="task-title">
+                <strong>异常任务</strong>
+                <el-tag type="danger" effect="light">{{ visibleExceptionTaskCards.length }}</el-tag>
+              </div>
+              <p>处理异常组补图、改采集器或模块号</p>
+            </button>
+            <button
+              class="task-card field-task-entry kind-unmatched"
+              :class="{ active: taskPickerMode === 'unmatched' }"
+              type="button"
+              @click="selectTaskPickerMode('unmatched')"
+            >
+              <div class="task-title">
+                <strong>未匹配任务</strong>
+                <el-tag type="warning" effect="light">{{ visibleUnmatchedTaskCards.length }}</el-tag>
+              </div>
+              <p>现场确认未匹配地址、换表和项目外施工</p>
+            </button>
+          </div>
+
+          <div v-if="taskPickerMode === 'exception'" class="field-task-picker-list">
+            <article v-for="order in visibleExceptionTaskCards" :key="order.id" class="field-task-card kind-exception">
+              <div class="field-task-title">
+                <strong>{{ order.meterNo || order.groupId || order.id }}</strong>
+                <el-tag type="danger" effect="light">{{ order.assignedTo ? `已指派 ${order.assignedTo}` : '待指派' }}</el-tag>
+              </div>
+              <p>{{ order.terminal || '未绑定终端' }} / {{ order.address || '未填写地址' }}</p>
+              <small>{{ order.category || '异常工单' }} {{ order.note || '' }}</small>
+              <el-button size="small" type="primary" plain @click="openExceptionTaskCard(order)">进入处理</el-button>
+            </article>
+            <el-empty v-if="!visibleExceptionTaskCards.length" description="暂无异常任务" />
+          </div>
+
+          <div v-if="taskPickerMode === 'unmatched'" class="field-task-picker-list">
+            <article v-for="record in visibleUnmatchedTaskCards" :key="record.unmatchedId" class="field-task-card kind-unmatched">
+              <div class="field-task-title">
+                <strong>{{ record.barcode || record.meterNo || record.unmatchedId }}</strong>
+                <el-tag type="warning" effect="light">{{ record.assignedTo ? `已指派 ${record.assignedTo}` : '待确认' }}</el-tag>
+              </div>
+              <p>{{ record.terminal || '未匹配终端' }} / {{ record.address || '未匹配地址' }}</p>
+              <small>{{ record.projectOutside ? '项目外施工' : '现场确认' }}</small>
+              <el-button size="small" type="primary" plain @click="openUnmatchedTaskCard(record)">进入终端</el-button>
+            </article>
+            <el-empty v-if="!visibleUnmatchedTaskCards.length" description="暂无未匹配任务" />
+          </div>
+
           <button
+            v-if="taskPickerMode === 'terminal'"
             v-for="task in visibleTasks"
             :key="task.id"
             class="task-card"
@@ -1619,7 +1760,7 @@ onBeforeUnmount(() => {
               </el-button>
             </div>
           </button>
-          <el-empty v-if="!loadingTasks && !visibleTasks.length" description="暂无指派施工终端" />
+          <el-empty v-if="!loadingTasks && taskPickerMode === 'terminal' && !visibleTasks.length" description="暂无指派施工终端" />
         </div>
       </aside>
 
@@ -2201,6 +2342,83 @@ onBeforeUnmount(() => {
 .task-list {
   min-height: 0;
   max-height: none;
+}
+
+.task-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.field-task-entry {
+  border-left: 4px solid transparent;
+  background: linear-gradient(180deg, #ffffff, #fbfdff);
+}
+
+.field-task-entry.kind-exception {
+  border-left-color: #b42318;
+}
+
+.field-task-entry.kind-unmatched {
+  border-left-color: #d97706;
+}
+
+.field-task-entry p {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.field-task-picker-list {
+  display: grid;
+  gap: 8px;
+}
+
+.field-task-card {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid #d9e4ee;
+  border-left: 4px solid transparent;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.field-task-card.kind-exception {
+  border-left-color: #b42318;
+}
+
+.field-task-card.kind-unmatched {
+  border-left-color: #d97706;
+}
+
+.field-task-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-task-title strong,
+.field-task-card p,
+.field-task-card small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field-task-card p {
+  margin: 0;
+  color: #475467;
+  font-size: 13px;
+}
+
+.field-task-card small {
+  color: #667085;
+  font-size: 12px;
 }
 
 .construction-panel-logout {
@@ -2891,6 +3109,10 @@ onBeforeUnmount(() => {
 
   .task-card {
     min-width: 0;
+  }
+
+  .task-mode-grid {
+    grid-template-columns: 1fr;
   }
 
   .group-tools {
