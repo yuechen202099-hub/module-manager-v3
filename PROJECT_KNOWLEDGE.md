@@ -2,7 +2,7 @@
 
 Last full scan: 2026-06-21
 Current known version: V2.4.11
-Active maintenance baseline: V2.4.11 only
+Active maintenance baseline: latest repository version
 Maintenance mode: active
 
 ## 项目用途
@@ -227,4 +227,4 @@ build/、exports/、logs/、uploads/  构建、导出、日志、运行产物；
 19. 版本号规则：大改动 `+0.1.0`，小改动 `+0.0.1`。
 20. 后续回答按用户指定结构输出：问题分析、需要查看、修复方案、修改文件、影响范围、风险等级、验证步骤。
 21. 后续 Bug 修复默认只读这三个维护文档和相关局部代码，不再全项目扫描。
-22. 后续维护默认只读取和处理最新版本 `V2.4.11`，不主动读取旧版本、历史 release 或旧静态页面；只有用户明确要求回滚、对比或追溯时才查看历史版本。
+22. 后续维护默认只读取和处理仓库当前最新版本，不主动读取旧版本、历史 release 或旧静态页面；只有用户明确要求回滚、对比或追溯时才查看历史版本。
