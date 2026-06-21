@@ -24,6 +24,8 @@ export type UserAccount = {
   status: string
   home?: string
   lastLoginAt?: string
+  lastLoginIp?: string
+  lastLoginDevice?: string
 }
 
 export type CurrentUser = {
@@ -90,6 +92,7 @@ export type ReviewTask = {
   uploadedCount?: number
   reviewedCount?: number
   unreviewedCount?: number
+  uploadRate?: number
   reviewRate?: number
   constructionEnabled?: boolean
   constructionClaimedBy?: string
@@ -190,6 +193,20 @@ export type ProjectSummary = {
   scanUnmatched: number
   reviewProgress: number
   installerDistribution: Array<{ installer: string; groupCount: number; share: number }>
+}
+
+export type InstallerWorkloadRow = {
+  date: string
+  groupCount: number
+  photoCount: number
+  archivedCount: number
+  exceptionCount: number
+  unreviewedCount: number
+}
+
+export type InstallerWorkload = {
+  installer: string
+  items: InstallerWorkloadRow[]
 }
 
 export type ImportJob = {

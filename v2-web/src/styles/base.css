@@ -119,12 +119,14 @@ a:hover {
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 38px;
+  min-width: 52px;
   height: 38px;
+  padding: 0 8px;
   border-radius: 8px;
   background: var(--v2-primary);
   color: #fff;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .brand strong,

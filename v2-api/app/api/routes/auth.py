@@ -111,6 +111,20 @@ def environment_admin_login(username: str, password: str) -> dict | None:
     }
 
 
+def request_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    real_ip = request.headers.get("x-real-ip", "")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else ""
+
+
+def request_device(request: Request) -> str:
+    return request.headers.get("user-agent", "").strip()[:256]
+
+
 @router.get("/config")
 def config(request: Request):
     ensure_user_store()
@@ -155,8 +169,10 @@ def config(request: Request):
 
 @router.post("/login")
 def login(payload: LoginRequest, request: Request):
+    client_ip = request_client_ip(request)
+    client_device = request_device(request)
     user = (
-        authenticate_user(payload.username, payload.password)
+        authenticate_user(payload.username, payload.password, ip=client_ip, device=client_device)
         or environment_admin_login(payload.username, payload.password)
         or demo_login_user(payload.username, payload.password)
     )

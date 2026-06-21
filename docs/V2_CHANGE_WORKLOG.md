@@ -1968,3 +1968,56 @@
   - Release tag: `v2.4.10`
   - Next version after this baseline: `V2.4.11` for the next small patch, or `V2.5.0` for the next major workflow/UI change.
 - Status: Completed.
+
+### Project Board production patch: V2.4.11
+
+- Date: 2026-06-21
+- Version target: `V2.4.11`
+- User request:
+  - Fix clipped version label in the top-left product mark.
+  - Show all terminal tasks on the project board, not only the first 12.
+  - Add sortable upload rate / review rate / archive / unreviewed / total archive count columns.
+  - Treat account `name` as the canonical installer/KPI identity and show last login IP/device.
+  - Add installer daily workload popup and CSV export for KPI review.
+  - Add version to system status and explain the meaning of `data file`.
+- Changed files:
+  - `v2-web/src/views/ProjectBoardView.vue`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/api/types.ts`
+  - `v2-web/src/styles/base.css`
+  - `v2-web/src/styles/main.css`
+  - `v2-web/src/layouts/AppLayout.vue`
+  - `v2-web/src/views/LoginView.vue`
+  - `v2-web/src/components/AppLayout.vue`
+  - `v2-web/index.html`
+  - `v2-web/package.json`
+  - `v2-api/app/api/routes/auth.py`
+  - `v2-api/app/api/routes/local_test.py`
+  - `v2-api/app/services/account_store.py`
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/app/services/ops_status.py`
+  - `v2-api/app/main.py`
+  - `v2-api/pyproject.toml`
+  - `v2-api/tests/test_api.py`
+  - `AGENTS.md`
+- Changes:
+  - Bumped runtime/product metadata from `V2.4.10` to `V2.4.11`.
+  - Enlarged the version badge min width so `V2.4.11` renders fully.
+  - Rebuilt the Vue project board view with clean Chinese labels in the touched surface.
+  - Removed the 12-terminal slice and added table-level sorting for full terminal data.
+  - Added upload rate to the task model and terminal progress table.
+  - Added login IP and User-Agent recording for account rows.
+  - Added `/local-test/installers/{installer}/daily-workload` for JSON/PostgreSQL backends.
+  - Added installer KPI modal and CSV export from the project board.
+  - Added system status version row and a note explaining that data file size means the business state snapshot, not photo storage.
+- Validation:
+  - `vue-tsc --noEmit`: passed.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed, with existing Rollup PURE/chunk warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - `pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+  - `pytest v2-api\tests\test_state_repository.py v2-api\tests\test_postgres_migration.py -q`: `9 passed`.
+  - `python scripts\smoke-client-demo.py`: passed.
+  - Browser QA on local `http://127.0.0.1:8000/project-board`: passed after explicit demo admin login.
+    - Confirmed full `V2.4.11` badge.
+    - Confirmed full terminal table text, upload-rate column, upload-rate sort button, login IP/device columns, system data-file explanation, installer KPI modal and KPI CSV action.

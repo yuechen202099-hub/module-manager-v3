@@ -5,6 +5,7 @@ import type {
   ConstructionUploadPayload,
   CurrentUser,
   ImportJob,
+  InstallerWorkload,
   MaterialGroup,
   Project,
   ProjectSummary,
@@ -63,6 +64,7 @@ type BackendTask = {
   total_groups?: number
   renovation_count?: number
   uploaded_count?: number
+  upload_rate?: number
   reviewed_count?: number
   unreviewed_count?: number
   review_rate?: number
@@ -180,6 +182,20 @@ type BackendUserAccount = {
   status?: string
   home?: string
   last_login_at?: string
+  last_login_ip?: string
+  last_login_device?: string
+}
+
+type BackendInstallerWorkload = {
+  installer?: string
+  items?: Array<{
+    date?: string
+    group_count?: number
+    photo_count?: number
+    archived_count?: number
+    exception_count?: number
+    unreviewed_count?: number
+  }>
 }
 
 const delay = (ms = 120) => new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -302,6 +318,7 @@ function mapTask(raw: BackendTask): ReviewTask {
     uploadedCount,
     reviewedCount,
     unreviewedCount,
+    uploadRate: Number(raw.upload_rate || (renovationCount ? uploadedCount / renovationCount : 0)),
     reviewRate: Number(raw.review_rate || (renovationCount ? reviewedCount / renovationCount : 0)),
     constructionEnabled: Boolean(raw.construction_enabled),
     constructionClaimedBy: raw.construction_claimed_by || '',
@@ -437,6 +454,8 @@ function mapUserAccount(raw: BackendUserAccount): UserAccount {
     status: raw.status || 'active',
     home: raw.home || '',
     lastLoginAt: raw.last_login_at || '',
+    lastLoginIp: raw.last_login_ip || '',
+    lastLoginDevice: raw.last_login_device || '',
   }
 }
 
@@ -820,6 +839,23 @@ export async function uploadConstructionBatch(
 export async function fetchProjectSummary(): Promise<{ summary: ProjectSummary; paths: Record<string, unknown> }> {
   const data = await api<{ summary: BackendSummary; paths?: Record<string, unknown> }>('/local-test/summary')
   return { summary: mapSummary(data.summary || {}), paths: data.paths || {} }
+}
+
+export async function fetchInstallerWorkload(installer: string): Promise<InstallerWorkload> {
+  const data = await api<BackendInstallerWorkload>(
+    `/local-test/installers/${encodeURIComponent(installer)}/daily-workload`,
+  )
+  return {
+    installer: data.installer || installer,
+    items: (data.items || []).map((item) => ({
+      date: item.date || '',
+      groupCount: Number(item.group_count || 0),
+      photoCount: Number(item.photo_count || 0),
+      archivedCount: Number(item.archived_count || 0),
+      exceptionCount: Number(item.exception_count || 0),
+      unreviewedCount: Number(item.unreviewed_count || 0),
+    })),
+  }
 }
 
 export async function fetchSystemStatus(): Promise<Record<string, unknown>> {

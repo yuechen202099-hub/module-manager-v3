@@ -72,7 +72,7 @@ onMounted(() => {
   <main class="login-page">
     <section class="login-card">
       <div class="login-intro">
-        <span class="login-mark">V2.4.10</span>
+        <span class="login-mark">V2.4.11</span>
         <div>
           <strong>模块更换项目管理器</strong>
           <p>工程审阅、施工采集、异常闭环</p>

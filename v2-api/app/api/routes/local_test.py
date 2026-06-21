@@ -833,6 +833,11 @@ def summary(request: Request):
     return ok(request, state_repository().summary())
 
 
+@router.get("/installers/{installer}/daily-workload")
+def installer_daily_workload(installer: str, request: Request):
+    return ok(request, state_repository().installer_daily_workload(installer))
+
+
 @router.get("/teams")
 def teams(request: Request):
     return ok(request, {"items": state_repository().list_team_states()})

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import shutil
@@ -17,7 +17,7 @@ LOCAL_UPLOAD_WARN_FILES = 30_000
 
 
 def app_version() -> str:
-    return "2.4.10"
+    return "2.4.11"
 
 
 def project_root() -> Path:

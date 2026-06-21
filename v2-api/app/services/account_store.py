@@ -53,6 +53,8 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
         "last_login_at": user.get("last_login_at"),
+        "last_login_ip": user.get("last_login_ip"),
+        "last_login_device": user.get("last_login_device"),
     }
 
 
@@ -69,6 +71,8 @@ def _default_admin_user() -> dict[str, Any]:
         "created_at": now,
         "updated_at": now,
         "last_login_at": None,
+        "last_login_ip": None,
+        "last_login_device": None,
     }
 
 
@@ -146,13 +150,13 @@ def get_user(username: str) -> dict[str, Any] | None:
     return deepcopy(user) if user else None
 
 
-def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
+def authenticate_user(username: str, password: str, *, ip: str = "", device: str = "") -> dict[str, Any] | None:
     user = get_user(username)
     if not user or user.get("status") != "active":
         return None
     if not verify_password(password, user.get("password_hash", "")):
         return None
-    update_last_login(user["username"])
+    update_last_login(user["username"], ip=ip, device=device)
     return get_user(user["username"])
 
 
@@ -188,6 +192,8 @@ def upsert_user(
             "updated_at": now,
             "created_at": (existing or {}).get("created_at") or now,
             "last_login_at": (existing or {}).get("last_login_at"),
+            "last_login_ip": (existing or {}).get("last_login_ip"),
+            "last_login_device": (existing or {}).get("last_login_device"),
         }
         if password:
             user["password_hash"] = hash_password(password)
@@ -230,11 +236,13 @@ def delete_user(username: str) -> dict[str, Any]:
         return deleted
 
 
-def update_last_login(username: str) -> None:
+def update_last_login(username: str, *, ip: str = "", device: str = "") -> None:
     normalized_username = normalize_username(username)
     with _lock:
         users = ensure_user_store()
         if normalized_username not in users:
             return
         users[normalized_username]["last_login_at"] = now_iso()
+        users[normalized_username]["last_login_ip"] = str(ip or "").strip()[:128]
+        users[normalized_username]["last_login_device"] = str(device or "").strip()[:256]
         _write_users_unlocked(users)

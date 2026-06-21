@@ -434,6 +434,10 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def installer_daily_workload(self, installer: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_team_states(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -757,6 +761,9 @@ class JsonStateRepository(StateRepository):
 
     def list_tasks(self) -> list[dict[str, Any]]:
         return local_simulation.list_tasks()
+
+    def installer_daily_workload(self, installer: str) -> dict[str, Any]:
+        return local_simulation.installer_daily_workload(installer)
 
     def list_team_states(self) -> list[dict[str, Any]]:
         return local_simulation.list_team_states()
@@ -1329,6 +1336,65 @@ class PostgresStateRepository(StateRepository):
                 [_task_payload(task, stats_by_task.get(int(task.legacy_id or 0), _empty_task_stats())) for task in tasks],
                 key=lambda item: (not item.get("can_claim", False), str(item.get("terminal", "")), item["id"]),
             )
+
+    def installer_daily_workload(self, installer: str) -> dict[str, Any]:
+        target = str(installer or "").strip()
+        if not target:
+            return {"installer": target, "items": []}
+        with self._session() as session:
+            team_id = local_simulation.current_team_id()
+            day = func.date(Photo.created_at).label("work_date")
+            rows = session.execute(
+                select(
+                    day,
+                    func.count(func.distinct(Photo.group_id)).label("group_count"),
+                    func.count(Photo.id).label("photo_count"),
+                    func.coalesce(
+                        func.sum(case((MaterialGroup.status == GroupStatus.APPROVED, 1), else_=0)),
+                        0,
+                    ).label("archived_photo_rows"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    (MaterialGroup.status == GroupStatus.REJECTED)
+                                    | (MaterialGroup.exception_status == "open")
+                                    | (MaterialGroup.has_archive_blocker.is_(True)),
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("exception_photo_rows"),
+                )
+                .join(MaterialGroup, Photo.group_id == MaterialGroup.id)
+                .where(
+                    Photo.team_id == team_id,
+                    Photo.is_active.is_(True),
+                    Photo.creator == target,
+                )
+                .group_by(day)
+                .order_by(day.desc())
+            ).all()
+        items = []
+        for row in rows:
+            group_count = int(row.group_count or 0)
+            archived_photo_rows = int(row.archived_photo_rows or 0)
+            exception_photo_rows = int(row.exception_photo_rows or 0)
+            archived_count = min(group_count, archived_photo_rows)
+            exception_count = min(group_count, exception_photo_rows)
+            items.append(
+                {
+                    "date": str(row.work_date or "未记录日期"),
+                    "group_count": group_count,
+                    "photo_count": int(row.photo_count or 0),
+                    "archived_count": archived_count,
+                    "exception_count": exception_count,
+                    "unreviewed_count": max(group_count - archived_count - exception_count, 0),
+                }
+            )
+        return {"installer": target, "items": items}
 
     def list_team_states(self) -> list[dict[str, Any]]:
         with self._session() as session:

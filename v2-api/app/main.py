@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -28,7 +28,7 @@ def create_app() -> FastAPI:
     production_mode = settings.app_env.lower() in {"prod", "production"}
     app = FastAPI(
         title="Module Manager V2 API",
-        version="2.4.10",
+        version="2.4.11",
         lifespan=lifespan,
         docs_url=None if production_mode else "/docs",
         redoc_url=None if production_mode else "/redoc",

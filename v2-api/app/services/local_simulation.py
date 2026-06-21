@@ -2180,6 +2180,65 @@ def summarize_installers_by_group(groups: list[dict[str, Any]]) -> list[dict[str
     ]
 
 
+def _date_key_from_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", text):
+        return text[:10]
+    try:
+        normalized = text.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).date().isoformat()
+    except ValueError:
+        return ""
+
+
+def installer_daily_workload(installer: str) -> dict[str, Any]:
+    target = str(installer or "").strip()
+    rows: dict[str, dict[str, Any]] = {}
+    if not target:
+        return {"installer": target, "items": []}
+    for group in get_state()["groups"]:
+        matched_photos = [
+            photo
+            for photo in group.get("photos", [])
+            if str(photo.get("creator") or "").strip() == target and photo.get("is_active", True) is not False
+        ]
+        if not matched_photos:
+            continue
+        date_key = ""
+        for photo in matched_photos:
+            date_key = (
+                _date_key_from_value(photo.get("created_at"))
+                or _date_key_from_value(photo.get("taken_at"))
+                or _date_key_from_value(photo.get("classified_at"))
+            )
+            if date_key:
+                break
+        date_key = date_key or _date_key_from_value(group.get("last_photo_imported_at")) or "未记录日期"
+        row = rows.setdefault(
+            date_key,
+            {
+                "date": date_key,
+                "group_count": 0,
+                "photo_count": 0,
+                "archived_count": 0,
+                "exception_count": 0,
+                "unreviewed_count": 0,
+            },
+        )
+        row["group_count"] += 1
+        row["photo_count"] += len(matched_photos)
+        if is_reviewed_group(group):
+            row["archived_count"] += 1
+        elif is_problem_group(group):
+            row["exception_count"] += 1
+        else:
+            row["unreviewed_count"] += 1
+    items = sorted(rows.values(), key=lambda item: str(item["date"]), reverse=True)
+    return {"installer": target, "items": items}
+
+
 def refresh_summary() -> None:
     state = get_state()
     refresh_group_exceptions()

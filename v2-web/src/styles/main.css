@@ -87,8 +87,9 @@ button {
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
-  width: 42px;
+  min-width: 62px;
   height: 30px;
+  padding: 0 8px;
   border-radius: var(--v2-radius-md);
   background: var(--v2-bg-inverse);
   color: var(--v2-text-inverse);
@@ -96,6 +97,7 @@ button {
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 0;
+  white-space: nowrap;
 }
 
 .brand-copy {
