@@ -2021,3 +2021,40 @@
   - Browser QA on local `http://127.0.0.1:8000/project-board`: passed after explicit demo admin login.
     - Confirmed full `V2.4.11` badge.
     - Confirmed full terminal table text, upload-rate column, upload-rate sort button, login IP/device columns, system data-file explanation, installer KPI modal and KPI CSV action.
+
+### Construction mobile scanner patch: V2.4.12
+
+- Date: 2026-06-21
+- Version target: `V2.4.12`
+- User request:
+  - Fix the mobile construction collection page where tapping scan did not open/respond with the camera.
+  - Production deployment will be handled by the project engineer thread that has SSH key permission.
+- Changed files:
+  - `v2-web/src/views/ConstructionView.vue`
+  - `v2-web/package.json`
+  - `v2-api/pyproject.toml`
+  - `v2-api/app/main.py`
+  - `v2-api/app/services/ops_status.py`
+  - `v2-web/src/layouts/AppLayout.vue`
+  - `v2-web/src/components/AppLayout.vue`
+  - `v2-web/src/views/LoginView.vue`
+  - `v2-api/app/static/app_shell.html`
+  - `v2-api/app/static/task_hall.html`
+  - Vue build output under `v2-api/app/static/vue/**`
+  - `v2-api/tests/test_api.py`
+  - `AGENTS.md`
+  - `PROJECT_KNOWLEDGE.md`
+  - `BUG_HISTORY.md`
+  - `FIX_NOTES.md`
+- Changes:
+  - Bumped app/product metadata from `V2.4.11` to `V2.4.12`.
+  - Added `await nextTick()` before starting the live scanner so the camera target DOM is mounted before QuaggaJS/BarcodeDetector binds to it.
+  - Changed live-scan failure behavior to keep the scanner panel open and ask the user to tap `拍照识别` or `手动输入`, avoiding mobile browser blocking of programmatic camera/file-picker activation.
+- Validation:
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed, with existing Rollup PURE/chunk warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - `pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+  - Desktop automation cannot fully validate real phone camera permission, autofocus, or barcode recognition; production mobile QA remains required after deployment.
+- Deployment handoff:
+  - SSH deployment is assigned to the project engineer thread with key access.
+  - Suggested command after pulling this commit on the server: rebuild Vue if needed, restart `module-manager-v2.service`, reload Nginx if config changed, then verify `/health`, `/login`, and `/construction`.

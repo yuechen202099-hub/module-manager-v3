@@ -708,7 +708,7 @@ async function startScanner(target: ScannerTarget) {
   scanCandidate = ''
   scanCandidateHits = 0
   scanLocked = false
-  scannerStatus.value = '将条形码横向放入框内，保持 1 秒稳定。'
+  scannerStatus.value = '正在启动相机，请允许浏览器使用摄像头。'
   scannerHint.value =
     target === 'collector'
       ? '采集器扫码成功后只填入编号，照片仍需单独拍摄'
@@ -716,6 +716,7 @@ async function startScanner(target: ScannerTarget) {
         ? '将模块条码横向放入框内'
         : '扫描表号条码后直接打开施工单'
 
+  await nextTick()
   const quagga = await ensureQuaggaLoaded().catch(() => null)
   if (quagga?.init && typeof navigator.mediaDevices?.getUserMedia === 'function') {
     try {
@@ -723,7 +724,7 @@ async function startScanner(target: ScannerTarget) {
       return
     } catch {
       resetScannerRuntime()
-      await fallbackScannerInput('实时扫码不可用')
+      prepareScannerFallback('实时扫码不可用')
       return
     }
   }
@@ -734,12 +735,12 @@ async function startScanner(target: ScannerTarget) {
       return
     } catch {
       resetScannerRuntime()
-      await fallbackScannerInput('实时识别失败')
+      prepareScannerFallback('实时识别失败')
       return
     }
   }
 
-  await fallbackScannerInput('当前浏览器不支持实时扫码')
+  prepareScannerFallback('当前浏览器不支持实时扫码')
 }
 
 async function startQuaggaScanner() {
@@ -795,7 +796,8 @@ async function startNativeScanner() {
       }
     } catch {
       closeScanner()
-      await fallbackScannerInput('实时识别失败')
+      scannerOpen.value = true
+      prepareScannerFallback('实时识别失败')
       return
     }
     scannerTimer = window.setTimeout(tick, 320)
@@ -875,6 +877,11 @@ async function fallbackScannerInput(reason = '') {
     return
   }
   await manualScannerInput('已拍照，但当前环境无法自动识别条码，请手动确认编号')
+}
+
+function prepareScannerFallback(reason = '') {
+  scannerStatus.value = `${reason || '实时扫码不可用'}，请点击“拍照识别”或“手动输入”。`
+  scannerHint.value = '移动浏览器要求相机/相册必须由用户点击按钮打开'
 }
 
 async function manualScannerInput(message = '请输入编号') {

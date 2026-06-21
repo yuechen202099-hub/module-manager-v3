@@ -24,6 +24,7 @@ Last updated: 2026-06-21
 | BH-0106 | 系统状态缺少版本号，“数据文件”含义不清 | 项目看板系统状态只显示服务、磁盘、数据文件、最近备份 | 已修复，新增版本号和说明 | 2026-06-21 | `ops_status.py`、`ProjectBoardView.vue` |
 | BH-0107 | 独立缓存上传页和异常处理页仍有旧入口风险 | 访问 `/construction-cache` 或 `/unmatched` 可能进入旧独立页面 | 已修复，统一重定向到施工采集/审阅工作台 | 2026-06-21 | `main.py`、`router/index.ts`、`TaskHallView.vue` |
 | BH-0108 | PowerShell 中文输出可能误导源码编码判断 | PowerShell 默认编码显示中文时出现乱码 | 已处理，新增 UTF-8 初始化脚本 | 2026-06-21 | `setup_terminal_utf8.ps1` |
+| BH-0109 | 施工采集页手机端点击扫码后相机无响应 | 手机端打开施工采集页，点击采集器/模块扫码，弹层打开后相机未启动或降级拍照无响应 | 已修复，本地构建通过；生产发布交给有 SSH 密钥权限的项目工程师线程 | 2026-06-21 | `v2-web/src/views/ConstructionView.vue` |
 
 ## 处理规则
 

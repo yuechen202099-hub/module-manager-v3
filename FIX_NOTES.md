@@ -126,3 +126,48 @@ Last updated: 2026-06-21
   - 账号表有登录 IP 和登录设备。
   - 安装人员 KPI 弹窗可打开并可导出 CSV。
   - 系统状态显示版本号和数据文件说明。
+
+## 2026-06-21 - V2.4.12 施工采集扫码相机修复
+
+### 修改原因
+
+施工采集页手机端点击“扫码”后，相机可能无响应。最可能原因是扫码弹层刚打开时 DOM 尚未完成渲染，QuaggaJS 立即绑定相机容器会失败；失败后又自动触发隐藏文件选择器，移动端浏览器会拦截这种非用户直接点击触发的相机/相册动作。
+
+### 修改文件
+
+- `v2-web/src/views/ConstructionView.vue`
+- `v2-web/package.json`
+- `v2-api/pyproject.toml`
+- `v2-api/app/main.py`
+- `v2-api/app/services/ops_status.py`
+- `v2-web/src/layouts/AppLayout.vue`
+- `v2-web/src/components/AppLayout.vue`
+- `v2-web/src/views/LoginView.vue`
+- `v2-api/app/static/app_shell.html`
+- `v2-api/app/static/task_hall.html`
+- `v2-api/app/static/vue/**`
+- `v2-api/tests/test_api.py`
+- `AGENTS.md`
+- `PROJECT_KNOWLEDGE.md`
+- `BUG_HISTORY.md`
+- `FIX_NOTES.md`
+- `docs/V2_CHANGE_WORKLOG.md`
+
+### 修改内容
+
+- `startScanner()` 打开扫码弹层后先 `await nextTick()`，确保视频容器已挂载，再启动 QuaggaJS/BarcodeDetector。
+- 实时扫码失败时不再自动触发隐藏拍照控件，而是保留扫码弹层并提示用户点击“拍照识别”或“手动输入”。
+- 将本次小修版本从 `V2.4.11` 升级为 `V2.4.12`。
+
+### 影响范围
+
+- 影响施工采集页扫码弹层。
+- 不改变施工采集业务数据、接口协议、数据库结构、上传逻辑或缓存结构。
+- 生产发布由有 SSH 密钥权限的项目工程师线程执行。
+
+### 验证方法
+
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`：通过。
+- `python scripts\verify_vue_migration_gate.py --strict-native`：通过。
+- `pytest v2-api\tests\test_api.py -q`：`43 passed, 1 warning`。
+- 真实手机相机权限和条形码识别需要在生产部署后用手机浏览器验证。
