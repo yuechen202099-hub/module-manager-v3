@@ -2233,3 +2233,31 @@
   - Use patch sync.
   - Preserve production `.env`, `data/`, and uploads.
   - Do not run Alembic because this combined release stores extension metadata in existing JSON/JSONB fields.
+
+### Production patch deployment: V2.5.0
+
+- Date: 2026-06-22
+- Commit: `eeb0fa9`
+- Tag: `v2.5.0`
+- Deployment mode:
+  - Patch sync to the current production release directory.
+  - Did not replace production `.env`, `data/`, or uploads.
+  - Did not run Alembic migration.
+- Backup:
+  - `/opt/module-manager-v2/backups/runtime/20260622_014459_before_v2.5.0_patch`
+  - Included current release archive, `.env`, `data`, uploads archives, and PostgreSQL dump.
+- Production validation:
+  - `systemctl is-active module-manager-v2.service`: `active`
+  - `http://127.0.0.1:8000/health`: 200
+  - `http://127.0.0.1:8000/login`: 200, `V2.5.0`
+  - `http://127.0.0.1:8000/project-board`: 200, `V2.5.0`
+  - `http://127.0.0.1:8000/task-hall`: 200, `V2.5.0`
+  - `http://127.0.0.1:8000/construction`: 200, `V2.5.0`
+  - `http://127.0.0.1:8000/openapi.json`: 404
+  - `http://106.14.122.43/login`: 200, `V2.5.0`
+  - `http://106.14.122.43/project-board`: 200, `V2.5.0`
+  - Server-side `http://www.sgcc.online/login`: 200, `V2.5.0`
+  - Server-side `https://www.sgcc.online/login`: 200, `V2.5.0`
+  - `nginx -t`: successful
+- Note:
+  - Local machine HTTPS request to `https://www.sgcc.online/login` returned `000`, but server-side domain HTTPS validation succeeded and Nginx listens on 443.

@@ -322,3 +322,11 @@ Unmatched address records and exception groups needed to become actionable workf
 ### Release note
 
 This workflow feature version (`V2.5.0`) is now the combined release vehicle for both the V2.4.15 hotfix and the V2.5.0 field-task workflow, per user approval.
+
+### Production deployment
+
+- Commit: `eeb0fa9`
+- Tag: `v2.5.0`
+- Backup: `/opt/module-manager-v2/backups/runtime/20260622_014459_before_v2.5.0_patch`
+- Release method: patch sync; production `.env`, `data`, uploads preserved; no Alembic migration.
+- Validation: service active; local server pages and public IP pages return `V2.5.0`; server-side `https://www.sgcc.online/login` returns 200.
