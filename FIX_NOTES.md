@@ -244,3 +244,81 @@ The task claiming page still exposed obsolete construction open/close actions. R
 - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
 - Headless Chrome screenshot verified the local claim task page renders `V2.4.13`, no longer shows `开放施工` / `关闭施工`, shows `指派施工`, and keeps `领取` readable.
+
+## 2026-06-22 - V2.4.15 review/thumbnail/KPI hotfix
+
+### Reason
+
+Three production bugs were assigned to the BUG fix thread: exception work orders opened in construction collection did not carry collector/module values from review; review thumbnail chips could all fail when the thumbnail proxy failed; installer daily workload grouped by storage/import date instead of scan or construction upload business date.
+
+### Changed files
+
+- `v2-web/src/api/types.ts`
+- `v2-web/src/api/services.ts`
+- `v2-web/src/views/ConstructionView.vue`
+- `v2-web/src/views/TaskHallView.vue`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/app/services/local_simulation.py`
+- version metadata and generated Vue assets
+
+### Changes
+
+- Added exception order `payload` mapping to the frontend API adapter and type.
+- Construction exception work orders now fall back to payload collector/module/meter/address when the nested group lacks those values.
+- Returning a group to exception order in the PostgreSQL repository now uses the shared exception payload builder.
+- Review thumbnail images now fall back from the backend thumbnail proxy to direct thumbnail/preview URLs after an image error.
+- Installer KPI daily workload now prefers scan/source created time for imported scan photos and latest construction upload time for construction photos.
+- Version metadata advanced to `V2.4.15`.
+
+### Impact
+
+- Affects review workspace thumbnail display, construction exception form prefill, and installer KPI daily workload.
+- Does not change database schema or public API paths.
+- Does not include V2.5 new feature work.
+
+### Validation
+
+- `python -m compileall v2-api\app\services\state_repository.py v2-api\app\services\local_simulation.py v2-api\app\main.py`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+- `node node_modules\vue-tsc\bin\vue-tsc.js --noEmit`: passed.
+- `node node_modules\vite\bin\vite.js build`: passed with existing chunk-size/PURE-comment warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+
+### Release note
+
+User approved folding this hotfix into the V2.5.0 feature release instead of publishing a separate V2.4.15 tag.
+
+## 2026-06-22 - V2.5.0 unmatched and exception task workflow
+
+### Reason
+
+Unmatched address records and exception groups needed to become actionable workflow tasks instead of passive records. Administrators need to assign them to field constructors, reviewers need to correct meter numbers and replacement-meter cases, and project-outside construction must be traceable and exportable.
+
+### Changed files
+
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/app/api/routes/local_test.py`
+- `v2-api/app/api/routes/exports.py`
+- `v2-web/src/api/services.ts`
+- `v2-web/src/api/types.ts`
+- `v2-web/src/views/TaskHallView.vue`
+- Vue build output under `v2-api/app/static/vue/**`
+
+### Changes
+
+- Added unmatched-record update, assignment, unassignment, rematch, replacement-meter matching, project-outside marking, and project-outside export APIs.
+- Added exception-order assignment and unassignment APIs.
+- When assigning an exception order or unmatched record that has a terminal, the backend also assigns the corresponding construction terminal task to the constructor, preserving the one-active-terminal rule.
+- Added review-workbench field task cards for unmatched records and exception orders.
+- Added quick actions: modify meter, replacement meter, project outside, assign/unassign constructor, delete unmatched record as admin, and export project-outside records.
+- Implemented JSON and PostgreSQL repository support without schema migration by storing extension metadata in existing JSONB payload/raw fields.
+
+### Validation
+
+- `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/api/routes/local_test.py v2-api/app/api/routes/exports.py`: passed.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+
+### Release note
+
+This workflow feature version (`V2.5.0`) is now the combined release vehicle for both the V2.4.15 hotfix and the V2.5.0 field-task workflow, per user approval.

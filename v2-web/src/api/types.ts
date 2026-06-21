@@ -176,6 +176,11 @@ export type ConstructionExceptionOrder = {
   category: string
   note: string
   assignedTo?: string
+  assignedBy?: string
+  assignedAt?: string
+  assignmentNote?: string
+  dueDate?: string
+  payload?: Record<string, unknown>
   group?: MaterialGroup
 }
 
@@ -219,6 +224,7 @@ export type ImportJob = {
 
 export type UnmatchedRecord = {
   unmatchedId: string
+  status: string
   barcode: string
   meterNo: string
   meterMatchKey: string
@@ -229,4 +235,18 @@ export type UnmatchedRecord = {
   creator: string
   photoCount: number
   recordType?: string
+  assignedTo?: string
+  assignedBy?: string
+  assignedAt?: string
+  assignmentNote?: string
+  dueDate?: string
+  projectOutside?: boolean
+  projectOutsideBy?: string
+  projectOutsideAt?: string
+  projectOutsideNote?: string
+  replacementOldMeterNo?: string
+  replacementTargetGroupId?: string
+  fieldTaskType?: string
+  sourceFile?: string
+  raw?: Record<string, unknown>
 }

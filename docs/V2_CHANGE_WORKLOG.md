@@ -2164,3 +2164,72 @@
   - Must use patch sync only.
   - Do not overwrite production `.env`, `data/`, uploads, or run Alembic.
   - This patch was folded into `V2.4.14` because the build output includes all Vue pages and the BUG fix thread had already handed off a construction page patch.
+
+### V2.4.15 review/thumbnail/KPI hotfix
+
+- Date: 2026-06-22
+- Owner: BUG fix thread
+- Scope:
+  - Preserve collector/module payload when review returns a group to construction exception work order.
+  - Add review thumbnail fallback when backend thumbnail proxy fails.
+  - Calculate installer daily workload from scan/source created time or latest construction upload time instead of storage/import time.
+- Validation:
+  - Backend compile passed.
+  - `pytest v2-api\tests\test_api.py -q`: 43 passed, 1 warning.
+  - Vue typecheck passed.
+  - Vite build passed with existing warnings.
+  - Vue strict-native gate passed.
+- Coordination:
+  - Current worktree also contains V2.5 project-engineer feature changes in unmatched/exception assignment files.
+- User approved folding V2.4.15 into the V2.5.0 release, so this hotfix is no longer published as a separate tag.
+
+### V2.5.0 unmatched and exception task workflow
+
+- Date: 2026-06-22
+- Owner: project engineer thread
+- Scope:
+  - Unmatched address task cards.
+  - Project-outside-construction trace and export.
+  - Replacement-meter rematch workflow.
+  - Exception group assignment as constructor field task.
+- Changed files:
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/app/api/routes/local_test.py`
+  - `v2-api/app/api/routes/exports.py`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/api/types.ts`
+  - `v2-web/src/views/TaskHallView.vue`
+  - `v2-api/app/static/vue/**`
+- Behavior:
+  - Review workspace now shows field task cards for unmatched records and exception orders.
+  - Unmatched records can be edited, rematched by new meter number, rematched by old meter number for replacement-meter cases, marked as project-outside construction, assigned/unassigned to constructors, exported, and deleted by admins.
+  - Exception orders can be assigned/unassigned to constructors. Assignment also assigns the corresponding terminal construction task when possible.
+  - JSON and PostgreSQL backends support the workflow without Alembic migration.
+- Validation:
+  - Backend Python compile passed.
+  - Vue production build passed with existing warnings.
+- Release:
+  - User approved publishing V2.4.15 + V2.5.0 together as the combined `V2.5.0` release.
+  - Must be committed/tagged as `v2.5.0` and deployed by patch sync.
+
+### V2.5.0 combined release decision
+
+- Date: 2026-06-22
+- Decision:
+  - Fold BUG-thread V2.4.15 fixes and project-engineer V2.5.0 workflow features into one release.
+  - Do not create a standalone `v2.4.15` production tag.
+  - Use `v2.5.0` as the commit/tag/deployment version.
+- Included hotfixes:
+  - Review exception work orders retain collector/module payload.
+  - Review thumbnails fall back when the thumbnail proxy fails.
+  - Installer daily workload uses scan/source time or latest construction upload time.
+- Included features:
+  - Unmatched address task cards.
+  - Project-outside construction trace and export.
+  - Replacement-meter rematch workflow.
+  - Exception group task cards and constructor assignment.
+- Deployment rule:
+  - Use patch sync.
+  - Preserve production `.env`, `data/`, and uploads.
+  - Do not run Alembic because this combined release stores extension metadata in existing JSON/JSONB fields.

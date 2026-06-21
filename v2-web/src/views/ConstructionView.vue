@@ -525,16 +525,20 @@ function draftToGroup(draft: CacheDraft): MaterialGroup {
 }
 
 function orderToGroup(order: ConstructionExceptionOrder): MaterialGroup {
+  const payload = order.payload || {}
   return {
     id: order.groupId || order.id,
     taskId: order.taskId || '',
-    address: order.address || '',
-    meterNo: order.meterNo || '',
+    address: firstText(order.address, payloadText(payload, 'address')),
+    meterNo: firstText(order.meterNo, payloadText(payload, 'meter_no', 'meterNo')),
     terminal: order.terminal || '',
     status: 'exception',
     photoCount: order.group?.photoCount || order.group?.photos?.length || 0,
-    constructionCollector: order.group?.constructionCollector || '',
-    constructionModuleAssetNo: order.group?.constructionModuleAssetNo || '',
+    constructionCollector: firstText(order.group?.constructionCollector, payloadText(payload, 'collector')),
+    constructionModuleAssetNo: firstText(
+      order.group?.constructionModuleAssetNo,
+      payloadText(payload, 'module_asset_no', 'moduleAssetNo', 'asset_no'),
+    ),
     constructionStatus: 'exception',
     exceptionOrderId: order.id,
     exceptionNote: order.note,
@@ -550,6 +554,23 @@ function itemBadge(item: WorkItem) {
 
 function photoUrl(photo?: ReviewPhoto | null) {
   return photo?.imageUrl || photo?.url || ''
+}
+
+function firstText(...values: unknown[]) {
+  for (const value of values) {
+    const text = String(value ?? '').trim()
+    if (text) return text
+  }
+  return ''
+}
+
+function payloadText(payload: Record<string, unknown> | undefined, ...keys: string[]) {
+  if (!payload) return ''
+  for (const key of keys) {
+    const text = firstText(payload[key])
+    if (text) return text
+  }
+  return ''
 }
 
 function existingPhotoForSlot(group: MaterialGroup | null, slotKey: string) {
@@ -1109,9 +1130,20 @@ async function loadDraftIntoForm(group: MaterialGroup) {
     selectedFiles.value = {}
     clearPreviews()
     const draft = await getDraft(draftKey(selectedTaskId.value, group.id))
-    form.collector = draft?.collector ?? group.constructionCollector ?? group.photos?.[0]?.collector ?? ''
-    form.moduleAssetNo = draft?.module_asset_no ?? group.constructionModuleAssetNo ?? group.photos?.[0]?.moduleAssetNo ?? ''
-    form.note = draft?.exception_note ?? group.exceptionNote ?? activeOrder.value?.note ?? ''
+    const orderPayload = activeOrder.value?.payload || {}
+    form.collector = firstText(
+      draft?.collector,
+      group.constructionCollector,
+      payloadText(orderPayload, 'collector'),
+      group.photos?.[0]?.collector,
+    )
+    form.moduleAssetNo = firstText(
+      draft?.module_asset_no,
+      group.constructionModuleAssetNo,
+      payloadText(orderPayload, 'module_asset_no', 'moduleAssetNo', 'asset_no'),
+      group.photos?.[0]?.moduleAssetNo,
+    )
+    form.note = firstText(draft?.exception_note, group.exceptionNote, activeOrder.value?.note)
     if (draft?.photos?.length) {
       const files: Record<string, File | null> = {}
       const urls: Record<string, string> = {}

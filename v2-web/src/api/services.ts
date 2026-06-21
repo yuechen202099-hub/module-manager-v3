@@ -129,6 +129,10 @@ type BackendConstructionExceptionOrder = {
   category?: string
   note?: string
   assigned_to?: string
+  assigned_by?: string
+  assigned_at?: string
+  assignment_note?: string
+  due_date?: string
   payload?: Record<string, unknown>
   group?: BackendGroup
 }
@@ -172,6 +176,21 @@ type BackendUnmatchedRecord = {
   photo_count?: number
   photo_urls?: unknown
   record_type?: string
+  status?: string
+  assigned_to?: string
+  assigned_by?: string
+  assigned_at?: string
+  assignment_note?: string
+  due_date?: string
+  project_outside?: boolean
+  project_outside_by?: string
+  project_outside_at?: string
+  project_outside_note?: string
+  replacement_old_meter_no?: string
+  replacement_target_group_id?: string
+  field_task_type?: string
+  source_file?: string
+  raw?: Record<string, unknown>
 }
 
 type BackendUserAccount = {
@@ -392,6 +411,11 @@ function mapConstructionExceptionOrder(raw: BackendConstructionExceptionOrder): 
     category: raw.category || '',
     note: raw.note || '',
     assignedTo: raw.assigned_to || '',
+    assignedBy: raw.assigned_by || '',
+    assignedAt: raw.assigned_at || '',
+    assignmentNote: raw.assignment_note || '',
+    dueDate: raw.due_date || '',
+    payload: raw.payload || {},
     group,
   }
 }
@@ -432,6 +456,7 @@ function mapUnmatchedRecord(raw: BackendUnmatchedRecord): UnmatchedRecord {
   const photoUrls = Array.isArray(raw.photo_urls) ? raw.photo_urls : []
   return {
     unmatchedId: raw.unmatched_id || '',
+    status: raw.status || '',
     barcode: raw.barcode || '',
     meterNo: raw.meter_no || '',
     meterMatchKey: raw.meter_match_key || '',
@@ -442,6 +467,20 @@ function mapUnmatchedRecord(raw: BackendUnmatchedRecord): UnmatchedRecord {
     creator: raw.creator || '',
     photoCount: Number(raw.photo_count || photoUrls.length || 0),
     recordType: raw.record_type || '',
+    assignedTo: raw.assigned_to || '',
+    assignedBy: raw.assigned_by || '',
+    assignedAt: raw.assigned_at || '',
+    assignmentNote: raw.assignment_note || '',
+    dueDate: raw.due_date || '',
+    projectOutside: Boolean(raw.project_outside),
+    projectOutsideBy: raw.project_outside_by || '',
+    projectOutsideAt: raw.project_outside_at || '',
+    projectOutsideNote: raw.project_outside_note || '',
+    replacementOldMeterNo: raw.replacement_old_meter_no || '',
+    replacementTargetGroupId: raw.replacement_target_group_id || '',
+    fieldTaskType: raw.field_task_type || '',
+    sourceFile: raw.source_file || '',
+    raw: raw.raw || {},
   }
 }
 
@@ -777,8 +816,9 @@ export async function fetchConstructionTaskGroups(taskId: string, status = ''): 
   return (data.items || []).map(mapGroup)
 }
 
-export async function fetchConstructionExceptionOrders(taskId = ''): Promise<ConstructionExceptionOrder[]> {
-  const query = new URLSearchParams({ actor: currentActor() })
+export async function fetchConstructionExceptionOrders(taskId = '', actor = currentActor()): Promise<ConstructionExceptionOrder[]> {
+  const query = new URLSearchParams()
+  if (actor) query.set('actor', actor)
   if (taskId) query.set('task_id', taskId)
   const data = await api<{ items: BackendConstructionExceptionOrder[] }>(
     `/local-test/construction/exception-orders?${query.toString()}`,
@@ -810,6 +850,38 @@ export async function submitConstructionExceptionOrder(
     order: data.order ? mapConstructionExceptionOrder(data.order) : undefined,
     group: data.group ? mapGroup(data.group) : undefined,
   }
+}
+
+export async function assignConstructionExceptionOrder(
+  orderId: string,
+  constructor: string,
+  note = '',
+  dueDate = '',
+): Promise<ConstructionExceptionOrder> {
+  const data = await api<{ order?: BackendConstructionExceptionOrder }>(
+    `/local-test/construction/exception-orders/${encodeURIComponent(orderId)}/assign`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({
+        actor: currentActor(),
+        constructor,
+        note,
+        due_date: dueDate,
+      }),
+    },
+  )
+  return mapConstructionExceptionOrder(data.order || {})
+}
+
+export async function unassignConstructionExceptionOrder(orderId: string, reason = ''): Promise<ConstructionExceptionOrder> {
+  const data = await api<{ order?: BackendConstructionExceptionOrder }>(
+    `/local-test/construction/exception-orders/${encodeURIComponent(orderId)}/unassign`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ actor: currentActor(), reason }),
+    },
+  )
+  return mapConstructionExceptionOrder(data.order || {})
 }
 
 export async function uploadConstructionBatch(
@@ -893,6 +965,98 @@ export async function createBlankUnmatchedRecord(): Promise<UnmatchedRecord> {
     body: JSON.stringify({ actor: currentActor() }),
   })
   return mapUnmatchedRecord(data.record || {})
+}
+
+export async function updateUnmatchedRecord(
+  unmatchedId: string,
+  updates: Record<string, unknown>,
+): Promise<UnmatchedRecord> {
+  const data = await api<{ record?: BackendUnmatchedRecord }>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ actor: currentActor(), updates }),
+    },
+  )
+  return mapUnmatchedRecord(data.record || {})
+}
+
+export async function assignUnmatchedRecord(
+  unmatchedId: string,
+  constructor: string,
+  note = '',
+  dueDate = '',
+): Promise<UnmatchedRecord> {
+  const data = await api<{ record?: BackendUnmatchedRecord }>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/assign`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ actor: currentActor(), constructor, note, due_date: dueDate }),
+    },
+  )
+  return mapUnmatchedRecord(data.record || {})
+}
+
+export async function unassignUnmatchedRecord(unmatchedId: string, reason = ''): Promise<UnmatchedRecord> {
+  const data = await api<{ record?: BackendUnmatchedRecord }>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/unassign`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ actor: currentActor(), reason }),
+    },
+  )
+  return mapUnmatchedRecord(data.record || {})
+}
+
+export async function markUnmatchedOutsideProject(unmatchedId: string, note = ''): Promise<UnmatchedRecord> {
+  const data = await api<{ record?: BackendUnmatchedRecord }>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/outside-project`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ actor: currentActor(), note }),
+    },
+  )
+  return mapUnmatchedRecord(data.record || {})
+}
+
+export async function deleteUnmatchedRecord(unmatchedId: string, reason = ''): Promise<UnmatchedRecord> {
+  const data = await api<BackendUnmatchedRecord>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/delete`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ actor: currentActor(), reason }),
+    },
+  )
+  return mapUnmatchedRecord(data || {})
+}
+
+export async function rematchUnmatchedRecord(
+  unmatchedId: string,
+  payload: {
+    meterNo?: string
+    oldMeterNo?: string
+    terminal?: string
+    updates?: Record<string, unknown>
+  },
+): Promise<{ matched: boolean; record?: UnmatchedRecord; group?: MaterialGroup }> {
+  const data = await api<{ matched?: boolean; record?: BackendUnmatchedRecord; group?: BackendGroup }>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/rematch`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        actor: currentActor(),
+        meter_no: payload.meterNo || '',
+        old_meter_no: payload.oldMeterNo || '',
+        terminal: payload.terminal || '',
+        updates: payload.updates || {},
+      }),
+    },
+  )
+  return {
+    matched: Boolean(data.matched || data.group),
+    record: data.record ? mapUnmatchedRecord(data.record) : undefined,
+    group: data.group ? mapGroup(data.group) : undefined,
+  }
 }
 
 export async function fetchExceptionGroups(): Promise<MaterialGroup[]> {
@@ -1042,6 +1206,10 @@ export async function exportExceptionMeters(reviewer = ''): Promise<void> {
     blob,
     filenameFromDisposition(response.headers.get('Content-Disposition') || '', `exception-meters-${Date.now()}.xlsx`),
   )
+}
+
+export async function exportProjectOutsideConstruction(): Promise<void> {
+  await downloadExcel('/exports/project-outside', { team_id: currentTeamId() }, `project-outside-${Date.now()}.xlsx`)
 }
 
 const zipEncoder = new TextEncoder()

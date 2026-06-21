@@ -4,22 +4,32 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 import {
+  assignConstructionExceptionOrder,
+  assignUnmatchedRecord,
   classifyPhotoWithGroup,
   currentActor,
   deleteGroupPhoto,
+  deleteUnmatchedRecord,
   exportExceptionMeters,
+  exportProjectOutsideConstruction,
+  fetchConstructionExceptionOrders,
   fetchGroupPhotoObjectUrl,
   fetchGroup,
+  fetchUnmatchedRecords,
   fetchTaskGroups,
   fetchTasks,
   groupPhotoContentUrl,
+  markUnmatchedOutsideProject,
+  rematchUnmatchedRecord,
   resetGroupToUnconstructed,
   returnGroupToException,
   saveReview,
+  unassignConstructionExceptionOrder,
+  unassignUnmatchedRecord,
   updateGroupMetadata,
   uploadGroupImages,
 } from '@/api/services'
-import type { MaterialGroup, ReviewPhoto, ReviewTask } from '@/api/types'
+import type { ConstructionExceptionOrder, MaterialGroup, ReviewPhoto, ReviewTask, UnmatchedRecord } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
 const categories = [
@@ -48,9 +58,12 @@ const actor = computed(() => auth.user?.username || auth.user?.id || currentActo
 const loadingTasks = ref(false)
 const loadingGroups = ref(false)
 const loadingGroup = ref(false)
+const loadingFieldTasks = ref(false)
 const busy = ref(false)
 const tasks = ref<ReviewTask[]>([])
 const groups = ref<MaterialGroup[]>([])
+const unmatchedRecords = ref<UnmatchedRecord[]>([])
+const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
 const selectedTaskId = ref('')
 const selectedGroupId = ref('')
 const selectedPhotoId = ref('')
@@ -69,6 +82,7 @@ const imageLoading = ref(false)
 const imageLoadError = ref(false)
 const imageVersion = ref(0)
 const pendingArchivePhotoIds = ref<Set<string>>(new Set())
+const failedThumbnailPhotoIds = ref<Set<string>>(new Set())
 const imagePreloadCache = new Set<string>()
 let archiveQueue = Promise.resolve()
 let backgroundRefreshTimer: number | null = null
@@ -109,6 +123,10 @@ const filterOptions: Array<{ label: string; value: GroupFilter }> = [
 const myTasks = computed(() =>
   tasks.value.filter((task) => task.hasScanInfo && task.claimedBy === actor.value),
 )
+const isAdmin = computed(() => {
+  const roles = auth.user?.roles || [auth.user?.role].filter(Boolean)
+  return roles.includes('admin')
+})
 const selectedTask = computed(() => myTasks.value.find((task) => task.id === selectedTaskId.value) || null)
 const selectedPhoto = computed(() => photos.value.find((photo) => photo.id === selectedPhotoId.value) || null)
 const selectedPhotoIndex = computed(() => photos.value.findIndex((photo) => photo.id === selectedPhotoId.value))
@@ -137,6 +155,25 @@ const progress = computed(() => {
   const reviewable = groups.value.filter((group) => Number(group.photoCount || 0) > 0)
   const done = reviewable.filter(isGroupDone).length
   return { total: reviewable.length, done, rate: reviewable.length ? Math.round((done / reviewable.length) * 100) : 0 }
+})
+const fieldTaskCards = computed(() => {
+  const unmatched = unmatchedRecords.value.map((record) => ({
+    key: `unmatched-${record.unmatchedId}`,
+    kind: 'unmatched' as const,
+    title: record.barcode || record.meterNo || record.unmatchedId,
+    subtitle: `${record.terminal || '未匹配终端'} / ${record.address || '未匹配地址'}`,
+    status: record.projectOutside ? '项目外施工' : record.assignedTo ? `已指派 ${record.assignedTo}` : '待处理',
+    record,
+  }))
+  const exception = exceptionOrders.value.map((order) => ({
+    key: `exception-${order.id}`,
+    kind: 'exception' as const,
+    title: order.meterNo || order.groupId || order.id,
+    subtitle: `${order.terminal || '未匹配终端'} / ${order.address || '未匹配地址'}`,
+    status: order.assignedTo ? `已指派 ${order.assignedTo}` : '待指派',
+    order,
+  }))
+  return [...unmatched, ...exception]
 })
 const statusCounts = computed<Record<GroupFilter, number>>(() => {
   const counts: Record<GroupFilter, number> = { all: 0, reviewable: 0, exception: 0, unconstructed: 0, archived: 0 }
@@ -321,8 +358,16 @@ function hasReadablePhotoSource(photo: ReviewPhoto | null | undefined) {
 
 function photoThumbUrl(photo: ReviewPhoto) {
   if (!hasReadablePhotoSource(photo)) return ''
-  if (!activeGroup.value) return photoDirectThumbnailUrl(photo)
-  return `${groupPhotoContentUrl(activeGroup.value.id, photo.id, 'thumbnail')}&v=${imageVersion.value}` || photoDirectThumbnailUrl(photo)
+  const direct = photoDirectThumbnailUrl(photo)
+  if (!activeGroup.value) return direct
+  const preview = `${groupPhotoContentUrl(activeGroup.value.id, photo.id, 'preview')}&v=${imageVersion.value}`
+  if (failedThumbnailPhotoIds.value.has(photo.id)) return direct || preview
+  return `${groupPhotoContentUrl(activeGroup.value.id, photo.id, 'thumbnail')}&v=${imageVersion.value}` || direct || preview
+}
+
+function handlePhotoThumbError(photo: ReviewPhoto) {
+  if (failedThumbnailPhotoIds.value.has(photo.id)) return
+  failedThumbnailPhotoIds.value = new Set([...failedThumbnailPhotoIds.value, photo.id])
 }
 
 function replaceMainImageObjectUrl(url = '') {
@@ -480,6 +525,7 @@ async function loadTasks() {
   errorMessage.value = ''
   try {
     tasks.value = await fetchTasks()
+    void loadFieldTasks()
     if (!myTasks.value.some((task) => task.id === selectedTaskId.value)) {
       selectedTaskId.value = myTasks.value[0]?.id || ''
     }
@@ -494,6 +540,22 @@ async function loadTasks() {
     errorMessage.value = error instanceof Error ? error.message : '任务加载失败'
   } finally {
     loadingTasks.value = false
+  }
+}
+
+async function loadFieldTasks() {
+  loadingFieldTasks.value = true
+  try {
+    const [unmatched, orders] = await Promise.all([
+      fetchUnmatchedRecords(''),
+      fetchConstructionExceptionOrders('', isAdmin.value ? '' : actor.value),
+    ])
+    unmatchedRecords.value = unmatched
+    exceptionOrders.value = orders
+  } catch {
+    // Field task cards are auxiliary; keep the review workflow available when they fail.
+  } finally {
+    loadingFieldTasks.value = false
   }
 }
 
@@ -524,6 +586,7 @@ async function loadGroup(groupId: string, preferredPhotoId = '') {
   const cachedGroup = groups.value.find((group) => String(group.id) === String(groupId))
   loadingGroup.value = !cachedGroup
   selectedGroupId.value = groupId
+  failedThumbnailPhotoIds.value = new Set()
   if (cachedGroup) {
     activeGroup.value = { ...cachedGroup, photos: cachedGroup.photos || [] }
     photos.value = cachedGroup.photos || []
@@ -698,6 +761,7 @@ async function externalRefresh() {
   try {
     await refreshTasksSilently()
     if (selectedTaskId.value) await refreshGroupsSilently()
+    await loadFieldTasks()
   } catch {
     // 后台刷新失败不打断当前审阅动作，下一轮刷新再试。
   }
@@ -1027,6 +1091,160 @@ async function exportExceptions() {
   }
 }
 
+async function exportOutsideProjectRecords() {
+  markInteraction()
+  try {
+    await exportProjectOutsideConstruction()
+    ElMessage.success('项目外施工记录已导出')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '导出失败')
+  }
+}
+
+async function editUnmatchedMeter(record: UnmatchedRecord) {
+  markInteraction()
+  try {
+    const { value } = await ElMessageBox.prompt('录入正确表号后重新匹配总清单地址', '修改表号', {
+      confirmButtonText: '重新匹配',
+      cancelButtonText: '取消',
+      inputValue: record.meterNo || record.barcode || '',
+      inputPattern: /\S+/,
+      inputErrorMessage: '表号不能为空',
+    })
+    const result = await rematchUnmatchedRecord(record.unmatchedId, {
+      meterNo: String(value || ''),
+      terminal: record.terminal || '',
+    })
+    await loadFieldTasks()
+    if (result.matched) {
+      ElMessage.success('已匹配到资料组')
+      if (selectedTaskId.value) await refreshGroupsSilently()
+    } else {
+      ElMessage.warning('未匹配到资料组，已保存新表号')
+    }
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '修改失败')
+  }
+}
+
+async function replaceUnmatchedMeter(record: UnmatchedRecord) {
+  markInteraction()
+  try {
+    const { value } = await ElMessageBox.prompt('录入旧表号，用旧表号匹配总清单地址并绑定终端', '换表匹配', {
+      confirmButtonText: '匹配旧表',
+      cancelButtonText: '取消',
+      inputValue: record.replacementOldMeterNo || '',
+      inputPattern: /\S+/,
+      inputErrorMessage: '旧表号不能为空',
+    })
+    const result = await rematchUnmatchedRecord(record.unmatchedId, {
+      meterNo: record.meterNo || record.barcode || '',
+      oldMeterNo: String(value || ''),
+      terminal: record.terminal || '',
+    })
+    await loadFieldTasks()
+    if (result.matched) {
+      ElMessage.success('换表关系已绑定')
+      if (selectedTaskId.value) await refreshGroupsSilently()
+    } else {
+      ElMessage.warning('未匹配到旧表地址，已保存换表记录')
+    }
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '换表失败')
+  }
+}
+
+async function markOutsideProject(record: UnmatchedRecord) {
+  markInteraction()
+  try {
+    const { value } = await ElMessageBox.prompt('记录项目外施工原因，后续可一键导出追溯', '项目外施工', {
+      confirmButtonText: '记录',
+      cancelButtonText: '取消',
+      inputValue: record.projectOutsideNote || '',
+    })
+    await markUnmatchedOutsideProject(record.unmatchedId, String(value || ''))
+    await loadFieldTasks()
+    ElMessage.success('已记录项目外施工')
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '记录失败')
+  }
+}
+
+async function assignUnmatched(record: UnmatchedRecord) {
+  markInteraction()
+  try {
+    const { value } = await ElMessageBox.prompt('输入施工员账号，将该未匹配记录指派为现场确认任务', '指派未匹配任务', {
+      confirmButtonText: '指派',
+      cancelButtonText: '取消',
+      inputValue: record.assignedTo || '',
+      inputPattern: /\S+/,
+      inputErrorMessage: '施工员账号不能为空',
+    })
+    await assignUnmatchedRecord(record.unmatchedId, String(value || ''), record.assignmentNote || '')
+    await loadFieldTasks()
+    ElMessage.success('已指派施工员')
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '指派失败')
+  }
+}
+
+async function releaseUnmatchedAssignment(record: UnmatchedRecord) {
+  markInteraction()
+  try {
+    await unassignUnmatchedRecord(record.unmatchedId, '管理员取消指派')
+    await loadFieldTasks()
+    ElMessage.success('已取消指派')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '取消失败')
+  }
+}
+
+async function deleteUnmatched(record: UnmatchedRecord) {
+  if (!isAdmin.value) return
+  markInteraction()
+  try {
+    await ElMessageBox.confirm('删除后该未匹配资料组不再出现在现场任务中。生产数据不会清空，仅做状态删除。', '删除未匹配资料组', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await deleteUnmatchedRecord(record.unmatchedId, '管理员删除')
+    await loadFieldTasks()
+    ElMessage.success('已删除未匹配资料组')
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '删除失败')
+  }
+}
+
+async function assignExceptionOrder(order: ConstructionExceptionOrder) {
+  markInteraction()
+  try {
+    const { value } = await ElMessageBox.prompt('输入施工员账号，将异常组指派为现场处理任务', '指派异常组', {
+      confirmButtonText: '指派',
+      cancelButtonText: '取消',
+      inputValue: order.assignedTo || '',
+      inputPattern: /\S+/,
+      inputErrorMessage: '施工员账号不能为空',
+    })
+    await assignConstructionExceptionOrder(order.id, String(value || ''), order.assignmentNote || '')
+    await loadFieldTasks()
+    ElMessage.success('异常组已指派')
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '指派失败')
+  }
+}
+
+async function releaseExceptionOrderAssignment(order: ConstructionExceptionOrder) {
+  markInteraction()
+  try {
+    await unassignConstructionExceptionOrder(order.id, '管理员取消指派')
+    await loadFieldTasks()
+    ElMessage.success('已取消异常组指派')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '取消失败')
+  }
+}
+
 async function selectNextUnfinishedGroup(completedGroupId = '') {
   await loadGroups(selectedTaskId.value)
   const next = firstUnfinishedGroup(completedGroupId)
@@ -1178,6 +1396,41 @@ onUnmounted(() => {
         </div>
         <ElTag effect="plain">{{ visibleGroupCountLabel }}</ElTag>
       </div>
+      <section v-if="fieldTaskCards.length || loadingFieldTasks" class="field-task-section">
+        <div class="field-task-head">
+          <div>
+            <strong>现场异常任务</strong>
+            <span>未匹配地址与异常组在这里统一处理</span>
+          </div>
+          <div class="field-task-actions">
+            <ElButton size="small" :loading="loadingFieldTasks" @click="loadFieldTasks">刷新</ElButton>
+            <ElButton size="small" @click="exportOutsideProjectRecords">导出项目外施工</ElButton>
+          </div>
+        </div>
+        <div class="field-task-list">
+          <article v-for="card in fieldTaskCards" :key="card.key" class="field-task-card" :class="`kind-${card.kind}`">
+            <div class="field-task-title">
+              <strong>{{ card.title }}</strong>
+              <ElTag size="small" effect="light">{{ card.kind === 'unmatched' ? '未匹配' : '异常组' }}</ElTag>
+            </div>
+            <p>{{ card.subtitle }}</p>
+            <small>{{ card.status }}</small>
+            <div v-if="card.kind === 'unmatched'" class="field-task-buttons">
+              <ElButton size="small" @click="editUnmatchedMeter(card.record)">修改表号</ElButton>
+              <ElButton size="small" @click="replaceUnmatchedMeter(card.record)">换表</ElButton>
+              <ElButton size="small" @click="markOutsideProject(card.record)">项目外</ElButton>
+              <ElButton v-if="card.record.assignedTo" size="small" @click="releaseUnmatchedAssignment(card.record)">取消指派</ElButton>
+              <ElButton v-else size="small" type="primary" plain @click="assignUnmatched(card.record)">指派施工</ElButton>
+              <ElButton v-if="isAdmin" size="small" type="danger" plain @click="deleteUnmatched(card.record)">删除</ElButton>
+            </div>
+            <div v-else class="field-task-buttons">
+              <ElButton v-if="card.order.assignedTo" size="small" @click="releaseExceptionOrderAssignment(card.order)">取消指派</ElButton>
+              <ElButton v-else size="small" type="primary" plain @click="assignExceptionOrder(card.order)">指派施工</ElButton>
+            </div>
+          </article>
+        </div>
+      </section>
+
       <div class="review-filter-row">
         <div class="review-status-tabs" role="group" aria-label="资料组状态筛选">
           <button
@@ -1278,7 +1531,14 @@ onUnmounted(() => {
             @click="markInteraction(); selectPhoto(photo)"
             @dblclick="openLightbox"
           >
-            <img v-if="photoThumbUrl(photo)" :src="photoThumbUrl(photo)" alt="" loading="lazy" decoding="async" />
+            <img
+              v-if="photoThumbUrl(photo)"
+              :src="photoThumbUrl(photo)"
+              alt=""
+              loading="lazy"
+              decoding="async"
+              @error="handlePhotoThumbError(photo)"
+            />
             <span v-else class="photo-thumb-empty" aria-hidden="true"></span>
             <span>#{{ index + 1 }} {{ categoryLabel(photo.category) }}</span>
           </button>
@@ -1424,6 +1684,90 @@ onUnmounted(() => {
   background: var(--v2-bg-subtle);
   color: var(--v2-text-strong);
   font-size: 12px;
+  white-space: nowrap;
+}
+
+.field-task-section {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--v2-border-soft);
+  background: linear-gradient(180deg, rgba(245, 250, 252, 0.9), rgba(255, 255, 255, 0.88));
+}
+
+.field-task-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-task-head strong {
+  display: block;
+  color: var(--v2-text-strong);
+  font-size: 13px;
+}
+
+.field-task-head span,
+.field-task-card small {
+  color: var(--v2-text-muted);
+  font-size: 11px;
+}
+
+.field-task-actions,
+.field-task-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.field-task-list {
+  display: grid;
+  gap: 8px;
+  max-height: 240px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.field-task-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--v2-border-soft);
+  border-radius: var(--v2-radius-sm);
+  background: #fff;
+}
+
+.field-task-card.kind-unmatched {
+  border-left: 3px solid #d97706;
+}
+
+.field-task-card.kind-exception {
+  border-left: 3px solid #b42318;
+}
+
+.field-task-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.field-task-title strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--v2-text-strong);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field-task-card p {
+  margin: 0;
+  overflow: hidden;
+  color: var(--v2-text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

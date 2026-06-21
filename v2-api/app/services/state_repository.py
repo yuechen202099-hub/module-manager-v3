@@ -66,6 +66,49 @@ def _legacy_group_status(group: MaterialGroup) -> str:
     return status
 
 
+def _date_key_from_value(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", text):
+        return text[:10]
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return ""
+
+
+def _photo_is_construction_upload(photo: Photo) -> bool:
+    raw = photo.raw_data or {}
+    source_text = " ".join(
+        str(value or "")
+        for value in (photo.source, raw.get("upload_source"), raw.get("storage_source"), raw.get("source_file"))
+    ).lower()
+    return "construction" in source_text
+
+
+def _photo_work_date_key(photo: Photo) -> str:
+    raw = photo.raw_data or {}
+    if _photo_is_construction_upload(photo):
+        return _date_key_from_value(photo.created_at)
+    for key in (
+        "scan_created_at",
+        "source_created_at",
+        "created_at",
+        "\u521b\u5efa\u65f6\u95f4",
+        "scan_time",
+        "scanned_at",
+        "taken_at",
+        "classified_at",
+    ):
+        date_key = _date_key_from_value(raw.get(key))
+        if date_key:
+            return date_key
+    return _date_key_from_value(photo.created_at)
+
+
 def _empty_task_stats() -> dict[str, int]:
     return {
         "total_groups": 0,
@@ -420,6 +463,19 @@ def _unmatched_payload(record: UnmatchedRecord) -> dict[str, Any]:
         "creator": payload.get("creator") or "",
         "photo_urls": photo_urls,
         "photo_count": len(photo_urls),
+        "assigned_to": payload.get("assigned_to") or "",
+        "assigned_by": payload.get("assigned_by") or "",
+        "assigned_at": payload.get("assigned_at") or "",
+        "assignment_note": payload.get("assignment_note") or "",
+        "due_date": payload.get("due_date") or "",
+        "project_outside": bool(payload.get("project_outside")),
+        "project_outside_by": payload.get("project_outside_by") or "",
+        "project_outside_at": payload.get("project_outside_at") or "",
+        "project_outside_note": payload.get("project_outside_note") or "",
+        "replacement_old_meter_no": payload.get("replacement_old_meter_no") or "",
+        "replacement_target_group_id": payload.get("replacement_target_group_id") or "",
+        "field_task_type": payload.get("field_task_type") or "",
+        "source_file": payload.get("source_file") or "",
         "raw": payload,
     }
 
@@ -507,6 +563,49 @@ class StateRepository(ABC):
 
     @abstractmethod
     def create_blank_unmatched_record(self, *, actor: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def assign_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        constructor: str,
+        note: str = "",
+        due_date: str = "",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def unassign_unmatched_record(self, unmatched_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_unmatched_outside_project(self, unmatched_id: str, *, actor: str, note: str = "") -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def rematch_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        meter_no: str = "",
+        old_meter_no: str = "",
+        terminal: str = "",
+        updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -603,6 +702,22 @@ class StateRepository(ABC):
         updates: dict[str, Any] | None = None,
         note: str = "",
     ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def assign_construction_exception_order(
+        self,
+        order_id: str,
+        *,
+        actor: str,
+        constructor: str,
+        note: str = "",
+        due_date: str = "",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def unassign_construction_exception_order(self, order_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -727,6 +842,10 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def build_project_outside_export(self) -> bytes:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_delivery_cached_photo_path(self, group_id: str, photo_id: str) -> Path:
         raise NotImplementedError
 
@@ -840,6 +959,71 @@ class JsonStateRepository(StateRepository):
     def create_blank_unmatched_record(self, *, actor: str) -> dict[str, Any]:
         return {"record": local_simulation.create_blank_unmatched_record(actor=actor)}
 
+    def update_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {"record": local_simulation.update_unmatched_record(unmatched_id, actor=actor, updates=updates)}
+
+    def assign_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        constructor: str,
+        note: str = "",
+        due_date: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "record": local_simulation.assign_unmatched_record(
+                unmatched_id,
+                actor=actor,
+                constructor=constructor,
+                note=note,
+                due_date=due_date,
+            )
+        }
+
+    def unassign_unmatched_record(self, unmatched_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+        return {
+            "record": local_simulation.unassign_unmatched_record(
+                unmatched_id,
+                actor=actor,
+                reason=reason,
+            )
+        }
+
+    def mark_unmatched_outside_project(self, unmatched_id: str, *, actor: str, note: str = "") -> dict[str, Any]:
+        return {
+            "record": local_simulation.mark_unmatched_outside_project(
+                unmatched_id,
+                actor=actor,
+                note=note,
+            )
+        }
+
+    def rematch_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        meter_no: str = "",
+        old_meter_no: str = "",
+        terminal: str = "",
+        updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return local_simulation.rematch_unmatched_record(
+            unmatched_id,
+            actor=actor,
+            meter_no=meter_no,
+            old_meter_no=old_meter_no,
+            terminal=terminal,
+            updates=updates,
+        )
+
     def list_exception_groups(self, *, reviewer: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         return local_simulation.list_exception_groups(reviewer=reviewer, limit=limit, offset=offset)
 
@@ -935,6 +1119,34 @@ class JsonStateRepository(StateRepository):
             updates=updates,
             note=note,
         )
+
+    def assign_construction_exception_order(
+        self,
+        order_id: str,
+        *,
+        actor: str,
+        constructor: str,
+        note: str = "",
+        due_date: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "order": local_simulation.assign_construction_exception_order(
+                order_id,
+                actor=actor,
+                constructor=constructor,
+                note=note,
+                due_date=due_date,
+            )
+        }
+
+    def unassign_construction_exception_order(self, order_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+        return {
+            "order": local_simulation.unassign_construction_exception_order(
+                order_id,
+                actor=actor,
+                reason=reason,
+            )
+        }
 
     def review_group(
         self,
@@ -1081,6 +1293,9 @@ class JsonStateRepository(StateRepository):
 
     def build_exception_meter_export(self, *, reviewer: str = "") -> bytes:
         return local_simulation.build_exception_meter_export(reviewer=reviewer)
+
+    def build_project_outside_export(self) -> bytes:
+        return local_simulation.build_project_outside_export()
 
     def get_delivery_cached_photo_path(self, group_id: str, photo_id: str) -> Path:
         return local_simulation.get_delivery_cached_photo_path(group_id, photo_id)
@@ -1341,6 +1556,63 @@ class PostgresStateRepository(StateRepository):
         target = str(installer or "").strip()
         if not target:
             return {"installer": target, "items": []}
+        with self._session() as session:
+            team_id = local_simulation.current_team_id()
+            rows = session.execute(
+                select(Photo, MaterialGroup)
+                .join(MaterialGroup, Photo.group_id == MaterialGroup.id)
+                .where(
+                    Photo.team_id == team_id,
+                    Photo.is_active.is_(True),
+                    Photo.creator == target,
+                )
+                .order_by(Photo.created_at, Photo.sort_order, Photo.legacy_id)
+            ).all()
+        groups_by_id: dict[str, dict[str, Any]] = {}
+        for photo, group in rows:
+            bundle = groups_by_id.setdefault(str(group.id), {"group": group, "photos": []})
+            bundle["photos"].append(photo)
+        rows_by_date: dict[str, dict[str, Any]] = {}
+        for bundle in groups_by_id.values():
+            group = bundle["group"]
+            matched_photos = bundle["photos"]
+            construction_dates = [
+                _photo_work_date_key(photo)
+                for photo in matched_photos
+                if _photo_is_construction_upload(photo)
+            ]
+            date_key = max([date for date in construction_dates if date], default="")
+            if not date_key:
+                for photo in matched_photos:
+                    date_key = _photo_work_date_key(photo)
+                    if date_key:
+                        break
+            date_key = date_key or _date_key_from_value(group.last_photo_imported_at) or "未记录日期"
+            row = rows_by_date.setdefault(
+                date_key,
+                {
+                    "date": date_key,
+                    "group_count": 0,
+                    "photo_count": 0,
+                    "archived_count": 0,
+                    "exception_count": 0,
+                    "unreviewed_count": 0,
+                },
+            )
+            row["group_count"] += 1
+            row["photo_count"] += len(matched_photos)
+            if _status_value(group.status) == GroupStatus.APPROVED.value:
+                row["archived_count"] += 1
+            elif (
+                _status_value(group.status) == GroupStatus.REJECTED.value
+                or group.exception_status == "open"
+                or group.has_archive_blocker
+            ):
+                row["exception_count"] += 1
+            else:
+                row["unreviewed_count"] += 1
+        items = sorted(rows_by_date.values(), key=lambda item: str(item["date"]), reverse=True)
+        return {"installer": target, "items": items}
         with self._session() as session:
             team_id = local_simulation.current_team_id()
             day = func.date(Photo.created_at).label("work_date")
@@ -1737,6 +2009,239 @@ class PostgresStateRepository(StateRepository):
             session.refresh(record)
             return {"record": _unmatched_payload(record)}
 
+    def update_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        updates = updates or {}
+        with self._session() as session:
+            record = session.scalar(
+                select(UnmatchedRecord)
+                .where(
+                    UnmatchedRecord.team_id == local_simulation.current_team_id(),
+                    UnmatchedRecord.legacy_id == unmatched_id,
+                    UnmatchedRecord.status == "open",
+                )
+                .with_for_update()
+            )
+            if record is None:
+                raise KeyError(unmatched_id)
+            raw = dict(record.payload or {})
+            for key in (
+                "barcode",
+                "meter_no",
+                "meter_match_key",
+                "terminal",
+                "address",
+                "collector",
+                "module_asset_no",
+                "asset_no",
+                "creator",
+                "note",
+                "assignment_note",
+                "replacement_old_meter_no",
+            ):
+                if key in updates:
+                    value = str(updates.get(key) or "").strip()
+                    if key == "asset_no":
+                        record.module_asset_no = value
+                    elif hasattr(record, key):
+                        setattr(record, key, value)
+                    else:
+                        raw[key] = value
+            record.payload = {**raw, "updated_by": actor, "updated_at": datetime.now(UTC).isoformat()}
+            session.commit()
+            session.refresh(record)
+            return {"record": _unmatched_payload(record)}
+
+    def assign_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        constructor: str,
+        note: str = "",
+        due_date: str = "",
+    ) -> dict[str, Any]:
+        constructor = constructor.strip()
+        if not constructor:
+            raise ValueError("Constructor is required")
+        with self._session() as session:
+            record = session.scalar(
+                select(UnmatchedRecord)
+                .where(
+                    UnmatchedRecord.team_id == local_simulation.current_team_id(),
+                    UnmatchedRecord.legacy_id == unmatched_id,
+                    UnmatchedRecord.status == "open",
+                )
+                .with_for_update()
+            )
+            if record is None:
+                raise KeyError(unmatched_id)
+            terminal = str(record.terminal or "").strip()
+            if terminal:
+                task = session.scalar(
+                    select(Task)
+                    .where(Task.team_id == record.team_id, Task.terminal == terminal)
+                    .with_for_update()
+                )
+                if task is not None:
+                    existing = session.scalar(
+                        select(Task)
+                        .where(
+                            Task.team_id == record.team_id,
+                            Task.id != task.id,
+                            Task.construction_enabled.is_(True),
+                            Task.construction_claimed_by == constructor,
+                        )
+                        .with_for_update()
+                    )
+                    if existing is not None:
+                        terminal_label = existing.terminal or existing.legacy_id or ""
+                        raise ValueError(f"Current constructor already has active terminal {terminal_label}")
+                    now = datetime.now(UTC)
+                    task_raw = dict(task.raw_data or {})
+                    task_raw["construction_assignment_note"] = note.strip()
+                    task_raw["construction_due_date"] = due_date.strip()
+                    task.raw_data = task_raw
+                    task.construction_enabled = True
+                    task.construction_claimed_by = constructor
+                    task.construction_claimed_at = now
+                    task.construction_released_at = None
+                    task.construction_opened_by = actor.strip() or "admin"
+                    task.construction_opened_at = task.construction_opened_at or now
+            raw = dict(record.payload or {})
+            raw.update(
+                {
+                    "assigned_to": constructor,
+                    "assigned_by": actor,
+                    "assigned_at": datetime.now(UTC).isoformat(),
+                    "assignment_note": note.strip(),
+                    "due_date": due_date.strip(),
+                    "field_task_type": "unmatched",
+                }
+            )
+            record.payload = raw
+            session.commit()
+            session.refresh(record)
+            return {"record": _unmatched_payload(record)}
+
+    def unassign_unmatched_record(self, unmatched_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+        with self._session() as session:
+            record = session.scalar(
+                select(UnmatchedRecord)
+                .where(
+                    UnmatchedRecord.team_id == local_simulation.current_team_id(),
+                    UnmatchedRecord.legacy_id == unmatched_id,
+                    UnmatchedRecord.status == "open",
+                )
+                .with_for_update()
+            )
+            if record is None:
+                raise KeyError(unmatched_id)
+            raw = dict(record.payload or {})
+            raw.update(
+                {
+                    "assigned_to": "",
+                    "unassigned_by": actor,
+                    "unassigned_at": datetime.now(UTC).isoformat(),
+                    "unassign_reason": reason.strip(),
+                }
+            )
+            record.payload = raw
+            session.commit()
+            session.refresh(record)
+            return {"record": _unmatched_payload(record)}
+
+    def mark_unmatched_outside_project(self, unmatched_id: str, *, actor: str, note: str = "") -> dict[str, Any]:
+        with self._session() as session:
+            record = session.scalar(
+                select(UnmatchedRecord)
+                .where(
+                    UnmatchedRecord.team_id == local_simulation.current_team_id(),
+                    UnmatchedRecord.legacy_id == unmatched_id,
+                    UnmatchedRecord.status == "open",
+                )
+                .with_for_update()
+            )
+            if record is None:
+                raise KeyError(unmatched_id)
+            raw = dict(record.payload or {})
+            raw.update(
+                {
+                    "project_outside": True,
+                    "project_outside_by": actor,
+                    "project_outside_at": datetime.now(UTC).isoformat(),
+                    "project_outside_note": note.strip(),
+                    "field_task_type": "outside_project",
+                }
+            )
+            record.payload = raw
+            session.commit()
+            session.refresh(record)
+            return {"record": _unmatched_payload(record)}
+
+    def rematch_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        meter_no: str = "",
+        old_meter_no: str = "",
+        terminal: str = "",
+        updates: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        updates = dict(updates or {})
+        meter_no = meter_no.strip()
+        old_meter_no = old_meter_no.strip()
+        terminal = terminal.strip()
+        if meter_no:
+            updates.update(
+                {
+                    "meter_no": meter_no,
+                    "barcode": meter_no,
+                    "meter_match_key": local_simulation.build_total_catalog_match_key(meter_no) or meter_no,
+                }
+            )
+        if terminal:
+            updates["terminal"] = terminal
+        if old_meter_no:
+            updates["replacement_old_meter_no"] = old_meter_no
+        updated = self.update_unmatched_record(unmatched_id, actor=actor, updates=updates)["record"]
+        reference = old_meter_no or meter_no or str(updated.get("meter_no") or updated.get("barcode") or "")
+        match_key = local_simulation.build_total_catalog_match_key(reference) or reference
+        with self._session() as session:
+            statement = select(MaterialGroup).where(MaterialGroup.team_id == local_simulation.current_team_id())
+            if terminal or updated.get("terminal"):
+                statement = statement.where(MaterialGroup.terminal == (terminal or updated.get("terminal")))
+            target = session.scalar(
+                statement.where(
+                    or_(
+                        MaterialGroup.legacy_id == reference,
+                        MaterialGroup.display_meter_no == reference,
+                        MaterialGroup.meter_match_key == match_key,
+                    )
+                ).limit(1)
+            )
+        if target is None:
+            return {"record": updated, "matched": False}
+        associate_updates = dict(updated)
+        if old_meter_no:
+            associate_updates["replacement_old_meter_no"] = old_meter_no
+            associate_updates["replacement_target_group_id"] = target.legacy_id
+        associated = self.associate_unmatched_record(
+            unmatched_id,
+            actor=actor,
+            target_group_id=str(target.legacy_id),
+            updates=associate_updates,
+        )
+        associated["matched"] = True
+        associated["replacement_old_meter_no"] = old_meter_no
+        return associated
+
     def list_exception_groups(self, *, reviewer: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         statement = select(MaterialGroup).where(
@@ -2117,6 +2622,8 @@ class PostgresStateRepository(StateRepository):
         module_asset_no = next((photo.asset_no for photo in active_photos if photo.asset_no), "")
         raw = group.raw_data if group is not None and group.raw_data else {}
         order_payload = getattr(order, "payload", None) or {}
+        assignments = raw.get("exception_order_assignments") if isinstance(raw, dict) else {}
+        assignment = assignments.get(str(order.id), {}) if isinstance(assignments, dict) else {}
         return {
             "id": str(order.id),
             "team_id": order.team_id,
@@ -2126,7 +2633,11 @@ class PostgresStateRepository(StateRepository):
             "status": order.status.value if hasattr(order.status, "value") else str(order.status),
             "category": order.category,
             "note": order.description,
-            "assigned_to": task.construction_claimed_by if task is not None else "",
+            "assigned_to": assignment.get("assigned_to") or (task.construction_claimed_by if task is not None else ""),
+            "assigned_by": assignment.get("assigned_by") or "",
+            "assigned_at": assignment.get("assigned_at") or "",
+            "assignment_note": assignment.get("assignment_note") or "",
+            "due_date": assignment.get("due_date") or "",
             "created_by": order_payload.get("created_by", ""),
             "submitted_by": order_payload.get("submitted_by", ""),
             "created_at": order.created_at.isoformat() if order.created_at else None,
@@ -2233,6 +2744,110 @@ class PostgresStateRepository(StateRepository):
             session.refresh(order)
             session.refresh(group)
             return {"order": self._exception_order_payload(session, order, group), "group": _group_payload(session, group)}
+
+    def assign_construction_exception_order(
+        self,
+        order_id: str,
+        *,
+        actor: str,
+        constructor: str,
+        note: str = "",
+        due_date: str = "",
+    ) -> dict[str, Any]:
+        constructor = constructor.strip()
+        if not constructor:
+            raise ValueError("Constructor is required")
+        try:
+            parsed_order_id = UUID(str(order_id))
+        except ValueError as exc:
+            raise KeyError(order_id) from exc
+        with self._session() as session:
+            order = session.scalar(
+                select(ExceptionItem)
+                .where(ExceptionItem.team_id == local_simulation.current_team_id(), ExceptionItem.id == parsed_order_id)
+                .with_for_update()
+            )
+            if order is None:
+                raise KeyError(order_id)
+            group = session.scalar(select(MaterialGroup).where(MaterialGroup.id == order.group_id).with_for_update())
+            if group is None:
+                raise KeyError(str(order.group_id))
+            if group.legacy_task_id is not None:
+                task = self._task_by_legacy_id(session, int(group.legacy_task_id), lock=True)
+                existing = session.scalar(
+                    select(Task)
+                    .where(
+                        Task.team_id == group.team_id,
+                        Task.id != task.id,
+                        Task.construction_enabled.is_(True),
+                        Task.construction_claimed_by == constructor,
+                    )
+                    .with_for_update()
+                )
+                if existing is not None:
+                    terminal = existing.terminal or existing.legacy_id or ""
+                    raise ValueError(f"Current constructor already has active terminal {terminal}")
+                now = datetime.now(UTC)
+                task_raw = dict(task.raw_data or {})
+                task_raw["construction_assignment_note"] = note.strip()
+                task_raw["construction_due_date"] = due_date.strip()
+                task.raw_data = task_raw
+                task.construction_enabled = True
+                task.construction_claimed_by = constructor
+                task.construction_claimed_at = now
+                task.construction_released_at = None
+                task.construction_opened_by = actor.strip() or "admin"
+                task.construction_opened_at = task.construction_opened_at or now
+            raw = dict(group.raw_data or {})
+            assignments = dict(raw.get("exception_order_assignments") or {})
+            assignments[str(order.id)] = {
+                "assigned_to": constructor,
+                "assigned_by": actor,
+                "assigned_at": datetime.now(UTC).isoformat(),
+                "assignment_note": note.strip(),
+                "due_date": due_date.strip(),
+            }
+            raw["exception_order_assignments"] = assignments
+            group.raw_data = raw
+            session.commit()
+            session.refresh(order)
+            session.refresh(group)
+            return {"order": self._exception_order_payload(session, order, group)}
+
+    def unassign_construction_exception_order(self, order_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+        try:
+            parsed_order_id = UUID(str(order_id))
+        except ValueError as exc:
+            raise KeyError(order_id) from exc
+        with self._session() as session:
+            order = session.scalar(
+                select(ExceptionItem)
+                .where(ExceptionItem.team_id == local_simulation.current_team_id(), ExceptionItem.id == parsed_order_id)
+                .with_for_update()
+            )
+            if order is None:
+                raise KeyError(order_id)
+            group = session.scalar(select(MaterialGroup).where(MaterialGroup.id == order.group_id).with_for_update())
+            if group is None:
+                raise KeyError(str(order.group_id))
+            raw = dict(group.raw_data or {})
+            assignments = dict(raw.get("exception_order_assignments") or {})
+            assignment = dict(assignments.get(str(order.id)) or {})
+            assignment.update(
+                {
+                    "assigned_to": "",
+                    "unassigned_by": actor,
+                    "unassigned_at": datetime.now(UTC).isoformat(),
+                    "unassign_reason": reason.strip(),
+                }
+            )
+            assignments[str(order.id)] = assignment
+            raw["exception_order_assignments"] = assignments
+            group.raw_data = raw
+            session.commit()
+            session.refresh(order)
+            session.refresh(group)
+            return {"order": self._exception_order_payload(session, order, group)}
 
     def review_group(
         self,
@@ -2843,6 +3458,21 @@ class PostgresStateRepository(StateRepository):
         result = self.list_exception_groups(reviewer=reviewer, limit=100_000, offset=0)
         return local_simulation.build_exception_meter_workbook(result.get("items", []))
 
+    def build_project_outside_export(self) -> bytes:
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            records = session.scalars(
+                select(UnmatchedRecord)
+                .where(UnmatchedRecord.team_id == team_id, UnmatchedRecord.status == "open")
+                .order_by(UnmatchedRecord.terminal, UnmatchedRecord.barcode, UnmatchedRecord.legacy_id)
+            ).all()
+            payloads = [
+                _unmatched_payload(record)
+                for record in records
+                if bool((record.payload or {}).get("project_outside"))
+            ]
+        return local_simulation.build_project_outside_workbook(payloads)
+
     def get_delivery_cached_photo_path(self, group_id: str, photo_id: str) -> Path:
         raise FileNotFoundError(photo_id)
 
@@ -2928,18 +3558,7 @@ class PostgresStateRepository(StateRepository):
             session.refresh(order)
             return {
                 "group": _group_payload(session, group),
-                "order": {
-                    "id": str(order.id),
-                    "team_id": order.team_id,
-                    "task_id": group.legacy_task_id,
-                    "group_id": group.legacy_id,
-                    "terminal": group.terminal or "",
-                    "status": order.status.value,
-                    "category": order.category,
-                    "note": order.description,
-                    "created_by": actor,
-                    "created_at": order.created_at.isoformat() if order.created_at else None,
-                },
+                "order": {**self._exception_order_payload(session, order, group), "created_by": actor},
             }
 
 

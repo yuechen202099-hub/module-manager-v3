@@ -40,3 +40,17 @@ Last updated: 2026-06-21
 | ID | Bug | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0112 | Claim task page exposed obsolete construction open/close actions and the primary `领取` label could become unreadable after the card visual cleanup. | Open `/claim-tasks` as admin; task cards showed construction open/close actions in older builds, and the primary button text inherited muted card text styles. | Fixed in `V2.4.13`. | 2026-06-21 | `v2-web/src/views/ClaimTasksView.vue`, `v2-web/src/styles/main.css` |
+
+## 2026-06-22 - V2.4.15 maintenance fixes
+
+| ID | Bug | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0113 | Review-to-exception work orders lost collector/module values on the mobile construction page. | In review workspace, return a group to exception order; open the assigned exception order in construction collection. Collector/module fields could be empty even though the reviewed group already had values. | Fixed and folded into the combined `V2.5.0` release. | 2026-06-22 | `v2-api/app/services/state_repository.py`, `v2-web/src/api/services.ts`, `v2-web/src/api/types.ts`, `v2-web/src/views/ConstructionView.vue` |
+| BH-0114 | Review thumbnail strip could show thumbnails as failed when the proxy thumbnail endpoint failed. | Open review workspace for a group whose thumbnail proxy URL fails while direct preview/source URLs still exist. | Fixed and folded into the combined `V2.5.0` release. | 2026-06-22 | `v2-web/src/views/TaskHallView.vue` |
+| BH-0115 | Installer daily workload dates used photo import/storage timestamps instead of scan or construction upload business time. | Open project board installer KPI; imported scan data could cluster on import dates such as 6-19/6-20. | Fixed and folded into the combined `V2.5.0` release. | 2026-06-22 | `v2-api/app/services/local_simulation.py`, `v2-api/app/services/state_repository.py` |
+
+## 2026-06-22 - Workflow risk covered by V2.5.0 feature work
+
+| ID | Risk | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0116 | Unmatched address records and exception groups were passive records instead of assignable field tasks. | Reviewers/admins could see unmatched or exception data, but field handling required separate manual coordination and had no project-outside export or replacement-meter rematch workflow. | Covered by the combined `V2.5.0` release. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `local_test.py`, `exports.py`, `services.ts`, `types.ts`, `TaskHallView.vue` |

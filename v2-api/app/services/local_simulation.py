@@ -1476,6 +1476,204 @@ def create_blank_unmatched_record(actor: str) -> dict[str, Any]:
     return record
 
 
+UNMATCHED_EDIT_FIELDS = {
+    "barcode",
+    "meter_no",
+    "meter_match_key",
+    "terminal",
+    "address",
+    "collector",
+    "module_asset_no",
+    "asset_no",
+    "creator",
+    "note",
+    "assignment_note",
+    "replacement_old_meter_no",
+    "replacement_by",
+    "replacement_at",
+}
+
+
+def update_unmatched_record(
+    unmatched_id: str,
+    actor: str,
+    updates: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    state = get_state()
+    updates = updates or {}
+    for index, record in enumerate(state.get("scan_unmatched", [])):
+        item = ensure_unmatched_record(record)
+        if item["unmatched_id"] != unmatched_id:
+            continue
+        for key in UNMATCHED_EDIT_FIELDS:
+            if key in updates:
+                item[key] = str(updates.get(key) or "").strip()
+        if item.get("module_asset_no") and not item.get("asset_no"):
+            item["asset_no"] = item["module_asset_no"]
+        item["updated_by"] = actor
+        item["updated_at"] = now_iso()
+        item["text_index"] = build_record_text_index(item)
+        state["scan_unmatched"][index] = item
+        append_audit_event("update_unmatched", actor, {"unmatched_id": unmatched_id, "updates": updates})
+        refresh_summary()
+        return item
+    raise KeyError(unmatched_id)
+
+
+def assign_unmatched_record(
+    unmatched_id: str,
+    actor: str,
+    constructor: str,
+    note: str = "",
+    due_date: str = "",
+) -> dict[str, Any]:
+    constructor = constructor.strip()
+    if not constructor:
+        raise ValueError("Constructor is required")
+    record = update_unmatched_record(
+        unmatched_id,
+        actor,
+        {
+            "assignment_note": note,
+        },
+    )
+    terminal = str(record.get("terminal") or "").strip()
+    if terminal:
+        task = ensure_task_for_terminal(terminal)
+        assign_construction_task(int(task["id"]), actor=actor, constructor=constructor, note=note, due_date=due_date)
+    record.update(
+        {
+            "assigned_to": constructor,
+            "assigned_by": actor,
+            "assigned_at": now_iso(),
+            "assignment_note": note.strip(),
+            "due_date": due_date.strip(),
+            "field_task_type": "unmatched",
+        }
+    )
+    record["text_index"] = build_record_text_index(record)
+    state = get_state()
+    state["scan_unmatched"] = [
+        record if ensure_unmatched_record(item)["unmatched_id"] == unmatched_id else item
+        for item in state.get("scan_unmatched", [])
+    ]
+    append_audit_event(
+        "assign_unmatched",
+        actor,
+        {"unmatched_id": unmatched_id, "constructor": constructor, "note": note, "due_date": due_date},
+    )
+    return record
+
+
+def unassign_unmatched_record(unmatched_id: str, actor: str, reason: str = "") -> dict[str, Any]:
+    state = get_state()
+    for index, record in enumerate(state.get("scan_unmatched", [])):
+        item = ensure_unmatched_record(record)
+        if item["unmatched_id"] != unmatched_id:
+            continue
+        previous = item.get("assigned_to") or ""
+        item["assigned_to"] = ""
+        item["unassigned_by"] = actor
+        item["unassigned_at"] = now_iso()
+        item["unassign_reason"] = reason.strip()
+        item["text_index"] = build_record_text_index(item)
+        state["scan_unmatched"][index] = item
+        append_audit_event(
+            "unassign_unmatched",
+            actor,
+            {"unmatched_id": unmatched_id, "previous_constructor": previous, "reason": reason},
+        )
+        return item
+    raise KeyError(unmatched_id)
+
+
+def mark_unmatched_outside_project(unmatched_id: str, actor: str, note: str = "") -> dict[str, Any]:
+    state = get_state()
+    for index, record in enumerate(state.get("scan_unmatched", [])):
+        item = ensure_unmatched_record(record)
+        if item["unmatched_id"] != unmatched_id:
+            continue
+        item["project_outside"] = True
+        item["project_outside_by"] = actor
+        item["project_outside_at"] = now_iso()
+        item["project_outside_note"] = note.strip()
+        item["field_task_type"] = "outside_project"
+        item["text_index"] = build_record_text_index(item)
+        state["scan_unmatched"][index] = item
+        append_audit_event("mark_unmatched_outside_project", actor, {"unmatched_id": unmatched_id, "note": note})
+        refresh_summary()
+        return item
+    raise KeyError(unmatched_id)
+
+
+def find_group_by_meter_reference(meter_reference: str, terminal: str = "") -> dict[str, Any] | None:
+    reference = str(meter_reference or "").strip()
+    if not reference:
+        return None
+    candidates = {
+        reference,
+        build_total_catalog_match_key(reference) or reference,
+    }
+    terminal = terminal.strip()
+    for group in get_state()["groups"]:
+        if terminal and str(group.get("terminal") or "") != terminal:
+            continue
+        values = {
+            str(group.get("id") or ""),
+            str(group.get("meter_no") or ""),
+            str(group.get("meter_match_key") or ""),
+            build_total_catalog_match_key(str(group.get("meter_no") or "")) or "",
+        }
+        if candidates & values:
+            return group
+    return None
+
+
+def rematch_unmatched_record(
+    unmatched_id: str,
+    actor: str,
+    meter_no: str = "",
+    old_meter_no: str = "",
+    terminal: str = "",
+    updates: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged_updates = dict(updates or {})
+    if meter_no:
+        merged_updates["meter_no"] = meter_no
+        merged_updates["barcode"] = meter_no
+        merged_updates["meter_match_key"] = build_total_catalog_match_key(meter_no) or meter_no
+    if terminal:
+        merged_updates["terminal"] = terminal
+    if old_meter_no:
+        merged_updates["replacement_old_meter_no"] = old_meter_no
+        merged_updates["replacement_by"] = actor
+        merged_updates["replacement_at"] = now_iso()
+    record = update_unmatched_record(unmatched_id, actor, merged_updates)
+    target = find_group_by_meter_reference(old_meter_no or meter_no or record.get("meter_no") or record.get("barcode"), terminal or record.get("terminal", ""))
+    if target is None and not terminal:
+        target = find_group_by_meter_reference(old_meter_no or meter_no or record.get("meter_no") or record.get("barcode"), "")
+    if target is None:
+        append_audit_event(
+            "rematch_unmatched_no_target",
+            actor,
+            {"unmatched_id": unmatched_id, "meter_no": meter_no, "old_meter_no": old_meter_no, "terminal": terminal},
+        )
+        return {"record": record, "matched": False}
+    associate_updates = dict(record)
+    if old_meter_no:
+        associate_updates["replacement_old_meter_no"] = old_meter_no
+        associate_updates["replacement_target_group_id"] = target.get("id", "")
+    associated = associate_unmatched_record(
+        unmatched_id,
+        actor,
+        target_group_id=str(target.get("id") or ""),
+        updates=associate_updates,
+    )
+    associated["matched"] = True
+    associated["replacement_old_meter_no"] = old_meter_no
+    return associated
+
+
 def associate_unmatched_record(
     unmatched_id: str,
     actor: str,
@@ -2193,6 +2391,33 @@ def _date_key_from_value(value: Any) -> str:
         return ""
 
 
+def _photo_is_construction_upload(photo: dict[str, Any]) -> bool:
+    source_text = " ".join(
+        str(photo.get(key) or "")
+        for key in ("source", "upload_source", "storage_source", "source_file")
+    ).lower()
+    return "construction" in source_text
+
+
+def _photo_work_date_key(photo: dict[str, Any]) -> str:
+    if _photo_is_construction_upload(photo):
+        return _date_key_from_value(photo.get("created_at")) or _date_key_from_value(photo.get("downloaded_at"))
+    for key in (
+        "scan_created_at",
+        "source_created_at",
+        "created_at",
+        "\u521b\u5efa\u65f6\u95f4",
+        "scan_time",
+        "scanned_at",
+        "taken_at",
+        "classified_at",
+    ):
+        date_key = _date_key_from_value(photo.get(key))
+        if date_key:
+            return date_key
+    return ""
+
+
 def installer_daily_workload(installer: str) -> dict[str, Any]:
     target = str(installer or "").strip()
     rows: dict[str, dict[str, Any]] = {}
@@ -2206,15 +2431,17 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
         ]
         if not matched_photos:
             continue
-        date_key = ""
-        for photo in matched_photos:
-            date_key = (
-                _date_key_from_value(photo.get("created_at"))
-                or _date_key_from_value(photo.get("taken_at"))
-                or _date_key_from_value(photo.get("classified_at"))
-            )
-            if date_key:
-                break
+        construction_dates = [
+            _photo_work_date_key(photo)
+            for photo in matched_photos
+            if _photo_is_construction_upload(photo)
+        ]
+        date_key = max([date for date in construction_dates if date], default="")
+        if not date_key:
+            for photo in matched_photos:
+                date_key = _photo_work_date_key(photo)
+                if date_key:
+                    break
         date_key = date_key or _date_key_from_value(group.get("last_photo_imported_at")) or "未记录日期"
         row = rows.setdefault(
             date_key,
@@ -2746,6 +2973,70 @@ def build_final_delivery_export(task_id: int | None = None, terminal: str = "", 
 def build_exception_meter_export(reviewer: str = "") -> bytes:
     groups = collect_exception_groups(reviewer=reviewer)
     return build_exception_meter_workbook(groups)
+
+
+def build_project_outside_export() -> bytes:
+    records = [
+        ensure_unmatched_record(item)
+        for item in get_state().get("scan_unmatched", [])
+        if ensure_unmatched_record(item).get("project_outside")
+    ]
+    return build_project_outside_workbook(records)
+
+
+def build_project_outside_workbook(records: list[dict[str, Any]]) -> bytes:
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:
+        raise RuntimeError("openpyxl is required to export Excel files") from exc
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "项目外施工"
+    headers = [
+        "记录ID",
+        "表号/扫码内容",
+        "短表号",
+        "终端",
+        "地址",
+        "采集器",
+        "模块资产编号",
+        "安装人员",
+        "照片数量",
+        "记录人",
+        "记录时间",
+        "说明",
+        "指派施工员",
+        "来源文件",
+    ]
+    sheet.append(headers)
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = "A1:N1"
+    for record in records:
+        sheet.append(
+            [
+                record.get("unmatched_id", ""),
+                record.get("barcode") or record.get("meter_no") or "",
+                record.get("meter_match_key") or "",
+                record.get("terminal") or "",
+                record.get("address") or "",
+                record.get("collector") or "",
+                record.get("module_asset_no") or record.get("asset_no") or "",
+                record.get("creator") or "",
+                len(split_urls(str(record.get("photo_urls") or ""))) or len(record.get("image_urls") or []),
+                record.get("project_outside_by") or "",
+                record.get("project_outside_at") or "",
+                record.get("project_outside_note") or record.get("note") or "",
+                record.get("assigned_to") or "",
+                record.get("source_file") or "",
+            ]
+        )
+    for column_cells in sheet.columns:
+        max_length = max(len(str(cell.value or "")) for cell in column_cells)
+        sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 10), 52)
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
 
 
 def build_exception_meter_workbook(groups: list[dict[str, Any]]) -> bytes:
@@ -3501,6 +3792,65 @@ def list_construction_exception_orders(actor: str = "", task_id: int | None = No
     if actor:
         orders = [item for item in orders if item.get("assigned_to") == actor]
     return sorted(orders, key=lambda item: (str(item.get("terminal") or ""), str(item.get("created_at") or ""), str(item.get("id") or "")))
+
+
+def assign_construction_exception_order(
+    order_id: str,
+    *,
+    actor: str,
+    constructor: str,
+    note: str = "",
+    due_date: str = "",
+) -> dict[str, Any]:
+    constructor = constructor.strip()
+    if not constructor:
+        raise ValueError("Constructor is required")
+    orders = construction_exception_orders()
+    for index, item in enumerate(orders):
+        order = ensure_construction_exception_order(item)
+        if order.get("id") != order_id:
+            continue
+        task_id = int(order.get("task_id") or 0)
+        if task_id:
+            assign_construction_task(task_id, actor=actor, constructor=constructor, note=note, due_date=due_date)
+        order["assigned_to"] = constructor
+        order["assigned_by"] = actor
+        order["assigned_at"] = now_iso()
+        order["assignment_note"] = note.strip()
+        order["due_date"] = due_date.strip()
+        if order.get("status") == "open":
+            order["status"] = "assigned"
+        orders[index] = order
+        append_audit_event(
+            "assign_construction_exception_order",
+            actor,
+            {"order_id": order_id, "constructor": constructor, "note": note, "due_date": due_date},
+        )
+        return order
+    raise KeyError(order_id)
+
+
+def unassign_construction_exception_order(order_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+    orders = construction_exception_orders()
+    for index, item in enumerate(orders):
+        order = ensure_construction_exception_order(item)
+        if order.get("id") != order_id:
+            continue
+        previous = order.get("assigned_to") or ""
+        order["assigned_to"] = ""
+        order["unassigned_by"] = actor
+        order["unassigned_at"] = now_iso()
+        order["unassign_reason"] = reason.strip()
+        if order.get("status") == "assigned":
+            order["status"] = "open"
+        orders[index] = order
+        append_audit_event(
+            "unassign_construction_exception_order",
+            actor,
+            {"order_id": order_id, "previous_constructor": previous, "reason": reason},
+        )
+        return order
+    raise KeyError(order_id)
 
 
 def submit_construction_exception_order(

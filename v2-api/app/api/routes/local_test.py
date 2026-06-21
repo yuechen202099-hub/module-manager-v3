@@ -705,6 +705,18 @@ class ConstructionExceptionSubmitRequest(BaseModel):
     note: str = ""
 
 
+class ConstructionExceptionAssignRequest(BaseModel):
+    actor: str = "module_admin"
+    constructor: str
+    note: str = ""
+    due_date: str = ""
+
+
+class ConstructionExceptionUnassignRequest(BaseModel):
+    actor: str = "module_admin"
+    reason: str = ""
+
+
 class PhotoClassifyRequest(BaseModel):
     category: str
     reviewer: str = "local-reviewer"
@@ -734,6 +746,36 @@ class UnmatchedDeleteRequest(BaseModel):
 
 class BlankUnmatchedRequest(BaseModel):
     actor: str = "local-reviewer"
+
+
+class UnmatchedUpdateRequest(BaseModel):
+    actor: str = "local-reviewer"
+    updates: dict = {}
+
+
+class UnmatchedAssignRequest(BaseModel):
+    actor: str = "module_admin"
+    constructor: str
+    note: str = ""
+    due_date: str = ""
+
+
+class UnmatchedUnassignRequest(BaseModel):
+    actor: str = "module_admin"
+    reason: str = ""
+
+
+class UnmatchedOutsideProjectRequest(BaseModel):
+    actor: str = "local-reviewer"
+    note: str = ""
+
+
+class UnmatchedRematchRequest(BaseModel):
+    actor: str = "local-reviewer"
+    meter_no: str = ""
+    old_meter_no: str = ""
+    terminal: str = ""
+    updates: dict = {}
 
 
 class EmptyGroupRequest(BaseModel):
@@ -1269,6 +1311,80 @@ def create_blank_unmatched(payload: BlankUnmatchedRequest, request: Request):
     return ok(request, state_repository().create_blank_unmatched_record(actor=payload.actor))
 
 
+@router.patch("/unmatched/{unmatched_id}")
+def update_unmatched(unmatched_id: str, payload: UnmatchedUpdateRequest, request: Request):
+    try:
+        record = state_repository().update_unmatched_record(
+            unmatched_id,
+            actor=payload.actor,
+            updates=payload.updates,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    return ok(request, record)
+
+
+@router.patch("/unmatched/{unmatched_id}/assign")
+def assign_unmatched(unmatched_id: str, payload: UnmatchedAssignRequest, request: Request):
+    try:
+        record = state_repository().assign_unmatched_record(
+            unmatched_id,
+            actor=payload.actor,
+            constructor=payload.constructor,
+            note=payload.note,
+            due_date=payload.due_date,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, record)
+
+
+@router.patch("/unmatched/{unmatched_id}/unassign")
+def unassign_unmatched(unmatched_id: str, payload: UnmatchedUnassignRequest, request: Request):
+    try:
+        record = state_repository().unassign_unmatched_record(
+            unmatched_id,
+            actor=payload.actor,
+            reason=payload.reason,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    return ok(request, record)
+
+
+@router.post("/unmatched/{unmatched_id}/outside-project")
+def mark_unmatched_outside_project(unmatched_id: str, payload: UnmatchedOutsideProjectRequest, request: Request):
+    try:
+        record = state_repository().mark_unmatched_outside_project(
+            unmatched_id,
+            actor=payload.actor,
+            note=payload.note,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    return ok(request, record)
+
+
+@router.post("/unmatched/{unmatched_id}/rematch")
+def rematch_unmatched(unmatched_id: str, payload: UnmatchedRematchRequest, request: Request):
+    try:
+        result = state_repository().rematch_unmatched_record(
+            unmatched_id,
+            actor=payload.actor,
+            meter_no=payload.meter_no,
+            old_meter_no=payload.old_meter_no,
+            terminal=payload.terminal,
+            updates=payload.updates,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, response_payload(result))
+
+
 @router.get("/exception-groups")
 def exception_groups(
     request: Request,
@@ -1482,6 +1598,36 @@ def construction_exception_order_list(
     task_id: int | None = None,
 ):
     return ok(request, {"items": state_repository().list_construction_exception_orders(actor=actor, task_id=task_id)})
+
+
+@router.patch("/construction/exception-orders/{order_id}/assign")
+def construction_exception_order_assign(order_id: str, payload: ConstructionExceptionAssignRequest, request: Request):
+    try:
+        result = state_repository().assign_construction_exception_order(
+            order_id,
+            actor=payload.actor,
+            constructor=payload.constructor,
+            note=payload.note,
+            due_date=payload.due_date,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Exception order not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, response_payload(result))
+
+
+@router.patch("/construction/exception-orders/{order_id}/unassign")
+def construction_exception_order_unassign(order_id: str, payload: ConstructionExceptionUnassignRequest, request: Request):
+    try:
+        result = state_repository().unassign_construction_exception_order(
+            order_id,
+            actor=payload.actor,
+            reason=payload.reason,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Exception order not found") from exc
+    return ok(request, response_payload(result))
 
 
 @router.patch("/construction/exception-orders/{order_id}/submit")

@@ -70,6 +70,13 @@ def export_exception_meters(payload: ExceptionMetersExportRequest, request: Requ
     return excel_response(content, filename)
 
 
+@router.post("/project-outside")
+def export_project_outside(request: Request):
+    content = get_state_repository().build_project_outside_export()
+    filename = f"project-outside-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    return excel_response(content, filename)
+
+
 def scoped_exception_reviewer(requested_reviewer: str, request: Request) -> str:
     payload = getattr(request.state, "auth", None) or {}
     roles = payload.get("roles") or []
