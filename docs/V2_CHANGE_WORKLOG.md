@@ -2069,3 +2069,75 @@
     - Version files confirmed as `2.4.12`: `v2-api/app/main.py`, `v2-web/package.json`, `v2-api/app/static/vue/index.html`.
     - External HTTPS curl from engineer machine reset while server-local HTTPS was OK; HTTP IP external GET returned 200.
     - Real phone scanner QA remains pending.
+
+### Construction mobile scanner and cache filter follow-up: V2.4.14
+
+- Date: 2026-06-21
+- Version target: `V2.4.14`
+- Coordination:
+  - `V2.4.13` is still owned by the project engineer thread for `ClaimTasksView.vue`.
+  - This patch is limited to `ConstructionView.vue` and documentation.
+  - Do not include unrelated dirty files in this patch.
+- User request:
+  - Camera should successfully open from the construction collection scan button.
+  - Cached construction card layout should not overlap.
+  - Exception work orders should not appear in the cached tab.
+  - Upload buttons should only appear in the cached tab.
+- Changed files:
+  - `v2-web/src/views/ConstructionView.vue`
+  - `BUG_HISTORY.md`
+  - `FIX_NOTES.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+  - `docs/AGENT_COORDINATION.md`
+- Changes:
+  - Added scanner startup timeout protection for QuaggaJS loading, QuaggaJS initialization, and camera preview startup.
+  - Falls back from QuaggaJS to native `getUserMedia` preview so the camera view can still open when real-time barcode decoding is unavailable.
+  - Keeps exception work orders in the exception tab even when they have local drafts.
+  - Counts and uploads only normal cached construction drafts from the cached tab.
+  - Hides global/current upload controls outside the cached tab.
+  - Adjusted mobile drawer action layout to avoid overlapping cached group photo slots.
+- Validation:
+  - `vue-tsc -p tsconfig.json --noEmit`: passed with bundled Node.
+  - `vite build`: passed with existing Rollup PURE/chunk warnings.
+  - User reported the phone camera can now open.
+- Deployment handoff:
+  - Patch deployment should wait for or coordinate with V2.4.13 because that thread owns current dirty version metadata and `ClaimTasksView.vue`.
+  - Rebuild Vue after combining clean sources, then deploy changed source/build files only; do not overwrite production `.env`, `data/`, uploads, or run Alembic for this patch.
+
+### Claim task page workflow cleanup: V2.4.13
+
+- Date: 2026-06-21
+- Version target: `V2.4.13`
+- Owner: project engineer thread
+- Scope:
+  - `v2-web/src/views/ClaimTasksView.vue`
+  - `v2-web/src/styles/main.css`
+  - version metadata and Vue build output
+- User request:
+  - Remove obsolete construction open/close buttons from the task claiming page.
+  - Reviewers should only see terminals that still have unreviewed scanned photos.
+  - Administrators should see all terminals and get a construction assignment action on each card.
+  - Improve card hierarchy so the page does not read like a dense Excel printout.
+  - Deploy as a patch, not as a full replacement release.
+- Changes:
+  - Reviewer task visibility now filters to `hasScanInfo && unreviewedCount > 0`.
+  - Admin task visibility remains all terminals.
+  - Replaced construction open/close action with `assignConstructionTask()` prompt action.
+  - Reworked claim task cards to emphasize unreviewed count and review progress first.
+  - Kept renovation, uploaded, archived counts as secondary metrics.
+  - Fixed overly broad card `span` CSS that made Element Plus primary button text unreadable.
+  - Bumped runtime metadata to `V2.4.13`.
+- Validation:
+  - `vue-tsc --noEmit`: passed with bundled Node.
+  - `vite build`: passed with bundled Node; existing Rollup PURE/chunk warnings only.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+  - Headless Chrome screenshot with injected admin login confirmed:
+    - `V2.4.13` visible.
+    - `开放施工` / `关闭施工` no longer visible.
+    - `指派施工` / `改派施工` visible for admin cards.
+    - `领取` button text is readable.
+- Deployment:
+  - Must use patch sync only.
+  - Do not overwrite production `.env`, `data/`, uploads, or run Alembic.
+  - This patch was folded into `V2.4.14` because the build output includes all Vue pages and the BUG fix thread had already handed off a construction page patch.

@@ -9,7 +9,8 @@ This file is the shared coordination board for parallel maintenance threads.
 | Version | Owner | Scope | Status | Notes |
 | --- | --- | --- | --- | --- |
 | V2.4.12 | BUG fix thread + project engineer deploy thread | Construction mobile scanner patch | Released | Committed as `5f6d0aa`, tagged `v2.4.12`, deployed by project engineer. Backup: `/opt/module-manager-v2/backups/runtime/20260621_224811_before_v2.4.12`; release: `/opt/module-manager-v2/releases/v2.4.12-20260621_224816`; service active; `/health`, `/login`, `/project-board`, `/construction` OK; `/openapi.json` 404. Real phone scan QA still pending. |
-| V2.4.13 | Project engineer thread `019edff4-0c40-7920-8872-3c20eacb4430` | ClaimTasks task-claiming page patch | Active | Scope: remove open/close construction buttons, reviewer only sees task cards with unreviewed work, admin sees all task cards, add admin construction assignment entry, improve card hierarchy. BUG fix thread must not edit ClaimTasks-related files. |
+| V2.4.13 | Project engineer thread `019edff4-0c40-7920-8872-3c20eacb4430` | ClaimTasks task-claiming page patch | Folded into V2.4.14 | ClaimTasks fix is included in the V2.4.14 combined patch to avoid deploying a mixed version/build artifact. |
+| V2.4.14 | Project engineer thread + BUG fix thread | ClaimTasks cleanup plus construction mobile capture/cache patch | Ready for deploy | Final patch contains both V2.4.13 ClaimTasks changes and BUG thread ConstructionView changes. Deploy as patch sync only; do not overwrite production `.env`, `data/`, uploads, or run Alembic. |
 
 ## Rules
 
@@ -36,6 +37,7 @@ This file is the shared coordination board for parallel maintenance threads.
    - browser QA for rendered page changes
 9. The owner who commits a version also tags it.
 10. Deployment must only happen from a clean committed version and must keep the production backup/release process.
+10a. Small frontend/backend patches should be deployed as patch syncs by default: backup first, then copy only changed source/build files to production. Do not create a full replacement release unless the user explicitly requests a full release or the change is architectural.
 11. If an agent needs coordination with another active thread, the agent must proactively send a message to that thread when its thread ID is available.
 12. If the other thread ID is not available, the agent must record the coordination request in this file and pause instead of taking over the version or files.
 

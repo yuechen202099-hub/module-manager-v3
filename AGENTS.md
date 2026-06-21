@@ -59,12 +59,12 @@ Future work must use multiple focused agents when the task is broad enough:
 
 ## Versioning Discipline
 
-- Current product version: `V2.4.12`.
+- Current product version: `V2.4.14`.
 - Every shipped change must update the product version before completion.
 - Major workflow, architecture, database, deployment, or UI experience changes increment the minor version by `0.1`.
   - Example: `V2.4.11` -> `V2.5.0`.
 - Small bug fixes, copy changes, focused UI adjustments, and low-risk patches increment the patch version by `0.0.1`.
-  - Example: `V2.4.11` -> `V2.4.12`.
+  - Example: `V2.4.13` -> `V2.4.14`.
 - Update all visible app version labels, release notes, and deployment notes consistently.
 - Do not finish a production update without stating the old version and new version in the final report.
 

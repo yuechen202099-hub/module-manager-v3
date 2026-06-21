@@ -25,6 +25,8 @@ Last updated: 2026-06-21
 | BH-0107 | 独立缓存上传页和异常处理页仍有旧入口风险 | 访问 `/construction-cache` 或 `/unmatched` 可能进入旧独立页面 | 已修复，统一重定向到施工采集/审阅工作台 | 2026-06-21 | `main.py`、`router/index.ts`、`TaskHallView.vue` |
 | BH-0108 | PowerShell 中文输出可能误导源码编码判断 | PowerShell 默认编码显示中文时出现乱码 | 已处理，新增 UTF-8 初始化脚本 | 2026-06-21 | `setup_terminal_utf8.ps1` |
 | BH-0109 | 施工采集页手机端点击扫码后相机无响应 | 手机端打开施工采集页，点击采集器/模块扫码，弹层打开后相机未启动或降级拍照无响应 | 已修复，本地构建通过；生产发布交给有 SSH 密钥权限的项目工程师线程 | 2026-06-21 | `v2-web/src/views/ConstructionView.vue` |
+| BH-0110 | 施工采集页扫码弹层可能停留在“正在启动相机”且无预览 | 手机端 HTTPS 打开施工采集，点击采集器/模块扫码，QuaggaJS 初始化卡住时黑框不切换到真实相机画面 | 已修复，增加相机启动超时和原生预览兜底；现场反馈相机已能打开 | 2026-06-21 | `v2-web/src/views/ConstructionView.vue` |
+| BH-0111 | 施工采集“已缓存”筛选混入异常工单，上传按钮显示范围过宽 | 打开施工采集页，异常工单带本地草稿时出现在“已缓存”；未处于已缓存筛选时仍可见上传入口 | 已修复，本地类型检查和构建通过 | 2026-06-21 | `v2-web/src/views/ConstructionView.vue` |
 
 ## 处理规则
 
@@ -32,3 +34,9 @@ Last updated: 2026-06-21
 - 修复完成后更新“修复状态、修复时间、涉及文件”。
 - 不记录测试账号、密码、Token、密钥。
 - PowerShell 显示乱码优先按终端编码处理，不直接认定为业务 Bug。
+
+## 2026-06-21 - Added maintenance item
+
+| ID | Bug | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0112 | Claim task page exposed obsolete construction open/close actions and the primary `领取` label could become unreadable after the card visual cleanup. | Open `/claim-tasks` as admin; task cards showed construction open/close actions in older builds, and the primary button text inherited muted card text styles. | Fixed in `V2.4.13`. | 2026-06-21 | `v2-web/src/views/ClaimTasksView.vue`, `v2-web/src/styles/main.css` |

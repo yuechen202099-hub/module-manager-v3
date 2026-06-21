@@ -1,6 +1,6 @@
 {
   "name": "module-manager-v2-web",
-  "version": "2.4.12",
+  "version": "2.4.14",
   "private": true,
   "type": "module",
   "scripts": {

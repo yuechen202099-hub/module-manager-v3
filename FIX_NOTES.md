@@ -177,3 +177,70 @@ Last updated: 2026-06-21
   - 服务器本机验证：`/health` OK，`/login` 200，`/project-board` 200，`/construction` 200，`/openapi.json` 404，`https://www.sgcc.online/login` 200。
   - 版本文件确认：`v2-api/app/main.py`、`v2-web/package.json`、`v2-api/app/static/vue/index.html` 均为 `2.4.12`。
 - 真实手机相机权限和条形码识别仍需现场执行最终验证。
+
+## 2026-06-21 - V2.4.14 施工采集相机启动兜底与缓存筛选修复
+
+### 修改原因
+
+手机端 HTTPS 环境下扫码弹层仍可能停留在“正在启动相机”，黑色预览区不显示真实相机画面。最可能原因是 QuaggaJS 脚本加载或初始化 Promise 在部分移动浏览器上卡住，导致后续原生相机预览没有机会启动。同时，异常工单如果已有本地草稿，会被“已缓存”筛选误收，上传按钮也在非已缓存界面出现，容易误操作。
+
+### 修改文件
+
+- `v2-web/src/views/ConstructionView.vue`
+- `BUG_HISTORY.md`
+- `FIX_NOTES.md`
+- `docs/V2_CHANGE_WORKLOG.md`
+- `docs/AGENT_COORDINATION.md`
+
+### 修改内容
+
+- 给 QuaggaJS 加载、初始化和相机启动增加超时，避免扫码弹层无限等待。
+- QuaggaJS 实时识别失败时，自动切换到浏览器原生 `getUserMedia` 相机预览；即使浏览器不支持 `BarcodeDetector`，也先保证相机画面打开。
+- 将隐藏文件输入从 `display: none` 调整为极小透明元素，降低移动浏览器拦截相机/相册选择的概率。
+- “已缓存”只统计普通施工缓存，不再混入异常工单缓存。
+- 异常工单固定归入“异常工单”筛选，即使它带本地草稿。
+- 顶部上传缓存、一键上传、上传当前组按钮只在“已缓存”筛选中显示。
+- 移动端采集表单底部按钮改为普通流式位置，避免打开已缓存资料组时压住照片槽内容。
+
+### 影响范围
+
+- 仅影响施工采集页的扫码弹层、缓存/异常筛选和移动端采集表单布局。
+- 不修改接口协议、数据库结构、缓存库结构、任务领取页或审阅工作台。
+- 当前工作区存在项目工程师线程的 V2.4.13 未提交改动，本次补丁未纳入其文件。
+
+### 验证方法
+
+- `vue-tsc -p tsconfig.json --noEmit`：通过。
+- `vite build`：通过，存在既有 Rollup PURE 注释和 chunk 体积警告。
+- 用户现场反馈：扫码相机已能打开。
+- 浏览器端真实摄像头授权、焦距和条形码识别仍需手机端复测。
+
+## 2026-06-21 - V2.4.13 Claim task page cleanup
+
+### Reason
+
+The task claiming page still exposed obsolete construction open/close actions. Reviewers also needed a stricter task list that only shows terminals with remaining unreviewed scanned photos. The first visual pass made the primary `领取` button too low contrast because broad card text CSS leaked into Element Plus button spans.
+
+### Changed files
+
+- `v2-web/src/views/ClaimTasksView.vue`
+- `v2-web/src/styles/main.css`
+- version metadata files
+- Vue build output under `v2-api/app/static/vue/**`
+
+### Changes
+
+- Removed the open/close construction action from claim task cards.
+- Added admin construction assignment entry on each task card.
+- Reviewer task list now filters to terminals with `hasScanInfo` and `unreviewedCount > 0`.
+- Admin task list continues to show all terminals.
+- Reworked card hierarchy around unreviewed count and review progress.
+- Scoped button span CSS so `领取` and other Element Plus button labels keep readable colors.
+
+### Validation
+
+- `vue-tsc --noEmit`: passed.
+- `vite build`: passed using bundled Node.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+- Headless Chrome screenshot verified the local claim task page renders `V2.4.13`, no longer shows `开放施工` / `关闭施工`, shows `指派施工`, and keeps `领取` readable.

@@ -366,8 +366,8 @@ button {
 
 .claim-task-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(292px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
   padding: 12px;
 }
 
@@ -386,6 +386,23 @@ button {
   text-align: left;
   cursor: pointer;
   transition: border-color var(--v2-transition-fast), background var(--v2-transition-fast), box-shadow var(--v2-transition-fast), transform var(--v2-transition-fast);
+}
+
+.claim-task-card {
+  gap: 10px;
+  padding: 14px;
+}
+
+.claim-task-card.done {
+  background: linear-gradient(180deg, #ffffff, #f8fbfa);
+}
+
+.claim-task-card.empty {
+  background: #fbfcfd;
+}
+
+.claim-task-card.empty .task-primary-line {
+  opacity: 0.72;
 }
 
 .claim-task-card:hover,
@@ -441,6 +458,15 @@ button {
   font-size: 12px;
 }
 
+.claim-task-card .el-button span,
+.review-list-card .el-button span,
+.construction-task-card .el-button span,
+.construction-group-card .el-button span {
+  display: inline-flex;
+  color: inherit;
+  font-size: inherit;
+}
+
 .claim-task-card strong,
 .review-list-card strong,
 .construction-task-card strong,
@@ -450,18 +476,64 @@ button {
   font-weight: 850;
 }
 
+.task-title-block {
+  min-width: 0;
+}
+
+.task-title-block strong,
+.task-title-block span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-primary-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(96px, 0.55fr);
+  gap: 8px;
+}
+
+.task-primary-line div {
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--v2-border-soft);
+  border-radius: var(--v2-radius-md);
+  background: linear-gradient(180deg, #f8fbfd, #ffffff);
+}
+
+.task-primary-line span,
+.task-construction-line span {
+  display: block;
+  overflow: hidden;
+  color: var(--v2-text-muted);
+  font-size: 12px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-primary-line b {
+  display: block;
+  margin-top: 3px;
+  color: var(--v2-text-strong);
+  font-family: var(--v2-font-mono);
+  font-size: 28px;
+  font-weight: 900;
+  line-height: 1;
+}
+
 .task-card-metrics,
 .construction-task-metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 6px;
 }
 
 .task-card-metrics div,
 .construction-task-metrics div {
   min-width: 0;
-  padding: 8px;
-  border-radius: var(--v2-radius-md);
+  padding: 7px 8px;
+  border-radius: var(--v2-radius-sm);
   background: var(--v2-bg-subtle);
 }
 
@@ -471,8 +543,39 @@ button {
   margin-top: 2px;
   color: var(--v2-text-strong);
   font-family: var(--v2-font-mono);
-  font-size: 20px;
+  font-size: 17px;
   line-height: 1.1;
+}
+
+.task-construction-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 28px;
+  padding: 6px 8px;
+  border: 1px solid var(--v2-border-soft);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-primary-muted);
+}
+
+.task-card-actions .el-button {
+  min-width: 84px;
+  font-weight: 800;
+}
+
+.task-card-actions .el-button--primary:not(.is-disabled) {
+  color: #fff;
+}
+
+.task-card-actions .el-button.is-disabled {
+  opacity: 1;
+}
+
+.task-card-actions .el-button--primary.is-disabled {
+  color: var(--v2-neutral);
+  background: var(--v2-neutral-soft);
+  border-color: var(--v2-neutral-border);
 }
 
 .native-review-page {

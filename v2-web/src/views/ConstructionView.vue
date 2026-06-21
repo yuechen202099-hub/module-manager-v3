@@ -116,6 +116,7 @@ const slotAliases: Record<string, string[]> = {
 const DB_NAME = 'module-manager-construction-v1'
 const DRAFT_STORE = 'drafts'
 const SNAPSHOT_STORE = 'terminal_snapshots'
+const SCANNER_START_TIMEOUT_MS = 7000
 const collator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' })
 
 const auth = useAuthStore()
@@ -197,11 +198,20 @@ const inTaskPicker = computed(() => !selectedTask.value || taskPickerOpen.value)
 const taskDrafts = computed(() =>
   drafts.value.filter((draft) => String(draft.taskId || '') === selectedTaskId.value && (!draft.actor || draft.actor === actor.value)),
 )
-const readyTaskDrafts = computed(() => taskDrafts.value.filter((draft) => draftReady(draft)))
+const exceptionGroupIdSet = computed(() => new Set(exceptionOrders.value.map((order) => String(order.groupId || '')).filter(Boolean)))
+function draftGroupId(draft: CacheDraft) {
+  return String(draft.groupId || draft.group_id || '')
+}
+function isExceptionDraft(draft: CacheDraft) {
+  const groupId = draftGroupId(draft)
+  return Boolean(draft.work_order_id) || Boolean(groupId && exceptionGroupIdSet.value.has(groupId))
+}
+const cachedTaskDrafts = computed(() => taskDrafts.value.filter((draft) => !isExceptionDraft(draft)))
+const readyCachedDrafts = computed(() => cachedTaskDrafts.value.filter((draft) => draftReady(draft)))
 const draftByGroupId = computed(() => {
   const map = new Map<string, CacheDraft>()
   for (const draft of taskDrafts.value) {
-    const groupId = String(draft.groupId || draft.group_id || '')
+    const groupId = draftGroupId(draft)
     if (groupId) map.set(groupId, draft)
   }
   return map
@@ -209,27 +219,21 @@ const draftByGroupId = computed(() => {
 
 const groupFilterCounts = computed(() => {
   const keyword = normalizeSearch(groupQuery.value)
-  const cachedGroupIds = new Set(taskDrafts.value.map((draft) => String(draft.groupId || draft.group_id || '')).filter(Boolean))
-  const exceptionGroupIds = new Set(exceptionOrders.value.map((order) => String(order.groupId || '')).filter(Boolean))
+  const cachedGroupIds = new Set(cachedTaskDrafts.value.map((draft) => draftGroupId(draft)).filter(Boolean))
+  const exceptionGroupIds = exceptionGroupIdSet.value
   const byQuery = groups.value.filter((group) => matchesGroupQuery(group, keyword) && !group.exceptionOrderId && !exceptionGroupIds.has(String(group.id)))
   const exceptionGroups = exceptionOrders.value
     .map((order) => order.group || orderToGroup(order))
     .filter((group) => matchesGroupQuery(group, keyword))
-  const countedCachedGroupIds = new Set<string>([
-    ...byQuery.filter((group) => cachedGroupIds.has(String(group.id))).map((group) => String(group.id)),
-    ...exceptionGroups.filter((group) => cachedGroupIds.has(String(group.id))).map((group) => String(group.id)),
-  ])
-  const standaloneCached = taskDrafts.value.filter((draft) => {
-    const groupId = String(draft.groupId || draft.group_id || '')
+  const countedCachedGroupIds = new Set<string>(byQuery.filter((group) => cachedGroupIds.has(String(group.id))).map((group) => String(group.id)))
+  const standaloneCached = cachedTaskDrafts.value.filter((draft) => {
+    const groupId = draftGroupId(draft)
     return groupId && !countedCachedGroupIds.has(groupId)
   }).length
   return {
     all: byQuery.length,
     unbuilt: byQuery.filter((group) => !cachedGroupIds.has(String(group.id)) && !group.exceptionOrderId).length,
-    cached:
-      byQuery.filter((group) => cachedGroupIds.has(String(group.id))).length +
-      exceptionGroups.filter((group) => cachedGroupIds.has(String(group.id))).length +
-      standaloneCached,
+    cached: byQuery.filter((group) => cachedGroupIds.has(String(group.id))).length + standaloneCached,
     exceptions: exceptionGroups.length,
   }
 })
@@ -266,7 +270,7 @@ const workItems = computed<WorkItem[]>(() => {
     const draft = draftByGroupId.value.get(order.groupId)
     items.push({
       key: `exception-${order.id || order.groupId}`,
-      kind: draft ? 'cached' : 'exception',
+      kind: 'exception',
       group: {
         ...group,
         exceptionOrderId: order.id,
@@ -300,7 +304,7 @@ const visibleWorkItems = computed(() => {
     .filter((item) => {
       if (groupFilter.value === 'all' && (item.order || item.key.startsWith('draft-'))) return false
       if (groupFilter.value === 'unbuilt' && (item.kind !== 'group' || item.order)) return false
-      if (groupFilter.value === 'cached' && !item.draft) return false
+      if (groupFilter.value === 'cached' && (!item.draft || item.order)) return false
       if (groupFilter.value === 'exception' && !item.order) return false
       if (!keyword) return true
       return matchesGroupQuery(item.group, keyword)
@@ -335,6 +339,7 @@ const canUploadCurrent = computed(() => {
   if (missingRequiredSlots.value.length) return false
   return Boolean(Object.values(selectedFiles.value).some(Boolean) || activeOrder.value)
 })
+const canShowCurrentUpload = computed(() => groupFilter.value === 'cached' && Boolean(activeGroup.value && draftByGroupId.value.get(activeGroup.value.id)))
 
 const scannerTitle = computed(() => {
   if (scannerTarget.value === 'collector') return '扫描采集器'
@@ -657,23 +662,58 @@ function getQuagga(): any {
   return source.Quagga || source.Quagga2 || source.exports?.Quagga || source.module?.exports || null
 }
 
+function withTimeout<T>(promise: Promise<T>, milliseconds: number, message: string) {
+  let timer = 0
+  return new Promise<T>((resolve, reject) => {
+    timer = window.setTimeout(() => reject(new Error(message)), milliseconds)
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        window.clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
 async function ensureQuaggaLoaded() {
   if (getQuagga()?.init) return getQuagga()
-  await new Promise<void>((resolve, reject) => {
-    const existing = document.querySelector<HTMLScriptElement>('script[data-quagga-loader="1"]')
-    if (existing) {
-      existing.addEventListener('load', () => resolve(), { once: true })
-      existing.addEventListener('error', () => reject(new Error('QuaggaJS 加载失败')), { once: true })
-      return
-    }
-    const script = document.createElement('script')
-    script.src = '/static/vendor/quagga.min.js?v=20260615-quagga2'
-    script.async = true
-    script.dataset.quaggaLoader = '1'
-    script.onload = () => resolve()
-    script.onerror = () => reject(new Error('QuaggaJS 加载失败'))
-    document.head.appendChild(script)
-  })
+  await withTimeout(
+    new Promise<void>((resolve, reject) => {
+      const existing = document.querySelector<HTMLScriptElement>('script[data-quagga-loader="1"]')
+      if (existing) {
+        if (existing.dataset.loaded === '1' || getQuagga()?.init) {
+          resolve()
+          return
+        }
+        existing.addEventListener(
+          'load',
+          () => {
+            existing.dataset.loaded = '1'
+            resolve()
+          },
+          { once: true },
+        )
+        existing.addEventListener('error', () => reject(new Error('QuaggaJS 加载失败')), { once: true })
+        return
+      }
+      const script = document.createElement('script')
+      script.src = '/static/vendor/quagga.min.js?v=20260615-quagga2'
+      script.async = true
+      script.dataset.quaggaLoader = '1'
+      script.onload = () => {
+        script.dataset.loaded = '1'
+        resolve()
+      }
+      script.onerror = () => reject(new Error('QuaggaJS 加载失败'))
+      document.head.appendChild(script)
+    }),
+    SCANNER_START_TIMEOUT_MS,
+    'QuaggaJS 加载超时',
+  )
   return getQuagga()
 }
 
@@ -717,30 +757,30 @@ async function startScanner(target: ScannerTarget) {
         : '扫描表号条码后直接打开施工单'
 
   await nextTick()
+  if (!window.isSecureContext || typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+    prepareScannerFallback('当前浏览器未开放摄像头能力')
+    return
+  }
+
   const quagga = await ensureQuaggaLoaded().catch(() => null)
-  if (quagga?.init && typeof navigator.mediaDevices?.getUserMedia === 'function') {
+  if (quagga?.init) {
     try {
-      await startQuaggaScanner()
+      await withTimeout(startQuaggaScanner(), SCANNER_START_TIMEOUT_MS, '相机启动超时')
       return
     } catch {
       resetScannerRuntime()
-      prepareScannerFallback('实时扫码不可用')
-      return
+      scannerStatus.value = '实时扫码启动失败，正在切换相机预览。'
     }
   }
 
-  if ('BarcodeDetector' in window && typeof navigator.mediaDevices?.getUserMedia === 'function') {
-    try {
-      await startNativeScanner()
-      return
-    } catch {
-      resetScannerRuntime()
-      prepareScannerFallback('实时识别失败')
-      return
-    }
+  try {
+    await withTimeout(startNativeScanner(), SCANNER_START_TIMEOUT_MS, '相机启动超时')
+    return
+  } catch {
+    resetScannerRuntime()
+    prepareScannerFallback('相机启动失败')
+    return
   }
-
-  prepareScannerFallback('当前浏览器不支持实时扫码')
 }
 
 async function startQuaggaScanner() {
@@ -748,28 +788,33 @@ async function startQuaggaScanner() {
   const target = scannerCamera.value
   if (!quagga?.init || !target) throw new Error('QuaggaJS 不可用')
   scannerCamera.value?.querySelectorAll('canvas, video:not(.scanner-video)').forEach((node) => node.remove())
-  await new Promise<void>((resolve, reject) => {
-    quagga.init(
-      {
-        inputStream: {
-          name: 'Live',
-          type: 'LiveStream',
-          target,
-          constraints: {
-            facingMode: 'environment',
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
+  await withTimeout(
+    new Promise<void>((resolve, reject) => {
+      quagga.init(
+        {
+          inputStream: {
+            name: 'Live',
+            type: 'LiveStream',
+            target,
+            constraints: {
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              audio: false,
+            },
           },
+          locator: { patchSize: 'medium', halfSample: true },
+          locate: true,
+          numOfWorkers: Math.min(2, Math.max(0, navigator.hardwareConcurrency || 0)),
+          frequency: 8,
+          decoder: { readers: QUAGGA_READERS },
         },
-        locator: { patchSize: 'medium', halfSample: true },
-        locate: true,
-        numOfWorkers: Math.min(2, Math.max(0, navigator.hardwareConcurrency || 0)),
-        frequency: 8,
-        decoder: { readers: QUAGGA_READERS },
-      },
-      (error: unknown) => (error ? reject(error) : resolve()),
-    )
-  })
+        (error: unknown) => (error ? reject(error) : resolve()),
+      )
+    }),
+    SCANNER_START_TIMEOUT_MS,
+    'QuaggaJS 初始化超时',
+  )
   quaggaActive = true
   quaggaDetectedHandler = (result: any) => handleDetectedCode(result?.codeResult?.code || '')
   quagga.onDetected(quaggaDetectedHandler)
@@ -777,15 +822,41 @@ async function startQuaggaScanner() {
   scannerStatus.value = 'QuaggaJS 正在识别条形码。'
 }
 
+async function requestCameraStream() {
+  try {
+    return await withTimeout(
+      navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      }),
+      SCANNER_START_TIMEOUT_MS,
+      '后置摄像头启动超时',
+    )
+  } catch {
+    return await withTimeout(navigator.mediaDevices.getUserMedia({ video: true, audio: false }), SCANNER_START_TIMEOUT_MS, '摄像头启动超时')
+  }
+}
+
 async function startNativeScanner() {
   if (!scannerVideo.value) throw new Error('扫描视频容器不可用')
-  const detectorCtor = (window as unknown as { BarcodeDetector?: new (options: { formats: string[] }) => any }).BarcodeDetector
-  if (!detectorCtor) throw new Error('当前浏览器不支持 BarcodeDetector')
-  const detector = new detectorCtor({ formats: ['code_128', 'code_39', 'qr_code', 'ean_13', 'ean_8'] })
-  scannerStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+  scannerVideo.value.setAttribute('playsinline', 'true')
+  scannerVideo.value.setAttribute('webkit-playsinline', 'true')
+  scannerVideo.value.autoplay = true
+  scannerStream = await requestCameraStream()
   scannerVideo.value.srcObject = scannerStream
-  await scannerVideo.value.play()
-  scannerStatus.value = '正在使用浏览器原生识别。'
+  await withTimeout(scannerVideo.value.play(), 3000, '摄像头预览启动超时')
+  const detectorCtor = (window as unknown as { BarcodeDetector?: new (options: { formats: string[] }) => any }).BarcodeDetector
+  if (!detectorCtor) {
+    scannerStatus.value = '相机已打开，当前浏览器不支持实时识别，可拍照识别或手动输入。'
+    scannerHint.value = '保持此窗口可确认相机已启动；需要自动识别时请点击拍照识别'
+    return
+  }
+  const detector = new detectorCtor({ formats: ['code_128', 'code_39', 'qr_code', 'ean_13', 'ean_8'] })
+  scannerStatus.value = '相机已打开，正在使用浏览器原生识别。'
   const tick = async () => {
     try {
       const codes = await detector.detect(scannerVideo.value)
@@ -1204,14 +1275,14 @@ async function uploadCurrentDraft() {
 }
 
 async function uploadAllCached() {
-  if (!readyTaskDrafts.value.length) {
+  if (!readyCachedDrafts.value.length) {
     ElMessage.warning('当前终端没有可上传的完整缓存')
     return
   }
   uploading.value = true
   let success = 0
   let failed = 0
-  for (const draft of [...readyTaskDrafts.value]) {
+  for (const draft of [...readyCachedDrafts.value]) {
     try {
       await uploadDraft(draft)
       success += 1
@@ -1444,13 +1515,14 @@ onBeforeUnmount(() => {
         <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
         <el-button :icon="Refresh" :loading="loadingTasks || loadingGroups" @click="loadTasks">刷新</el-button>
         <el-button
+          v-if="groupFilter === 'cached' && cachedTaskDrafts.length"
           type="primary"
           :icon="UploadFilled"
           :loading="uploading"
-          :disabled="!readyTaskDrafts.length"
+          :disabled="!readyCachedDrafts.length"
           @click="uploadAllCached"
         >
-          上传缓存 {{ readyTaskDrafts.length || '' }}
+          上传缓存 {{ readyCachedDrafts.length || '' }}
         </el-button>
       </div>
     </header>
@@ -1558,9 +1630,9 @@ onBeforeUnmount(() => {
                 <strong>{{ tab.count }}</strong>
               </button>
             </div>
-            <div v-if="selectedTask && taskDrafts.length" class="cache-inline-actions">
-              <span>{{ taskDrafts.length }} 个本地缓存</span>
-              <el-button size="small" type="primary" :loading="uploading" :disabled="!readyTaskDrafts.length" @click="uploadAllCached">
+            <div v-if="selectedTask && groupFilter === 'cached' && cachedTaskDrafts.length" class="cache-inline-actions">
+              <span>{{ cachedTaskDrafts.length }} 个本地缓存</span>
+              <el-button size="small" type="primary" :loading="uploading" :disabled="!readyCachedDrafts.length" @click="uploadAllCached">
                 一键上传
               </el-button>
             </div>
@@ -1756,7 +1828,7 @@ onBeforeUnmount(() => {
             <footer class="sheet-actions">
               <span class="draft-status">{{ Object.values(selectedFiles).filter(Boolean).length }} 张本地待上传</span>
               <el-button size="large" :loading="cacheBusy" @click="saveCurrentDraft()">保存缓存</el-button>
-              <el-button size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
+              <el-button v-if="canShowCurrentUpload" size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
                 上传当前组
               </el-button>
             </footer>
@@ -1911,7 +1983,7 @@ onBeforeUnmount(() => {
         <footer class="sheet-actions">
           <span class="draft-status">{{ Object.values(selectedFiles).filter(Boolean).length }} 张本地待上传</span>
           <el-button size="large" :loading="cacheBusy" @click="saveCurrentDraft()">保存缓存</el-button>
-          <el-button size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
+          <el-button v-if="canShowCurrentUpload" size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
             上传当前组
           </el-button>
         </footer>
@@ -2586,7 +2658,13 @@ onBeforeUnmount(() => {
 }
 
 .file-input {
-  display: none;
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  z-index: -1;
+  width: 1px;
+  height: 1px;
+  opacity: 0.01;
 }
 
 .scanner-backdrop {
@@ -2894,8 +2972,8 @@ onBeforeUnmount(() => {
   .collector-sheet {
     height: 100%;
     min-height: 0;
-    display: grid;
-    grid-template-rows: auto auto auto auto minmax(0, 1fr) auto auto;
+    display: flex;
+    flex-direction: column;
     overflow-y: auto;
     padding: 12px;
   }
@@ -2928,7 +3006,9 @@ onBeforeUnmount(() => {
   }
 
   .sheet-actions {
+    position: static;
     grid-template-columns: 1fr 1fr;
+    margin: 0;
     margin-right: -14px;
     margin-left: -14px;
     padding-right: 14px;
