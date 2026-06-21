@@ -2104,6 +2104,29 @@
   - Patch deployment should wait for or coordinate with V2.4.13 because that thread owns current dirty version metadata and `ClaimTasksView.vue`.
   - Rebuild Vue after combining clean sources, then deploy changed source/build files only; do not overwrite production `.env`, `data/`, uploads, or run Alembic for this patch.
 
+### Production patch deployment: V2.4.14
+
+- Date: 2026-06-21
+- Commit: `d18c516`
+- Tag: `v2.4.14`
+- Deployment strategy:
+  - Patch sync to the existing production `current` release directory.
+  - Replaced only changed source/runtime files and `v2-api/app/static/vue/**`.
+  - Did not overwrite production `.env`, `data/`, uploads.
+  - Did not run Alembic because this patch has no database schema change.
+- Backup:
+  - `/opt/module-manager-v2/backups/runtime/20260621_234534_before_v2.4.14_patch`
+  - Includes selected current files, static Vue bundle, `.env`, `data`, uploads if present, and PostgreSQL dump.
+- Production validation:
+  - `module-manager-v2.service`: active.
+  - `/health`: OK.
+  - `http://127.0.0.1:8000/login`: 200.
+  - `http://127.0.0.1:8000/project-board`: 200.
+  - `http://127.0.0.1:8000/claim-tasks`: 200.
+  - `http://127.0.0.1:8000/construction`: 200.
+  - `https://www.sgcc.online/login`: 200.
+  - Production version files confirm `2.4.14`.
+
 ### Claim task page workflow cleanup: V2.4.13
 
 - Date: 2026-06-21
