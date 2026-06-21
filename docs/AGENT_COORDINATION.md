@@ -9,7 +9,7 @@ This file is the shared coordination board for parallel maintenance threads.
 | Version | Owner | Scope | Status | Notes |
 | --- | --- | --- | --- | --- |
 | V2.4.12 | BUG fix thread | Construction mobile scanner patch | Released | Committed as `5f6d0aa` and tagged `v2.4.12`. Production deployment is delegated to the project engineer thread with SSH key access. |
-| V2.4.13 | Unassigned | Next small patch after V2.4.12 lands | Reserved next | Available for the next small fix unless another active thread claims it first. |
+| V2.4.13 | Project engineer thread `019edff4-0c40-7920-8872-3c20eacb4430` | ClaimTasks task-claiming page patch | Active | Scope: remove open/close construction buttons, reviewer only sees task cards with unreviewed work, admin sees all task cards, add admin construction assignment entry, improve card hierarchy. BUG fix thread must not edit ClaimTasks-related files. |
 
 ## Rules
 
