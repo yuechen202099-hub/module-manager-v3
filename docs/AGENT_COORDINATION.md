@@ -8,7 +8,7 @@ This file is the shared coordination board for parallel maintenance threads.
 
 | Version | Owner | Scope | Status | Notes |
 | --- | --- | --- | --- | --- |
-| V2.4.12 | BUG fix thread | Construction mobile scanner patch | Released | Committed as `5f6d0aa` and tagged `v2.4.12`. Production deployment is delegated to the project engineer thread with SSH key access. |
+| V2.4.12 | BUG fix thread + project engineer deploy thread | Construction mobile scanner patch | Released | Committed as `5f6d0aa`, tagged `v2.4.12`, deployed by project engineer. Backup: `/opt/module-manager-v2/backups/runtime/20260621_224811_before_v2.4.12`; release: `/opt/module-manager-v2/releases/v2.4.12-20260621_224816`; service active; `/health`, `/login`, `/project-board`, `/construction` OK; `/openapi.json` 404. Real phone scan QA still pending. |
 | V2.4.13 | Project engineer thread `019edff4-0c40-7920-8872-3c20eacb4430` | ClaimTasks task-claiming page patch | Active | Scope: remove open/close construction buttons, reviewer only sees task cards with unreviewed work, admin sees all task cards, add admin construction assignment entry, improve card hierarchy. BUG fix thread must not edit ClaimTasks-related files. |
 
 ## Rules

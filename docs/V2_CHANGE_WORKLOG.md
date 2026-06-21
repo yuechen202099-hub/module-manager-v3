@@ -2058,3 +2058,14 @@
 - Deployment handoff:
   - SSH deployment is assigned to the project engineer thread with key access.
   - Suggested command after pulling this commit on the server: rebuild Vue if needed, restart `module-manager-v2.service`, reload Nginx if config changed, then verify `/health`, `/login`, and `/construction`.
+  - Production deployment result from project engineer thread:
+    - Strategy: new release directory + `current` symlink switch, not in-place overwrite.
+    - Production `.env`, `data/`, and uploads were not overwritten.
+    - Alembic migration was not executed.
+    - Backup: `/opt/module-manager-v2/backups/runtime/20260621_224811_before_v2.4.12`.
+    - Release: `/opt/module-manager-v2/releases/v2.4.12-20260621_224816`.
+    - Service: active.
+    - Server-local checks: `/health` OK, `/login` 200, `/project-board` 200, `/construction` 200, `/openapi.json` 404, `https://www.sgcc.online/login` 200.
+    - Version files confirmed as `2.4.12`: `v2-api/app/main.py`, `v2-web/package.json`, `v2-api/app/static/vue/index.html`.
+    - External HTTPS curl from engineer machine reset while server-local HTTPS was OK; HTTP IP external GET returned 200.
+    - Real phone scanner QA remains pending.

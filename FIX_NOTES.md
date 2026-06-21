@@ -170,4 +170,10 @@ Last updated: 2026-06-21
 - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`：通过。
 - `python scripts\verify_vue_migration_gate.py --strict-native`：通过。
 - `pytest v2-api\tests\test_api.py -q`：`43 passed, 1 warning`。
-- 真实手机相机权限和条形码识别需要在生产部署后用手机浏览器验证。
+- 生产发布已由项目工程师线程完成：
+  - 备份路径：`/opt/module-manager-v2/backups/runtime/20260621_224811_before_v2.4.12`
+  - 当前 release：`/opt/module-manager-v2/releases/v2.4.12-20260621_224816`
+  - 服务状态：active。
+  - 服务器本机验证：`/health` OK，`/login` 200，`/project-board` 200，`/construction` 200，`/openapi.json` 404，`https://www.sgcc.online/login` 200。
+  - 版本文件确认：`v2-api/app/main.py`、`v2-web/package.json`、`v2-api/app/static/vue/index.html` 均为 `2.4.12`。
+- 真实手机相机权限和条形码识别仍需现场执行最终验证。
