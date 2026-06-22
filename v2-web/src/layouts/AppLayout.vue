@@ -252,7 +252,7 @@ async function startShellScanImport(message: { file?: File; filename?: string })
   <div class="app-shell" :class="{ embedded: isEmbedded, 'construction-route': isConstructionRoute }">
     <header v-if="!isEmbedded" class="topbar">
       <div class="topbar-brand">
-        <span class="brand-mark">V2.5.2</span>
+        <span class="brand-mark">V2.5.3</span>
         <div class="brand-copy">
           <strong>模块更换项目管理器</strong>
           <span>{{ workspace.activeProject?.name || '工程审阅与施工采集工作台' }}</span>

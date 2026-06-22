@@ -214,6 +214,16 @@ type BackendInstallerWorkload = {
     archived_count?: number
     exception_count?: number
     unreviewed_count?: number
+    exception_groups?: Array<{
+      group_id?: string
+      meter_no?: string
+      terminal?: string
+      address?: string
+      status?: string
+      exception_note?: string
+      exception_reasons?: string[]
+      photo_count?: number
+    }>
   }>
 }
 
@@ -926,6 +936,16 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
       archivedCount: Number(item.archived_count || 0),
       exceptionCount: Number(item.exception_count || 0),
       unreviewedCount: Number(item.unreviewed_count || 0),
+      exceptionGroups: (item.exception_groups || []).map((group) => ({
+        groupId: String(group.group_id || ''),
+        meterNo: String(group.meter_no || ''),
+        terminal: String(group.terminal || ''),
+        address: String(group.address || ''),
+        status: String(group.status || ''),
+        exceptionNote: String(group.exception_note || ''),
+        exceptionReasons: Array.isArray(group.exception_reasons) ? group.exception_reasons.filter(Boolean) : [],
+        photoCount: Number(group.photo_count || 0),
+      })),
     })),
   }
 }

@@ -61,6 +61,12 @@ Last updated: 2026-06-21
 | --- | --- | --- | --- | --- | --- |
 | BH-0118 | Construction mobile permanent field-task cards could open the field-task list but fail to enter the related collection task. | Open `/construction` on mobile, tap the permanent exception or unmatched task card added in V2.5.1, then tap a listed field task. Records without a direct task id or cards tapped outside the small action button might not enter the terminal collection view. | Fixed locally in `V2.5.2`; pending project-engineer production publish. | 2026-06-22 | `v2-web/src/views/ConstructionView.vue` |
 
+## 2026-06-22 - V2.5.3 installer KPI exception drilldown
+
+| ID | Request | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0119 | Project board installer workload popup showed daily exception counts but could not open the underlying abnormal groups. | Open `/project-board`, click an installer in the installer distribution panel, then inspect the daily workload table; the exception count was only a number. | Fixed locally in `V2.5.3`; exception counts now open a daily abnormal group detail dialog. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `services.ts`, `types.ts`, `ProjectBoardView.vue` |
+
 ## 2026-06-22 - V2.5.1 UX maintenance
 
 | ID | Bug / UX issue | Reproduction | Status | Fixed at | Files |

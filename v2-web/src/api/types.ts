@@ -207,6 +207,18 @@ export type InstallerWorkloadRow = {
   archivedCount: number
   exceptionCount: number
   unreviewedCount: number
+  exceptionGroups: InstallerExceptionGroup[]
+}
+
+export type InstallerExceptionGroup = {
+  groupId: string
+  meterNo: string
+  terminal: string
+  address: string
+  status: string
+  exceptionNote: string
+  exceptionReasons: string[]
+  photoCount: number
 }
 
 export type InstallerWorkload = {

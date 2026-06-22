@@ -2328,3 +2328,33 @@
   - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_085116_before_v2.5.2_patch`.
   - Preserved production `.env`, `data`, uploads; no Alembic migration.
   - Verified `/health`, `/login`, `/project-board`, `/construction`, `/task-hall`, `/claim-tasks`, `https://www.sgcc.online/login`, and `/openapi.json` 404.
+
+### V2.5.3 project board installer KPI exception drilldown
+
+- Date: 2026-06-22
+- Owner: project engineer thread
+- Scope:
+  - Project board installer KPI daily workload popup.
+  - JSON and PostgreSQL state repository workload payloads.
+- Changed files:
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-web/src/api/types.ts`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/views/ProjectBoardView.vue`
+  - version metadata files
+  - maintenance documentation
+- Behavior:
+  - Installer daily workload rows now carry `exception_groups` details.
+  - The daily exception count in the installer workload modal is clickable when greater than zero.
+  - Clicking the count opens abnormal group details for that installer/date, including meter number, terminal, address, reason, and photo count.
+- Release note:
+  - No API path change.
+  - No database schema change.
+  - No Alembic migration required.
+- Validation:
+  - Frontend typecheck passed using bundled Node.
+- Vue production build passed with existing Rollup PURE/chunk-size warnings.
+- Vue migration gate passed.
+- Backend API tests passed: `43 passed, 1 warning`.
+- Browser QA opened `/project-board?qa=v253-installer-exception` and confirmed visible `V2.5.3`; local data is empty, so installer drilldown payload was verified with an in-memory backend sample.

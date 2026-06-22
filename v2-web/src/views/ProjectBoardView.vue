@@ -17,6 +17,7 @@ import {
 } from '@/api/services'
 import type {
   ImportJob,
+  InstallerExceptionGroup,
   InstallerWorkloadRow,
   ProjectSummary,
   ReviewTask,
@@ -73,6 +74,9 @@ const workloadDialogVisible = ref(false)
 const workloadLoading = ref(false)
 const workloadInstaller = ref('')
 const workloadRows = ref<InstallerWorkloadRow[]>([])
+const workloadExceptionDialogVisible = ref(false)
+const workloadExceptionDate = ref('')
+const workloadExceptionGroups = ref<InstallerExceptionGroup[]>([])
 
 const accountForm = reactive({
   username: '',
@@ -129,6 +133,7 @@ const workloadTotals = computed(() =>
     { groupCount: 0, photoCount: 0, archivedCount: 0, exceptionCount: 0, unreviewedCount: 0 },
   ),
 )
+const workloadExceptionTitle = computed(() => `${workloadInstaller.value} ${workloadExceptionDate.value} 异常明细`)
 
 const accountRoles: Array<{ value: UserRole; label: string }> = [
   { value: 'admin', label: '管理员' },
@@ -422,6 +427,9 @@ function csvCell(value: unknown) {
 async function openInstallerWorkload(installer: string) {
   workloadInstaller.value = installer
   workloadRows.value = []
+  workloadExceptionGroups.value = []
+  workloadExceptionDate.value = ''
+  workloadExceptionDialogVisible.value = false
   workloadDialogVisible.value = true
   workloadLoading.value = true
   try {
@@ -432,6 +440,13 @@ async function openInstallerWorkload(installer: string) {
   } finally {
     workloadLoading.value = false
   }
+}
+
+function openWorkloadExceptionGroups(row: InstallerWorkloadRow) {
+  if (!row.exceptionCount) return
+  workloadExceptionDate.value = row.date
+  workloadExceptionGroups.value = row.exceptionGroups || []
+  workloadExceptionDialogVisible.value = true
 }
 
 function exportInstallerWorkloadCsv() {
@@ -773,7 +788,20 @@ onUnmounted(() => {
         <el-table-column prop="groupCount" label="资料组" width="92" />
         <el-table-column prop="photoCount" label="照片" width="92" />
         <el-table-column prop="archivedCount" label="已归档" width="92" />
-        <el-table-column prop="exceptionCount" label="异常" width="92" />
+        <el-table-column label="异常" width="92">
+          <template #default="{ row }">
+            <el-button
+              v-if="row.exceptionCount"
+              class="workload-exception-link"
+              link
+              type="danger"
+              @click.stop="openWorkloadExceptionGroups(row)"
+            >
+              {{ row.exceptionCount }}
+            </el-button>
+            <span v-else>0</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="unreviewedCount" label="未审阅" width="92" />
       </el-table>
       <template #footer>
@@ -781,6 +809,31 @@ onUnmounted(() => {
         <el-button type="primary" :disabled="!workloadRows.length" @click="exportInstallerWorkloadCsv">
           导出 KPI CSV
         </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="workloadExceptionDialogVisible" :title="workloadExceptionTitle" width="860px">
+      <el-alert
+        class="claim-alert"
+        type="info"
+        :closable="false"
+        title="点击日期异常数后展示该安装人员当天产生的异常资料组，便于按人、按天追溯问题。"
+      />
+      <el-table :data="workloadExceptionGroups" height="420" size="small">
+        <el-table-column prop="meterNo" label="表号" min-width="130" />
+        <el-table-column prop="terminal" label="终端" min-width="130" />
+        <el-table-column prop="address" label="地址" min-width="240" show-overflow-tooltip />
+        <el-table-column label="异常原因" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="exception-reasons">
+              {{ row.exceptionReasons?.length ? row.exceptionReasons.join('；') : row.exceptionNote || '未填写' }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="photoCount" label="照片" width="76" />
+      </el-table>
+      <template #footer>
+        <el-button @click="workloadExceptionDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
   </section>
@@ -894,6 +947,21 @@ onUnmounted(() => {
 .workload-summary strong {
   color: var(--v2-text-strong, #0f172a);
   font-size: 22px;
+}
+
+.workload-exception-link {
+  height: auto;
+  padding: 0;
+  font-weight: 800;
+}
+
+.exception-reasons {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 @media (max-width: 1280px) {

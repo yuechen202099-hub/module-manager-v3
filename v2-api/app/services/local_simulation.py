@@ -2418,6 +2418,20 @@ def _photo_work_date_key(photo: dict[str, Any]) -> str:
     return ""
 
 
+def _installer_exception_group_payload(group: dict[str, Any]) -> dict[str, Any]:
+    reasons = build_exception_reasons(group)
+    return {
+        "group_id": str(group.get("id") or ""),
+        "meter_no": str(group.get("meter_no") or group.get("barcode") or ""),
+        "terminal": str(group.get("terminal") or ""),
+        "address": str(group.get("address") or ""),
+        "status": str(group.get("status") or ""),
+        "exception_note": str(group.get("exception_note") or group.get("review_note") or ""),
+        "exception_reasons": reasons,
+        "photo_count": int(group.get("photo_count") or len(group.get("photos", []) or [])),
+    }
+
+
 def installer_daily_workload(installer: str) -> dict[str, Any]:
     target = str(installer or "").strip()
     rows: dict[str, dict[str, Any]] = {}
@@ -2452,6 +2466,7 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
                 "archived_count": 0,
                 "exception_count": 0,
                 "unreviewed_count": 0,
+                "exception_groups": [],
             },
         )
         row["group_count"] += 1
@@ -2460,6 +2475,7 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
             row["archived_count"] += 1
         elif is_problem_group(group):
             row["exception_count"] += 1
+            row["exception_groups"].append(_installer_exception_group_payload(group))
         else:
             row["unreviewed_count"] += 1
     items = sorted(rows.values(), key=lambda item: str(item["date"]), reverse=True)

@@ -246,6 +246,23 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
     return payload
 
 
+def _installer_exception_group_payload(group: MaterialGroup, photo_count: int) -> dict[str, Any]:
+    reasons = [str(item).strip() for item in (group.exception_reasons or []) if str(item).strip()]
+    note = str(group.exception_note or group.review_note or "").strip()
+    if note and note not in reasons:
+        reasons.append(note)
+    return {
+        "group_id": group.legacy_id or str(group.id),
+        "meter_no": group.display_meter_no,
+        "terminal": group.terminal or "",
+        "address": group.installation_address,
+        "status": _legacy_group_status(group),
+        "exception_note": note,
+        "exception_reasons": reasons,
+        "photo_count": int(photo_count or group.photo_count or 0),
+    }
+
+
 def _group_target_summary(group: dict[str, Any]) -> dict[str, Any]:
     photo_count = int(group.get("photo_count") or 0)
     return {
@@ -1597,6 +1614,7 @@ class PostgresStateRepository(StateRepository):
                     "archived_count": 0,
                     "exception_count": 0,
                     "unreviewed_count": 0,
+                    "exception_groups": [],
                 },
             )
             row["group_count"] += 1
@@ -1609,6 +1627,7 @@ class PostgresStateRepository(StateRepository):
                 or group.has_archive_blocker
             ):
                 row["exception_count"] += 1
+                row["exception_groups"].append(_installer_exception_group_payload(group, len(matched_photos)))
             else:
                 row["unreviewed_count"] += 1
         items = sorted(rows_by_date.values(), key=lambda item: str(item["date"]), reverse=True)

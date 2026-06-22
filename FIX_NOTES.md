@@ -243,6 +243,45 @@ The task claiming page still exposed obsolete construction open/close actions. R
 - `vite build`: passed using bundled Node.
 - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+
+## 2026-06-22 - V2.5.3 installer KPI exception drilldown
+
+### Reason
+
+The installer daily workload popup on the project board already showed a per-date exception count, but managers could not click that count to inspect which material groups caused the exceptions.
+
+### Changed files
+
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-web/src/api/types.ts`
+- `v2-web/src/api/services.ts`
+- `v2-web/src/views/ProjectBoardView.vue`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Added `exception_groups` to each installer daily workload row for JSON and PostgreSQL state backends.
+- Mapped the abnormal group payload into the Vue API layer.
+- Made the daily exception count clickable in the installer workload table.
+- Added a lightweight abnormal group detail dialog with meter number, terminal, address, exception reason, and photo count.
+- Advanced version metadata to `V2.5.3`.
+
+### Impact
+
+- Project board KPI drilldown only.
+- No API path change.
+- No database schema change.
+- No Alembic migration required.
+
+### Validation
+
+- Frontend typecheck passed using bundled Node.
+- Vue production build passed with existing Rollup PURE/chunk-size warnings.
+- Vue migration gate passed.
+- Backend API tests passed: `43 passed, 1 warning`.
+- Browser QA opened `/project-board?qa=v253-installer-exception` and confirmed visible `V2.5.3`; local data is empty, so installer drilldown payload was verified with an in-memory backend sample.
 - Headless Chrome screenshot verified the local claim task page renders `V2.4.13`, no longer shows `开放施工` / `关闭施工`, shows `指派施工`, and keeps `领取` readable.
 
 ## 2026-06-22 - V2.4.15 review/thumbnail/KPI hotfix
