@@ -1679,33 +1679,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div v-loading="loadingTasks" class="task-list">
-          <div class="task-mode-grid">
-            <button
-              class="task-card field-task-entry kind-exception"
-              :class="{ active: taskPickerMode === 'exception' }"
-              type="button"
-              @click="selectTaskPickerMode('exception')"
-            >
-              <div class="task-title">
-                <strong>异常任务</strong>
-                <el-tag type="danger" effect="light">{{ visibleExceptionTaskCards.length }}</el-tag>
-              </div>
-              <p>处理异常组补图、改采集器或模块号</p>
-            </button>
-            <button
-              class="task-card field-task-entry kind-unmatched"
-              :class="{ active: taskPickerMode === 'unmatched' }"
-              type="button"
-              @click="selectTaskPickerMode('unmatched')"
-            >
-              <div class="task-title">
-                <strong>未匹配任务</strong>
-                <el-tag type="warning" effect="light">{{ visibleUnmatchedTaskCards.length }}</el-tag>
-              </div>
-              <p>现场确认未匹配地址、换表和项目外施工</p>
-            </button>
-          </div>
-
           <div v-if="taskPickerMode === 'exception'" class="field-task-picker-list">
             <article
               v-for="order in visibleExceptionTaskCards"
@@ -2376,32 +2349,6 @@ onBeforeUnmount(() => {
 .task-list {
   min-height: 0;
   max-height: none;
-}
-
-.task-mode-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.field-task-entry {
-  border-left: 4px solid transparent;
-  background: linear-gradient(180deg, #ffffff, #fbfdff);
-}
-
-.field-task-entry.kind-exception {
-  border-left-color: #b42318;
-}
-
-.field-task-entry.kind-unmatched {
-  border-left-color: #d97706;
-}
-
-.field-task-entry p {
-  margin: 0;
-  color: #667085;
-  font-size: 12px;
-  line-height: 1.4;
 }
 
 .field-task-picker-list {
@@ -3156,10 +3103,6 @@ onBeforeUnmount(() => {
 
   .task-card {
     min-width: 0;
-  }
-
-  .task-mode-grid {
-    grid-template-columns: 1fr;
   }
 
   .group-tools {

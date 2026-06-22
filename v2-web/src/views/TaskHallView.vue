@@ -1414,38 +1414,6 @@ onUnmounted(() => {
       </div>
       <div class="review-task-list">
         <button
-          class="review-list-card task-card-simple field-entry-card kind-exception"
-          :class="{ active: activeTaskMode === 'exception' }"
-          type="button"
-          @click="selectFieldTaskMode('exception')"
-        >
-          <div class="field-entry-title">
-            <strong>异常任务</strong>
-            <ElTag type="danger" effect="light">{{ exceptionFieldTaskCards.length }}</ElTag>
-          </div>
-          <span>异常组指派、回流施工处理</span>
-          <div class="task-mini-metrics">
-            <b>待处理 {{ exceptionFieldTaskCards.length }}</b>
-            <b>已指派 {{ exceptionOrders.filter((order) => order.assignedTo).length }}</b>
-          </div>
-        </button>
-        <button
-          class="review-list-card task-card-simple field-entry-card kind-unmatched"
-          :class="{ active: activeTaskMode === 'unmatched' }"
-          type="button"
-          @click="selectFieldTaskMode('unmatched')"
-        >
-          <div class="field-entry-title">
-            <strong>未匹配任务</strong>
-            <ElTag type="warning" effect="light">{{ unmatchedFieldTaskCards.length }}</ElTag>
-          </div>
-          <span>改表号、换表、项目外施工</span>
-          <div class="task-mini-metrics">
-            <b>待处理 {{ unmatchedFieldTaskCards.length }}</b>
-            <b>项目外 {{ unmatchedRecords.filter((record) => record.projectOutside).length }}</b>
-          </div>
-        </button>
-        <button
           v-for="task in myTasks"
           :key="task.id"
           class="review-list-card task-card-simple"
@@ -1764,35 +1732,6 @@ onUnmounted(() => {
   background: var(--v2-bg-subtle);
   color: var(--v2-text-strong);
   font-size: 12px;
-  white-space: nowrap;
-}
-
-.field-entry-card {
-  position: relative;
-  border-left: 4px solid transparent;
-  background: linear-gradient(180deg, #ffffff, #fbfdff);
-}
-
-.field-entry-card.kind-exception {
-  border-left-color: #b42318;
-}
-
-.field-entry-card.kind-unmatched {
-  border-left-color: #d97706;
-}
-
-.field-entry-title {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.field-entry-title strong {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

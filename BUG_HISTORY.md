@@ -125,3 +125,9 @@ Last updated: 2026-06-22
 | ID | 问题 / 风险 | 复现方式 | 修复状态 | 修复时间 | 涉及文件 |
 | --- | --- | --- | --- | --- | --- |
 | BH-0128 | 安装人员 KPI 地址权重可能把同一楼栋拆散：一条是住户地址，另一条是公用设备时，同楼栋公用设备会被计算得像零散地址。 | 构造同一天 KPI 数据，包含 `95弄18号201室`、`95弄18号公用设备`、`95弄19号公用设备`；旧逻辑可能只依赖后缀裁剪，没有优先把 `95弄18号` 作为共享楼栋键。 | 已在 `V2.6.3` 本地修复；地址聚类会优先使用 `弄+号` / `号` 作为楼栋键，再处理室号、公用设备等后缀。 | 2026-06-22 | `local_simulation.py`, `test_api.py` |
+
+## 2026-06-22 - V2.6.4 permanent field task cards removed
+
+| ID | UX issue | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0129 | The permanent exception/unmatched task cards made the review workbench and construction collection task list noisy after those workflows were folded back into normal handling. | Open `/task-hall` or `/construction`; the always-visible exception/unmatched cards appeared before normal terminal tasks. | Fixed locally in `V2.6.4`; the permanent entry cards were removed while the underlying APIs/data remain unchanged. | 2026-06-22 | `TaskHallView.vue`, `ConstructionView.vue` |

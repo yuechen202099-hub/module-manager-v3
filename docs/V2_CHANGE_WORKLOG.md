@@ -2756,3 +2756,33 @@
   - 备份路径：`/opt/module-manager-v2/backups/runtime/20260622_204933_before_v2.6.3_patch`。
   - 生产 `.env`、`data`、uploads 均保留；未执行 Alembic 迁移。
   - 生产检查通过：`/health`、`/login`、`/project-board`、`https://www.sgcc.online/login`；`/openapi.json` 返回 `404`。
+
+### V2.6.4 remove permanent exception/unmatched task cards
+
+- Date: 2026-06-22
+- Owner: Project engineer thread
+- Goal:
+  - Remove the always-visible exception/unmatched task cards from the review workbench left task list.
+  - Remove the always-visible exception/unmatched task cards from the construction collection task picker.
+  - Keep exception/unmatched data and underlying service APIs intact.
+- Files changed:
+  - `v2-web/src/views/TaskHallView.vue`
+  - `v2-web/src/views/ConstructionView.vue`
+  - Version metadata files
+  - `BUG_HISTORY.md`
+  - `FIX_NOTES.md`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - `/task-hall` now shows only normal claimed terminal tasks in the left task list.
+  - `/construction` no longer shows the permanent exception/unmatched entry cards.
+- Database note:
+  - No Alembic migration required.
+- Validation:
+  - `python -m py_compile v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - `rg "field-entry-card|field-task-entry|异常任务 3|未匹配任务 97" v2-web\src\views v2-api\app\static\vue`: no matches.
+- Status:
+  - Ready for patch deployment.

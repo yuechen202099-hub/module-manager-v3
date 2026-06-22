@@ -771,6 +771,42 @@ The V2.6.0 completion line chart made the work-time popup visually noisy and did
 - Production checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`.
 - `/openapi.json`: `404`.
 
+
+## 2026-06-22 - V2.6.4 remove permanent field task cards
+
+### Reason
+
+The always-visible exception and unmatched task cards in the review workbench and construction collection page added visual noise after the workflow was folded back into normal task handling.
+
+### Changed files
+
+- `v2-web/src/views/TaskHallView.vue`
+- `v2-web/src/views/ConstructionView.vue`
+- Version metadata files
+- Maintenance documentation
+
+### Changes
+
+- Removed the permanent exception/unmatched task entry cards from `/task-hall`.
+- Removed the permanent exception/unmatched task entry cards from `/construction`.
+- Kept existing underlying APIs/data structures and terminal workflows unchanged.
+- Advanced visible/runtime version metadata to `V2.6.4`.
+
+### Impact
+
+- UI-only change.
+- No API path changes.
+- No Alembic migration.
+- Existing exception/unmatched data remains intact.
+
+### Validation
+
+- `python -m py_compile v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `rg "field-entry-card|field-task-entry|异常任务 3|未匹配任务 97" v2-web\src\views v2-api\app\static\vue`: no matches.
+
 ## 2026-06-22 - V2.6.3 安装人员 KPI 同楼栋地址聚类
 
 ### 修改原因
