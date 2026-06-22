@@ -2322,3 +2322,9 @@
   - `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
   - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
   - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+- Production deployment:
+  - Published to production by project engineer patch sync.
+  - Code commit: `8ac42ba`; tag: `v2.5.2`.
+  - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_085116_before_v2.5.2_patch`.
+  - Preserved production `.env`, `data`, uploads; no Alembic migration.
+  - Verified `/health`, `/login`, `/project-board`, `/construction`, `/task-hall`, `/claim-tasks`, `https://www.sgcc.online/login`, and `/openapi.json` 404.
