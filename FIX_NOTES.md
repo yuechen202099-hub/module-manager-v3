@@ -628,3 +628,22 @@ The task claiming page needed a direct way to locate terminal cards by terminal 
 - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - Bundled Node `vue-tsc --noEmit`: passed.
 - Browser QA on `http://127.0.0.1:8000/claim-tasks`: V2.5.7 page loaded, search input visible, terminal search filtered 135 cards down to the matching terminal card.
+
+### Production deployment
+
+- Published by project engineer patch sync.
+- Commit/tag: `13074ab` / `v2.5.7`.
+- Backup path: `/opt/module-manager-v2/backups/runtime/20260622_163957_before_v2.5.7_patch`.
+- Production `.env`, `data`, and uploads were preserved.
+- Production was still on `V2.5.5` with Alembic `20260619_0003`; ran `alembic upgrade head` to apply `20260622_0004`.
+- Verification:
+  - `module-manager-v2.service`: active.
+  - Runtime version: `2.5.7`.
+  - Alembic current: `20260622_0004 (head)`.
+  - `/health`: OK.
+  - `/login`: shows `V2.5.7`.
+  - `http://106.14.122.43/login`: 200 and shows `V2.5.7`.
+  - `http://www.sgcc.online/login`: 200 and shows `V2.5.7`.
+  - `https://www.sgcc.online/login`: 200 and shows `V2.5.7`.
+  - `/openapi.json`: 404.
+  - Production task repository returns non-empty `address_search_text`.
