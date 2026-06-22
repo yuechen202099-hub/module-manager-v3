@@ -2724,29 +2724,35 @@
   - Production `.env`, `data`, uploads preserved; no Alembic migration.
   - Production checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`; `/openapi.json` returned `404`.
 
-### V2.6.3 installer KPI same-building clustering
+### V2.6.3 安装人员 KPI 同楼栋地址聚类
 
-- Date: 2026-06-22
-- Owner: BUG fix thread
-- Goal:
-  - Tune installer KPI address weighting so records with the same building number are treated as one work cluster.
-  - Keep public equipment in the same building together with room addresses.
-- Files changed:
+- 日期：2026-06-22
+- 负责人：BUG 修复线程
+- 目标：
+  - 调整安装人员 KPI 地址权重，让同一楼栋号的数据视为同一工作簇。
+  - 同楼栋公用设备和住户地址归到一起计算。
+- 修改文件：
   - `v2-api/app/services/local_simulation.py`
   - `v2-api/tests/test_api.py`
-  - version metadata files
+  - 版本标识文件
   - `BUG_HISTORY.md`
   - `FIX_NOTES.md`
   - `docs/AGENT_COORDINATION.md`
   - `docs/V2_CHANGE_WORKLOG.md`
-- Behavior:
-  - Address clustering now prefers the building-level `弄+号` / `号` key before trimming room, parking-space, or charging-pile suffixes.
-  - Example: `95弄18号201室` and `95弄18号公用设备` share a cluster, while `95弄19号公用设备` remains separate.
-- Database note:
-  - No Alembic migration required.
-- Validation:
-  - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
-  - `pytest v2-api\tests\test_api.py::test_installer_kpi_clusters_same_building_number_public_equipment -q`: passed.
-  - `pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
-  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
-  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- 行为：
+  - 地址聚类优先使用楼栋级 `弄+号` / `号` 键，再裁剪室号、车位、充电桩等后缀。
+  - 示例：`95弄18号201室` 和 `95弄18号公用设备` 共享同一地址簇，`95弄19号公用设备` 保持独立。
+- 数据库说明：
+  - 不需要 Alembic 迁移。
+- 验证：
+  - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/main.py v2-api/app/services/ops_status.py`：通过。
+  - `pytest v2-api\tests\test_api.py::test_installer_kpi_clusters_same_building_number_public_equipment -q`：通过。
+  - `pytest v2-api\tests\test_api.py -q`：`45 passed, 1 warning`。
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`：通过，仍有既有 Rollup PURE / chunk-size 警告。
+  - `python scripts\verify_vue_migration_gate.py --strict-native`：通过。
+- 状态：
+  - 已通过 patch sync 发布到生产。
+  - Commit: `5e748ca`; tag: `v2.6.3`.
+  - 备份路径：`/opt/module-manager-v2/backups/runtime/20260622_204933_before_v2.6.3_patch`。
+  - 生产 `.env`、`data`、uploads 均保留；未执行 Alembic 迁移。
+  - 生产检查通过：`/health`、`/login`、`/project-board`、`https://www.sgcc.online/login`；`/openapi.json` 返回 `404`。

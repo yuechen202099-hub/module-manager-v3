@@ -120,8 +120,8 @@ Last updated: 2026-06-22
 | --- | --- | --- | --- | --- | --- |
 | BH-0127 | Personnel KPI work-time popup looked visually noisy and the completion line chart was hard to read. | Open `/project-board`, click an installer, then click a daily work-time value. V2.6.0/V2.6.1 displayed a thick completion line above the bars, making the popup feel cluttered. | Fixed locally in `V2.6.2`; the line chart was removed and the chart was restyled as a quieter Apple Screen Time style 2-hour bar view with direct completion labels and address drilldown preserved. | 2026-06-22 | `ProjectBoardView.vue` |
 
-## 2026-06-22 - V2.6.3 installer KPI same-building clustering
+## 2026-06-22 - V2.6.3 安装人员 KPI 同楼栋地址聚类
 
-| ID | Request / Risk | Reproduction | Status | Fixed at | Files |
+| ID | 问题 / 风险 | 复现方式 | 修复状态 | 修复时间 | 涉及文件 |
 | --- | --- | --- | --- | --- | --- |
-| BH-0128 | Installer KPI address weighting could split the same building number when one row is a room address and another row is public equipment, making common equipment in the same building look more scattered than it is. | Build a KPI day containing `95弄18号201室`, `95弄18号公用设备`, and `95弄19号公用设备`; older clustering could fall back to suffix trimming instead of treating `95弄18号` as the shared building key. | Fixed locally in `V2.6.3`; address clustering now prefers `弄+号` / `号` as the building key before room/public-equipment suffix cleanup. | 2026-06-22 | `local_simulation.py`, `test_api.py` |
+| BH-0128 | 安装人员 KPI 地址权重可能把同一楼栋拆散：一条是住户地址，另一条是公用设备时，同楼栋公用设备会被计算得像零散地址。 | 构造同一天 KPI 数据，包含 `95弄18号201室`、`95弄18号公用设备`、`95弄19号公用设备`；旧逻辑可能只依赖后缀裁剪，没有优先把 `95弄18号` 作为共享楼栋键。 | 已在 `V2.6.3` 本地修复；地址聚类会优先使用 `弄+号` / `号` 作为楼栋键，再处理室号、公用设备等后缀。 | 2026-06-22 | `local_simulation.py`, `test_api.py` |

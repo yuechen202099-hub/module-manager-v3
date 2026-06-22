@@ -771,38 +771,49 @@ The V2.6.0 completion line chart made the work-time popup visually noisy and did
 - Production checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`.
 - `/openapi.json`: `404`.
 
-## 2026-06-22 - V2.6.3 installer KPI same-building clustering
+## 2026-06-22 - V2.6.3 安装人员 KPI 同楼栋地址聚类
 
-### Reason
+### 修改原因
 
-The installer KPI address weighting should treat records with the same building number as one work cluster. Public equipment in the same building, such as `95弄18号公用设备`, should stay with room addresses like `95弄18号201室` instead of being treated as scattered work.
+安装人员 KPI 地址权重需要把同一楼栋号的数据视为同一工作簇。`95弄18号公用设备` 这类同楼栋公用设备，应和 `95弄18号201室` 这类住户地址归到一起，而不是被当作零散地址。
 
-### Changed files
+### 修改文件
 
 - `v2-api/app/services/local_simulation.py`
 - `v2-api/tests/test_api.py`
-- version metadata files
-- maintenance documentation
+- 版本标识文件
+- 维护文档
 
-### Changes
+### 修改内容
 
-- Updated the KPI address cluster key to prefer the building-level `弄+号` / `号` pattern before suffix cleanup.
-- Added a regression test that keeps `95弄18号201室` and `95弄18号公用设备` in the same cluster while keeping `95弄19号公用设备` separate.
-- Advanced version metadata to `V2.6.3`.
+- KPI 地址聚类键优先识别楼栋级 `弄+号` / `号`，再执行室号、车位、充电桩等后缀清理。
+- 新增回归测试，确认 `95弄18号201室` 和 `95弄18号公用设备` 归为同一簇，同时 `95弄19号公用设备` 保持独立。
+- 版本标识推进到 `V2.6.3`。
 
-### Impact
+### 影响范围
 
-- Affects only installer KPI address weight and address drilldown clustering.
-- No API path change.
-- No database migration.
+- 仅影响安装人员 KPI 地址权重和地址明细聚类。
+- 不改变 API 路径。
+- 不需要数据库迁移。
 
-### Validation
+### 验证方法
 
-- `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
-- `pytest v2-api\tests\test_api.py::test_installer_kpi_clusters_same_building_number_public_equipment -q`: passed.
-- `pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
-- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
-- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/main.py v2-api/app/services/ops_status.py`：通过。
+- `pytest v2-api\tests\test_api.py::test_installer_kpi_clusters_same_building_number_public_equipment -q`：通过。
+- `pytest v2-api\tests\test_api.py -q`：`45 passed, 1 warning`。
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`：通过，仍有既有 Rollup PURE / chunk-size 警告。
+- `python scripts\verify_vue_migration_gate.py --strict-native`：通过。
+
+### 生产发布
+
+- Commit: `5e748ca`.
+- Tag: `v2.6.3`.
+- 发布方式：patch sync 到现有生产 `current` 目录；未做完整 release 替换。
+- 备份路径：`/opt/module-manager-v2/backups/runtime/20260622_204933_before_v2.6.3_patch`。
+- 生产 `.env`、`data`、uploads 均保留。
+- 未执行 Alembic 迁移。
+- 生产检查通过：`/health`、`/login`、`/project-board`、`https://www.sgcc.online/login`。
+- `/openapi.json`: `404`.
 
 ## 2026-06-22 - V2.6.0 installer KPI efficiency model
 
