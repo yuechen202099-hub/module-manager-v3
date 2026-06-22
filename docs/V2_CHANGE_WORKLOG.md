@@ -2490,3 +2490,53 @@
 - Status:
   - Local implementation complete.
   - Requires production backup plus Alembic migration before deployment.
+
+### V2.5.7 claim task terminal/address search
+
+- Date: 2026-06-22
+- Owner: Project engineer thread
+- Goal:
+  - Add a search box on the task claiming page so users can locate terminal cards by terminal number or installation address.
+  - Keep the current reviewer/admin visibility rules unchanged.
+- Files changed:
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/tests/test_api.py`
+  - `v2-web/src/api/types.ts`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/views/ClaimTasksView.vue`
+  - `v2-web/src/styles/main.css`
+  - `v2-api/app/main.py`
+  - `v2-api/app/services/ops_status.py`
+  - `v2-api/pyproject.toml`
+  - `v2-web/package.json`
+  - `v2-web/index.html`
+  - `v2-web/src/components/AppLayout.vue`
+  - `v2-web/src/layouts/AppLayout.vue`
+  - `v2-web/src/views/LoginView.vue`
+  - `v2-api/app/static/app_shell.html`
+  - `v2-api/app/static/task_hall.html`
+  - `PROJECT_KNOWLEDGE.md`
+  - `AGENTS.md`
+  - `FIX_NOTES.md`
+  - `BUG_HISTORY.md`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - Task payloads now include `address` and `address_search_text`.
+  - JSON state tasks get the address search fields refreshed on task-list reads, so existing data can be searched immediately.
+  - PostgreSQL task stats include a full address aggregation for search without displaying long address text in cards.
+  - The claim task page filters the currently visible task set by terminal, id, name, first address, or full address search index.
+  - Search is responsive and stacks cleanly on narrow screens.
+- Database note:
+  - No Alembic migration required.
+- Validation:
+  - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+  - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - Bundled Node `vue-tsc --noEmit`: passed.
+  - Browser QA on `http://127.0.0.1:8000/claim-tasks`: V2.5.7 page loaded, search input visible, terminal search filtered 135 cards down to the matching terminal card.
+- Status:
+  - Local implementation complete.
+  - Not deployed.

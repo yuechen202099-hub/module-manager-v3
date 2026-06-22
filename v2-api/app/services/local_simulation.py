@@ -2292,10 +2292,14 @@ def build_terminal_tasks(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
         metrics = calculate_task_metrics(terminal_groups)
         scan_rows = sum(group["photo_count"] for group in terminal_groups)
         has_scan_info = scan_rows > 0
+        address = first_task_address(terminal_groups)
+        address_search_text = task_address_search_text(terminal_groups)
         task = {
             "id": task_id,
             "project_id": 1,
             "terminal": terminal,
+            "address": address,
+            "address_search_text": address_search_text,
             "name": f"终端 {terminal}",
             "status": "published",
             "claimed_by": None,
@@ -2321,6 +2325,26 @@ def build_terminal_tasks(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         tasks.append(task)
     return tasks
+
+
+def first_task_address(groups: list[dict[str, Any]]) -> str:
+    for group in groups:
+        address = str(group.get("address") or "").strip()
+        if address:
+            return address
+    return ""
+
+
+def task_address_search_text(groups: list[dict[str, Any]]) -> str:
+    addresses: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        address = str(group.get("address") or "").strip()
+        if not address or address in seen:
+            continue
+        seen.add(address)
+        addresses.append(address)
+    return " ".join(addresses)
 
 
 def build_summary(
@@ -2497,6 +2521,8 @@ def refresh_summary() -> None:
         ensure_construction_task_fields(task)
         task_groups = [group for group in state["groups"] if group["task_id"] == task["id"]]
         metrics = calculate_task_metrics(task_groups)
+        task["address"] = first_task_address(task_groups)
+        task["address_search_text"] = task_address_search_text(task_groups)
         task["total_groups"] = len(task_groups)
         task["completed_groups"] = sum(1 for group in task_groups if is_reviewed_group(group))
         task["exception_groups"] = sum(1 for group in task_groups if is_problem_group(group))
@@ -2536,6 +2562,8 @@ def refresh_task_summary(task_id: int) -> None:
     ensure_construction_task_fields(task)
     task_groups = [group for group in state["groups"] if group["task_id"] == task_id]
     metrics = calculate_task_metrics(task_groups)
+    task["address"] = first_task_address(task_groups)
+    task["address_search_text"] = task_address_search_text(task_groups)
     task["total_groups"] = len(task_groups)
     task["completed_groups"] = sum(1 for group in task_groups if is_reviewed_group(group))
     task["exception_groups"] = sum(1 for group in task_groups if is_problem_group(group))
@@ -3307,10 +3335,17 @@ def get_group(group_id: str) -> dict[str, Any] | None:
 
 
 def list_tasks() -> list[dict[str, Any]]:
-    for task in get_state()["tasks"]:
+    state = get_state()
+    groups_by_task: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for group in state["groups"]:
+        groups_by_task[int(group.get("task_id") or 0)].append(group)
+    for task in state["tasks"]:
         ensure_construction_task_fields(task)
+        task_groups = groups_by_task.get(int(task.get("id") or 0), [])
+        task["address"] = first_task_address(task_groups)
+        task["address_search_text"] = task_address_search_text(task_groups)
     return sorted(
-        get_state()["tasks"],
+        state["tasks"],
         key=lambda task: (
             not task.get("can_claim", False),
             str(task.get("terminal", "")),

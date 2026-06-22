@@ -308,6 +308,11 @@ button {
   margin: 0;
 }
 
+.claim-task-search {
+  width: min(380px, 100%);
+  flex: 0 1 380px;
+}
+
 .metric-grid,
 .claim-summary,
 .board-metrics {
@@ -1093,6 +1098,11 @@ button {
   .construction-submit-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .claim-task-search {
+    width: 100%;
+    flex: none;
   }
 
   .claim-actions,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Refresh, Unlock, UserFilled } from '@element-plus/icons-vue'
+import { Refresh, Search, Unlock, UserFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -22,15 +22,20 @@ const releasingAll = ref(false)
 const assigningTaskId = ref('')
 const tasks = ref<ReviewTask[]>([])
 const errorMessage = ref('')
+const searchQuery = ref('')
 let refreshInterval = 0
 let refreshTimer = 0
 
 const actor = computed(() => auth.user?.username || auth.user?.id || currentActor())
 const isAdmin = computed(() => auth.user?.role === 'admin' || auth.user?.roles?.includes('admin'))
-const visibleTasks = computed(() => {
-  const items = isAdmin.value
+const baseVisibleTasks = computed(() =>
+  isAdmin.value
     ? [...tasks.value]
-    : tasks.value.filter((task) => task.hasScanInfo && Number(task.unreviewedCount || 0) > 0)
+    : tasks.value.filter((task) => task.hasScanInfo && Number(task.unreviewedCount || 0) > 0),
+)
+const visibleTasks = computed(() => {
+  const query = normalizeSearch(searchQuery.value)
+  const items = query ? baseVisibleTasks.value.filter((task) => taskMatchesSearch(task, query)) : [...baseVisibleTasks.value]
   return items.sort((left, right) => {
     if (!isAdmin.value) {
       const myDiff = Number(right.claimedBy === actor.value) - Number(left.claimedBy === actor.value)
@@ -69,6 +74,26 @@ function percent(value: number | undefined) {
 
 function countValue(value: number | undefined) {
   return Number(value || 0)
+}
+
+function normalizeSearch(value: string) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+}
+
+function taskMatchesSearch(task: ReviewTask, query: string) {
+  const haystack = normalizeSearch(
+    [
+      task.terminal,
+      task.address,
+      task.addressSearchText,
+      task.name,
+      task.id,
+    ].filter(Boolean).join(' '),
+  )
+  return haystack.includes(query)
 }
 
 function taskReviewPercent(task: ReviewTask) {
@@ -247,10 +272,21 @@ onUnmounted(() => {
             共 {{ visibleTasks.length }} 个{{ isAdmin ? '可见终端' : '待审终端' }} / {{ tasks.length }} 个总终端
           </p>
         </div>
+        <ElInput
+          v-model="searchQuery"
+          class="claim-task-search"
+          clearable
+          :prefix-icon="Search"
+          placeholder="搜索终端号或地址"
+          aria-label="搜索终端号或地址"
+        />
       </div>
 
       <ElSkeleton v-if="loading && !tasks.length" :rows="6" animated />
-      <ElEmpty v-else-if="!visibleTasks.length" description="暂无可领取终端任务" />
+      <ElEmpty
+        v-else-if="!visibleTasks.length"
+        :description="searchQuery ? '没有匹配的终端或地址' : '暂无可领取终端任务'"
+      />
       <div v-else class="claim-task-grid">
         <article
           v-for="task in visibleTasks"

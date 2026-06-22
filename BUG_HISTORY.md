@@ -89,3 +89,9 @@ Last updated: 2026-06-21
 | ID | Request / Risk | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0122 | The old one-terminal-per-constructor rule blocks field work when one constructor needs to handle multiple nearby terminals. PostgreSQL also had a partial unique index that would still reject a second assignment even after code changes. | Assign one terminal to a constructor, then try to assign a second terminal to the same constructor. Old behavior rejected the second assignment. | Fixed locally in `V2.5.6`; rule is now max 5 active terminal tasks per constructor. Production deployment must run Alembic migration `20260622_0004` before using the new capacity. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `0004_allow_five_construction_tasks.py`, `test_api.py`, `v2-miniprogram/miniprogram/**` |
+
+## 2026-06-22 - V2.5.7 claim task search
+
+| ID | Request / Risk | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0123 | The task claiming page required terminal/address search; without it, users had to scan the full terminal card grid manually. | Open `/claim-tasks` with many terminal cards and try to find a specific terminal or installation address. | Fixed locally in `V2.5.7`; the claim task page now filters role-visible tasks by terminal number, task id, and full task address index. | 2026-06-22 | `ClaimTasksView.vue`, `main.css`, `services.ts`, `types.ts`, `local_simulation.py`, `state_repository.py`, `test_api.py` |

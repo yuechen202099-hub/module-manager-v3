@@ -81,6 +81,8 @@ export type ReviewTask = {
   stage: string
   status: TaskStatus
   terminal?: string
+  address?: string
+  addressSearchText?: string
   totalGroups: number
   claimedGroups: number
   completedGroups: number

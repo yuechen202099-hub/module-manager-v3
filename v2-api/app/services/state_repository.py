@@ -110,7 +110,7 @@ def _photo_work_date_key(photo: Photo) -> str:
     return _date_key_from_value(photo.created_at)
 
 
-def _empty_task_stats() -> dict[str, int]:
+def _empty_task_stats() -> dict[str, Any]:
     return {
         "total_groups": 0,
         "uploaded_count": 0,
@@ -119,7 +119,7 @@ def _empty_task_stats() -> dict[str, int]:
     }
 
 
-def _task_payload(task: Task, stats: dict[str, int] | None = None) -> dict[str, Any]:
+def _task_payload(task: Task, stats: dict[str, Any] | None = None) -> dict[str, Any]:
     resolved_stats = stats or _empty_task_stats()
     total_groups = int(resolved_stats.get("total_groups", 0))
     uploaded_count = int(resolved_stats.get("uploaded_count", 0))
@@ -132,6 +132,8 @@ def _task_payload(task: Task, stats: dict[str, int] | None = None) -> dict[str, 
     return {
         "id": task.legacy_id if task.legacy_id is not None else str(task.id),
         "terminal": task.terminal or "",
+        "address": str(resolved_stats.get("address") or ""),
+        "address_search_text": str(resolved_stats.get("address_search_text") or ""),
         "name": task.title,
         "status": _legacy_task_status(task),
         "claimed_by": claimed_by,
@@ -152,7 +154,7 @@ def _task_payload(task: Task, stats: dict[str, int] | None = None) -> dict[str, 
     }
 
 
-def _construction_task_payload(task: Task, stats: dict[str, int] | None = None) -> dict[str, Any]:
+def _construction_task_payload(task: Task, stats: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = _task_payload(task, stats)
     raw = task.raw_data or {}
     assigned_constructor = task.construction_claimed_by or None
@@ -1561,10 +1563,12 @@ class PostgresStateRepository(StateRepository):
         if task is None or task.review_claimed_by != actor:
             raise ValueError("Task must be claimed by the current reviewer before review or classification")
 
-    def _task_stats_map(self, session: Session, team_id: str) -> dict[int, dict[str, int]]:
+    def _task_stats_map(self, session: Session, team_id: str) -> dict[int, dict[str, Any]]:
         rows = session.execute(
             select(
                 MaterialGroup.legacy_task_id,
+                func.min(MaterialGroup.installation_address).label("address"),
+                func.string_agg(MaterialGroup.installation_address.distinct(), " ").label("address_search_text"),
                 func.count(MaterialGroup.id).label("total_groups"),
                 func.coalesce(func.sum(case((MaterialGroup.photo_count > 0, 1), else_=0)), 0).label("uploaded_count"),
                 func.coalesce(
@@ -1582,6 +1586,8 @@ class PostgresStateRepository(StateRepository):
         return {
             int(row.legacy_task_id): {
                 "total_groups": int(row.total_groups or 0),
+                "address": str(row.address or ""),
+                "address_search_text": str(row.address_search_text or ""),
                 "uploaded_count": int(row.uploaded_count or 0),
                 "reviewed_count": int(row.reviewed_count or 0),
                 "unreviewed_count": int(row.unreviewed_count or 0),

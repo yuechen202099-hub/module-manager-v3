@@ -586,3 +586,45 @@ The construction workflow originally enforced one active terminal per constructo
 - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
 - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - Bundled Node syntax checks for mini-program task/API scripts: passed.
+
+## 2026-06-22 - V2.5.7 claim task terminal/address search
+
+### Reason
+
+The task claiming page needed a direct way to locate terminal cards by terminal number or installation address instead of visually scanning the full task card grid.
+
+### Changed files
+
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/tests/test_api.py`
+- `v2-web/src/api/types.ts`
+- `v2-web/src/api/services.ts`
+- `v2-web/src/views/ClaimTasksView.vue`
+- `v2-web/src/styles/main.css`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Added task payload fields for a representative address and a hidden full address search index.
+- Backfilled the address search fields at task-list read time so existing JSON state can search without a full rebuild.
+- Added a claim task search box that filters the current role-visible task list by terminal number, task id, task name, first address, or full address index.
+- Kept reviewer/admin permission behavior unchanged.
+- Updated responsive styling so the search box stacks cleanly on mobile.
+- Advanced version metadata to `V2.5.7`.
+
+### Impact
+
+- No API path change.
+- No database migration.
+- No production data rewrite required.
+
+### Validation
+
+- `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- Bundled Node `vue-tsc --noEmit`: passed.
+- Browser QA on `http://127.0.0.1:8000/claim-tasks`: V2.5.7 page loaded, search input visible, terminal search filtered 135 cards down to the matching terminal card.

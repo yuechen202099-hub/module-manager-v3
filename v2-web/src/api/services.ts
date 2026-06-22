@@ -56,6 +56,8 @@ type BackendAuthConfig = {
 type BackendTask = {
   id: number | string
   terminal?: string
+  address?: string
+  address_search_text?: string
   name?: string
   status?: string
   claimed_by?: string
@@ -336,6 +338,8 @@ function mapTask(raw: BackendTask): ReviewTask {
     stage: raw.terminal || '',
     status: (raw.status || 'pending') as TaskStatus,
     terminal: raw.terminal || '',
+    address: raw.address || '',
+    addressSearchText: raw.address_search_text || raw.address || '',
     totalGroups: renovationCount,
     claimedGroups: uploadedCount,
     completedGroups: reviewedCount,
