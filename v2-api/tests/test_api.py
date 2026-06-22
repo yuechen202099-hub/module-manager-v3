@@ -95,7 +95,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "2.5.5"
+    assert data["version"] == "2.5.6"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -645,15 +645,15 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert all(photo["category"] == "unclassified" for photo in review_detail["photos"])
 
 
-def test_constructor_can_only_see_and_keep_one_claimed_terminal() -> None:
+def test_constructor_can_keep_up_to_five_assigned_terminals() -> None:
     admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
     constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
     admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
     constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
 
     client.post("/local-test/bootstrap", headers=admin_headers)
-    tasks = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][:2]
-    assert len(tasks) == 2
+    tasks = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][:6]
+    assert len(tasks) == 6
     for task in tasks:
         opened = client.patch(
             f"/local-test/construction/tasks/{task['id']}/open",
@@ -662,14 +662,18 @@ def test_constructor_can_only_see_and_keep_one_claimed_terminal() -> None:
         )
         assert opened.status_code == 200
 
-    first, second = tasks
-    assigned = client.patch(
-        f"/local-test/construction/tasks/{first['id']}/assign",
-        headers=admin_headers,
-        json={"actor": "admin", "constructor": "constructor"},
-    )
+    allowed_tasks = tasks[:5]
+    denied_task = tasks[5]
+    assigned_responses = [
+        client.patch(
+            f"/local-test/construction/tasks/{task['id']}/assign",
+            headers=admin_headers,
+            json={"actor": "admin", "constructor": "constructor"},
+        )
+        for task in allowed_tasks
+    ]
     claimed = client.post(
-        f"/local-test/construction/tasks/{first['id']}/claim",
+        f"/local-test/construction/tasks/{allowed_tasks[0]['id']}/claim",
         headers=constructor_headers,
         json={"actor": "constructor"},
     )
@@ -678,23 +682,23 @@ def test_constructor_can_only_see_and_keep_one_claimed_terminal() -> None:
         headers=constructor_headers,
     )
     denied = client.post(
-        f"/local-test/construction/tasks/{second['id']}/claim",
+        f"/local-test/construction/tasks/{denied_task['id']}/claim",
         headers=constructor_headers,
         json={"actor": "constructor"},
     )
     denied_assign = client.patch(
-        f"/local-test/construction/tasks/{second['id']}/assign",
+        f"/local-test/construction/tasks/{denied_task['id']}/assign",
         headers=admin_headers,
         json={"actor": "admin", "constructor": "constructor"},
     )
 
-    assert assigned.status_code == 200
+    assert all(response.status_code == 200 for response in assigned_responses)
     assert claimed.status_code == 200
-    assert [task["id"] for task in visible.json()["data"]["items"]] == [first["id"]]
+    assert {task["id"] for task in visible.json()["data"]["items"]} == {task["id"] for task in allowed_tasks}
     assert denied.status_code == 400
     assert "assigned by an administrator" in denied.json()["detail"]
     assert denied_assign.status_code == 400
-    assert "already has active terminal" in denied_assign.json()["detail"]
+    assert "already has 5 active terminals" in denied_assign.json()["detail"]
 
 
 def test_direct_workspace_routes_redirect_to_app_shell() -> None:

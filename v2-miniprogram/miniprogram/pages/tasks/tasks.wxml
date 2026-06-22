@@ -3,7 +3,7 @@
     <view class="row">
       <view>
         <view class="hero-title">施工任务</view>
-        <view class="hero-subtitle">领取后只显示当前账号正在施工的一个终端</view>
+        <view class="hero-subtitle">一个施工员最多同时处理 5 个终端任务</view>
       </view>
       <view class="badge {{online ? 'ok' : 'warn'}}">{{online ? '在线' : '离线'}}</view>
     </view>
@@ -35,7 +35,7 @@
           </view>
         </view>
       </block>
-      <view wx:else class="empty">暂无可领取施工任务，请联系管理员开放终端</view>
+      <view wx:else class="empty">暂无可处理施工任务，请联系管理员指派终端</view>
     </view>
   </view>
 

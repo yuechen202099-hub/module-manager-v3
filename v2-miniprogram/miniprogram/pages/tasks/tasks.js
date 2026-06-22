@@ -1,14 +1,17 @@
 const api = require("../../utils/api");
 const queue = require("../../utils/queue");
 
+const MAX_ACTIVE_CONSTRUCTION_TASKS = 5;
+
 Page({
   data: {
     actor: "",
     tasks: [],
     hasClaimedTask: false,
     claimedTaskId: "",
+    claimedTaskIds: [],
     claimedTerminal: "",
-    listTitle: "可领取终端",
+    listTitle: "可处理终端",
     listHint: "0 个可处理终端",
     queueCount: 0,
     readyCacheCount: 0,
@@ -27,10 +30,11 @@ Page({
       wx.reLaunch({ url: "/pages/login/login" });
       return;
     }
+    const summary = queue.getCacheSummary();
     this.setData({
       actor: session.user?.username || "constructor",
-      queueCount: queue.getCacheSummary().total,
-      readyCacheCount: queue.getCacheSummary().ready,
+      queueCount: summary.total,
+      readyCacheCount: summary.ready,
       online: getApp().globalData.online
     });
   },
@@ -38,24 +42,32 @@ Page({
   async refresh() {
     const actor = this.data.actor || api.session()?.user?.username || "constructor";
     const summary = queue.getCacheSummary();
-    this.setData({ loading: true, queueCount: summary.total, readyCacheCount: summary.ready, online: getApp().globalData.online });
+    this.setData({
+      loading: true,
+      queueCount: summary.total,
+      readyCacheCount: summary.ready,
+      online: getApp().globalData.online
+    });
     try {
       const result = await api.getConstructionTasks(actor, false);
       const items = result.items || [];
-      const mine = items.find((task) => task.construction_claimed_by === actor);
-      const visibleTasks = (mine ? [mine] : items).map((task) => this.decorateTask(task, actor));
+      const mine = items.filter((task) => task.construction_claimed_by === actor);
+      const visibleTasks = (mine.length ? mine : items).map((task) => this.decorateTask(task, actor));
       this.setData({
         tasks: visibleTasks,
-        hasClaimedTask: Boolean(mine),
-        claimedTaskId: mine?.id || "",
-        claimedTerminal: mine?.terminal || "",
-        listTitle: mine ? "我的施工终端" : "可领取终端",
-        listHint: mine ? "当前账号一次只能领取一个终端" : `${items.length} 个可处理终端`
+        hasClaimedTask: mine.length > 0,
+        claimedTaskId: mine[0]?.id || "",
+        claimedTaskIds: mine.map((task) => String(task.id)),
+        claimedTerminal: mine[0]?.terminal || "",
+        listTitle: mine.length ? "我的施工终端" : "可处理终端",
+        listHint: mine.length
+          ? `当前账号已指派 ${mine.length}/${MAX_ACTIVE_CONSTRUCTION_TASKS} 个终端`
+          : `${items.length} 个可处理终端`
       });
     } catch (error) {
       const snapshots = queue.listTerminalSnapshots()
         .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")))
-        .slice(0, 1);
+        .slice(0, MAX_ACTIVE_CONSTRUCTION_TASKS);
       if (snapshots.length) {
         const offlineTasks = snapshots.map((snapshot) => this.decorateTask({
           ...(snapshot.task || {}),
@@ -70,9 +82,10 @@ Page({
           tasks: offlineTasks,
           hasClaimedTask: true,
           claimedTaskId: offlineTasks[0]?.id || "",
+          claimedTaskIds: offlineTasks.map((task) => String(task.id)),
           claimedTerminal: offlineTasks[0]?.terminal || "",
           listTitle: "离线施工终端",
-          listHint: "已使用本机缓存，可继续采集"
+          listHint: `已使用本机缓存，可继续采集 ${offlineTasks.length} 个终端`
         });
       } else {
         wx.showToast({ title: error.message || "加载失败", icon: "none" });
@@ -89,8 +102,9 @@ Page({
       this.openGroups(id);
       return;
     }
-    if (this.data.hasClaimedTask && String(id) !== String(this.data.claimedTaskId)) {
-      wx.showToast({ title: `当前账号已领取终端 ${this.data.claimedTerminal}，请先释放后再领取其他终端`, icon: "none" });
+    const claimedTaskIds = this.data.claimedTaskIds || [];
+    if (this.data.hasClaimedTask && !claimedTaskIds.includes(String(id)) && claimedTaskIds.length >= MAX_ACTIVE_CONSTRUCTION_TASKS) {
+      wx.showToast({ title: `当前账号已指派 ${MAX_ACTIVE_CONSTRUCTION_TASKS} 个终端，请先释放后再处理其他终端`, icon: "none" });
       return;
     }
     try {
@@ -117,7 +131,7 @@ Page({
     const task = this.findTask(id);
     if (!task) return;
     if (task.construction_claimed_by && task.construction_claimed_by !== this.data.actor) {
-      wx.showToast({ title: "该终端已被别人领取", icon: "none" });
+      wx.showToast({ title: "该终端已被其他施工员领取", icon: "none" });
       return;
     }
     if (task.construction_claimed_by !== this.data.actor) {

@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatched"}
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
+MAX_ACTIVE_CONSTRUCTION_TASKS_PER_CONSTRUCTOR = 5
 
 
 class StateBackendNotReady(RuntimeError):
@@ -1352,6 +1353,45 @@ class PostgresStateRepository(StateRepository):
     def _session(self) -> Session:
         return SessionLocal()
 
+    def _active_construction_tasks_for(
+        self,
+        session: Session,
+        *,
+        team_id: str,
+        constructor: str,
+        excluding_task_id: UUID | None = None,
+    ) -> list[Task]:
+        statement = select(Task).where(
+            Task.team_id == team_id,
+            Task.construction_enabled.is_(True),
+            Task.construction_claimed_by == constructor,
+        )
+        if excluding_task_id is not None:
+            statement = statement.where(Task.id != excluding_task_id)
+        return list(session.scalars(statement.order_by(Task.terminal, Task.legacy_id).with_for_update()).all())
+
+    def _ensure_construction_assignment_capacity(
+        self,
+        session: Session,
+        *,
+        team_id: str,
+        constructor: str,
+        excluding_task_id: UUID | None = None,
+    ) -> None:
+        active_tasks = self._active_construction_tasks_for(
+            session,
+            team_id=team_id,
+            constructor=constructor,
+            excluding_task_id=excluding_task_id,
+        )
+        if len(active_tasks) < MAX_ACTIVE_CONSTRUCTION_TASKS_PER_CONSTRUCTOR:
+            return
+        terminals = ", ".join(str(task.terminal or task.legacy_id or "") for task in active_tasks[:3])
+        raise ValueError(
+            f"Current constructor already has {MAX_ACTIVE_CONSTRUCTION_TASKS_PER_CONSTRUCTOR} active terminals"
+            f"{': ' + terminals if terminals else ''}"
+        )
+
     def summary(self) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         with self._session() as session:
@@ -2111,19 +2151,12 @@ class PostgresStateRepository(StateRepository):
                     .with_for_update()
                 )
                 if task is not None:
-                    existing = session.scalar(
-                        select(Task)
-                        .where(
-                            Task.team_id == record.team_id,
-                            Task.id != task.id,
-                            Task.construction_enabled.is_(True),
-                            Task.construction_claimed_by == constructor,
-                        )
-                        .with_for_update()
+                    self._ensure_construction_assignment_capacity(
+                        session,
+                        team_id=record.team_id,
+                        constructor=constructor,
+                        excluding_task_id=task.id,
                     )
-                    if existing is not None:
-                        terminal_label = existing.terminal or existing.legacy_id or ""
-                        raise ValueError(f"Current constructor already has active terminal {terminal_label}")
                     now = datetime.now(UTC)
                     task_raw = dict(task.raw_data or {})
                     task_raw["construction_assignment_note"] = note.strip()
@@ -2521,19 +2554,12 @@ class PostgresStateRepository(StateRepository):
         team_id = local_simulation.current_team_id()
         with self._session() as session:
             task = self._task_by_legacy_id(session, task_id, lock=True)
-            existing = session.scalar(
-                select(Task)
-                .where(
-                    Task.team_id == team_id,
-                    Task.id != task.id,
-                    Task.construction_enabled.is_(True),
-                    Task.construction_claimed_by == constructor,
-                )
-                .with_for_update()
+            self._ensure_construction_assignment_capacity(
+                session,
+                team_id=team_id,
+                constructor=constructor,
+                excluding_task_id=task.id,
             )
-            if existing is not None:
-                terminal = existing.terminal or existing.legacy_id or ""
-                raise ValueError(f"Current constructor already has active terminal {terminal}")
             now = datetime.now(UTC)
             raw = dict(task.raw_data or {})
             raw["construction_assignment_note"] = note.strip()
@@ -2796,19 +2822,12 @@ class PostgresStateRepository(StateRepository):
                 raise KeyError(str(order.group_id))
             if group.legacy_task_id is not None:
                 task = self._task_by_legacy_id(session, int(group.legacy_task_id), lock=True)
-                existing = session.scalar(
-                    select(Task)
-                    .where(
-                        Task.team_id == group.team_id,
-                        Task.id != task.id,
-                        Task.construction_enabled.is_(True),
-                        Task.construction_claimed_by == constructor,
-                    )
-                    .with_for_update()
+                self._ensure_construction_assignment_capacity(
+                    session,
+                    team_id=group.team_id,
+                    constructor=constructor,
+                    excluding_task_id=task.id,
                 )
-                if existing is not None:
-                    terminal = existing.terminal or existing.legacy_id or ""
-                    raise ValueError(f"Current constructor already has active terminal {terminal}")
                 now = datetime.now(UTC)
                 task_raw = dict(task.raw_data or {})
                 task_raw["construction_assignment_note"] = note.strip()

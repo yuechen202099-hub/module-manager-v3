@@ -17,7 +17,7 @@ LOCAL_UPLOAD_WARN_FILES = 30_000
 
 
 def app_version() -> str:
-    return "2.5.5"
+    return "2.5.6"
 
 
 def project_root() -> Path:

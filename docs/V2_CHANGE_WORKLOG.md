@@ -2437,3 +2437,56 @@
   - Dry-run report: PostgreSQL `matched_creator_username=211`, JSON compatibility state `matched_creator_username=54`.
   - Apply report: PostgreSQL `updated=211`, JSON compatibility state `updated=54`; JSON pre-backfill copy saved at `/opt/module-manager-v2/backups/runtime/20260622_114149_before_v2.5.5_patch/local_state.pre-creator-name-backfill.20260622_034158.json`.
   - Verified service active and `/health`, `/login`, `/project-board`, `/construction`, `https://www.sgcc.online/login` returned OK.
+
+### V2.5.6 constructor assignment cap changed from 1 to 5
+
+- Date: 2026-06-22
+- Owner: Project engineer thread
+- Goal:
+  - Change the construction assignment rule from one active terminal task per constructor to at most five active terminal tasks per constructor.
+  - Keep web and WeChat mini-program behavior aligned.
+- Files changed:
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/alembic/versions/0004_allow_five_construction_tasks.py`
+  - `v2-api/tests/test_api.py`
+  - `v2-miniprogram/miniprogram/pages/tasks/tasks.js`
+  - `v2-miniprogram/miniprogram/pages/tasks/tasks.wxml`
+  - `v2-miniprogram/miniprogram/utils/api.js`
+  - `v2-api/app/main.py`
+  - `v2-api/app/services/ops_status.py`
+  - `v2-api/pyproject.toml`
+  - `v2-web/package.json`
+  - `v2-web/index.html`
+  - `v2-web/src/components/AppLayout.vue`
+  - `v2-web/src/layouts/AppLayout.vue`
+  - `v2-web/src/views/LoginView.vue`
+  - `v2-api/app/static/app_shell.html`
+  - `v2-api/app/static/task_hall.html`
+  - `v2-api/app/static/vue/**`
+  - `PROJECT_KNOWLEDGE.md`
+  - `AGENTS.md`
+  - `FIX_NOTES.md`
+  - `BUG_HISTORY.md`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - Normal construction terminal assignment now counts active assignments and rejects only when the constructor already has 5 active terminal tasks.
+  - Unmatched field-task assignment and exception field-task assignment use the same 5-task capacity guard.
+  - Mini-program task list now keeps up to 5 assigned terminals visible and allows opening any of them.
+  - Error text now says the account already has 5 active terminals instead of one active terminal.
+- Database note:
+  - Added Alembic migration `20260622_0004` to drop the old partial unique index `uq_tasks_team_construction_claimed_by`.
+  - Production must run `alembic upgrade head`; otherwise PostgreSQL can still reject the second assignment even when code allows it.
+  - Downgrade can fail if more than one active terminal already exists for a constructor.
+- Validation:
+  - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+  - `.venv\Scripts\python.exe -m py_compile v2-api/alembic/versions/0004_allow_five_construction_tasks.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py::test_constructor_can_keep_up_to_five_assigned_terminals -q`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+  - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - Bundled Node `--check` for `v2-miniprogram/miniprogram/pages/tasks/tasks.js` and `v2-miniprogram/miniprogram/utils/api.js`: passed.
+- Status:
+  - Local implementation complete.
+  - Requires production backup plus Alembic migration before deployment.

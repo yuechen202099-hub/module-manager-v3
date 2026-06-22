@@ -37,6 +37,7 @@ DEFAULT_SCAN_FILE = Path("C:/Users/Administrator/Desktop/\u6279\u91cf\u626b\u780
 REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatched"}
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
 DONE_STATUSES = {"approved", "exception"}
+MAX_ACTIVE_CONSTRUCTION_TASKS_PER_CONSTRUCTOR = 5
 PHOTO_CATEGORIES = {
     "unclassified": "\u672a\u5206\u7c7b",
     "before_box": "\u8868\u7bb1\u6574\u4f53\u6539\u9020\u524d",
@@ -3400,17 +3401,23 @@ def close_construction_task(task_id: int, actor: str) -> dict[str, Any]:
     return task
 
 
-def active_construction_task_for(actor: str, excluding_task_id: int | None = None) -> dict[str, Any] | None:
+def active_construction_tasks_for(actor: str, excluding_task_id: int | None = None) -> list[dict[str, Any]]:
     actor = actor.strip()
     if not actor:
-        return None
+        return []
+    tasks: list[dict[str, Any]] = []
     for item in get_state()["tasks"]:
         task = ensure_construction_task_fields(item)
         if excluding_task_id is not None and int(task.get("id") or 0) == int(excluding_task_id):
             continue
         if task.get("construction_enabled") and task.get("construction_claimed_by") == actor:
-            return task
-    return None
+            tasks.append(task)
+    return tasks
+
+
+def active_construction_task_for(actor: str, excluding_task_id: int | None = None) -> dict[str, Any] | None:
+    tasks = active_construction_tasks_for(actor, excluding_task_id=excluding_task_id)
+    return tasks[0] if tasks else None
 
 
 def assign_construction_task(
@@ -3425,10 +3432,13 @@ def assign_construction_task(
     if not constructor:
         raise ValueError("Constructor is required")
     task = ensure_construction_task_fields(find_task(task_id))
-    existing = active_construction_task_for(constructor, excluding_task_id=task_id)
-    if existing is not None:
-        terminal = str(existing.get("terminal") or existing.get("id") or "")
-        raise ValueError(f"Current constructor already has active terminal {terminal}")
+    active_tasks = active_construction_tasks_for(constructor, excluding_task_id=task_id)
+    if len(active_tasks) >= MAX_ACTIVE_CONSTRUCTION_TASKS_PER_CONSTRUCTOR:
+        terminals = ", ".join(str(item.get("terminal") or item.get("id") or "") for item in active_tasks[:3])
+        raise ValueError(
+            f"Current constructor already has {MAX_ACTIVE_CONSTRUCTION_TASKS_PER_CONSTRUCTOR} active terminals"
+            f"{': ' + terminals if terminals else ''}"
+        )
     previous = task.get("construction_claimed_by") or ""
     task["construction_enabled"] = True
     task["construction_claimed_by"] = constructor

@@ -46,6 +46,7 @@ function unwrap(response) {
 
 function localizeError(message) {
   const text = String(message || "请求失败");
+  if (/already has\s+5\s+active terminals/i.test(text)) return "当前账号已指派 5 个终端，请先释放后再处理其他终端";
   const claimed = text.match(/Current account already claimed terminal\s+([^.\s]+)/i);
   if (claimed) return `当前账号已领取终端 ${claimed[1]}，请先释放后再领取其他终端`;
   if (/Construction task is not open/i.test(text)) return "该终端尚未开放施工";

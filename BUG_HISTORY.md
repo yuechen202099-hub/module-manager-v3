@@ -84,3 +84,8 @@ Last updated: 2026-06-21
 | ID | Bug | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0121 | Construction photos uploaded before V2.5.4 can still have `creator` saved as the constructor account username, so installer KPI remains split by account id until old rows are backfilled. | Open installer distribution or group photo details for historical construction uploads created before V2.5.4; old photos can still show username. | Released in `V2.5.5`; production dry-run matched only constructor `xa` -> `樊哲浩`, then applied PostgreSQL `211` rows and JSON compatibility state `54` rows. | 2026-06-22 | `backfill_construction_creator_names.py`, `test_backfill_construction_creator_names.py` |
+## 2026-06-22 - V2.5.6 construction assignment rule change
+
+| ID | Request / Risk | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0122 | The old one-terminal-per-constructor rule blocks field work when one constructor needs to handle multiple nearby terminals. PostgreSQL also had a partial unique index that would still reject a second assignment even after code changes. | Assign one terminal to a constructor, then try to assign a second terminal to the same constructor. Old behavior rejected the second assignment. | Fixed locally in `V2.5.6`; rule is now max 5 active terminal tasks per constructor. Production deployment must run Alembic migration `20260622_0004` before using the new capacity. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `0004_allow_five_construction_tasks.py`, `test_api.py`, `v2-miniprogram/miniprogram/**` |

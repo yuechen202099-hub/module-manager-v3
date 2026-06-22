@@ -1,7 +1,7 @@
 # PROJECT_KNOWLEDGE
 
 Last full scan: 2026-06-21
-Current known version: V2.5.5
+Current known version: V2.5.6
 Active maintenance baseline: latest repository version
 Maintenance mode: active
 
@@ -114,7 +114,7 @@ build/、exports/、logs/、uploads/  构建、导出、日志、运行产物；
 
 5. 施工采集
    - 管理员按终端指派施工任务。
-   - 施工员只处理被指派终端。
+   - 施工员只处理被指派终端；同一施工员最多同时处理 5 个 active 终端任务。
    - 网页和小程序端支持扫码、拍照、压缩、本地缓存、统一上传。
    - 施工采集和缓存上传在同一个施工页面内处理。
 

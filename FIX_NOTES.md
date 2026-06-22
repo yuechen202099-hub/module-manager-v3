@@ -541,3 +541,48 @@ V2.5.4 fixed new construction uploads, but photos already saved before the fix c
 - Apply counts: PostgreSQL `updated=211`; JSON compatibility state `updated=54`.
 - JSON backup from apply: `/opt/module-manager-v2/backups/runtime/20260622_114149_before_v2.5.5_patch/local_state.pre-creator-name-backfill.20260622_034158.json`.
 - Verification: service active; `/health`, `/login`, `/project-board`, `/construction`, and `https://www.sgcc.online/login` returned OK.
+
+## 2026-06-22 - V2.5.6 constructor active task cap changed to 5
+
+### Reason
+
+The construction workflow originally enforced one active terminal per constructor. The requested production rule is now that one constructor can hold up to 5 active terminal tasks at the same time.
+
+### Changed files
+
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/alembic/versions/0004_allow_five_construction_tasks.py`
+- `v2-api/tests/test_api.py`
+- `v2-miniprogram/miniprogram/pages/tasks/tasks.js`
+- `v2-miniprogram/miniprogram/pages/tasks/tasks.wxml`
+- `v2-miniprogram/miniprogram/utils/api.js`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Replaced the one-active-construction-task guard with a shared maximum of 5 active terminal tasks per constructor.
+- Kept the old helper as a compatibility wrapper while adding list/count helpers for the new capacity rule.
+- Updated PostgreSQL assignment checks for normal construction tasks, unmatched field tasks, and exception field tasks.
+- Added Alembic migration `20260622_0004` to drop the old PostgreSQL partial unique index that physically enforced one active task.
+- Updated the WeChat mini-program task page to show and open up to 5 assigned terminal tasks.
+- Updated the mini-program API error text for the new 5-task limit.
+- Advanced version metadata to `V2.5.6`.
+
+### Impact
+
+- Runtime behavior change for construction assignment.
+- Requires a database migration before production can assign a second active terminal to the same constructor.
+- No API path changes.
+- Downgrading the migration can fail if production already has constructors with more than one active terminal; rollback should first release extra assignments or restore the pre-migration database backup.
+
+### Validation
+
+- `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+- `.venv\Scripts\python.exe -m py_compile v2-api/alembic/versions/0004_allow_five_construction_tasks.py`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py::test_constructor_can_keep_up_to_five_assigned_terminals -q`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- Bundled Node syntax checks for mini-program task/API scripts: passed.
