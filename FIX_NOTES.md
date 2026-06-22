@@ -817,7 +817,42 @@ The always-visible exception and unmatched task cards in the review workbench an
 - No Alembic migration.
 - Production checks passed: `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, `https://www.sgcc.online/login`.
 - `/openapi.json`: `404`.
-- Production Vue bundle verification: `field-entry-card=0`, `field-task-entry=0`, `task-mode-grid=0`.
+
+## 2026-06-22 - V2.6.5 construction task submit button
+
+### Reason
+
+Constructors needed a clear completion action after finishing field collection. Without it, an assigned terminal could remain visible in the construction page even after the photos and data had been uploaded.
+
+### Changed files
+
+- `v2-web/src/api/services.ts`
+- `v2-web/src/views/ConstructionView.vue`
+- `v2-api/tests/test_api.py`
+- Version metadata files
+- Maintenance documentation
+
+### Changes
+
+- Added a `releaseConstructionTask()` frontend API wrapper for the existing backend release endpoint.
+- Added a `提交施工任务` button to the selected construction terminal header for the assigned constructor.
+- Added a confirmation message that warns when the current terminal still has local cache or unbuilt groups before releasing the task.
+- On successful submit, the construction page clears the selected terminal, closes the collection sheet, refreshes tasks, and returns to the task picker.
+- Added API regression coverage to ensure constructor release clears `construction_claimed_by` and the released terminal no longer occupies the constructor task list.
+
+### Impact
+
+- No API path change.
+- No database migration.
+- No production data rewrite.
+- Existing admin assignment/unassignment behavior is unchanged.
+
+### Validation
+
+- `python -m py_compile v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
 
 ## 2026-06-22 - V2.6.3 安装人员 KPI 同楼栋地址聚类
 

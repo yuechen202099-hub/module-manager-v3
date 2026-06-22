@@ -24,6 +24,7 @@ import {
   fetchGroup,
   fetchUnmatchedRecords,
   openConstructionTask,
+  releaseConstructionTask,
   submitConstructionExceptionOrder,
   unassignConstructionTask,
   uploadConstructionBatch,
@@ -132,6 +133,7 @@ const loadingTasks = ref(false)
 const loadingGroups = ref(false)
 const uploading = ref(false)
 const cacheBusy = ref(false)
+const submittingTask = ref(false)
 const offlineMode = ref(false)
 const tasks = ref<ReviewTask[]>([])
 const groups = ref<MaterialGroup[]>([])
@@ -227,6 +229,11 @@ const taskPickerSubtitle = computed(() => {
 
 const selectedTask = computed(() => visibleTasks.value.find((task) => task.id === selectedTaskId.value) || null)
 const inTaskPicker = computed(() => !selectedTask.value || taskPickerOpen.value)
+const canSubmitSelectedTask = computed(() => {
+  const task = selectedTask.value
+  if (!task || isAdmin.value) return false
+  return task.constructionClaimedBy === actor.value || task.assignedConstructor === actor.value
+})
 const taskDrafts = computed(() =>
   drafts.value.filter((draft) => String(draft.taskId || '') === selectedTaskId.value && (!draft.actor || draft.actor === actor.value)),
 )
@@ -526,6 +533,14 @@ function taskProgress(task: ReviewTask) {
   const total = Number(task.renovationCount || task.totalGroups || 0)
   const uploaded = Number(task.constructionUploadedCount || task.uploadedCount || 0)
   return total ? Math.round((uploaded / total) * 100) : 0
+}
+
+function taskUnbuiltCount(task: ReviewTask) {
+  const explicit = Number(task.constructionUnbuiltCount)
+  if (Number.isFinite(explicit) && task.constructionUnbuiltCount !== undefined) return explicit
+  const total = Number(task.renovationCount || task.totalGroups || 0)
+  const uploaded = Number(task.constructionUploadedCount || task.uploadedCount || 0)
+  return Math.max(total - uploaded, 0)
 }
 
 function logoutConstruction() {
@@ -1391,6 +1406,52 @@ async function handleTaskAdminAction(task: ReviewTask, action: 'assign' | 'unass
   }
 }
 
+async function submitSelectedConstructionTask() {
+  const task = selectedTask.value
+  if (!task) return
+  if (!canSubmitSelectedTask.value) {
+    ElMessage.warning('只有当前被指派的施工员可以提交这个施工任务')
+    return
+  }
+  if (!online()) {
+    ElMessage.warning('当前离线，联网后再提交施工任务')
+    return
+  }
+  const unbuiltCount = taskUnbuiltCount(task)
+  const cacheCount = cachedTaskDrafts.value.length
+  const details: string[] = []
+  if (cacheCount) details.push(`还有 ${cacheCount} 条本地缓存未上传`)
+  if (unbuiltCount) details.push(`还有 ${unbuiltCount} 个资料组显示未施工`)
+  const message = details.length
+    ? `${details.join('，')}。提交后该终端会从你的施工采集页释放，请确认现场任务已经处理完毕。`
+    : '确认提交这个施工任务？提交后该终端会从你的施工采集页释放。'
+  try {
+    await flushCurrentDraftPersist()
+    await ElMessageBox.confirm(message, '提交施工任务', {
+      type: details.length ? 'warning' : 'success',
+      confirmButtonText: '确认提交',
+      cancelButtonText: '取消',
+    })
+    submittingTask.value = true
+    await releaseConstructionTask(task.id)
+    ElMessage.success('施工任务已提交')
+    selectedTaskId.value = ''
+    selectedItemKey.value = ''
+    groups.value = []
+    exceptionOrders.value = []
+    collectOpen.value = false
+    activeGroup.value = null
+    activeOrder.value = null
+    taskPickerOpen.value = true
+    await loadTasks()
+  } catch (error) {
+    if (error === 'cancel') return
+    ElMessage.error(error instanceof Error ? error.message : '提交施工任务失败')
+  } finally {
+    submittingTask.value = false
+  }
+}
+
 async function selectTask(task: ReviewTask) {
   await flushCurrentDraftPersist()
   taskPickerMode.value = 'terminal'
@@ -1740,7 +1801,7 @@ onBeforeUnmount(() => {
             <div class="task-metrics">
               <span><em>改造数</em><strong>{{ task.renovationCount || task.totalGroups || 0 }}</strong></span>
               <span><em>已上传</em><strong>{{ task.constructionUploadedCount || task.uploadedCount || 0 }}</strong></span>
-              <span><em>未施工</em><strong>{{ task.constructionUnbuiltCount || Math.max((task.renovationCount || task.totalGroups || 0) - (task.constructionUploadedCount || task.uploadedCount || 0), 0) }}</strong></span>
+              <span><em>未施工</em><strong>{{ taskUnbuiltCount(task) }}</strong></span>
               <span><em>异常</em><strong>{{ task.constructionExceptionCount || 0 }}</strong></span>
             </div>
             <div class="task-progress">
@@ -1781,6 +1842,15 @@ onBeforeUnmount(() => {
             <el-button size="small" @click="returnToTaskPicker">返回任务区</el-button>
             <el-tag effect="light">{{ groupSummary.total }}</el-tag>
             <el-button size="small" :icon="Refresh" :loading="loadingGroups" @click="loadGroups">刷新</el-button>
+            <el-button
+              v-if="canSubmitSelectedTask"
+              size="small"
+              type="primary"
+              :loading="submittingTask"
+              @click="submitSelectedConstructionTask"
+            >
+              提交施工任务
+            </el-button>
             <el-button size="small" class="construction-panel-logout" @click="logoutConstruction">退出</el-button>
           </div>
         </div>

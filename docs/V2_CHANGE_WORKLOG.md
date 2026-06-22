@@ -2791,3 +2791,31 @@
   - Production `.env`, `data`, uploads preserved; no Alembic migration.
   - Production checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`; `/openapi.json` returned `404`.
   - Production Vue bundle verification: `field-entry-card=0`, `field-task-entry=0`, `task-mode-grid=0`.
+
+### V2.6.5 construction task submit button
+
+- Date: 2026-06-22
+- Owner: Project engineer thread
+- Goal:
+  - Let a constructor explicitly submit a completed construction terminal task.
+  - Release the assigned terminal from the construction collection page after confirmation.
+- Files changed:
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/views/ConstructionView.vue`
+  - `v2-api/tests/test_api.py`
+  - Version metadata files
+  - `BUG_HISTORY.md`
+  - `FIX_NOTES.md`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - The selected terminal in `/construction` shows `提交施工任务` for the assigned constructor.
+  - The confirmation warns if the terminal still has local cache or unbuilt groups.
+  - On success, the task is released through the existing construction release API, the page refreshes, and the constructor returns to the task picker.
+- Database note:
+  - No Alembic migration required.
+- Validation:
+  - `python -m py_compile v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.

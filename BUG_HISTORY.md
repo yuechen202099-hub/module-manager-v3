@@ -131,3 +131,9 @@ Last updated: 2026-06-22
 | ID | UX issue | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0129 | The permanent exception/unmatched task cards made the review workbench and construction collection task list noisy after those workflows were folded back into normal handling. | Open `/task-hall` or `/construction`; the always-visible exception/unmatched cards appeared before normal terminal tasks. | Fixed locally in `V2.6.4`; the permanent entry cards were removed while the underlying APIs/data remain unchanged. | 2026-06-22 | `TaskHallView.vue`, `ConstructionView.vue` |
+
+## 2026-06-22 - V2.6.5 construction task submit button
+
+| ID | UX issue | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0130 | After a constructor finished field collection, there was no explicit submit action to release the assigned terminal, so the task kept occupying the construction collection page. | Log in as a constructor, open `/construction`, finish uploading a terminal's construction data, then try to mark the terminal task complete. Older UI only had refresh/back/logout actions. | Fixed locally in `V2.6.5`; the selected assigned terminal now has a submit button that calls the existing construction release API, warns about local cache/unbuilt groups, and refreshes the task picker. | 2026-06-22 | `ConstructionView.vue`, `services.ts`, `test_api.py` |

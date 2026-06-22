@@ -867,6 +867,14 @@ export async function unassignConstructionTask(taskId: string): Promise<ReviewTa
   return mapTask(task)
 }
 
+export async function releaseConstructionTask(taskId: string): Promise<ReviewTask> {
+  const task = await api<BackendTask>(`/local-test/construction/tasks/${encodeURIComponent(taskId)}/release`, {
+    method: 'POST',
+    body: JSON.stringify({ actor: currentActor() }),
+  })
+  return mapTask(task)
+}
+
 export async function fetchConstructionTaskGroups(taskId: string, status = ''): Promise<MaterialGroup[]> {
   const query = new URLSearchParams({
     limit: '1000',

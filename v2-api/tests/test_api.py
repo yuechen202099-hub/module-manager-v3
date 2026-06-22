@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "2.6.4"
+    assert data["version"] == "2.6.5"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -647,6 +647,19 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert all(photo["image_url"].startswith("/static/uploads/construction/") for photo in review_detail["photos"])
     assert all(photo["download_status"] == "downloaded" for photo in review_detail["photos"])
     assert all(photo["category"] == "unclassified" for photo in review_detail["photos"])
+
+    released = client.post(
+        f"/local-test/construction/tasks/{task['id']}/release",
+        headers=constructor_headers,
+        json={"actor": "constructor"},
+    )
+    assert released.status_code == 200
+    assert released.json()["data"]["construction_claimed_by"] in (None, "")
+    after_release = client.get(
+        "/local-test/construction/tasks?actor=constructor",
+        headers=constructor_headers,
+    ).json()["data"]["items"]
+    assert task["id"] not in {item["id"] for item in after_release}
 
 
 def test_constructor_can_keep_up_to_five_assigned_terminals() -> None:
