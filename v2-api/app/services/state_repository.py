@@ -1729,9 +1729,9 @@ class PostgresStateRepository(StateRepository):
                 row["_completion_records"].append(
                     {
                         "group_id": str(group.id),
-                        "meter_no": str(group.meter_no or ""),
+                        "meter_no": str(group.display_meter_no or ""),
                         "terminal": str(group.terminal or ""),
-                        "address": str(group.address or ""),
+                        "address": str(group.installation_address or ""),
                         "status": _status_value(group.status),
                         "photo_count": len(matched_photos),
                         "completed_at": completed_at,

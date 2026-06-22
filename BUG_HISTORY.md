@@ -107,3 +107,9 @@ Last updated: 2026-06-22
 | ID | Request / Risk | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0125 | KPI chart needed 2-hour dimensions, completion trend, per-effective-hour output, and clickable address evidence. Raw counts alone could reward easy concentrated jobs or penalize harder scattered/charging-pile jobs unfairly. | Open `/project-board`, click an installer, then click a daily work duration. Older chart only showed hourly work minutes and could not inspect address difficulty or completion efficiency. | Fixed locally in `V2.6.0`; chart now uses 2-hour segments, adds completion line, per-hour completion and weighted efficiency, and each segment opens an address list with explainable difficulty weights. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `services.ts`, `types.ts`, `ProjectBoardView.vue`, `test_api.py` |
+
+## 2026-06-22 - V2.6.1 installer KPI PostgreSQL field hotfix
+
+| ID | Bug | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0126 | Personnel KPI popup failed on PostgreSQL-backed production data because the workload address drilldown referenced non-existent `MaterialGroup.meter_no` and `MaterialGroup.address` fields. | Open `/project-board`, click an installer in the installer distribution panel. Production PostgreSQL path could return a 500 error before the daily workload dialog rendered. | Fixed locally in `V2.6.1`; PostgreSQL workload now uses `display_meter_no` and `installation_address`, with a regression test. | 2026-06-22 | `state_repository.py`, `test_state_repository.py` |

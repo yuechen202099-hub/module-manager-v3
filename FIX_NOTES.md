@@ -692,6 +692,40 @@ Installer KPI needs to infer daily work start/end times and effective working du
 - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
 - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
 
+## 2026-06-22 - V2.6.1 installer KPI PostgreSQL field hotfix
+
+### Reason
+
+Clicking the installer KPI popup on PostgreSQL-backed production data could fail because the V2.6.0 address drilldown payload referenced `MaterialGroup.meter_no` and `MaterialGroup.address`, while the actual model fields are `display_meter_no` and `installation_address`.
+
+### Changed files
+
+- `v2-api/app/services/state_repository.py`
+- `v2-api/tests/test_state_repository.py`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Changed PostgreSQL installer workload completion records to use `display_meter_no` and `installation_address`.
+- Added a regression test with a fake PostgreSQL material group that only exposes the real model fields.
+- Advanced version metadata to `V2.6.1`.
+
+### Impact
+
+- Affects only the project-board installer KPI popup in the PostgreSQL state backend.
+- No API path change.
+- No database migration.
+
+### Validation
+
+- `pytest v2-api\tests\test_state_repository.py::test_postgres_installer_workload_uses_material_group_installation_address -q`: passed.
+- `python -m py_compile v2-api/app/services/state_repository.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+- `pytest v2-api\tests\test_api.py -q`: `44 passed, 1 warning`.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- Browser QA on `http://127.0.0.1:8000/project-board?qa=v261-kpi`: page title `V2.6.1`, installer KPI dialog opens, no console error/warn.
+
 ### Production deployment
 
 - Commit: `d74b641`.

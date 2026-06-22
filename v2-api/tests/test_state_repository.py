@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -201,6 +202,63 @@ def test_postgres_classify_photo_persists_archive_fields() -> None:
     assert photo.archived_at is not None
     assert photo.raw_data["archive_status"] == "archived"
     assert photo.raw_data["category_label"] == repository.local_simulation.PHOTO_CATEGORIES["after_box"]
+
+
+def test_postgres_installer_workload_uses_material_group_installation_address() -> None:
+    photo = SimpleNamespace(
+        id="photo-uuid",
+        raw_data={"created_at": "2026-06-22 08:10:00"},
+        source="scan-import",
+        created_at=datetime(2026, 6, 22, 8, 10),
+        taken_at=None,
+        sort_order=1,
+        legacy_id="p-1",
+    )
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-1",
+        legacy_task_id=1,
+        display_meter_no="110020000001",
+        terminal="350000000001",
+        installation_address="上海市测试区测试路1号101室",
+        status=repository.GroupStatus.APPROVED,
+        raw_data={},
+        last_photo_imported_at=None,
+        exception_status="",
+        has_archive_blocker=False,
+        exception_reasons=[],
+        exception_note="",
+        review_note="",
+        photo_count=1,
+    )
+
+    class FakeResult:
+        def all(self):
+            return [(photo, group)]
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, _statement):
+            return FakeResult()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+    workload = TestPostgresRepository().installer_daily_workload("installer-a")
+
+    item = workload["items"][0]
+    segment_addresses = [
+        address
+        for segment in item["two_hour_segments"]
+        for address in segment["addresses"]
+    ]
+    assert segment_addresses[0]["address"] == group.installation_address
 
 
 def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:

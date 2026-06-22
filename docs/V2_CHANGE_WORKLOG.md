@@ -2649,3 +2649,31 @@
 - Status:
   - Local implementation complete.
   - Not deployed.
+
+### V2.6.1 installer KPI PostgreSQL field hotfix
+
+- Date: 2026-06-22
+- Owner: BUG fix thread
+- Goal:
+  - Fix personnel KPI popup errors on PostgreSQL-backed production data.
+- Files changed:
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/tests/test_state_repository.py`
+  - version metadata files
+  - `BUG_HISTORY.md`
+  - `FIX_NOTES.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - PostgreSQL installer workload completion records now use `display_meter_no` and `installation_address`.
+  - The daily KPI popup and segment address drilldown no longer access non-existent `MaterialGroup.meter_no` or `MaterialGroup.address` fields.
+- Database note:
+  - No Alembic migration required.
+- Validation:
+  - `pytest v2-api\tests\test_state_repository.py::test_postgres_installer_workload_uses_material_group_installation_address -q`: passed.
+  - `python -m py_compile v2-api/app/services/state_repository.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+  - `pytest v2-api\tests\test_api.py -q`: `44 passed, 1 warning`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - Browser QA on `http://127.0.0.1:8000/project-board?qa=v261-kpi`: page title `V2.6.1`, installer KPI dialog opens, no console error/warn.
+- Status:
+  - Local hotfix complete; pending project engineer production patch publish.
