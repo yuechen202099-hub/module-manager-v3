@@ -827,6 +827,7 @@ class StateRepository(ABC):
         collector: str,
         module_asset_no: str,
         photos: list[dict[str, Any]],
+        creator: str = "",
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1269,6 +1270,7 @@ class JsonStateRepository(StateRepository):
         collector: str,
         module_asset_no: str,
         photos: list[dict[str, Any]],
+        creator: str = "",
     ) -> dict[str, Any]:
         return local_simulation.upload_construction_group_batch(
             group_id,
@@ -1277,6 +1279,7 @@ class JsonStateRepository(StateRepository):
             collector=collector,
             module_asset_no=module_asset_no,
             photos=photos,
+            creator=creator,
         )
 
     def build_task_detail_export(self, task_id: int) -> bytes:
@@ -3364,8 +3367,10 @@ class PostgresStateRepository(StateRepository):
         collector: str,
         module_asset_no: str,
         photos: list[dict[str, Any]],
+        creator: str = "",
     ) -> dict[str, Any]:
         actor = actor.strip() or "constructor"
+        creator = creator.strip() or actor
         if not client_batch_id.strip():
             raise ValueError("Client batch id is required")
         with self._session() as session:
@@ -3380,7 +3385,7 @@ class PostgresStateRepository(StateRepository):
                 photos=photos,
                 collector=collector,
                 module_asset_no=module_asset_no,
-                creator=actor,
+                creator=creator,
                 source="construction",
                 client_batch_id=client_batch_id,
             )

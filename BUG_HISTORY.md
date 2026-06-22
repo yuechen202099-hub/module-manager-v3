@@ -67,6 +67,12 @@ Last updated: 2026-06-21
 | --- | --- | --- | --- | --- | --- |
 | BH-0119 | Project board installer workload popup showed daily exception counts but could not open the underlying abnormal groups. | Open `/project-board`, click an installer in the installer distribution panel, then inspect the daily workload table; the exception count was only a number. | Fixed locally in `V2.5.3`; exception counts now open a daily abnormal group detail dialog. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `services.ts`, `types.ts`, `ProjectBoardView.vue` |
 
+## 2026-06-22 - V2.5.4 construction upload installer name hotfix
+
+| ID | Bug | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0120 | Construction uploads used the account username as installer/creator instead of the user's display name. | Log in as a constructor account whose name differs from username, upload construction photos, then check installer KPI or group photo creator. The installer was grouped by username. | Fixed locally in `V2.5.4`; pending project-engineer production publish. | 2026-06-22 | `local_test.py`, `local_simulation.py`, `state_repository.py`, `test_api.py` |
+
 ## 2026-06-22 - V2.5.1 UX maintenance
 
 | ID | Bug / UX issue | Reproduction | Status | Fixed at | Files |

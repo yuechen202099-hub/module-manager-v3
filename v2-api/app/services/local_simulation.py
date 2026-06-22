@@ -3568,8 +3568,10 @@ def upload_construction_group_batch(
     collector: str,
     module_asset_no: str,
     photos: list[dict[str, Any]],
+    creator: str = "",
 ) -> dict[str, Any]:
     actor = actor.strip() or "constructor"
+    creator = creator.strip() or actor
     client_batch_id = client_batch_id.strip()
     if not client_batch_id:
         raise ValueError("Client batch id is required")
@@ -3610,7 +3612,7 @@ def upload_construction_group_batch(
             "collector": collector,
             "asset_no": module_asset_no,
             "asset_type": "",
-            "creator": actor,
+            "creator": creator,
             "created_at": now_iso(),
             "has_image": True,
             "image_file_id": "",

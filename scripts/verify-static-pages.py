@@ -26,6 +26,7 @@ STATIC_PAGES = {
 NAV_TEXT = ["项目看板", "任务领取", "审阅工作台"]
 UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 MOJIBAKE_FRAGMENTS = [
+    "\u599e\u3085\u6e71\u5a32\u4f34\u60c7\u7023\ue0a3\u7df2",
     "椤圭洰",
     "鐪嬫澘",
     "浠诲姟",
@@ -98,6 +99,8 @@ def decode_js_unicode_escapes(source: str) -> str:
 
 
 def check_script_syntax(node: Path | None, page_name: str, scripts: list[str]) -> None:
+    if not scripts:
+        return
     if not node:
         fail("Node runtime not found for static page script syntax checks")
     with tempfile.TemporaryDirectory(prefix="module-manager-static-") as tmp:

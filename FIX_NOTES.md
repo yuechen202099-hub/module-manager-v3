@@ -282,7 +282,46 @@ The installer daily workload popup on the project board already showed a per-dat
 - Vue migration gate passed.
 - Backend API tests passed: `43 passed, 1 warning`.
 - Browser QA opened `/project-board?qa=v253-installer-exception` and confirmed visible `V2.5.3`; local data is empty, so installer drilldown payload was verified with an in-memory backend sample.
-- Headless Chrome screenshot verified the local claim task page renders `V2.4.13`, no longer shows `开放施工` / `关闭施工`, shows `指派施工`, and keeps `领取` readable.
+
+## 2026-06-22 - V2.5.4 construction upload installer name hotfix
+
+### Reason
+
+Construction uploads attributed photo creator/installer to the login username. Installer statistics should use the user's display name so KPI grouping follows the configured personnel name, not the account id.
+
+### Changed files
+
+- `v2-api/app/api/routes/local_test.py`
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/tests/test_api.py`
+- `scripts/verify-static-pages.py`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Added server-side display-name resolution for construction upload requests.
+- Upload authorization still uses `actor` username, while photo `creator` now uses the resolved display name.
+- JSON and PostgreSQL state repositories both accept the resolved `creator`.
+- Added API regression coverage that verifies construction uploaded photos use the login user's name and not the username.
+- Fixed static-page verifier behavior so pages without inline scripts do not require Node before mojibake checks.
+- Advanced version metadata to `V2.5.4`.
+
+### Impact
+
+- Backend-only attribution hotfix plus version metadata.
+- No API path change.
+- No database schema change.
+- No Alembic migration required.
+
+### Validation
+
+- `python -m py_compile v2-api/app/api/routes/local_test.py v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py`: passed.
+- `node vue-tsc --noEmit`: passed using bundled Node.
+- `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
 
 ## 2026-06-22 - V2.4.15 review/thumbnail/KPI hotfix
 

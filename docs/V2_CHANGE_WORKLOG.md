@@ -2358,3 +2358,35 @@
 - Vue migration gate passed.
 - Backend API tests passed: `43 passed, 1 warning`.
 - Browser QA opened `/project-board?qa=v253-installer-exception` and confirmed visible `V2.5.3`; local data is empty, so installer drilldown payload was verified with an in-memory backend sample.
+
+### V2.5.4 construction upload installer name hotfix
+
+- Date: 2026-06-22
+- Owner: BUG fix thread
+- Scope:
+  - Construction upload attribution.
+  - Installer KPI source names.
+- Changed files:
+  - `v2-api/app/api/routes/local_test.py`
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/tests/test_api.py`
+  - `scripts/verify-static-pages.py`
+  - version metadata files
+  - maintenance documentation
+- Behavior:
+  - Construction upload authorization continues to use `actor` username.
+  - Uploaded construction photos now store the resolved account display name as `creator`.
+  - If no display name can be resolved, behavior falls back to the username.
+  - Static-page verifier no longer requires Node when a page has no inline scripts, so mojibake checks run first for no-script pages.
+- Release note:
+  - Backend attribution hotfix.
+  - No API path change.
+  - No database schema change.
+  - No Alembic migration required.
+- Validation:
+  - `python -m py_compile v2-api/app/api/routes/local_test.py v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py`: passed.
+  - `node vue-tsc --noEmit`: passed using bundled Node.
+  - `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.

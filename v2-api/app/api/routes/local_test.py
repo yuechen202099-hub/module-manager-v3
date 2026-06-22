@@ -35,6 +35,7 @@ from app.models import (
     UnmatchedRecord,
 )
 from app.services.ops_status import build_system_status
+from app.services.account_store import get_user
 from app.services.photo_storage import (
     normalize_suffix,
     parse_oss_image_url,
@@ -157,6 +158,23 @@ async def use_team_context(request: Request):
 
 
 router = APIRouter(prefix="/local-test", dependencies=[Depends(use_team_context)])
+
+
+def display_name_for_actor(request: Request, actor: str) -> str:
+    actor = str(actor or "").strip()
+    authorization = request.headers.get("Authorization") or ""
+    if authorization.lower().startswith("bearer "):
+        try:
+            payload = decode_access_token(authorization.split(" ", 1)[1].strip())
+            if str(payload.get("sub") or "") == actor:
+                return str(payload.get("name") or actor).strip() or actor
+        except ValueError:
+            pass
+    try:
+        user = get_user(actor)
+    except ValueError:
+        user = None
+    return str((user or {}).get("name") or actor).strip() or actor
 _scan_import_executor = ThreadPoolExecutor(max_workers=2)
 _scan_import_jobs: dict[str, dict] = {}
 _scan_import_jobs_lock = Lock()
@@ -1740,6 +1758,7 @@ async def construction_group_upload_batch(
             collector=collector,
             module_asset_no=module_asset_no,
             photos=records,
+            creator=display_name_for_actor(request, actor),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc

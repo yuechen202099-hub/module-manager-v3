@@ -95,7 +95,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "2.5.3"
+    assert data["version"] == "2.5.4"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -523,6 +523,7 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
     reviewer_login = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
     constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
+    constructor_name = constructor_login.json()["data"]["user"]["name"]
     admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
     reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
     constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
@@ -591,6 +592,8 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert payload["group"]["photos"][0]["upload_source"] == "construction-mobile"
     assert payload["group"]["photos"][0]["construction_slot"] == "before_box"
     assert payload["group"]["photos"][0]["category"] == "unclassified"
+    assert payload["group"]["photos"][0]["creator"] == constructor_name
+    assert payload["group"]["photos"][0]["creator"] != "constructor"
     assert payload["group"]["photos"][0]["sha256"]
     assert payload["group"]["photos"][0]["storage_type"] == "local_upload"
     assert payload["group"]["photos"][0]["storage_key"].startswith("construction/")
@@ -711,11 +714,11 @@ def test_project_board_page_is_available() -> None:
 def test_static_page_verifier_rejects_visible_mojibake(tmp_path, monkeypatch) -> None:
     verifier = load_static_page_verifier()
     page = tmp_path / "bad.html"
-    page.write_text("<!doctype html><html><body>椤圭洰鐪嬫澘 妞ゅ湱娲?/body></html>", encoding="utf-8")
+    page.write_text("<!doctype html><html><body>妞ゅ湱娲伴惇瀣緲 濡炪倕婀卞ú?/body></html>", encoding="utf-8")
     monkeypatch.setattr(verifier, "STATIC_ROOT", tmp_path)
 
     try:
-        verifier.verify_page("bad.html", ["椤圭洰鐪嬫澘"], node=None)
+        verifier.verify_page("bad.html", ["妞ゅ湱娲伴惇瀣緲"], node=None)
     except AssertionError as exc:
         assert "mojibake fragment" in str(exc)
     else:
