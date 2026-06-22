@@ -1,6 +1,6 @@
 # BUG_HISTORY
 
-Last updated: 2026-06-21
+Last updated: 2026-06-22
 
 本文件只记录维护期 Bug 和风险线索。后续修复时只追加或更新相关条目，不重复扫描全项目。
 
@@ -95,3 +95,9 @@ Last updated: 2026-06-21
 | ID | Request / Risk | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0123 | The task claiming page required terminal/address search; without it, users had to scan the full terminal card grid manually. | Open `/claim-tasks` with many terminal cards and try to find a specific terminal or installation address. | Fixed locally in `V2.5.7`; the claim task page now filters role-visible tasks by terminal number, task id, and full task address index. | 2026-06-22 | `ClaimTasksView.vue`, `main.css`, `services.ts`, `types.ts`, `local_simulation.py`, `state_repository.py`, `test_api.py` |
+
+## 2026-06-22 - V2.5.8 installer KPI work time
+
+| ID | Request / Risk | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0124 | Installer KPI needed start/end time and effective work duration; using only daily counts cannot support fair KPI assessment. Long idle gaps must not be counted as effective work. | Open `/project-board`, click an installer workload popup, and inspect daily KPI rows. Older versions only showed counts and exception drilldown, with no work start/end, effective duration, or hourly distribution. | Fixed locally in `V2.5.8`; daily workload now returns start/end, effective work duration, attendance span, hourly work segments, and excludes gaps over 60 minutes from effective duration. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `services.ts`, `types.ts`, `ProjectBoardView.vue`, `test_api.py` |

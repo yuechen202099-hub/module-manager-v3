@@ -2540,3 +2540,52 @@
 - Status:
   - Local implementation complete.
   - Not deployed.
+
+### V2.5.8 installer KPI effective work time
+
+- Date: 2026-06-22
+- Owner: Project engineer thread
+- Goal:
+  - Infer installer daily start/end time from scan time and construction upload time.
+  - Calculate effective work duration for KPI assessment while excluding long idle gaps.
+  - Add a click-through bar chart that shows hourly effective work distribution.
+- Files changed:
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/tests/test_api.py`
+  - `v2-web/src/api/types.ts`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/views/ProjectBoardView.vue`
+  - `v2-api/app/main.py`
+  - `v2-api/app/services/ops_status.py`
+  - `v2-api/pyproject.toml`
+  - `v2-web/package.json`
+  - `v2-web/index.html`
+  - `v2-web/src/components/AppLayout.vue`
+  - `v2-web/src/layouts/AppLayout.vue`
+  - `v2-web/src/views/LoginView.vue`
+  - `v2-api/app/static/app_shell.html`
+  - `v2-api/app/static/task_hall.html`
+  - `PROJECT_KNOWLEDGE.md`
+  - `AGENTS.md`
+  - `FIX_NOTES.md`
+  - `BUG_HISTORY.md`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - Installer daily workload payload now includes `start_time`, `end_time`, `work_duration_minutes`, `work_duration_label`, `work_span_minutes`, `work_span_label`, `break_threshold_minutes`, `timepoint_count`, and `hourly_segments`.
+  - Effective work duration sums only adjacent scan/upload intervals that are no more than 60 minutes apart.
+  - Longer gaps are treated as breaks and excluded from effective work duration.
+  - The project-board installer KPI dialog shows start/end/effective duration and opens a 24-hour bar chart by clicking the duration.
+  - KPI CSV export includes start/end, effective duration, attendance span, and effective time point count.
+- Database note:
+  - No Alembic migration required.
+- Validation:
+  - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py::test_installer_daily_workload_includes_work_time_segments -q`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `44 passed, 1 warning`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+  - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- Status:
+  - Local implementation complete.
+  - Ready for deployment; not deployed in this step.

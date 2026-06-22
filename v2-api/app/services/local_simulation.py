@@ -12,7 +12,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
@@ -33,6 +33,8 @@ from app.services.photo_storage import (
 
 DEFAULT_TOTAL_CATALOG = Path("C:/Users/Administrator/Desktop/\u603b\u4f53\u6570\u636e.xlsx")
 DEFAULT_STAGE_CATALOG = Path("C:/Users/Administrator/Desktop/\u7b2c\u4e00\u6279\u6570\u636e.xlsx")
+LOCAL_WORK_TZ = timezone(timedelta(hours=8))
+WORK_SESSION_BREAK_MINUTES = 60
 DEFAULT_SCAN_FILE = Path("C:/Users/Administrator/Desktop/\u6279\u91cf\u626b\u7801_20260608125555.xlsx")
 REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatched"}
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
@@ -2416,6 +2418,95 @@ def _date_key_from_value(value: Any) -> str:
         return ""
 
 
+def _datetime_from_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        result = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            number = float(text)
+            if 25569 <= number <= 60000:
+                result = datetime(1899, 12, 30) + timedelta(days=number)
+            elif number > 10_000_000_000:
+                result = datetime.fromtimestamp(number / 1000, tz=UTC)
+            elif number > 1_000_000_000:
+                result = datetime.fromtimestamp(number, tz=UTC)
+            else:
+                return None
+        else:
+            normalized = text.replace("Z", "+00:00").replace("/", "-")
+            if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}", normalized):
+                normalized = normalized.replace(" ", "T", 1)
+            try:
+                result = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+    if result.tzinfo is not None:
+        return result.astimezone(LOCAL_WORK_TZ).replace(tzinfo=None)
+    return result
+
+
+def _format_time_of_day(value: datetime | None) -> str:
+    return value.strftime("%H:%M") if value else ""
+
+
+def _format_duration_label(minutes: int) -> str:
+    minutes = max(0, int(minutes or 0))
+    hours, rest = divmod(minutes, 60)
+    if hours and rest:
+        return f"{hours}小时{rest}分钟"
+    if hours:
+        return f"{hours}小时"
+    return f"{rest}分钟"
+
+
+def build_work_time_summary(timestamps: list[datetime | None]) -> dict[str, Any]:
+    valid = sorted({value.replace(second=0, microsecond=0) for value in timestamps if value})
+    start = valid[0] if valid else None
+    end = valid[-1] if valid else None
+    span_minutes = int(round((end - start).total_seconds() / 60)) if start and end and end > start else 0
+    effective_minutes = 0
+    buckets = {hour: 0 for hour in range(24)}
+    if len(valid) >= 2:
+        for left, right in zip(valid, valid[1:]):
+            if right <= left:
+                continue
+            gap_minutes = int(round((right - left).total_seconds() / 60))
+            if gap_minutes > WORK_SESSION_BREAK_MINUTES:
+                continue
+            effective_minutes += gap_minutes
+            cursor = left
+            while cursor < right:
+                next_hour = (cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+                segment_end = min(right, next_hour)
+                buckets[cursor.hour] += int(round((segment_end - cursor).total_seconds() / 60))
+                cursor = segment_end
+    return {
+        "start_at": start.isoformat(timespec="minutes") if start else "",
+        "end_at": end.isoformat(timespec="minutes") if end else "",
+        "start_time": _format_time_of_day(start),
+        "end_time": _format_time_of_day(end),
+        "work_duration_minutes": effective_minutes,
+        "work_duration_hours": round(effective_minutes / 60, 2) if effective_minutes else 0,
+        "work_duration_label": _format_duration_label(effective_minutes),
+        "work_span_minutes": span_minutes,
+        "work_span_label": _format_duration_label(span_minutes),
+        "break_threshold_minutes": WORK_SESSION_BREAK_MINUTES,
+        "timepoint_count": len(valid),
+        "hourly_segments": [
+            {
+                "hour": hour,
+                "label": f"{hour:02d}:00",
+                "minutes": minutes,
+                "duration_label": _format_duration_label(minutes),
+            }
+            for hour, minutes in buckets.items()
+        ],
+    }
+
+
 def _photo_is_construction_upload(photo: dict[str, Any]) -> bool:
     source_text = " ".join(
         str(photo.get(key) or "")
@@ -2441,6 +2532,25 @@ def _photo_work_date_key(photo: dict[str, Any]) -> str:
         if date_key:
             return date_key
     return ""
+
+
+def _photo_work_datetime(photo: dict[str, Any]) -> datetime | None:
+    if _photo_is_construction_upload(photo):
+        return _datetime_from_value(photo.get("created_at")) or _datetime_from_value(photo.get("downloaded_at"))
+    for key in (
+        "scan_created_at",
+        "source_created_at",
+        "created_at",
+        "\u521b\u5efa\u65f6\u95f4",
+        "scan_time",
+        "scanned_at",
+        "taken_at",
+        "classified_at",
+    ):
+        value = _datetime_from_value(photo.get(key))
+        if value:
+            return value
+    return None
 
 
 def _installer_exception_group_payload(group: dict[str, Any]) -> dict[str, Any]:
@@ -2492,8 +2602,12 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
                 "exception_count": 0,
                 "unreviewed_count": 0,
                 "exception_groups": [],
+                "_work_timestamps": [],
             },
         )
+        photo_times = [value for value in (_photo_work_datetime(photo) for photo in matched_photos) if value]
+        same_day_times = [value for value in photo_times if value.date().isoformat() == date_key]
+        row["_work_timestamps"].extend(same_day_times or photo_times)
         row["group_count"] += 1
         row["photo_count"] += len(matched_photos)
         if is_reviewed_group(group):
@@ -2503,6 +2617,9 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
             row["exception_groups"].append(_installer_exception_group_payload(group))
         else:
             row["unreviewed_count"] += 1
+    for row in rows.values():
+        timestamps = row.pop("_work_timestamps", [])
+        row.update(build_work_time_summary(timestamps))
     items = sorted(rows.values(), key=lambda item: str(item["date"]), reverse=True)
     return {"installer": target, "items": items}
 

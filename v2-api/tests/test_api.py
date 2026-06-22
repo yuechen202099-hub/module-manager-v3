@@ -95,7 +95,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "2.5.7"
+    assert data["version"] == "2.5.8"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -1022,6 +1022,62 @@ def test_url_row_import_adds_incremental_photos_for_duplicate_meter_number() -> 
     assert response.json()["data"]["skipped_duplicate_meters"] == 0
     assert response.json()["data"]["photos_new"] == 2
     assert group["photo_count"] == 2
+
+
+def test_installer_daily_workload_includes_work_time_segments() -> None:
+    client.post("/local-test/bootstrap")
+    first_group = client.get("/local-test/groups?limit=1").json()["data"]["items"][0]
+    client.post("/local-test/scan/clear")
+
+    rows = [
+        {
+            "meter_no": first_group["meter_no"],
+            "terminal": first_group["terminal"],
+            "creator": "kpi-installer",
+            "created_at": "2026-06-22 08:10:00",
+            "photo_urls": "https://example.test/kpi-1.jpg",
+        },
+        {
+            "meter_no": first_group["meter_no"],
+            "terminal": first_group["terminal"],
+            "creator": "kpi-installer",
+            "created_at": "2026-06-22 08:50:00",
+            "photo_urls": "https://example.test/kpi-2.jpg",
+        },
+        {
+            "meter_no": first_group["meter_no"],
+            "terminal": first_group["terminal"],
+            "creator": "kpi-installer",
+            "created_at": "2026-06-22 09:20:00",
+            "photo_urls": "https://example.test/kpi-3.jpg",
+        },
+        {
+            "meter_no": first_group["meter_no"],
+            "terminal": first_group["terminal"],
+            "creator": "kpi-installer",
+            "created_at": "2026-06-22 11:00:00",
+            "photo_urls": "https://example.test/kpi-4.jpg",
+        },
+    ]
+
+    response = client.post("/local-test/scan/import-url-rows", json={"rows": rows})
+    workload = client.get("/local-test/installers/kpi-installer/daily-workload")
+
+    assert response.status_code == 200
+    assert workload.status_code == 200
+    item = workload.json()["data"]["items"][0]
+    assert item["date"] == "2026-06-22"
+    assert item["start_time"] == "08:10"
+    assert item["end_time"] == "11:00"
+    assert item["work_duration_minutes"] == 70
+    assert item["work_duration_label"] == "1小时10分钟"
+    assert item["work_span_minutes"] == 170
+    assert item["break_threshold_minutes"] == 60
+    assert item["timepoint_count"] == 4
+    segments = {segment["hour"]: segment["minutes"] for segment in item["hourly_segments"]}
+    assert segments[8] == 50
+    assert segments[9] == 20
+    assert segments[10] == 0
 
 
 def test_excel_exports_return_real_workbooks() -> None:

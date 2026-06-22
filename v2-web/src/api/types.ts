@@ -209,7 +209,26 @@ export type InstallerWorkloadRow = {
   archivedCount: number
   exceptionCount: number
   unreviewedCount: number
+  startAt: string
+  endAt: string
+  startTime: string
+  endTime: string
+  workDurationMinutes: number
+  workDurationHours: number
+  workDurationLabel: string
+  workSpanMinutes: number
+  workSpanLabel: string
+  breakThresholdMinutes: number
+  timepointCount: number
+  hourlySegments: InstallerWorkSegment[]
   exceptionGroups: InstallerExceptionGroup[]
+}
+
+export type InstallerWorkSegment = {
+  hour: number
+  label: string
+  minutes: number
+  durationLabel: string
 }
 
 export type InstallerExceptionGroup = {

@@ -4,7 +4,7 @@ import logging
 import re
 import hashlib
 from abc import ABC, abstractmethod
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatched"}
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
 MAX_ACTIVE_CONSTRUCTION_TASKS_PER_CONSTRUCTOR = 5
+LOCAL_WORK_TZ = timezone(timedelta(hours=8))
 
 
 class StateBackendNotReady(RuntimeError):
@@ -81,6 +82,36 @@ def _date_key_from_value(value: Any) -> str:
         return ""
 
 
+def _datetime_from_value(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        result = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            number = float(text)
+            if 25569 <= number <= 60000:
+                result = datetime(1899, 12, 30) + timedelta(days=number)
+            elif number > 10_000_000_000:
+                result = datetime.fromtimestamp(number / 1000, tz=UTC)
+            elif number > 1_000_000_000:
+                result = datetime.fromtimestamp(number, tz=UTC)
+            else:
+                return None
+        else:
+            normalized = text.replace("Z", "+00:00").replace("/", "-")
+            if re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}", normalized):
+                normalized = normalized.replace(" ", "T", 1)
+            try:
+                result = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+    if result.tzinfo is not None:
+        return result.astimezone(LOCAL_WORK_TZ).replace(tzinfo=None)
+    return result
+
+
 def _photo_is_construction_upload(photo: Photo) -> bool:
     raw = photo.raw_data or {}
     source_text = " ".join(
@@ -107,7 +138,29 @@ def _photo_work_date_key(photo: Photo) -> str:
         date_key = _date_key_from_value(raw.get(key))
         if date_key:
             return date_key
+    if photo.taken_at:
+        return _date_key_from_value(photo.taken_at)
     return _date_key_from_value(photo.created_at)
+
+
+def _photo_work_datetime(photo: Photo) -> datetime | None:
+    raw = photo.raw_data or {}
+    if _photo_is_construction_upload(photo):
+        return _datetime_from_value(photo.created_at) or _datetime_from_value(raw.get("downloaded_at"))
+    for key in (
+        "scan_created_at",
+        "source_created_at",
+        "created_at",
+        "\u521b\u5efa\u65f6\u95f4",
+        "scan_time",
+        "scanned_at",
+        "taken_at",
+        "classified_at",
+    ):
+        value = _datetime_from_value(raw.get(key))
+        if value:
+            return value
+    return _datetime_from_value(photo.taken_at) or _datetime_from_value(photo.created_at)
 
 
 def _empty_task_stats() -> dict[str, Any]:
@@ -1664,8 +1717,12 @@ class PostgresStateRepository(StateRepository):
                     "exception_count": 0,
                     "unreviewed_count": 0,
                     "exception_groups": [],
+                    "_work_timestamps": [],
                 },
             )
+            photo_times = [value for value in (_photo_work_datetime(photo) for photo in matched_photos) if value]
+            same_day_times = [value for value in photo_times if value.date().isoformat() == date_key]
+            row["_work_timestamps"].extend(same_day_times or photo_times)
             row["group_count"] += 1
             row["photo_count"] += len(matched_photos)
             if _status_value(group.status) == GroupStatus.APPROVED.value:
@@ -1679,6 +1736,9 @@ class PostgresStateRepository(StateRepository):
                 row["exception_groups"].append(_installer_exception_group_payload(group, len(matched_photos)))
             else:
                 row["unreviewed_count"] += 1
+        for row in rows_by_date.values():
+            timestamps = row.pop("_work_timestamps", [])
+            row.update(local_simulation.build_work_time_summary(timestamps))
         items = sorted(rows_by_date.values(), key=lambda item: str(item["date"]), reverse=True)
         return {"installer": target, "items": items}
         with self._session() as session:

@@ -77,6 +77,8 @@ const workloadRows = ref<InstallerWorkloadRow[]>([])
 const workloadExceptionDialogVisible = ref(false)
 const workloadExceptionDate = ref('')
 const workloadExceptionGroups = ref<InstallerExceptionGroup[]>([])
+const workloadTimeDialogVisible = ref(false)
+const workloadTimeRow = ref<InstallerWorkloadRow | null>(null)
 
 const accountForm = reactive({
   username: '',
@@ -129,11 +131,17 @@ const workloadTotals = computed(() =>
       archivedCount: total.archivedCount + item.archivedCount,
       exceptionCount: total.exceptionCount + item.exceptionCount,
       unreviewedCount: total.unreviewedCount + item.unreviewedCount,
+      workDurationMinutes: total.workDurationMinutes + item.workDurationMinutes,
     }),
-    { groupCount: 0, photoCount: 0, archivedCount: 0, exceptionCount: 0, unreviewedCount: 0 },
+    { groupCount: 0, photoCount: 0, archivedCount: 0, exceptionCount: 0, unreviewedCount: 0, workDurationMinutes: 0 },
   ),
 )
 const workloadExceptionTitle = computed(() => `${workloadInstaller.value} ${workloadExceptionDate.value} 异常明细`)
+const workloadTimeTitle = computed(() => `${workloadInstaller.value} ${workloadTimeRow.value?.date || ''} 工时时段分布`)
+const workloadTimeSegments = computed(() => workloadTimeRow.value?.hourlySegments || [])
+const workloadMaxSegmentMinutes = computed(() =>
+  Math.max(1, ...workloadTimeSegments.value.map((item) => Number(item.minutes || 0))),
+)
 
 const accountRoles: Array<{ value: UserRole; label: string }> = [
   { value: 'admin', label: '管理员' },
@@ -160,6 +168,15 @@ function formatBytes(value: number) {
     index += 1
   }
   return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`
+}
+
+function formatWorkDuration(minutes: number) {
+  const safeMinutes = Math.max(0, Math.round(Number(minutes || 0)))
+  const hours = Math.floor(safeMinutes / 60)
+  const rest = safeMinutes % 60
+  if (hours && rest) return `${hours}小时${rest}分钟`
+  if (hours) return `${hours}小时`
+  return `${rest}分钟`
 }
 
 function taskSortValue(task: ReviewTask, key: TaskSortKey) {
@@ -449,12 +466,29 @@ function openWorkloadExceptionGroups(row: InstallerWorkloadRow) {
   workloadExceptionDialogVisible.value = true
 }
 
+function openWorkloadTimeChart(row: InstallerWorkloadRow) {
+  if (!row.timepointCount) return
+  workloadTimeRow.value = row
+  workloadTimeDialogVisible.value = true
+}
+
+function workloadBarHeight(minutes: number) {
+  const value = Number(minutes || 0)
+  if (!value) return 0
+  return Math.max(8, Math.round((value / workloadMaxSegmentMinutes.value) * 100))
+}
+
 function exportInstallerWorkloadCsv() {
   const rows = [
-    ['安装人员', '日期', '资料组数', '照片数', '已归档', '异常', '未审阅'],
+    ['安装人员', '日期', '开工时间', '收工时间', '有效工时', '考勤跨度', '有效时间点', '资料组数', '照片数', '已归档', '异常', '未审阅'],
     ...workloadRows.value.map((item) => [
       workloadInstaller.value,
       item.date,
+      item.startTime || '-',
+      item.endTime || '-',
+      item.workDurationLabel || formatWorkDuration(item.workDurationMinutes),
+      item.workSpanLabel || formatWorkDuration(item.workSpanMinutes),
+      item.timepointCount,
       item.groupCount,
       item.photoCount,
       item.archivedCount,
@@ -764,7 +798,7 @@ onUnmounted(() => {
       </p>
     </section>
 
-    <el-dialog v-model="workloadDialogVisible" :title="`${workloadInstaller} 每日工作量`" width="760px">
+    <el-dialog v-model="workloadDialogVisible" :title="`${workloadInstaller} 每日工作量`" width="980px">
       <div class="workload-summary">
         <article>
           <span>资料组</span>
@@ -782,9 +816,37 @@ onUnmounted(() => {
           <span>异常</span>
           <strong>{{ workloadTotals.exceptionCount }}</strong>
         </article>
+        <article>
+          <span>总工时</span>
+          <strong>{{ formatWorkDuration(workloadTotals.workDurationMinutes) }}</strong>
+        </article>
       </div>
       <el-table v-loading="workloadLoading" :data="workloadRows" height="360" size="small">
         <el-table-column prop="date" label="日期" min-width="120" />
+        <el-table-column prop="startTime" label="开工" width="82">
+          <template #default="{ row }">
+            <span>{{ row.startTime || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="endTime" label="收工" width="82">
+          <template #default="{ row }">
+            <span>{{ row.endTime || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="工作时长" width="120">
+          <template #default="{ row }">
+            <el-button
+              v-if="row.timepointCount"
+              class="workload-exception-link"
+              link
+              type="primary"
+              @click.stop="openWorkloadTimeChart(row)"
+            >
+              {{ row.workDurationLabel || formatWorkDuration(row.workDurationMinutes) }}
+            </el-button>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="groupCount" label="资料组" width="92" />
         <el-table-column prop="photoCount" label="照片" width="92" />
         <el-table-column prop="archivedCount" label="已归档" width="92" />
@@ -809,6 +871,51 @@ onUnmounted(() => {
         <el-button type="primary" :disabled="!workloadRows.length" @click="exportInstallerWorkloadCsv">
           导出 KPI CSV
         </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="workloadTimeDialogVisible" :title="workloadTimeTitle" width="900px">
+      <div v-if="workloadTimeRow" class="work-time-detail">
+        <div class="work-time-stats">
+          <article>
+            <span>开工</span>
+            <strong>{{ workloadTimeRow.startTime || '-' }}</strong>
+          </article>
+          <article>
+            <span>收工</span>
+            <strong>{{ workloadTimeRow.endTime || '-' }}</strong>
+          </article>
+          <article>
+            <span>推算工时</span>
+            <strong>{{ workloadTimeRow.workDurationLabel || formatWorkDuration(workloadTimeRow.workDurationMinutes) }}</strong>
+          </article>
+          <article>
+            <span>考勤跨度</span>
+            <strong>{{ workloadTimeRow.workSpanLabel || formatWorkDuration(workloadTimeRow.workSpanMinutes) }}</strong>
+          </article>
+        </div>
+        <p class="work-time-note">
+          柱状图按同一天内相邻扫码/上传时间点的连续间隔推算，超过
+          {{ workloadTimeRow.breakThresholdMinutes || 60 }} 分钟的长停顿不计入有效工时；有效时间点
+          {{ workloadTimeRow.timepointCount }} 个。
+        </p>
+        <div class="work-time-chart" role="img" :aria-label="`${workloadTimeTitle}，按小时展示推算工作分钟数`">
+          <article
+            v-for="segment in workloadTimeSegments"
+            :key="segment.hour"
+            class="work-time-segment"
+            :class="{ active: segment.minutes > 0 }"
+          >
+            <div class="work-time-bar-track">
+              <span class="work-time-bar" :style="{ height: `${workloadBarHeight(segment.minutes)}%` }" />
+            </div>
+            <strong>{{ segment.minutes ? segment.durationLabel : '0' }}</strong>
+            <span>{{ segment.label }}</span>
+          </article>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="workloadTimeDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -925,7 +1032,7 @@ onUnmounted(() => {
 
 .workload-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -964,6 +1071,88 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.work-time-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.work-time-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.work-time-stats article {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--v2-border-soft, #dde5ee);
+  border-radius: 8px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.work-time-stats span,
+.work-time-note {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+}
+
+.work-time-stats strong {
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 20px;
+}
+
+.work-time-note {
+  margin: 0;
+  line-height: 1.7;
+}
+
+.work-time-chart {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(22px, 1fr));
+  gap: 6px;
+  align-items: end;
+  min-height: 230px;
+  padding: 14px 10px 10px;
+  border: 1px solid var(--v2-border-soft, #dde5ee);
+  border-radius: 10px;
+  background: #f8fafc;
+  overflow-x: auto;
+}
+
+.work-time-segment {
+  display: grid;
+  grid-template-rows: 150px 20px 18px;
+  gap: 4px;
+  justify-items: center;
+  min-width: 24px;
+  color: var(--v2-text-muted, #64748b);
+  font-size: 11px;
+}
+
+.work-time-bar-track {
+  display: flex;
+  align-items: end;
+  justify-content: center;
+  width: 100%;
+  height: 150px;
+  border-radius: 999px;
+  background: #e8eef5;
+  overflow: hidden;
+}
+
+.work-time-bar {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  border-radius: 999px 999px 0 0;
+  background: linear-gradient(180deg, #0f7892 0%, #075f77 100%);
+}
+
+.work-time-segment.active strong {
+  color: var(--v2-text-strong, #0f172a);
+}
+
 @media (max-width: 1280px) {
   .account-form-grid {
     grid-template-columns: repeat(3, minmax(160px, 1fr));
@@ -972,8 +1161,13 @@ onUnmounted(() => {
 
 @media (max-width: 720px) {
   .account-form-grid,
-  .workload-summary {
+  .workload-summary,
+  .work-time-stats {
     grid-template-columns: 1fr;
+  }
+
+  .work-time-chart {
+    grid-template-columns: repeat(24, 28px);
   }
 
   .account-actions {

@@ -216,6 +216,23 @@ type BackendInstallerWorkload = {
     archived_count?: number
     exception_count?: number
     unreviewed_count?: number
+    start_at?: string
+    end_at?: string
+    start_time?: string
+    end_time?: string
+    work_duration_minutes?: number
+    work_duration_hours?: number
+    work_duration_label?: string
+    work_span_minutes?: number
+    work_span_label?: string
+    break_threshold_minutes?: number
+    timepoint_count?: number
+    hourly_segments?: Array<{
+      hour?: number
+      label?: string
+      minutes?: number
+      duration_label?: string
+    }>
     exception_groups?: Array<{
       group_id?: string
       meter_no?: string
@@ -940,6 +957,32 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
       archivedCount: Number(item.archived_count || 0),
       exceptionCount: Number(item.exception_count || 0),
       unreviewedCount: Number(item.unreviewed_count || 0),
+      startAt: String(item.start_at || ''),
+      endAt: String(item.end_at || ''),
+      startTime: String(item.start_time || ''),
+      endTime: String(item.end_time || ''),
+      workDurationMinutes: Number(item.work_duration_minutes || 0),
+      workDurationHours: Number(item.work_duration_hours || 0),
+      workDurationLabel: String(item.work_duration_label || '0分钟'),
+      workSpanMinutes: Number(item.work_span_minutes || 0),
+      workSpanLabel: String(item.work_span_label || '0分钟'),
+      breakThresholdMinutes: Number(item.break_threshold_minutes || 60),
+      timepointCount: Number(item.timepoint_count || 0),
+      hourlySegments: (
+        item.hourly_segments?.length
+          ? item.hourly_segments
+          : Array.from({ length: 24 }, (_, hour) => ({
+              hour,
+              label: `${String(hour).padStart(2, '0')}:00`,
+              minutes: 0,
+              duration_label: '0分钟',
+            }))
+      ).map((segment) => ({
+          hour: Number(segment.hour || 0),
+          label: String(segment.label || `${String(Number(segment.hour || 0)).padStart(2, '0')}:00`),
+          minutes: Number(segment.minutes || 0),
+          durationLabel: String(segment.duration_label || '0分钟'),
+      })),
       exceptionGroups: (item.exception_groups || []).map((group) => ({
         groupId: String(group.group_id || ''),
         meterNo: String(group.meter_no || ''),
