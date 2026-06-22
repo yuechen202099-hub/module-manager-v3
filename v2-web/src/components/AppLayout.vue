@@ -3,7 +3,7 @@
     <header class="legacy-layout-header">
       <div>
         <strong>模块更换项目管理器</strong>
-        <span>V2.6.1 云端协作</span>
+        <span>V2.6.2 云端协作</span>
       </div>
       <el-tag type="info" effect="plain">兼容布局</el-tag>
     </header>

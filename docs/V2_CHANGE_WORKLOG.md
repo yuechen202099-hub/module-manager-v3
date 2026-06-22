@@ -2647,8 +2647,12 @@
   - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
   - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - Status:
-  - Local implementation complete.
-  - Not deployed.
+  - Released to production by patch sync.
+  - Commit: `0306f34`; tag: `v2.6.0`.
+  - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_184919_before_v2.6.0_patch`.
+  - Production `.env`, `data`, and uploads preserved.
+  - No Alembic migration.
+  - Production GET checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, `http://www.sgcc.online/login`, and `https://www.sgcc.online/login`.
 
 ### V2.6.1 installer KPI PostgreSQL field hotfix
 
@@ -2685,3 +2689,33 @@
     - `module-manager-v2.service`: active.
     - Production GET checks passed for `/health`, `/login`, `/project-board`, `https://www.sgcc.online/login`; `/openapi.json` stayed 404.
     - Authenticated production KPI API check passed: installer `白红运` returned daily workload rows with 143 address drilldown records; sample address row used `display_meter_no` and `installation_address` values.
+
+### V2.6.2 installer KPI chart visual refinement
+
+- Date: 2026-06-22
+- Owner: Project engineer thread
+- Goal:
+  - Remove the visually noisy completion line chart from the installer KPI work-time popup.
+  - Rework the 2-hour chart toward an Apple Screen Time style view.
+  - Preserve address drilldown and KPI values while making the popup calmer and easier to read.
+- Files changed:
+  - `v2-web/src/views/ProjectBoardView.vue`
+  - version metadata files
+  - `BUG_HISTORY.md`
+  - `FIX_NOTES.md`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - The separate completion trend line is removed.
+  - A single screen-time card now shows 2-hour bars.
+  - Each bar displays completion count, effective work duration, and per-hour efficiency.
+  - Clicking a period still opens the address list.
+- Database note:
+  - No Alembic migration required.
+- Validation:
+  - `python -m py_compile v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+  - `pytest v2-api\tests\test_api.py -q`: `44 passed, 1 warning`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- Status:
+  - Ready for commit/tag and patch deployment.

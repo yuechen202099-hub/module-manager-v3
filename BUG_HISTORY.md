@@ -113,3 +113,9 @@ Last updated: 2026-06-22
 | ID | Bug | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0126 | Personnel KPI popup failed on PostgreSQL-backed production data because the workload address drilldown referenced non-existent `MaterialGroup.meter_no` and `MaterialGroup.address` fields. | Open `/project-board`, click an installer in the installer distribution panel. Production PostgreSQL path could return a 500 error before the daily workload dialog rendered. | Fixed locally in `V2.6.1`; PostgreSQL workload now uses `display_meter_no` and `installation_address`, with a regression test. | 2026-06-22 | `state_repository.py`, `test_state_repository.py` |
+
+## 2026-06-22 - V2.6.2 installer KPI chart visual refinement
+
+| ID | UX issue | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0127 | Personnel KPI work-time popup looked visually noisy and the completion line chart was hard to read. | Open `/project-board`, click an installer, then click a daily work-time value. V2.6.0/V2.6.1 displayed a thick completion line above the bars, making the popup feel cluttered. | Fixed locally in `V2.6.2`; the line chart was removed and the chart was restyled as a quieter Apple Screen Time style 2-hour bar view with direct completion labels and address drilldown preserved. | 2026-06-22 | `ProjectBoardView.vue` |

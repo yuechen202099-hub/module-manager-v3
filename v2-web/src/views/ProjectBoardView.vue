@@ -157,22 +157,6 @@ const workloadTimeSegments = computed(() => workloadTimeRow.value?.twoHourSegmen
 const workloadMaxSegmentMinutes = computed(() =>
   Math.max(1, ...workloadTimeSegments.value.map((item) => Number(item.minutes || 0))),
 )
-const workloadMaxCompletionCount = computed(() =>
-  Math.max(1, ...workloadTimeSegments.value.map((item) => Number(item.completionCount || 0))),
-)
-const workloadCompletionPoints = computed(() => {
-  const segments = workloadTimeSegments.value
-  if (!segments.length) return []
-  const step = segments.length > 1 ? 100 / (segments.length - 1) : 100
-  return segments.map((segment, index) => ({
-    x: index * step,
-    y: 92 - (Number(segment.completionCount || 0) / workloadMaxCompletionCount.value) * 78,
-    segment,
-  }))
-})
-const workloadCompletionPolyline = computed(() =>
-  workloadCompletionPoints.value.map((point) => `${point.x},${point.y}`).join(' '),
-)
 
 const accountRoles: Array<{ value: UserRole; label: string }> = [
   { value: 'admin', label: '管理员' },
@@ -983,53 +967,40 @@ onUnmounted(() => {
           </article>
         </div>
         <p class="work-time-note">
-          柱状图按 2 小时展示有效工时；折线展示每个时段完成资料组数。超过
+          按 2 小时展示有效工时与完成量。超过
           {{ workloadTimeRow.breakThresholdMinutes || 60 }} 分钟的长停顿不计入有效工时。地址权重会降低同楼集中施工的寻找成本，并提高缺少室号、零散地址、充电桩/车位等现场寻找难度。
         </p>
-        <div class="completion-line-card" role="img" :aria-label="`${workloadTimeTitle}，按 2 小时展示完成量折线`">
-          <div class="completion-line-head">
-            <strong>完成量趋势</strong>
-            <span>折线为完成资料组数，点开下方时段查看地址清单。</span>
-          </div>
-          <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="completion-line-svg">
-            <polyline
-              v-if="workloadCompletionPolyline"
-              :points="workloadCompletionPolyline"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.4"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-            <circle
-              v-for="point in workloadCompletionPoints"
-              :key="point.segment.label"
-              :cx="point.x"
-              :cy="point.y"
-              r="2.4"
-            />
-          </svg>
-          <div class="completion-line-labels">
-            <span v-for="segment in workloadTimeSegments" :key="segment.label">{{ segment.completionCount || 0 }}</span>
-          </div>
-        </div>
-        <div class="work-time-chart" role="img" :aria-label="`${workloadTimeTitle}，按 2 小时展示推算工作分钟数和完成量`">
-          <article
-            v-for="segment in workloadTimeSegments"
-            :key="segment.label"
-            class="work-time-segment"
-            :class="{ active: segment.minutes > 0, clickable: (segment.addresses?.length || 0) > 0 }"
-            @click="openWorkloadSegmentDetail(segment)"
-          >
-            <div class="work-time-bar-track">
-              <span class="work-time-bar" :style="{ height: `${workloadBarHeight(segment.minutes)}%` }" />
+        <section class="screen-time-card" :aria-label="`${workloadTimeTitle}，按 2 小时展示有效工时和完成量`">
+          <div class="screen-time-head">
+            <div>
+              <strong>2 小时效率分布</strong>
+              <span>柱高为有效工时，数字为完成资料组，点按时段查看地址清单。</span>
             </div>
-            <strong>{{ segment.minutes ? segment.durationLabel : '0' }}</strong>
-            <em>{{ segment.completionCount || 0 }}组</em>
-            <small>效 {{ formatDecimal(segment.completionPerEffectiveHour || 0) }}/h</small>
-            <span>{{ segment.label }}</span>
-          </article>
-        </div>
+            <div class="screen-time-legend" aria-hidden="true">
+              <span><i class="legend-bar" />有效工时</span>
+              <span><i class="legend-dot" />完成量</span>
+            </div>
+          </div>
+          <div class="work-time-chart" role="img">
+            <article
+              v-for="segment in workloadTimeSegments"
+              :key="segment.label"
+              class="work-time-segment"
+              :class="{ active: segment.minutes > 0, clickable: (segment.addresses?.length || 0) > 0 }"
+              @click="openWorkloadSegmentDetail(segment)"
+            >
+              <div class="work-time-value">
+                <strong>{{ segment.completionCount || 0 }}组</strong>
+                <span>{{ segment.minutes ? segment.durationLabel : '0分钟' }}</span>
+              </div>
+              <div class="work-time-bar-track">
+                <span class="work-time-bar" :style="{ height: `${workloadBarHeight(segment.minutes)}%` }" />
+              </div>
+              <small>效 {{ formatDecimal(segment.completionPerEffectiveHour || 0) }}/h</small>
+              <span class="work-time-label">{{ segment.label }}</span>
+            </article>
+          </div>
+        </section>
       </div>
       <template #footer>
         <el-button @click="workloadTimeDialogVisible = false">关闭</el-button>
@@ -1253,80 +1224,99 @@ onUnmounted(() => {
   line-height: 1.7;
 }
 
-.completion-line-card {
+.screen-time-card {
   display: grid;
-  gap: 10px;
-  padding: 12px;
+  gap: 14px;
+  padding: 16px 18px 14px;
   border: 1px solid var(--v2-border-soft, #dde5ee);
-  border-radius: 10px;
-  background: #ffffff;
-  color: #0f7892;
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 251, 253, 0.96)),
+    #ffffff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
-.completion-line-head {
-  align-items: baseline;
+.screen-time-head {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
 }
 
-.completion-line-head strong {
+.screen-time-head > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.screen-time-head strong {
   color: var(--v2-text-strong, #0f172a);
-  font-size: 14px;
+  font-size: 15px;
+  line-height: 1.3;
 }
 
-.completion-line-head span {
+.screen-time-head span,
+.screen-time-legend {
   color: var(--v2-text-muted, #64748b);
   font-size: 12px;
+  line-height: 1.5;
 }
 
-.completion-line-svg {
-  width: 100%;
-  height: 150px;
-  color: #0f7892;
-  overflow: visible;
+.screen-time-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 190px;
 }
 
-.completion-line-svg circle {
-  fill: #ffffff;
-  stroke: currentColor;
-  stroke-width: 1.6;
-}
-
-.completion-line-labels {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(40px, 1fr));
+.screen-time-legend span {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
-  color: var(--v2-text-strong, #0f172a);
-  font-size: 12px;
-  font-weight: 800;
-  text-align: center;
+  white-space: nowrap;
+}
+
+.legend-bar,
+.legend-dot {
+  display: inline-block;
+  background: #0f7892;
+}
+
+.legend-bar {
+  width: 8px;
+  height: 16px;
+  border-radius: 999px;
+}
+
+.legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
 }
 
 .work-time-chart {
   display: grid;
-  grid-template-columns: repeat(12, minmax(58px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(12, minmax(62px, 1fr));
+  gap: 10px;
   align-items: end;
-  min-height: 260px;
-  padding: 14px 10px 10px;
-  border: 1px solid var(--v2-border-soft, #dde5ee);
-  border-radius: 10px;
-  background: #f8fafc;
+  min-height: 300px;
+  padding: 6px 2px 0;
   overflow-x: auto;
 }
 
 .work-time-segment {
   display: grid;
-  grid-template-rows: 150px 18px 18px 18px 18px;
-  gap: 4px;
+  grid-template-rows: 48px 154px 18px 36px;
+  gap: 7px;
   justify-items: center;
-  min-width: 58px;
+  min-width: 62px;
   color: var(--v2-text-muted, #64748b);
   font-size: 11px;
-  padding: 6px 4px;
+  font-weight: 800;
+  padding: 8px 4px 7px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 12px;
 }
 
 .work-time-segment.clickable {
@@ -1334,16 +1324,36 @@ onUnmounted(() => {
 }
 
 .work-time-segment.clickable:hover {
-  border-color: rgba(15, 120, 146, 0.36);
-  background: #ffffff;
+  border-color: rgba(15, 120, 146, 0.24);
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.work-time-value {
+  display: grid;
+  align-content: end;
+  gap: 2px;
+  min-height: 48px;
+  text-align: center;
+}
+
+.work-time-value strong {
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 14px;
+  line-height: 1.15;
+}
+
+.work-time-value span {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 11px;
+  line-height: 1.25;
 }
 
 .work-time-bar-track {
   display: flex;
   align-items: end;
   justify-content: center;
-  width: 100%;
-  height: 150px;
+  width: 28px;
+  height: 154px;
   border-radius: 999px;
   background: #e8eef5;
   overflow: hidden;
@@ -1353,8 +1363,8 @@ onUnmounted(() => {
   display: block;
   width: 100%;
   min-height: 0;
-  border-radius: 999px 999px 0 0;
-  background: linear-gradient(180deg, #0f7892 0%, #075f77 100%);
+  border-radius: 999px;
+  background: linear-gradient(180deg, #168aa0 0%, #087084 100%);
 }
 
 .work-time-segment.active strong {
@@ -1366,11 +1376,18 @@ onUnmounted(() => {
   font-style: normal;
 }
 
-.work-time-segment em {
-  color: #0f7892;
-  font-weight: 800;
+.work-time-segment small {
+  color: var(--v2-text-muted, #64748b);
 }
 
+.work-time-label {
+  display: block;
+  max-width: 64px;
+  color: var(--v2-text-muted, #64748b);
+  font-weight: 760;
+  line-height: 1.35;
+  text-align: center;
+}
 @media (max-width: 1280px) {
   .account-form-grid {
     grid-template-columns: repeat(3, minmax(160px, 1fr));
@@ -1391,16 +1408,6 @@ onUnmounted(() => {
 
   .work-time-chart {
     grid-template-columns: repeat(12, 74px);
-  }
-
-  .completion-line-head {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .completion-line-labels {
-    grid-template-columns: repeat(12, 74px);
-    overflow-x: auto;
   }
 
   .account-actions {

@@ -726,16 +726,43 @@ Clicking the installer KPI popup on PostgreSQL-backed production data could fail
 - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - Browser QA on `http://127.0.0.1:8000/project-board?qa=v261-kpi`: page title `V2.6.1`, installer KPI dialog opens, no console error/warn.
 
+## 2026-06-22 - V2.6.2 installer KPI chart visual refinement
+
+### Reason
+
+The V2.6.0 completion line chart made the work-time popup visually noisy and did not match the desired Apple Screen Time style. The completion count is easier to read when it is integrated directly into each 2-hour bar segment.
+
+### Changed files
+
+- `v2-web/src/views/ProjectBoardView.vue`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Removed the separate completion line chart and related computed state.
+- Restyled the 2-hour KPI chart as a single quiet screen-time card.
+- Kept each segment clickable so users can still open the address list.
+- Kept direct labels for completion count, effective work duration, and per-hour efficiency.
+- Advanced version metadata to `V2.6.2`.
+
+### Impact
+
+- Frontend visual-only change.
+- No API path change.
+- No database migration.
+- Address drilldown and KPI weighting remain unchanged.
+
+### Validation
+
+- `python -m py_compile v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+- `pytest v2-api\tests\test_api.py -q`: `44 passed, 1 warning`.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+
 ### Production deployment
 
-- Commit: `d74b641`.
-- Tag: `v2.5.8`.
-- Deployment mode: patch sync to the existing production `current` target; no full release replacement.
-- Backup path: `/opt/module-manager-v2/backups/runtime/20260622_174553_before_v2.5.8_patch`.
-- Production `.env`, `data`, uploads preserved.
-- No Alembic migration.
-- Production GET checks passed for `/login`, `/project-board`, `/task-hall`, `/construction`, `http://106.14.122.43/login`, `http://www.sgcc.online/login`, and `https://www.sgcc.online/login`.
-- `/openapi.json`: `404`.
+- Pending patch deployment after `v2.6.2` commit/tag.
 
 ## 2026-06-22 - V2.6.0 installer KPI efficiency model
 
