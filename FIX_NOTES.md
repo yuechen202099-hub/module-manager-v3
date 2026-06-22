@@ -691,3 +691,14 @@ Installer KPI needs to infer daily work start/end times and effective working du
 - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `44 passed, 1 warning`.
 - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
 - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
+
+### Production deployment
+
+- Commit: `d74b641`.
+- Tag: `v2.5.8`.
+- Deployment mode: patch sync to the existing production `current` target; no full release replacement.
+- Backup path: `/opt/module-manager-v2/backups/runtime/20260622_174553_before_v2.5.8_patch`.
+- Production `.env`, `data`, uploads preserved.
+- No Alembic migration.
+- Production GET checks passed for `/login`, `/project-board`, `/task-hall`, `/construction`, `http://106.14.122.43/login`, `http://www.sgcc.online/login`, and `https://www.sgcc.online/login`.
+- `/openapi.json`: `404`.
