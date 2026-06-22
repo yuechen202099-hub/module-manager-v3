@@ -2537,9 +2537,16 @@
   - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
   - Bundled Node `vue-tsc --noEmit`: passed.
   - Browser QA on `http://127.0.0.1:8000/claim-tasks`: V2.5.7 page loaded, search input visible, terminal search filtered 135 cards down to the matching terminal card.
-- Status:
-  - Local implementation complete.
-  - Not deployed.
+  - Status:
+    - Released to production by patch sync.
+    - Commit: `0306f34`; tag: `v2.6.0`.
+    - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_184919_before_v2.6.0_patch`.
+    - Production `.env`, `data`, and uploads preserved.
+    - No Alembic migration.
+    - Synced 22 changed source/docs/version files plus `v2-api/app/static/vue/`.
+    - `module-manager-v2.service`: active.
+    - Production GET checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, `http://www.sgcc.online/login`, and `https://www.sgcc.online/login`.
+    - `/openapi.json`: 404.
 
 ### V2.5.8 installer KPI effective work time
 
