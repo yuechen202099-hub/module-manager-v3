@@ -1718,11 +1718,25 @@ class PostgresStateRepository(StateRepository):
                     "unreviewed_count": 0,
                     "exception_groups": [],
                     "_work_timestamps": [],
+                    "_completion_records": [],
                 },
             )
             photo_times = [value for value in (_photo_work_datetime(photo) for photo in matched_photos) if value]
             same_day_times = [value for value in photo_times if value.date().isoformat() == date_key]
             row["_work_timestamps"].extend(same_day_times or photo_times)
+            completed_at = max(same_day_times or photo_times, default=None)
+            if completed_at:
+                row["_completion_records"].append(
+                    {
+                        "group_id": str(group.id),
+                        "meter_no": str(group.meter_no or ""),
+                        "terminal": str(group.terminal or ""),
+                        "address": str(group.address or ""),
+                        "status": _status_value(group.status),
+                        "photo_count": len(matched_photos),
+                        "completed_at": completed_at,
+                    }
+                )
             row["group_count"] += 1
             row["photo_count"] += len(matched_photos)
             if _status_value(group.status) == GroupStatus.APPROVED.value:
@@ -1738,7 +1752,8 @@ class PostgresStateRepository(StateRepository):
                 row["unreviewed_count"] += 1
         for row in rows_by_date.values():
             timestamps = row.pop("_work_timestamps", [])
-            row.update(local_simulation.build_work_time_summary(timestamps))
+            completion_records = row.pop("_completion_records", [])
+            row.update(local_simulation.build_work_time_summary(timestamps, completion_records))
         items = sorted(rows_by_date.values(), key=lambda item: str(item["date"]), reverse=True)
         return {"installer": target, "items": items}
         with self._session() as session:

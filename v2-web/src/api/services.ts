@@ -227,11 +227,43 @@ type BackendInstallerWorkload = {
     work_span_label?: string
     break_threshold_minutes?: number
     timepoint_count?: number
+    completion_count?: number
+    completion_per_effective_hour?: number
+    weighted_completion?: number
+    weighted_completion_per_effective_hour?: number
     hourly_segments?: Array<{
       hour?: number
       label?: string
       minutes?: number
       duration_label?: string
+    }>
+    two_hour_segments?: Array<{
+      hour?: number
+      start_hour?: number
+      end_hour?: number
+      label?: string
+      minutes?: number
+      duration_label?: string
+      completion_count?: number
+      weighted_completion?: number
+      completion_per_effective_hour?: number
+      weighted_completion_per_effective_hour?: number
+      address_count?: number
+      addresses?: Array<{
+        group_id?: string
+        meter_no?: string
+        terminal?: string
+        address?: string
+        status?: string
+        photo_count?: number
+        completed_at?: string
+        completed_time?: string
+        address_cluster_key?: string
+        difficulty_weight?: number
+        difficulty_label?: string
+        difficulty_reasons?: string[]
+        cluster_size?: number
+      }>
     }>
     exception_groups?: Array<{
       group_id?: string
@@ -968,6 +1000,10 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
       workSpanLabel: String(item.work_span_label || '0分钟'),
       breakThresholdMinutes: Number(item.break_threshold_minutes || 60),
       timepointCount: Number(item.timepoint_count || 0),
+      completionCount: Number(item.completion_count || 0),
+      completionPerEffectiveHour: Number(item.completion_per_effective_hour || 0),
+      weightedCompletion: Number(item.weighted_completion || 0),
+      weightedCompletionPerEffectiveHour: Number(item.weighted_completion_per_effective_hour || 0),
       hourlySegments: (
         item.hourly_segments?.length
           ? item.hourly_segments
@@ -982,6 +1018,51 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
           label: String(segment.label || `${String(Number(segment.hour || 0)).padStart(2, '0')}:00`),
           minutes: Number(segment.minutes || 0),
           durationLabel: String(segment.duration_label || '0分钟'),
+      })),
+      twoHourSegments: (
+        item.two_hour_segments?.length
+          ? item.two_hour_segments
+          : Array.from({ length: 12 }, (_, index) => ({
+              hour: index * 2,
+              start_hour: index * 2,
+              end_hour: index * 2 + 2,
+              label: `${String(index * 2).padStart(2, '0')}:00-${String(index * 2 + 2).padStart(2, '0')}:00`,
+              minutes: 0,
+              duration_label: '0分钟',
+              completion_count: 0,
+              weighted_completion: 0,
+              completion_per_effective_hour: 0,
+              weighted_completion_per_effective_hour: 0,
+              address_count: 0,
+              addresses: [],
+            }))
+      ).map((segment) => ({
+        hour: Number(segment.hour ?? segment.start_hour ?? 0),
+        startHour: Number(segment.start_hour ?? segment.hour ?? 0),
+        endHour: Number(segment.end_hour ?? Number(segment.start_hour ?? segment.hour ?? 0) + 2),
+        label: String(segment.label || ''),
+        minutes: Number(segment.minutes || 0),
+        durationLabel: String(segment.duration_label || '0分钟'),
+        completionCount: Number(segment.completion_count || 0),
+        weightedCompletion: Number(segment.weighted_completion || 0),
+        completionPerEffectiveHour: Number(segment.completion_per_effective_hour || 0),
+        weightedCompletionPerEffectiveHour: Number(segment.weighted_completion_per_effective_hour || 0),
+        addressCount: Number(segment.address_count || segment.addresses?.length || 0),
+        addresses: (segment.addresses || []).map((address) => ({
+          groupId: String(address.group_id || ''),
+          meterNo: String(address.meter_no || ''),
+          terminal: String(address.terminal || ''),
+          address: String(address.address || ''),
+          status: String(address.status || ''),
+          photoCount: Number(address.photo_count || 0),
+          completedAt: String(address.completed_at || ''),
+          completedTime: String(address.completed_time || ''),
+          addressClusterKey: String(address.address_cluster_key || ''),
+          difficultyWeight: Number(address.difficulty_weight || 1),
+          difficultyLabel: String(address.difficulty_label || '标准地址'),
+          difficultyReasons: Array.isArray(address.difficulty_reasons) ? address.difficulty_reasons.filter(Boolean) : [],
+          clusterSize: Number(address.cluster_size || 1),
+        })),
       })),
       exceptionGroups: (item.exception_groups || []).map((group) => ({
         groupId: String(group.group_id || ''),

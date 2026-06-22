@@ -220,15 +220,44 @@ export type InstallerWorkloadRow = {
   workSpanLabel: string
   breakThresholdMinutes: number
   timepointCount: number
+  completionCount: number
+  completionPerEffectiveHour: number
+  weightedCompletion: number
+  weightedCompletionPerEffectiveHour: number
   hourlySegments: InstallerWorkSegment[]
+  twoHourSegments: InstallerWorkSegment[]
   exceptionGroups: InstallerExceptionGroup[]
 }
 
 export type InstallerWorkSegment = {
   hour: number
+  startHour?: number
+  endHour?: number
   label: string
   minutes: number
   durationLabel: string
+  completionCount?: number
+  weightedCompletion?: number
+  completionPerEffectiveHour?: number
+  weightedCompletionPerEffectiveHour?: number
+  addressCount?: number
+  addresses?: InstallerWorkAddress[]
+}
+
+export type InstallerWorkAddress = {
+  groupId: string
+  meterNo: string
+  terminal: string
+  address: string
+  status: string
+  photoCount: number
+  completedAt: string
+  completedTime: string
+  addressClusterKey: string
+  difficultyWeight: number
+  difficultyLabel: string
+  difficultyReasons: string[]
+  clusterSize: number
 }
 
 export type InstallerExceptionGroup = {

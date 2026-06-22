@@ -35,6 +35,7 @@ DEFAULT_TOTAL_CATALOG = Path("C:/Users/Administrator/Desktop/\u603b\u4f53\u6570\
 DEFAULT_STAGE_CATALOG = Path("C:/Users/Administrator/Desktop/\u7b2c\u4e00\u6279\u6570\u636e.xlsx")
 LOCAL_WORK_TZ = timezone(timedelta(hours=8))
 WORK_SESSION_BREAK_MINUTES = 60
+WORK_SEGMENT_HOURS = 2
 DEFAULT_SCAN_FILE = Path("C:/Users/Administrator/Desktop/\u6279\u91cf\u626b\u7801_20260608125555.xlsx")
 REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatched"}
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
@@ -2462,13 +2463,123 @@ def _format_duration_label(minutes: int) -> str:
     return f"{rest}分钟"
 
 
-def build_work_time_summary(timestamps: list[datetime | None]) -> dict[str, Any]:
+def _two_hour_label(start_hour: int) -> str:
+    end_hour = min(24, start_hour + WORK_SEGMENT_HOURS)
+    return f"{start_hour:02d}:00-{end_hour:02d}:00"
+
+
+def _bucket_start_hour(value: datetime) -> int:
+    return (int(value.hour) // WORK_SEGMENT_HOURS) * WORK_SEGMENT_HOURS
+
+
+def _is_charging_pile_address(address: str) -> bool:
+    return bool(re.search(r"充电桩|车位|车库|地库|地下|配电", address or ""))
+
+
+def _address_has_room(address: str) -> bool:
+    text = str(address or "")
+    return bool(re.search(r"\d+\s*(室|房|户|单元)", text) or re.search(r"[A-Za-z]?\d+[-－]\d+", text))
+
+
+def _address_cluster_key(address: str) -> str:
+    text = re.sub(r"\s+", "", str(address or ""))
+    if not text:
+        return ""
+    text = re.sub(r"\d+\s*(室|房|户).*$", "", text)
+    text = re.sub(r"(车位|充电桩).*$", "", text)
+    text = re.sub(r"[-－]\d+.*$", "", text)
+    return text[:80] or str(address or "")[:80]
+
+
+def _address_difficulty(address: str, cluster_size: int) -> dict[str, Any]:
+    text = str(address or "").strip()
+    reasons: list[str] = []
+    if not text:
+        return {
+            "weight": 1.4,
+            "label": "地址缺失",
+            "reasons": ["缺少地址，现场确认成本高"],
+            "cluster_size": 0,
+        }
+    weight = 1.0
+    if cluster_size >= 4:
+        weight -= 0.2
+        reasons.append("同楼/同区高度集中")
+    elif cluster_size >= 2:
+        weight -= 0.1
+        reasons.append("同楼/同区集中")
+    else:
+        weight += 0.1
+        reasons.append("地址零散")
+    is_charging = _is_charging_pile_address(text)
+    if is_charging:
+        weight += 0.25
+        reasons.append("充电桩/车位定位难度")
+        if cluster_size >= 2:
+            weight -= 0.1
+            reasons.append("同配电间/同停车区域可复用寻找路径")
+    elif not _address_has_room(text):
+        weight += 0.25
+        reasons.append("缺少室号，按商铺/别墅/现场寻找处理")
+    weight = min(1.6, max(0.75, weight))
+    if weight <= 0.9:
+        label = "集中地址"
+    elif weight >= 1.25:
+        label = "高寻找难度"
+    else:
+        label = "标准地址"
+    return {
+        "weight": round(weight, 2),
+        "label": label,
+        "reasons": reasons,
+        "cluster_size": cluster_size,
+    }
+
+
+def _completion_address_payload(record: dict[str, Any], cluster_counts: dict[str, int]) -> dict[str, Any]:
+    address = str(record.get("address") or "")
+    cluster_key = _address_cluster_key(address)
+    difficulty = _address_difficulty(address, cluster_counts.get(cluster_key, 1))
+    completed_at = record.get("completed_at")
+    return {
+        "group_id": str(record.get("group_id") or ""),
+        "meter_no": str(record.get("meter_no") or ""),
+        "terminal": str(record.get("terminal") or ""),
+        "address": address,
+        "status": str(record.get("status") or ""),
+        "photo_count": int(record.get("photo_count") or 0),
+        "completed_at": completed_at.isoformat(timespec="minutes") if isinstance(completed_at, datetime) else "",
+        "completed_time": _format_time_of_day(completed_at) if isinstance(completed_at, datetime) else "",
+        "address_cluster_key": cluster_key,
+        "difficulty_weight": difficulty["weight"],
+        "difficulty_label": difficulty["label"],
+        "difficulty_reasons": difficulty["reasons"],
+        "cluster_size": difficulty["cluster_size"],
+    }
+
+
+def build_work_time_summary(
+    timestamps: list[datetime | None],
+    completion_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     valid = sorted({value.replace(second=0, microsecond=0) for value in timestamps if value})
     start = valid[0] if valid else None
     end = valid[-1] if valid else None
     span_minutes = int(round((end - start).total_seconds() / 60)) if start and end and end > start else 0
     effective_minutes = 0
     buckets = {hour: 0 for hour in range(24)}
+    segment_buckets: dict[int, dict[str, Any]] = {
+        hour: {
+            "start_hour": hour,
+            "end_hour": min(24, hour + WORK_SEGMENT_HOURS),
+            "label": _two_hour_label(hour),
+            "minutes": 0,
+            "completion_count": 0,
+            "weighted_completion": 0.0,
+            "addresses": [],
+        }
+        for hour in range(0, 24, WORK_SEGMENT_HOURS)
+    }
     if len(valid) >= 2:
         for left, right in zip(valid, valid[1:]):
             if right <= left:
@@ -2481,8 +2592,40 @@ def build_work_time_summary(timestamps: list[datetime | None]) -> dict[str, Any]
             while cursor < right:
                 next_hour = (cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
                 segment_end = min(right, next_hour)
-                buckets[cursor.hour] += int(round((segment_end - cursor).total_seconds() / 60))
+                segment_minutes = int(round((segment_end - cursor).total_seconds() / 60))
+                buckets[cursor.hour] += segment_minutes
+                segment_buckets[_bucket_start_hour(cursor)]["minutes"] += segment_minutes
                 cursor = segment_end
+    completion_records = completion_records or []
+    cluster_counts: dict[str, int] = defaultdict(int)
+    for record in completion_records:
+        cluster_counts[_address_cluster_key(str(record.get("address") or ""))] += 1
+    for record in completion_records:
+        completed_at = record.get("completed_at")
+        if not isinstance(completed_at, datetime):
+            continue
+        segment = segment_buckets[_bucket_start_hour(completed_at)]
+        payload = _completion_address_payload(record, cluster_counts)
+        segment["completion_count"] += 1
+        segment["weighted_completion"] += float(payload["difficulty_weight"])
+        segment["addresses"].append(payload)
+    two_hour_segments = []
+    total_completion = 0
+    weighted_completion = 0.0
+    for segment in segment_buckets.values():
+        minutes = int(segment["minutes"])
+        completion_count = int(segment["completion_count"])
+        weighted = round(float(segment["weighted_completion"]), 2)
+        hours = minutes / 60 if minutes else 0
+        total_completion += completion_count
+        weighted_completion += weighted
+        segment["duration_label"] = _format_duration_label(minutes)
+        segment["completion_per_effective_hour"] = round(completion_count / hours, 2) if hours else 0
+        segment["weighted_completion_per_effective_hour"] = round(weighted / hours, 2) if hours else 0
+        segment["weighted_completion"] = weighted
+        segment["address_count"] = len(segment["addresses"])
+        two_hour_segments.append(segment)
+    effective_hours = effective_minutes / 60 if effective_minutes else 0
     return {
         "start_at": start.isoformat(timespec="minutes") if start else "",
         "end_at": end.isoformat(timespec="minutes") if end else "",
@@ -2495,6 +2638,10 @@ def build_work_time_summary(timestamps: list[datetime | None]) -> dict[str, Any]
         "work_span_label": _format_duration_label(span_minutes),
         "break_threshold_minutes": WORK_SESSION_BREAK_MINUTES,
         "timepoint_count": len(valid),
+        "completion_count": total_completion,
+        "completion_per_effective_hour": round(total_completion / effective_hours, 2) if effective_hours else 0,
+        "weighted_completion": round(weighted_completion, 2),
+        "weighted_completion_per_effective_hour": round(weighted_completion / effective_hours, 2) if effective_hours else 0,
         "hourly_segments": [
             {
                 "hour": hour,
@@ -2504,6 +2651,7 @@ def build_work_time_summary(timestamps: list[datetime | None]) -> dict[str, Any]
             }
             for hour, minutes in buckets.items()
         ],
+        "two_hour_segments": two_hour_segments,
     }
 
 
@@ -2603,11 +2751,25 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
                 "unreviewed_count": 0,
                 "exception_groups": [],
                 "_work_timestamps": [],
+                "_completion_records": [],
             },
         )
         photo_times = [value for value in (_photo_work_datetime(photo) for photo in matched_photos) if value]
         same_day_times = [value for value in photo_times if value.date().isoformat() == date_key]
         row["_work_timestamps"].extend(same_day_times or photo_times)
+        completed_at = max(same_day_times or photo_times, default=None)
+        if completed_at:
+            row["_completion_records"].append(
+                {
+                    "group_id": str(group.get("id") or ""),
+                    "meter_no": str(group.get("meter_no") or group.get("barcode") or ""),
+                    "terminal": str(group.get("terminal") or ""),
+                    "address": str(group.get("address") or ""),
+                    "status": str(group.get("status") or ""),
+                    "photo_count": len(matched_photos),
+                    "completed_at": completed_at,
+                }
+            )
         row["group_count"] += 1
         row["photo_count"] += len(matched_photos)
         if is_reviewed_group(group):
@@ -2619,7 +2781,8 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
             row["unreviewed_count"] += 1
     for row in rows.values():
         timestamps = row.pop("_work_timestamps", [])
-        row.update(build_work_time_summary(timestamps))
+        completion_records = row.pop("_completion_records", [])
+        row.update(build_work_time_summary(timestamps, completion_records))
     items = sorted(rows.values(), key=lambda item: str(item["date"]), reverse=True)
     return {"installer": target, "items": items}
 

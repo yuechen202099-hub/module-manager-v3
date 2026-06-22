@@ -101,3 +101,9 @@ Last updated: 2026-06-22
 | ID | Request / Risk | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0124 | Installer KPI needed start/end time and effective work duration; using only daily counts cannot support fair KPI assessment. Long idle gaps must not be counted as effective work. | Open `/project-board`, click an installer workload popup, and inspect daily KPI rows. Older versions only showed counts and exception drilldown, with no work start/end, effective duration, or hourly distribution. | Released in `V2.5.8`; daily workload now returns start/end, effective work duration, attendance span, hourly work segments, and excludes gaps over 60 minutes from effective duration. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `services.ts`, `types.ts`, `ProjectBoardView.vue`, `test_api.py` |
+
+## 2026-06-22 - V2.6.0 installer KPI efficiency model
+
+| ID | Request / Risk | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0125 | KPI chart needed 2-hour dimensions, completion trend, per-effective-hour output, and clickable address evidence. Raw counts alone could reward easy concentrated jobs or penalize harder scattered/charging-pile jobs unfairly. | Open `/project-board`, click an installer, then click a daily work duration. Older chart only showed hourly work minutes and could not inspect address difficulty or completion efficiency. | Fixed locally in `V2.6.0`; chart now uses 2-hour segments, adds completion line, per-hour completion and weighted efficiency, and each segment opens an address list with explainable difficulty weights. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `services.ts`, `types.ts`, `ProjectBoardView.vue`, `test_api.py` |

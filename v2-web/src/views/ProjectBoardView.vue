@@ -18,6 +18,7 @@ import {
 import type {
   ImportJob,
   InstallerExceptionGroup,
+  InstallerWorkSegment,
   InstallerWorkloadRow,
   ProjectSummary,
   ReviewTask,
@@ -79,6 +80,8 @@ const workloadExceptionDate = ref('')
 const workloadExceptionGroups = ref<InstallerExceptionGroup[]>([])
 const workloadTimeDialogVisible = ref(false)
 const workloadTimeRow = ref<InstallerWorkloadRow | null>(null)
+const workloadSegmentDialogVisible = ref(false)
+const workloadSegment = ref<InstallerWorkSegment | null>(null)
 
 const accountForm = reactive({
   username: '',
@@ -132,15 +135,43 @@ const workloadTotals = computed(() =>
       exceptionCount: total.exceptionCount + item.exceptionCount,
       unreviewedCount: total.unreviewedCount + item.unreviewedCount,
       workDurationMinutes: total.workDurationMinutes + item.workDurationMinutes,
+      completionCount: total.completionCount + item.completionCount,
+      weightedCompletion: total.weightedCompletion + item.weightedCompletion,
     }),
-    { groupCount: 0, photoCount: 0, archivedCount: 0, exceptionCount: 0, unreviewedCount: 0, workDurationMinutes: 0 },
+    {
+      groupCount: 0,
+      photoCount: 0,
+      archivedCount: 0,
+      exceptionCount: 0,
+      unreviewedCount: 0,
+      workDurationMinutes: 0,
+      completionCount: 0,
+      weightedCompletion: 0,
+    },
   ),
 )
 const workloadExceptionTitle = computed(() => `${workloadInstaller.value} ${workloadExceptionDate.value} 异常明细`)
 const workloadTimeTitle = computed(() => `${workloadInstaller.value} ${workloadTimeRow.value?.date || ''} 工时时段分布`)
-const workloadTimeSegments = computed(() => workloadTimeRow.value?.hourlySegments || [])
+const workloadSegmentTitle = computed(() => `${workloadInstaller.value} ${workloadTimeRow.value?.date || ''} ${workloadSegment.value?.label || ''} 地址清单`)
+const workloadTimeSegments = computed(() => workloadTimeRow.value?.twoHourSegments || [])
 const workloadMaxSegmentMinutes = computed(() =>
   Math.max(1, ...workloadTimeSegments.value.map((item) => Number(item.minutes || 0))),
+)
+const workloadMaxCompletionCount = computed(() =>
+  Math.max(1, ...workloadTimeSegments.value.map((item) => Number(item.completionCount || 0))),
+)
+const workloadCompletionPoints = computed(() => {
+  const segments = workloadTimeSegments.value
+  if (!segments.length) return []
+  const step = segments.length > 1 ? 100 / (segments.length - 1) : 100
+  return segments.map((segment, index) => ({
+    x: index * step,
+    y: 92 - (Number(segment.completionCount || 0) / workloadMaxCompletionCount.value) * 78,
+    segment,
+  }))
+})
+const workloadCompletionPolyline = computed(() =>
+  workloadCompletionPoints.value.map((point) => `${point.x},${point.y}`).join(' '),
 )
 
 const accountRoles: Array<{ value: UserRole; label: string }> = [
@@ -177,6 +208,11 @@ function formatWorkDuration(minutes: number) {
   if (hours && rest) return `${hours}小时${rest}分钟`
   if (hours) return `${hours}小时`
   return `${rest}分钟`
+}
+
+function formatDecimal(value: number, digits = 2) {
+  if (!Number.isFinite(Number(value))) return '0'
+  return Number(value).toFixed(digits).replace(/\.?0+$/, '')
 }
 
 function taskSortValue(task: ReviewTask, key: TaskSortKey) {
@@ -472,6 +508,11 @@ function openWorkloadTimeChart(row: InstallerWorkloadRow) {
   workloadTimeDialogVisible.value = true
 }
 
+function openWorkloadSegmentDetail(segment: InstallerWorkSegment) {
+  workloadSegment.value = segment
+  workloadSegmentDialogVisible.value = true
+}
+
 function workloadBarHeight(minutes: number) {
   const value = Number(minutes || 0)
   if (!value) return 0
@@ -480,7 +521,24 @@ function workloadBarHeight(minutes: number) {
 
 function exportInstallerWorkloadCsv() {
   const rows = [
-    ['安装人员', '日期', '开工时间', '收工时间', '有效工时', '考勤跨度', '有效时间点', '资料组数', '照片数', '已归档', '异常', '未审阅'],
+    [
+      '安装人员',
+      '日期',
+      '开工时间',
+      '收工时间',
+      '有效工时',
+      '考勤跨度',
+      '有效时间点',
+      '完成量',
+      '每小时完成量',
+      '难度加权完成量',
+      '难度加权效率',
+      '资料组数',
+      '照片数',
+      '已归档',
+      '异常',
+      '未审阅',
+    ],
     ...workloadRows.value.map((item) => [
       workloadInstaller.value,
       item.date,
@@ -489,6 +547,10 @@ function exportInstallerWorkloadCsv() {
       item.workDurationLabel || formatWorkDuration(item.workDurationMinutes),
       item.workSpanLabel || formatWorkDuration(item.workSpanMinutes),
       item.timepointCount,
+      item.completionCount,
+      item.completionPerEffectiveHour,
+      item.weightedCompletion,
+      item.weightedCompletionPerEffectiveHour,
       item.groupCount,
       item.photoCount,
       item.archivedCount,
@@ -820,6 +882,14 @@ onUnmounted(() => {
           <span>总工时</span>
           <strong>{{ formatWorkDuration(workloadTotals.workDurationMinutes) }}</strong>
         </article>
+        <article>
+          <span>完成量</span>
+          <strong>{{ workloadTotals.completionCount }}</strong>
+        </article>
+        <article>
+          <span>加权完成</span>
+          <strong>{{ formatDecimal(workloadTotals.weightedCompletion, 1) }}</strong>
+        </article>
       </div>
       <el-table v-loading="workloadLoading" :data="workloadRows" height="360" size="small">
         <el-table-column prop="date" label="日期" min-width="120" />
@@ -845,6 +915,16 @@ onUnmounted(() => {
               {{ row.workDurationLabel || formatWorkDuration(row.workDurationMinutes) }}
             </el-button>
             <span v-else>-</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="completionPerEffectiveHour" label="每小时完成" width="110">
+          <template #default="{ row }">
+            <span>{{ formatDecimal(row.completionPerEffectiveHour) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="weightedCompletionPerEffectiveHour" label="加权效率" width="110">
+          <template #default="{ row }">
+            <span>{{ formatDecimal(row.weightedCompletionPerEffectiveHour) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="groupCount" label="资料组" width="92" />
@@ -893,29 +973,95 @@ onUnmounted(() => {
             <span>考勤跨度</span>
             <strong>{{ workloadTimeRow.workSpanLabel || formatWorkDuration(workloadTimeRow.workSpanMinutes) }}</strong>
           </article>
+          <article>
+            <span>每小时完成</span>
+            <strong>{{ formatDecimal(workloadTimeRow.completionPerEffectiveHour) }}</strong>
+          </article>
+          <article>
+            <span>加权效率</span>
+            <strong>{{ formatDecimal(workloadTimeRow.weightedCompletionPerEffectiveHour) }}</strong>
+          </article>
         </div>
         <p class="work-time-note">
-          柱状图按同一天内相邻扫码/上传时间点的连续间隔推算，超过
-          {{ workloadTimeRow.breakThresholdMinutes || 60 }} 分钟的长停顿不计入有效工时；有效时间点
-          {{ workloadTimeRow.timepointCount }} 个。
+          柱状图按 2 小时展示有效工时；折线展示每个时段完成资料组数。超过
+          {{ workloadTimeRow.breakThresholdMinutes || 60 }} 分钟的长停顿不计入有效工时。地址权重会降低同楼集中施工的寻找成本，并提高缺少室号、零散地址、充电桩/车位等现场寻找难度。
         </p>
-        <div class="work-time-chart" role="img" :aria-label="`${workloadTimeTitle}，按小时展示推算工作分钟数`">
+        <div class="completion-line-card" role="img" :aria-label="`${workloadTimeTitle}，按 2 小时展示完成量折线`">
+          <div class="completion-line-head">
+            <strong>完成量趋势</strong>
+            <span>折线为完成资料组数，点开下方时段查看地址清单。</span>
+          </div>
+          <svg viewBox="0 0 100 100" preserveAspectRatio="none" class="completion-line-svg">
+            <polyline
+              v-if="workloadCompletionPolyline"
+              :points="workloadCompletionPolyline"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <circle
+              v-for="point in workloadCompletionPoints"
+              :key="point.segment.label"
+              :cx="point.x"
+              :cy="point.y"
+              r="2.4"
+            />
+          </svg>
+          <div class="completion-line-labels">
+            <span v-for="segment in workloadTimeSegments" :key="segment.label">{{ segment.completionCount || 0 }}</span>
+          </div>
+        </div>
+        <div class="work-time-chart" role="img" :aria-label="`${workloadTimeTitle}，按 2 小时展示推算工作分钟数和完成量`">
           <article
             v-for="segment in workloadTimeSegments"
-            :key="segment.hour"
+            :key="segment.label"
             class="work-time-segment"
-            :class="{ active: segment.minutes > 0 }"
+            :class="{ active: segment.minutes > 0, clickable: (segment.addresses?.length || 0) > 0 }"
+            @click="openWorkloadSegmentDetail(segment)"
           >
             <div class="work-time-bar-track">
               <span class="work-time-bar" :style="{ height: `${workloadBarHeight(segment.minutes)}%` }" />
             </div>
             <strong>{{ segment.minutes ? segment.durationLabel : '0' }}</strong>
+            <em>{{ segment.completionCount || 0 }}组</em>
+            <small>效 {{ formatDecimal(segment.completionPerEffectiveHour || 0) }}/h</small>
             <span>{{ segment.label }}</span>
           </article>
         </div>
       </div>
       <template #footer>
         <el-button @click="workloadTimeDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="workloadSegmentDialogVisible" :title="workloadSegmentTitle" width="920px">
+      <el-alert
+        class="claim-alert"
+        type="info"
+        :closable="false"
+        title="效率权重：同楼/同区集中地址降低权重；缺少室号、零散地址、充电桩/车位提高权重。权重用于 KPI 修正，不改变原始完成量。"
+      />
+      <el-table :data="workloadSegment?.addresses || []" height="430" size="small">
+        <el-table-column prop="completedTime" label="时间" width="76" />
+        <el-table-column prop="meterNo" label="表号" min-width="130" />
+        <el-table-column prop="terminal" label="终端" min-width="120" />
+        <el-table-column prop="address" label="地址" min-width="260" show-overflow-tooltip />
+        <el-table-column label="地址类型" min-width="150">
+          <template #default="{ row }">
+            <span>{{ row.difficultyLabel }} × {{ formatDecimal(row.difficultyWeight) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="判断原因" min-width="240" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span>{{ row.difficultyReasons?.length ? row.difficultyReasons.join('；') : '标准地址' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="photoCount" label="照片" width="70" />
+      </el-table>
+      <template #footer>
+        <el-button @click="workloadSegmentDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1032,7 +1178,7 @@ onUnmounted(() => {
 
 .workload-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -1078,7 +1224,7 @@ onUnmounted(() => {
 
 .work-time-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -1107,12 +1253,62 @@ onUnmounted(() => {
   line-height: 1.7;
 }
 
+.completion-line-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--v2-border-soft, #dde5ee);
+  border-radius: 10px;
+  background: #ffffff;
+  color: #0f7892;
+}
+
+.completion-line-head {
+  align-items: baseline;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.completion-line-head strong {
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 14px;
+}
+
+.completion-line-head span {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+}
+
+.completion-line-svg {
+  width: 100%;
+  height: 150px;
+  color: #0f7892;
+  overflow: visible;
+}
+
+.completion-line-svg circle {
+  fill: #ffffff;
+  stroke: currentColor;
+  stroke-width: 1.6;
+}
+
+.completion-line-labels {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(40px, 1fr));
+  gap: 6px;
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
 .work-time-chart {
   display: grid;
-  grid-template-columns: repeat(24, minmax(22px, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(12, minmax(58px, 1fr));
+  gap: 8px;
   align-items: end;
-  min-height: 230px;
+  min-height: 260px;
   padding: 14px 10px 10px;
   border: 1px solid var(--v2-border-soft, #dde5ee);
   border-radius: 10px;
@@ -1122,12 +1318,24 @@ onUnmounted(() => {
 
 .work-time-segment {
   display: grid;
-  grid-template-rows: 150px 20px 18px;
+  grid-template-rows: 150px 18px 18px 18px 18px;
   gap: 4px;
   justify-items: center;
-  min-width: 24px;
+  min-width: 58px;
   color: var(--v2-text-muted, #64748b);
   font-size: 11px;
+  padding: 6px 4px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+
+.work-time-segment.clickable {
+  cursor: pointer;
+}
+
+.work-time-segment.clickable:hover {
+  border-color: rgba(15, 120, 146, 0.36);
+  background: #ffffff;
 }
 
 .work-time-bar-track {
@@ -1153,9 +1361,24 @@ onUnmounted(() => {
   color: var(--v2-text-strong, #0f172a);
 }
 
+.work-time-segment em,
+.work-time-segment small {
+  font-style: normal;
+}
+
+.work-time-segment em {
+  color: #0f7892;
+  font-weight: 800;
+}
+
 @media (max-width: 1280px) {
   .account-form-grid {
     grid-template-columns: repeat(3, minmax(160px, 1fr));
+  }
+
+  .workload-summary,
+  .work-time-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -1167,7 +1390,17 @@ onUnmounted(() => {
   }
 
   .work-time-chart {
-    grid-template-columns: repeat(24, 28px);
+    grid-template-columns: repeat(12, 74px);
+  }
+
+  .completion-line-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .completion-line-labels {
+    grid-template-columns: repeat(12, 74px);
+    overflow-x: auto;
   }
 
   .account-actions {

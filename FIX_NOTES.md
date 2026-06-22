@@ -702,3 +702,49 @@ Installer KPI needs to infer daily work start/end times and effective working du
 - No Alembic migration.
 - Production GET checks passed for `/login`, `/project-board`, `/task-hall`, `/construction`, `http://106.14.122.43/login`, `http://www.sgcc.online/login`, and `https://www.sgcc.online/login`.
 - `/openapi.json`: `404`.
+
+## 2026-06-22 - V2.6.0 installer KPI efficiency model
+
+### Reason
+
+Installer KPI should focus on efficiency, not only attendance span or photo/group counts. The work-time chart also needed to move from 1-hour bars to 2-hour periods, show completion trend, expose each period's address list, and account for address concentration/difficulty.
+
+### Changed files
+
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/tests/test_api.py`
+- `v2-web/src/api/types.ts`
+- `v2-web/src/api/services.ts`
+- `v2-web/src/views/ProjectBoardView.vue`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Changed installer KPI visual segments from 1-hour bars to 2-hour periods.
+- Added completion counts, completion per effective hour, weighted completion, and weighted completion per effective hour to the workload payload.
+- Added a 2-hour completion line chart above the effective-work bar chart.
+- Added clickable segment drilldown with the address list for that period.
+- Added explainable address difficulty weights:
+  - same building / same area lowers weight because search path can be reused;
+  - missing room number raises weight as shop/villa/site-search risk;
+  - scattered addresses raise weight;
+  - charging pile / parking-space addresses raise weight, but clustered charging-pile areas get partial search-path reuse.
+- Added KPI CSV columns for completion count, per-hour completion, weighted completion, and weighted efficiency.
+- Advanced version metadata to `V2.6.0`.
+
+### Impact
+
+- No API path change.
+- No database migration.
+- Existing clients that ignore new KPI fields remain compatible.
+- Address difficulty is heuristic and intentionally explainable; future tuning can adjust constants without data migration.
+
+### Validation
+
+- `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py::test_installer_daily_workload_includes_work_time_segments -q`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `44 passed, 1 warning`.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.

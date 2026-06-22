@@ -95,7 +95,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "2.5.8"
+    assert data["version"] == "2.6.0"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -1026,34 +1026,34 @@ def test_url_row_import_adds_incremental_photos_for_duplicate_meter_number() -> 
 
 def test_installer_daily_workload_includes_work_time_segments() -> None:
     client.post("/local-test/bootstrap")
-    first_group = client.get("/local-test/groups?limit=1").json()["data"]["items"][0]
+    groups = client.get("/local-test/groups?limit=3").json()["data"]["items"]
     client.post("/local-test/scan/clear")
 
     rows = [
         {
-            "meter_no": first_group["meter_no"],
-            "terminal": first_group["terminal"],
+            "meter_no": groups[0]["meter_no"],
+            "terminal": groups[0]["terminal"],
             "creator": "kpi-installer",
             "created_at": "2026-06-22 08:10:00",
             "photo_urls": "https://example.test/kpi-1.jpg",
         },
         {
-            "meter_no": first_group["meter_no"],
-            "terminal": first_group["terminal"],
+            "meter_no": groups[0]["meter_no"],
+            "terminal": groups[0]["terminal"],
             "creator": "kpi-installer",
             "created_at": "2026-06-22 08:50:00",
             "photo_urls": "https://example.test/kpi-2.jpg",
         },
         {
-            "meter_no": first_group["meter_no"],
-            "terminal": first_group["terminal"],
+            "meter_no": groups[1]["meter_no"],
+            "terminal": groups[1]["terminal"],
             "creator": "kpi-installer",
             "created_at": "2026-06-22 09:20:00",
             "photo_urls": "https://example.test/kpi-3.jpg",
         },
         {
-            "meter_no": first_group["meter_no"],
-            "terminal": first_group["terminal"],
+            "meter_no": groups[2]["meter_no"],
+            "terminal": groups[2]["terminal"],
             "creator": "kpi-installer",
             "created_at": "2026-06-22 11:00:00",
             "photo_urls": "https://example.test/kpi-4.jpg",
@@ -1074,10 +1074,21 @@ def test_installer_daily_workload_includes_work_time_segments() -> None:
     assert item["work_span_minutes"] == 170
     assert item["break_threshold_minutes"] == 60
     assert item["timepoint_count"] == 4
+    assert item["completion_count"] == 3
+    assert item["completion_per_effective_hour"] == 2.57
+    assert item["weighted_completion"] >= 2.25
     segments = {segment["hour"]: segment["minutes"] for segment in item["hourly_segments"]}
     assert segments[8] == 50
     assert segments[9] == 20
     assert segments[10] == 0
+    two_hour = {segment["start_hour"]: segment for segment in item["two_hour_segments"]}
+    assert two_hour[8]["minutes"] == 70
+    assert two_hour[8]["completion_count"] == 2
+    assert two_hour[8]["completion_per_effective_hour"] == 1.71
+    assert len(two_hour[8]["addresses"]) == 2
+    assert two_hour[10]["minutes"] == 0
+    assert two_hour[10]["completion_count"] == 1
+    assert two_hour[10]["addresses"][0]["difficulty_weight"] >= 0.75
 
 
 def test_excel_exports_return_real_workbooks() -> None:

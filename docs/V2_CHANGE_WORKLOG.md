@@ -2591,3 +2591,54 @@
   - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_174553_before_v2.5.8_patch`.
   - Production `.env`, `data`, uploads preserved; no Alembic migration.
   - Production GET checks passed for `/login`, `/project-board`, `/task-hall`, `/construction`, `http://106.14.122.43/login`, `http://www.sgcc.online/login`, and `https://www.sgcc.online/login`.
+
+### V2.6.0 installer KPI 2-hour efficiency model
+
+- Date: 2026-06-22
+- Owner: Project engineer thread
+- Goal:
+  - Change work-time chart dimension from 1 hour to 2 hours.
+  - Add completion trend and per-effective-hour output.
+  - Make each period clickable to inspect address-level evidence.
+  - Add an explainable address difficulty weight model for KPI fairness.
+- Files changed:
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/tests/test_api.py`
+  - `v2-web/src/api/types.ts`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/views/ProjectBoardView.vue`
+  - `v2-api/app/main.py`
+  - `v2-api/app/services/ops_status.py`
+  - `v2-api/pyproject.toml`
+  - `v2-web/package.json`
+  - `v2-web/index.html`
+  - `v2-web/src/components/AppLayout.vue`
+  - `v2-web/src/layouts/AppLayout.vue`
+  - `v2-web/src/views/LoginView.vue`
+  - `v2-api/app/static/app_shell.html`
+  - `v2-api/app/static/task_hall.html`
+  - `AGENTS.md`
+  - `PROJECT_KNOWLEDGE.md`
+  - `BUG_HISTORY.md`
+  - `FIX_NOTES.md`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - Installer daily workload now includes `completion_count`, `completion_per_effective_hour`, `weighted_completion`, `weighted_completion_per_effective_hour`, and `two_hour_segments`.
+  - Two-hour segments include effective minutes, completion count, weighted completion, per-hour efficiency, weighted efficiency, and address drilldown rows.
+  - Address drilldown rows include meter, terminal, address, completed time, photo count, cluster size, difficulty label, weight, and reasons.
+  - Difficulty weight rule is transparent: concentrated same building/area is easier; missing room number, scattered address, and charging pile/parking-space work are harder; clustered charging-pile areas recover part of the search cost.
+  - The project-board KPI dialog adds a completion line chart and 2-hour bar grid. Clicking a period opens the address list.
+  - KPI CSV export includes completion and weighted efficiency columns.
+- Database note:
+  - No Alembic migration required.
+- Validation:
+  - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py::test_installer_daily_workload_includes_work_time_segments -q`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `44 passed, 1 warning`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+  - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- Status:
+  - Local implementation complete.
+  - Not deployed.
