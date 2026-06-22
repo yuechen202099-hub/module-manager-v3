@@ -2785,4 +2785,9 @@
   - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
   - `rg "field-entry-card|field-task-entry|异常任务 3|未匹配任务 97" v2-web\src\views v2-api\app\static\vue`: no matches.
 - Status:
-  - Ready for patch deployment.
+  - Released to production by patch sync.
+  - Commit: `443482d`; tag: `v2.6.4`.
+  - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_213557_before_v2.6.4_patch`.
+  - Production `.env`, `data`, uploads preserved; no Alembic migration.
+  - Production checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`; `/openapi.json` returned `404`.
+  - Production Vue bundle verification: `field-entry-card=0`, `field-task-entry=0`, `task-mode-grid=0`.

@@ -807,6 +807,18 @@ The always-visible exception and unmatched task cards in the review workbench an
 - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - `rg "field-entry-card|field-task-entry|异常任务 3|未匹配任务 97" v2-web\src\views v2-api\app\static\vue`: no matches.
 
+### Production deployment
+
+- Commit: `443482d`.
+- Tag: `v2.6.4`.
+- Deployment method: patch sync into the existing production `current` directory; no full release replacement.
+- Backup path: `/opt/module-manager-v2/backups/runtime/20260622_213557_before_v2.6.4_patch`.
+- Production `.env`, `data`, uploads preserved.
+- No Alembic migration.
+- Production checks passed: `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, `https://www.sgcc.online/login`.
+- `/openapi.json`: `404`.
+- Production Vue bundle verification: `field-entry-card=0`, `field-task-entry=0`, `task-mode-grid=0`.
+
 ## 2026-06-22 - V2.6.3 安装人员 KPI 同楼栋地址聚类
 
 ### 修改原因
