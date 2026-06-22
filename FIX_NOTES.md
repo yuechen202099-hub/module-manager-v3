@@ -762,7 +762,14 @@ The V2.6.0 completion line chart made the work-time popup visually noisy and did
 
 ### Production deployment
 
-- Pending patch deployment after `v2.6.2` commit/tag.
+- Commit: `f4d32c2`.
+- Tag: `v2.6.2`.
+- Deployment mode: patch sync to the existing production `current` target; no full release replacement.
+- Backup path: `/opt/module-manager-v2/backups/runtime/20260622_202711_before_v2.6.2_patch`.
+- Production `.env`, `data`, uploads preserved.
+- No Alembic migration.
+- Production checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`.
+- `/openapi.json`: `404`.
 
 ## 2026-06-22 - V2.6.0 installer KPI efficiency model
 

@@ -2718,4 +2718,8 @@
   - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
   - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - Status:
-  - Ready for commit/tag and patch deployment.
+  - Released to production by patch sync.
+  - Commit: `f4d32c2`; tag: `v2.6.2`.
+  - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_202711_before_v2.6.2_patch`.
+  - Production `.env`, `data`, uploads preserved; no Alembic migration.
+  - Production checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`; `/openapi.json` returned `404`.
