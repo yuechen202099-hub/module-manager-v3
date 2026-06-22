@@ -372,3 +372,36 @@ The unmatched and exception workflows should behave like permanent task entries,
   - `/task-hall?qa=v251-field-cards` shows `V2.5.1` and one `异常任务` card plus one `未匹配任务` card.
   - `/construction?qa=v251-field-cards` shows `V2.5.1` and one `异常任务` card plus one `未匹配任务` card.
   - Sample Element Plus button/tag contents report centered flex display.
+
+## 2026-06-22 - V2.5.2 construction mobile field-task card click-through
+
+### Reason
+
+Mobile construction users reported that the two permanent field-task cards added in V2.5.1 could be opened, but tapping them did not reliably jump into the related collection task screen.
+
+### Changed files
+
+- `v2-web/src/views/ConstructionView.vue`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Added a shared task resolver for construction field-task cards that matches by task id first and terminal second.
+- Made exception and unmatched field-task list cards fully clickable and keyboard accessible, not only their small action buttons.
+- When a permanent field-task mode contains exactly one actionable card, selecting that mode now enters the related task directly.
+- Advanced version metadata to `V2.5.2`.
+
+### Impact
+
+- Frontend-only construction collection workflow hotfix.
+- No API path change.
+- No database schema change.
+- No Alembic migration required.
+
+### Validation
+
+- `node vue-tsc --noEmit`: passed using bundled Node.
+- `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.

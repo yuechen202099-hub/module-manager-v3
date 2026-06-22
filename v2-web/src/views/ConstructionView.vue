@@ -1418,6 +1418,16 @@ async function loadFieldTaskCards() {
   }
 }
 
+function findTaskForFieldCard(taskId?: string | number, terminal?: string) {
+  const normalizedTaskId = String(taskId || '').trim()
+  const normalizedTerminal = String(terminal || '').trim()
+  return visibleTasks.value.find((item) => {
+    if (normalizedTaskId && String(item.id) === normalizedTaskId) return true
+    if (normalizedTerminal && String(item.terminal || '') === normalizedTerminal) return true
+    return false
+  })
+}
+
 async function selectTaskPickerMode(mode: TaskPickerMode) {
   await flushCurrentDraftPersist()
   taskPickerMode.value = mode
@@ -1428,24 +1438,30 @@ async function selectTaskPickerMode(mode: TaskPickerMode) {
     exceptionOrders.value = []
     resetCollectorForm()
     await loadFieldTaskCards()
+    if (mode === 'exception' && visibleExceptionTaskCards.value.length === 1) {
+      await openExceptionTaskCard(visibleExceptionTaskCards.value[0])
+    }
+    if (mode === 'unmatched' && visibleUnmatchedTaskCards.value.length === 1) {
+      await openUnmatchedTaskCard(visibleUnmatchedTaskCards.value[0])
+    }
   }
 }
 
 async function openExceptionTaskCard(order: ConstructionExceptionOrder) {
-  const taskId = String(order.taskId || '')
-  const task = visibleTasks.value.find((item) => String(item.id) === taskId)
+  const task = findTaskForFieldCard(order.taskId, order.terminal)
   if (!task) {
     ElMessage.warning('该异常任务尚未绑定可进入的终端')
     return
   }
   await selectTask(task)
   groupFilter.value = 'exception'
+  await nextTick()
   const target = workItems.value.find((item) => item.order?.id === order.id || String(item.group.id) === String(order.groupId))
   if (target) await openWorkItem(target)
 }
 
 async function openUnmatchedTaskCard(record: UnmatchedRecord) {
-  const task = visibleTasks.value.find((item) => String(item.terminal || '') === String(record.terminal || ''))
+  const task = findTaskForFieldCard('', record.terminal)
   if (!task) {
     ElMessage.info('该未匹配任务需要先由管理员补充或指派终端')
     return
@@ -1691,27 +1707,45 @@ onBeforeUnmount(() => {
           </div>
 
           <div v-if="taskPickerMode === 'exception'" class="field-task-picker-list">
-            <article v-for="order in visibleExceptionTaskCards" :key="order.id" class="field-task-card kind-exception">
+            <article
+              v-for="order in visibleExceptionTaskCards"
+              :key="order.id"
+              class="field-task-card kind-exception"
+              role="button"
+              tabindex="0"
+              @click="openExceptionTaskCard(order)"
+              @keydown.enter.prevent="openExceptionTaskCard(order)"
+              @keydown.space.prevent="openExceptionTaskCard(order)"
+            >
               <div class="field-task-title">
                 <strong>{{ order.meterNo || order.groupId || order.id }}</strong>
                 <el-tag type="danger" effect="light">{{ order.assignedTo ? `已指派 ${order.assignedTo}` : '待指派' }}</el-tag>
               </div>
               <p>{{ order.terminal || '未绑定终端' }} / {{ order.address || '未填写地址' }}</p>
               <small>{{ order.category || '异常工单' }} {{ order.note || '' }}</small>
-              <el-button size="small" type="primary" plain @click="openExceptionTaskCard(order)">进入处理</el-button>
+              <el-button size="small" type="primary" plain @click.stop="openExceptionTaskCard(order)">进入处理</el-button>
             </article>
             <el-empty v-if="!visibleExceptionTaskCards.length" description="暂无异常任务" />
           </div>
 
           <div v-if="taskPickerMode === 'unmatched'" class="field-task-picker-list">
-            <article v-for="record in visibleUnmatchedTaskCards" :key="record.unmatchedId" class="field-task-card kind-unmatched">
+            <article
+              v-for="record in visibleUnmatchedTaskCards"
+              :key="record.unmatchedId"
+              class="field-task-card kind-unmatched"
+              role="button"
+              tabindex="0"
+              @click="openUnmatchedTaskCard(record)"
+              @keydown.enter.prevent="openUnmatchedTaskCard(record)"
+              @keydown.space.prevent="openUnmatchedTaskCard(record)"
+            >
               <div class="field-task-title">
                 <strong>{{ record.barcode || record.meterNo || record.unmatchedId }}</strong>
                 <el-tag type="warning" effect="light">{{ record.assignedTo ? `已指派 ${record.assignedTo}` : '待确认' }}</el-tag>
               </div>
               <p>{{ record.terminal || '未匹配终端' }} / {{ record.address || '未匹配地址' }}</p>
               <small>{{ record.projectOutside ? '项目外施工' : '现场确认' }}</small>
-              <el-button size="small" type="primary" plain @click="openUnmatchedTaskCard(record)">进入终端</el-button>
+              <el-button size="small" type="primary" plain @click.stop="openUnmatchedTaskCard(record)">进入终端</el-button>
             </article>
             <el-empty v-if="!visibleUnmatchedTaskCards.length" description="暂无未匹配任务" />
           </div>
@@ -2383,6 +2417,19 @@ onBeforeUnmount(() => {
   border-left: 4px solid transparent;
   border-radius: 10px;
   background: #fff;
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+.field-task-card:hover,
+.field-task-card:focus-visible {
+  border-color: #9ccfe0;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+  outline: none;
+  transform: translateY(-1px);
 }
 
 .field-task-card.kind-exception {

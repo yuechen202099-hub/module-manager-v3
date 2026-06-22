@@ -59,7 +59,7 @@ Future work must use multiple focused agents when the task is broad enough:
 
 ## Versioning Discipline
 
-- Current product version: `V2.5.1`.
+- Current product version: `V2.5.2`.
 - Every shipped change must update the product version before completion.
 - Major workflow, architecture, database, deployment, or UI experience changes increment the minor version by `0.1`.
   - Example: `V2.4.11` -> `V2.5.0`.

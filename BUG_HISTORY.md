@@ -55,6 +55,12 @@ Last updated: 2026-06-21
 | --- | --- | --- | --- | --- | --- |
 | BH-0116 | Unmatched address records and exception groups were passive records instead of assignable field tasks. | Reviewers/admins could see unmatched or exception data, but field handling required separate manual coordination and had no project-outside export or replacement-meter rematch workflow. | Covered by the combined `V2.5.0` release. | 2026-06-22 | `local_simulation.py`, `state_repository.py`, `local_test.py`, `exports.py`, `services.ts`, `types.ts`, `TaskHallView.vue` |
 
+## 2026-06-22 - V2.5.2 construction mobile task-card click-through hotfix
+
+| ID | Bug | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0118 | Construction mobile permanent field-task cards could open the field-task list but fail to enter the related collection task. | Open `/construction` on mobile, tap the permanent exception or unmatched task card added in V2.5.1, then tap a listed field task. Records without a direct task id or cards tapped outside the small action button might not enter the terminal collection view. | Fixed locally in `V2.5.2`; pending project-engineer production publish. | 2026-06-22 | `v2-web/src/views/ConstructionView.vue` |
+
 ## 2026-06-22 - V2.5.1 UX maintenance
 
 | ID | Bug / UX issue | Reproduction | Status | Fixed at | Files |

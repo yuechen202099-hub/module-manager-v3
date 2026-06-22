@@ -2296,3 +2296,29 @@
   - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_075536_before_v2.5.1_patch`.
   - Preserved production `.env`, `data`, uploads; no Alembic migration.
   - Verified `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, `/claim-tasks`, `https://www.sgcc.online/login`, and `/openapi.json` 404.
+
+### V2.5.2 construction mobile field-task card click-through hotfix
+
+- Date: 2026-06-22
+- Owner: BUG fix thread
+- Scope:
+  - Construction mobile task picker.
+  - Permanent exception/unmatched field-task card click-through.
+- Changed files:
+  - `v2-web/src/views/ConstructionView.vue`
+  - version metadata files
+  - maintenance documentation
+- Behavior:
+  - Field-task card lookup now matches by task id first and terminal second.
+  - Exception and unmatched field-task list cards are fully clickable, not only the small action button.
+  - If a permanent field-task entry has exactly one actionable card, tapping the permanent entry enters that task directly.
+- Release note:
+  - Frontend-only hotfix.
+  - No API path change.
+  - No database schema change.
+  - No Alembic migration required.
+- Validation:
+  - `node vue-tsc --noEmit`: passed using bundled Node.
+  - `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
