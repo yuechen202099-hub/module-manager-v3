@@ -1,6 +1,6 @@
 # Agent Coordination
 
-Last updated: 2026-06-22
+Last updated: 2026-06-23
 
 This file is the shared coordination board for parallel maintenance threads.
 
@@ -8,6 +8,8 @@ This file is the shared coordination board for parallel maintenance threads.
 
 | Version | Owner | Scope | Status | Notes |
 | --- | --- | --- | --- | --- |
+| V3.0.0-rc1 | Project engineer thread | Controlled production rollout of the V3 Apple-like UI branch while preserving V2.6.5 rollback | Preparing deployment | Branch `feature/v3.0.0-apple-ui-lab`; target release `V3.0.0-rc1`. No backend API/database change, no Alembic, no `.env`/`data`/`uploads` overwrite. Deploy through a new release directory and switch the production `current` symlink only after backup. Roll back by switching `current` back to the V2.6.5 release and restarting service. |
+| V3.0.0-alpha | Codex V3 UI lab thread | Information architecture optimization for `/project-board`, `/claim-tasks`, and `/construction`: project cockpit, terminal exports/review/assignment consolidated into claim tasks, construction page scoped to installer collection | Superseded by V3.0.0-rc1 | Branch `feature/v3.0.0-apple-ui-lab`; this was the local UI lab phase. No backend API/database change, no Alembic, no `.env`/`data`/`uploads`/OSS/PostgreSQL impact. `/project-board` no longer shows the terminal task table and now surfaces cockpit flow/ring/signal visualization. `/claim-tasks` terminal cards now expose detail/package export, explicit review entry only, current installer display by name with username as auxiliary, and admin construction assign/reassign. `/construction` no longer contains admin assignment main actions; constructors only see assigned terminals while scan/photo/cache/upload/submit collection remains available. Local gates passed: `vue-tsc --noEmit`, Vue shell build, Vue migration gate, `pytest v2-api/tests/test_api.py -q`, and `git diff --check`. Browser QA passed for `/project-board`, `/claim-tasks`, `/construction`, `/login`, and `/task-hall` across 1366/1920/390px samples with no horizontal overflow; production-mode `/openapi.json` returned 404 on temporary port `8019`. |
 | V2.4.12 | BUG fix thread + project engineer deploy thread | Construction mobile scanner patch | Released | Committed as `5f6d0aa`, tagged `v2.4.12`, deployed by project engineer. Backup: `/opt/module-manager-v2/backups/runtime/20260621_224811_before_v2.4.12`; release: `/opt/module-manager-v2/releases/v2.4.12-20260621_224816`; service active; `/health`, `/login`, `/project-board`, `/construction` OK; `/openapi.json` 404. Real phone scan QA still pending. |
 | V2.4.13 | Project engineer thread `019edff4-0c40-7920-8872-3c20eacb4430` | ClaimTasks task-claiming page patch | Folded into V2.4.14 | ClaimTasks fix is included in the V2.4.14 combined patch to avoid deploying a mixed version/build artifact. |
 | V2.4.14 | Project engineer thread + BUG fix thread | ClaimTasks cleanup plus construction mobile capture/cache patch | Released | Committed as `d18c516`, tagged `v2.4.14`, deployed by patch sync. Backup: `/opt/module-manager-v2/backups/runtime/20260621_234534_before_v2.4.14_patch`. Production `.env`, `data`, uploads preserved; no Alembic migration. Service active; `/health`, `/login`, `/project-board`, `/claim-tasks`, `/construction`, and `https://www.sgcc.online/login` OK. |

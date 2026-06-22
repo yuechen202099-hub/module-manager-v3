@@ -6,7 +6,6 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   deleteUserAccount,
   exportExceptionMeters,
-  exportTaskDetail,
   fetchInstallerWorkload,
   fetchProjectSummary,
   fetchSystemStatus,
@@ -26,15 +25,6 @@ import type {
   UserRole,
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
-
-type SortOrder = 'ascending' | 'descending'
-type TaskSortKey =
-  | 'renovationCount'
-  | 'uploadedCount'
-  | 'uploadRate'
-  | 'unreviewedCount'
-  | 'reviewedCount'
-  | 'reviewRate'
 
 const emptySummary: ProjectSummary = {
   totalCatalogRows: 0,
@@ -65,12 +55,6 @@ const accountUsers = ref<UserAccount[]>([])
 const loadingAccounts = ref(false)
 const savingAccount = ref(false)
 const exportingException = ref(false)
-const exportingTaskId = ref('')
-const exportProgressText = ref('')
-const exportProgressPercent = ref(0)
-const exportScopeByTask = ref<Record<string, 'reviewed' | 'all'>>({})
-const taskSortKey = ref<TaskSortKey>('uploadedCount')
-const taskSortOrder = ref<SortOrder>('descending')
 const workloadDialogVisible = ref(false)
 const workloadLoading = ref(false)
 const workloadInstaller = ref('')
@@ -96,14 +80,44 @@ const accountForm = reactive({
 const isAdmin = computed(() => Boolean(auth.user?.roles?.includes('admin') || auth.user?.role === 'admin'))
 const scannedRate = computed(() => (summary.value.groups ? summary.value.scannedGroups / summary.value.groups : 0))
 const archiveRate = computed(() => (summary.value.groups ? summary.value.approvedGroups / summary.value.groups : 0))
-const taskRows = computed(() => {
-  const order = taskSortOrder.value === 'ascending' ? 1 : -1
-  return [...tasks.value].sort((left, right) => {
-    const delta = taskSortValue(left, taskSortKey.value) - taskSortValue(right, taskSortKey.value)
-    if (delta !== 0) return delta * order
-    return String(left.terminal || left.id).localeCompare(String(right.terminal || right.id), 'zh-Hans-CN')
-  })
+const terminalCockpit = computed(() => {
+  const total = tasks.value.length
+  const scanned = tasks.value.filter((task) => task.hasScanInfo).length
+  const uploaded = tasks.value.filter((task) => Number(task.uploadedCount || 0) > 0).length
+  const reviewing = tasks.value.filter((task) => Number(task.unreviewedCount || 0) > 0).length
+  const archived = tasks.value.filter((task) => task.hasScanInfo && !Number(task.unreviewedCount || 0)).length
+  const claimed = tasks.value.filter((task) => task.claimedBy).length
+  const constructionAssigned = tasks.value.filter((task) => task.assignedConstructor || task.constructionClaimedBy).length
+  const avgUploadRate = total ? tasks.value.reduce((sum, task) => sum + Number(task.uploadRate || 0), 0) / total : 0
+  const avgReviewRate = total ? tasks.value.reduce((sum, task) => sum + Number(task.reviewRate || 0), 0) / total : 0
+  return {
+    total,
+    scanned,
+    uploaded,
+    reviewing,
+    archived,
+    claimed,
+    constructionAssigned,
+    avgUploadRate,
+    avgReviewRate,
+  }
 })
+const cockpitFlow = computed(() => [
+  { label: '终端总数', value: terminalCockpit.value.total, hint: '导入形成的终端范围' },
+  { label: '已扫码', value: terminalCockpit.value.scanned, hint: '扫码表已关联终端' },
+  { label: '有上传', value: terminalCockpit.value.uploaded, hint: '已有现场照片回流' },
+  { label: '待审阅', value: terminalCockpit.value.reviewing, hint: '仍有未审照片' },
+  { label: '已闭环', value: terminalCockpit.value.archived, hint: '终端审阅完成' },
+])
+const cockpitSignals = computed(() => [
+  { label: '审阅领取', value: terminalCockpit.value.claimed, caption: '已被审阅员持有的终端', tone: 'info' },
+  { label: '施工指派', value: terminalCockpit.value.constructionAssigned, caption: '已指派施工员的终端', tone: 'success' },
+  { label: '未施工未扫码', value: summary.value.unconstructedGroups, caption: '需要施工采集推进', tone: 'warning' },
+  { label: '异常与缺照', value: summary.value.exceptionGroups + summary.value.incompleteGroups, caption: '需要复核或补采', tone: 'danger' },
+])
+const reviewRingStyle = computed(() => ringStyle(archiveRate.value, '#0a72d8', '#e8eef5'))
+const uploadRingStyle = computed(() => ringStyle(terminalCockpit.value.avgUploadRate, '#0f7892', '#e8eef5'))
+const reviewGap = computed(() => Math.max(0, summary.value.groups - summary.value.approvedGroups))
 const jobPercent = computed(() => {
   if (!activeJob.value) return 0
   if (activeJob.value.status === 'complete') return 100
@@ -173,6 +187,18 @@ function percent(value: number) {
   return `${Math.round(value * 100)}%`
 }
 
+function flowPercent(value: number) {
+  const total = Math.max(terminalCockpit.value.total, 1)
+  return Math.max(0, Math.min(100, Math.round((Number(value || 0) / total) * 100)))
+}
+
+function ringStyle(value: number, active: string, track: string) {
+  const degrees = Math.max(0, Math.min(360, Math.round(Number(value || 0) * 360)))
+  return {
+    background: `conic-gradient(${active} ${degrees}deg, ${track} 0deg)`,
+  }
+}
+
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -197,20 +223,6 @@ function formatWorkDuration(minutes: number) {
 function formatDecimal(value: number, digits = 2) {
   if (!Number.isFinite(Number(value))) return '0'
   return Number(value).toFixed(digits).replace(/\.?0+$/, '')
-}
-
-function taskSortValue(task: ReviewTask, key: TaskSortKey) {
-  if (key === 'uploadRate') {
-    return Number(task.uploadRate ?? ((task.renovationCount || 0) ? (task.uploadedCount || 0) / (task.renovationCount || 1) : 0))
-  }
-  if (key === 'reviewRate') return Number(task.reviewRate || 0)
-  return Number(task[key] || 0)
-}
-
-function handleTaskSortChange(payload: { prop?: string; order?: SortOrder | null }) {
-  const prop = payload.prop as TaskSortKey | undefined
-  if (prop) taskSortKey.value = prop
-  taskSortOrder.value = payload.order || 'descending'
 }
 
 function roleLabel(role: string) {
@@ -328,9 +340,6 @@ async function loadBoard() {
     const [summaryResult, taskResult] = await Promise.all([fetchProjectSummary(), fetchTasks()])
     summary.value = summaryResult.summary
     tasks.value = taskResult
-    for (const task of taskResult) {
-      if (!exportScopeByTask.value[task.id]) exportScopeByTask.value[task.id] = 'reviewed'
-    }
     try {
       systemStatus.value = await fetchSystemStatus()
     } catch {
@@ -340,46 +349,6 @@ async function loadBoard() {
     errorMessage.value = error instanceof Error ? error.message : '项目看板加载失败'
   } finally {
     loading.value = false
-  }
-}
-
-async function exportTaskDetailRow(task: ReviewTask) {
-  exportingTaskId.value = `detail-${task.id}`
-  try {
-    await exportTaskDetail(task.id)
-    ElMessage.success('任务明细已导出')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '任务明细导出失败')
-  } finally {
-    exportingTaskId.value = ''
-  }
-}
-
-async function exportTerminalPackage(task: ReviewTask) {
-  exportingTaskId.value = `terminal-${task.id}`
-  exportProgressText.value = '准备导出终端包'
-  exportProgressPercent.value = 2
-  try {
-    window.postMessage(
-      {
-        type: 'module-manager:start-terminal-export',
-        scope: {
-          taskId: task.id,
-          terminal: task.terminal || '',
-          reviewScope: exportScopeByTask.value[task.id] || 'reviewed',
-        },
-      },
-      window.location.origin,
-    )
-    exportProgressText.value = '终端包导出已提交到全局任务栏'
-    exportProgressPercent.value = 5
-    ElMessage.success('终端包导出已提交，可切换页面继续等待')
-  } finally {
-    window.setTimeout(() => {
-      exportingTaskId.value = ''
-      exportProgressText.value = ''
-      exportProgressPercent.value = 0
-    }, 900)
   }
 }
 
@@ -569,9 +538,9 @@ onUnmounted(() => {
   <section class="native-board-page">
     <div class="board-hero panel">
       <div>
-        <p class="eyebrow">项目看板</p>
-        <h2>总清单、终端任务、审阅进度</h2>
-        <p class="muted">生产关键入口：导入、进度、风险、系统状态。</p>
+        <p class="eyebrow">项目驾驶舱</p>
+        <h2>进度、风险、采集与审阅态势</h2>
+        <p class="muted">保留项目级导入、进度、风险和系统状态；终端级导出与施工指派统一前往任务领取。</p>
       </div>
       <div class="claim-actions">
         <label class="el-button el-button--primary" :class="{ 'is-loading': importingTotal }">
@@ -595,12 +564,6 @@ onUnmounted(() => {
       <strong>扫码导入任务：{{ activeJob.status }}</strong>
       <span class="muted">{{ activeJob.error || JSON.stringify(activeJob.progress || {}) }}</span>
       <el-progress :percentage="jobPercent" />
-    </div>
-
-    <div v-if="exportingTaskId" class="panel import-progress">
-      <strong>导出任务</strong>
-      <span class="muted">{{ exportProgressText || '正在处理导出任务' }}</span>
-      <el-progress :percentage="exportProgressPercent" />
     </div>
 
     <div v-loading="loading" class="board-metrics">
@@ -681,59 +644,56 @@ onUnmounted(() => {
       </section>
     </div>
 
-    <section class="panel task-list-panel">
+    <section class="panel cockpit-panel">
       <div class="construction-panel-head">
         <div>
-          <h3>终端任务进度</h3>
-          <span>全量显示 {{ taskRows.length }} 个终端。点击表头可按上传率、审阅率、已归档、未审阅等字段升序/降序。</span>
+          <h3>终端流转态势</h3>
+          <span>仅展示聚合态势，不承载单终端导出、审阅跳转或施工指派操作。</span>
         </div>
       </div>
-      <el-table
-        :data="taskRows"
-        height="520"
-        row-key="id"
-        size="small"
-        :default-sort="{ prop: taskSortKey, order: taskSortOrder }"
-        @sort-change="handleTaskSortChange"
-      >
-        <el-table-column prop="terminal" label="终端" min-width="150" fixed="left" />
-        <el-table-column prop="renovationCount" label="档案数" width="92" sortable="custom" />
-        <el-table-column prop="uploadedCount" label="已上传" width="92" sortable="custom" />
-        <el-table-column prop="uploadRate" label="上传率" width="96" sortable="custom">
-          <template #default="{ row }">{{ percent(row.uploadRate || 0) }}</template>
-        </el-table-column>
-        <el-table-column prop="unreviewedCount" label="未审阅" width="96" sortable="custom" />
-        <el-table-column prop="reviewedCount" label="已归档" width="96" sortable="custom" />
-        <el-table-column prop="reviewRate" label="审阅率" width="96" sortable="custom">
-          <template #default="{ row }">{{ percent(row.reviewRate || 0) }}</template>
-        </el-table-column>
-        <el-table-column prop="claimedBy" label="审阅员" min-width="120" />
-        <el-table-column v-if="isAdmin" label="导出" min-width="330" fixed="right">
-          <template #default="{ row }">
-            <div class="task-export-actions">
-              <el-button
-                size="small"
-                :loading="exportingTaskId === `detail-${row.id}`"
-                @click="exportTaskDetailRow(row)"
-              >
-                导出明细
-              </el-button>
-              <el-select v-model="exportScopeByTask[row.id]" class="export-scope-select" size="small">
-                <el-option label="已归档" value="reviewed" />
-                <el-option label="全部" value="all" />
-              </el-select>
-              <el-button
-                size="small"
-                type="primary"
-                :loading="exportingTaskId === `terminal-${row.id}`"
-                @click="exportTerminalPackage(row)"
-              >
-                导出终端包
-              </el-button>
+      <div class="cockpit-body">
+        <div class="cockpit-flow" aria-label="终端流转阶段">
+          <article v-for="item in cockpitFlow" :key="item.label" class="flow-node">
+            <div>
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
             </div>
-          </template>
-        </el-table-column>
-      </el-table>
+            <div class="flow-track" aria-hidden="true">
+              <i :style="{ width: `${flowPercent(item.value)}%` }" />
+            </div>
+            <small>{{ item.hint }} / {{ flowPercent(item.value) }}%</small>
+          </article>
+        </div>
+
+        <div class="cockpit-rings">
+          <article>
+            <div class="cockpit-ring" :style="reviewRingStyle">
+              <span>{{ percent(archiveRate) }}</span>
+            </div>
+            <div>
+              <strong>归档闭环率</strong>
+              <small>{{ reviewGap }} 个资料组待闭环</small>
+            </div>
+          </article>
+          <article>
+            <div class="cockpit-ring teal" :style="uploadRingStyle">
+              <span>{{ percent(terminalCockpit.avgUploadRate) }}</span>
+            </div>
+            <div>
+              <strong>终端平均上传率</strong>
+              <small>{{ terminalCockpit.uploaded }} 个终端已有照片回流</small>
+            </div>
+          </article>
+        </div>
+
+        <div class="cockpit-signals">
+          <article v-for="signal in cockpitSignals" :key="signal.label" :class="['signal-card', signal.tone]">
+            <span>{{ signal.label }}</span>
+            <strong>{{ signal.value }}</strong>
+            <small>{{ signal.caption }}</small>
+          </article>
+        </div>
+      </div>
     </section>
 
     <section v-if="isAdmin" class="panel account-admin-panel">
@@ -1094,8 +1054,9 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(6, minmax(128px, 1fr)) auto;
   gap: 10px;
-  padding: 12px;
+  padding: 14px;
   border-bottom: 1px solid var(--v2-border-soft, #dde5ee);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(248, 250, 252, 0.72));
 }
 
 .account-field {
@@ -1118,7 +1079,7 @@ onUnmounted(() => {
 }
 
 .account-table-wrap {
-  padding: 12px;
+  padding: 14px;
 }
 
 .device-cell {
@@ -1157,10 +1118,11 @@ onUnmounted(() => {
 .workload-summary article {
   display: grid;
   gap: 4px;
-  padding: 10px;
+  padding: 12px;
   border: 1px solid var(--v2-border-soft, #dde5ee);
-  border-radius: 8px;
-  background: var(--v2-bg-soft, #f8fafc);
+  border-radius: var(--v2-radius-md, 9px);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.9));
+  box-shadow: var(--v2-shadow-hairline, 0 0 0 1px rgba(17, 24, 39, 0.03));
 }
 
 .workload-summary span {
@@ -1204,8 +1166,9 @@ onUnmounted(() => {
   gap: 4px;
   padding: 12px;
   border: 1px solid var(--v2-border-soft, #dde5ee);
-  border-radius: 8px;
+  border-radius: var(--v2-radius-md, 9px);
   background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: var(--v2-shadow-hairline, 0 0 0 1px rgba(17, 24, 39, 0.03));
 }
 
 .work-time-stats span,
@@ -1229,11 +1192,11 @@ onUnmounted(() => {
   gap: 14px;
   padding: 16px 18px 14px;
   border: 1px solid var(--v2-border-soft, #dde5ee);
-  border-radius: 12px;
+  border-radius: var(--v2-radius-panel, 12px);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 251, 253, 0.96)),
     #ffffff;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  box-shadow: var(--v2-shadow-raised, 0 1px 2px rgba(15, 26, 36, 0.05)), inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 .screen-time-head {
@@ -1316,7 +1279,7 @@ onUnmounted(() => {
   font-weight: 800;
   padding: 8px 4px 7px;
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--v2-radius-md, 9px);
 }
 
 .work-time-segment.clickable {
@@ -1326,6 +1289,7 @@ onUnmounted(() => {
 .work-time-segment.clickable:hover {
   border-color: rgba(15, 120, 146, 0.24);
   background: rgba(255, 255, 255, 0.76);
+  box-shadow: var(--v2-shadow-raised, 0 1px 2px rgba(15, 26, 36, 0.05));
 }
 
 .work-time-value {
@@ -1364,7 +1328,7 @@ onUnmounted(() => {
   width: 100%;
   min-height: 0;
   border-radius: 999px;
-  background: linear-gradient(180deg, #168aa0 0%, #087084 100%);
+  background: linear-gradient(180deg, #18a0c8 0%, #0a72d8 100%);
 }
 
 .work-time-segment.active strong {

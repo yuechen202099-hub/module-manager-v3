@@ -19,8 +19,8 @@ export type StaticPageRoute = {
 export const staticPages: StaticPageRoute[] = [
   {
     key: 'project-board',
-    title: '项目看板',
-    subtitle: '总清单、终端任务、审阅进度',
+    title: '项目驾驶舱',
+    subtitle: '项目进度、风险与采集审阅态势',
     routePath: '/project-board',
     roles: ['admin', 'reviewer'],
     migrationStatus: 'native_vue',

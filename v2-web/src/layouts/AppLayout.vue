@@ -252,7 +252,7 @@ async function startShellScanImport(message: { file?: File; filename?: string })
   <div class="app-shell" :class="{ embedded: isEmbedded, 'construction-route': isConstructionRoute }">
     <header v-if="!isEmbedded" class="topbar">
       <div class="topbar-brand">
-        <span class="brand-mark">V2.6.5</span>
+        <span class="brand-mark">V3.0.0-rc1</span>
         <div class="brand-copy">
           <strong>模块更换项目管理器</strong>
           <span>{{ workspace.activeProject?.name || '工程审阅与施工采集工作台' }}</span>
@@ -303,11 +303,13 @@ async function startShellScanImport(message: { file?: File; filename?: string })
   display: grid;
   width: min(420px, calc(100vw - 36px));
   gap: 8px;
-  padding: 14px;
+  padding: 16px;
   border: 1px solid var(--v2-border, #d7e1ec);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.16);
+  border-radius: var(--v2-radius-panel, 12px);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--v2-shadow-panel, 0 18px 42px rgba(15, 23, 42, 0.16));
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
 }
 
 .shell-job-status strong {

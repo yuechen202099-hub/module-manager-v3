@@ -14,8 +14,6 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useRouter } from 'vue-router'
 
 import {
-  assignConstructionTask,
-  closeConstructionTask,
   currentActor,
   currentTeamId,
   fetchConstructionExceptionOrders,
@@ -23,10 +21,8 @@ import {
   fetchConstructionTasks,
   fetchGroup,
   fetchUnmatchedRecords,
-  openConstructionTask,
   releaseConstructionTask,
   submitConstructionExceptionOrder,
-  unassignConstructionTask,
   uploadConstructionBatch,
 } from '@/api/services'
 import type {
@@ -190,13 +186,11 @@ const QUAGGA_READERS = [
 ]
 
 const visibleTasks = computed(() => {
-  const source = isAdmin.value
-    ? tasks.value
-    : tasks.value.filter((task) => task.constructionClaimedBy === actor.value || task.assignedConstructor === actor.value)
+  const source = tasks.value.filter((task) => task.constructionClaimedBy === actor.value || task.assignedConstructor === actor.value)
   return [...source].sort((left, right) => {
     const leftUploaded = Number(left.constructionUploadedCount || left.uploadedCount || 0)
     const rightUploaded = Number(right.constructionUploadedCount || right.uploadedCount || 0)
-    if (isAdmin.value && leftUploaded !== rightUploaded) return rightUploaded - leftUploaded
+    if (leftUploaded !== rightUploaded) return rightUploaded - leftUploaded
     return collator.compare(String(left.terminal || left.id), String(right.terminal || right.id))
   })
 })
@@ -205,26 +199,26 @@ const visibleExceptionTaskCards = computed(() => {
   const source = fieldExceptionOrders.value.length ? fieldExceptionOrders.value : exceptionOrders.value
   const map = new Map<string, ConstructionExceptionOrder>()
   for (const order of source) {
-    if (!isAdmin.value && order.assignedTo && order.assignedTo !== actor.value) continue
+    if (order.assignedTo !== actor.value) continue
     map.set(order.id || `${order.taskId}-${order.groupId}`, order)
   }
   return [...map.values()]
 })
 
 const visibleUnmatchedTaskCards = computed(() =>
-  unmatchedRecords.value.filter((record) => isAdmin.value || !record.assignedTo || record.assignedTo === actor.value),
+  unmatchedRecords.value.filter((record) => record.assignedTo === actor.value),
 )
 
 const taskPickerTitle = computed(() => {
   if (taskPickerMode.value === 'exception') return '异常任务'
   if (taskPickerMode.value === 'unmatched') return '未匹配任务'
-  return '开放终端'
+  return '已指派终端'
 })
 
 const taskPickerSubtitle = computed(() => {
   if (taskPickerMode.value === 'exception') return '被指派的异常组可直接进入施工处理'
   if (taskPickerMode.value === 'unmatched') return '现场确认未匹配地址、换表或项目外施工'
-  return '管理员指派后施工员可进入施工'
+  return '只显示当前账号已被指派的施工终端'
 })
 
 const selectedTask = computed(() => visibleTasks.value.find((task) => task.id === selectedTaskId.value) || null)
@@ -1374,38 +1368,6 @@ async function uploadAllCached() {
   await reloadAfterUpload()
 }
 
-async function handleTaskAdminAction(task: ReviewTask, action: 'assign' | 'unassign' | 'open' | 'close') {
-  try {
-    if (action === 'assign') {
-      const { value } = await ElMessageBox.prompt('请输入施工员账号', task.constructionClaimedBy || task.assignedConstructor || '', {
-        confirmButtonText: '指派',
-        cancelButtonText: '取消',
-        inputValue: task.constructionClaimedBy || task.assignedConstructor || '',
-      })
-      const constructor = String(value || '').trim()
-      if (!constructor) return
-      await assignConstructionTask(task.id, constructor)
-      ElMessage.success('已指派施工终端')
-    }
-    if (action === 'unassign') {
-      await unassignConstructionTask(task.id)
-      ElMessage.success('已取消指派')
-    }
-    if (action === 'open') {
-      await openConstructionTask(task.id)
-      ElMessage.success('已开放施工')
-    }
-    if (action === 'close') {
-      await closeConstructionTask(task.id)
-      ElMessage.success('已关闭施工')
-    }
-    await loadTasks()
-  } catch (error) {
-    if (error === 'cancel') return
-    ElMessage.error(error instanceof Error ? error.message : '操作失败')
-  }
-}
-
 async function submitSelectedConstructionTask() {
   const task = selectedTask.value
   if (!task) return
@@ -1469,7 +1431,7 @@ async function loadFieldTaskCards() {
   if (!online()) return
   try {
     const [orders, unmatched] = await Promise.all([
-      fetchConstructionExceptionOrders('', isAdmin.value ? '' : actor.value),
+      fetchConstructionExceptionOrders('', actor.value),
       fetchUnmatchedRecords(''),
     ])
     fieldExceptionOrders.value = orders
@@ -1547,7 +1509,7 @@ async function loadTasks() {
   try {
     await loadDrafts()
     if (!online()) throw new Error('offline')
-    tasks.value = await fetchConstructionTasks(isAdmin.value)
+    tasks.value = await fetchConstructionTasks(false)
     await loadFieldTaskCards()
     offlineMode.value = false
   } catch (error) {
@@ -1567,7 +1529,7 @@ async function loadTasks() {
       taskPickerOpen.value = true
     } else if (!selectedTaskId.value || !visibleTasks.value.some((task) => task.id === selectedTaskId.value)) {
       selectedTaskId.value = visibleTasks.value[0]?.id || ''
-      taskPickerOpen.value = isAdmin.value || visibleTasks.value.length !== 1
+      taskPickerOpen.value = visibleTasks.value.length !== 1
     }
     loadingTasks.value = false
   }
@@ -1704,8 +1666,8 @@ onBeforeUnmount(() => {
     <header class="construction-top panel">
       <div>
         <p class="eyebrow">施工采集</p>
-        <h2>按终端指派施工，按地址快速采集</h2>
-        <p class="muted">先缓存，后上传；弱网现场也能连续施工。</p>
+        <h2>已指派终端采集</h2>
+        <p class="muted">扫码、拍照、本地缓存、上传与提交施工任务；指派请前往任务领取。</p>
       </div>
       <div class="top-actions">
         <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
@@ -1807,25 +1769,6 @@ onBeforeUnmount(() => {
             <div class="task-progress">
               <i :style="{ width: `${taskProgress(task)}%` }" />
               <b>{{ taskProgress(task) }}%</b>
-            </div>
-            <div v-if="isAdmin" class="task-actions" @click.stop>
-              <el-button size="small" @click="handleTaskAdminAction(task, 'assign')">
-                {{ task.constructionClaimedBy || task.assignedConstructor ? '改派' : '指派' }}
-              </el-button>
-              <el-button
-                v-if="task.constructionClaimedBy || task.assignedConstructor"
-                size="small"
-                @click="handleTaskAdminAction(task, 'unassign')"
-              >
-                取消
-              </el-button>
-              <el-button
-                size="small"
-                :type="task.constructionEnabled ? 'warning' : 'primary'"
-                @click="handleTaskAdminAction(task, task.constructionEnabled ? 'close' : 'open')"
-              >
-                {{ task.constructionEnabled ? '关闭' : '开放' }}
-              </el-button>
             </div>
           </button>
           <el-empty v-if="!loadingTasks && taskPickerMode === 'terminal' && !visibleTasks.length" description="暂无指派施工终端" />
@@ -3124,6 +3067,504 @@ onBeforeUnmount(() => {
   font-weight: 800;
 }
 
+/* V3 construction scoped visual layer. Business logic and API calls stay in the script above. */
+.construction-v24 {
+  --construction-accent: var(--v2-primary, #0a72d8);
+  --construction-accent-hover: var(--v2-primary-hover, #075eb5);
+  --construction-accent-soft: rgba(10, 114, 216, 0.08);
+  --construction-surface: rgba(255, 255, 255, 0.9);
+  --construction-surface-strong: rgba(255, 255, 255, 0.98);
+  --construction-subtle: rgba(248, 250, 252, 0.92);
+  --construction-border: rgba(16, 24, 40, 0.08);
+  --construction-border-strong: rgba(10, 114, 216, 0.24);
+  --construction-shadow: 0 18px 46px rgba(16, 24, 40, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.78);
+  --construction-shadow-soft: 0 10px 28px rgba(16, 24, 40, 0.055), inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  min-width: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(247, 250, 253, 0.96) 36%, rgba(242, 246, 251, 0.98) 100%),
+    var(--v2-bg-app, #f5f7fb);
+  color: var(--v2-text, #27364a);
+}
+
+.construction-v24 :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.construction-v24 :deep(.el-button) {
+  min-height: 36px;
+  border-radius: 10px;
+  font-weight: 820;
+  white-space: nowrap;
+}
+
+.construction-v24 :deep(.el-button--small) {
+  min-height: 34px;
+  padding-right: 12px;
+  padding-left: 12px;
+}
+
+.construction-v24 :deep(.el-button--large) {
+  min-height: 44px;
+  border-radius: 11px;
+}
+
+.construction-v24 :deep(.el-input__wrapper),
+.construction-v24 :deep(.el-textarea__inner) {
+  min-height: 38px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 0 0 1px var(--construction-border) inset, 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.construction-v24 :deep(.el-input__inner) {
+  min-width: 0;
+}
+
+.construction-v24 :deep(.el-tag) {
+  max-width: 100%;
+  border-radius: 999px;
+  font-weight: 780;
+}
+
+.panel {
+  overflow: hidden;
+  border-color: var(--construction-border);
+  border-radius: var(--v2-radius-panel, 12px);
+  background:
+    linear-gradient(180deg, var(--construction-surface-strong), rgba(255, 255, 255, 0.88)),
+    var(--v2-bg-surface, #fff);
+  box-shadow: var(--construction-shadow);
+  backdrop-filter: blur(18px) saturate(155%);
+  -webkit-backdrop-filter: blur(18px) saturate(155%);
+}
+
+.construction-workspace {
+  gap: 12px;
+}
+
+.construction-workspace.task-select-mode {
+  grid-template-columns: minmax(320px, 680px);
+  padding-top: 12px;
+}
+
+.construction-workspace.work-mode {
+  grid-template-columns: minmax(370px, 520px) minmax(0, 1fr);
+}
+
+.panel-head {
+  min-height: 64px;
+  align-items: flex-start;
+  padding: 14px 16px;
+  border-bottom-color: var(--construction-border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(249, 251, 254, 0.9)),
+    var(--v2-bg-surface, #fff);
+}
+
+.panel-head > div:first-child,
+.sheet-head > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.panel-head h3 {
+  color: var(--v2-text-strong, #101828);
+  font-size: 17px;
+  line-height: 1.22;
+}
+
+.panel-head span,
+.sheet-head span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--v2-text-muted, #68778b);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.head-actions {
+  gap: 8px;
+}
+
+.task-list,
+.group-list {
+  gap: 10px;
+  padding: 12px;
+}
+
+.field-task-picker-list {
+  gap: 10px;
+}
+
+.task-card,
+.field-task-card,
+.group-card,
+.photo-slot,
+.existing-photos,
+.readonly-grid > div,
+.field-grid label {
+  border-color: var(--construction-border);
+  border-radius: var(--v2-radius-panel, 12px);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(249, 251, 254, 0.94)),
+    var(--v2-bg-surface, #fff);
+  box-shadow: var(--construction-shadow-soft);
+}
+
+.task-card,
+.field-task-card {
+  padding: 14px;
+}
+
+.task-card:hover,
+.field-task-card:hover,
+.field-task-card:focus-visible,
+.group-card:hover {
+  border-color: var(--construction-border-strong);
+  box-shadow: 0 16px 36px rgba(16, 24, 40, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.84);
+}
+
+.task-card.active,
+.group-card.active {
+  border-color: var(--construction-border-strong);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(244, 249, 255, 0.96)),
+    var(--v2-primary-muted, #f4f9ff);
+  box-shadow: 0 16px 38px rgba(10, 114, 216, 0.13), inset 0 0 0 1px rgba(10, 114, 216, 0.08);
+}
+
+.field-task-card.kind-exception {
+  border-left-color: var(--v2-danger, #b42318);
+}
+
+.field-task-card.kind-unmatched {
+  border-left-color: var(--v2-warning, #a15c00);
+}
+
+.task-title,
+.field-task-title,
+.group-name-row {
+  align-items: flex-start;
+}
+
+.task-title strong,
+.field-task-title strong,
+.group-main strong {
+  min-width: 0;
+  color: var(--v2-text-strong, #101828);
+  font-size: 16px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.task-metrics {
+  gap: 8px;
+}
+
+.task-metrics span {
+  border: 1px solid rgba(16, 24, 40, 0.045);
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.86);
+  padding: 9px;
+}
+
+.task-metrics strong {
+  color: var(--v2-text-strong, #101828);
+  font-family: var(--v2-font-mono, monospace);
+}
+
+.task-progress::before {
+  height: 8px;
+  background: rgba(226, 232, 240, 0.95);
+}
+
+.task-progress i {
+  height: 8px;
+  background: linear-gradient(90deg, var(--construction-accent), #18a0c8);
+}
+
+.task-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+}
+
+.task-actions .el-button {
+  width: 100%;
+}
+
+.group-tools {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  gap: 10px;
+  padding: 12px;
+  border-bottom-color: var(--construction-border);
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+}
+
+.group-search-row {
+  gap: 8px;
+}
+
+.group-search-row .el-button {
+  min-width: 72px;
+}
+
+.group-filter-tabs {
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--construction-border);
+  border-radius: var(--v2-radius-panel, 12px);
+  background: rgba(241, 245, 249, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.group-filter-tabs button {
+  height: 42px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--v2-text-muted, #68778b);
+  padding: 0 10px;
+  transition:
+    background var(--v2-transition-fast, 140ms ease),
+    color var(--v2-transition-fast, 140ms ease),
+    box-shadow var(--v2-transition-fast, 140ms ease);
+}
+
+.group-filter-tabs button.active {
+  background: #fff;
+  color: var(--v2-text-strong, #101828);
+  box-shadow: 0 7px 18px rgba(16, 24, 40, 0.085), inset 0 0 0 1px rgba(10, 114, 216, 0.11);
+}
+
+.group-filter-tabs strong {
+  display: inline-grid;
+  min-width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(10, 114, 216, 0.08);
+  color: inherit;
+  font-family: var(--v2-font-mono, monospace);
+  font-size: 12px;
+}
+
+.cache-inline-actions {
+  justify-content: space-between;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(161, 92, 0, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 246, 230, 0.74);
+}
+
+.cache-inline-actions span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.group-card {
+  padding: 14px;
+}
+
+.group-card.cached {
+  border-color: rgba(161, 92, 0, 0.24);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(255, 250, 240, 0.94)),
+    #fff;
+}
+
+.group-card.exception {
+  border-color: rgba(180, 35, 24, 0.22);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(255, 246, 245, 0.94)),
+    #fff;
+}
+
+.cache-line {
+  color: var(--v2-warning, #a15c00);
+}
+
+.exception-line {
+  color: var(--v2-danger, #b42318);
+}
+
+:deep(.construction-drawer) {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 247, 251, 0.98)),
+    var(--v2-bg-app, #f5f7fb);
+}
+
+.collector-sheet {
+  gap: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(246, 249, 253, 0.98)),
+    var(--v2-bg-app, #f5f7fb);
+}
+
+.collector-sheet-inline {
+  background: transparent;
+}
+
+.sheet-head {
+  align-items: flex-start;
+}
+
+.eyebrow {
+  color: var(--construction-accent);
+  font-weight: 820;
+}
+
+.sheet-head h3 {
+  color: var(--v2-text-strong, #101828);
+  font-size: clamp(20px, 2vw, 25px);
+  line-height: 1.12;
+  overflow-wrap: anywhere;
+}
+
+.exception-note,
+.sheet-warning,
+.slot-note {
+  border-radius: 10px;
+}
+
+.sheet-warning {
+  display: grid;
+  gap: 4px;
+  border-color: var(--v2-danger-border, #ffc7c0);
+  background: rgba(255, 240, 238, 0.88);
+}
+
+.readonly-grid,
+.field-grid {
+  gap: 10px;
+}
+
+.readonly-grid > div,
+.field-grid label {
+  min-width: 0;
+}
+
+.readonly-grid strong {
+  color: var(--v2-text-strong, #101828);
+}
+
+.field-with-action {
+  grid-template-columns: minmax(0, 1fr) minmax(78px, auto);
+}
+
+.existing-photos,
+.photo-slot {
+  padding: 12px;
+}
+
+.existing-list img {
+  width: 82px;
+  height: 82px;
+  border-color: var(--construction-border);
+  border-radius: 10px;
+}
+
+.photo-slot {
+  display: grid;
+  min-width: 0;
+}
+
+.slot-title {
+  align-items: flex-start;
+}
+
+.slot-title strong {
+  min-width: 0;
+  color: var(--v2-text-strong, #101828);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.slot-preview {
+  min-height: 0;
+  aspect-ratio: 4 / 3;
+  border-color: rgba(10, 114, 216, 0.18);
+  border-radius: 11px;
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.94), rgba(241, 245, 249, 0.92)),
+    #f8fafc;
+}
+
+.slot-preview img {
+  height: 100%;
+  min-height: 0;
+  background: #0b1118;
+}
+
+.slot-preview > div {
+  color: var(--v2-text-muted, #68778b);
+}
+
+.slot-preview :deep(.el-icon) {
+  font-size: 28px;
+}
+
+.slot-actions {
+  gap: 8px;
+}
+
+.slot-actions .el-button,
+.scanner-actions .el-button {
+  width: 100%;
+  min-height: 40px;
+}
+
+.sheet-actions {
+  grid-template-columns: minmax(0, 1fr) minmax(126px, auto) minmax(148px, auto);
+  align-items: center;
+  border-top-color: var(--construction-border);
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(22px) saturate(165%);
+  -webkit-backdrop-filter: blur(22px) saturate(165%);
+}
+
+.collector-sheet-inline .sheet-actions {
+  border-radius: 0 0 var(--v2-radius-panel, 12px) var(--v2-radius-panel, 12px);
+}
+
+.draft-status {
+  overflow: hidden;
+  color: var(--v2-text-muted, #68778b);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scanner-backdrop {
+  background: rgba(10, 18, 27, 0.62);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.scanner-panel {
+  border-color: rgba(255, 255, 255, 0.28);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.scanner-camera {
+  border-radius: 14px;
+}
+
+.scan-frame {
+  border-color: rgba(232, 246, 255, 0.98);
+  box-shadow:
+    0 0 0 999px rgba(0, 0, 0, 0.2),
+    inset 0 0 28px rgba(10, 114, 216, 0.28);
+}
+
 @media (max-width: 960px) {
   .construction-v24 {
     height: 100dvh;
@@ -3331,6 +3772,340 @@ onBeforeUnmount(() => {
 
   .draft-status {
     grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 960px) {
+  .construction-v24 {
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 247, 251, 0.98)),
+      var(--v2-bg-app, #f5f7fb);
+  }
+
+  .construction-workspace {
+    padding: 0;
+  }
+
+  .construction-workspace.task-select-mode {
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .construction-workspace.task-select-mode .task-panel {
+    max-height: calc(100dvh - 16px - env(safe-area-inset-bottom));
+    border-radius: var(--v2-radius-panel, 12px);
+  }
+
+  .task-panel .panel-head,
+  .group-panel .panel-head {
+    display: grid;
+    gap: 10px;
+    min-height: auto;
+    align-items: stretch;
+    padding: 12px;
+  }
+
+  .task-panel .head-actions,
+  .group-panel .head-actions {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .task-panel .head-actions .el-tag,
+  .group-panel .head-actions .el-tag {
+    display: none;
+  }
+
+  .task-panel .head-actions .el-button,
+  .group-panel .head-actions .el-button {
+    width: 100%;
+    min-height: 40px;
+  }
+
+  .panel-head h3 {
+    font-size: 18px;
+  }
+
+  .panel-head span,
+  .sheet-head span {
+    display: -webkit-box;
+    overflow: hidden;
+    line-height: 1.42;
+    text-overflow: clip;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .task-list {
+    max-height: none;
+    padding: 10px;
+  }
+
+  .task-card,
+  .field-task-card {
+    gap: 11px;
+    padding: 14px;
+  }
+
+  .task-title,
+  .field-task-title {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .task-title strong,
+  .field-task-title strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .task-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .task-metrics span {
+    padding: 10px;
+  }
+
+  .task-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .task-actions .el-button {
+    min-height: 40px;
+  }
+
+  .construction-workspace.work-mode,
+  .group-panel {
+    height: 100dvh;
+    min-height: 0;
+  }
+
+  .group-panel {
+    border-radius: 0;
+    background: rgba(247, 250, 253, 0.98);
+  }
+
+  .group-panel .panel-head {
+    position: relative;
+    z-index: 5;
+    border-bottom-color: rgba(16, 24, 40, 0.08);
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 10px 26px rgba(16, 24, 40, 0.055);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+  }
+
+  .group-tools {
+    gap: 10px;
+    padding: 10px;
+    background: rgba(247, 250, 253, 0.92);
+  }
+
+  .group-search-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .group-search-row .el-input {
+    grid-column: 1 / -1;
+  }
+
+  .group-search-row .el-button {
+    width: 100%;
+    min-width: 0;
+    min-height: 42px;
+  }
+
+  .group-filter-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .group-filter-tabs button {
+    height: 46px;
+    padding: 0 11px;
+  }
+
+  .cache-inline-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .cache-inline-actions .el-button {
+    min-height: 38px;
+  }
+
+  .group-list {
+    gap: 10px;
+    padding: 10px 8px calc(14px + env(safe-area-inset-bottom));
+  }
+
+  .group-card {
+    min-height: 88px;
+    border-radius: var(--v2-radius-panel, 12px);
+    padding: 14px;
+  }
+
+  .group-card.active {
+    box-shadow:
+      inset 3px 0 0 var(--construction-accent),
+      0 14px 30px rgba(10, 114, 216, 0.12);
+  }
+
+  .group-name-row {
+    align-items: flex-start;
+  }
+
+  .group-main span {
+    margin-top: 1px;
+  }
+
+  :deep(.construction-drawer.el-drawer.btt) {
+    height: 95dvh !important;
+    border-radius: 18px 18px 0 0;
+  }
+
+  .collector-sheet {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .sheet-head {
+    position: sticky;
+    top: 0;
+    z-index: 4;
+    margin: -12px -12px 0;
+    padding: 12px;
+    border-bottom: 1px solid rgba(16, 24, 40, 0.08);
+    background: rgba(255, 255, 255, 0.94);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+  }
+
+  .sheet-head h3 {
+    font-size: 22px;
+  }
+
+  .sheet-head-actions {
+    align-items: flex-start;
+  }
+
+  .readonly-grid > div,
+  .field-grid label,
+  .existing-photos,
+  .photo-slot {
+    border-radius: var(--v2-radius-panel, 12px);
+  }
+
+  .field-with-action {
+    grid-template-columns: minmax(0, 1fr) 86px;
+  }
+
+  .field-with-action .el-button {
+    min-height: 42px;
+  }
+
+  .slot-grid {
+    gap: 10px;
+    padding-bottom: calc(74px + env(safe-area-inset-bottom));
+  }
+
+  .slot-title {
+    gap: 10px;
+  }
+
+  .slot-preview {
+    min-height: 136px;
+    aspect-ratio: 16 / 10;
+  }
+
+  .slot-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .slot-actions .el-button {
+    min-height: 44px;
+  }
+
+  .sheet-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+    margin: 0 -12px;
+    border-radius: 12px 12px 0 0;
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow:
+      0 -16px 28px rgba(16, 24, 40, 0.08),
+      0 32px 0 rgba(255, 255, 255, 0.98);
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .sheet-actions .el-button {
+    width: 100%;
+    min-width: 0;
+    min-height: 44px;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .draft-status {
+    grid-column: 1 / -1;
+    text-align: left;
+  }
+
+  .scanner-backdrop {
+    align-items: end;
+    padding: 8px;
+  }
+
+  .scanner-panel {
+    width: 100%;
+    border-radius: 18px 18px 12px 12px;
+    padding: 12px;
+  }
+
+  .scanner-camera {
+    min-height: min(58dvh, 520px);
+  }
+
+  .scanner-actions .el-button {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 420px) {
+  .task-panel .head-actions,
+  .group-panel .head-actions {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .task-title,
+  .field-task-title,
+  .group-name-row {
+    gap: 8px;
+  }
+
+  .task-title .el-tag,
+  .field-task-title .el-tag,
+  .group-name-row .el-tag {
+    max-width: 118px;
+  }
+
+  .group-filter-tabs button {
+    padding: 0 9px;
+  }
+
+  .group-filter-tabs strong {
+    min-width: 22px;
+  }
+
+  .field-with-action {
+    grid-template-columns: minmax(0, 1fr) 78px;
   }
 }
 </style>

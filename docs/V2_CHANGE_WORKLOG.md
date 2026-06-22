@@ -2,6 +2,73 @@
 
 > 目的：避免重复修改同一页面、避免靠记忆判断状态。后续每完成一个修改，都必须在这里记录文件、目标、状态和验证结果。
 
+### V3.0.0-rc1 受控生产上线准备
+
+- 时间：2026-06-23
+- 分支：`feature/v3.0.0-apple-ui-lab`
+- 目标：
+  - 将 V3 UI 分支整理为 `V3.0.0-rc1` 可追溯 release commit。
+  - 生产上线采用新 release 目录，不原地覆盖。
+  - 保留当前生产 `V2.6.5` 快速回滚。
+- 版本调整：
+  - 后端 FastAPI version、运维状态 version、`pyproject.toml`、Vue package、页面可见版本均改为 `3.0.0-rc1` / `V3.0.0-rc1`。
+  - 重新构建 `v2-api/app/static/vue/`。
+  - 修正构建产物 `index.html` 标题乱码。
+- 部署边界：
+  - 不执行 Alembic。
+  - 不覆盖生产 `.env`。
+  - 不覆盖生产 `data/`。
+  - 不覆盖生产 `uploads/`。
+  - 发布前必须备份 PostgreSQL、当前 release、`.env`、`data/`、`uploads/`。
+- 本地验证：
+  - `python -m py_compile v2-api\app\main.py v2-api\app\services\ops_status.py`：通过。
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`：通过，仅保留既有 Rollup PURE 注释与 chunk 体积警告。
+  - `python scripts\verify_vue_migration_gate.py --strict-native`：通过。
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`：`45 passed, 1 warning`。
+  - `git diff --check`：通过，仅有 CRLF 转换提示。
+
+### V3.0.0-alpha 信息架构优化：项目驾驶舱 / 任务领取 / 施工采集
+
+- 时间：2026-06-23
+- 分支：`feature/v3.0.0-apple-ui-lab`
+- 生产基线：`V2.6.5`，本阶段不发布生产。
+- 修改文件：
+  - `v2-web/src/views/ProjectBoardView.vue`
+  - `v2-web/src/views/ClaimTasksView.vue`
+  - `v2-web/src/views/ConstructionView.vue`
+  - `v2-web/src/api/types.ts`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/router/staticPages.ts`
+  - `v2-web/src/styles/main.css`
+  - `v2-api/app/static/vue/`
+  - `docs/V2_CHANGE_WORKLOG.md`
+  - `docs/AGENT_COORDINATION.md`
+- 改动内容：
+  - `/project-board` 删除终端任务列表和单终端导出入口，改为项目驾驶舱：终端流转态势、审阅/上传环形指标、施工指派与审阅缺口等可视化信号。
+  - `/claim-tasks` 承接终端级操作：终端卡新增 `导出明细`、`导出终端包`、导出范围选择，并保留明确的 `进入审阅` 按钮。
+  - `/claim-tasks` 终端卡取消整卡点击跳转审阅，避免误触；审阅必须通过按钮进入。
+  - `/claim-tasks` 管理员可在终端卡上完成施工指派/改派，弹窗选择施工员时优先展示姓名、账号作为辅助；终端卡显示当前施工员姓名。
+  - `/construction` 去掉管理员任务领取/指派类主操作，不再作为管理员指派入口。
+  - `/construction` 施工员只看当前账号已指派终端，保留扫码、拍照/相册、本地缓存、上传和提交施工任务流程。
+  - 仅复用现有字段与接口，前端兼容 `name` / `username` 及后端可返回的姓名字段；未新增后端 API，未改数据库，未执行 Alembic。
+- 验证：
+  - `v2-web`: `vue-tsc --noEmit`：通过（本机无全局 `npm`，使用工作区/运行时 Node 直接执行 `node_modules/vue-tsc/bin/vue-tsc.js`）。
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`：通过，仅保留既有第三方 `PURE` 注释和 chunk 体积提示。
+  - `python scripts\verify_vue_migration_gate.py --strict-native`：通过，registered pages 5，legacy bridge pages 0。
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`：通过，45 passed，1 warning。
+  - 临时生产模式 QA 服务：`/openapi.json` 返回 404。
+- Browser QA：
+  - `/project-board` 1366px：无终端任务表、无 `导出明细` / `导出终端包` 终端入口；项目驾驶舱流转节点 5 个、信号卡 4 个；无横向溢出。
+  - `/claim-tasks` 1366px：终端卡显示 `导出明细`、`导出终端包`、`进入审阅`、`改派施工`；卡片 `cursor: default` 且无整卡点击角色；施工员显示为 `Installer A`，账号 `constructor` 辅助显示；指派弹窗选项为 `Installer A（constructor）`。
+  - `/claim-tasks` 明确点击 `进入审阅` 后进入 `/task-hall`，验证审阅入口为按钮触发。
+  - `/construction` 管理员视角：未出现指派、改派、取消指派、开放、关闭等管理员指派按钮。
+  - `/construction` 施工员视角：仅显示已指派终端；桌面与 390px 下可进入终端采集，扫码、拍照/相册、保存缓存、上传相关入口、提交施工任务可达。
+  - `/login`、`/task-hall` smoke 正常；`/project-board`、`/claim-tasks`、`/construction`、`/task-hall` 在 1366px、1920px、390px 抽检无横向溢出。
+- 风险与边界：
+  - 未改 `.env`、`data`、`uploads`、OSS、PostgreSQL；未发布生产，生产继续保留 `V2.6.5`。
+  - 导出真实下载受内置浏览器下载能力限制，已验证入口、按钮与调用路径，真实落盘需普通浏览器人工复核。
+- 状态：完成，待 PM 审阅。
+
 ### 审阅工作台 P0：当前 Vue 实现复核
 
 - 时间：2026-06-21
@@ -2819,3 +2886,199 @@
   - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
   - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
   - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+
+### V3.0.0-alpha Apple-like UI lab phase 1
+
+- Date: 2026-06-22
+- Owner: Codex V3 UI lab thread
+- Branch:
+  - `feature/v3.0.0-apple-ui-lab`
+  - V3.0.0 UI 试验分支创建。
+- Baseline:
+  - Created from local tag `v2.6.5`.
+  - 生产继续保留 V2.6.5。
+- Goal:
+  - Establish a V3 Apple-like UI visual baseline.
+  - Run a low-risk UI trial on `/login`, `AppLayout`, and the top area of `/project-board`.
+  - Keep business logic, KPI calculation, API contracts, import/export rules, account permissions, review rules, construction rules, and retired legacy pages unchanged.
+- Files changed:
+  - `v2-web/src/styles/tokens.css`
+  - `v2-web/src/styles/main.css`
+  - `v2-web/src/styles/element-plus.css`
+  - `v2-web/src/layouts/AppLayout.vue`
+  - `v2-web/src/components/AppLayout.vue`
+  - `v2-web/src/views/LoginView.vue`
+  - `v2-web/src/views/ProjectBoardView.vue`
+  - `v2-web/package.json`
+  - `v2-web/index.html`
+  - `v2-api/app/main.py`
+  - `v2-api/app/services/ops_status.py`
+  - `v2-api/pyproject.toml`
+  - `v2-api/tests/test_api.py`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - Login page now uses a lighter Apple-like entry layout with larger whitespace, glass-like white surface, clearer form hierarchy, and mobile-safe single-column collapse.
+  - Global app shell uses a softer translucent topbar, cleaner segmented navigation, non-clipped `V3.0.0-alpha` version pill, and lighter global task-status surface.
+  - Project board top area uses quieter dashboard cards, larger metric hierarchy, subtler progress/risk/system panels, and lower-noise Element Plus buttons, inputs, tags, tables, and dialogs.
+  - Dangerous actions remain red and visually clear.
+- Production and data note:
+  - 本任务未发布生产。
+  - 未改数据库。
+  - 未执行 Alembic。
+  - 未影响 `.env` / `data` / `uploads` / OSS / PostgreSQL。
+  - `/unmatched` and `/construction-cache` remain retired redirect routes; no independent pages were restored.
+- Validation:
+  - `vue-tsc --noEmit`: passed using bundled Node and local `vue-tsc`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed; existing Rollup PURE-comment and chunk-size warnings remain.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed; registered pages `5`, legacy bridge pages `0`.
+  - `python -m py_compile v2-api\app\main.py v2-api\app\services\ops_status.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+  - `git diff --check`: passed; only CRLF conversion warnings were reported.
+  - Browser QA on `http://127.0.0.1:8013`:
+    - `/login`: desktop and 390px mobile loaded, no page-level horizontal overflow, no app `error`/`warn`, login flow succeeded and redirected to `/project-board`.
+    - `/project-board`: 1366px and 1920px loaded, no page-level horizontal overflow, no app `error`/`warn`; top cockpit UI rendered with 5 metric cards and 5 system status rows.
+    - `/claim-tasks`: 1366px and 390px loaded, no page-level horizontal overflow, no app `error`/`warn`.
+    - `/task-hall`: 1366px and 390px loaded, no page-level horizontal overflow, no app `error`/`warn`.
+    - `/construction`: 1366px and 390px loaded, no page-level horizontal overflow, no app `error`/`warn`; existing construction flow classes remained intact.
+    - Production-mode temporary server on `8014`: `/openapi.json` returned `404`.
+    - `/unmatched` remained `307 -> /task-hall`; `/construction-cache` remained `307 -> /construction`.
+
+### V3.0.0-alpha Apple-like UI lab phase 2 - `/claim-tasks`
+
+- Date: 2026-06-23
+- Owner: Codex V3 UI lab thread
+- Branch:
+  - `feature/v3.0.0-apple-ui-lab`
+- Baseline:
+  - 生产继续保留 `V2.6.5`，本轮只在 V3.0.0-alpha 试验分支验证。
+- Goal:
+  - 只优化 `/claim-tasks` 视觉，延续 V3 浅色、轻量、类 Apple 的工作台语言。
+  - 保持领取、释放、搜索、管理员指派施工逻辑不变。
+  - 不改 API、不改数据库、不执行 Alembic。
+  - 不恢复 `/unmatched`、`/construction-cache` 独立页面。
+- Files changed:
+  - `v2-web/src/views/ClaimTasksView.vue`
+  - `v2-web/src/styles/main.css`
+  - `v2-api/app/static/vue/**`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - `/claim-tasks` hero、统计卡、任务列表和终端卡片改为更轻的玻璃白、细边界、低噪声阴影和更清晰的信息层级。
+  - 终端卡片展示代表地址，便于和终端号/地址搜索结果对应。
+  - 当前账号已持有的卡片增加视觉状态；管理员卡片保留 `指派施工/改派施工` 入口，审阅员卡片只保留 `暂存释放` 和 `领取/继续持有`。
+  - 390px 下统计卡改为两列，进度卡占满一行，任务列表更早进入首屏范围。
+  - 未添加或恢复 `开放施工 / 关闭施工` 旧按钮。
+- Production and data note:
+  - 本任务未发布生产。
+  - 未改 API、数据库、Alembic、`.env`、`data`、`uploads`、OSS、PostgreSQL。
+  - `/unmatched`、`/construction-cache` 保持旧地址重定向状态，没有恢复独立页面。
+- Validation:
+  - `vue-tsc --noEmit`: passed with temporary PATH pointing to bundled Node and local `node_modules/.bin`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed; existing Rollup PURE-comment and chunk-size warnings remain.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed; registered pages `5`, legacy bridge pages `0`.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+  - `git diff --check`: passed; only CRLF conversion warnings were reported.
+  - Browser QA on `http://127.0.0.1:8013`:
+    - Admin `/claim-tasks`: 1366px, 1920px, 390px all had no page-level horizontal overflow; 135 cards rendered; `收回全部`, `暂存释放`, `领取`, and `指派施工/改派施工` entries were visible as expected.
+    - Reviewer `/claim-tasks`: 1366px, 1920px, 390px all had no page-level horizontal overflow; role-visible list showed 1 pending review terminal in local data; no `收回全部`, no construction assignment button, no construction nav item.
+    - Search: terminal `350000434929` filtered admin list to 1 card; address prefix `上海市宝山区聚丰` returned matching cards; reviewer terminal/address search also returned the visible target card.
+    - Admin assignment entry: opened `指派施工终端` prompt from the card and cancelled; no assignment submitted.
+    - `/login`: clean desktop and 390px mobile loaded, no horizontal overflow, no framework overlay.
+    - `/project-board`, `/task-hall`, `/construction`: 1366px and 390px smoke checks were nonblank, no horizontal overflow, no framework overlay, and no app console `error`/`warn`.
+    - Production-mode temporary server on `8015`: `/openapi.json` returned `404`.
+
+### V3.0.0-alpha Apple-like UI lab phase 3 - `/task-hall`
+
+- Date: 2026-06-23
+- Owner: Codex V3 UI lab thread
+- Branch:
+  - `feature/v3.0.0-apple-ui-lab`
+- Baseline:
+  - 生产继续保留 `V2.6.5`，本轮只在 V3.0.0-alpha 试验分支验证。
+- Goal:
+  - 只优化 `/task-hall` 审阅工作台视觉，高级感、轻量、类 Apple。
+  - 保留审阅核心效率：图片加载、快捷键 `1-4`、方向键切图/切组、`Enter` 归档、`Esc` 关闭大图、重复分类阻断。
+  - 保留补图、删除、恢复待审、回退未施工、转异常工单、导出异常表计入口和逻辑。
+  - 不改 API、不改数据库、不执行 Alembic。
+  - 不恢复 `/unmatched`、`/construction-cache` 独立页面。
+- Files changed:
+  - `v2-web/src/views/TaskHallView.vue`
+  - `v2-api/app/static/vue/**`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - `/task-hall` 在 scoped CSS 内增加 V3 视觉层，任务列、资料组列、照片审阅区的层级更清楚。
+  - 审阅主图舞台改为更干净的深色 contain 画布，主图完整显示；缩略图固定方形尺寸并保持 `object-fit: cover`，不拉伸变形。
+  - 分类按钮、状态筛选、资料组卡、异常说明区、底部操作区改为更轻的玻璃白、细边框、低噪声阴影和更稳定的移动端网格。
+  - 动作入口保持可见：保存资料组、补图、恢复待审、回退未施工、转异常工单、删除当前图、归档当前资料组、`Enter` 归档当前图、导出异常表计。
+- Production and data note:
+  - 本任务未发布生产。
+  - 未改 API、数据库、Alembic、`.env`、`data`、`uploads`、OSS、PostgreSQL。
+  - `/unmatched`、`/construction-cache` 保持重定向，没有恢复独立页面。
+  - Browser QA 使用临时本地服务 `127.0.0.1:8016`，进程环境为 `STATE_BACKEND=json`、`DEMO_AUTH_ENABLED=true`、`APP_ENV=local`；为验证图片加载，仅在临时内存演示组补入一条公开测试图片 URL，未写入仓库或生产数据。
+- Validation:
+  - `vue-tsc --noEmit`: passed via bundled Node executing local `vue-tsc`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed; existing Rollup PURE-comment and chunk-size warnings remain.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed; registered pages `5`, legacy bridge pages `0`.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+  - `git diff --check`: passed; only CRLF conversion warnings were reported.
+- Browser QA:
+  - `/task-hall` 1366px: no page-level horizontal overflow; 3 panels rendered; 1 claimed task, 22 photo groups, all required action buttons visible; app console `error`/`warn` empty.
+  - `/task-hall` 1920px: no page-level horizontal overflow; main image loaded as `960x1280`, rendered with `object-fit: contain`; active thumbnail used fixed `52x52` with `object-fit: cover`; app console `error`/`warn` empty.
+  - `/task-hall` 390px: no page-level horizontal overflow; panels stacked vertically; main image rendered `332x378` with `object-fit: contain`; active thumbnail fixed `46x46` with `object-fit: cover`; action buttons computed at `329px` width and did not overflow.
+  - Keyboard and review flow: hotkeys `1-4` changed selected category; `ArrowLeft/ArrowRight` switched photos; `ArrowUp/ArrowDown` switched groups; `Enter` archived the selected test photo in the temporary QA state; duplicate category warning blocked archive with `分类重复：采集器条形码。请先选中对应照片修改分类后再归档。`; double-click opened the large image overlay; `Esc` closed it.
+  - Exception/action area: exception category selector and note field visible; supplement, delete, restore pending, reset unconstructed, transfer exception order, archive, and export exception meter entries visible. Destructive reset/delete/exception/export actions were not submitted during browser QA.
+  - Smoke checks: `/login` 390px logged-out page loaded with no horizontal overflow and no framework overlay; `/project-board`, `/claim-tasks`, `/construction` at 1366px and 390px were nonblank, had no horizontal overflow, no framework overlay, and no app console `error`/`warn`.
+  - Production-mode temporary server on `8017`: `/openapi.json` returned `404`.
+- Issues:
+  - None found in this scoped UI trial.
+
+### V3.0.0-alpha Apple-like UI lab phase 4 - `/construction`
+
+- Date: 2026-06-23
+- Owner: Codex V3 UI lab thread
+- Branch:
+  - `feature/v3.0.0-apple-ui-lab`
+- Baseline:
+  - Production remains `V2.6.5`; this is only a V3.0.0-alpha branch UI experiment.
+- Goal:
+  - Only polish `/construction` visuals with a lighter Apple-like, mobile-first treatment.
+  - Preserve task picker mode, construction workspace mode, and return-to-task-area behavior.
+  - Preserve scan, camera, album, local cache, upload-current-group, upload-all-cache, and submit-construction-task entries and logic.
+  - Preserve `全部 / 未施工 / 已缓存 / 异常工单` filters plus module-asset required validation and required-photo validation.
+  - Do not change APIs, database schema, Alembic, production env/data/uploads/OSS/PostgreSQL, or retired `/unmatched` and `/construction-cache` behavior.
+- Files changed:
+  - `v2-web/src/views/ConstructionView.vue`
+  - `v2-api/app/static/vue/**`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - `/construction` now has a scoped V3 visual layer: softer app background, translucent panels, clearer terminal/group cards, quieter metric/filter surfaces, and larger mobile touch targets.
+  - Mobile work mode uses stronger hierarchy for terminal header, search/scan controls, two-column filters, cache actions, group cards, and the bottom collection action bar.
+  - Collection form/drawer keeps the same fields and file inputs; only spacing, borders, shadows, and sticky action presentation were refined.
+  - Cached and exception visual states remain visible; cached drafts show the local cache line and expose upload actions while required-photo validation keeps upload buttons disabled until ready.
+- Production and data note:
+  - No production deployment.
+  - No API/database/Alembic changes.
+  - No `.env`, repo `data`, repo `uploads`, OSS, or PostgreSQL writes.
+  - Browser QA used temporary local services and temp state under `%TEMP%`; no repo or production data was modified.
+  - `/unmatched` and `/construction-cache` were not restored as standalone pages.
+- Validation:
+  - `vue-tsc --noEmit`: passed.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed; existing Rollup PURE-comment and chunk-size warnings remain.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed; registered pages `5`, legacy bridge pages `0`.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+  - `git diff --check`: passed.
+- Browser QA:
+  - `/construction` 1366px and 1920px: no page-level horizontal overflow; construction workspace rendered with return-to-task-area, scan/search, filters, cached state, collector form, and submit-construction-task entry visible.
+  - `/construction` 390px: no horizontal overflow; mobile work mode felt app-like with larger controls; collection drawer showed scanner buttons, module asset field, 4 photo slots, camera/album buttons, save-cache, upload-current-group, and required warnings.
+  - Task picker: opened via `返回任务区`; terminal task card rendered and reopened the construction workspace.
+  - Filters: `全部`, `未施工`, `已缓存`, and `异常工单` all switched without layout issues. Temporary saved draft moved cached count from `0` to `1`.
+  - Cache/upload: saved a local draft with module asset `QA-MODULE-001`; `已缓存` filter displayed `1 个本地缓存`; `一键上传` and `上传当前组` entries were visible and disabled because required photos were intentionally missing.
+  - Required validation: empty form showed module asset required and missing required-photo messages; after filling module asset, missing required-photo warning remained.
+  - Related smoke: `/login`, `/project-board`, `/claim-tasks`, and `/task-hall` rendered without horizontal overflow and with empty page console `error` logs.
+  - Production-mode temporary server on `8019`: `/openapi.json` returned `404`.
+- Issues:
+  - None found in this scoped UI trial.
+  - Camera permission, actual photo selection, upload, and final submit were not executed during browser QA; the entries and validation states were verified.

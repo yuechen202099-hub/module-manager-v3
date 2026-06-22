@@ -88,6 +88,7 @@ export type ReviewTask = {
   completedGroups: number
   ownerName?: string
   claimedBy?: string
+  claimedByName?: string
   canClaim?: boolean
   hasScanInfo?: boolean
   renovationCount?: number
@@ -98,7 +99,9 @@ export type ReviewTask = {
   reviewRate?: number
   constructionEnabled?: boolean
   constructionClaimedBy?: string
+  constructionClaimedByName?: string
   assignedConstructor?: string
+  assignedConstructorName?: string
   constructionUploadedCount?: number
   constructionUnbuiltCount?: number
   constructionExceptionCount?: number

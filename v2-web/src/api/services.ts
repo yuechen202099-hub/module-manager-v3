@@ -61,6 +61,7 @@ type BackendTask = {
   name?: string
   status?: string
   claimed_by?: string
+  claimed_by_name?: string
   can_claim?: boolean
   has_scan_info?: boolean
   total_groups?: number
@@ -72,7 +73,9 @@ type BackendTask = {
   review_rate?: number
   construction_enabled?: boolean
   construction_claimed_by?: string
+  construction_claimed_by_name?: string
   assigned_constructor?: string
+  assigned_constructor_name?: string
   construction_uploaded_count?: number
   construction_unbuilt_count?: number
   construction_exception_count?: number
@@ -392,8 +395,9 @@ function mapTask(raw: BackendTask): ReviewTask {
     totalGroups: renovationCount,
     claimedGroups: uploadedCount,
     completedGroups: reviewedCount,
-    ownerName: raw.claimed_by || '',
+    ownerName: raw.claimed_by_name || raw.claimed_by || '',
     claimedBy: raw.claimed_by || '',
+    claimedByName: raw.claimed_by_name || '',
     canClaim: Boolean(raw.can_claim),
     hasScanInfo: Boolean(raw.has_scan_info ?? raw.can_claim),
     renovationCount,
@@ -404,7 +408,9 @@ function mapTask(raw: BackendTask): ReviewTask {
     reviewRate: Number(raw.review_rate || (renovationCount ? reviewedCount / renovationCount : 0)),
     constructionEnabled: Boolean(raw.construction_enabled),
     constructionClaimedBy: raw.construction_claimed_by || '',
+    constructionClaimedByName: raw.construction_claimed_by_name || '',
     assignedConstructor: raw.assigned_constructor || raw.construction_claimed_by || '',
+    assignedConstructorName: raw.assigned_constructor_name || raw.construction_claimed_by_name || '',
     constructionUploadedCount: Number(raw.construction_uploaded_count || raw.uploaded_count || 0),
     constructionUnbuiltCount: Number(raw.construction_unbuilt_count || Math.max(renovationCount - uploadedCount, 0)),
     constructionExceptionCount: Number(raw.construction_exception_count || 0),

@@ -1,18 +1,20 @@
 <script setup lang="ts">
-import { Refresh, Search, Unlock, UserFilled } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { Download, FolderOpened, Refresh, Search, Unlock, UserFilled } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import {
   assignConstructionTask,
   currentActor,
+  exportTaskDetail,
   fetchTasks,
+  fetchUserAccounts,
   claimTask as claimTaskApi,
   releaseAllClaimedTasks,
   releaseTask as releaseTaskApi,
 } from '@/api/services'
-import type { ReviewTask } from '@/api/types'
+import type { ReviewTask, UserAccount } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
@@ -20,9 +22,19 @@ const auth = useAuthStore()
 const loading = ref(false)
 const releasingAll = ref(false)
 const assigningTaskId = ref('')
+const assignmentDialogVisible = ref(false)
+const assignmentTargetTask = ref<ReviewTask | null>(null)
+const assignmentConstructor = ref('')
+const assignmentSubmitting = ref(false)
 const tasks = ref<ReviewTask[]>([])
+const accountUsers = ref<UserAccount[]>([])
+const loadingAccounts = ref(false)
 const errorMessage = ref('')
 const searchQuery = ref('')
+const exportingTaskId = ref('')
+const exportProgressText = ref('')
+const exportProgressPercent = ref(0)
+const exportScopeByTask = ref<Record<string, 'reviewed' | 'all'>>({})
 let refreshInterval = 0
 let refreshTimer = 0
 
@@ -51,6 +63,26 @@ const visibleTasks = computed(() => {
 
 const claimedTasks = computed(() => tasks.value.filter((task) => task.claimedBy))
 const myTasks = computed(() => tasks.value.filter((task) => task.claimedBy === actor.value))
+const userByUsername = computed(() => {
+  const map = new Map<string, UserAccount>()
+  for (const user of accountUsers.value) {
+    if (user.username) map.set(user.username, user)
+  }
+  return map
+})
+const constructorOptions = computed(() =>
+  accountUsers.value.filter((user) => (user.roles || []).includes('constructor')),
+)
+const assignmentDialogTitle = computed(() => {
+  const task = assignmentTargetTask.value
+  if (!task) return '指派施工终端'
+  return task.assignedConstructor || task.constructionClaimedBy ? '改派施工终端' : '指派施工终端'
+})
+const assignmentTargetLabel = computed(() => {
+  const task = assignmentTargetTask.value
+  if (!task) return ''
+  return `终端 ${task.terminal || task.id}`
+})
 const claimedSummary = computed(() => {
   const base = claimedTasks.value
   const renovation = base.reduce((sum, task) => sum + Number(task.renovationCount || task.totalGroups || 0), 0)
@@ -74,6 +106,50 @@ function percent(value: number | undefined) {
 
 function countValue(value: number | undefined) {
   return Number(value || 0)
+}
+
+function userDisplayName(username = '') {
+  const value = String(username || '').trim()
+  if (!value) return ''
+  const user = userByUsername.value.get(value)
+  return user?.name?.trim() || value
+}
+
+function userDisplayLabel(username = '') {
+  const value = String(username || '').trim()
+  if (!value) return '未指派'
+  const name = userDisplayName(value)
+  return name && name !== value ? `${name}（${value}）` : value
+}
+
+function accountOptionLabel(user: UserAccount) {
+  const name = user.name?.trim()
+  return name && name !== user.username ? `${name}（${user.username}）` : user.username
+}
+
+function taskConstructorAccount(task: ReviewTask) {
+  return task.assignedConstructor || task.constructionClaimedBy || ''
+}
+
+function taskConstructorName(task: ReviewTask) {
+  return (
+    task.assignedConstructorName ||
+    task.constructionClaimedByName ||
+    userDisplayName(taskConstructorAccount(task)) ||
+    '未指派'
+  )
+}
+
+function taskConstructorAccountHint(task: ReviewTask) {
+  const account = taskConstructorAccount(task)
+  const name = taskConstructorName(task)
+  return account && account !== name ? `账号 ${account}` : ''
+}
+
+function taskReviewerLabel(task: ReviewTask) {
+  if (!task.claimedBy) return '审阅：尚未领取'
+  const name = task.claimedByName || userDisplayName(task.claimedBy)
+  return name && name !== task.claimedBy ? `审阅：${name}（${task.claimedBy}）` : `审阅：${task.claimedBy}`
 }
 
 function normalizeSearch(value: string) {
@@ -119,11 +195,27 @@ async function loadTasks() {
   loading.value = true
   errorMessage.value = ''
   try {
-    tasks.value = await fetchTasks()
+    const result = await fetchTasks()
+    tasks.value = result
+    for (const task of result) {
+      if (!exportScopeByTask.value[task.id]) exportScopeByTask.value[task.id] = 'reviewed'
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '任务加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function loadAccounts() {
+  if (!isAdmin.value || loadingAccounts.value) return
+  loadingAccounts.value = true
+  try {
+    accountUsers.value = await fetchUserAccounts()
+  } catch (error) {
+    ElMessage.warning(error instanceof Error ? error.message : '施工员账号列表加载失败，可稍后重试')
+  } finally {
+    loadingAccounts.value = false
   }
 }
 
@@ -176,27 +268,75 @@ async function releaseAll() {
   }
 }
 
-async function assignConstruction(task: ReviewTask) {
+async function openAssignDialog(task: ReviewTask) {
   if (!isAdmin.value) return
+  assignmentTargetTask.value = task
+  assignmentConstructor.value = taskConstructorAccount(task)
+  assignmentDialogVisible.value = true
+  if (!accountUsers.value.length) await loadAccounts()
+}
+
+async function submitAssignment() {
+  const task = assignmentTargetTask.value
+  if (!task || !isAdmin.value) return
+  const constructor = String(assignmentConstructor.value || '').trim()
+  if (!constructor) {
+    ElMessage.warning('请选择施工员，或输入施工员账号')
+    return
+  }
+  assignmentSubmitting.value = true
+  assigningTaskId.value = task.id
+  errorMessage.value = ''
   try {
-    const { value } = await ElMessageBox.prompt('请输入施工员账号', '指派施工终端', {
-      confirmButtonText: task.assignedConstructor || task.constructionClaimedBy ? '确认改派' : '确认指派',
-      cancelButtonText: '取消',
-      inputValue: task.assignedConstructor || task.constructionClaimedBy || '',
-      inputPlaceholder: '例如 constructor-a',
-      inputValidator: (value) => Boolean(String(value || '').trim()) || '施工员账号不能为空',
-    })
-    const constructor = String(value || '').trim()
-    assigningTaskId.value = task.id
-    errorMessage.value = ''
     const updated = await assignConstructionTask(task.id, constructor)
     tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
-    ElMessage.success(`已指派给 ${constructor}`)
+    assignmentDialogVisible.value = false
+    ElMessage.success(`已指派给 ${userDisplayLabel(constructor)}`)
   } catch (error) {
-    if (error === 'cancel' || (error instanceof Error && error.message === 'cancel')) return
     errorMessage.value = error instanceof Error ? error.message : '指派施工失败'
   } finally {
+    assignmentSubmitting.value = false
     assigningTaskId.value = ''
+  }
+}
+
+async function exportTaskDetailRow(task: ReviewTask) {
+  exportingTaskId.value = `detail-${task.id}`
+  try {
+    await exportTaskDetail(task.id)
+    ElMessage.success('任务明细已导出')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '任务明细导出失败')
+  } finally {
+    exportingTaskId.value = ''
+  }
+}
+
+async function exportTerminalPackage(task: ReviewTask) {
+  exportingTaskId.value = `terminal-${task.id}`
+  exportProgressText.value = '准备导出终端包'
+  exportProgressPercent.value = 2
+  try {
+    window.postMessage(
+      {
+        type: 'module-manager:start-terminal-export',
+        scope: {
+          taskId: task.id,
+          terminal: task.terminal || '',
+          reviewScope: exportScopeByTask.value[task.id] || 'reviewed',
+        },
+      },
+      window.location.origin,
+    )
+    exportProgressText.value = '终端包导出已提交到全局任务栏'
+    exportProgressPercent.value = 5
+    ElMessage.success('终端包导出已提交，可切换页面继续等待')
+  } finally {
+    window.setTimeout(() => {
+      exportingTaskId.value = ''
+      exportProgressText.value = ''
+      exportProgressPercent.value = 0
+    }, 900)
   }
 }
 
@@ -207,8 +347,13 @@ function openReview(task: ReviewTask) {
 
 onMounted(() => {
   void loadTasks()
+  if (isAdmin.value) void loadAccounts()
   window.addEventListener('message', handleExternalRefresh)
   refreshInterval = window.setInterval(scheduleRefresh, 10000)
+})
+
+watch(isAdmin, (value) => {
+  if (value && !accountUsers.value.length) void loadAccounts()
 })
 
 onUnmounted(() => {
@@ -237,6 +382,12 @@ onUnmounted(() => {
     </div>
 
     <ElAlert v-if="errorMessage" class="claim-alert" type="error" :closable="false" :title="errorMessage" />
+
+    <div v-if="exportingTaskId" class="panel import-progress">
+      <strong>导出任务</strong>
+      <span class="muted">{{ exportProgressText || '正在处理导出任务' }}</span>
+      <ElProgress :percentage="exportProgressPercent" />
+    </div>
 
     <div class="claim-summary">
       <article class="metric">
@@ -292,13 +443,18 @@ onUnmounted(() => {
           v-for="task in visibleTasks"
           :key="task.id"
           class="claim-task-card"
-          :class="{ empty: !task.hasScanInfo, done: !task.unreviewedCount && task.hasScanInfo }"
-          @click="openReview(task)"
+          :class="{
+            empty: !task.hasScanInfo,
+            done: !task.unreviewedCount && task.hasScanInfo,
+            mine: task.claimedBy === actor,
+            claimed: !!task.claimedBy,
+          }"
         >
           <div class="task-card-top">
             <div class="task-title-block">
               <strong>终端 {{ task.terminal || task.id }}</strong>
-              <span>{{ task.claimedBy ? `审阅：${task.claimedBy}` : '审阅：尚未领取' }}</span>
+              <span>{{ taskReviewerLabel(task) }}</span>
+              <span v-if="task.address" class="task-address-line">{{ task.address }}</span>
             </div>
             <ElTag :type="statusType(task)" effect="plain">{{ statusLabel(task) }}</ElTag>
           </div>
@@ -323,8 +479,37 @@ onUnmounted(() => {
           <ElProgress :percentage="taskReviewPercent(task)" :stroke-width="8" :show-text="false" />
 
           <div v-if="isAdmin" class="task-construction-line">
-            <span>施工：{{ task.assignedConstructor || task.constructionClaimedBy || '未指派' }}</span>
+            <span>
+              施工：<strong>{{ taskConstructorName(task) }}</strong>
+              <small v-if="taskConstructorAccountHint(task)">{{ taskConstructorAccountHint(task) }}</small>
+            </span>
             <span v-if="task.constructionExceptionCount">异常 {{ task.constructionExceptionCount }}</span>
+          </div>
+
+          <div v-if="isAdmin" class="task-export-row" @click.stop>
+            <ElButton
+              size="small"
+              plain
+              :icon="Download"
+              :loading="exportingTaskId === `detail-${task.id}`"
+              @click="exportTaskDetailRow(task)"
+            >
+              导出明细
+            </ElButton>
+            <ElSelect v-model="exportScopeByTask[task.id]" class="export-scope-select" size="small" aria-label="终端包导出范围">
+              <ElOption label="已归档" value="reviewed" />
+              <ElOption label="全部" value="all" />
+            </ElSelect>
+            <ElButton
+              size="small"
+              type="primary"
+              plain
+              :icon="FolderOpened"
+              :loading="exportingTaskId === `terminal-${task.id}`"
+              @click="exportTerminalPackage(task)"
+            >
+              导出终端包
+            </ElButton>
           </div>
 
           <div class="task-card-actions" @click.stop>
@@ -334,7 +519,7 @@ onUnmounted(() => {
               plain
               :icon="UserFilled"
               :loading="assigningTaskId === task.id"
-              @click="assignConstruction(task)"
+              @click="openAssignDialog(task)"
             >
               {{ task.assignedConstructor || task.constructionClaimedBy ? '改派施工' : '指派施工' }}
             </ElButton>
@@ -347,9 +532,48 @@ onUnmounted(() => {
             >
               {{ task.claimedBy === actor ? '继续持有' : '领取' }}
             </ElButton>
+            <ElButton
+              size="small"
+              type="primary"
+              :disabled="!!task.claimedBy && task.claimedBy !== actor && !isAdmin"
+              @click="openReview(task)"
+            >
+              进入审阅
+            </ElButton>
           </div>
         </article>
       </div>
     </section>
+
+    <ElDialog v-model="assignmentDialogVisible" :title="assignmentDialogTitle" width="520px">
+      <div class="assignment-dialog-body">
+        <span class="assignment-target">{{ assignmentTargetLabel }}</span>
+        <label class="assignment-field">
+          <span>施工员</span>
+          <ElSelect
+            v-model="assignmentConstructor"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            :loading="loadingAccounts"
+            placeholder="优先选择姓名，必要时输入账号"
+          >
+            <ElOption
+              v-for="user in constructorOptions"
+              :key="user.username"
+              :label="accountOptionLabel(user)"
+              :value="user.username"
+              :disabled="user.status === 'disabled'"
+            />
+          </ElSelect>
+        </label>
+        <p class="assignment-note">提交给后端仍使用账号；界面优先展示姓名，并保留账号辅助识别。</p>
+      </div>
+      <template #footer>
+        <ElButton @click="assignmentDialogVisible = false">取消</ElButton>
+        <ElButton type="primary" :loading="assignmentSubmitting" @click="submitAssignment">确认指派</ElButton>
+      </template>
+    </ElDialog>
   </section>
 </template>
