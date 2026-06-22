@@ -78,3 +78,9 @@ Last updated: 2026-06-21
 | ID | Bug / UX issue | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0117 | Review and construction field-task workflows were not exposed as stable task cards, and some Element Plus labels were vertically off-center inside cards. | Open `/task-hall` or `/construction`; unmatched/exception work was shown as a secondary mixed section or hidden behind terminal context, and compact tags such as `可审阅` could appear visually high/low in their pill. | Fixed in `V2.5.1`. | 2026-06-22 | `TaskHallView.vue`, `ConstructionView.vue`, `element-plus.css`, `main.css` |
+
+## 2026-06-22 - V2.5.5 historical construction creator backfill
+
+| ID | Bug | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0121 | Construction photos uploaded before V2.5.4 can still have `creator` saved as the constructor account username, so installer KPI remains split by account id until old rows are backfilled. | Open installer distribution or group photo details for historical construction uploads created before V2.5.4; old photos can still show username. | Fixed locally in `V2.5.5`; pending project-engineer production dry-run/apply. | 2026-06-22 | `backfill_construction_creator_names.py`, `test_backfill_construction_creator_names.py` |

@@ -2397,3 +2397,33 @@
   - Synced 38 patch files/build artifacts; recorded list at `v2.5.4-synced-files.txt` inside the backup directory.
   - Preserved production `.env`, `data`, uploads; no Alembic migration.
   - Verified `/health`, `/login`, `/project-board`, `/construction`, `https://www.sgcc.online/login`, and `/openapi.json` 404.
+
+### V2.5.5 historical construction creator backfill
+
+- Date: 2026-06-22
+- Owner: BUG fix thread
+- Scope:
+  - Historical construction-upload installer name repair.
+- Changed files:
+  - `v2-api/scripts/backfill_construction_creator_names.py`
+  - `v2-api/tests/test_backfill_construction_creator_names.py`
+  - version metadata files
+  - maintenance documentation
+- Behavior:
+  - Adds a dry-run-first script that maps constructor usernames to configured user display names.
+  - Only construction-upload photos are eligible for rewrite.
+  - Imported scan photos and unknown creators are left untouched.
+  - PostgreSQL is updated by default; JSON state can also be updated when `--state` is provided.
+  - Script writes only when `--apply` is explicitly supplied.
+- Release note:
+  - Data backfill utility.
+  - No API path change.
+  - No database schema change.
+  - No Alembic migration required.
+- Validation:
+  - `python -m py_compile v2-api/scripts/backfill_construction_creator_names.py`: passed.
+  - `pytest v2-api/tests/test_backfill_construction_creator_names.py -q`: `1 passed`.
+  - `node vue-tsc --noEmit`: passed using bundled Node.
+  - `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py v2-api\tests\test_backfill_construction_creator_names.py -q`: `44 passed, 1 warning`.

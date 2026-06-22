@@ -491,3 +491,41 @@ Mobile construction users reported that the two permanent field-task cards added
 - `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
 - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `43 passed, 1 warning`.
+
+## 2026-06-22 - V2.5.5 historical construction creator backfill
+
+### Reason
+
+V2.5.4 fixed new construction uploads, but photos already saved before the fix can still store the constructor username in `creator`. Installer KPI and photo details should use the configured user display name for those historical construction uploads too.
+
+### Changed files
+
+- `v2-api/scripts/backfill_construction_creator_names.py`
+- `v2-api/tests/test_backfill_construction_creator_names.py`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Added a dry-run-first backfill script for historical construction-upload photo creators.
+- PostgreSQL backfill updates only photos whose `creator` equals a known username and whose source metadata identifies them as construction uploads.
+- Optional JSON state backfill is available for compatibility state files.
+- The script defaults to dry-run; `--apply` is required for writes.
+- Added regression coverage for JSON state behavior so scan/import creators are not accidentally rewritten.
+- Advanced version metadata to `V2.5.5`.
+
+### Impact
+
+- One-time data repair utility plus version metadata.
+- No runtime API path change.
+- No database schema change.
+- No Alembic migration required.
+
+### Validation
+
+- `python -m py_compile v2-api/scripts/backfill_construction_creator_names.py`: passed.
+- `pytest v2-api/tests/test_backfill_construction_creator_names.py -q`: `1 passed`.
+- `node vue-tsc --noEmit`: passed using bundled Node.
+- `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py v2-api\tests\test_backfill_construction_creator_names.py -q`: `44 passed, 1 warning`.
