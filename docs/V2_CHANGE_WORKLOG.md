@@ -2675,5 +2675,13 @@
   - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
   - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
   - Browser QA on `http://127.0.0.1:8000/project-board?qa=v261-kpi`: page title `V2.6.1`, installer KPI dialog opens, no console error/warn.
-- Status:
-  - Local hotfix complete; pending project engineer production patch publish.
+  - Status:
+    - Released to production by project engineer patch sync.
+    - Commit: `b3470d1`; tag: `v2.6.1`.
+    - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_192008_before_v2.6.1_patch`.
+    - Production `.env`, `data`, and uploads preserved.
+    - No Alembic migration.
+    - Synced 18 changed source/docs/version files plus `v2-api/app/static/vue/`.
+    - `module-manager-v2.service`: active.
+    - Production GET checks passed for `/health`, `/login`, `/project-board`, `https://www.sgcc.online/login`; `/openapi.json` stayed 404.
+    - Authenticated production KPI API check passed: installer `白红运` returned daily workload rows with 143 address drilldown records; sample address row used `display_meter_no` and `installation_address` values.
