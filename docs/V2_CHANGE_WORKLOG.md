@@ -2427,3 +2427,13 @@
   - `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
   - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
   - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py v2-api\tests\test_backfill_construction_creator_names.py -q`: `44 passed, 1 warning`.
+- Production deployment:
+  - Published to production by project engineer patch sync.
+  - Code commit: `f0b0edb`; tag: `v2.5.5`.
+  - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_114149_before_v2.5.5_patch`.
+  - Preserved production `.env`, `data`, uploads; no Alembic migration.
+  - Server virtualenv used for runtime scripts: `/opt/module-manager-v2/venv/bin/python`.
+  - Dry-run matched only constructor username `xa` -> `樊哲浩`.
+  - Dry-run report: PostgreSQL `matched_creator_username=211`, JSON compatibility state `matched_creator_username=54`.
+  - Apply report: PostgreSQL `updated=211`, JSON compatibility state `updated=54`; JSON pre-backfill copy saved at `/opt/module-manager-v2/backups/runtime/20260622_114149_before_v2.5.5_patch/local_state.pre-creator-name-backfill.20260622_034158.json`.
+  - Verified service active and `/health`, `/login`, `/project-board`, `/construction`, `https://www.sgcc.online/login` returned OK.

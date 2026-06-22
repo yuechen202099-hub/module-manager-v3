@@ -529,3 +529,15 @@ V2.5.4 fixed new construction uploads, but photos already saved before the fix c
 - `node vite build`: passed with existing Rollup PURE/chunk-size warnings.
 - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
 - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py v2-api\tests\test_backfill_construction_creator_names.py -q`: `44 passed, 1 warning`.
+
+### Production deployment
+
+- Published by project engineer patch sync.
+- Commit/tag: `f0b0edb` / `v2.5.5`.
+- Backup path: `/opt/module-manager-v2/backups/runtime/20260622_114149_before_v2.5.5_patch`.
+- Production `.env`, `data`, and uploads were preserved; no Alembic migration was run.
+- Dry-run matched only constructor username `xa` and display name `樊哲浩`.
+- Dry-run counts: PostgreSQL `matched_creator_username=211`; JSON compatibility state `matched_creator_username=54`.
+- Apply counts: PostgreSQL `updated=211`; JSON compatibility state `updated=54`.
+- JSON backup from apply: `/opt/module-manager-v2/backups/runtime/20260622_114149_before_v2.5.5_patch/local_state.pre-creator-name-backfill.20260622_034158.json`.
+- Verification: service active; `/health`, `/login`, `/project-board`, `/construction`, and `https://www.sgcc.online/login` returned OK.

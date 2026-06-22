@@ -22,6 +22,8 @@ uploads/
 exports/
 logs/
 tmp/
+release-patches/
+deploy-reports/
 v2-api/local-test-state.json
 v2-api/data/
 v2-api/uploads/
