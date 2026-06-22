@@ -771,6 +771,39 @@ The V2.6.0 completion line chart made the work-time popup visually noisy and did
 - Production checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`.
 - `/openapi.json`: `404`.
 
+## 2026-06-22 - V2.6.3 installer KPI same-building clustering
+
+### Reason
+
+The installer KPI address weighting should treat records with the same building number as one work cluster. Public equipment in the same building, such as `95弄18号公用设备`, should stay with room addresses like `95弄18号201室` instead of being treated as scattered work.
+
+### Changed files
+
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/tests/test_api.py`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Updated the KPI address cluster key to prefer the building-level `弄+号` / `号` pattern before suffix cleanup.
+- Added a regression test that keeps `95弄18号201室` and `95弄18号公用设备` in the same cluster while keeping `95弄19号公用设备` separate.
+- Advanced version metadata to `V2.6.3`.
+
+### Impact
+
+- Affects only installer KPI address weight and address drilldown clustering.
+- No API path change.
+- No database migration.
+
+### Validation
+
+- `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+- `pytest v2-api\tests\test_api.py::test_installer_kpi_clusters_same_building_number_public_equipment -q`: passed.
+- `pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+
 ## 2026-06-22 - V2.6.0 installer KPI efficiency model
 
 ### Reason

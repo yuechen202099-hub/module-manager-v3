@@ -2723,3 +2723,30 @@
   - Backup path: `/opt/module-manager-v2/backups/runtime/20260622_202711_before_v2.6.2_patch`.
   - Production `.env`, `data`, uploads preserved; no Alembic migration.
   - Production checks passed for `/health`, `/login`, `/project-board`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`; `/openapi.json` returned `404`.
+
+### V2.6.3 installer KPI same-building clustering
+
+- Date: 2026-06-22
+- Owner: BUG fix thread
+- Goal:
+  - Tune installer KPI address weighting so records with the same building number are treated as one work cluster.
+  - Keep public equipment in the same building together with room addresses.
+- Files changed:
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/tests/test_api.py`
+  - version metadata files
+  - `BUG_HISTORY.md`
+  - `FIX_NOTES.md`
+  - `docs/AGENT_COORDINATION.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+- Behavior:
+  - Address clustering now prefers the building-level `弄+号` / `号` key before trimming room, parking-space, or charging-pile suffixes.
+  - Example: `95弄18号201室` and `95弄18号公用设备` share a cluster, while `95弄19号公用设备` remains separate.
+- Database note:
+  - No Alembic migration required.
+- Validation:
+  - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/main.py v2-api/app/services/ops_status.py`: passed.
+  - `pytest v2-api\tests\test_api.py::test_installer_kpi_clusters_same_building_number_public_equipment -q`: passed.
+  - `pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.

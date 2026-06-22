@@ -2485,6 +2485,9 @@ def _address_cluster_key(address: str) -> str:
     text = re.sub(r"\s+", "", str(address or ""))
     if not text:
         return ""
+    building_match = re.match(r"^(.+?(?:\d+\u5f04)?\d+\u53f7)", text)
+    if building_match:
+        return building_match.group(1)[:80]
     text = re.sub(r"\d+\s*(室|房|户).*$", "", text)
     text = re.sub(r"(车位|充电桩).*$", "", text)
     text = re.sub(r"[-－]\d+.*$", "", text)

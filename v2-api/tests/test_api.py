@@ -1,6 +1,7 @@
 import html
 import importlib.util
 import time
+from datetime import datetime
 from io import BytesIO
 from uuid import uuid4
 from pathlib import Path
@@ -14,7 +15,7 @@ from app.api.routes import auth
 from app.core.config import settings
 from app.core import security
 from app.services.ezcodes_scheduler import sync_manager
-from app.services import account_store
+from app.services import account_store, local_simulation
 from app.services.photo_storage import resolve_photo_for_response
 
 
@@ -95,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "2.6.2"
+    assert data["version"] == "2.6.3"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -1089,6 +1090,46 @@ def test_installer_daily_workload_includes_work_time_segments() -> None:
     assert two_hour[10]["minutes"] == 0
     assert two_hour[10]["completion_count"] == 1
     assert two_hour[10]["addresses"][0]["difficulty_weight"] >= 0.75
+
+
+def test_installer_kpi_clusters_same_building_number_public_equipment() -> None:
+    completion_records = [
+        {
+            "group_id": "g-room",
+            "meter_no": "110000000001",
+            "terminal": "350000000001",
+            "address": "上海市宝山区聚丰园路95弄18号201室",
+            "completed_at": datetime(2026, 6, 22, 8, 10),
+        },
+        {
+            "group_id": "g-public",
+            "meter_no": "110000000002",
+            "terminal": "350000000001",
+            "address": "上海市宝山区聚丰园路95弄18号公用设备",
+            "completed_at": datetime(2026, 6, 22, 8, 20),
+        },
+        {
+            "group_id": "g-other-building",
+            "meter_no": "110000000003",
+            "terminal": "350000000001",
+            "address": "上海市宝山区聚丰园路95弄19号公用设备",
+            "completed_at": datetime(2026, 6, 22, 8, 30),
+        },
+    ]
+
+    summary = local_simulation.build_work_time_summary(
+        [record["completed_at"] for record in completion_records],
+        completion_records,
+    )
+
+    segment = next(item for item in summary["two_hour_segments"] if item["start_hour"] == 8)
+    addresses = {item["meter_no"]: item for item in segment["addresses"]}
+
+    assert addresses["110000000001"]["address_cluster_key"].endswith("95弄18号")
+    assert addresses["110000000002"]["address_cluster_key"] == addresses["110000000001"]["address_cluster_key"]
+    assert addresses["110000000002"]["cluster_size"] == 2
+    assert addresses["110000000003"]["address_cluster_key"].endswith("95弄19号")
+    assert addresses["110000000003"]["address_cluster_key"] != addresses["110000000001"]["address_cluster_key"]
 
 
 def test_excel_exports_return_real_workbooks() -> None:
