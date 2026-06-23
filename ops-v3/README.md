@@ -1,46 +1,31 @@
-# V3 Production Ops System
+# V3 轻量运维记录
 
-This directory is the current source of truth for Module Manager V3 production operations.
+本目录不再使用旧的多 Agent 强流程。当前协作规则以以下文件为准：
 
-## Baseline
+- `AGENTS.md`
+- `docs/WORK_RULES.md`
 
-- Repository: https://github.com/yuechen202099-hub/module-manager-v3
-- Legacy source repository: https://github.com/yuechen202099-hub/module-manager-v2
-- Baseline product version: V3.0.2
-- Baseline branch: main
-- Baseline source branch: feature/v3.0.0-apple-ui-lab
-- First ops task: OPS-INIT-001
+## 目录用途
 
-## Authority
+- `tasks/`：按版本保存代码改动任务记录。
+- `releases/`：保存发布记录。
+- `acceptance/`：保存重要验收记录。
+- `db-changes/`：保存数据库迁移、数据修复、dry-run、回滚记录。
+- `incidents/`：保存生产事故和阻塞问题记录。
 
-Rules in `ops-v3/` supersede old development-stage coordination notes. The old files below are historical references only:
+## 当前任务记录路径
 
-- `docs/V2_CHANGE_WORKLOG.md`
-- `BUG_HISTORY.md`
-- `FIX_NOTES.md`
-- `docs/AGENT_COORDINATION.md`
+```text
+ops-v3/tasks/V3.0.2/
+```
 
-Business facts and production safety rules remain active:
+所有代码改动都要建立简短任务记录。文档和协作规则改动不强制建立任务记录。
 
-- Do not overwrite production `.env`.
-- Do not overwrite production `data`.
-- Do not overwrite uploads.
-- Do not change OSS production data without an approved task.
-- Do not execute Alembic without database and release double confirmation.
-- Do not publish without backup.
-- Do not mark work complete without validation.
+## 生产底线
 
-## Required Flow
-
-All work follows this path:
-
-User issue -> chief owner registers TASK_ID -> triage agent -> chief owner decides type, priority, and version strategy -> assigned agent -> QA acceptance -> version check -> release handoff or release -> archive -> user report.
-
-## Current Directories
-
-- `agent-prompts/`: startup prompts for each standing Agent thread.
-- `tasks/`: task records and handoffs.
-- `incidents/`: production incident records.
-- `releases/`: release plans and reports.
-- `db-changes/`: database risk, dry-run, apply, and rollback records.
-- `acceptance/`: QA acceptance reports.
+- 不覆盖生产 `.env`。
+- 不覆盖生产 `data`。
+- 不覆盖生产 `uploads`。
+- 不直接修改 OSS 生产对象。
+- 不直接修改 PostgreSQL 生产数据。
+- 数据库迁移、数据修复、生产数据相关操作必须单独确认。
