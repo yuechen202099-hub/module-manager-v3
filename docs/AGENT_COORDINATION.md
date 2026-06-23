@@ -33,6 +33,7 @@ This file is the shared coordination board for parallel maintenance threads.
 ## Current Deployment Note
 
 - 2026-06-23: V3.0.0-rc1 controlled rollout now includes the construction completion-time fix. Web construction upload and the mini-program queue send `client_completed_at` from the last valid local cache time. Backend upload accepts the optional field, stores it in photo raw metadata, and KPI/daily workload/two-hour efficiency logic prefers this construction completion time. Missing or invalid `client_completed_at` falls back to server upload time. No database schema change and no Alembic migration.
+- 2026-06-23: V3.0.0-rc1 also includes missing collector photo quality-exception handling. Construction upload requires only `before_box`, `module_meter`, and `after_box`; missing `collector_barcode` no longer blocks upload but marks the group with `missing_collector_photo` / `缺采集器照片`. Adding the collector barcode photo clears that automatic exception; deleting it re-applies the exception. No database schema change and no Alembic migration.
 
 ## Rules
 

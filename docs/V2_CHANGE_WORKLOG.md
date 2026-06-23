@@ -3153,3 +3153,42 @@
   - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed; existing Rollup PURE-comment and chunk-size warnings remain.
   - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
   - `git diff --check`: passed; only CRLF conversion warnings were reported.
+
+### V3.0.0-rc1 missing collector photo quality exception
+
+- Date: 2026-06-23
+- Owner: Project engineer thread
+- Branch:
+  - `feature/v3.0.0-apple-ui-lab`
+- Goal:
+  - Fix missing-photo automatic exception logic before V3.0.0-rc1 production rollout.
+  - Separate upload-required construction photos from quality-required review photos.
+  - Required upload slots are `before_box`, `module_meter`, and `after_box`.
+  - `collector_barcode` is optional for upload but required for quality completeness.
+- Files changed:
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/tests/test_api.py`
+  - `v2-api/tests/test_state_repository.py`
+  - `BUG_HISTORY.md`
+  - `FIX_NOTES.md`
+  - `docs/V2_CHANGE_WORKLOG.md`
+  - `docs/AGENT_COORDINATION.md`
+- Behavior:
+  - Missing `before_box`, `module_meter`, or `after_box` now blocks construction `upload-batch`.
+  - Missing `collector_barcode` no longer blocks upload.
+  - A group with all three upload-required slots but no collector barcode photo is automatically marked `exception`.
+  - The automatic reason code is `missing_collector_photo`; the visible note is `缺采集器照片`.
+  - Uploading a collector barcode photo clears this automatic exception.
+  - Deleting the collector barcode photo re-applies this automatic exception.
+  - PostgreSQL photo payload now includes `construction_slot` and `construction_slot_label` for stable slot detection.
+- Validation so far:
+  - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/api/routes/local_test.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api/tests/test_api.py::test_construction_task_open_claim_and_upload_batch -q`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api/tests/test_state_repository.py::test_postgres_quality_exception_marks_and_clears_missing_collector_photo -q`: passed.
+- Production/data note:
+  - No deployment performed in this step.
+  - No API path change.
+  - No database schema change.
+  - No Alembic migration.
+  - No `.env`, `data`, `uploads`, OSS, or PostgreSQL mutation.

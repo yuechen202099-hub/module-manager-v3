@@ -263,6 +263,55 @@ def test_postgres_installer_workload_uses_material_group_installation_address() 
     assert segment_addresses[0]["address"] == group.installation_address
 
 
+def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -> None:
+    def photo(category: str):
+        return SimpleNamespace(
+            raw_data={"construction_slot": category, "upload_source": "construction-mobile"},
+            category=category,
+        )
+
+    photos = [photo("before_box"), photo("module_meter"), photo("after_box")]
+    group = SimpleNamespace(
+        id="group-uuid",
+        team_id="default-team",
+        photo_count=3,
+        status=repository.GroupStatus.UNREVIEWED,
+        exception_status="",
+        exception_note="",
+        exception_reasons=[],
+        has_archive_blocker=False,
+        reviewer="reviewer",
+        review_note="",
+        reviewed_at=datetime(2026, 6, 8, 9, 30),
+        raw_data={},
+    )
+
+    class FakeScalars:
+        def __init__(self, items):
+            self._items = items
+
+        def all(self):
+            return self._items
+
+    class FakeSession:
+        def scalars(self, _statement):
+            return FakeScalars(photos)
+
+    repository._apply_photo_quality_exception_status(FakeSession(), group)
+
+    assert group.status == repository.GroupStatus.REJECTED
+    assert group.exception_note == repository.local_simulation.MISSING_COLLECTOR_PHOTO_LABEL
+    assert repository.local_simulation.MISSING_COLLECTOR_PHOTO_REASON in group.exception_reasons
+
+    photos.append(photo("collector_barcode"))
+    group.photo_count = 4
+    repository._apply_photo_quality_exception_status(FakeSession(), group)
+
+    assert group.status == repository.GroupStatus.UNREVIEWED
+    assert group.exception_note == ""
+    assert repository.local_simulation.MISSING_COLLECTOR_PHOTO_REASON not in group.exception_reasons
+
+
 def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository.settings, "state_backend", "json")
     monkeypatch.setattr(

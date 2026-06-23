@@ -57,6 +57,13 @@ CONSTRUCTION_SLOT_CATEGORIES = {
     "after_box": "after_box",
     "other": "other",
 }
+CONSTRUCTION_UPLOAD_REQUIRED_SLOTS = frozenset({"before_box", "module_meter", "after_box"})
+CONSTRUCTION_QUALITY_REQUIRED_SLOTS = CONSTRUCTION_UPLOAD_REQUIRED_SLOTS | frozenset({"collector_barcode"})
+MISSING_COLLECTOR_PHOTO_REASON = "missing_collector_photo"
+MISSING_COLLECTOR_PHOTO_LABEL = "\u7f3a\u91c7\u96c6\u5668\u7167\u7247"
+AUTO_EXCEPTION_REASON_LABELS = {
+    MISSING_COLLECTOR_PHOTO_REASON: MISSING_COLLECTOR_PHOTO_LABEL,
+}
 VOLATILE_URL_QUERY_KEYS = {
     "access_token",
     "expires",
@@ -2966,6 +2973,91 @@ def count_partial_groups(groups: list[dict[str, Any]]) -> int:
     return sum(1 for item in groups if 0 < item["photo_count"] < 4)
 
 
+def display_exception_reason(reason: str) -> str:
+    return AUTO_EXCEPTION_REASON_LABELS.get(str(reason or "").strip(), str(reason or "").strip())
+
+
+def display_exception_reasons(reasons: list[str]) -> list[str]:
+    labels: list[str] = []
+    for reason in reasons:
+        label = display_exception_reason(reason)
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def normalize_construction_slot(value: Any) -> str:
+    raw = str(value or "").strip()
+    if raw in CONSTRUCTION_SLOT_CATEGORIES:
+        return CONSTRUCTION_SLOT_CATEGORIES[raw]
+    for slot, label in PHOTO_CATEGORIES.items():
+        if slot in CONSTRUCTION_SLOT_CATEGORIES and raw == label:
+            return slot
+    return ""
+
+
+def photo_construction_slot(photo: dict[str, Any]) -> str:
+    for key in ("construction_slot", "slot", "category"):
+        slot = normalize_construction_slot(photo.get(key))
+        if slot and slot != "other":
+            return slot
+    label_text = f"{photo.get('construction_slot_label') or ''} {photo.get('category_label') or ''}"
+    for slot, label in PHOTO_CATEGORIES.items():
+        if slot in CONSTRUCTION_SLOT_CATEGORIES and label and label in label_text:
+            return slot
+    return ""
+
+
+def group_photo_slots(group: dict[str, Any]) -> set[str]:
+    slots: set[str] = set()
+    for photo in group.get("photos", []):
+        slot = photo_construction_slot(photo)
+        if slot and slot != "other":
+            slots.add(slot)
+    return slots
+
+
+def validate_construction_upload_required_slots(group: dict[str, Any], photos: list[dict[str, Any]]) -> None:
+    covered = group_photo_slots(group)
+    seen_sha = {
+        str(photo.get("sha256") or "").strip()
+        for photo in group.get("photos", [])
+        if str(photo.get("sha256") or "").strip()
+    }
+    for item in photos:
+        sha256 = str(item.get("sha256") or "").strip()
+        if sha256 and sha256 in seen_sha:
+            continue
+        slot = normalize_construction_slot(item.get("slot") or item.get("construction_slot") or item.get("category"))
+        if slot and slot != "other":
+            covered.add(slot)
+        if sha256:
+            seen_sha.add(sha256)
+    missing = [slot for slot in ("before_box", "module_meter", "after_box") if slot not in covered]
+    if missing:
+        labels = [PHOTO_CATEGORIES[slot] for slot in missing]
+        raise ValueError(f"\u7f3a\u5c11\u5fc5\u586b\u7167\u7247\uff1a{'、'.join(labels)}")
+
+
+def apply_photo_quality_exception_status(group: dict[str, Any], *, allow_recover: bool = True) -> None:
+    previous_reasons = {str(item).strip() for item in group.get("exception_reasons", []) if str(item).strip()}
+    had_missing_collector = MISSING_COLLECTOR_PHOTO_REASON in previous_reasons
+    reasons = validate_group_archive(group)
+    set_group_exception_flags(group, reasons)
+    has_missing_collector = MISSING_COLLECTOR_PHOTO_REASON in set(reasons)
+    if has_missing_collector:
+        group["status"] = "exception"
+        group["exception_note"] = MISSING_COLLECTOR_PHOTO_LABEL
+        group["reviewer"] = None
+        group["review_note"] = ""
+        group["reviewed_at"] = None
+        return
+    if allow_recover and had_missing_collector and str(group.get("exception_note") or "").strip() == MISSING_COLLECTOR_PHOTO_LABEL:
+        group["exception_note"] = ""
+        if not reasons and group.get("status") == "exception":
+            group["status"] = "pending" if group.get("photo_count", 0) > 0 else "pending"
+
+
 def calculate_completeness_rate(groups: list[dict[str, Any]], scan_only: bool = False) -> float:
     scoped_groups = [item for item in groups if item["photo_count"] > 0] if scan_only else groups
     if not scoped_groups:
@@ -2990,8 +3082,12 @@ def validate_group_archive(group: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     if not photos:
         return reasons
-    if len(photos) < 4:
+    slots = group_photo_slots(group)
+    missing_collector_only = CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots) and "collector_barcode" not in slots
+    if len(photos) < 4 and not missing_collector_only:
         reasons.append("资料组照片不足 4 张")
+    if missing_collector_only:
+        reasons.append(MISSING_COLLECTOR_PHOTO_REASON)
     if photos and not any(str(photo.get("collector") or "").strip() for photo in photos):
         reasons.append("缺少采集器信息")
     if photos and not any(str(photo.get("asset_no") or "").strip() for photo in photos):
@@ -3448,7 +3544,7 @@ def build_exception_type(group: dict[str, Any]) -> str:
 
 
 def build_exception_reasons(group: dict[str, Any]) -> list[str]:
-    reasons = [str(item).strip() for item in group.get("exception_reasons", []) if str(item).strip()]
+    reasons = display_exception_reasons([str(item).strip() for item in group.get("exception_reasons", []) if str(item).strip()])
     for note in (group.get("exception_note"), group.get("review_note")):
         note_text = str(note or "").strip()
         if note_text and note_text not in reasons:
@@ -3920,6 +4016,7 @@ def upload_construction_group_batch(
     task = ensure_construction_task_fields(find_task(group["task_id"]))
     if task.get("construction_claimed_by") != actor:
         raise ValueError("Construction task must be claimed by the current constructor before upload")
+    validate_construction_upload_required_slots(group, photos)
     existing_composite = {
         make_construction_photo_unique_key(photo)
         for photo in group.get("photos", [])
@@ -4008,6 +4105,7 @@ def upload_construction_group_batch(
     group["review_note"] = ""
     group["exception_note"] = ""
     group["reviewed_at"] = None
+    apply_photo_quality_exception_status(group)
     mark_delivery_cache_stale(group, "construction upload changed photos")
     append_audit_event(
         "construction_upload_batch",
@@ -4412,7 +4510,7 @@ def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str,
     group["review_note"] = ""
     group["exception_note"] = ""
     group["reviewed_at"] = None
-    set_group_exception_flags(group, validate_group_archive(group))
+    apply_photo_quality_exception_status(group)
     state = get_state()
     state["photo_events"].append(
         {
@@ -4457,7 +4555,7 @@ def update_group_archive_status(group: dict[str, Any], reviewer: str) -> None:
     set_group_exception_flags(group, reasons)
     if reasons:
         group["status"] = "exception"
-        group["exception_note"] = "; ".join(reasons)
+        group["exception_note"] = "; ".join(display_exception_reasons(reasons))
         mark_delivery_cache_stale(group, "archive blocked")
         append_audit_event("archive_blocked", reviewer, {"group_id": group["id"], "reasons": reasons})
         return

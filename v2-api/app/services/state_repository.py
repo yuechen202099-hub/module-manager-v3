@@ -172,6 +172,124 @@ def _photo_work_datetime(photo: Photo) -> datetime | None:
     return _datetime_from_value(photo.taken_at) or _datetime_from_value(photo.created_at)
 
 
+def _photo_construction_slot(photo: Photo) -> str:
+    raw = photo.raw_data or {}
+    for value in (raw.get("construction_slot"), raw.get("slot"), photo.category):
+        slot = local_simulation.normalize_construction_slot(value)
+        if slot and slot != "other":
+            return slot
+    return ""
+
+
+def _photo_dict_construction_slot(photo: dict[str, Any]) -> str:
+    return local_simulation.normalize_construction_slot(
+        photo.get("slot") or photo.get("construction_slot") or photo.get("category")
+    )
+
+
+def _group_active_photo_slots(session: Session, group: MaterialGroup, *, exclude_photo_id: Any | None = None) -> set[str]:
+    statement = select(Photo).where(
+        Photo.team_id == group.team_id,
+        Photo.group_id == group.id,
+        Photo.is_active.is_(True),
+    )
+    if exclude_photo_id is not None:
+        statement = statement.where(Photo.id != exclude_photo_id)
+    slots: set[str] = set()
+    for photo in session.scalars(statement).all():
+        slot = _photo_construction_slot(photo)
+        if slot and slot != "other":
+            slots.add(slot)
+    return slots
+
+
+def _validate_construction_upload_required_slots(
+    session: Session,
+    group: MaterialGroup,
+    photos: list[dict[str, Any]],
+) -> None:
+    covered = _group_active_photo_slots(session, group)
+    seen_sha = {
+        str(value or "").strip()
+        for value in session.scalars(
+            select(Photo.sha256).where(
+                Photo.team_id == group.team_id,
+                Photo.group_id == group.id,
+                Photo.is_active.is_(True),
+                Photo.sha256.is_not(None),
+            )
+        ).all()
+        if str(value or "").strip()
+    }
+    for item in photos:
+        sha256 = str(item.get("sha256") or "").strip()
+        if sha256 and sha256 in seen_sha:
+            continue
+        slot = _photo_dict_construction_slot(item)
+        if slot and slot != "other":
+            covered.add(slot)
+        if sha256:
+            seen_sha.add(sha256)
+    missing = [slot for slot in ("before_box", "module_meter", "after_box") if slot not in covered]
+    if missing:
+        labels = [local_simulation.PHOTO_CATEGORIES[slot] for slot in missing]
+        raise ValueError("\u7f3a\u5c11\u5fc5\u586b\u7167\u7247\uff1a" + chr(0x3001).join(labels))
+
+
+def _apply_photo_quality_exception_status(
+    session: Session,
+    group: MaterialGroup,
+    *,
+    exclude_photo_id: Any | None = None,
+) -> None:
+    previous_reasons = {str(item).strip() for item in (group.exception_reasons or []) if str(item).strip()}
+    had_missing_collector = local_simulation.MISSING_COLLECTOR_PHOTO_REASON in previous_reasons
+    slots = _group_active_photo_slots(session, group, exclude_photo_id=exclude_photo_id)
+    missing_collector = (
+        group.photo_count > 0
+        and local_simulation.CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots)
+        and "collector_barcode" not in slots
+    )
+    reasons = [item for item in previous_reasons if item != local_simulation.MISSING_COLLECTOR_PHOTO_REASON]
+    if missing_collector:
+        reasons.append(local_simulation.MISSING_COLLECTOR_PHOTO_REASON)
+    group.exception_reasons = list(dict.fromkeys(reasons))
+    group.has_archive_blocker = bool(group.exception_reasons)
+    raw = dict(group.raw_data or {})
+    if missing_collector:
+        group.status = GroupStatus.REJECTED
+        group.exception_status = "open"
+        group.exception_note = local_simulation.MISSING_COLLECTOR_PHOTO_LABEL
+        group.reviewer = None
+        group.review_note = ""
+        group.reviewed_at = None
+        raw.update(
+            {
+                "status": "exception",
+                "exception_note": group.exception_note,
+                "exception_reasons": group.exception_reasons,
+                "reviewer": "",
+                "review_note": "",
+                "reviewed_at": None,
+            }
+        )
+    elif had_missing_collector and str(group.exception_note or "").strip() == local_simulation.MISSING_COLLECTOR_PHOTO_LABEL:
+        group.exception_note = ""
+        if not group.exception_reasons and _legacy_group_status(group) == "exception":
+            group.status = GroupStatus.UNREVIEWED if group.photo_count > 0 else GroupStatus.UNREVIEWED
+            group.exception_status = ""
+        raw.update(
+            {
+                "status": _legacy_group_status(group),
+                "exception_note": group.exception_note or "",
+                "exception_reasons": group.exception_reasons,
+            }
+        )
+    else:
+        raw["exception_reasons"] = group.exception_reasons
+    group.raw_data = raw
+
+
 def _empty_task_stats() -> dict[str, Any]:
     return {
         "total_groups": 0,
@@ -265,6 +383,11 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
         "storage_key": photo.storage_key or "",
         "sha256": photo.sha256,
         "category": photo.category or "unclassified",
+        "category_label": raw.get("category_label")
+        or local_simulation.PHOTO_CATEGORIES.get(photo.category or "unclassified", local_simulation.PHOTO_CATEGORIES["unclassified"]),
+        "construction_slot": raw.get("construction_slot") or _photo_construction_slot(photo),
+        "construction_slot_label": raw.get("construction_slot_label")
+        or local_simulation.PHOTO_CATEGORIES.get(_photo_construction_slot(photo), ""),
         "archive_filename": photo.archive_filename or "",
         "archive_status": photo.archive_status or "",
         "sort_order": photo.sort_order,
@@ -3094,6 +3217,7 @@ class PostgresStateRepository(StateRepository):
             raw_data = dict(group.raw_data or {})
             raw_data.update({"status": "incomplete" if group.photo_count < 4 else "pending"})
             group.raw_data = raw_data
+            _apply_photo_quality_exception_status(session, group, exclude_photo_id=photo.id)
             session.commit()
             session.refresh(group)
             return {"group": _group_payload(session, group), "deleted_photo": deleted_payload}
@@ -3342,6 +3466,8 @@ class PostgresStateRepository(StateRepository):
         source: str = "manual-photo-import",
         client_batch_id: str = "",
     ) -> dict[str, Any]:
+        if source == "construction":
+            _validate_construction_upload_required_slots(session, group, photos)
         existing_keys: set[tuple[str, str]] = set()
         existing_sha: set[str] = set()
         existing_storage: set[tuple[str, str]] = set()
@@ -3391,6 +3517,13 @@ class PostgresStateRepository(StateRepository):
             raw_payload = dict(item)
             if source == "construction":
                 raw_payload.setdefault("upload_source", "construction-mobile")
+                slot = local_simulation.normalize_construction_slot(item.get("slot") or item.get("category"))
+                if slot:
+                    raw_payload.setdefault("construction_slot", slot)
+                    raw_payload.setdefault(
+                        "construction_slot_label",
+                        local_simulation.PHOTO_CATEGORIES.get(slot, local_simulation.PHOTO_CATEGORIES["other"]),
+                    )
             photo = Photo(
                 team_id=group.team_id,
                 group_id=group.id,
@@ -3437,6 +3570,8 @@ class PostgresStateRepository(StateRepository):
             raw = dict(group.raw_data or {})
             raw.update({"status": "incomplete" if group.photo_count < 4 else "pending", "photo_count": group.photo_count})
             group.raw_data = raw
+            session.flush()
+            _apply_photo_quality_exception_status(session, group)
         return {"added": added, "skipped_duplicates": skipped_duplicates}
 
     def add_photo_urls_to_group(

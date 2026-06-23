@@ -692,6 +692,43 @@ Installer KPI needs to infer daily work start/end times and effective working du
 - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
 - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
 
+## 2026-06-23 - V3.0.0-rc1 missing collector photo quality exception
+
+### Reason
+
+Construction upload and review quality checks were both treated like a strict 4-photo requirement. The field side should only be blocked when the three required construction photos are missing, while a missing collector barcode photo should become a review/quality exception after upload.
+
+### Changed files
+
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/tests/test_api.py`
+- `v2-api/tests/test_state_repository.py`
+
+### Changes
+
+- Added shared slot constants for construction upload-required photos: `before_box`, `module_meter`, and `after_box`.
+- Kept `collector_barcode` as quality-required but not upload-required.
+- Construction upload now validates the effective required slot set after SHA duplicate filtering.
+- Missing upload-required slots returns a 400 error before the group state is accepted.
+- Missing collector barcode photo allows upload, marks the group `exception`, stores reason code `missing_collector_photo`, and shows `缺采集器照片`.
+- Adding a collector barcode photo clears only this automatic exception.
+- Deleting the collector barcode photo re-applies the automatic exception.
+- PostgreSQL photo payloads now expose `construction_slot` and `construction_slot_label` for reliable existing-slot detection.
+
+### Impact
+
+- No API path change.
+- No database migration.
+- No Alembic.
+- Web, mini-program, and future native clients all go through the same backend `upload-batch` validation.
+
+### Validation
+
+- `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/api/routes/local_test.py`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api/tests/test_api.py::test_construction_task_open_claim_and_upload_batch -q`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api/tests/test_state_repository.py::test_postgres_quality_exception_marks_and_clears_missing_collector_photo -q`: passed.
+
 ## 2026-06-23 - V3.0.0-rc1 construction completion time
 
 ### Reason

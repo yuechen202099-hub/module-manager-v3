@@ -564,6 +564,23 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
         headers=constructor_headers,
     ).json()["data"]["items"]
     group = groups[0]
+    missing_module_upload = client.post(
+        f"/local-test/construction/groups/{group['id']}/upload-batch",
+        headers=constructor_headers,
+        data={
+            "actor": "constructor",
+            "client_batch_id": "batch-api-missing-module",
+            "client_completed_at": "bad-client-time",
+            "collector": "collector-api",
+            "module_asset_no": "module-api",
+            "photo_slots": ["before_box", "after_box"],
+            "client_photo_ids": ["photo-a", "photo-b"],
+        },
+        files=[
+            ("files", ("before.jpg", b"image-before", "image/jpeg")),
+            ("files", ("after.jpg", b"image-after", "image/jpeg")),
+        ],
+    )
     uploaded = client.post(
         f"/local-test/construction/groups/{group['id']}/upload-batch",
         headers=constructor_headers,
@@ -573,12 +590,13 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
             "client_completed_at": "bad-client-time",
             "collector": "collector-api",
             "module_asset_no": "module-api",
-            "photo_slots": ["before_box", "after_box"],
-            "client_photo_ids": ["photo-a", "photo-b"],
+            "photo_slots": ["before_box", "module_meter", "after_box"],
+            "client_photo_ids": ["photo-a", "photo-b", "photo-c"],
         },
         files=[
-            ("files", ("before.jpg", b"same-image", "image/jpeg")),
-            ("files", ("after.jpg", b"same-image", "image/jpeg")),
+            ("files", ("before.jpg", b"image-before-1", "image/jpeg")),
+            ("files", ("meter.jpg", b"image-meter-1", "image/jpeg")),
+            ("files", ("after.jpg", b"image-after-1", "image/jpeg")),
         ],
     )
 
@@ -590,10 +608,15 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert assigned.json()["data"]["construction_claimed_by"] == "constructor"
     assert claimed.status_code == 200
     assert claimed.json()["data"]["construction_claimed_by"] == "constructor"
+    assert missing_module_upload.status_code == 400
+    assert "模块与电能表" in missing_module_upload.json()["detail"]
     assert uploaded.status_code == 200
     payload = uploaded.json()["data"]
-    assert payload["added"] == 1
-    assert payload["skipped_duplicates"] == 1
+    assert payload["added"] == 3
+    assert payload["skipped_duplicates"] == 0
+    assert payload["group"]["status"] == "exception"
+    assert payload["group"]["exception_note"] == "缺采集器照片"
+    assert "missing_collector_photo" in payload["group"]["exception_reasons"]
     assert payload["group"]["photos"][0]["upload_source"] == "construction-mobile"
     assert payload["group"]["photos"][0]["construction_slot"] == "before_box"
     assert payload["group"]["photos"][0]["category"] == "unclassified"
@@ -609,6 +632,29 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
         headers=constructor_headers,
     ).json()["data"]["items"]
     assert group["id"] not in {item["id"] for item in after_first_upload}
+
+    collector_upload = client.post(
+        f"/local-test/construction/groups/{group['id']}/upload-batch",
+        headers=constructor_headers,
+        data={
+            "actor": "constructor",
+            "client_batch_id": "batch-api-collector-fix",
+            "client_completed_at": "2026-06-08T09:10:00",
+            "collector": "collector-api",
+            "module_asset_no": "module-api",
+            "photo_slots": ["collector_barcode"],
+            "client_photo_ids": ["photo-collector"],
+        },
+        files=[
+            ("files", ("collector.jpg", b"image-collector-1", "image/jpeg")),
+        ],
+    )
+    assert collector_upload.status_code == 200
+    collector_payload = collector_upload.json()["data"]
+    assert collector_payload["group"]["status"] == "pending"
+    assert collector_payload["group"]["exception_note"] == ""
+    assert "missing_collector_photo" not in collector_payload["group"]["exception_reasons"]
+
     second_group = after_first_upload[0]
     complete_upload = client.post(
         f"/local-test/construction/groups/{second_group['id']}/upload-batch",
@@ -656,6 +702,22 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert all(photo["image_url"].startswith("/static/uploads/construction/") for photo in review_detail["photos"])
     assert all(photo["download_status"] == "downloaded" for photo in review_detail["photos"])
     assert all(photo["category"] == "unclassified" for photo in review_detail["photos"])
+
+    repaired_detail = client.get(f"/local-test/groups/{group['id']}", headers=reviewer_headers).json()["data"]
+    collector_photo = next(photo for photo in repaired_detail["photos"] if photo["construction_slot"] == "collector_barcode")
+    deleted_collector = client.request(
+        "DELETE",
+        f"/local-test/groups/{group['id']}/photos/{collector_photo['id']}",
+        headers=reviewer_headers,
+        json={"reviewer": "reviewer"},
+    )
+    assert deleted_collector.status_code == 200
+    deleted_group = deleted_collector.json()["data"]["group"]
+    assert deleted_group["status"] == "exception"
+    assert deleted_group["exception_note"] == "缺采集器照片"
+    assert "missing_collector_photo" in deleted_group["exception_reasons"]
+    exception_groups = client.get("/local-test/exception-groups", headers=reviewer_headers).json()["data"]["items"]
+    assert group["id"] in {item["id"] for item in exception_groups}
 
     released = client.post(
         f"/local-test/construction/tasks/{task['id']}/release",
