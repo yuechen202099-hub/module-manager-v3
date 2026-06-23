@@ -428,7 +428,17 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
         "photos": photos,
     }
     raw = group.raw_data or {}
-    for key in ("collector", "module_asset_no", "asset_no", "creator", "installer"):
+    for key in (
+        "collector",
+        "module_asset_no",
+        "asset_no",
+        "creator",
+        "installer",
+        "replacement_old_meter_no",
+        "replacement_new_meter_no",
+        "replacement_by",
+        "replacement_at",
+    ):
         if key in raw and key not in payload:
             payload[key] = raw[key]
     return payload
@@ -2570,6 +2580,8 @@ class PostgresStateRepository(StateRepository):
         if old_meter_no:
             associate_updates["replacement_old_meter_no"] = old_meter_no
             associate_updates["replacement_target_group_id"] = target.legacy_id
+            associate_updates["replacement_new_meter_no"] = meter_no or str(updated.get("meter_no") or updated.get("barcode") or "")
+            associate_updates["meter_no"] = target.display_meter_no
         associated = self.associate_unmatched_record(
             unmatched_id,
             actor=actor,
@@ -3378,6 +3390,12 @@ class PostgresStateRepository(StateRepository):
                 raise ValueError("Target data group was not found")
             payload = {**_unmatched_payload(record), **(updates or {})}
             raw = dict(group.raw_data or {})
+            replacement_old_meter_no = str(payload.get("replacement_old_meter_no") or "").strip()
+            if replacement_old_meter_no:
+                raw["replacement_old_meter_no"] = replacement_old_meter_no
+                raw["replacement_new_meter_no"] = str(payload.get("replacement_new_meter_no") or payload.get("barcode") or "").strip()
+                raw["replacement_by"] = actor
+                raw["replacement_at"] = datetime.now(UTC).isoformat()
             meter_no = str(payload.get("meter_no") or payload.get("barcode") or "").strip()
             collector = str(payload.get("collector") or "").strip()
             module_asset_no = str(payload.get("module_asset_no") or payload.get("asset_no") or "").strip()

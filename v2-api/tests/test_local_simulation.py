@@ -17,6 +17,7 @@ from app.services.local_simulation import (
     add_photo_urls_to_group,
     blank_state,
     build_delivery_cache_for_group,
+    build_final_delivery_export,
     build_final_delivery_manifest,
     bootstrap_local_simulation,
     classify_photo,
@@ -43,6 +44,7 @@ from app.services.local_simulation import (
     list_tasks,
     normalize_cell,
     release_task,
+    rematch_unmatched_record,
     reset_group_to_unconstructed,
     return_group_to_exception_order,
     review_group,
@@ -952,6 +954,51 @@ def test_unmatched_record_attaches_to_existing_terminal_group(synthetic_state: d
     assert result["group"]["address"] == "corrected address"
     assert list_unmatched_records(query="manual-attach-1")["total"] == 0
     assert audits["items"][0]["action"] == "attach_unmatched_to_existing_group"
+
+
+def test_replacement_rematch_adds_delivery_export_remark(synthetic_state: dict) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    target = synthetic_state["groups"][0]
+    claim_task(target["task_id"], "alice")
+    archive_all_group_photos(target)
+    review_group(target["id"], status="approved", reviewer="alice", note="ready")
+    apply_synced_scan_records(
+        [
+            {
+                "file_id": "replacement-export-1",
+                "source_file": "replacement-source",
+                "barcode": "NEW-METER-001",
+                "meter_no": "NEW-METER-001",
+                "meter_match_key": "NEW-METER-001",
+                "terminal": target["terminal"],
+                "collector": "collector-replacement",
+                "module_asset_no": "module-replacement",
+                "photo_urls": "https://example.test/replacement-a.jpg",
+            }
+        ]
+    )
+    record = list_unmatched_records(query="NEW-METER-001")["items"][0]
+
+    result = rematch_unmatched_record(
+        record["unmatched_id"],
+        actor="alice",
+        meter_no="NEW-METER-001",
+        old_meter_no=target["meter_no"],
+        terminal=target["terminal"],
+    )
+
+    workbook = openpyxl.load_workbook(
+        BytesIO(build_final_delivery_export(terminal=target["terminal"], review_scope="all")),
+        read_only=True,
+    )
+    sheet = workbook.active
+    rows = list(sheet.iter_rows(values_only=True))
+    remark_index = rows[0].index("备注")
+    target_rows = [row for row in rows[1:] if row[1] == target["meter_no"]]
+
+    assert result["matched"] is True
+    assert target_rows
+    assert any(row[remark_index] == f"换表：旧表号 {target['meter_no']}" for row in target_rows)
 
 
 def test_admin_can_create_empty_group_and_import_missing_photos(synthetic_state: dict) -> None:

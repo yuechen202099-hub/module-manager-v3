@@ -3378,3 +3378,25 @@ Date: 2026-06-23
   - 不执行 Alembic。
   - 不清空未匹配列表。
   - 只移动唯一明确匹配成功的记录。
+
+# V3.0.3 - Project Board Replacement Meter Rematch Export Remark
+
+- 日期：2026-06-24
+- 页面/模块：项目看板未匹配资料、最终交付资料包导出
+- 改动：
+  - 项目看板未匹配资料弹窗每行新增“换表”按键。
+  - 输入旧表号后，复用未匹配重匹配接口按旧表号匹配总清单地址并绑定目标资料组。
+  - 本地 JSON 状态和 PostgreSQL 状态均保存换表旧表号、新表号、操作人和操作时间。
+  - 最终交付资料包 Excel 新增“备注”列，换表资料组输出 `换表：旧表号 ...`。
+  - 应用版本从 V3.0.2 升级到 V3.0.3。
+- 数据安全：
+  - 不改数据库结构。
+  - 不执行 Alembic。
+  - 不直接修改生产 `.env`、`data`、`uploads`、OSS 或 PostgreSQL 数据。
+- 验证：
+  - 换表备注回归测试通过：`1 passed`。
+  - 导出和系统版本 API 回归通过：`2 passed`。
+  - `py_compile`、Vue 迁移门禁、静态页面校验、`vue-tsc --noEmit`、`vite build`、`git diff --check` 通过。
+- 发布状态：
+  - 本地已验证并准备 patch sync。
+  - 生产发布必须先完成生产备份和 `scripts/production_health_check.sh`。

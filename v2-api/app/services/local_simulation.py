@@ -1745,6 +1745,11 @@ def rematch_unmatched_record(
     if old_meter_no:
         associate_updates["replacement_old_meter_no"] = old_meter_no
         associate_updates["replacement_target_group_id"] = target.get("id", "")
+        associate_updates["replacement_new_meter_no"] = meter_no or record.get("meter_no") or record.get("barcode", "")
+        target["replacement_old_meter_no"] = old_meter_no
+        target["replacement_new_meter_no"] = associate_updates["replacement_new_meter_no"]
+        target["replacement_by"] = actor
+        target["replacement_at"] = now_iso()
     associated = associate_unmatched_record(
         unmatched_id,
         actor,
@@ -3714,6 +3719,16 @@ def build_delivery_photo_manifest(group: dict[str, Any], photo: dict[str, Any], 
     }
 
 
+def delivery_group_remark(group: dict[str, Any]) -> str:
+    old_meter_no = str(group.get("replacement_old_meter_no") or "").strip()
+    if not old_meter_no:
+        for photo in group.get("photos") or []:
+            old_meter_no = str(photo.get("replacement_old_meter_no") or "").strip()
+            if old_meter_no:
+                break
+    return f"换表：旧表号 {old_meter_no}" if old_meter_no else ""
+
+
 def build_groups_export_workbook(groups: list[dict[str, Any]], sheet_title: str) -> bytes:
     try:
         from openpyxl import Workbook
@@ -3737,10 +3752,12 @@ def build_groups_export_workbook(groups: list[dict[str, Any]], sheet_title: str)
         "模块",
         "安装人员",
         "照片URL",
+        "备注",
     ]
     sheet.append(headers)
     for group in groups:
         photos = group.get("photos") or []
+        remark = delivery_group_remark(group)
         if not photos:
             sheet.append(
                 [
@@ -3758,6 +3775,7 @@ def build_groups_export_workbook(groups: list[dict[str, Any]], sheet_title: str)
                     "",
                     "",
                     "",
+                    remark,
                 ]
             )
             continue
@@ -3778,6 +3796,7 @@ def build_groups_export_workbook(groups: list[dict[str, Any]], sheet_title: str)
                     photo.get("asset_no") or "",
                     photo.get("creator") or "",
                     photo.get("image_url") or "",
+                    remark,
                 ]
             )
     for column_cells in sheet.columns:

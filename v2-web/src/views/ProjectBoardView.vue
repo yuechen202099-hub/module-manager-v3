@@ -17,6 +17,7 @@ import {
   fetchUnmatchedRecords,
   fetchUserAccounts,
   importTotalCatalog,
+  rematchUnmatchedRecord,
   saveUserAccount,
   returnGroupToException,
   unassignConstructionExceptionOrder,
@@ -79,6 +80,7 @@ const workloadSegment = ref<InstallerWorkSegment | null>(null)
 const unmatchedDialogVisible = ref(false)
 const unmatchedLoading = ref(false)
 const unmatchedDeduping = ref(false)
+const unmatchedRematchingId = ref('')
 const unmatchedQuery = ref('')
 const unmatchedRows = ref<UnmatchedRecord[]>([])
 const exceptionDialogVisible = ref(false)
@@ -766,6 +768,34 @@ async function cleanupDuplicateUnmatchedRows() {
   }
 }
 
+async function replaceUnmatchedMeter(row: UnmatchedRecord) {
+  try {
+    const { value } = await ElMessageBox.prompt('录入旧表号，用旧表号匹配总清单地址并绑定终端', '换表匹配', {
+      confirmButtonText: '匹配旧表',
+      cancelButtonText: '取消',
+      inputValue: row.replacementOldMeterNo || '',
+      inputPattern: /\S+/,
+      inputErrorMessage: '旧表号不能为空',
+    })
+    unmatchedRematchingId.value = row.unmatchedId
+    const result = await rematchUnmatchedRecord(row.unmatchedId, {
+      meterNo: row.meterNo || row.barcode || '',
+      oldMeterNo: String(value || ''),
+      terminal: row.terminal || '',
+    })
+    if (result.matched) {
+      ElMessage.success('换表关系已绑定')
+    } else {
+      ElMessage.warning('未匹配到旧表地址，已保存换表记录')
+    }
+    await Promise.all([loadUnmatchedRows(), loadBoard()])
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '换表失败')
+  } finally {
+    unmatchedRematchingId.value = ''
+  }
+}
+
 function handleExternalRefresh(event: MessageEvent) {
   if (event.data?.type !== 'module-manager:data-refresh') return
   void loadBoard()
@@ -1321,12 +1351,26 @@ onUnmounted(() => {
         <el-table-column label="状态" width="118">
           <template #default="{ row }">
             <el-tag v-if="row.projectOutside" type="warning" effect="plain">项目外</el-tag>
+            <el-tag v-else-if="row.replacementOldMeterNo" type="info" effect="plain">换表</el-tag>
             <el-tag v-else-if="row.assignedTo" type="success" effect="plain">已指派</el-tag>
             <el-tag v-else effect="plain">待处理</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="assignedTo" label="指派" width="110" />
         <el-table-column prop="sourceFile" label="来源文件" min-width="150" show-overflow-tooltip />
+        <el-table-column label="操作" width="96" fixed="right">
+          <template #default="{ row }">
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              :loading="unmatchedRematchingId === row.unmatchedId"
+              @click="replaceUnmatchedMeter(row)"
+            >
+              换表
+            </el-button>
+          </template>
+        </el-table-column>
       </el-table>
       <template #footer>
         <el-button @click="unmatchedDialogVisible = false">关闭</el-button>

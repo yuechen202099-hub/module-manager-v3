@@ -1,8 +1,43 @@
 # FIX_NOTES
 
-Last updated: 2026-06-22
+Last updated: 2026-06-24
 
 本文件记录维护期每次修改。后续修 Bug 时只追加本次相关内容，不重复全项目扫描。
+
+## 2026-06-24 - V3.0.3 项目看板未匹配资料换表匹配
+
+### 修改原因
+
+现场换表资料可能携带新表号，项目看板未匹配清单需要允许管理员录入旧表号，用旧表号匹配总清单地址，并在最终资料包里保留换表说明。
+
+### 修改文件
+
+- `v2-web/src/views/ProjectBoardView.vue`
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/tests/test_local_simulation.py`
+- `v2-api/app/static/vue/`
+
+### 修改内容
+
+- 项目看板未匹配资料弹窗每行新增“换表”操作。
+- 换表匹配保存旧表号、新表号、操作人和操作时间。
+- 最终交付资料包 Excel 新增“备注”列，换表资料组显示“换表：旧表号 ...”。
+- 应用版本升级到 V3.0.3。
+
+### 影响范围
+
+仅影响项目看板未匹配处理、未匹配关联保存和最终资料包导出；不改数据库结构，不执行 Alembic，不改生产数据。
+
+### 验证方法
+
+- `pytest test_replacement_rematch_adds_delivery_export_remark`
+- `pytest test_excel_exports_return_real_workbooks test_system_status_requires_admin_and_reports_runtime_state`
+- `py_compile`
+- `verify_vue_migration_gate.py`
+- `verify-static-pages.py`
+- `vue-tsc --noEmit`
+- `vite build`
 
 ## 2026-06-23 - 管理员施工进度未施工清单下钻
 
