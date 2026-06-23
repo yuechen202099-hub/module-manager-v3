@@ -8,7 +8,7 @@ Last updated: 2026-06-23
 - Scope: fix production rematch maintenance script import after V3.0.1 release
 - Files: `v2-api/scripts/rematch_unmatched_records.py`, version metadata, release docs
 - Constraints: no database schema change, no Alembic, no `.env/data/uploads` overwrite
-- Status: implementation in progress
+- Status: released to production; rematch and 10-digit key backfill completed
 
 ## V3.0.1 Production Rematch Claim
 

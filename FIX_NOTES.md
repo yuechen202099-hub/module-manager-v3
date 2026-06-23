@@ -1218,6 +1218,12 @@ Date: 2026-06-23
 - 本地重新执行脚本编译、匹配规则测试、API 回归、Vue 构建和 strict-native gate。
 - 生产侧需要重新发布 V3.0.2 后再执行 dry-run/apply 重匹配。
 
+## Production Verification
+- `/health`, `/login`, `/project-board`, `/task-hall`, `/construction` passed.
+- `/openapi.json` returned 404.
+- 重匹配先 dry-run 后 apply：27 条明确匹配记录已关联，21 条仍保留未匹配。
+- 历史 10 位总清单 key 已回填，避免后续导入继续使用旧的去前 2 位 key。
+
 # V3.0.1 修复说明：总清单 10 位表号匹配
 
 ## 背景

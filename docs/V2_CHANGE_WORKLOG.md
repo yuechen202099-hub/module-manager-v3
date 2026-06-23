@@ -3352,6 +3352,19 @@ Date: 2026-06-23
 - No Alembic migration.
 - After deploy, run unmatched rematch dry-run first, then apply only uniquely matched records.
 
+## Production Result
+- Commit/tag: `b353ce2` / `v3.0.2`.
+- Release: `/opt/module-manager-v2/releases/v3.0.2-20260624_000900-b353ce2`.
+- Backup: `/opt/module-manager-v2/backups/runtime/20260624_000900_before_v3.0.2_release`.
+- PostgreSQL dump: `/opt/module-manager-v2/backups/runtime/20260624_000900_before_v3.0.2_release/postgres.dump`.
+- Alembic: not executed.
+- Preserved: production `.env`, `data/`, `uploads`.
+- Rematch dry-run: unmatched 48, matched 27, still unmatched 21, ambiguous 0, failed 0.
+- Rematch apply: attempted 27, applied 27, failed 0.
+- Historical 10-digit key backfill: updated 1150 total catalog rows and 1150 linked material groups.
+- Post-backfill rematch dry-run: unmatched 21, matched 0, still unmatched 21.
+- Spot check: `2004243564` now remains `2004243564` in total catalog and material group keys; long scan `3130001011820042435646` maps to `2004243564`.
+
 # V3.0.1 - Matching Rule Hotfix And Production Rematch
 
 - 日期：2026-06-23
