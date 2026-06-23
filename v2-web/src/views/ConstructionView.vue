@@ -151,6 +151,8 @@ const quickMeter = ref('')
 const errorMessage = ref('')
 const collectOpen = ref(false)
 const scannerOpen = ref(false)
+const unbuiltDialogOpen = ref(false)
+const unbuiltDialogLoading = ref(false)
 const scannerTarget = ref<ScannerTarget>('quickMeter')
 const scannerStatus = ref('优先使用 QuaggaJS 识别一维条形码。')
 const scannerHint = ref('将条形码横向放入框内，保持稳定')
@@ -178,6 +180,10 @@ const form = reactive({
   moduleAssetNo: '',
   note: '',
 })
+const unbuiltDialogTask = ref<ReviewTask | null>(null)
+const unbuiltDialogGroups = ref<MaterialGroup[]>([])
+const unbuiltDialogQuery = ref('')
+const unbuiltDialogError = ref('')
 
 const QUAGGA_READERS = [
   'code_128_reader',
@@ -255,15 +261,35 @@ const exceptionGroupIdSet = computed(() => new Set(exceptionOrders.value.map((or
 function draftGroupId(draft: CacheDraft) {
   return String(draft.groupId || draft.group_id || '')
 }
+function isAllZeroCode(value?: string | number) {
+  const normalized = String(value || '').replace(/\D/g, '')
+  return normalized.length >= 6 && /^0+$/.test(normalized)
+}
+function isInvalidPlaceholderDraft(draft: CacheDraft) {
+  const noPhotos = !(draft.photos || []).length
+  const noCollector = !String(draft.collector || '').trim()
+  const noWorkOrder = !String(draft.work_order_id || '').trim()
+  const placeholderId = isAllZeroCode(draft.groupId) || isAllZeroCode(draft.group_id) || isAllZeroCode(draft.meter_no)
+  const placeholderAddress = String(draft.address || '').includes('待导入总清单地址')
+  return noPhotos && noCollector && noWorkOrder && placeholderId && placeholderAddress
+}
 function isExceptionDraft(draft: CacheDraft) {
   const groupId = draftGroupId(draft)
   return Boolean(draft.work_order_id) || Boolean(groupId && exceptionGroupIdSet.value.has(groupId))
 }
-const cachedTaskDrafts = computed(() => taskDrafts.value.filter((draft) => !isExceptionDraft(draft)))
+const cachedTaskDrafts = computed(() => taskDrafts.value.filter((draft) => !isExceptionDraft(draft) && !isInvalidPlaceholderDraft(draft)))
 const readyCachedDrafts = computed(() => cachedTaskDrafts.value.filter((draft) => draftReady(draft)))
 const draftByGroupId = computed(() => {
   const map = new Map<string, CacheDraft>()
   for (const draft of taskDrafts.value) {
+    const groupId = draftGroupId(draft)
+    if (groupId) map.set(groupId, draft)
+  }
+  return map
+})
+const cachedDraftByGroupId = computed(() => {
+  const map = new Map<string, CacheDraft>()
+  for (const draft of cachedTaskDrafts.value) {
     const groupId = draftGroupId(draft)
     if (groupId) map.set(groupId, draft)
   }
@@ -313,7 +339,7 @@ const workItems = computed<WorkItem[]>(() => {
 
   for (const group of groups.value) {
     if (group.exceptionOrderId || exceptionGroupIds.has(String(group.id))) continue
-    const draft = draftByGroupId.value.get(group.id)
+    const draft = cachedDraftByGroupId.value.get(group.id)
     items.push({ key: `group-${group.id}`, kind: draft ? 'cached' : 'group', group, draft })
     seen.add(group.id)
   }
@@ -336,7 +362,7 @@ const workItems = computed<WorkItem[]>(() => {
     if (group.id) seen.add(String(group.id))
   }
 
-  for (const draft of taskDrafts.value) {
+  for (const draft of cachedTaskDrafts.value) {
     const groupId = String(draft.groupId || draft.group_id || '')
     if (!groupId || seen.has(groupId)) continue
     items.push({
@@ -369,6 +395,17 @@ const visibleWorkItems = computed(() => {
     })
 })
 
+const unbuiltDialogTitle = computed(() => {
+  const task = unbuiltDialogTask.value
+  return task ? `终端 ${task.terminal || task.id} 未施工清单` : '未施工清单'
+})
+
+const filteredUnbuiltDialogGroups = computed(() => {
+  const keyword = normalizeSearch(unbuiltDialogQuery.value)
+  if (!keyword) return unbuiltDialogGroups.value
+  return unbuiltDialogGroups.value.filter((group) => matchesGroupQuery(group, keyword))
+})
+
 const missingRequiredSlots = computed(() => {
   if (!activeGroup.value) return []
   if (
@@ -393,8 +430,9 @@ const canUploadCurrent = computed(() => {
   return Boolean(Object.values(selectedFiles.value).some(Boolean) || activeOrder.value)
 })
 const canShowCurrentUpload = computed(
-  () => !isAdmin.value && groupFilter.value === 'cached' && Boolean(activeGroup.value && draftByGroupId.value.get(activeGroup.value.id)),
+  () => !isAdmin.value && groupFilter.value === 'cached' && Boolean(activeGroup.value && cachedDraftByGroupId.value.get(activeGroup.value.id)),
 )
+const activeCachedDraft = computed(() => (activeGroup.value ? cachedDraftByGroupId.value.get(String(activeGroup.value.id)) || null : null))
 
 const scannerTitle = computed(() => {
   if (scannerTarget.value === 'collector') return '扫描采集器'
@@ -1146,7 +1184,12 @@ async function withStore<T>(
 
 async function loadDrafts() {
   try {
-    drafts.value = await withStore<CacheDraft[]>(DRAFT_STORE, 'readonly', (store) => store.getAll())
+    const allDrafts = await withStore<CacheDraft[]>(DRAFT_STORE, 'readonly', (store) => store.getAll())
+    const invalidDrafts = allDrafts.filter(isInvalidPlaceholderDraft)
+    if (invalidDrafts.length) {
+      await Promise.all(invalidDrafts.map((draft) => deleteDraft(draft.client_batch_id)))
+    }
+    drafts.value = allDrafts.filter((draft) => !isInvalidPlaceholderDraft(draft))
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '缓存读取失败'
   }
@@ -1326,6 +1369,28 @@ async function saveCurrentDraft(options: { silent?: boolean } = {}) {
   }
 }
 
+async function removeCachedDraft(draft?: CacheDraft | null) {
+  if (!draft?.client_batch_id) return
+  try {
+    await ElMessageBox.confirm('确认删除这条本地缓存？只会清理本机待上传草稿，不会删除服务器资料。', '删除本地缓存', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+    const wasActive = activeCachedDraft.value?.client_batch_id === draft.client_batch_id
+    await deleteDraft(draft.client_batch_id)
+    await loadDrafts()
+    if (wasActive) {
+      selectedItemKey.value = ''
+      collectOpen.value = false
+      resetCollectorForm()
+    }
+    ElMessage.success('本地缓存已删除')
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '删除缓存失败')
+  }
+}
+
 function scheduleCurrentDraftPersist() {
   window.clearTimeout(draftPersistTimer)
   draftPersistTimer = window.setTimeout(() => {
@@ -1500,6 +1565,30 @@ async function selectTask(task: ReviewTask) {
   await loadGroups()
 }
 
+async function openUnbuiltDialog(task: ReviewTask, options: { preserveQuery?: boolean } = {}) {
+  if (!isAdmin.value) return
+  const previousQuery = unbuiltDialogQuery.value
+  unbuiltDialogOpen.value = true
+  unbuiltDialogTask.value = task
+  unbuiltDialogGroups.value = []
+  unbuiltDialogQuery.value = options.preserveQuery ? previousQuery : ''
+  unbuiltDialogError.value = ''
+  unbuiltDialogLoading.value = true
+  try {
+    const items = await fetchConstructionTaskGroups(task.id)
+    unbuiltDialogGroups.value = sortGroupsByAddress(items)
+  } catch (error) {
+    unbuiltDialogError.value = error instanceof Error ? error.message : '未施工清单加载失败'
+  } finally {
+    unbuiltDialogLoading.value = false
+  }
+}
+
+async function reloadUnbuiltDialog() {
+  if (!unbuiltDialogTask.value) return
+  await openUnbuiltDialog(unbuiltDialogTask.value, { preserveQuery: true })
+}
+
 async function loadFieldTaskCards() {
   if (isAdmin.value || !online()) return
   try {
@@ -1621,7 +1710,8 @@ async function loadTasks() {
       taskPickerOpen.value = true
     } else if (!selectedTaskId.value || !visibleTasks.value.some((task) => task.id === selectedTaskId.value)) {
       selectedTaskId.value = visibleTasks.value[0]?.id || ''
-      taskPickerOpen.value = visibleTasks.value.length !== 1
+      const hasAssignedFieldTasks = visibleExceptionTaskCards.value.length > 0 || visibleUnmatchedTaskCards.value.length > 0
+      taskPickerOpen.value = hasAssignedFieldTasks || visibleTasks.value.length !== 1
     }
     loadingTasks.value = false
   }
@@ -1800,6 +1890,23 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div v-loading="loadingTasks" class="task-list">
+          <article
+            v-if="taskPickerMode === 'terminal' && !isAdmin && visibleExceptionTaskCards.length"
+            class="field-task-card kind-exception field-task-entry"
+            role="button"
+            tabindex="0"
+            @click="selectTaskPickerMode('exception')"
+            @keydown.enter.prevent="selectTaskPickerMode('exception')"
+            @keydown.space.prevent="selectTaskPickerMode('exception')"
+          >
+            <div class="field-task-title">
+              <strong>异常任务</strong>
+              <el-tag type="danger" effect="light">{{ visibleExceptionTaskCards.length }}</el-tag>
+            </div>
+            <p>管理员派发的异常资料组，进入后只补充缺失或错误的数据。</p>
+            <small>点击进入异常工单处理</small>
+          </article>
+
           <div v-if="taskPickerMode === 'exception'" class="field-task-picker-list">
             <article
               v-for="order in visibleExceptionTaskCards"
@@ -1844,13 +1951,17 @@ onBeforeUnmount(() => {
             <el-empty v-if="!visibleUnmatchedTaskCards.length" description="暂无未匹配任务" />
           </div>
 
-          <button
+          <article
             v-if="taskPickerMode === 'terminal'"
             v-for="task in visibleTasks"
             :key="task.id"
             class="task-card"
             :class="{ active: task.id === selectedTaskId }"
+            role="button"
+            tabindex="0"
             @click="selectTask(task)"
+            @keydown.enter.prevent="selectTask(task)"
+            @keydown.space.prevent="selectTask(task)"
           >
             <div class="task-title">
               <strong>终端 {{ task.terminal || task.id }}</strong>
@@ -1866,7 +1977,19 @@ onBeforeUnmount(() => {
             <div class="task-metrics">
               <span><em>{{ isAdmin ? '总资料组数' : '改造数' }}</em><strong>{{ task.renovationCount || task.totalGroups || 0 }}</strong></span>
               <span><em>{{ isAdmin ? '已上传/已完成' : '已上传' }}</em><strong>{{ task.constructionUploadedCount || task.uploadedCount || 0 }}</strong></span>
-              <span><em>{{ isAdmin ? '未施工数' : '未施工' }}</em><strong>{{ taskUnbuiltCount(task) }}</strong></span>
+              <button
+                v-if="isAdmin"
+                type="button"
+                class="task-metric-button"
+                :disabled="taskUnbuiltCount(task) <= 0"
+                @click.stop="openUnbuiltDialog(task)"
+                @keydown.stop
+              >
+                <em>未施工数</em>
+                <strong>{{ taskUnbuiltCount(task) }}</strong>
+                <small v-if="taskUnbuiltCount(task) > 0">查看清单</small>
+              </button>
+              <span v-else><em>未施工</em><strong>{{ taskUnbuiltCount(task) }}</strong></span>
               <span><em>{{ isAdmin ? '异常数' : '异常' }}</em><strong>{{ taskExceptionCount(task) }}</strong></span>
             </div>
             <div class="task-progress" :class="{ 'with-label': isAdmin }">
@@ -1878,7 +2001,7 @@ onBeforeUnmount(() => {
               <span>代表地址</span>
               <strong>{{ taskRepresentativeAddress(task) }}</strong>
             </div>
-          </button>
+          </article>
           <el-empty
             v-if="!loadingTasks && taskPickerMode === 'terminal' && !visibleTasks.length"
             :description="isAdmin ? '暂无已指派未完成终端' : '暂无指派施工终端'"
@@ -1964,6 +2087,9 @@ onBeforeUnmount(() => {
                 <small v-if="item.order" class="exception-line">
                   {{ item.order.category || '异常工单' }} {{ item.order.note || '' }}
                 </small>
+              </div>
+              <div v-if="item.draft" class="group-card-actions">
+                <el-button size="small" type="danger" plain @click.stop="removeCachedDraft(item.draft)">删除缓存</el-button>
               </div>
             </article>
             <el-empty
@@ -2131,6 +2257,7 @@ onBeforeUnmount(() => {
 
             <footer class="sheet-actions">
               <span class="draft-status">{{ Object.values(selectedFiles).filter(Boolean).length }} 张本地待上传</span>
+              <el-button v-if="activeCachedDraft" size="large" type="danger" plain @click="removeCachedDraft(activeCachedDraft)">删除缓存</el-button>
               <el-button size="large" :loading="cacheBusy" @click="saveCurrentDraft()">保存缓存</el-button>
               <el-button v-if="canShowCurrentUpload" size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
                 上传当前组
@@ -2140,6 +2267,61 @@ onBeforeUnmount(() => {
         </div>
       </aside>
     </div>
+
+    <el-dialog
+      v-model="unbuiltDialogOpen"
+      class="unbuilt-dialog"
+      :title="unbuiltDialogTitle"
+      width="760px"
+      append-to-body
+    >
+      <div v-loading="unbuiltDialogLoading" class="unbuilt-dialog-body">
+        <div v-if="unbuiltDialogTask" class="unbuilt-dialog-summary">
+          <div>
+            <span>施工员</span>
+            <strong>{{ taskConstructorDisplayName(unbuiltDialogTask) }}</strong>
+          </div>
+          <div>
+            <span>完成度</span>
+            <strong>{{ taskProgress(unbuiltDialogTask) }}%</strong>
+          </div>
+          <div>
+            <span>未施工</span>
+            <strong>{{ unbuiltDialogGroups.length }}</strong>
+          </div>
+        </div>
+        <el-input
+          v-model="unbuiltDialogQuery"
+          :prefix-icon="Search"
+          placeholder="搜索表号、地址、终端"
+          clearable
+        />
+        <el-alert
+          v-if="unbuiltDialogError"
+          type="error"
+          :title="unbuiltDialogError"
+          show-icon
+          :closable="false"
+        />
+        <div class="unbuilt-dialog-list">
+          <article v-for="group in filteredUnbuiltDialogGroups" :key="group.id" class="unbuilt-row">
+            <div>
+              <strong>{{ group.meterNo || group.meterMatchKey || group.id }}</strong>
+              <span>{{ group.address || '未填写地址' }}</span>
+            </div>
+            <small>终端 {{ group.terminal || unbuiltDialogTask?.terminal || '-' }}</small>
+          </article>
+          <el-empty
+            v-if="!unbuiltDialogLoading && !filteredUnbuiltDialogGroups.length"
+            description="暂无未施工清单"
+          />
+        </div>
+      </div>
+      <template #footer>
+        <el-button :loading="unbuiltDialogLoading" @click="reloadUnbuiltDialog">刷新</el-button>
+        <el-button type="primary" @click="unbuiltDialogOpen = false">关闭</el-button>
+      </template>
+    </el-dialog>
 
     <el-drawer v-model="collectOpen" class="construction-drawer" size="92%" direction="btt" :with-header="false" destroy-on-close>
       <div class="collector-sheet" v-if="activeGroup">
@@ -2286,6 +2468,7 @@ onBeforeUnmount(() => {
 
         <footer class="sheet-actions">
           <span class="draft-status">{{ Object.values(selectedFiles).filter(Boolean).length }} 张本地待上传</span>
+          <el-button v-if="activeCachedDraft" size="large" type="danger" plain @click="removeCachedDraft(activeCachedDraft)">删除缓存</el-button>
           <el-button size="large" :loading="cacheBusy" @click="saveCurrentDraft()">保存缓存</el-button>
           <el-button v-if="canShowCurrentUpload" size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
             上传当前组
@@ -2511,6 +2694,18 @@ onBeforeUnmount(() => {
   border-left-color: #d97706;
 }
 
+.field-task-entry {
+  margin-bottom: 4px;
+}
+
+.field-task-entry .el-tag,
+.field-task-title .el-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
 .field-task-title {
   display: flex;
   min-width: 0;
@@ -2682,11 +2877,45 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
-.task-metrics span {
+.task-metrics span,
+.task-metric-button {
   min-width: 0;
+  border: 0;
   border-radius: 9px;
   background: #f7fafc;
   padding: 8px;
+  text-align: left;
+}
+
+.task-metric-button {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.task-metric-button:not(:disabled):hover,
+.task-metric-button:not(:disabled):focus-visible {
+  outline: none;
+  background: #e8f6fa;
+  box-shadow: inset 0 0 0 1px rgba(15, 127, 149, 0.24);
+}
+
+.task-metric-button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.task-metric-button small {
+  display: block;
+  margin-top: 3px;
+  color: #0f7f95;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
 }
 
 .task-metrics em {
@@ -2742,6 +2971,95 @@ onBeforeUnmount(() => {
 .task-progress b {
   color: #667085;
   font-size: 12px;
+}
+
+:deep(.unbuilt-dialog) {
+  max-width: calc(100vw - 24px);
+}
+
+.unbuilt-dialog-body {
+  display: grid;
+  gap: 12px;
+}
+
+.unbuilt-dialog-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.unbuilt-dialog-summary > div {
+  min-width: 0;
+  border: 1px solid #d9e4ee;
+  border-radius: 12px;
+  background: #f8fbfd;
+  padding: 12px;
+}
+
+.unbuilt-dialog-summary span {
+  display: block;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.3;
+}
+
+.unbuilt-dialog-summary strong {
+  display: block;
+  margin-top: 4px;
+  color: #111827;
+  font-size: 20px;
+  font-weight: 900;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.unbuilt-dialog-list {
+  display: grid;
+  min-height: 180px;
+  max-height: 52vh;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.unbuilt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #d9e4ee;
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+}
+
+.unbuilt-row div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.unbuilt-row strong {
+  color: #111827;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1.25;
+}
+
+.unbuilt-row span {
+  color: #526173;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.unbuilt-row small {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
 }
 
 .task-actions {
@@ -3401,6 +3719,18 @@ onBeforeUnmount(() => {
   border-left-color: var(--v2-warning, #a15c00);
 }
 
+.field-task-entry {
+  margin-bottom: 4px;
+}
+
+.field-task-entry .el-tag,
+.field-task-title .el-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
 .task-title,
 .field-task-title,
 .group-name-row {
@@ -3421,7 +3751,8 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-.task-metrics span {
+.task-metrics span,
+.task-metric-button {
   border: 1px solid rgba(16, 24, 40, 0.045);
   border-radius: 10px;
   background: rgba(248, 250, 252, 0.86);
@@ -3547,6 +3878,16 @@ onBeforeUnmount(() => {
 
 .cache-line {
   color: var(--v2-warning, #a15c00);
+}
+
+.group-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.group-card-actions .el-button {
+  min-height: 32px;
 }
 
 .exception-line {
@@ -4024,7 +4365,8 @@ onBeforeUnmount(() => {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .task-metrics span {
+  .task-metrics span,
+  .task-metric-button {
     padding: 10px;
   }
 
@@ -4233,6 +4575,16 @@ onBeforeUnmount(() => {
 
   .scanner-actions .el-button {
     min-height: 44px;
+  }
+}
+
+@media (max-width: 720px) {
+  .unbuilt-dialog-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .unbuilt-row {
+    flex-direction: column;
   }
 }
 

@@ -12,6 +12,7 @@ import type {
   ReviewPhoto,
   ReviewTask,
   TaskStatus,
+  UnmatchedDedupeResult,
   UnmatchedRecord,
   UserAccount,
   UserRole,
@@ -1125,6 +1126,22 @@ export async function fetchUnmatchedRecords(query = ''): Promise<UnmatchedRecord
   return (data.items || []).map(mapUnmatchedRecord)
 }
 
+export async function dedupeUnmatchedRecords(): Promise<UnmatchedDedupeResult> {
+  const data = await api<{ total?: number; kept?: number; removed?: number; duplicate_ids?: string[] }>(
+    '/local-test/unmatched/dedupe',
+    {
+      method: 'POST',
+      body: JSON.stringify({ actor: currentActor() }),
+    },
+  )
+  return {
+    total: Number(data.total || 0),
+    kept: Number(data.kept || 0),
+    removed: Number(data.removed || 0),
+    duplicateIds: Array.isArray(data.duplicate_ids) ? data.duplicate_ids.map(String) : [],
+  }
+}
+
 export async function createBlankUnmatchedRecord(): Promise<UnmatchedRecord> {
   const data = await api<{ record: BackendUnmatchedRecord }>('/local-test/unmatched/blank', {
     method: 'POST',
@@ -1225,9 +1242,11 @@ export async function rematchUnmatchedRecord(
   }
 }
 
-export async function fetchExceptionGroups(): Promise<MaterialGroup[]> {
+export async function fetchExceptionGroups(reviewer = currentActor()): Promise<MaterialGroup[]> {
+  const query = new URLSearchParams({ limit: '1000' })
+  if (reviewer) query.set('reviewer', reviewer)
   const data = await api<{ total: number; items: BackendGroup[] }>(
-    `/local-test/exception-groups?limit=1000&reviewer=${encodeURIComponent(currentActor())}`,
+    `/local-test/exception-groups?${query.toString()}`,
   )
   return (data.items || []).map(mapGroup)
 }

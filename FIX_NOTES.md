@@ -4,6 +4,37 @@ Last updated: 2026-06-22
 
 本文件记录维护期每次修改。后续修 Bug 时只追加本次相关内容，不重复全项目扫描。
 
+## 2026-06-23 - 管理员施工进度未施工清单下钻
+
+### 修改原因
+
+管理员在施工采集页只能看到终端级进度和未施工数量，无法直接核对未施工明细。用户要求点击“未施工”后弹窗显示未施工清单。
+
+### 修改文件
+
+- `v2-web/src/views/ConstructionView.vue`
+- `docs/V2_CHANGE_WORKLOG.md`
+- `BUG_HISTORY.md`
+
+### 修改内容
+
+- 管理员终端任务卡的“未施工数”改为可点击指标。
+- 新增未施工清单弹窗，展示表号、地址、终端，并支持搜索。
+- 弹窗刷新保留搜索词；施工员视角不显示下钻入口。
+- 保持原有施工采集、缓存、上传和提交任务逻辑不变。
+
+### 影响范围
+
+- 仅影响 `/construction` 管理员进度查看体验。
+- 不新增后端接口，不改数据库结构，不执行 Alembic。
+
+### 验证方法
+
+- `vue-tsc --noEmit`
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`
+- `python scripts\verify_vue_migration_gate.py --strict-native`
+- `git diff --check`
+
 ## 2026-06-21 - 建立长期维护基线
 
 ### 修改原因
@@ -692,6 +723,40 @@ Installer KPI needs to infer daily work start/end times and effective working du
 - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
 - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
 
+## 2026-06-23 - V3.0.0-rc2 施工采集本地缓存占位工单修复
+
+### 修改原因
+
+施工员反馈手机端扫码打开工单后，“已缓存”里出现表号 `0000000000`、地址“待导入总清单地址”的占位卡片，并且无法删除。该问题会干扰现场施工判断，也可能让异常工单草稿混入普通缓存列表。
+
+### 修改文件
+
+- `v2-web/src/views/ConstructionView.vue`
+- 版本标识文件
+- 维护文档
+
+### 修改内容
+
+- 普通“已缓存”列表只读取普通施工缓存，不再遍历全部 `taskDrafts`。
+- 新增占位缓存识别：无照片、无采集器、无异常工单、表号/资料组为全 0 且地址为“待导入总清单地址”的草稿会自动删除，避免缓存膨胀。
+- 新增单条“删除缓存”入口，施工员可以删除某一条本机待上传草稿。
+- 未增加批量清理按钮或批量清理入口。
+- 版本推进到 `V3.0.0-rc2`。
+
+### 影响范围
+
+- 仅影响施工采集页本机 IndexedDB 缓存展示、上传前单条草稿删除和无效占位草稿自动删除。
+- 不修改后端接口。
+- 不修改数据库结构。
+- 不删除服务器资料、OSS 图片或总清单。
+
+### 验证方法
+
+- 打开 `/construction`，进入某个已指派终端。
+- 已缓存列表不应再显示 `0000000000 / 待导入总清单地址` 这种无效占位卡片；刷新或进入施工页后该类无效缓存应从本机 IndexedDB 删除。
+- 正常缓存卡片应显示“删除缓存”，点击后只删除当前单条本地草稿。
+- 异常工单应只出现在“异常工单”分类，不应混入普通“已缓存”分类。
+
 ## 2026-06-23 - V3.0.0-rc1 missing collector photo quality exception
 
 ### Reason
@@ -1022,3 +1087,91 @@ Installer KPI should focus on efficiency, not only attendance span or photo/grou
 - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `44 passed, 1 warning`.
 - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
 - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
+## 2026-06-23 - Project-board unmatched list modal and duplicate cleanup
+
+### Reason
+
+The project board showed the unmatched count but did not let administrators directly inspect, export, or remove duplicate unmatched records. Repeated incremental imports can produce duplicate unmatched rows, so the cleanup needs to be available from the production management surface.
+
+### Changed files
+
+- `v2-api/app/api/routes/local_test.py`
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/tests/test_local_simulation.py`
+- `v2-web/src/api/services.ts`
+- `v2-web/src/api/types.ts`
+- `v2-web/src/views/ProjectBoardView.vue`
+- `v2-api/app/static/vue/**`
+
+### Changes
+
+- Made the project-board `扫码未匹配` risk card open a dialog with searchable unmatched records.
+- Added CSV export inside that dialog.
+- Added a `删除重复项` action that removes duplicate unmatched records by meter/barcode/fallback identity while preferring assigned, project-outside, replacement, photo-rich, and newer records.
+- Added repository support for JSON, PostgreSQL, and dual-write state backends.
+- Added an API endpoint: `POST /local-test/unmatched/dedupe`.
+- Added a regression test for JSON-state unmatched duplicate cleanup.
+
+### Impact
+
+- No database schema change.
+- No Alembic migration.
+- Existing unmatched edit/assign/project-outside workflows remain unchanged.
+- PostgreSQL cleanup soft-deletes duplicate unmatched rows by setting status to `deduped`; JSON cleanup removes duplicate entries from the compatibility state and writes an audit event.
+
+### Validation
+
+- `python -m py_compile v2-api\app\services\local_simulation.py v2-api\app\services\state_repository.py v2-api\app\api\routes\local_test.py`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_local_simulation.py::test_unmatched_dedupe_removes_duplicate_meter_records -q`: `1 passed, 1 warning`.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+- `vue-tsc --noEmit`: passed.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `git diff --check`: passed; only CRLF conversion warnings were reported.
+## 2026-06-23 - V3.0.0 exception group dispatch workflow
+
+### Reason
+
+Administrators needed to open exception material groups directly, assign selected exception groups to a constructor, and have the constructor receive a focused exception task card that leads into the existing construction collection workflow.
+
+### Changed files
+
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/tests/test_api.py`
+- `v2-web/src/api/services.ts`
+- `v2-web/src/views/ProjectBoardView.vue`
+- `v2-web/src/views/ConstructionView.vue`
+- version metadata files
+- maintenance documentation
+
+### Changes
+
+- Made the project-board exception risk card open a searchable exception-group dialog.
+- Added exception-group CSV export inside the dialog.
+- Added administrator assign/unassign controls that create or reuse construction exception orders and assign them to a constructor.
+- Added a constructor-side exception task entry on `/construction` when assigned exception orders exist.
+- Opening an exception task enters the normal construction collection form and pre-fills existing meter, collector, module, address, exception note, and existing photos where available.
+- Added a JSON repository helper used by exception-order assignment paths, closing a no-schema-change compatibility gap.
+- Advanced the production version marker to `V3.0.0`.
+
+### Impact
+
+- No database schema change.
+- No Alembic migration.
+- Existing review, construction upload, and normal terminal assignment flows remain compatible.
+- The exception task entry is conditional: constructors see it only when exception orders have been assigned to their account.
+
+### Validation
+
+- Target API regression for exception assignment: passed.
+- Full API regression: `46 passed, 1 warning`.
+- Vue typecheck: passed.
+- Vue shell build: passed with existing Rollup PURE/chunk-size warnings.
+- Vue migration gate: passed.
+- `git diff --check`: passed with CRLF warnings only.
+- Browser QA on a temporary local V3 service:
+  - `/project-board` exception card opens the exception dialog.
+  - Dialog shows exception rows, export, and assign controls.
+  - `/construction` shows the assigned exception task card for the constructor.
+  - Opening the exception task enters the collection form with collector/module values prefilled.

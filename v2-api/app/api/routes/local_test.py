@@ -762,6 +762,10 @@ class UnmatchedDeleteRequest(BaseModel):
     reason: str = ""
 
 
+class UnmatchedDedupeRequest(BaseModel):
+    actor: str = "module_admin"
+
+
 class BlankUnmatchedRequest(BaseModel):
     actor: str = "local-reviewer"
 
@@ -1322,6 +1326,11 @@ def unmatched_records(
     offset: int = Query(default=0, ge=0),
 ):
     return ok(request, state_repository().list_unmatched_records(query=query, limit=limit, offset=offset))
+
+
+@router.post("/unmatched/dedupe")
+def dedupe_unmatched(payload: UnmatchedDedupeRequest, request: Request):
+    return ok(request, state_repository().dedupe_unmatched_records(actor=payload.actor))
 
 
 @router.post("/unmatched/blank")

@@ -4,23 +4,33 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 import {
+  assignConstructionExceptionOrder,
   deleteUserAccount,
+  dedupeUnmatchedRecords,
   exportExceptionMeters,
+  fetchConstructionExceptionOrders,
+  fetchExceptionGroups,
   fetchInstallerWorkload,
   fetchProjectSummary,
   fetchSystemStatus,
   fetchTasks,
+  fetchUnmatchedRecords,
   fetchUserAccounts,
   importTotalCatalog,
   saveUserAccount,
+  returnGroupToException,
+  unassignConstructionExceptionOrder,
 } from '@/api/services'
 import type {
+  ConstructionExceptionOrder,
   ImportJob,
   InstallerExceptionGroup,
   InstallerWorkSegment,
   InstallerWorkloadRow,
+  MaterialGroup,
   ProjectSummary,
   ReviewTask,
+  UnmatchedRecord,
   UserAccount,
   UserRole,
 } from '@/api/types'
@@ -66,6 +76,18 @@ const workloadTimeDialogVisible = ref(false)
 const workloadTimeRow = ref<InstallerWorkloadRow | null>(null)
 const workloadSegmentDialogVisible = ref(false)
 const workloadSegment = ref<InstallerWorkSegment | null>(null)
+const unmatchedDialogVisible = ref(false)
+const unmatchedLoading = ref(false)
+const unmatchedDeduping = ref(false)
+const unmatchedQuery = ref('')
+const unmatchedRows = ref<UnmatchedRecord[]>([])
+const exceptionDialogVisible = ref(false)
+const exceptionLoading = ref(false)
+const exceptionAssigningGroupId = ref('')
+const exceptionQuery = ref('')
+const exceptionRows = ref<MaterialGroup[]>([])
+const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
+const exceptionAssignDraft = reactive<Record<string, string>>({})
 
 const accountForm = reactive({
   username: '',
@@ -171,6 +193,67 @@ const workloadTimeSegments = computed(() => workloadTimeRow.value?.twoHourSegmen
 const workloadMaxSegmentMinutes = computed(() =>
   Math.max(1, ...workloadTimeSegments.value.map((item) => Number(item.minutes || 0))),
 )
+const unmatchedDialogStats = computed(() => {
+  const outside = unmatchedRows.value.filter((item) => item.projectOutside).length
+  const assigned = unmatchedRows.value.filter((item) => item.assignedTo).length
+  return {
+    total: unmatchedRows.value.length,
+    outside,
+    assigned,
+    pending: unmatchedRows.value.filter((item) => !item.projectOutside && !item.assignedTo).length,
+  }
+})
+const constructorOptions = computed(() =>
+  accountUsers.value
+    .filter((user) => user.status !== 'disabled' && user.roles?.includes('constructor'))
+    .map((user) => ({
+      value: user.username,
+      label: user.name && user.name !== user.username ? `${user.name} / ${user.username}` : user.username,
+    })),
+)
+const exceptionOrdersByGroupId = computed(() => {
+  const map = new Map<string, ConstructionExceptionOrder>()
+  for (const order of exceptionOrders.value) {
+    if (order.groupId) map.set(String(order.groupId), order)
+  }
+  return map
+})
+const filteredExceptionRows = computed(() => {
+  const keyword = exceptionQuery.value.trim().toLowerCase()
+  if (!keyword) return exceptionRows.value
+  return exceptionRows.value.filter((row) => {
+    const order = exceptionOrdersByGroupId.value.get(String(row.id))
+    const content = [
+      row.meterNo,
+      row.meterMatchKey,
+      row.terminal,
+      row.address,
+      row.constructionCollector,
+      row.constructionModuleAssetNo,
+      row.reviewer,
+      row.exceptionNote,
+      ...(row.exceptionReasons || []),
+      order?.assignedTo,
+      order?.note,
+      order?.category,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+    return content.includes(keyword)
+  })
+})
+const exceptionDialogStats = computed(() => {
+  const assigned = exceptionRows.value.filter((row) => {
+    const order = exceptionOrdersByGroupId.value.get(String(row.id))
+    return Boolean(order?.assignedTo)
+  }).length
+  return {
+    total: exceptionRows.value.length,
+    assigned,
+    pending: Math.max(0, exceptionRows.value.length - assigned),
+  }
+})
 
 const accountRoles: Array<{ value: UserRole; label: string }> = [
   { value: 'admin', label: '管理员' },
@@ -515,6 +598,174 @@ function exportInstallerWorkloadCsv() {
   downloadText(`${workloadInstaller.value || 'installer'}-daily-workload.csv`, csv)
 }
 
+function exceptionReasonText(row: MaterialGroup) {
+  return row.exceptionReasons?.length ? row.exceptionReasons.join('；') : row.exceptionNote || '异常资料组'
+}
+
+function exceptionOrderFor(row: MaterialGroup) {
+  return exceptionOrdersByGroupId.value.get(String(row.id))
+}
+
+async function loadExceptionRows() {
+  exceptionLoading.value = true
+  try {
+    const [groups, orders] = await Promise.all([fetchExceptionGroups(''), fetchConstructionExceptionOrders('', '')])
+    exceptionRows.value = groups
+    exceptionOrders.value = orders
+    for (const group of groups) {
+      const order = orders.find((item) => String(item.groupId) === String(group.id))
+      if (order?.assignedTo) exceptionAssignDraft[group.id] = order.assignedTo
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '异常资料组加载失败')
+  } finally {
+    exceptionLoading.value = false
+  }
+}
+
+async function openExceptionDialog() {
+  exceptionDialogVisible.value = true
+  if (isAdmin.value && !accountUsers.value.length) await loadAccounts()
+  await loadExceptionRows()
+}
+
+function exportExceptionGroupCsv() {
+  const rows = [
+    ['资料组ID', '表号', '终端', '地址', '采集器', '模块', '审阅员', '照片数', '异常原因', '派发施工员', '工单状态'],
+    ...filteredExceptionRows.value.map((item) => {
+      const order = exceptionOrderFor(item)
+      return [
+        item.id,
+        item.meterNo,
+        item.terminal,
+        item.address,
+        item.constructionCollector,
+        item.constructionModuleAssetNo,
+        item.reviewer,
+        item.photoCount,
+        exceptionReasonText(item),
+        order?.assignedTo || '',
+        order?.status || '',
+      ]
+    }),
+  ]
+  const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}`
+  downloadText(`异常资料组-${new Date().toISOString().slice(0, 10)}.csv`, csv)
+}
+
+async function assignExceptionGroup(row: MaterialGroup) {
+  if (!isAdmin.value) return
+  const constructor = String(exceptionAssignDraft[row.id] || '').trim()
+  if (!constructor) {
+    ElMessage.warning('请选择施工员')
+    return
+  }
+  exceptionAssigningGroupId.value = row.id
+  try {
+    let order = exceptionOrderFor(row)
+    let orderId = order?.id || row.exceptionOrderId || ''
+    if (!orderId) {
+      const result = await returnGroupToException(row.id, {
+        category: row.exceptionReasons?.[0] || '其他',
+        note: exceptionReasonText(row),
+      })
+      orderId = result.orderId || ''
+    }
+    if (!orderId) throw new Error('异常工单创建失败')
+    order = await assignConstructionExceptionOrder(orderId, constructor, '项目看板派发异常资料组')
+    exceptionAssignDraft[row.id] = order.assignedTo || constructor
+    ElMessage.success(`已派发给 ${constructor}`)
+    await Promise.all([loadExceptionRows(), loadBoard()])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '派发异常资料组失败')
+  } finally {
+    exceptionAssigningGroupId.value = ''
+  }
+}
+
+async function unassignExceptionGroup(row: MaterialGroup) {
+  if (!isAdmin.value) return
+  const order = exceptionOrderFor(row)
+  if (!order?.id) return
+  exceptionAssigningGroupId.value = row.id
+  try {
+    await unassignConstructionExceptionOrder(order.id, '项目看板取消异常资料组派发')
+    exceptionAssignDraft[row.id] = ''
+    ElMessage.success('已取消派发')
+    await Promise.all([loadExceptionRows(), loadBoard()])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '取消派发失败')
+  } finally {
+    exceptionAssigningGroupId.value = ''
+  }
+}
+
+async function loadUnmatchedRows() {
+  unmatchedLoading.value = true
+  try {
+    unmatchedRows.value = await fetchUnmatchedRecords(unmatchedQuery.value)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '未匹配清单加载失败')
+  } finally {
+    unmatchedLoading.value = false
+  }
+}
+
+async function openUnmatchedDialog() {
+  unmatchedDialogVisible.value = true
+  await loadUnmatchedRows()
+}
+
+function exportUnmatchedCsv() {
+  const rows = [
+    ['未匹配ID', '表号/扫码内容', '短表号', '终端', '地址', '采集器', '模块', '安装人员', '照片数', '状态', '指派施工员', '项目外施工', '备注', '来源文件'],
+    ...unmatchedRows.value.map((item) => [
+      item.unmatchedId,
+      item.barcode || item.meterNo,
+      item.meterMatchKey,
+      item.terminal,
+      item.address,
+      item.collector,
+      item.moduleAssetNo,
+      item.creator,
+      item.photoCount,
+      item.status,
+      item.assignedTo || '',
+      item.projectOutside ? '是' : '否',
+      item.projectOutsideNote || item.assignmentNote || '',
+      item.sourceFile || '',
+    ]),
+  ]
+  const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}`
+  downloadText(`未匹配清单-${new Date().toISOString().slice(0, 10)}.csv`, csv)
+}
+
+async function cleanupDuplicateUnmatchedRows() {
+  try {
+    await ElMessageBox.confirm(
+      '系统会按表号/扫码内容等特征保留价值最高的一条，删除重复未匹配项。已指派、项目外施工、换表记录会优先保留。',
+      '清理未匹配重复项',
+      {
+        type: 'warning',
+        confirmButtonText: '清理重复项',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  unmatchedDeduping.value = true
+  try {
+    const result = await dedupeUnmatchedRecords()
+    ElMessage.success(result.removed ? `已清理 ${result.removed} 条重复未匹配项` : '未发现重复未匹配项')
+    await Promise.all([loadUnmatchedRows(), loadBoard()])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '重复项清理失败')
+  } finally {
+    unmatchedDeduping.value = false
+  }
+}
+
 function handleExternalRefresh(event: MessageEvent) {
   if (event.data?.type !== 'module-manager:data-refresh') return
   void loadBoard()
@@ -603,14 +854,16 @@ onUnmounted(() => {
           <b>{{ percent(archiveRate) }}</b>
         </div>
         <div class="risk-grid">
-          <article class="risk-card bad">
+          <button class="risk-card risk-card-button bad" type="button" @click="openUnmatchedDialog">
             <span>扫码未匹配</span>
             <strong>{{ summary.scanUnmatched }}</strong>
-          </article>
-          <article class="risk-card bad">
+            <small>点击查看清单</small>
+          </button>
+          <button class="risk-card risk-card-button bad" type="button" @click="openExceptionDialog">
             <span>异常资料组</span>
             <strong>{{ summary.exceptionGroups }}</strong>
-          </article>
+            <small>查看并派发</small>
+          </button>
           <article class="risk-card warn">
             <span>未施工未扫码</span>
             <strong>{{ summary.unconstructedGroups }}</strong>
@@ -898,6 +1151,189 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="exceptionDialogVisible" title="异常资料组" width="1120px" class="unmatched-board-dialog">
+      <div class="unmatched-dialog-head">
+        <div class="unmatched-dialog-stats">
+          <article>
+            <span>当前异常</span>
+            <strong>{{ exceptionDialogStats.total }}</strong>
+          </article>
+          <article>
+            <span>待派发</span>
+            <strong>{{ exceptionDialogStats.pending }}</strong>
+          </article>
+          <article>
+            <span>已派发</span>
+            <strong>{{ exceptionDialogStats.assigned }}</strong>
+          </article>
+          <article>
+            <span>当前筛选</span>
+            <strong>{{ filteredExceptionRows.length }}</strong>
+          </article>
+        </div>
+        <div class="unmatched-dialog-tools exception-dialog-tools">
+          <el-input
+            v-model="exceptionQuery"
+            clearable
+            placeholder="搜索表号、地址、终端、采集器、模块或异常原因"
+          />
+          <el-button :loading="exceptionLoading" @click="loadExceptionRows">刷新</el-button>
+          <el-button :disabled="!filteredExceptionRows.length" @click="exportExceptionGroupCsv">导出清单</el-button>
+          <el-button v-if="isAdmin" :disabled="!constructorOptions.length" @click="loadAccounts">刷新施工员</el-button>
+        </div>
+      </div>
+      <el-alert
+        class="claim-alert"
+        type="info"
+        :closable="false"
+        title="异常资料组可直接派发给施工员。施工员会在施工采集页看到异常任务卡，进入后只补充缺失或错误的数据。"
+      />
+      <el-table v-loading="exceptionLoading" :data="filteredExceptionRows" height="520" size="small">
+        <el-table-column type="index" width="52" label="#" />
+        <el-table-column label="表号 / 资料组" min-width="150">
+          <template #default="{ row }">
+            <strong>{{ row.meterNo || '-' }}</strong>
+            <small class="table-subline">{{ row.id }}</small>
+          </template>
+        </el-table-column>
+        <el-table-column prop="terminal" label="终端" min-width="120" />
+        <el-table-column prop="address" label="地址" min-width="260" show-overflow-tooltip />
+        <el-table-column prop="constructionCollector" label="采集器" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="constructionModuleAssetNo" label="模块" min-width="150" show-overflow-tooltip />
+        <el-table-column label="异常原因" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="exception-reasons">{{ exceptionReasonText(row) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="派发状态" width="110">
+          <template #default="{ row }">
+            <el-tag v-if="exceptionOrderFor(row)?.assignedTo" type="success" effect="plain">
+              已派发
+            </el-tag>
+            <el-tag v-else type="warning" effect="plain">待派发</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="施工员" min-width="260">
+          <template #default="{ row }">
+            <div v-if="isAdmin" class="exception-assign-cell">
+              <el-select
+                v-model="exceptionAssignDraft[row.id]"
+                filterable
+                allow-create
+                default-first-option
+                size="small"
+                placeholder="选择或输入施工员账号"
+              >
+                <el-option
+                  v-for="item in constructorOptions"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+              <el-button
+                size="small"
+                type="primary"
+                :loading="exceptionAssigningGroupId === row.id"
+                @click="assignExceptionGroup(row)"
+              >
+                派发
+              </el-button>
+            </div>
+            <span v-else>{{ exceptionOrderFor(row)?.assignedTo || '未派发' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="isAdmin" label="操作" width="96">
+          <template #default="{ row }">
+            <el-button
+              size="small"
+              plain
+              :disabled="!exceptionOrderFor(row)?.assignedTo"
+              :loading="exceptionAssigningGroupId === row.id"
+              @click="unassignExceptionGroup(row)"
+            >
+              取消
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="exceptionDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :disabled="!filteredExceptionRows.length" @click="exportExceptionGroupCsv">导出当前清单</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="unmatchedDialogVisible" title="未匹配清单" width="1040px" class="unmatched-board-dialog">
+      <div class="unmatched-dialog-head">
+        <div class="unmatched-dialog-stats">
+          <article>
+            <span>当前清单</span>
+            <strong>{{ unmatchedDialogStats.total }}</strong>
+          </article>
+          <article>
+            <span>待处理</span>
+            <strong>{{ unmatchedDialogStats.pending }}</strong>
+          </article>
+          <article>
+            <span>已指派</span>
+            <strong>{{ unmatchedDialogStats.assigned }}</strong>
+          </article>
+          <article>
+            <span>项目外</span>
+            <strong>{{ unmatchedDialogStats.outside }}</strong>
+          </article>
+        </div>
+        <div class="unmatched-dialog-tools">
+          <el-input
+            v-model="unmatchedQuery"
+            clearable
+            placeholder="搜索表号、地址、终端、采集器或模块"
+            @keyup.enter="loadUnmatchedRows"
+            @clear="loadUnmatchedRows"
+          />
+          <el-button :loading="unmatchedLoading" @click="loadUnmatchedRows">刷新</el-button>
+          <el-button :disabled="!unmatchedRows.length" @click="exportUnmatchedCsv">导出清单</el-button>
+          <el-button type="warning" plain :loading="unmatchedDeduping" @click="cleanupDuplicateUnmatchedRows">
+            删除重复项
+          </el-button>
+        </div>
+      </div>
+      <el-alert
+        class="claim-alert"
+        type="info"
+        :closable="false"
+        title="重复项按表号/扫码内容等特征识别。系统会优先保留已指派、项目外施工、换表记录或照片更多的记录。"
+      />
+      <el-table v-loading="unmatchedLoading" :data="unmatchedRows" height="520" size="small">
+        <el-table-column type="index" width="54" label="#" />
+        <el-table-column label="表号 / 扫码内容" min-width="150">
+          <template #default="{ row }">
+            <strong>{{ row.barcode || row.meterNo || '-' }}</strong>
+            <small class="table-subline">{{ row.meterMatchKey || row.unmatchedId }}</small>
+          </template>
+        </el-table-column>
+        <el-table-column prop="terminal" label="终端" min-width="120" />
+        <el-table-column prop="address" label="地址" min-width="280" show-overflow-tooltip />
+        <el-table-column prop="collector" label="采集器" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="moduleAssetNo" label="模块" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="creator" label="安装人员" width="100" />
+        <el-table-column prop="photoCount" label="照片" width="76" />
+        <el-table-column label="状态" width="118">
+          <template #default="{ row }">
+            <el-tag v-if="row.projectOutside" type="warning" effect="plain">项目外</el-tag>
+            <el-tag v-else-if="row.assignedTo" type="success" effect="plain">已指派</el-tag>
+            <el-tag v-else effect="plain">待处理</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="assignedTo" label="指派" width="110" />
+        <el-table-column prop="sourceFile" label="来源文件" min-width="150" show-overflow-tooltip />
+      </el-table>
+      <template #footer>
+        <el-button @click="unmatchedDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :disabled="!unmatchedRows.length" @click="exportUnmatchedCsv">导出当前清单</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="workloadTimeDialogVisible" :title="workloadTimeTitle" width="900px">
       <div v-if="workloadTimeRow" class="work-time-detail">
         <div class="work-time-stats">
@@ -1043,6 +1479,99 @@ onUnmounted(() => {
 
 .installer-row-button:hover {
   color: var(--v2-primary);
+}
+
+.risk-card-button {
+  width: 100%;
+  border: 1px solid var(--v2-border-soft, #dde5ee);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.risk-card-button:hover {
+  border-color: rgba(15, 120, 146, 0.36);
+  box-shadow: var(--v2-shadow-raised, 0 1px 2px rgba(15, 26, 36, 0.05));
+  transform: translateY(-1px);
+}
+
+.risk-card-button small {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.unmatched-dialog-head {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.unmatched-dialog-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.unmatched-dialog-stats article {
+  display: grid;
+  gap: 4px;
+  min-height: 72px;
+  padding: 12px;
+  border: 1px solid var(--v2-border-soft, #dde5ee);
+  border-radius: var(--v2-radius-md, 9px);
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.unmatched-dialog-stats span {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.unmatched-dialog-stats strong {
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.unmatched-dialog-tools {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) auto auto auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.exception-dialog-tools {
+  grid-template-columns: minmax(320px, 1fr) auto auto auto;
+}
+
+.exception-assign-cell {
+  display: grid;
+  grid-template-columns: minmax(132px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.exception-assign-cell :deep(.el-select) {
+  min-width: 0;
+}
+
+.exception-assign-cell :deep(.el-button),
+.unmatched-board-dialog :deep(.el-tag) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.table-subline {
+  display: block;
+  margin-top: 3px;
+  color: var(--v2-text-muted, #64748b);
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .account-admin-panel {
@@ -1366,7 +1895,12 @@ onUnmounted(() => {
 @media (max-width: 720px) {
   .account-form-grid,
   .workload-summary,
+  .unmatched-dialog-stats,
   .work-time-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .unmatched-dialog-tools {
     grid-template-columns: 1fr;
   }
 

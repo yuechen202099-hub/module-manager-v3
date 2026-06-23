@@ -1,9 +1,14 @@
 # PROJECT_KNOWLEDGE
 
 Last full scan: 2026-06-21
-Current known version: V2.6.5
+Current known version: V3.0.0
 Active maintenance baseline: latest repository version
 Maintenance mode: active
+
+## 增量认知记录
+
+- 2026-06-23：V3 施工采集页的本地缓存存放在浏览器 IndexedDB `module-manager-construction-v1` / `drafts`。缓存展示应区分普通施工缓存与异常工单缓存，不能把异常工单草稿混入“已缓存”列表。
+- 2026-06-23：表号 `0000000000` 且地址为“待导入总清单地址”的无照片草稿属于扫码/弱网流程产生的占位缓存，不应作为真实施工工单展示。
 
 ## 项目用途
 

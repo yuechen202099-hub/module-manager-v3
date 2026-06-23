@@ -1405,6 +1405,41 @@ def ensure_unmatched_record(record: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+def make_unmatched_duplicate_key(record: dict[str, Any]) -> str:
+    item = ensure_unmatched_record(record)
+    meter_key = make_import_meter_duplicate_key(item)
+    if meter_key:
+        return f"meter:{meter_key}"
+    barcode = str(item.get("barcode") or "").strip()
+    if barcode:
+        return f"barcode:{barcode}"
+    terminal = str(item.get("terminal") or "").strip()
+    address = str(item.get("address") or "").strip()
+    collector = str(item.get("collector") or "").strip()
+    module_asset_no = str(item.get("module_asset_no") or item.get("asset_no") or "").strip()
+    if any([terminal, address, collector, module_asset_no]):
+        return f"fallback:{terminal}|{address}|{collector}|{module_asset_no}"
+    return f"id:{item['unmatched_id']}"
+
+
+def unmatched_keep_score(record: dict[str, Any]) -> tuple[int, int, int, int, str]:
+    item = ensure_unmatched_record(record)
+    photo_urls = item.get("photo_urls") or item.get("image_urls") or []
+    if isinstance(photo_urls, str):
+        photo_count = len([part for part in re.split(r"[\r\n,]+", photo_urls) if part.strip()])
+    elif isinstance(photo_urls, list):
+        photo_count = len(photo_urls)
+    else:
+        photo_count = 0
+    return (
+        1 if item.get("project_outside") else 0,
+        1 if item.get("assigned_to") else 0,
+        1 if item.get("replacement_old_meter_no") else 0,
+        photo_count,
+        str(item.get("updated_at") or item.get("created_at") or ""),
+    )
+
+
 def merge_unmatched_records(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     for record in existing + incoming:
@@ -1432,6 +1467,42 @@ def list_unmatched_records(query: str = "", limit: int = 100, offset: int = 0) -
         records = [item for item in records if all(term in item.get("text_index", "") for term in terms)]
     records = sorted(records, key=lambda item: (str(item.get("terminal") or ""), str(item.get("barcode") or "")))
     return {"total": len(records), "items": records[offset : offset + limit]}
+
+
+def dedupe_unmatched_records(actor: str) -> dict[str, Any]:
+    state = get_state()
+    records = [ensure_unmatched_record(item) for item in state.get("scan_unmatched", [])]
+    winners: dict[str, dict[str, Any]] = {}
+    duplicate_ids: set[str] = set()
+    for item in records:
+        key = make_unmatched_duplicate_key(item)
+        if key.startswith("id:"):
+            winners[key] = item
+            continue
+        current = winners.get(key)
+        if current is None:
+            winners[key] = item
+            continue
+        if unmatched_keep_score(item) > unmatched_keep_score(current):
+            duplicate_ids.add(current["unmatched_id"])
+            winners[key] = item
+        else:
+            duplicate_ids.add(item["unmatched_id"])
+    if not duplicate_ids:
+        return {"total": len(records), "kept": len(records), "removed": 0, "duplicate_ids": []}
+    state["scan_unmatched"] = [item for item in records if item["unmatched_id"] not in duplicate_ids]
+    append_audit_event(
+        "dedupe_unmatched",
+        actor,
+        {"removed": len(duplicate_ids), "duplicate_ids": sorted(duplicate_ids)},
+    )
+    refresh_summary()
+    return {
+        "total": len(records),
+        "kept": len(state["scan_unmatched"]),
+        "removed": len(duplicate_ids),
+        "duplicate_ids": sorted(duplicate_ids),
+    }
 
 
 def get_unmatched_record(unmatched_id: str) -> dict[str, Any] | None:
@@ -4179,6 +4250,32 @@ def exception_category_label(category: str) -> str:
 
 def construction_exception_orders() -> list[dict[str, Any]]:
     return state_for_team().setdefault("construction_exception_orders", [])
+
+
+def ensure_construction_exception_order(order: dict[str, Any]) -> dict[str, Any]:
+    order.setdefault("id", f"ceo-{len(construction_exception_orders()) + 1:06d}")
+    order.setdefault("team_id", current_team_id())
+    order.setdefault("task_id", None)
+    order.setdefault("group_id", "")
+    order.setdefault("terminal", "")
+    order.setdefault("status", "open")
+    order.setdefault("category", CONSTRUCTION_EXCEPTION_CATEGORIES["other"])
+    order.setdefault("note", "")
+    order.setdefault("assigned_to", "")
+    order.setdefault("assigned_by", "")
+    order.setdefault("assigned_at", "")
+    order.setdefault("assignment_note", "")
+    order.setdefault("due_date", "")
+    order.setdefault("created_by", "")
+    order.setdefault("submitted_by", "")
+    order.setdefault("created_at", now_iso())
+    order.setdefault("updated_at", now_iso())
+    order.setdefault("submitted_at", None)
+    order.setdefault("resolved_at", None)
+    payload = order.get("payload")
+    if not isinstance(payload, dict):
+        order["payload"] = {}
+    return order
 
 
 def create_construction_exception_order(

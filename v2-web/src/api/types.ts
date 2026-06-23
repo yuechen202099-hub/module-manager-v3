@@ -316,3 +316,10 @@ export type UnmatchedRecord = {
   sourceFile?: string
   raw?: Record<string, unknown>
 }
+
+export type UnmatchedDedupeResult = {
+  total: number
+  kept: number
+  removed: number
+  duplicateIds: string[]
+}

@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.0-rc1"
+    assert data["version"] == "3.0.0"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -731,6 +731,51 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
         headers=constructor_headers,
     ).json()["data"]["items"]
     assert task["id"] not in {item["id"] for item in after_release}
+
+
+def test_exception_group_assignment_is_visible_to_constructor() -> None:
+    admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    reviewer_login = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
+    constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
+    admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
+    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
+    constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
+
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    task = next(item for item in client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"] if item["can_claim"])
+    claim = client.post(f"/local-test/tasks/{task['id']}/claim", headers=reviewer_headers, json={"reviewer": "reviewer"})
+    assert claim.status_code == 200
+    group = client.get(
+        f"/local-test/tasks/{task['id']}/groups?limit=1&summary=true",
+        headers=reviewer_headers,
+    ).json()["data"]["items"][0]
+
+    returned = client.patch(
+        f"/local-test/groups/{group['id']}/return-exception",
+        headers=reviewer_headers,
+        json={"actor": "reviewer", "category": "照片缺失", "note": "现场补缺失照片"},
+    )
+    assert returned.status_code == 200
+    order = returned.json()["data"]["order"]
+    assigned = client.patch(
+        f"/local-test/construction/exception-orders/{order['id']}/assign",
+        headers=admin_headers,
+        json={"actor": "admin", "constructor": "constructor", "note": "补采异常资料组"},
+    )
+    constructor_orders = client.get(
+        "/local-test/construction/exception-orders?actor=constructor",
+        headers=constructor_headers,
+    ).json()["data"]["items"]
+    constructor_tasks = client.get(
+        "/local-test/construction/tasks?actor=constructor",
+        headers=constructor_headers,
+    ).json()["data"]["items"]
+
+    assert assigned.status_code == 200
+    assert assigned.json()["data"]["order"]["assigned_to"] == "constructor"
+    assert order["id"] in {item["id"] for item in constructor_orders}
+    assert str(group["id"]) in {str(item["group_id"]) for item in constructor_orders}
+    assert task["id"] in {item["id"] for item in constructor_tasks}
 
 
 def test_constructor_can_keep_up_to_five_assigned_terminals() -> None:

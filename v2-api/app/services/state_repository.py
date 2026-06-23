@@ -767,6 +767,10 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def create_blank_unmatched_record(self, *, actor: str) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1162,6 +1166,9 @@ class JsonStateRepository(StateRepository):
 
     def list_unmatched_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         return local_simulation.list_unmatched_records(query=query, limit=limit, offset=offset)
+
+    def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:
+        return local_simulation.dedupe_unmatched_records(actor=actor)
 
     def create_blank_unmatched_record(self, *, actor: str) -> dict[str, Any]:
         return {"record": local_simulation.create_blank_unmatched_record(actor=actor)}
@@ -2264,6 +2271,66 @@ class PostgresStateRepository(StateRepository):
                 .limit(limit)
             ).all()
             return {"total": int(total), "items": [_unmatched_payload(record) for record in records]}
+
+    def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            records = list(
+                session.scalars(
+                    select(UnmatchedRecord)
+                    .where(UnmatchedRecord.team_id == team_id, UnmatchedRecord.status == "open")
+                    .with_for_update()
+                ).all()
+            )
+            winners: dict[str, UnmatchedRecord] = {}
+            duplicates: list[UnmatchedRecord] = []
+            for record in records:
+                payload = _unmatched_payload(record)
+                key = local_simulation.make_unmatched_duplicate_key(payload)
+                if key.startswith("id:"):
+                    winners[key] = record
+                    continue
+                current = winners.get(key)
+                if current is None:
+                    winners[key] = record
+                    continue
+                if local_simulation.unmatched_keep_score(payload) > local_simulation.unmatched_keep_score(
+                    _unmatched_payload(current)
+                ):
+                    duplicates.append(current)
+                    winners[key] = record
+                else:
+                    duplicates.append(record)
+            now = datetime.now(UTC).isoformat()
+            duplicate_ids = [str(record.legacy_id) for record in duplicates]
+            for record in duplicates:
+                raw = dict(record.payload or {})
+                raw.update(
+                    {
+                        "dedupe_deleted_by": actor,
+                        "dedupe_deleted_at": now,
+                        "dedupe_delete_reason": "duplicate unmatched record",
+                    }
+                )
+                record.payload = raw
+                record.status = "deduped"
+            if duplicates:
+                event = AuditLog(
+                    team_id=team_id,
+                    legacy_id=f"dedupe-unmatched-{uuid4()}",
+                    actor_username=actor,
+                    action="dedupe_unmatched",
+                    entity_type="unmatched_records",
+                    payload={"removed": len(duplicates), "duplicate_ids": duplicate_ids},
+                )
+                session.add(event)
+                session.commit()
+            return {
+                "total": len(records),
+                "kept": len(records) - len(duplicates),
+                "removed": len(duplicates),
+                "duplicate_ids": duplicate_ids,
+            }
 
     def create_blank_unmatched_record(self, *, actor: str) -> dict[str, Any]:
         created_at = datetime.now(UTC).isoformat()
@@ -3857,6 +3924,11 @@ class DualWriteStateRepository(JsonStateRepository):
     def release_task(self, task_id: int, reviewer: str, *, force: bool = False) -> dict[str, Any]:
         result = super().release_task(task_id, reviewer, force=force)
         self._mirror_write("release_task", task_id, reviewer, force=force)
+        return result
+
+    def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:
+        result = super().dedupe_unmatched_records(actor=actor)
+        self._mirror_write("dedupe_unmatched_records", actor=actor)
         return result
 
     def review_group(

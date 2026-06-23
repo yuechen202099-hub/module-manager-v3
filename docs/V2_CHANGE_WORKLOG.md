@@ -2,6 +2,40 @@
 
 > 目的：避免重复修改同一页面、避免靠记忆判断状态。后续每完成一个修改，都必须在这里记录文件、目标、状态和验证结果。
 
+### V3.0.0-rc1 管理员未施工清单下钻
+
+- 时间：2026-06-23
+- 分支：`feature/v3.0.0-apple-ui-lab`
+- 修改文件：
+  - `v2-web/src/views/ConstructionView.vue`
+  - `docs/V2_CHANGE_WORKLOG.md`
+  - `FIX_NOTES.md`
+  - `BUG_HISTORY.md`
+- 改动内容：
+  - `/construction` 管理员终端任务卡的“未施工数”改为可点击指标。
+  - 点击后弹出该终端未施工资料组清单，展示表号、地址、终端，并支持按表号/地址/终端搜索。
+  - 弹窗刷新保留当前搜索条件；施工员视角仍只显示普通未施工数字。
+  - 为任务卡增加键盘可访问性，避免指标按钮按键冒泡误触发终端选择。
+- 边界：
+  - 不新增后端接口，复用现有 `fetchConstructionTaskGroups`。
+  - 不改数据库、不执行 Alembic、不影响上传、缓存和提交施工任务流程。
+- 验证：
+  - `vue-tsc --noEmit`：通过。
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`：通过；保留既有 Rollup `PURE` 注释提示和 chunk 体积提示。
+  - `python scripts\verify_vue_migration_gate.py --strict-native`：通过，registered pages 5，legacy bridge pages 0。
+  - `git diff --check`：通过，仅有工作区 CRLF 转换提示。
+  - 浏览器 QA：新开临时本地服务 `http://127.0.0.1:8018/construction?qa=admin-unbuilt-dialog`，页面标题 `Module Manager V3.0.0-rc2`，页面可加载且 console error/warn 为空。
+  - 浏览器交互限制：临时 QA 数据无已指派未完成终端，`/local-test/construction/tasks` 和 `/local-test/tasks` 均返回空列表，demo seed 也提示无可领取演示任务，因此未能实际点击“未施工数”弹窗；临时 QA 服务已关闭。
+- 状态：本地实现完成，待 PM 审阅。
+- 生产发布：
+  - 时间：2026-06-23 19:47
+  - 发布方式：patch sync，同步当前 `v2-api/app/static/vue/` 构建产物和相关源码/维护文档；未创建新 release 目录，未覆盖 `.env`、`data`、`uploads`。
+  - 备份目录：`/opt/module-manager-v2/backups/runtime/20260623_194752_before_v3_rc2_admin_unbuilt_patch`
+  - PostgreSQL dump：`/opt/module-manager-v2/backups/runtime/20260623_194752_before_v3_rc2_admin_unbuilt_patch/postgres.dump`
+  - Alembic：未执行。
+  - 服务验证：`module-manager-v2.service` active，`/health` 正常；`/login`、`/project-board`、`/claim-tasks`、`/task-hall`、`/construction` 均返回 200；`/openapi.json` 返回 404；服务器侧 `https://www.sgcc.online/login` 返回 200。
+  - 备注：本机公网 `curl.exe` 访问 `https://www.sgcc.online/*` 出现 connection reset，但服务器本机 curl 验证公网域名正常。
+
 ### V3.0.0-rc1 管理员施工已指派未完成终端视图
 
 - 时间：2026-06-23
@@ -3196,3 +3230,92 @@
   - No Alembic migration.
   - No `.env`, `data`, `uploads`, OSS, or PostgreSQL mutation.
   - Production checks passed for `/health`, `/login`, `/project-board`, `/claim-tasks`, `/task-hall`, `/construction`, `https://www.sgcc.online/login`, and `/openapi.json` returned `404`.
+
+### V3.0.0-rc2 施工采集本地缓存占位工单修复
+
+- 日期：2026-06-23
+- 负责人：BUG 修复线程
+- 目标：
+  - 修复手机施工端扫码后“已缓存”出现 `0000000000 / 待导入总清单地址` 占位工单的问题。
+  - 修复异常工单草稿可能混入普通“已缓存”列表的问题。
+  - 增加单条缓存删除入口，禁止新增批量清理入口。
+- 修改文件：
+  - `v2-web/src/views/ConstructionView.vue`
+  - 版本标识文件
+  - 维护文档
+- 行为：
+  - 普通缓存列表只使用 `cachedTaskDrafts`。
+  - 无照片、无采集器、无异常工单、全 0 表号/资料组、地址为“待导入总清单地址”的占位草稿读取时自动删除。
+  - 已缓存卡片和采集单底部提供单条“删除缓存”按钮。
+  - 不提供批量清理功能。
+- 影响：
+  - 仅影响前端 IndexedDB 本机缓存展示、单条缓存删除和明确无效占位草稿自动删除。
+  - 不改 API、不改数据库、不跑 Alembic。
+### Project-board unmatched list and duplicate cleanup
+
+- Date: 2026-06-23
+- Owner: Project engineer thread
+- Scope:
+  - Project board unmatched count entry.
+  - Unmatched record duplicate cleanup.
+  - JSON/PostgreSQL repository parity.
+- Files changed:
+  - `v2-api/app/api/routes/local_test.py`
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/tests/test_local_simulation.py`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/api/types.ts`
+  - `v2-web/src/views/ProjectBoardView.vue`
+  - `v2-api/app/static/vue/**`
+- Behavior:
+  - Clicking `扫码未匹配` on `/project-board` opens a searchable unmatched-list dialog.
+  - The dialog can export the current list as CSV.
+  - The dialog can delete duplicate unmatched records through a backend dedupe endpoint.
+  - Duplicate cleanup keeps the highest-value record: project-outside, assigned, replacement, photo-rich, and newer records are preferred.
+  - PostgreSQL cleanup marks duplicates as `deduped`; JSON cleanup removes duplicates from `scan_unmatched`.
+- Validation:
+  - Backend compile: passed.
+  - JSON unmatched dedupe unit test: passed.
+  - API regression: `45 passed, 1 warning`.
+  - Vue typecheck: passed.
+  - Vue shell build: passed with existing Rollup warnings.
+  - Vue migration gate: passed.
+  - `git diff --check`: passed with CRLF warnings only.
+- Production note:
+  - Not deployed in this step.
+  - No database schema change.
+  - No Alembic migration.
+### V3.0.0 exception group dispatch to construction
+
+- Date: 2026-06-23
+- Owner: Project engineer thread
+- Scope:
+  - Project-board exception group dialog.
+  - Administrator exception group dispatch.
+  - Constructor-side assigned exception task card.
+- Files changed:
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/tests/test_api.py`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/views/ProjectBoardView.vue`
+  - `v2-web/src/views/ConstructionView.vue`
+  - `v2-api/app/static/vue/**`
+- Behavior:
+  - Clicking `异常资料组` on `/project-board` opens a searchable exception-group dialog.
+  - The dialog supports CSV export, assign to constructor, and cancel assignment.
+  - If an exception group has no construction exception order yet, assignment creates/reuses one through the existing return-to-exception workflow.
+  - Constructors with assigned exception orders see an `异常任务` card on `/construction`.
+  - Clicking the exception task opens the normal construction form for that group, keeping existing data visible and requiring only missing/wrong data to be补齐.
+  - Version markers are advanced to `V3.0.0` for production rollout.
+- Validation:
+  - Target exception assignment test: passed.
+  - Full API regression: `46 passed, 1 warning`.
+  - Vue typecheck: passed.
+  - Vue shell build: passed with existing Rollup warnings.
+  - Vue migration gate: passed.
+  - Browser QA passed on `127.0.0.1:8011` for project-board dialog and constructor exception task flow.
+- Production note:
+  - Ready for controlled V3.0.0 production rollout.
+  - No database schema change.
+  - No Alembic migration.

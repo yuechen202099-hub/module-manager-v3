@@ -28,6 +28,7 @@ from app.services.local_simulation import (
     create_group_from_unmatched_record,
     delete_group_photo,
     delete_unmatched_record,
+    dedupe_unmatched_records,
     get_task_progress,
     get_delivery_cached_photo_path,
     get_group,
@@ -821,6 +822,43 @@ def test_unmatched_records_are_searchable_and_audited(synthetic_state: dict) -> 
     assert deleted["barcode"] == "NO-MATCH-001"
     assert audits["items"][0]["action"] == "delete_unmatched"
     assert audits["items"][0]["actor"] == "alice"
+
+
+def test_unmatched_dedupe_removes_duplicate_meter_records(synthetic_state: dict) -> None:
+    synthetic_state["scan_unmatched"] = []
+    synthetic_state["scan_unmatched"].extend(
+        [
+            {
+                "unmatched_id": "dup-plain",
+                "barcode": "3130001201100201234503",
+                "meter_no": "110020123450",
+                "meter_match_key": "002012345",
+                "terminal": "T-404",
+                "address": "A road 101",
+                "photo_urls": ["https://download.example/a.jpg"],
+            },
+            {
+                "unmatched_id": "dup-assigned",
+                "barcode": "3130001201100201234503",
+                "meter_no": "110020123450",
+                "meter_match_key": "002012345",
+                "terminal": "T-404",
+                "address": "A road 101",
+                "assigned_to": "constructor-a",
+                "photo_urls": ["https://download.example/a.jpg", "https://download.example/b.jpg"],
+            },
+        ]
+    )
+
+    result = dedupe_unmatched_records(actor="admin")
+    records = list_unmatched_records(query="110020123450")
+    audits = list_audit_events()
+
+    assert result["removed"] == 1
+    assert result["duplicate_ids"] == ["dup-plain"]
+    assert records["total"] == 1
+    assert records["items"][0]["unmatched_id"] == "dup-assigned"
+    assert audits["items"][0]["action"] == "dedupe_unmatched"
 
 
 def test_blank_group_creation_enters_unmatched_queue(synthetic_state: dict) -> None:

@@ -16,6 +16,7 @@ Last updated: 2026-06-22
 
 | ID | Bug | 复现方式 | 修复状态 | 修复时间 | 涉及文件 |
 | --- | --- | --- | --- | --- | --- |
+| BH-0134 | 管理员施工进度只显示未施工数量，不能下钻查看清单 | 管理员打开 `/construction`，终端卡只能看到“未施工数”，无法直接核对未施工表号和地址 | 已修复，本地类型检查和构建通过 | 2026-06-23 | `v2-web/src/views/ConstructionView.vue` |
 | BH-0101 | 项目看板左上版本号 `V2.4.11` 显示不全 | 打开生产 `/project-board`，左上角品牌版本徽标被裁切 | 已修复 | 2026-06-21 | `v2-web/src/styles/base.css`、`v2-web/src/styles/main.css` |
 | BH-0102 | 终端任务进度只显示前 12 个终端 | 打开项目看板，终端任务表只有前 12 条 | 已修复，全量显示并支持排序 | 2026-06-21 | `v2-web/src/views/ProjectBoardView.vue` |
 | BH-0103 | 终端任务表缺少上传率和多字段升降序排序 | 项目看板终端任务表无法按上传率、审阅率、已归档、未审阅等字段排序 | 已修复 | 2026-06-21 | `ProjectBoardView.vue`、`services.ts`、`types.ts` |
@@ -157,3 +158,19 @@ BH-0132 was deployed to production on 2026-06-23 as commit `9f3fc67` by patch sy
 - PostgreSQL dump: `/opt/module-manager-v2/backups/runtime/20260623_180532_before_v3_missing_collector_patch/postgres.dump`
 - No Alembic migration was executed.
 - Production `.env`, `data`, and uploads were preserved.
+
+## 2026-06-23 - V3.0.0-rc2 施工采集无效缓存占位工单
+
+| ID | 问题 / 风险 | 复现方式 | 修复状态 | 修复时间 | 涉及文件 |
+| --- | --- | --- | --- | --- | --- |
+| BH-0133 | 手机施工端扫码打开工单后，可能出现表号 `0000000000`、地址“待导入总清单地址”的本地缓存卡片，且施工员无法删除。异常工单草稿也可能被普通“已缓存”列表混入。 | 在 `/construction` 打开已指派终端，扫码或弱网缓存后切换到“已缓存”，可看到无照片、仅有模块号的占位卡片；点击后没有删除缓存入口。 | 已在 `V3.0.0-rc2` 本地修复；普通缓存列表只显示普通施工缓存，明显无效占位草稿会自动删除，真实单条缓存可手动删除。 | 2026-06-23 | `ConstructionView.vue` |
+## 2026-06-23 - Project-board unmatched list and duplicate cleanup
+
+| ID | Request / Risk | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0135 | Unmatched scan records could accumulate duplicate items after repeated imports, and project managers had to leave the project board to inspect or export the unmatched list. | Open `/project-board`, inspect the `扫码未匹配` risk number, then try to view/export details or remove duplicate unmatched rows. Older UI only showed the count. | Fixed locally; the project-board risk card opens a searchable unmatched-list dialog with CSV export and a duplicate cleanup action. Backend JSON/PostgreSQL repositories now expose a no-schema-change unmatched dedupe operation. | 2026-06-23 | `ProjectBoardView.vue`, `services.ts`, `types.ts`, `local_test.py`, `local_simulation.py`, `state_repository.py`, `test_local_simulation.py` |
+## 2026-06-23 - V3.0.0 exception group dispatch to construction
+
+| ID | Request / Risk | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0136 | Exception material groups needed a direct management surface and a way to dispatch selected exception work back to constructors. Without this, administrators could see exception counts but had to rely on manual coordination, and constructors had no focused exception task entry. | Open `/project-board`, click the exception count, then try to inspect and assign exception groups; log in as a constructor and look for the assigned exception work. Older builds did not provide a project-board exception dispatch dialog and constructor task-card entry. | Fixed locally for `V3.0.0`; the project-board exception risk card opens a searchable exception-group dialog with CSV export and admin assign/unassign controls. Assigned constructors see an exception task card on `/construction`, and opening it enters the normal collection form with existing meter, collector, module, address, and photos prefilled where available. | 2026-06-23 | `ProjectBoardView.vue`, `ConstructionView.vue`, `services.ts`, `local_simulation.py`, `test_api.py` |

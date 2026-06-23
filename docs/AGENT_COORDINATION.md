@@ -9,6 +9,7 @@ This file is the shared coordination board for parallel maintenance threads.
 | Version | Owner | Scope | Status | Notes |
 | --- | --- | --- | --- | --- |
 | V3.0.0-rc1 | Project engineer thread | Controlled production rollout of the V3 Apple-like UI branch while preserving V2.6.5 rollback; `/construction` admin read-only view for assigned unfinished construction terminals | Ready for PM review | Branch `feature/v3.0.0-apple-ui-lab`; target release `V3.0.0-rc1`. Current patch adds an admin-only `/construction` list of current-team assigned terminals whose construction progress is below 100%, showing installer display name with username as auxiliary; constructor collection flow remains unchanged. Local gates passed (`vue-tsc`, Vue shell build, migration gate, pytest, `git diff --check`), and production-mode HTTP/API smoke passed on a temporary JSON-state service with `/openapi.json` returning 404. Browser screenshot-level QA is blocked by the in-app Browser URL policy for local URLs. No new backend endpoint, no database change, no Alembic, no `.env`/`data`/`uploads`/OSS/PostgreSQL overwrite. Deploy through a new release directory and switch the production `current` symlink only after backup. Roll back by switching `current` back to the V2.6.5 release and restarting service. |
+| V3.0.0-rc2 | BUG 修复线程 | 修复施工采集页无效本地缓存占位工单：`0000000000 / 待导入总清单地址` 不再展示，异常工单草稿不混入普通已缓存，增加单条删除缓存入口 | Local fix in progress | 仅限 `ConstructionView.vue`、版本标识和维护文档；不新增批量清理功能；不改 API、不改数据库、不跑 Alembic。 |
 | V3.0.0-alpha | Codex V3 UI lab thread | Information architecture optimization for `/project-board`, `/claim-tasks`, and `/construction`: project cockpit, terminal exports/review/assignment consolidated into claim tasks, construction page scoped to installer collection | Superseded by V3.0.0-rc1 | Branch `feature/v3.0.0-apple-ui-lab`; this was the local UI lab phase. No backend API/database change, no Alembic, no `.env`/`data`/`uploads`/OSS/PostgreSQL impact. `/project-board` no longer shows the terminal task table and now surfaces cockpit flow/ring/signal visualization. `/claim-tasks` terminal cards now expose detail/package export, explicit review entry only, current installer display by name with username as auxiliary, and admin construction assign/reassign. `/construction` no longer contains admin assignment main actions; constructors only see assigned terminals while scan/photo/cache/upload/submit collection remains available. Local gates passed: `vue-tsc --noEmit`, Vue shell build, Vue migration gate, `pytest v2-api/tests/test_api.py -q`, and `git diff --check`. Browser QA passed for `/project-board`, `/claim-tasks`, `/construction`, `/login`, and `/task-hall` across 1366/1920/390px samples with no horizontal overflow; production-mode `/openapi.json` returned 404 on temporary port `8019`. |
 | V2.4.12 | BUG fix thread + project engineer deploy thread | Construction mobile scanner patch | Released | Committed as `5f6d0aa`, tagged `v2.4.12`, deployed by project engineer. Backup: `/opt/module-manager-v2/backups/runtime/20260621_224811_before_v2.4.12`; release: `/opt/module-manager-v2/releases/v2.4.12-20260621_224816`; service active; `/health`, `/login`, `/project-board`, `/construction` OK; `/openapi.json` 404. Real phone scan QA still pending. |
 | V2.4.13 | Project engineer thread `019edff4-0c40-7920-8872-3c20eacb4430` | ClaimTasks task-claiming page patch | Folded into V2.4.14 | ClaimTasks fix is included in the V2.4.14 combined patch to avoid deploying a mixed version/build artifact. |
@@ -32,8 +33,11 @@ This file is the shared coordination board for parallel maintenance threads.
 
 ## Current Deployment Note
 
+- 2026-06-23: Local V3.0.0-rc1 admin construction progress patch adds an admin-only unbuilt-group drilldown on `/construction`. The terminal card `未施工数` opens a searchable modal listing unconstructed meter groups for that terminal. It reuses existing construction task group APIs; no database schema change and no Alembic migration.
 - 2026-06-23: V3.0.0-rc1 controlled rollout now includes the construction completion-time fix. Web construction upload and the mini-program queue send `client_completed_at` from the last valid local cache time. Backend upload accepts the optional field, stores it in photo raw metadata, and KPI/daily workload/two-hour efficiency logic prefers this construction completion time. Missing or invalid `client_completed_at` falls back to server upload time. No database schema change and no Alembic migration.
 - 2026-06-23: V3.0.0-rc1 also includes missing collector photo quality-exception handling. Construction upload requires only `before_box`, `module_meter`, and `after_box`; missing `collector_barcode` no longer blocks upload but marks the group with `missing_collector_photo` / `缺采集器照片`. Adding the collector barcode photo clears that automatic exception; deleting it re-applies the exception. No database schema change and no Alembic migration.
+
+- 2026-06-23: Local project-board unmatched patch adds a direct unmatched-list dialog from `扫码未匹配`, CSV export inside the dialog, and duplicate cleanup via `POST /local-test/unmatched/dedupe`. JSON cleanup removes duplicate compatibility-state rows; PostgreSQL cleanup soft-deletes duplicates with status `deduped`. No database schema change and no Alembic migration.
 
 ## Rules
 
@@ -70,3 +74,17 @@ This file is the shared coordination board for parallel maintenance threads.
 - The second agent pauses and records the requested follow-up under the next version.
 - If urgent production work must interrupt an active claim, the user must explicitly reassign ownership.
 - Direct thread messaging is preferred over implicit assumptions. The coordination file is the fallback channel when direct messaging is not possible.
+## V3.0.0 Production Claim
+
+- Date: 2026-06-23
+- Owner: Project engineer thread
+- Scope: official V3 production candidate after adding exception-group dialog and dispatch to constructor exception task cards.
+- Status: Ready for production rollout after final gate run.
+- Notes:
+  - Branch: `feature/v3.0.0-apple-ui-lab`.
+  - No database schema change.
+  - No Alembic migration.
+  - Deploy through a new release directory.
+  - Preserve V2.6.5 rollback.
+  - Do not overwrite production `.env`, `data`, or uploads.
+  - Browser QA passed on a temporary local V3 service for `/project-board` exception dialog and `/construction` assigned exception task flow.
