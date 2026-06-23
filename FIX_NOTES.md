@@ -1175,3 +1175,50 @@ Administrators needed to open exception material groups directly, assign selecte
   - Dialog shows exception rows, export, and assign controls.
   - `/construction` shows the assigned exception task card for the constructor.
   - Opening the exception task enters the collection form with collector/module values prefilled.
+
+## 2026-06-23 - V3.0.0 总清单 10 位表号匹配规则
+
+### 修改原因
+
+现场反馈 10 位表号在未施工列表中存在，但扫码/输入后无法稳定打开施工单。根因是总清单匹配键统一去前 2 位，错误处理了 10 位表号。
+
+### 修改文件
+
+- `v2-api/app/services/matching.py`
+- `v2-api/tests/test_matching.py`
+- `v2-web/src/views/ConstructionView.vue`
+
+### 修改内容
+
+- 后端总清单匹配键规则改为：长度为 12 位时去前 2 位，长度为 10 位时保持原值。
+- 前端施工采集页 `totalMeterMatchKey` 同步同一规则，避免扫码打开工单和后端导入规则不一致。
+- 增加 10 位表号保持原值的单元测试。
+
+### 影响范围
+
+- 影响总清单导入、扫码表格导入时的表号匹配键。
+- 影响施工采集页扫码/输入表号打开施工单。
+- 不改变数据库结构，不改变 API 协议。
+
+### 验证方法
+
+- `pytest v2-api/tests/test_matching.py -q`
+- `vue-tsc --noEmit`
+- 现场手测：总清单 10 位表号 `2004243564` 可直接匹配并打开未施工资料组。
+# V3.0.1 修复说明：总清单 10 位表号匹配
+
+## 背景
+
+生产未匹配列表中存在总清单短表号为 10 位的数据。旧逻辑把总清单表号统一去前 2 位，导致 10 位短表号被错误截断，无法和扫码条码裁剪后的 10 位 key 匹配。
+
+## 修复
+
+- 12 位总清单表号：继续去前 2 位。
+- 10 位总清单表号：保留原样。
+- 长扫码条码：继续去前 11 位和最后 1 位。
+- 施工采集候选匹配同步使用同一规则。
+- 新增维护脚本：`v2-api/scripts/rematch_unmatched_records.py`。
+
+## 生产维护策略
+
+先 dry-run 输出报告，再 apply。只处理唯一明确匹配成功的未匹配记录，不清空未匹配列表。照片追加走现有 `associate_unmatched_record`，继续使用 source_fingerprint / URL / sha256 / storage_key 级去重。

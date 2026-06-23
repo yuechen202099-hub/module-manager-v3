@@ -3319,3 +3319,35 @@
   - Ready for controlled V3.0.0 production rollout.
   - No database schema change.
   - No Alembic migration.
+
+### V3.0.0 总清单 10 位表号匹配规则修复
+
+- 日期：2026-06-23
+- 负责人：BUG 修复线程
+- 目标：
+  - 修复 10 位总清单表号被错误去前 2 位后，施工端扫码/输入表号无法打开对应未施工资料组的问题。
+- 修改文件：
+  - `v2-api/app/services/matching.py`
+  - `v2-api/tests/test_matching.py`
+  - `v2-web/src/views/ConstructionView.vue`
+- 行为：
+  - 总清单表号长度为 12 位时，匹配键去前 2 位。
+  - 总清单表号长度为 10 位时，匹配键保持原表号。
+  - 施工采集页前端表号候选规则与后端保持一致。
+- 影响：
+  - 不改数据库结构。
+  - 不改 API 协议。
+  - 不影响照片去重、审阅、导出和施工上传流程。
+# V3.0.1 - Matching Rule Hotfix And Production Rematch
+
+- 日期：2026-06-23
+- 页面/模块：总清单导入、扫码导入、施工采集候选匹配、未匹配维护脚本
+- 改动：
+  - 总清单 12 位表号去前 2 位生成匹配 key。
+  - 总清单 10 位表号不截断，原样生成匹配 key。
+  - 新增 `rematch_unmatched_records.py`，用于生产未匹配记录 dry-run/apply 重匹配。
+- 数据安全：
+  - 不改数据库结构。
+  - 不执行 Alembic。
+  - 不清空未匹配列表。
+  - 只移动唯一明确匹配成功的记录。

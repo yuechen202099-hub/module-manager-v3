@@ -456,7 +456,8 @@ function normalizeCode(value: string) {
 
 function totalMeterMatchKey(value: string) {
   const normalized = normalizeCode(value)
-  return normalized.length > 2 ? normalized.slice(2) : normalized
+  if (normalized.length === 12) return normalized.slice(2)
+  return normalized
 }
 
 function scannedBarcodeMatchKey(value: string) {

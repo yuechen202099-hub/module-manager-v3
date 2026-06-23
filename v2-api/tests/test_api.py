@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.0"
+    assert data["version"] == "3.0.1"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -435,14 +435,14 @@ def test_async_scan_template_import_job_completes() -> None:
     catalog = build_api_workbook(
         [
             ["terminal", "meter_no", "address"],
-            ["T-ASYNC", "ZZ1001", "Async road"],
+            ["T-ASYNC", "ZZ0000001001", "Async road"],
         ]
     )
     scan = build_api_workbook(
         [
             ["barcode", "meter_match_key", "terminal", "collector", "module_asset_no", "photo_urls"],
-            ["scan-1", "1001", "T-ASYNC", "collector", "asset-1", "https://example.invalid/1.jpg"],
-            ["scan-2", "1001", "T-ASYNC", "collector", "asset-2", "https://example.invalid/2.jpg"],
+            ["scan-1", "0000001001", "T-ASYNC", "collector", "asset-1", "https://example.invalid/1.jpg"],
+            ["scan-2", "0000001001", "T-ASYNC", "collector", "asset-2", "https://example.invalid/2.jpg"],
         ]
     )
 

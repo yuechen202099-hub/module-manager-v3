@@ -12,7 +12,7 @@ def test_parse_spreadsheet_rows_supports_required_chinese_fields() -> None:
             {
                 "\u7ec8\u7aef": "T-001",
                 "\u91c7\u96c6\u5668": "C-001",
-                "\u8868\u53f7": "ZZ123456789",
+                "\u8868\u53f7": "ZZ1234567890",
                 "\u6a21\u5757": "M-001",
                 "\u5730\u5740": "\u4e00\u53f7\u697c 101",
                 "\u7167\u7247URL": "https://example.test/a.jpg\uff1bhttps://example.test/b.jpg",
@@ -27,10 +27,10 @@ def test_parse_spreadsheet_rows_supports_required_chinese_fields() -> None:
     record = result.records[0]
     assert record.terminal == "T-001"
     assert record.collector == "C-001"
-    assert record.meter_no == "ZZ123456789"
+    assert record.meter_no == "ZZ1234567890"
     assert record.module_asset_no == "M-001"
     assert record.address == "\u4e00\u53f7\u697c 101"
-    assert record.meter_match_key == "123456789"
+    assert record.meter_match_key == "1234567890"
     assert record.category_name == "\u6a21\u5757\u4e0e\u7535\u80fd\u8868"
     assert [photo.url for photo in record.photos] == [
         "https://example.test/a.jpg",
@@ -45,7 +45,7 @@ def test_parse_spreadsheet_rows_supports_numbered_photo_url_columns_and_dedupes(
             {
                 "terminal": "T-001",
                 "collector": "C-001",
-                "meter_no": "ZZ123456789",
+                "meter_no": "ZZ1234567890",
                 "module_asset_no": "M-001",
                 "photo_url_1": "https://example.test/a.jpg",
                 "photo_url_2": "https://example.test/a.jpg",
@@ -66,7 +66,7 @@ def test_parse_spreadsheet_rows_keeps_urls_and_skips_non_url_photo_values() -> N
     result = parse_spreadsheet_rows(
         [
             {
-                "meter_no": "ZZ123456789",
+                "meter_no": "ZZ1234567890",
                 "photo_urls": "C:/local/a.jpg, https://example.test/a.jpg",
             }
         ]
@@ -87,7 +87,11 @@ def test_parse_spreadsheet_rows_rejects_rows_without_matchable_meter_identity() 
 
 
 def test_infer_meter_match_key_prefers_long_barcode_when_available() -> None:
-    assert infer_meter_match_key(meter_no="ZZ999", barcode="ABCDEFGHIJK123456789X") == "123456789"
+    assert infer_meter_match_key(meter_no="ZZ999", barcode="ABCDEFGHIJK1234567890X") == "1234567890"
+
+
+def test_infer_meter_match_key_keeps_10_digit_total_catalog_meter() -> None:
+    assert infer_meter_match_key(meter_no="2004243564") == "2004243564"
 
 
 def test_split_photo_url_cell_accepts_lists_and_common_separators() -> None:
@@ -101,7 +105,7 @@ def test_split_photo_url_cell_accepts_lists_and_common_separators() -> None:
 def test_parse_csv_text_feeds_generic_parser() -> None:
     rows = parse_csv_text(
         "terminal,meter_no,photo_urls,category_name\n"
-        "T-001,ZZ123456789,https://example.test/a.jpg,before_box\n"
+        "T-001,ZZ1234567890,https://example.test/a.jpg,before_box\n"
     )
 
     result = parse_spreadsheet_rows(rows)

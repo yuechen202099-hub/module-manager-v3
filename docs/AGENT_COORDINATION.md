@@ -2,6 +2,19 @@
 
 Last updated: 2026-06-23
 
+## V3.0.1 Production Rematch Claim
+
+- Date: 2026-06-23
+- Owner: Project engineer thread
+- Scope: release the 10-digit total-catalog meter matching hotfix and run production unmatched-record rematch with dry-run/apply reports.
+- Status: Active
+- Notes:
+  - No database schema change.
+  - No Alembic migration.
+  - Preserve production `.env`, `data`, and uploads.
+  - Maintenance script: `v2-api/scripts/rematch_unmatched_records.py`.
+  - Only uniquely matched records may be moved out of unmatched; ambiguous and failed records remain.
+
 This file is the shared coordination board for parallel maintenance threads.
 
 ## Active Version Claims
@@ -88,3 +101,15 @@ This file is the shared coordination board for parallel maintenance threads.
   - Preserve V2.6.5 rollback.
   - Do not overwrite production `.env`, `data`, or uploads.
   - Browser QA passed on a temporary local V3 service for `/project-board` exception dialog and `/construction` assigned exception task flow.
+
+## V3.0.0-rc2 BUG Fix Addendum
+
+- Date: 2026-06-23
+- Owner: BUG 修复线程
+- Scope: 总清单表号匹配规则补丁。
+- Status: Local fix in progress.
+- Notes:
+  - 总清单表号长度为 12 位时去前 2 位。
+  - 总清单表号长度为 10 位时保持原值。
+  - 施工采集页前端候选匹配同步该规则。
+  - 无数据库结构变更，无 Alembic 迁移。

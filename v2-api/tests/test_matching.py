@@ -13,15 +13,19 @@ def test_normalize_meter_text_strips_all_whitespace() -> None:
 
 
 def test_long_scan_match_key_removes_first_11_and_last_1_chars() -> None:
-    assert build_long_scan_match_key("ABCDEFGHIJK123456789X") == "123456789"
+    assert build_long_scan_match_key("ABCDEFGHIJK1234567890X") == "1234567890"
 
 
-def test_total_catalog_match_key_removes_first_2_chars() -> None:
-    assert build_total_catalog_match_key("ZZ123456789") == "123456789"
+def test_total_catalog_match_key_removes_first_2_chars_for_12_digit_meter() -> None:
+    assert build_total_catalog_match_key("ZZ1234567890") == "1234567890"
+
+
+def test_total_catalog_match_key_keeps_10_digit_meter() -> None:
+    assert build_total_catalog_match_key("2004243564") == "2004243564"
 
 
 def test_scan_and_total_catalog_keys_match() -> None:
-    assert is_match("ABCDEFGHIJK123456789X", "ZZ123456789")
+    assert is_match("ABCDEFGHIJK1234567890X", "ZZ1234567890")
 
 
 @pytest.mark.parametrize("value", ["", "123456789012"])
@@ -34,4 +38,3 @@ def test_long_scan_match_key_requires_enough_characters(value: str) -> None:
 def test_total_catalog_match_key_requires_enough_characters(value: str) -> None:
     with pytest.raises(ValueError):
         build_total_catalog_match_key(value)
-

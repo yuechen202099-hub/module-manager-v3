@@ -174,3 +174,17 @@ BH-0132 was deployed to production on 2026-06-23 as commit `9f3fc67` by patch sy
 | ID | Request / Risk | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0136 | Exception material groups needed a direct management surface and a way to dispatch selected exception work back to constructors. Without this, administrators could see exception counts but had to rely on manual coordination, and constructors had no focused exception task entry. | Open `/project-board`, click the exception count, then try to inspect and assign exception groups; log in as a constructor and look for the assigned exception work. Older builds did not provide a project-board exception dispatch dialog and constructor task-card entry. | Fixed locally for `V3.0.0`; the project-board exception risk card opens a searchable exception-group dialog with CSV export and admin assign/unassign controls. Assigned constructors see an exception task card on `/construction`, and opening it enters the normal collection form with existing meter, collector, module, address, and photos prefilled where available. | 2026-06-23 | `ProjectBoardView.vue`, `ConstructionView.vue`, `services.ts`, `local_simulation.py`, `test_api.py` |
+
+## 2026-06-23 - V3.0.0 总清单 10 位表号匹配规则修复
+
+| ID | 问题 / 风险 | 复现方式 | 修复状态 | 修复时间 | 涉及文件 |
+| --- | --- | --- | --- | --- | --- |
+| BH-0137 | 总清单表号原逻辑只要长度大于 2 就去前 2 位，导致 10 位表号也被错误截断；施工端扫码或导入匹配时，明明未施工列表存在 `2004243564`，仍可能匹配不到。 | 总清单存在 10 位表号资料组，例如 `2004243564`；在施工采集页按 10 位表号或相关条码打开施工单，旧逻辑会把总清单侧变成 `04243564`，造成候选键不一致。 | 已本地修复：总清单表号长度为 12 位时才去前 2 位，长度为 10 位时保持原表号；前端施工扫码候选逻辑同步该规则。 | 2026-06-23 | `matching.py`, `test_matching.py`, `ConstructionView.vue` |
+# V3.0.1 - 总清单 10 位表号匹配规则与未匹配重匹配
+
+- 日期：2026-06-23
+- 类型：匹配规则 BUG 修复 / 生产维护
+- 问题：总清单表号为 10 位时，旧规则仍按“去前 2 位”生成匹配 key，导致扫码资料进入未匹配列表。
+- 修复：`build_total_catalog_match_key` 改为仅当总清单表号长度为 12 位时去前 2 位；10 位表号保持原样参与匹配。
+- 维护：新增 `v2-api/scripts/rematch_unmatched_records.py`，支持 dry-run/apply，对生产未匹配记录按最新规则做一次维护性重匹配。
+- 风险控制：脚本只移动唯一明确匹配成功的记录；找不到、歧义或失败记录继续保留在未匹配列表；照片补入沿用现有仓储去重逻辑。
