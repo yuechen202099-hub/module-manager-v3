@@ -728,6 +728,24 @@ Construction upload and review quality checks were both treated like a strict 4-
 - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/api/routes/local_test.py`: passed.
 - `.venv\Scripts\python.exe -m pytest v2-api/tests/test_api.py::test_construction_task_open_claim_and_upload_batch -q`: passed.
 - `.venv\Scripts\python.exe -m pytest v2-api/tests/test_state_repository.py::test_postgres_quality_exception_marks_and_clears_missing_collector_photo -q`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api/tests/test_api.py -q`: `45 passed, 1 warning`.
+- `.venv\Scripts\python.exe -m pytest v2-api/tests/test_state_repository.py -q`: `9 passed`.
+- `vue-tsc --noEmit`: passed.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `git diff --check`: passed with CRLF warnings only.
+
+### Production deployment
+
+- Commit: `9f3fc67`.
+- Branch: `feature/v3.0.0-apple-ui-lab`.
+- Deployment method: patch sync into the current V3.0.0-rc1 release; no full release replacement.
+- Backup path: `/opt/module-manager-v2/backups/runtime/20260623_180532_before_v3_missing_collector_patch`.
+- PostgreSQL dump: `/opt/module-manager-v2/backups/runtime/20260623_180532_before_v3_missing_collector_patch/postgres.dump`.
+- Production `.env`, `data`, and uploads were preserved.
+- No Alembic migration was executed.
+- Production checks passed for `/health`, `/login`, `/project-board`, `/claim-tasks`, `/task-hall`, `/construction`, and `https://www.sgcc.online/login`.
+- `/openapi.json`: `404`.
 
 ## 2026-06-23 - V3.0.0-rc1 construction completion time
 

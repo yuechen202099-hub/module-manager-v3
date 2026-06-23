@@ -3182,13 +3182,17 @@
   - Uploading a collector barcode photo clears this automatic exception.
   - Deleting the collector barcode photo re-applies this automatic exception.
   - PostgreSQL photo payload now includes `construction_slot` and `construction_slot_label` for stable slot detection.
-- Validation so far:
+- Validation:
   - `python -m py_compile v2-api/app/services/local_simulation.py v2-api/app/services/state_repository.py v2-api/app/api/routes/local_test.py`: passed.
   - `.venv\Scripts\python.exe -m pytest v2-api/tests/test_api.py::test_construction_task_open_claim_and_upload_batch -q`: passed.
   - `.venv\Scripts\python.exe -m pytest v2-api/tests/test_state_repository.py::test_postgres_quality_exception_marks_and_clears_missing_collector_photo -q`: passed.
 - Production/data note:
-  - No deployment performed in this step.
+  - Production patch deployed on 2026-06-23.
+  - Commit: `9f3fc67`.
+  - Backup path: `/opt/module-manager-v2/backups/runtime/20260623_180532_before_v3_missing_collector_patch`.
+  - Deployment method: patch sync into the current V3.0.0-rc1 release; no full release replacement.
   - No API path change.
   - No database schema change.
   - No Alembic migration.
   - No `.env`, `data`, `uploads`, OSS, or PostgreSQL mutation.
+  - Production checks passed for `/health`, `/login`, `/project-board`, `/claim-tasks`, `/task-hall`, `/construction`, `https://www.sgcc.online/login`, and `/openapi.json` returned `404`.

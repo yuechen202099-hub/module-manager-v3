@@ -149,3 +149,11 @@ Last updated: 2026-06-22
 | ID | Bug / Risk | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0132 | Construction upload completeness and review quality completeness used the same 4-photo rule, so missing collector barcode photos could either block field upload too aggressively or fail to become a clear quality exception. | Upload a construction group with `before_box`, `module_meter`, and `after_box` but without `collector_barcode`, then inspect review exceptions and project-board counts; old behavior did not distinguish upload-required photos from quality-required photos. | Fixed locally for `V3.0.0-rc1`; upload now requires only `before_box`, `module_meter`, and `after_box`; missing `collector_barcode` uploads successfully but auto-marks the group with `missing_collector_photo` / `缺采集器照片`. Adding the collector photo clears that auto exception; deleting it marks it again. No database schema change. | 2026-06-23 | `local_simulation.py`, `state_repository.py`, `test_api.py`, `test_state_repository.py` |
+## 2026-06-23 - V3.0.0-rc1 missing collector photo production deployment
+
+BH-0132 was deployed to production on 2026-06-23 as commit `9f3fc67` by patch sync into the current `V3.0.0-rc1` release.
+
+- Backup path: `/opt/module-manager-v2/backups/runtime/20260623_180532_before_v3_missing_collector_patch`
+- PostgreSQL dump: `/opt/module-manager-v2/backups/runtime/20260623_180532_before_v3_missing_collector_patch/postgres.dump`
+- No Alembic migration was executed.
+- Production `.env`, `data`, and uploads were preserved.
