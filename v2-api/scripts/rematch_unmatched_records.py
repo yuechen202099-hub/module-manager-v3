@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 from app.database import SessionLocal  # noqa: E402
 from app.models import MaterialGroup, Photo, UnmatchedRecord  # noqa: E402
 from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key, normalize_meter_text  # noqa: E402
-from app.services.state_repository import _unmatched_payload, state_repository  # noqa: E402
+from app.services.state_repository import _unmatched_payload, get_state_repository  # noqa: E402
 
 
 PHOTO_SPLIT_RE = re.compile(r"[\r\n,;\uff0c\uff1b]+")
@@ -229,7 +229,7 @@ def build_plan(team_id: str, limit: int = 0) -> tuple[dict[str, Any], list[dict[
 
 
 def apply_plan(plan: list[dict[str, Any]], actor: str) -> dict[str, Any]:
-    repo = state_repository()
+    repo = get_state_repository()
     report = {
         "dry_run": False,
         "attempted": len(plan),

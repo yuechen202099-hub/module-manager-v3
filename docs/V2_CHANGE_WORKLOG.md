@@ -3338,6 +3338,20 @@
   - 不改数据库结构。
   - 不改 API 协议。
   - 不影响照片去重、审阅、导出和施工上传流程。
+# V3.0.2 - Rematch Script Production Hotfix
+
+Date: 2026-06-23
+
+## Changed
+- Fixed `v2-api/scripts/rematch_unmatched_records.py` to use `get_state_repository()`.
+- Bumped visible/application version from V3.0.1 to V3.0.2 because V3.0.1 had already been published and tagged.
+
+## Deployment Notes
+- Patch or release deploy only.
+- Preserve production `.env`, `data/`, `uploads`.
+- No Alembic migration.
+- After deploy, run unmatched rematch dry-run first, then apply only uniquely matched records.
+
 # V3.0.1 - Matching Rule Hotfix And Production Rematch
 
 - 日期：2026-06-23

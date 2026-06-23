@@ -2,6 +2,14 @@
 
 Last updated: 2026-06-23
 
+## V3.0.2 Rematch Script Hotfix Claim
+
+- Owner: project engineer thread
+- Scope: fix production rematch maintenance script import after V3.0.1 release
+- Files: `v2-api/scripts/rematch_unmatched_records.py`, version metadata, release docs
+- Constraints: no database schema change, no Alembic, no `.env/data/uploads` overwrite
+- Status: implementation in progress
+
 ## V3.0.1 Production Rematch Claim
 
 - Date: 2026-06-23

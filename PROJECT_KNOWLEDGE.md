@@ -1,7 +1,7 @@
 # PROJECT_KNOWLEDGE
 
 Last full scan: 2026-06-21
-Current known version: V3.0.1
+Current known version: V3.0.2
 Active maintenance baseline: latest repository version
 Maintenance mode: active
 

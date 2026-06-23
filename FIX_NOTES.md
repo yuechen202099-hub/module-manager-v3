@@ -1205,6 +1205,19 @@ Administrators needed to open exception material groups directly, assign selecte
 - `pytest v2-api/tests/test_matching.py -q`
 - `vue-tsc --noEmit`
 - 现场手测：总清单 10 位表号 `2004243564` 可直接匹配并打开未施工资料组。
+# V3.0.2 修复说明：生产未匹配重匹配脚本导入修正
+
+Date: 2026-06-23
+
+## Scope
+- 修复 `scripts/rematch_unmatched_records.py` 在生产 dry-run 时导入不存在的 `state_repository` 工厂导致失败的问题。
+- 脚本改为使用现有 `get_state_repository()`，保持复用统一仓储和现有照片去重逻辑。
+- 不改数据库结构，不需要 Alembic。
+
+## Verification
+- 本地重新执行脚本编译、匹配规则测试、API 回归、Vue 构建和 strict-native gate。
+- 生产侧需要重新发布 V3.0.2 后再执行 dry-run/apply 重匹配。
+
 # V3.0.1 修复说明：总清单 10 位表号匹配
 
 ## 背景
