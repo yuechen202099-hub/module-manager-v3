@@ -2,6 +2,38 @@
 
 > 目的：避免重复修改同一页面、避免靠记忆判断状态。后续每完成一个修改，都必须在这里记录文件、目标、状态和验证结果。
 
+### V3.0.0-rc1 管理员施工已指派未完成终端视图
+
+- 时间：2026-06-23
+- 分支：`feature/v3.0.0-apple-ui-lab`
+- 生产基线：`V2.6.5`，本阶段不发布生产。
+- 修改文件：
+  - `v2-web/src/views/ConstructionView.vue`
+  - `v2-web/src/api/services.ts`
+  - `docs/V2_CHANGE_WORKLOG.md`
+  - `docs/AGENT_COORDINATION.md`
+- 改动内容：
+  - `/construction` 管理员视角改为只读“已指派未完成终端”列表，读取当前团队已指派施工任务，并在前端过滤完成度 `100%` 的终端。
+  - 管理员终端卡显示终端号、施工员姓名与账号辅助、总资料组数、已上传/已完成数、未施工数、异常数、完成度和代表地址。
+  - 施工员视角仍按当前账号读取已指派终端，保留原扫码、拍照/相册、本地缓存、上传当前组、一键上传缓存、提交施工任务流程。
+  - 管理员不进入采集工作区，不显示上传当前组、一键上传缓存、提交施工任务等施工员操作。
+  - 施工任务指派/改派仍保留在 `/claim-tasks`，本阶段不新增后端接口、不改数据库、不执行 Alembic。
+- 边界：
+  - 未修改上传、缓存、提交施工任务逻辑。
+  - 未修改 `.env`、`data/`、`uploads/`、OSS、PostgreSQL。
+- 验证：
+  - `vue-tsc --noEmit`：通过。
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`：通过；保留既有 Rollup `PURE` 注释提示和 chunk 体积提示。
+  - `python scripts\verify_vue_migration_gate.py --strict-native`：通过，registered pages 5，legacy bridge pages 0。
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`：通过，`45 passed, 1 warning`。
+  - `git diff --check`：通过，仅有工作区 CRLF 转换提示。
+  - 临时生产模式服务（`APP_ENV=production`、`STATE_BACKEND=json`、临时状态文件）：`/login`、`/project-board`、`/claim-tasks`、`/task-hall`、`/construction` HTTP 200；`/openapi.json` 返回 404。
+  - API smoke：管理员无 `actor` 查询返回当前团队 2 个已指派未完成施工终端；施工员 `constructor` 只返回自己 1 个已指派终端；`/auth/users` 可提供 `constructor -> Field Installer`、`constructor2 -> Backup Installer` 姓名映射。
+- Browser QA：
+  - 内置浏览器插件已创建 QA 会话，但访问本地 `127.0.0.1` 被 Browser URL policy 拒绝；`tabs.new({ url })` 正式入口未导航到目标页。
+  - 遵循插件安全提示，未改用 CDP、Chrome 或外部 Playwright 绕过，因此 1366、1920、390px 截图级无横向溢出检查未完成。
+- 状态：实现完成，待 PM 审阅；浏览器截图级 QA 存在工具策略阻塞。
+
 ### V3.0.0-rc1 受控生产上线准备
 
 - 时间：2026-06-23
@@ -3082,3 +3114,42 @@
 - Issues:
   - None found in this scoped UI trial.
   - Camera permission, actual photo selection, upload, and final submit were not executed during browser QA; the entries and validation states were verified.
+
+### V3.0.0-rc1 construction completion time fix
+
+- Date: 2026-06-23
+- Owner: Project engineer thread
+- Branch:
+  - `feature/v3.0.0-apple-ui-lab`
+- Goal:
+  - Fix construction completion-time accounting before the controlled V3.0.0-rc1 production rollout.
+  - Use the construction-side last valid cache time as completion time instead of server upload time.
+  - Preserve old client compatibility by falling back to server upload time when `client_completed_at` is missing or invalid.
+  - Keep the no-schema-change production rule: no Alembic migration, no database structure change.
+- Files changed:
+  - `v2-web/src/views/ConstructionView.vue`
+  - `v2-web/src/api/services.ts`
+  - `v2-web/src/api/types.ts`
+  - `v2-api/app/api/routes/local_test.py`
+  - `v2-api/app/services/local_simulation.py`
+  - `v2-api/app/services/state_repository.py`
+  - `v2-api/tests/test_api.py`
+  - `v2-api/tests/test_state_repository.py`
+  - `v2-miniprogram/miniprogram/utils/api.js`
+  - `v2-miniprogram/miniprogram/utils/queue.js`
+  - `v2-miniprogram/miniprogram/pages/collect/collect.js`
+  - `v2-api/app/static/vue/**`
+- Behavior:
+  - Web construction drafts now persist `client_completed_at` only when the draft is valid: module number exists and required photo slots `before_box`, `module_meter`, and `after_box` are satisfied.
+  - Upload payloads include `client_completed_at`; backend accepts it as optional form data.
+  - JSON and PostgreSQL repository KPI code prefers `client_completed_at`, then previous construction completion metadata, then server upload time.
+  - Mini-program queued uploads send the same field when cached data is complete.
+- Validation:
+  - `python -m py_compile v2-api\app\api\routes\local_test.py v2-api\app\services\local_simulation.py v2-api\app\services\state_repository.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py::test_construction_task_open_claim_and_upload_batch v2-api\tests\test_state_repository.py::test_postgres_installer_workload_uses_material_group_installation_address -q`: `2 passed, 1 warning`.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+  - `.venv\Scripts\python.exe -m pytest v2-api\tests\test_state_repository.py -q`: `8 passed`.
+  - `vue-tsc --noEmit`: passed via local `v2-web\node_modules\.bin\vue-tsc.cmd` with bundled Node in PATH.
+  - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed; existing Rollup PURE-comment and chunk-size warnings remain.
+  - `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+  - `git diff --check`: passed; only CRLF conversion warnings were reported.

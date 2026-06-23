@@ -137,3 +137,9 @@ Last updated: 2026-06-22
 | ID | UX issue | Reproduction | Status | Fixed at | Files |
 | --- | --- | --- | --- | --- | --- |
 | BH-0130 | After a constructor finished field collection, there was no explicit submit action to release the assigned terminal, so the task kept occupying the construction collection page. | Log in as a constructor, open `/construction`, finish uploading a terminal's construction data, then try to mark the terminal task complete. Older UI only had refresh/back/logout actions. | Fixed locally in `V2.6.5`; the selected assigned terminal now has a submit button that calls the existing construction release API, warns about local cache/unbuilt groups, and refreshes the task picker. | 2026-06-22 | `ConstructionView.vue`, `services.ts`, `test_api.py` |
+
+## 2026-06-23 - V3.0.0-rc1 construction completion-time accounting
+
+| ID | Bug / Risk | Reproduction | Status | Fixed at | Files |
+| --- | --- | --- | --- | --- | --- |
+| BH-0131 | Construction KPI and daily workload could use the server upload time instead of the field-side completion time. When offline cache is uploaded later, this shifts work to the wrong date/time window and distorts KPI. | Cache a completed construction group in the field, upload it later, then inspect installer daily workload or 2-hour efficiency. Old behavior could count the server upload timestamp. | Fixed locally for `V3.0.0-rc1`; Web and mini-program uploads send `client_completed_at` from the last valid cache time, backend stores it in photo raw metadata, and KPI prefers it. Missing or invalid values fall back to server upload time. No database schema change. | 2026-06-23 | `ConstructionView.vue`, `services.ts`, `types.ts`, `local_test.py`, `local_simulation.py`, `state_repository.py`, `test_api.py`, `test_state_repository.py`, `v2-miniprogram/**` |

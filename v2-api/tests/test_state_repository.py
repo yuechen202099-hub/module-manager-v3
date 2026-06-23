@@ -207,8 +207,8 @@ def test_postgres_classify_photo_persists_archive_fields() -> None:
 def test_postgres_installer_workload_uses_material_group_installation_address() -> None:
     photo = SimpleNamespace(
         id="photo-uuid",
-        raw_data={"created_at": "2026-06-22 08:10:00"},
-        source="scan-import",
+        raw_data={"client_completed_at": "2026-06-08T09:30:00", "upload_source": "construction-mobile"},
+        source="construction",
         created_at=datetime(2026, 6, 22, 8, 10),
         taken_at=None,
         sort_order=1,
@@ -258,6 +258,8 @@ def test_postgres_installer_workload_uses_material_group_installation_address() 
         for segment in item["two_hour_segments"]
         for address in segment["addresses"]
     ]
+    assert item["date"] == "2026-06-08"
+    assert item["start_time"] == "09:30"
     assert segment_addresses[0]["address"] == group.installation_address
 
 

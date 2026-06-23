@@ -1703,6 +1703,7 @@ async def construction_group_upload_batch(
     request: Request,
     actor: str = Form(default="constructor"),
     client_batch_id: str = Form(default=""),
+    client_completed_at: str = Form(default=""),
     collector: str = Form(default=""),
     module_asset_no: str = Form(default=""),
     photo_slots: list[str] = Form(default=[]),
@@ -1740,6 +1741,7 @@ async def construction_group_upload_batch(
                 "url": stored["url"],
                 "sha256": stored["sha256"],
                 "client_photo_id": client_photo_id,
+                "client_completed_at": client_completed_at,
                 "slot": slot,
                 "filename": filename,
                 "storage_type": stored["storage_type"],
@@ -1759,6 +1761,7 @@ async def construction_group_upload_batch(
             module_asset_no=module_asset_no,
             photos=records,
             creator=display_name_for_actor(request, actor),
+            client_completed_at=client_completed_at,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc

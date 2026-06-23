@@ -21,6 +21,7 @@ import {
   fetchConstructionTasks,
   fetchGroup,
   fetchUnmatchedRecords,
+  fetchUserAccounts,
   releaseConstructionTask,
   submitConstructionExceptionOrder,
   uploadConstructionBatch,
@@ -32,6 +33,7 @@ import type {
   ReviewPhoto,
   ReviewTask,
   UnmatchedRecord,
+  UserAccount,
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
@@ -69,6 +71,7 @@ type CacheDraft = {
   status?: string
   created_at?: string
   updated_at?: string
+  client_completed_at?: string
 }
 
 type PhotoRequirementSource = {
@@ -137,6 +140,7 @@ const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
 const fieldExceptionOrders = ref<ConstructionExceptionOrder[]>([])
 const unmatchedRecords = ref<UnmatchedRecord[]>([])
 const drafts = ref<CacheDraft[]>([])
+const accountUsers = ref<UserAccount[]>([])
 const taskPickerMode = ref<TaskPickerMode>('terminal')
 const selectedTaskId = ref('')
 const selectedItemKey = ref('')
@@ -185,12 +189,26 @@ const QUAGGA_READERS = [
   'codabar_reader',
 ]
 
+const userByUsername = computed(() => {
+  const map = new Map<string, UserAccount>()
+  for (const user of accountUsers.value) {
+    if (user.username && (!user.teamId || user.teamId === teamId.value)) map.set(user.username, user)
+  }
+  return map
+})
+
 const visibleTasks = computed(() => {
-  const source = tasks.value.filter((task) => task.constructionClaimedBy === actor.value || task.assignedConstructor === actor.value)
+  const source = isAdmin.value
+    ? tasks.value.filter((task) => taskIsAssigned(task) && taskProgress(task) < 100)
+    : tasks.value.filter((task) => task.constructionClaimedBy === actor.value || task.assignedConstructor === actor.value)
   return [...source].sort((left, right) => {
     const leftUploaded = Number(left.constructionUploadedCount || left.uploadedCount || 0)
     const rightUploaded = Number(right.constructionUploadedCount || right.uploadedCount || 0)
     if (leftUploaded !== rightUploaded) return rightUploaded - leftUploaded
+    if (isAdmin.value) {
+      const assigneeDiff = collator.compare(taskConstructorDisplayName(left), taskConstructorDisplayName(right))
+      if (assigneeDiff) return assigneeDiff
+    }
     return collator.compare(String(left.terminal || left.id), String(right.terminal || right.id))
   })
 })
@@ -210,19 +228,21 @@ const visibleUnmatchedTaskCards = computed(() =>
 )
 
 const taskPickerTitle = computed(() => {
+  if (isAdmin.value) return '已指派未完成终端'
   if (taskPickerMode.value === 'exception') return '异常任务'
   if (taskPickerMode.value === 'unmatched') return '未匹配任务'
   return '已指派终端'
 })
 
 const taskPickerSubtitle = computed(() => {
+  if (isAdmin.value) return '当前团队已指派施工员且完成度未达到 100% 的施工终端，只读查看进度'
   if (taskPickerMode.value === 'exception') return '被指派的异常组可直接进入施工处理'
   if (taskPickerMode.value === 'unmatched') return '现场确认未匹配地址、换表或项目外施工'
   return '只显示当前账号已被指派的施工终端'
 })
 
 const selectedTask = computed(() => visibleTasks.value.find((task) => task.id === selectedTaskId.value) || null)
-const inTaskPicker = computed(() => !selectedTask.value || taskPickerOpen.value)
+const inTaskPicker = computed(() => isAdmin.value || !selectedTask.value || taskPickerOpen.value)
 const canSubmitSelectedTask = computed(() => {
   const task = selectedTask.value
   if (!task || isAdmin.value) return false
@@ -372,7 +392,9 @@ const canUploadCurrent = computed(() => {
   if (missingRequiredSlots.value.length) return false
   return Boolean(Object.values(selectedFiles.value).some(Boolean) || activeOrder.value)
 })
-const canShowCurrentUpload = computed(() => groupFilter.value === 'cached' && Boolean(activeGroup.value && draftByGroupId.value.get(activeGroup.value.id)))
+const canShowCurrentUpload = computed(
+  () => !isAdmin.value && groupFilter.value === 'cached' && Boolean(activeGroup.value && draftByGroupId.value.get(activeGroup.value.id)),
+)
 
 const scannerTitle = computed(() => {
   if (scannerTarget.value === 'collector') return '扫描采集器'
@@ -516,7 +538,38 @@ function online() {
   return typeof navigator === 'undefined' ? true : navigator.onLine
 }
 
+function taskConstructorAccount(task: ReviewTask) {
+  return task.assignedConstructor || task.constructionClaimedBy || ''
+}
+
+function userDisplayName(username = '') {
+  const account = String(username || '').trim()
+  if (!account) return ''
+  const user = userByUsername.value.get(account)
+  return user?.name?.trim() || account
+}
+
+function taskConstructorDisplayName(task: ReviewTask) {
+  const account = taskConstructorAccount(task)
+  return task.assignedConstructorName || task.constructionClaimedByName || userDisplayName(account) || account || '未指派'
+}
+
+function taskConstructorAccountHint(task: ReviewTask) {
+  const account = taskConstructorAccount(task)
+  const name = taskConstructorDisplayName(task)
+  return account && account !== name ? `账号 ${account}` : ''
+}
+
+function taskRepresentativeAddress(task: ReviewTask) {
+  return task.address || task.addressSearchText || '未填写代表地址'
+}
+
+function taskIsAssigned(task: ReviewTask) {
+  return Boolean(taskConstructorAccount(task))
+}
+
 function taskStatus(task: ReviewTask) {
+  if (isAdmin.value && taskIsAssigned(task)) return '已指派'
   if (task.constructionClaimedBy === actor.value || task.assignedConstructor === actor.value) return '已指派给我'
   if (task.constructionClaimedBy || task.assignedConstructor) return `已指派 ${task.constructionClaimedBy || task.assignedConstructor}`
   if (task.constructionEnabled) return '待指派'
@@ -526,7 +579,7 @@ function taskStatus(task: ReviewTask) {
 function taskProgress(task: ReviewTask) {
   const total = Number(task.renovationCount || task.totalGroups || 0)
   const uploaded = Number(task.constructionUploadedCount || task.uploadedCount || 0)
-  return total ? Math.round((uploaded / total) * 100) : 0
+  return total ? Math.min(100, Math.round((uploaded / total) * 100)) : 0
 }
 
 function taskUnbuiltCount(task: ReviewTask) {
@@ -535,6 +588,10 @@ function taskUnbuiltCount(task: ReviewTask) {
   const total = Number(task.renovationCount || task.totalGroups || 0)
   const uploaded = Number(task.constructionUploadedCount || task.uploadedCount || 0)
   return Math.max(total - uploaded, 0)
+}
+
+function taskExceptionCount(task: ReviewTask) {
+  return Number(task.constructionExceptionCount || 0)
 }
 
 function logoutConstruction() {
@@ -1165,6 +1222,11 @@ function draftReady(draft: CacheDraft) {
   return Boolean((draft.groupId || draft.group_id) && draft.module_asset_no && missingSlotsForDraft(draft).length === 0)
 }
 
+function draftCompletedAt(draft: CacheDraft) {
+  if (!draftReady(draft)) return ''
+  return draft.client_completed_at || draft.updated_at || draft.created_at || ''
+}
+
 async function loadDraftIntoForm(group: MaterialGroup) {
   suspendDraftAutoPersist = true
   try {
@@ -1205,6 +1267,8 @@ async function loadDraftIntoForm(group: MaterialGroup) {
 
 function buildCurrentDraft(): CacheDraft {
   if (!activeGroup.value || !selectedTask.value) throw new Error('请先选择施工资料组')
+  const now = new Date().toISOString()
+  const previousDraft = draftByGroupId.value.get(String(activeGroup.value.id))
   const photos = Object.entries(selectedFiles.value)
     .map(([slot, file]) => {
       if (!file) return null
@@ -1217,7 +1281,7 @@ function buildCurrentDraft(): CacheDraft {
       }
     })
     .filter(Boolean) as DraftPhoto[]
-  return {
+  const draft: CacheDraft = {
     client_batch_id: draftKey(selectedTask.value.id, activeGroup.value.id),
     teamId: teamId.value,
     actor: actor.value,
@@ -1234,9 +1298,11 @@ function buildCurrentDraft(): CacheDraft {
     covered_slots: coveredSlotsForGroup(activeGroup.value),
     photos,
     status: 'queued',
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    created_at: previousDraft?.created_at || now,
+    updated_at: now,
   }
+  draft.client_completed_at = draftReady(draft) ? now : previousDraft?.client_completed_at || ''
+  return draft
 }
 
 async function persistCurrentDraft() {
@@ -1303,6 +1369,7 @@ async function uploadDraft(draft: CacheDraft) {
     const result = await uploadConstructionBatch(groupId, {
       actor: draft.actor || actor.value,
       clientBatchId: draft.client_batch_id,
+      clientCompletedAt: draftCompletedAt(draft),
       collector: draft.collector || '',
       moduleAssetNo: draft.module_asset_no || '',
       photos,
@@ -1415,6 +1482,12 @@ async function submitSelectedConstructionTask() {
 }
 
 async function selectTask(task: ReviewTask) {
+  if (isAdmin.value) {
+    selectedTaskId.value = task.id
+    taskPickerMode.value = 'terminal'
+    taskPickerOpen.value = true
+    return
+  }
   await flushCurrentDraftPersist()
   taskPickerMode.value = 'terminal'
   selectedTaskId.value = task.id
@@ -1428,7 +1501,7 @@ async function selectTask(task: ReviewTask) {
 }
 
 async function loadFieldTaskCards() {
-  if (!online()) return
+  if (isAdmin.value || !online()) return
   try {
     const [orders, unmatched] = await Promise.all([
       fetchConstructionExceptionOrders('', actor.value),
@@ -1503,13 +1576,26 @@ async function useSnapshot(taskId: string, reason = '') {
   if (!exists) tasks.value = [snapshot.task, ...tasks.value]
 }
 
+async function loadAccountUsers() {
+  if (!isAdmin.value) {
+    accountUsers.value = []
+    return
+  }
+  try {
+    accountUsers.value = await fetchUserAccounts()
+  } catch {
+    accountUsers.value = []
+  }
+}
+
 async function loadTasks() {
   loadingTasks.value = true
   errorMessage.value = ''
   try {
     await loadDrafts()
+    await loadAccountUsers()
     if (!online()) throw new Error('offline')
-    tasks.value = await fetchConstructionTasks(false)
+    tasks.value = await fetchConstructionTasks(false, isAdmin.value ? '' : actor.value)
     await loadFieldTaskCards()
     offlineMode.value = false
   } catch (error) {
@@ -1524,7 +1610,13 @@ async function loadTasks() {
       errorMessage.value = cacheError instanceof Error ? cacheError.message : '施工任务加载失败'
     }
   } finally {
-    if (taskPickerMode.value !== 'terminal') {
+    if (isAdmin.value) {
+      if (!selectedTaskId.value || !visibleTasks.value.some((task) => task.id === selectedTaskId.value)) {
+        selectedTaskId.value = visibleTasks.value[0]?.id || ''
+      }
+      taskPickerMode.value = 'terminal'
+      taskPickerOpen.value = true
+    } else if (taskPickerMode.value !== 'terminal') {
       selectedTaskId.value = ''
       taskPickerOpen.value = true
     } else if (!selectedTaskId.value || !visibleTasks.value.some((task) => task.id === selectedTaskId.value)) {
@@ -1533,7 +1625,7 @@ async function loadTasks() {
     }
     loadingTasks.value = false
   }
-  if (taskPickerMode.value === 'terminal' && selectedTaskId.value) await loadGroups()
+  if (!isAdmin.value && taskPickerMode.value === 'terminal' && selectedTaskId.value) await loadGroups()
 }
 
 async function loadGroups() {
@@ -1665,15 +1757,21 @@ onBeforeUnmount(() => {
   <section class="construction-v24" :class="{ 'is-work-mode': !inTaskPicker, 'is-task-mode': inTaskPicker }">
     <header class="construction-top panel">
       <div>
-        <p class="eyebrow">施工采集</p>
-        <h2>已指派终端采集</h2>
-        <p class="muted">扫码、拍照、本地缓存、上传与提交施工任务；指派请前往任务领取。</p>
+        <p class="eyebrow">{{ isAdmin ? '施工进度' : '施工采集' }}</p>
+        <h2>{{ isAdmin ? '已指派未完成终端' : '已指派终端采集' }}</h2>
+        <p class="muted">
+          {{
+            isAdmin
+              ? '查看当前团队已指派施工员且未完成的施工终端；指派与改派仍在任务领取。'
+              : '扫码、拍照、本地缓存、上传与提交施工任务；指派请前往任务领取。'
+          }}
+        </p>
       </div>
       <div class="top-actions">
         <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
         <el-button :icon="Refresh" :loading="loadingTasks || loadingGroups" @click="loadTasks">刷新</el-button>
         <el-button
-          v-if="groupFilter === 'cached' && cachedTaskDrafts.length"
+          v-if="!isAdmin && groupFilter === 'cached' && cachedTaskDrafts.length"
           type="primary"
           :icon="UploadFilled"
           :loading="uploading"
@@ -1760,18 +1858,31 @@ onBeforeUnmount(() => {
                 {{ taskStatus(task) }}
               </el-tag>
             </div>
-            <div class="task-metrics">
-              <span><em>改造数</em><strong>{{ task.renovationCount || task.totalGroups || 0 }}</strong></span>
-              <span><em>已上传</em><strong>{{ task.constructionUploadedCount || task.uploadedCount || 0 }}</strong></span>
-              <span><em>未施工</em><strong>{{ taskUnbuiltCount(task) }}</strong></span>
-              <span><em>异常</em><strong>{{ task.constructionExceptionCount || 0 }}</strong></span>
+            <div v-if="isAdmin" class="task-assignee">
+              <span>施工员</span>
+              <strong>{{ taskConstructorDisplayName(task) }}</strong>
+              <small v-if="taskConstructorAccountHint(task)">{{ taskConstructorAccountHint(task) }}</small>
             </div>
-            <div class="task-progress">
+            <div class="task-metrics">
+              <span><em>{{ isAdmin ? '总资料组数' : '改造数' }}</em><strong>{{ task.renovationCount || task.totalGroups || 0 }}</strong></span>
+              <span><em>{{ isAdmin ? '已上传/已完成' : '已上传' }}</em><strong>{{ task.constructionUploadedCount || task.uploadedCount || 0 }}</strong></span>
+              <span><em>{{ isAdmin ? '未施工数' : '未施工' }}</em><strong>{{ taskUnbuiltCount(task) }}</strong></span>
+              <span><em>{{ isAdmin ? '异常数' : '异常' }}</em><strong>{{ taskExceptionCount(task) }}</strong></span>
+            </div>
+            <div class="task-progress" :class="{ 'with-label': isAdmin }">
+              <span v-if="isAdmin" class="task-progress-label">完成度</span>
               <i :style="{ width: `${taskProgress(task)}%` }" />
               <b>{{ taskProgress(task) }}%</b>
             </div>
+            <div v-if="isAdmin" class="task-address">
+              <span>代表地址</span>
+              <strong>{{ taskRepresentativeAddress(task) }}</strong>
+            </div>
           </button>
-          <el-empty v-if="!loadingTasks && taskPickerMode === 'terminal' && !visibleTasks.length" description="暂无指派施工终端" />
+          <el-empty
+            v-if="!loadingTasks && taskPickerMode === 'terminal' && !visibleTasks.length"
+            :description="isAdmin ? '暂无已指派未完成终端' : '暂无指派施工终端'"
+          />
         </div>
       </aside>
 
@@ -2527,6 +2638,44 @@ onBeforeUnmount(() => {
   font-weight: 800;
 }
 
+.task-assignee,
+.task-address {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  border: 1px solid rgba(15, 127, 149, 0.12);
+  border-radius: 10px;
+  background: rgba(232, 246, 250, 0.52);
+  padding: 9px 10px;
+}
+
+.task-assignee span,
+.task-address span,
+.task-progress-label {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.task-assignee strong,
+.task-address strong {
+  min-width: 0;
+  color: #111827;
+  font-size: 14px;
+  font-weight: 820;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.task-assignee small {
+  min-width: 0;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
 .task-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2563,6 +2712,10 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.task-progress.with-label {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
 .task-progress::before {
   content: "";
   grid-column: 1;
@@ -2579,6 +2732,11 @@ onBeforeUnmount(() => {
   max-width: 100%;
   border-radius: 999px;
   background: #0f7f95;
+}
+
+.task-progress.with-label::before,
+.task-progress.with-label i {
+  grid-column: 2;
 }
 
 .task-progress b {

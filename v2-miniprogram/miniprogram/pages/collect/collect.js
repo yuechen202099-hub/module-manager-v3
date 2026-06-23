@@ -251,7 +251,8 @@ Page({
       exception_note: this.data.group?.exception_note || "",
       covered_slots: coveredSlotsForGroup(this.data.group),
       photos,
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      client_completed_at: new Date().toISOString()
     };
   },
 

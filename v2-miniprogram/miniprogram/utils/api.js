@@ -86,6 +86,7 @@ function uploadPhoto(groupId, draft, photo, onProgress) {
       formData: {
         actor: draft.actor,
         client_batch_id: draft.client_batch_id,
+        client_completed_at: draft.client_completed_at || draft.updated_at || "",
         collector: draft.collector || "",
         module_asset_no: draft.module_asset_no || "",
         photo_slots: photo.slot || "other",

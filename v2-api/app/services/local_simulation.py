@@ -2668,7 +2668,12 @@ def _photo_is_construction_upload(photo: dict[str, Any]) -> bool:
 
 def _photo_work_date_key(photo: dict[str, Any]) -> str:
     if _photo_is_construction_upload(photo):
-        return _date_key_from_value(photo.get("created_at")) or _date_key_from_value(photo.get("downloaded_at"))
+        return (
+            _date_key_from_value(photo.get("client_completed_at"))
+            or _date_key_from_value(photo.get("construction_completed_at"))
+            or _date_key_from_value(photo.get("created_at"))
+            or _date_key_from_value(photo.get("downloaded_at"))
+        )
     for key in (
         "scan_created_at",
         "source_created_at",
@@ -2687,7 +2692,12 @@ def _photo_work_date_key(photo: dict[str, Any]) -> str:
 
 def _photo_work_datetime(photo: dict[str, Any]) -> datetime | None:
     if _photo_is_construction_upload(photo):
-        return _datetime_from_value(photo.get("created_at")) or _datetime_from_value(photo.get("downloaded_at"))
+        return (
+            _datetime_from_value(photo.get("client_completed_at"))
+            or _datetime_from_value(photo.get("construction_completed_at"))
+            or _datetime_from_value(photo.get("created_at"))
+            or _datetime_from_value(photo.get("downloaded_at"))
+        )
     for key in (
         "scan_created_at",
         "source_created_at",
@@ -3897,6 +3907,7 @@ def upload_construction_group_batch(
     module_asset_no: str,
     photos: list[dict[str, Any]],
     creator: str = "",
+    client_completed_at: str = "",
 ) -> dict[str, Any]:
     actor = actor.strip() or "constructor"
     creator = creator.strip() or actor
@@ -3942,6 +3953,7 @@ def upload_construction_group_batch(
             "asset_type": "",
             "creator": creator,
             "created_at": now_iso(),
+            "client_completed_at": client_completed_at,
             "has_image": True,
             "image_file_id": "",
             "image_url": url,
@@ -3952,6 +3964,7 @@ def upload_construction_group_batch(
             {
                 "client_batch_id": client_batch_id,
                 "client_photo_id": client_photo_id,
+                "client_completed_at": client_completed_at,
                 "sha256": sha256,
                 "construction_slot": slot,
                 "construction_slot_label": PHOTO_CATEGORIES.get(slot_category, PHOTO_CATEGORIES["other"]),

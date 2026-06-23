@@ -692,6 +692,30 @@ Installer KPI needs to infer daily work start/end times and effective working du
 - `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup PURE/chunk-size warnings.
 - `.venv\Scripts\python.exe scripts\verify_vue_migration_gate.py --strict-native`: passed.
 
+## 2026-06-23 - V3.0.0-rc1 construction completion time
+
+### Reason
+
+Construction completion time must represent when the field-side data became complete, not when the server later received an upload. This matters when a constructor works offline and uploads cached groups after network recovery.
+
+### Fix
+
+- Web construction drafts now keep `client_completed_at` once a draft is valid: module number exists and required slots `before_box`, `module_meter`, and `after_box` are present.
+- Web and mini-program upload payloads send `client_completed_at`.
+- Backend `upload-batch` accepts optional `client_completed_at`, stores it in photo raw metadata, and keeps upload compatible for old clients.
+- KPI, daily workload, two-hour time segments, and efficiency calculations prefer `client_completed_at`; malformed or missing values fall back to server upload time.
+- No database schema change and no Alembic migration.
+
+### Validation
+
+- `python -m py_compile v2-api\app\api\routes\local_test.py v2-api\app\services\local_simulation.py v2-api\app\services\state_repository.py`: passed.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -q`: `45 passed, 1 warning`.
+- `.venv\Scripts\python.exe -m pytest v2-api\tests\test_state_repository.py -q`: `8 passed`.
+- `vue-tsc --noEmit`: passed.
+- `powershell -ExecutionPolicy Bypass -File scripts\build-vue-shell.ps1`: passed with existing Rollup warnings.
+- `python scripts\verify_vue_migration_gate.py --strict-native`: passed.
+- `git diff --check`: passed with CRLF conversion warnings only.
+
 ## 2026-06-22 - V2.6.1 installer KPI PostgreSQL field hotfix
 
 ### Reason

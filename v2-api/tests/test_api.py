@@ -570,6 +570,7 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
         data={
             "actor": "constructor",
             "client_batch_id": "batch-api-1",
+            "client_completed_at": "bad-client-time",
             "collector": "collector-api",
             "module_asset_no": "module-api",
             "photo_slots": ["before_box", "after_box"],
@@ -615,6 +616,7 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
         data={
             "actor": "constructor",
             "client_batch_id": "batch-api-2",
+            "client_completed_at": "2026-06-08T09:30:00",
             "collector": "collector-api-2",
             "module_asset_no": "module-api-2",
             "photo_slots": ["before_box", "after_box", "module_meter", "collector_barcode"],
@@ -631,6 +633,13 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     complete_payload = complete_upload.json()["data"]
     assert complete_payload["added"] == 4
     assert complete_payload["group"]["status"] == "pending"
+    workload = client.get(f"/local-test/installers/{constructor_name}/daily-workload", headers=admin_headers)
+    assert workload.status_code == 200
+    client_day = next(item for item in workload.json()["data"]["items"] if item["date"] == "2026-06-08")
+    assert client_day["group_count"] == 1
+    assert client_day["completion_count"] == 1
+    assert client_day["start_time"] == "09:30"
+    assert client_day["end_time"] == "09:30"
 
     client.post(
         f"/local-test/tasks/{task['id']}/claim",

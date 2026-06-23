@@ -70,6 +70,7 @@ type BackendTask = {
   upload_rate?: number
   reviewed_count?: number
   unreviewed_count?: number
+  exception_groups?: number
   review_rate?: number
   construction_enabled?: boolean
   construction_claimed_by?: string
@@ -413,7 +414,7 @@ function mapTask(raw: BackendTask): ReviewTask {
     assignedConstructorName: raw.assigned_constructor_name || raw.construction_claimed_by_name || '',
     constructionUploadedCount: Number(raw.construction_uploaded_count || raw.uploaded_count || 0),
     constructionUnbuiltCount: Number(raw.construction_unbuilt_count || Math.max(renovationCount - uploadedCount, 0)),
-    constructionExceptionCount: Number(raw.construction_exception_count || 0),
+    constructionExceptionCount: Number(raw.construction_exception_count || raw.exception_groups || 0),
   }
 }
 
@@ -824,10 +825,12 @@ export async function returnGroupToException(
   }
 }
 
-export async function fetchConstructionTasks(includeClosed = false): Promise<ReviewTask[]> {
-  const data = await api<{ items: BackendTask[] }>(
-    `/local-test/construction/tasks?actor=${encodeURIComponent(currentActor())}&include_closed=${includeClosed ? 'true' : 'false'}`,
-  )
+export async function fetchConstructionTasks(includeClosed = false, actor = currentActor()): Promise<ReviewTask[]> {
+  const query = new URLSearchParams({
+    include_closed: includeClosed ? 'true' : 'false',
+  })
+  if (actor) query.set('actor', actor)
+  const data = await api<{ items: BackendTask[] }>(`/local-test/construction/tasks?${query.toString()}`)
   return (data.items || []).map(mapTask)
 }
 
@@ -968,6 +971,7 @@ export async function uploadConstructionBatch(
   const form = new FormData()
   form.append('actor', payload.actor)
   form.append('client_batch_id', payload.clientBatchId)
+  if (payload.clientCompletedAt) form.append('client_completed_at', payload.clientCompletedAt)
   form.append('collector', payload.collector)
   form.append('module_asset_no', payload.moduleAssetNo)
   for (const photo of payload.photos) {

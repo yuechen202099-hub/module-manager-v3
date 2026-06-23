@@ -124,7 +124,11 @@ def _photo_is_construction_upload(photo: Photo) -> bool:
 def _photo_work_date_key(photo: Photo) -> str:
     raw = photo.raw_data or {}
     if _photo_is_construction_upload(photo):
-        return _date_key_from_value(photo.created_at)
+        return (
+            _date_key_from_value(raw.get("client_completed_at"))
+            or _date_key_from_value(raw.get("construction_completed_at"))
+            or _date_key_from_value(photo.created_at)
+        )
     for key in (
         "scan_created_at",
         "source_created_at",
@@ -146,7 +150,12 @@ def _photo_work_date_key(photo: Photo) -> str:
 def _photo_work_datetime(photo: Photo) -> datetime | None:
     raw = photo.raw_data or {}
     if _photo_is_construction_upload(photo):
-        return _datetime_from_value(photo.created_at) or _datetime_from_value(raw.get("downloaded_at"))
+        return (
+            _datetime_from_value(raw.get("client_completed_at"))
+            or _datetime_from_value(raw.get("construction_completed_at"))
+            or _datetime_from_value(photo.created_at)
+            or _datetime_from_value(raw.get("downloaded_at"))
+        )
     for key in (
         "scan_created_at",
         "source_created_at",
@@ -884,6 +893,7 @@ class StateRepository(ABC):
         module_asset_no: str,
         photos: list[dict[str, Any]],
         creator: str = "",
+        client_completed_at: str = "",
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1327,6 +1337,7 @@ class JsonStateRepository(StateRepository):
         module_asset_no: str,
         photos: list[dict[str, Any]],
         creator: str = "",
+        client_completed_at: str = "",
     ) -> dict[str, Any]:
         return local_simulation.upload_construction_group_batch(
             group_id,
@@ -1336,6 +1347,7 @@ class JsonStateRepository(StateRepository):
             module_asset_no=module_asset_no,
             photos=photos,
             creator=creator,
+            client_completed_at=client_completed_at,
         )
 
     def build_task_detail_export(self, task_id: int) -> bytes:
@@ -3468,6 +3480,7 @@ class PostgresStateRepository(StateRepository):
         module_asset_no: str,
         photos: list[dict[str, Any]],
         creator: str = "",
+        client_completed_at: str = "",
     ) -> dict[str, Any]:
         actor = actor.strip() or "constructor"
         creator = creator.strip() or actor
@@ -3478,6 +3491,9 @@ class PostgresStateRepository(StateRepository):
             task = session.scalar(select(Task).where(Task.id == group.task_id).with_for_update())
             if task is None or task.construction_claimed_by != actor:
                 raise ValueError("Construction task must be claimed by the current constructor before upload")
+            if client_completed_at:
+                for photo in photos:
+                    photo.setdefault("client_completed_at", client_completed_at)
             result = self._add_photo_records_to_group(
                 session,
                 group,

@@ -103,14 +103,20 @@ function loadGroupDraft(taskId, groupId) {
 
 function saveGroupDraft(taskId, groupId, draft) {
   const drafts = loadGroupDrafts();
-  drafts[groupDraftKey(taskId, groupId)] = {
+  const now = new Date().toISOString();
+  const next = {
     ...draft,
     teamId: draft.teamId || currentTeamId(),
     actor: draft.actor || currentActor(),
     taskId,
     groupId,
-    updated_at: new Date().toISOString()
+    created_at: draft.created_at || now,
+    updated_at: now
   };
+  if (!cacheMissingFields(groupDraftToUploadDraft(next)).length) {
+    next.client_completed_at = now;
+  }
+  drafts[groupDraftKey(taskId, groupId)] = next;
   delete drafts[legacyGroupDraftKey(taskId, groupId)];
   saveGroupDrafts(drafts);
 }
@@ -163,6 +169,8 @@ function groupDraftToUploadDraft(draft) {
     covered_slots: draft.covered_slots || [],
     photos,
     kind: "group-draft",
+    created_at: draft.created_at,
+    client_completed_at: draft.client_completed_at || draft.updated_at || "",
     updated_at: draft.updated_at
   };
 }

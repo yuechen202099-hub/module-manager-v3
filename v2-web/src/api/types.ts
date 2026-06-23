@@ -165,6 +165,7 @@ export type ConstructionUploadPhoto = {
 export type ConstructionUploadPayload = {
   actor: string
   clientBatchId: string
+  clientCompletedAt?: string
   collector: string
   moduleAssetNo: string
   photos: ConstructionUploadPhoto[]
