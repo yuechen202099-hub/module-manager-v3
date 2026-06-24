@@ -139,11 +139,12 @@ const cockpitFlow = computed(() => [
   { label: '待审阅', value: terminalCockpit.value.reviewing, hint: '仍有未审照片' },
   { label: '已闭环', value: terminalCockpit.value.archived, hint: '终端审阅完成' },
 ])
+const exceptionRiskTotal = computed(() => summary.value.exceptionGroups)
 const cockpitSignals = computed(() => [
   { label: '审阅领取', value: terminalCockpit.value.claimed, caption: '已被审阅员持有的终端', tone: 'info' },
   { label: '施工指派', value: terminalCockpit.value.constructionAssigned, caption: '已指派施工员的终端', tone: 'success' },
   { label: '未施工未扫码', value: summary.value.unconstructedGroups, caption: '需要施工采集推进', tone: 'warning' },
-  { label: '异常与缺照', value: summary.value.exceptionGroups + summary.value.incompleteGroups, caption: '需要复核或补采', tone: 'danger' },
+  { label: '异常与缺照', value: exceptionRiskTotal.value, caption: '需要复核或补采', tone: 'danger' },
 ])
 const reviewRingStyle = computed(() => ringStyle(archiveRate.value, '#0a72d8', '#e8eef5'))
 const uploadRingStyle = computed(() => ringStyle(terminalCockpit.value.avgUploadRate, '#0f7892', '#e8eef5'))
@@ -620,7 +621,7 @@ function exportInstallerWorkloadCsv() {
 }
 
 function exceptionReasonText(row: MaterialGroup) {
-  return row.exceptionReasons?.length ? row.exceptionReasons.join('；') : row.exceptionNote || '异常资料组'
+  return row.exceptionReasons?.length ? row.exceptionReasons.join('；') : row.exceptionNote || '异常与缺照'
 }
 
 function exceptionOrderFor(row: MaterialGroup) {
@@ -638,7 +639,7 @@ async function loadExceptionRows() {
       if (order?.assignedTo) exceptionAssignDraft[group.id] = order.assignedTo
     }
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '异常资料组加载失败')
+    ElMessage.error(error instanceof Error ? error.message : '异常与缺照加载失败')
   } finally {
     exceptionLoading.value = false
   }
@@ -671,7 +672,7 @@ function exportExceptionGroupCsv() {
     }),
   ]
   const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}`
-  downloadText(`异常资料组-${new Date().toISOString().slice(0, 10)}.csv`, csv)
+  downloadText(`异常与缺照-${new Date().toISOString().slice(0, 10)}.csv`, csv)
 }
 
 async function assignExceptionGroup(row: MaterialGroup) {
@@ -693,12 +694,12 @@ async function assignExceptionGroup(row: MaterialGroup) {
       orderId = result.orderId || ''
     }
     if (!orderId) throw new Error('异常工单创建失败')
-    order = await assignConstructionExceptionOrder(orderId, constructor, '项目看板派发异常资料组')
+    order = await assignConstructionExceptionOrder(orderId, constructor, '项目看板派发异常与缺照')
     exceptionAssignDraft[row.id] = order.assignedTo || constructor
     ElMessage.success(`已派发给 ${constructor}`)
     await Promise.all([loadExceptionRows(), loadBoard()])
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '派发异常资料组失败')
+    ElMessage.error(error instanceof Error ? error.message : '派发异常与缺照失败')
   } finally {
     exceptionAssigningGroupId.value = ''
   }
@@ -710,7 +711,7 @@ async function unassignExceptionGroup(row: MaterialGroup) {
   if (!order?.id) return
   exceptionAssigningGroupId.value = row.id
   try {
-    await unassignConstructionExceptionOrder(order.id, '项目看板取消异常资料组派发')
+    await unassignConstructionExceptionOrder(order.id, '项目看板取消异常与缺照派发')
     exceptionAssignDraft[row.id] = ''
     ElMessage.success('已取消派发')
     await Promise.all([loadExceptionRows(), loadBoard()])
@@ -921,8 +922,8 @@ onUnmounted(() => {
         <strong class="metric-value">{{ summary.approvedGroups }}</strong>
       </article>
       <article class="metric">
-        <span class="metric-label">异常组</span>
-        <strong class="metric-value">{{ summary.exceptionGroups }}</strong>
+        <span class="metric-label">异常/缺照</span>
+        <strong class="metric-value">{{ exceptionRiskTotal }}</strong>
       </article>
     </div>
 
@@ -945,23 +946,19 @@ onUnmounted(() => {
             <strong>{{ summary.scanUnmatched }}</strong>
             <small>点击查看清单</small>
           </button>
-        <button class="risk-card risk-card-button bad" type="button" @click="openExceptionDialog">
-          <span>异常资料组</span>
-          <strong>{{ summary.exceptionGroups }}</strong>
-          <small>查看并派发</small>
-        </button>
-        <button class="risk-card risk-card-button warn" type="button" @click="openReplacementDialog">
-          <span>换表清单</span>
-          <strong>{{ replacementRows.length || '查看' }}</strong>
-          <small>人工换表记录</small>
-        </button>
-        <article class="risk-card warn">
+          <button class="risk-card risk-card-button bad" type="button" @click="openExceptionDialog">
+            <span>异常与缺照</span>
+            <strong>{{ exceptionRiskTotal }}</strong>
+            <small>含缺照，查看并派发</small>
+          </button>
+          <button class="risk-card risk-card-button warn" type="button" @click="openReplacementDialog">
+            <span>换表清单</span>
+            <strong>{{ replacementRows.length || '查看' }}</strong>
+            <small>人工换表记录</small>
+          </button>
+          <article class="risk-card warn">
             <span>未施工未扫码</span>
             <strong>{{ summary.unconstructedGroups }}</strong>
-          </article>
-          <article class="risk-card warn">
-            <span>缺照片</span>
-            <strong>{{ summary.incompleteGroups }}</strong>
           </article>
         </div>
       </section>
@@ -1242,11 +1239,11 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="exceptionDialogVisible" title="异常资料组" width="1120px" class="unmatched-board-dialog">
+    <el-dialog v-model="exceptionDialogVisible" title="异常与缺照" width="1120px" class="unmatched-board-dialog">
       <div class="unmatched-dialog-head">
         <div class="unmatched-dialog-stats">
           <article>
-            <span>当前异常</span>
+            <span>异常/缺照</span>
             <strong>{{ exceptionDialogStats.total }}</strong>
           </article>
           <article>
@@ -1277,7 +1274,7 @@ onUnmounted(() => {
         class="claim-alert"
         type="info"
         :closable="false"
-        title="异常资料组可直接派发给施工员。施工员会在施工采集页看到异常任务卡，进入后只补充缺失或错误的数据。"
+        title="异常与缺照记录可直接派发给施工员。施工员会在施工采集页看到异常任务卡，进入后只补充缺失或错误的数据。"
       />
       <el-table v-loading="exceptionLoading" :data="filteredExceptionRows" height="520" size="small">
         <el-table-column type="index" width="52" label="#" />

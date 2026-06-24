@@ -3427,4 +3427,39 @@ Date: 2026-06-23
   - 生产备份：`/opt/module-manager-v2/backups/runtime/20260624-011733`，包含 `local_state.json`、`users.json`、`env.backup`、`uploads.tar.gz` 和 `postgres.dump`。
   - 发布后健康检查通过：`module-manager-v2.service=active`、`nginx=active`、磁盘使用率 27%。
   - 页面探测：`/health`、`/login`、`/project-board`、`/task-hall`、`/construction`、`/vue/assets/index-Bvvbn8bU.js`、`/vue/assets/ProjectBoardView-uva5WQkn.js` 返回 200；`/openapi.json` 返回预期 404；`https://www.sgcc.online/login` 返回 200。
-  - 新接口内部校验：`list_replacement_records(limit=3)` 返回 `total=5`、`sample_count=3`。
+- 新接口内部校验：`list_replacement_records(limit=3)` 返回 `total=5`、`sample_count=3`。
+
+# V3.0.5 - Project Board Exception And Missing Photo Merge
+
+- 日期：2026-06-24
+- 分支：`ops/OPS-20260624-001-meter-replace-dispatch`
+- 页面/模块：项目看板、异常与缺照处理弹窗、Vue 静态构建产物
+- 任务记录：`ops-v3/tasks/V3.0.2/2026-06-24-merge-exception-missing-photo-card.md`
+
+## Change
+
+- 项目看板“项目进度”区将“异常资料组”和“缺照片”合并为“异常与缺照”入口。
+- 合并入口沿用异常清单接口口径，避免缺照记录在看板上重复统计。
+- 顶部指标、弹窗标题、统计标签、导出 CSV 文件名和派发备注文案同步为“异常与缺照”。
+- 应用版本从 V3.0.4 升级到 V3.0.5。
+
+## Files
+
+- `v2-web/src/views/ProjectBoardView.vue`
+- `scripts/verify_project_board_exception_merge.py`
+- `v2-api/app/static/vue/`
+- 版本号相关文件：`v2-api/app/main.py`、`v2-api/app/services/ops_status.py`、`v2-api/pyproject.toml`、`v2-api/tests/test_api.py`、`v2-web/package.json`、`v2-web/index.html`、`v2-web/src/components/AppLayout.vue`、`v2-web/src/layouts/AppLayout.vue`、`v2-web/src/views/LoginView.vue`
+
+## Validation
+
+- `python scripts\verify_project_board_exception_merge.py`：通过。
+- `python -m py_compile v2-api\app\main.py v2-api\app\services\ops_status.py`：通过。
+- `python scripts\verify_vue_migration_gate.py`：通过。
+- `npm run build`：通过。
+- `python scripts\verify-static-pages.py`：通过。
+- `C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -m pytest tests\test_api.py`：46 passed，1 个 Starlette/httpx deprecation warning。
+- `git diff --check`：通过，仅有 Git LF/CRLF 工作区提示。
+
+## Production Result
+
+- 待发布。
