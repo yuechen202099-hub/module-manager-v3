@@ -1,6 +1,6 @@
 # 看板推送刷新与任务领取加载加速
 
-- 状态：已验证，待发布
+- 状态：已发布
 - 日期：2026-06-24
 - 规则版本：Rules v1
 - 应用基线：V3.0.2
@@ -54,6 +54,11 @@
   - `http://127.0.0.1:8020/project-board?qa=v308-board-single`：V3.0.8 渲染，项目驾驶舱和终端总数可见，控制台无 error/warn，无 `Invalid access token`。
   - `http://127.0.0.1:8020/claim-tasks?qa=v308-claim-single`：V3.0.8 渲染，任务领取和终端任务可见，控制台无 error/warn，无 `Invalid access token`。
 - `git diff --check`：通过。
+- 发布：
+  - 提交/标签：`1c8dcd2` / `v3.0.8`。
+  - 生产 release：`/opt/module-manager-v2/releases/v3.0.8-20260624_121441-1c8dcd2`。
+  - 生产备份：`/opt/module-manager-v2/backups/runtime/20260624-121441-v3.0.8`，记录上一版 `/opt/module-manager-v2/releases/v3.0.7-20260624_114155-eba4a02`。
+  - 生产检查：`/health` ok，`/project-board` 200，`/claim-tasks` 200，`/vue/index.html` 200 且标题为 `Module Manager V3.0.8`；`module-manager-v2.service` 与 `nginx` 均 active。
 
 ## 风险/回滚
 

@@ -4,7 +4,7 @@
 
 - 时间：2026-06-24
 - 分支：`ops/OPS-20260624-001-meter-replace-dispatch`
-- 状态：已验证，待发布
+- 状态：已发布
 - 改动内容：
   - 新增 `/local-test/events` 服务端推送接口，每 15 分钟发送 `board-refresh`；项目看板使用带认证头的流式 `fetch` 订阅，断线退回 15 分钟轮询。
   - 新增 `/local-test/tasks/status` 轻量任务状态接口，返回版本和聚合数量，不返回地址搜索全文。
@@ -21,6 +21,11 @@
   - `vite build`：通过。
   - `pytest v2-api/tests/test_api.py`：46 passed，1 个 Starlette/httpx2 迁移警告。
   - Browser 检查：V3.0.8 的 `/project-board` 和 `/claim-tasks` 渲染通过，控制台无 error/warn。
+- 发布：
+  - 提交/标签：`1c8dcd2` / `v3.0.8`。
+  - 生产 release：`/opt/module-manager-v2/releases/v3.0.8-20260624_121441-1c8dcd2`。
+  - 生产备份：`/opt/module-manager-v2/backups/runtime/20260624-121441-v3.0.8`。
+  - 生产检查：`/health` ok，`/project-board` 200，`/claim-tasks` 200，`/vue/index.html` 200 且标题为 `Module Manager V3.0.8`；`module-manager-v2.service` 与 `nginx` 均 active。
 
 # V3.0.7 - 按钮整合与首屏加载优化
 
