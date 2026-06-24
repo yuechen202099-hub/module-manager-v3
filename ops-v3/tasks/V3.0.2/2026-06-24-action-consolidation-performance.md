@@ -1,6 +1,6 @@
 # 按钮整合与页面首屏加载优化
 
-- 状态：已验证，待发布
+- 状态：已发布
 - 日期：2026-06-24
 - 规则版本：Rules v1
 - 应用基线：V3.0.2
@@ -53,6 +53,18 @@
   - `http://127.0.0.1:8020/claim-tasks?qa=v307`：V3.0.7 渲染，卡片“更多”菜单包含导出终端包、导出明细、改派施工、暂存释放、导出范围切换，控制台无错误。
   - `http://127.0.0.1:8020/task-hall?qa=v307`：V3.0.7 渲染，危险动作未平铺，“更多”菜单包含恢复待审、回退未施工、转异常工单、删除当前图、导出异常表计，控制台无错误。
 - `git diff --check`：通过。
+
+## 发布结果
+
+- 发布提交/标签：`eba4a02` / `v3.0.7`。
+- 生产备份：`/opt/module-manager-v2/backups/runtime/20260624-033723`。
+- 生产 release：`/opt/module-manager-v2/releases/v3.0.7-20260624_114155-eba4a02`。
+- 生产服务：`module-manager-v2.service` active，`nginx` active。
+- 生产页面：
+  - `/claim-tasks`：HTTP 200。
+  - `/task-hall`：HTTP 200。
+  - `/vue/index.html`：HTTP 200，标题为 `Module Manager V3.0.7`。
+- 生产保护：未覆盖 `/opt/module-manager-v2/.env`，未覆盖 `/opt/module-manager-v2/data`，保留 current 的 `v2-api/app/static/uploads`。
 
 ## 风险/回滚
 

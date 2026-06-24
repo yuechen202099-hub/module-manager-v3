@@ -4,7 +4,7 @@
 
 - 时间：2026-06-24
 - 分支：`ops/OPS-20260624-001-meter-replace-dispatch`
-- 状态：已验证，待发布
+- 状态：已发布
 - 改动内容：
   - `/claim-tasks` 终端卡片只保留领取/进入审阅为主动作；导出终端包、导出明细、指派/改派施工、暂存释放、导出范围切换收进“更多”菜单。
   - `/task-hall` 审阅底部操作区拆成常用动作和主归档动作；恢复待审、回退未施工、转异常工单、删除当前图、导出异常表计收进“更多”菜单。
@@ -20,6 +20,11 @@
   - `python -m pytest v2-api/tests/test_api.py`：46 passed，1 个第三方 deprecation warning。
   - Browser 检查：V3.0.7 的 `/claim-tasks` 和 `/task-hall` 菜单交互通过，控制台无错误。
   - `git diff --check`：通过。
+- 发布：
+  - 提交/标签：`eba4a02` / `v3.0.7`。
+  - 备份：`/opt/module-manager-v2/backups/runtime/20260624-033723`。
+  - release：`/opt/module-manager-v2/releases/v3.0.7-20260624_114155-eba4a02`。
+  - 生产检查：`/claim-tasks` 200，`/task-hall` 200，`/vue/index.html` 200 且标题为 `Module Manager V3.0.7`；`module-manager-v2.service` 与 `nginx` 均 active。
 
 > 目的：避免重复修改同一页面、避免靠记忆判断状态。后续每完成一个修改，都必须在这里记录文件、目标、状态和验证结果。
 
