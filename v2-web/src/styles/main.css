@@ -944,6 +944,11 @@ button {
   white-space: nowrap;
 }
 
+.native-claim-page .task-card-actions .el-dropdown,
+.native-claim-page .task-card-actions .el-dropdown .el-button {
+  width: 100%;
+}
+
 .native-review-page {
   display: grid;
   grid-template-columns: 244px 330px minmax(600px, 1fr);

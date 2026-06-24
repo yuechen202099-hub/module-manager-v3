@@ -54,7 +54,7 @@ const shellJobTone = ref<'info' | 'success' | 'danger'>('info')
 onMounted(() => {
   void auth.hydrateFromLegacySession()
   if (!workspace.projects.length) {
-    void workspace.bootstrap()
+    void workspace.loadProjects()
   }
   window.addEventListener('message', handleShellMessage)
   window.addEventListener('storage', handleStorageRefresh)
@@ -252,7 +252,7 @@ async function startShellScanImport(message: { file?: File; filename?: string })
   <div class="app-shell" :class="{ embedded: isEmbedded, 'construction-route': isConstructionRoute }">
     <header v-if="!isEmbedded" class="topbar">
       <div class="topbar-brand">
-        <span class="brand-mark">V3.0.6</span>
+        <span class="brand-mark">V3.0.7</span>
         <div class="brand-copy">
           <strong>模块更换项目管理器</strong>
           <span>{{ workspace.activeProject?.name || '工程审阅与施工采集工作台' }}</span>

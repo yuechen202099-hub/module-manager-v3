@@ -34,6 +34,9 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
   },
   actions: {
+    async loadProjects() {
+      this.projects = await services.fetchProjects()
+    },
     async bootstrap() {
       this.loading = true
       try {

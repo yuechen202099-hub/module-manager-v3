@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Download, FolderOpened, Refresh, Search, Unlock, UserFilled } from '@element-plus/icons-vue'
+import { MoreFilled, Refresh, Search, Unlock } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -37,6 +37,12 @@ const exportProgressPercent = ref(0)
 const exportScopeByTask = ref<Record<string, 'reviewed' | 'all'>>({})
 let refreshInterval = 0
 let refreshTimer = 0
+
+type TaskMoreAction = 'scope-reviewed' | 'scope-all' | 'export-terminal' | 'export-detail' | 'assign' | 'release'
+type TaskMoreCommand = {
+  action: TaskMoreAction
+  taskId: string
+}
 
 const actor = computed(() => auth.user?.username || auth.user?.id || currentActor())
 const isAdmin = computed(() => auth.user?.role === 'admin' || auth.user?.roles?.includes('admin'))
@@ -340,6 +346,37 @@ async function exportTerminalPackage(task: ReviewTask) {
   }
 }
 
+async function handleTaskMoreCommand(command: string | number | TaskMoreCommand) {
+  if (typeof command !== 'object' || command === null) return
+  const task = tasks.value.find((item) => item.id === command.taskId)
+  if (!task) return
+  if (command.action === 'scope-reviewed') {
+    exportScopeByTask.value[task.id] = 'reviewed'
+    ElMessage.success('导出范围已切换为已归档')
+    return
+  }
+  if (command.action === 'scope-all') {
+    exportScopeByTask.value[task.id] = 'all'
+    ElMessage.success('导出范围已切换为全部')
+    return
+  }
+  if (command.action === 'export-terminal') {
+    await exportTerminalPackage(task)
+    return
+  }
+  if (command.action === 'export-detail') {
+    await exportTaskDetailRow(task)
+    return
+  }
+  if (command.action === 'assign') {
+    await openAssignDialog(task)
+    return
+  }
+  if (command.action === 'release') {
+    await release(task)
+  }
+}
+
 function openReview(task: ReviewTask) {
   if (task.claimedBy && task.claimedBy !== actor.value && !isAdmin.value) return
   void router.push('/task-hall')
@@ -486,44 +523,7 @@ onUnmounted(() => {
             <span v-if="task.constructionExceptionCount">异常 {{ task.constructionExceptionCount }}</span>
           </div>
 
-          <div v-if="isAdmin" class="task-export-row" @click.stop>
-            <ElButton
-              size="small"
-              plain
-              :icon="Download"
-              :loading="exportingTaskId === `detail-${task.id}`"
-              @click="exportTaskDetailRow(task)"
-            >
-              导出明细
-            </ElButton>
-            <ElSelect v-model="exportScopeByTask[task.id]" class="export-scope-select" size="small" aria-label="终端包导出范围">
-              <ElOption label="已归档" value="reviewed" />
-              <ElOption label="全部" value="all" />
-            </ElSelect>
-            <ElButton
-              size="small"
-              type="primary"
-              plain
-              :icon="FolderOpened"
-              :loading="exportingTaskId === `terminal-${task.id}`"
-              @click="exportTerminalPackage(task)"
-            >
-              导出终端包
-            </ElButton>
-          </div>
-
           <div class="task-card-actions" @click.stop>
-            <ElButton
-              v-if="isAdmin"
-              size="small"
-              plain
-              :icon="UserFilled"
-              :loading="assigningTaskId === task.id"
-              @click="openAssignDialog(task)"
-            >
-              {{ task.assignedConstructor || task.constructionClaimedBy ? '改派施工' : '指派施工' }}
-            </ElButton>
-            <ElButton size="small" :disabled="!task.claimedBy && !isAdmin" @click="release(task)">暂存释放</ElButton>
             <ElButton
               size="small"
               type="primary"
@@ -540,6 +540,30 @@ onUnmounted(() => {
             >
               进入审阅
             </ElButton>
+            <ElDropdown
+              v-if="isAdmin"
+              trigger="click"
+              placement="bottom-end"
+              @command="handleTaskMoreCommand"
+            >
+              <ElButton size="small" plain :icon="MoreFilled" :loading="assigningTaskId === task.id || exportingTaskId.endsWith(`-${task.id}`)">
+                更多
+              </ElButton>
+              <template #dropdown>
+                <ElDropdownMenu>
+                  <ElDropdownItem :command="{ action: 'export-terminal', taskId: task.id }">
+                    导出终端包（{{ exportScopeByTask[task.id] === 'all' ? '全部' : '已归档' }}）
+                  </ElDropdownItem>
+                  <ElDropdownItem :command="{ action: 'export-detail', taskId: task.id }">导出明细</ElDropdownItem>
+                  <ElDropdownItem divided :command="{ action: 'assign', taskId: task.id }">
+                    {{ task.assignedConstructor || task.constructionClaimedBy ? '改派施工' : '指派施工' }}
+                  </ElDropdownItem>
+                  <ElDropdownItem :command="{ action: 'release', taskId: task.id }" :disabled="!task.claimedBy && !isAdmin">暂存释放</ElDropdownItem>
+                  <ElDropdownItem divided :command="{ action: 'scope-reviewed', taskId: task.id }">导出范围：已归档</ElDropdownItem>
+                  <ElDropdownItem :command="{ action: 'scope-all', taskId: task.id }">导出范围：全部</ElDropdownItem>
+                </ElDropdownMenu>
+              </template>
+            </ElDropdown>
           </div>
         </article>
       </div>

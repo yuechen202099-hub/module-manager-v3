@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Finished, Refresh, Select } from '@element-plus/icons-vue'
+import { Finished, MoreFilled, Refresh, Select } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
@@ -88,6 +88,9 @@ const failedThumbnailPhotoIds = ref<Set<string>>(new Set())
 const imagePreloadCache = new Set<string>()
 let archiveQueue = Promise.resolve()
 let backgroundRefreshTimer: number | null = null
+let fieldTasksWarmupTimer = 0
+let fieldTasksLoaded = false
+let fieldTasksRequest: Promise<void> | null = null
 let lastInteractionAt = Date.now()
 let groupRequestSeq = 0
 let imageRequestSeq = 0
@@ -549,7 +552,11 @@ async function loadTasks() {
   errorMessage.value = ''
   try {
     tasks.value = await fetchTasks()
-    void loadFieldTasks()
+    if (activeTaskMode.value === 'terminal') {
+      scheduleFieldTasksWarmup()
+    } else {
+      await loadFieldTasks()
+    }
     if (activeTaskMode.value !== 'terminal') {
       selectedTaskId.value = ''
       groups.value = []
@@ -575,20 +582,35 @@ async function loadTasks() {
   }
 }
 
-async function loadFieldTasks() {
+function scheduleFieldTasksWarmup() {
+  if (fieldTasksLoaded || fieldTasksRequest || fieldTasksWarmupTimer) return
+  fieldTasksWarmupTimer = window.setTimeout(() => {
+    fieldTasksWarmupTimer = 0
+    void loadFieldTasks()
+  }, 900)
+}
+
+async function loadFieldTasks(force = false) {
+  if (!force && fieldTasksLoaded) return
+  if (fieldTasksRequest) return fieldTasksRequest
   loadingFieldTasks.value = true
-  try {
-    const [unmatched, orders] = await Promise.all([
-      fetchUnmatchedRecords(''),
-      fetchConstructionExceptionOrders('', isAdmin.value ? '' : actor.value),
-    ])
-    unmatchedRecords.value = unmatched
-    exceptionOrders.value = orders
-  } catch {
-    // Field task cards are auxiliary; keep the review workflow available when they fail.
-  } finally {
-    loadingFieldTasks.value = false
-  }
+  fieldTasksRequest = (async () => {
+    try {
+      const [unmatched, orders] = await Promise.all([
+        fetchUnmatchedRecords(''),
+        fetchConstructionExceptionOrders('', isAdmin.value ? '' : actor.value),
+      ])
+      unmatchedRecords.value = unmatched
+      exceptionOrders.value = orders
+      fieldTasksLoaded = true
+    } catch {
+      // Field task cards are auxiliary; keep the review workflow available when they fail.
+    } finally {
+      loadingFieldTasks.value = false
+      fieldTasksRequest = null
+    }
+  })()
+  return fieldTasksRequest
 }
 
 async function loadGroups(taskId: string) {
@@ -665,7 +687,7 @@ async function selectFieldTaskMode(mode: Exclude<ReviewTaskMode, 'terminal'>) {
   activeGroup.value = null
   photos.value = []
   resetImageState()
-  await loadFieldTasks()
+  await loadFieldTasks(true)
 }
 
 async function scrollActiveGroupIntoView() {
@@ -805,7 +827,7 @@ async function externalRefresh() {
   try {
     await refreshTasksSilently()
     if (activeTaskMode.value === 'terminal' && selectedTaskId.value) await refreshGroupsSilently()
-    await loadFieldTasks()
+    if (activeTaskMode.value !== 'terminal') await loadFieldTasks(true)
   } catch {
     // 后台刷新失败不打断当前审阅动作，下一轮刷新再试。
   }
@@ -1135,6 +1157,29 @@ async function exportExceptions() {
   }
 }
 
+async function handleReviewMoreCommand(command: string | number | object) {
+  const action = String(command)
+  if (action === 'restore') {
+    await restorePending()
+    return
+  }
+  if (action === 'reset') {
+    await resetUnconstructed()
+    return
+  }
+  if (action === 'exception') {
+    await markException()
+    return
+  }
+  if (action === 'delete-photo') {
+    await deleteCurrentPhoto()
+    return
+  }
+  if (action === 'export-exceptions') {
+    await exportExceptions()
+  }
+}
+
 async function exportOutsideProjectRecords() {
   markInteraction()
   try {
@@ -1392,6 +1437,10 @@ onUnmounted(() => {
     window.clearInterval(backgroundRefreshTimer)
     backgroundRefreshTimer = null
   }
+  if (fieldTasksWarmupTimer) {
+    window.clearTimeout(fieldTasksWarmupTimer)
+    fieldTasksWarmupTimer = 0
+  }
 })
 </script>
 
@@ -1637,17 +1686,28 @@ onUnmounted(() => {
 
         <input ref="photoFileInput" class="hidden-file-input" type="file" accept="image/*" multiple @change="uploadPhotos" />
         <div class="review-action-row review-action-grid">
-          <ElButton :loading="busy" @click="saveCurrentGroup">保存资料组</ElButton>
-          <ElButton :loading="busy" @click="choosePhotos">补图</ElButton>
-          <ElButton :loading="busy" @click="restorePending">恢复待审</ElButton>
-          <ElButton type="danger" plain :loading="busy" @click="resetUnconstructed">回退未施工</ElButton>
-          <ElButton type="danger" plain :loading="busy" @click="markException">转异常工单</ElButton>
-          <ElButton type="danger" plain :disabled="!selectedPhoto" :loading="busy" @click="deleteCurrentPhoto">删除当前图</ElButton>
-          <ElButton :icon="Finished" :disabled="!photos.length" :loading="busy" @click="archiveGroup">归档当前资料组</ElButton>
-          <ElButton type="primary" :icon="Select" :disabled="!selectedPhoto" :loading="busy" @click="archiveCurrentPhoto">
-            Enter 归档当前图
-          </ElButton>
-          <ElButton @click="exportExceptions">导出异常表计</ElButton>
+          <div class="review-action-cluster">
+            <ElButton :loading="busy" @click="saveCurrentGroup">保存资料组</ElButton>
+            <ElButton :loading="busy" @click="choosePhotos">补图</ElButton>
+          </div>
+          <div class="review-action-cluster review-action-cluster-main">
+            <ElButton :icon="Finished" :disabled="!photos.length" :loading="busy" @click="archiveGroup">归档资料组</ElButton>
+            <ElButton type="primary" :icon="Select" :disabled="!selectedPhoto" :loading="busy" @click="archiveCurrentPhoto">
+              Enter 归档当前图
+            </ElButton>
+            <ElDropdown trigger="click" placement="top-end" @command="handleReviewMoreCommand">
+              <ElButton :icon="MoreFilled" :loading="busy">更多</ElButton>
+              <template #dropdown>
+                <ElDropdownMenu>
+                  <ElDropdownItem command="restore">恢复待审</ElDropdownItem>
+                  <ElDropdownItem divided command="reset">回退未施工</ElDropdownItem>
+                  <ElDropdownItem command="exception">转异常工单</ElDropdownItem>
+                  <ElDropdownItem command="delete-photo" :disabled="!selectedPhoto">删除当前图</ElDropdownItem>
+                  <ElDropdownItem divided command="export-exceptions">导出异常表计</ElDropdownItem>
+                </ElDropdownMenu>
+              </template>
+            </ElDropdown>
+          </div>
         </div>
       </template>
       <ElEmpty v-else description="请选择资料组开始审阅" />
@@ -2742,9 +2802,10 @@ onUnmounted(() => {
   position: sticky;
   bottom: 0;
   z-index: 2;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: end;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  justify-content: stretch;
   gap: 8px;
   padding: 11px 12px 12px;
   border-top: 1px solid rgba(16, 24, 40, 0.06);
@@ -2752,6 +2813,23 @@ onUnmounted(() => {
   box-shadow: 0 -16px 32px rgba(16, 24, 40, 0.045), inset 0 1px 0 rgba(255, 255, 255, 0.84);
   backdrop-filter: blur(18px) saturate(150%);
   -webkit-backdrop-filter: blur(18px) saturate(150%);
+}
+
+.review-action-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.review-action-cluster-main {
+  justify-content: flex-end;
+}
+
+.review-action-cluster :deep(.el-dropdown),
+.review-action-cluster :deep(.el-dropdown .el-button) {
+  min-width: 0;
 }
 
 .review-action-grid :deep(.el-button) {
@@ -2867,14 +2945,21 @@ onUnmounted(() => {
     height: 46px;
   }
 
-  .review-action-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    justify-content: stretch;
-  }
+.review-action-grid {
+  grid-template-columns: minmax(0, 1fr);
+  justify-content: stretch;
+}
 
-  .review-action-grid :deep(.el-button) {
-    width: 100%;
-  }
+.review-action-cluster,
+.review-action-cluster-main {
+  justify-content: stretch;
+}
+
+.review-action-cluster :deep(.el-button),
+.review-action-cluster :deep(.el-dropdown),
+.review-action-cluster :deep(.el-dropdown .el-button) {
+  width: 100%;
+}
 }
 
 @media (max-width: 640px) {
