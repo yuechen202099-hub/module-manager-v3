@@ -1,3 +1,5 @@
+import asyncio
+import json
 import mimetypes
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +16,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select
 
 from app.core.config import settings
@@ -159,6 +161,7 @@ async def use_team_context(request: Request):
 
 
 router = APIRouter(prefix="/local-test", dependencies=[Depends(use_team_context)])
+BOARD_EVENT_INTERVAL_SECONDS = 15 * 60
 
 
 def display_name_for_actor(request: Request, actor: str) -> str:
@@ -907,6 +910,40 @@ def summary(request: Request):
     return ok(request, state_repository().summary())
 
 
+@router.get("/events")
+async def local_events(scope: str = Query(default="project-board")):
+    async def stream():
+        sequence = 0
+        ready_payload = {
+            "type": "board-events-ready",
+            "scope": scope,
+            "interval_seconds": BOARD_EVENT_INTERVAL_SECONDS,
+            "generated_at": datetime.now(UTC).isoformat(),
+        }
+        yield f"event: board-ready\ndata: {json.dumps(ready_payload, ensure_ascii=False)}\n\n"
+        while True:
+            await asyncio.sleep(BOARD_EVENT_INTERVAL_SECONDS)
+            sequence += 1
+            payload = {
+                "type": "board-refresh",
+                "scope": scope,
+                "sequence": sequence,
+                "interval_seconds": BOARD_EVENT_INTERVAL_SECONDS,
+                "generated_at": datetime.now(UTC).isoformat(),
+            }
+            yield f"event: board-refresh\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/installers/{installer}/daily-workload")
 def installer_daily_workload(installer: str, request: Request):
     return ok(request, state_repository().installer_daily_workload(installer))
@@ -1501,6 +1538,11 @@ def audit_log(
 @router.get("/tasks")
 def tasks(request: Request):
     return ok(request, {"items": state_repository().list_tasks()})
+
+
+@router.get("/tasks/status")
+def task_status(request: Request):
+    return ok(request, state_repository().task_status())
 
 
 @router.get("/tasks/{task_id}/groups")

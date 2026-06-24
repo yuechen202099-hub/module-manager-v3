@@ -107,6 +107,26 @@ export type ReviewTask = {
   constructionExceptionCount?: number
 }
 
+export type TaskStatusSummary = {
+  version: string
+  generatedAt: string
+  total: number
+  scanned: number
+  uploaded: number
+  reviewing: number
+  archived: number
+  claimed: number
+  constructionAssigned: number
+  avgUploadRate: number
+  avgReviewRate: number
+  renovationCount: number
+  uploadedCount: number
+  reviewedCount: number
+  unreviewedCount: number
+  totalCatalogRows: number
+  groups: number
+}
+
 export type MaterialGroup = {
   id: string
   taskId: string | number

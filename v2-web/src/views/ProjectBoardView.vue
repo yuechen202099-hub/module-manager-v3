@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { Refresh, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 import {
   assignConstructionExceptionOrder,
+  boardEventHeaders,
+  boardEventsUrl,
   deleteUnmatchedRecord,
   deleteUserAccount,
   dedupeUnmatchedRecords,
@@ -15,7 +17,7 @@ import {
   fetchProjectSummary,
   fetchReplacementRecords,
   fetchSystemStatus,
-  fetchTasks,
+  fetchTaskStatus,
   fetchUnmatchedRecords,
   fetchUserAccounts,
   importTotalCatalog,
@@ -33,7 +35,7 @@ import type {
   MaterialGroup,
   ProjectSummary,
   ReplacementRecord,
-  ReviewTask,
+  TaskStatusSummary,
   UnmatchedRecord,
   UserAccount,
   UserRole,
@@ -56,12 +58,32 @@ const emptySummary: ProjectSummary = {
   installerDistribution: [],
 }
 
+const emptyTaskStatus: TaskStatusSummary = {
+  version: '',
+  generatedAt: '',
+  total: 0,
+  scanned: 0,
+  uploaded: 0,
+  reviewing: 0,
+  archived: 0,
+  claimed: 0,
+  constructionAssigned: 0,
+  avgUploadRate: 0,
+  avgReviewRate: 0,
+  renovationCount: 0,
+  uploadedCount: 0,
+  reviewedCount: 0,
+  unreviewedCount: 0,
+  totalCatalogRows: 0,
+  groups: 0,
+}
+
 const auth = useAuthStore()
 const loading = ref(false)
 const importingTotal = ref(false)
 const importingScan = ref(false)
 const summary = ref<ProjectSummary>({ ...emptySummary })
-const tasks = ref<ReviewTask[]>([])
+const taskStatus = ref<TaskStatusSummary>({ ...emptyTaskStatus })
 const systemStatus = ref<Record<string, unknown> | null>(null)
 const activeJob = ref<ImportJob | null>(null)
 const errorMessage = ref('')
@@ -108,20 +130,23 @@ const accountForm = reactive({
   status: 'active',
   editing: false,
 })
+const BOARD_REFRESH_INTERVAL_MS = 15 * 60 * 1000
+let boardEventAbortController: AbortController | null = null
+let boardFallbackTimer = 0
 
 const isAdmin = computed(() => Boolean(auth.user?.roles?.includes('admin') || auth.user?.role === 'admin'))
 const scannedRate = computed(() => (summary.value.groups ? summary.value.scannedGroups / summary.value.groups : 0))
 const archiveRate = computed(() => (summary.value.groups ? summary.value.approvedGroups / summary.value.groups : 0))
 const terminalCockpit = computed(() => {
-  const total = tasks.value.length
-  const scanned = tasks.value.filter((task) => task.hasScanInfo).length
-  const uploaded = tasks.value.filter((task) => Number(task.uploadedCount || 0) > 0).length
-  const reviewing = tasks.value.filter((task) => Number(task.unreviewedCount || 0) > 0).length
-  const archived = tasks.value.filter((task) => task.hasScanInfo && !Number(task.unreviewedCount || 0)).length
-  const claimed = tasks.value.filter((task) => task.claimedBy).length
-  const constructionAssigned = tasks.value.filter((task) => task.assignedConstructor || task.constructionClaimedBy).length
-  const avgUploadRate = total ? tasks.value.reduce((sum, task) => sum + Number(task.uploadRate || 0), 0) / total : 0
-  const avgReviewRate = total ? tasks.value.reduce((sum, task) => sum + Number(task.reviewRate || 0), 0) / total : 0
+  const total = taskStatus.value.total
+  const scanned = taskStatus.value.scanned
+  const uploaded = taskStatus.value.uploaded
+  const reviewing = taskStatus.value.reviewing
+  const archived = taskStatus.value.archived
+  const claimed = taskStatus.value.claimed
+  const constructionAssigned = taskStatus.value.constructionAssigned
+  const avgUploadRate = taskStatus.value.avgUploadRate
+  const avgReviewRate = taskStatus.value.avgReviewRate
   return {
     total,
     scanned,
@@ -444,14 +469,14 @@ async function loadBoard() {
   loading.value = true
   errorMessage.value = ''
   try {
-    const [summaryResult, taskResult] = await Promise.all([fetchProjectSummary(), fetchTasks()])
+    const [summaryResult, statusResult, statusHealth] = await Promise.all([
+      fetchProjectSummary(),
+      fetchTaskStatus(),
+      isAdmin.value ? fetchSystemStatus().catch(() => null) : Promise.resolve(null),
+    ])
     summary.value = summaryResult.summary
-    tasks.value = taskResult
-    try {
-      systemStatus.value = await fetchSystemStatus()
-    } catch {
-      systemStatus.value = null
-    }
+    taskStatus.value = statusResult
+    systemStatus.value = statusHealth
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '项目看板加载失败'
   } finally {
@@ -577,6 +602,65 @@ function workloadBarHeight(minutes: number) {
   const value = Number(minutes || 0)
   if (!value) return 0
   return Math.max(8, Math.round((value / workloadMaxSegmentMinutes.value) * 100))
+}
+
+function startBoardFallbackRefresh() {
+  if (boardFallbackTimer) return
+  boardFallbackTimer = window.setInterval(() => {
+    void loadBoard()
+  }, BOARD_REFRESH_INTERVAL_MS)
+}
+
+function stopBoardFallbackRefresh() {
+  if (!boardFallbackTimer) return
+  window.clearInterval(boardFallbackTimer)
+  boardFallbackTimer = 0
+}
+
+function handleBoardEventChunk(chunk: string) {
+  for (const eventBlock of chunk.split('\n\n')) {
+    if (eventBlock.includes('event: board-refresh')) void loadBoard()
+  }
+}
+
+async function connectBoardEvents() {
+  if (typeof ReadableStream === 'undefined' || typeof TextDecoder === 'undefined') {
+    startBoardFallbackRefresh()
+    return
+  }
+  boardEventAbortController?.abort()
+  const controller = new AbortController()
+  boardEventAbortController = controller
+  try {
+    const response = await fetch(boardEventsUrl('project-board'), {
+      headers: boardEventHeaders(),
+      signal: controller.signal,
+    })
+    if (!response.ok || !response.body) throw new Error(`Board event stream failed: ${response.status}`)
+    stopBoardFallbackRefresh()
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (!controller.signal.aborted) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lastBoundary = buffer.lastIndexOf('\n\n')
+      if (lastBoundary < 0) continue
+      handleBoardEventChunk(buffer.slice(0, lastBoundary + 2))
+      buffer = buffer.slice(lastBoundary + 2)
+    }
+  } catch {
+    if (!controller.signal.aborted) startBoardFallbackRefresh()
+  } finally {
+    if (boardEventAbortController === controller) boardEventAbortController = null
+  }
+}
+
+function disconnectBoardEvents() {
+  boardEventAbortController?.abort()
+  boardEventAbortController = null
+  stopBoardFallbackRefresh()
 }
 
 function exportInstallerWorkloadCsv() {
@@ -884,19 +968,16 @@ async function replaceUnmatchedMeter(row: UnmatchedRecord) {
 function handleExternalRefresh(event: MessageEvent) {
   if (event.data?.type !== 'module-manager:data-refresh') return
   void loadBoard()
-  if (isAdmin.value) void loadAccounts()
 }
 
 onMounted(() => {
   void loadBoard()
-  if (isAdmin.value) void loadAccounts()
+  void connectBoardEvents()
   window.addEventListener('message', handleExternalRefresh)
-})
-watch(isAdmin, (value) => {
-  if (value && !accountUsers.value.length) void loadAccounts()
 })
 onUnmounted(() => {
   window.removeEventListener('message', handleExternalRefresh)
+  disconnectBoardEvents()
 })
 </script>
 

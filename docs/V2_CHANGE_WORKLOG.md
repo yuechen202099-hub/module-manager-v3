@@ -1,5 +1,27 @@
 # V2 修改工作记录
 
+# V3.0.8 - 看板推送刷新与任务领取加载加速
+
+- 时间：2026-06-24
+- 分支：`ops/OPS-20260624-001-meter-replace-dispatch`
+- 状态：已验证，待发布
+- 改动内容：
+  - 新增 `/local-test/events` 服务端推送接口，每 15 分钟发送 `board-refresh`；项目看板使用带认证头的流式 `fetch` 订阅，断线退回 15 分钟轮询。
+  - 新增 `/local-test/tasks/status` 轻量任务状态接口，返回版本和聚合数量，不返回地址搜索全文。
+  - 项目看板首屏改为加载 `summary + tasks/status`，不再加载完整 `/tasks`。
+  - 任务领取页首屏先恢复会话缓存，再请求轻量状态；状态版本不变时不再拉完整任务列表，并移除 10 秒全量刷新。
+  - 管理员账号列表改为按需加载，避免拖慢看板和任务领取页首屏。
+  - 应用版本从 V3.0.7 升级到 V3.0.8。
+- 验证：
+  - `python -m py_compile ...`：通过。
+  - `python scripts/verify_board_refresh_performance.py`：通过。
+  - `python scripts/verify_vue_migration_gate.py`：通过。
+  - `python scripts/verify-static-pages.py`：通过。
+  - `vue-tsc --noEmit`：通过。
+  - `vite build`：通过。
+  - `pytest v2-api/tests/test_api.py`：46 passed，1 个 Starlette/httpx2 迁移警告。
+  - Browser 检查：V3.0.8 的 `/project-board` 和 `/claim-tasks` 渲染通过，控制台无 error/warn。
+
 # V3.0.7 - 按钮整合与首屏加载优化
 
 - 时间：2026-06-24

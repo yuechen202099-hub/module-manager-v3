@@ -12,6 +12,7 @@ import type {
   ReplacementRecord,
   ReviewPhoto,
   ReviewTask,
+  TaskStatusSummary,
   TaskStatus,
   UnmatchedDedupeResult,
   UnmatchedRecord,
@@ -82,6 +83,26 @@ type BackendTask = {
   construction_uploaded_count?: number
   construction_unbuilt_count?: number
   construction_exception_count?: number
+}
+
+type BackendTaskStatusSummary = {
+  version?: string
+  generated_at?: string
+  total?: number
+  scanned?: number
+  uploaded?: number
+  reviewing?: number
+  archived?: number
+  claimed?: number
+  construction_assigned?: number
+  avg_upload_rate?: number
+  avg_review_rate?: number
+  renovation_count?: number
+  uploaded_count?: number
+  reviewed_count?: number
+  unreviewed_count?: number
+  total_catalog_rows?: number
+  groups?: number
 }
 
 type BackendPhoto = {
@@ -435,6 +456,28 @@ function mapTask(raw: BackendTask): ReviewTask {
   }
 }
 
+function mapTaskStatusSummary(raw: BackendTaskStatusSummary): TaskStatusSummary {
+  return {
+    version: raw.version || '',
+    generatedAt: raw.generated_at || '',
+    total: Number(raw.total || 0),
+    scanned: Number(raw.scanned || 0),
+    uploaded: Number(raw.uploaded || 0),
+    reviewing: Number(raw.reviewing || 0),
+    archived: Number(raw.archived || 0),
+    claimed: Number(raw.claimed || 0),
+    constructionAssigned: Number(raw.construction_assigned || 0),
+    avgUploadRate: Number(raw.avg_upload_rate || 0),
+    avgReviewRate: Number(raw.avg_review_rate || 0),
+    renovationCount: Number(raw.renovation_count || 0),
+    uploadedCount: Number(raw.uploaded_count || 0),
+    reviewedCount: Number(raw.reviewed_count || 0),
+    unreviewedCount: Number(raw.unreviewed_count || 0),
+    totalCatalogRows: Number(raw.total_catalog_rows || 0),
+    groups: Number(raw.groups || 0),
+  }
+}
+
 function mapPhoto(raw: BackendPhoto): ReviewPhoto {
   const originalUrl = raw.image_url || raw.source_url || raw.url || ''
   const imageUrl = raw.delivery_cache_url || raw.preview_url || raw.thumbnail_url || originalUrl
@@ -725,6 +768,20 @@ export async function fetchProjects(): Promise<Project[]> {
 export async function fetchTasks(): Promise<ReviewTask[]> {
   const data = await api<{ items: BackendTask[] }>('/local-test/tasks')
   return (data.items || []).map(mapTask)
+}
+
+export async function fetchTaskStatus(): Promise<TaskStatusSummary> {
+  const data = await api<BackendTaskStatusSummary>('/local-test/tasks/status')
+  return mapTaskStatusSummary(data || {})
+}
+
+export function boardEventsUrl(scope = 'project-board'): string {
+  const query = new URLSearchParams({ scope, team_id: currentTeamId() })
+  return `/local-test/events?${query.toString()}`
+}
+
+export function boardEventHeaders(): HeadersInit {
+  return formHeaders()
 }
 
 export async function claimTask(taskId: string): Promise<ReviewTask> {

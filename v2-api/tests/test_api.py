@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.7"
+    assert data["version"] == "3.0.8"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -356,7 +356,14 @@ def test_local_test_task_and_review_flow() -> None:
 
     tasks_response = client.get("/local-test/tasks")
     assert tasks_response.status_code == 200
-    task = next(item for item in tasks_response.json()["data"]["items"] if item["can_claim"])
+    tasks = tasks_response.json()["data"]["items"]
+    status_response = client.get("/local-test/tasks/status")
+    assert status_response.status_code == 200
+    task_status = status_response.json()["data"]
+    assert task_status["version"]
+    assert task_status["total"] == len(tasks)
+    assert "address_search_text" not in task_status
+    task = next(item for item in tasks if item["can_claim"])
     assert "address" in task
     assert "address_search_text" in task
     assert isinstance(task["address_search_text"], str)

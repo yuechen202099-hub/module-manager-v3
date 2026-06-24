@@ -1,20 +1,22 @@
 <script setup lang="ts">
 import { MoreFilled, Refresh, Search, Unlock } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import {
   assignConstructionTask,
   currentActor,
+  currentTeamId,
   exportTaskDetail,
+  fetchTaskStatus,
   fetchTasks,
   fetchUserAccounts,
   claimTask as claimTaskApi,
   releaseAllClaimedTasks,
   releaseTask as releaseTaskApi,
 } from '@/api/services'
-import type { ReviewTask, UserAccount } from '@/api/types'
+import type { ReviewTask, TaskStatusSummary, UserAccount } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
@@ -35,6 +37,10 @@ const exportingTaskId = ref('')
 const exportProgressText = ref('')
 const exportProgressPercent = ref(0)
 const exportScopeByTask = ref<Record<string, 'reviewed' | 'all'>>({})
+const taskStatus = ref<TaskStatusSummary | null>(null)
+const taskStatusVersion = ref('')
+const CLAIM_TASK_CACHE_PREFIX = 'module-manager:claim-tasks:v3'
+const TASK_STATUS_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 let refreshInterval = 0
 let refreshTimer = 0
 
@@ -197,20 +203,89 @@ function statusType(task: ReviewTask) {
   return 'primary'
 }
 
-async function loadTasks() {
-  loading.value = true
+type LoadTasksOptions = {
+  force?: boolean
+  silent?: boolean
+}
+
+function claimTasksCacheKey() {
+  return `${CLAIM_TASK_CACHE_PREFIX}:${currentTeamId()}:${actor.value}:${isAdmin.value ? 'admin' : 'reviewer'}`
+}
+
+function primeExportScopes(items: ReviewTask[]) {
+  for (const task of items) {
+    if (!exportScopeByTask.value[task.id]) exportScopeByTask.value[task.id] = 'reviewed'
+  }
+}
+
+function restoreCachedTasks() {
+  if (typeof window === 'undefined') return
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(claimTasksCacheKey()) || 'null') as
+      | { version?: string; tasks?: ReviewTask[] }
+      | null
+    if (!cached?.tasks?.length) return
+    tasks.value = cached.tasks
+    taskStatusVersion.value = cached.version || ''
+    primeExportScopes(cached.tasks)
+  } catch {
+    sessionStorage.removeItem(claimTasksCacheKey())
+  }
+}
+
+function rememberCachedTasks(version = taskStatusVersion.value) {
+  if (typeof window === 'undefined') return
+  try {
+    sessionStorage.setItem(
+      claimTasksCacheKey(),
+      JSON.stringify({
+        version,
+        cachedAt: Date.now(),
+        tasks: tasks.value,
+      }),
+    )
+  } catch {
+    // Storage quota should not block the task list.
+  }
+}
+
+async function loadTasks(options: LoadTasksOptions = {}) {
+  const showLoading = !options.silent
+  if (showLoading) loading.value = true
   errorMessage.value = ''
   try {
+    const status = await fetchTaskStatus()
+    taskStatus.value = status
+    if (!options.force && tasks.value.length && status.version && status.version === taskStatusVersion.value) {
+      return
+    }
     const result = await fetchTasks()
     tasks.value = result
-    for (const task of result) {
-      if (!exportScopeByTask.value[task.id]) exportScopeByTask.value[task.id] = 'reviewed'
-    }
+    taskStatusVersion.value = status.version
+    primeExportScopes(result)
+    rememberCachedTasks(status.version)
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '任务加载失败'
+    if (!tasks.value.length || options.force) {
+      try {
+        const result = await fetchTasks()
+        tasks.value = result
+        taskStatusVersion.value = ''
+        primeExportScopes(result)
+        rememberCachedTasks('')
+        return
+      } catch (fallbackError) {
+        errorMessage.value = fallbackError instanceof Error ? fallbackError.message : '任务加载失败'
+        return
+      }
+    }
+    errorMessage.value = error instanceof Error ? error.message : '任务状态加载失败'
   } finally {
-    loading.value = false
+    if (showLoading) loading.value = false
   }
+}
+
+function refreshTasks() {
+  void loadTasks({ force: true })
 }
 
 async function loadAccounts() {
@@ -229,7 +304,7 @@ function scheduleRefresh() {
   if (refreshTimer) window.clearTimeout(refreshTimer)
   refreshTimer = window.setTimeout(() => {
     refreshTimer = 0
-    void loadTasks()
+    void loadTasks({ silent: true })
   }, 180)
 }
 
@@ -244,6 +319,8 @@ async function claim(task: ReviewTask) {
   try {
     const updated = await claimTaskApi(task.id)
     tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
+    taskStatusVersion.value = ''
+    rememberCachedTasks('')
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '领取失败'
   }
@@ -254,6 +331,8 @@ async function release(task: ReviewTask) {
   try {
     const updated = await releaseTaskApi(task.id)
     tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
+    taskStatusVersion.value = ''
+    rememberCachedTasks('')
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '释放失败'
   }
@@ -266,7 +345,7 @@ async function releaseAll() {
   try {
     const result = await releaseAllClaimedTasks()
     ElMessage.success(`已收回 ${result.released || 0} 个任务`)
-    await loadTasks()
+    await loadTasks({ force: true })
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '收回全部失败'
   } finally {
@@ -296,6 +375,8 @@ async function submitAssignment() {
   try {
     const updated = await assignConstructionTask(task.id, constructor)
     tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
+    taskStatusVersion.value = ''
+    rememberCachedTasks('')
     assignmentDialogVisible.value = false
     ElMessage.success(`已指派给 ${userDisplayLabel(constructor)}`)
   } catch (error) {
@@ -383,14 +464,10 @@ function openReview(task: ReviewTask) {
 }
 
 onMounted(() => {
-  void loadTasks()
-  if (isAdmin.value) void loadAccounts()
+  restoreCachedTasks()
+  void loadTasks({ silent: tasks.value.length > 0 })
   window.addEventListener('message', handleExternalRefresh)
-  refreshInterval = window.setInterval(scheduleRefresh, 10000)
-})
-
-watch(isAdmin, (value) => {
-  if (value && !accountUsers.value.length) void loadAccounts()
+  refreshInterval = window.setInterval(scheduleRefresh, TASK_STATUS_REFRESH_INTERVAL_MS)
 })
 
 onUnmounted(() => {
@@ -411,7 +488,7 @@ onUnmounted(() => {
         <p class="muted">审阅员只看到仍有未审阅照片的终端；管理员可查看全部终端并指派施工。</p>
       </div>
       <div class="claim-actions">
-        <ElButton :icon="Refresh" :loading="loading" @click="loadTasks">刷新</ElButton>
+        <ElButton :icon="Refresh" :loading="loading" @click="refreshTasks">刷新</ElButton>
         <ElButton v-if="isAdmin" :icon="Unlock" type="warning" plain :loading="releasingAll" @click="releaseAll">
           收回全部
         </ElButton>

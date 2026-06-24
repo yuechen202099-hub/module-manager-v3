@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 import hashlib
+import json
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -296,6 +297,84 @@ def _empty_task_stats() -> dict[str, Any]:
         "uploaded_count": 0,
         "reviewed_count": 0,
         "unreviewed_count": 0,
+    }
+
+
+def _task_status_signature(payload: dict[str, Any]) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _build_task_status_summary(
+    rows: list[dict[str, Any]], summary: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    total = len(rows)
+    scanned = sum(1 for row in rows if int(row.get("uploaded_count") or 0) > 0)
+    reviewing = sum(1 for row in rows if int(row.get("unreviewed_count") or 0) > 0)
+    archived = sum(
+        1
+        for row in rows
+        if int(row.get("uploaded_count") or 0) > 0 and int(row.get("unreviewed_count") or 0) == 0
+    )
+    claimed = sum(1 for row in rows if str(row.get("claimed_by") or "").strip())
+    construction_assigned = sum(
+        1 for row in rows if str(row.get("construction_assigned_to") or "").strip()
+    )
+    renovation_count = sum(int(row.get("total_groups") or 0) for row in rows)
+    uploaded_count = sum(int(row.get("uploaded_count") or 0) for row in rows)
+    reviewed_count = sum(int(row.get("reviewed_count") or 0) for row in rows)
+    unreviewed_count = sum(int(row.get("unreviewed_count") or 0) for row in rows)
+    avg_upload_rate = (
+        sum(
+            (int(row.get("uploaded_count") or 0) / int(row.get("total_groups") or 0))
+            for row in rows
+            if int(row.get("total_groups") or 0)
+        )
+        / total
+        if total
+        else 0
+    )
+    avg_review_rate = (
+        sum(
+            (int(row.get("reviewed_count") or 0) / int(row.get("total_groups") or 0))
+            for row in rows
+            if int(row.get("total_groups") or 0)
+        )
+        / total
+        if total
+        else 0
+    )
+    summary = summary or {}
+    signature_source = {
+        "summary": {
+            "total_catalog_rows": summary.get("total_catalog_rows", 0),
+            "groups": summary.get("groups", 0),
+            "photo_rows_linked": summary.get("photo_rows_linked", 0),
+            "approved_groups": summary.get("approved_groups", 0),
+            "reviewed_groups": summary.get("reviewed_groups", 0),
+            "unreviewed_groups": summary.get("unreviewed_groups", 0),
+            "exception_groups": summary.get("exception_groups", 0),
+        },
+        "rows": sorted(rows, key=lambda row: str(row.get("id") or "")),
+    }
+    return {
+        "version": _task_status_signature(signature_source),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "total": total,
+        "scanned": scanned,
+        "uploaded": scanned,
+        "reviewing": reviewing,
+        "archived": archived,
+        "claimed": claimed,
+        "construction_assigned": construction_assigned,
+        "avg_upload_rate": round(avg_upload_rate, 4),
+        "avg_review_rate": round(avg_review_rate, 4),
+        "renovation_count": renovation_count,
+        "uploaded_count": uploaded_count,
+        "reviewed_count": reviewed_count,
+        "unreviewed_count": unreviewed_count,
+        "total_catalog_rows": int(summary.get("total_catalog_rows") or 0),
+        "groups": int(summary.get("groups") or 0),
     }
 
 
@@ -713,6 +792,23 @@ class StateRepository(ABC):
     def list_tasks(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    def task_status(self) -> dict[str, Any]:
+        task_rows = [
+            {
+                "id": task.get("id"),
+                "terminal": task.get("terminal"),
+                "claimed_by": task.get("claimed_by"),
+                "construction_assigned_to": task.get("assigned_constructor")
+                or task.get("construction_claimed_by"),
+                "total_groups": task.get("renovation_count") or task.get("total_groups"),
+                "uploaded_count": task.get("uploaded_count"),
+                "reviewed_count": task.get("reviewed_count"),
+                "unreviewed_count": task.get("unreviewed_count"),
+            }
+            for task in self.list_tasks()
+        ]
+        return _build_task_status_summary(task_rows, self.summary().get("summary", {}))
+
     @abstractmethod
     def installer_daily_workload(self, installer: str) -> dict[str, Any]:
         raise NotImplementedError
@@ -1114,6 +1210,9 @@ class JsonStateRepository(StateRepository):
 
     def list_tasks(self) -> list[dict[str, Any]]:
         return local_simulation.list_tasks()
+
+    def task_status(self) -> dict[str, Any]:
+        return local_simulation.task_status_summary()
 
     def installer_daily_workload(self, installer: str) -> dict[str, Any]:
         return local_simulation.installer_daily_workload(installer)
@@ -1838,6 +1937,87 @@ class PostgresStateRepository(StateRepository):
                 [_task_payload(task, stats_by_task.get(int(task.legacy_id or 0), _empty_task_stats())) for task in tasks],
                 key=lambda item: (not item.get("can_claim", False), str(item.get("terminal", "")), item["id"]),
             )
+
+    def task_status(self) -> dict[str, Any]:
+        with self._session() as session:
+            team_id = local_simulation.current_team_id()
+            task_rows_raw = session.execute(
+                select(
+                    Task.id,
+                    Task.legacy_id,
+                    Task.terminal,
+                    Task.review_claimed_by,
+                    Task.construction_claimed_by,
+                )
+                .where(Task.team_id == team_id)
+                .order_by(Task.terminal, Task.legacy_id)
+            ).all()
+            group_rows = session.execute(
+                select(
+                    MaterialGroup.legacy_task_id,
+                    func.count(MaterialGroup.id).label("total_groups"),
+                    func.coalesce(
+                        func.sum(case((MaterialGroup.photo_count > 0, 1), else_=0)),
+                        0,
+                    ).label("uploaded_count"),
+                    func.coalesce(
+                        func.sum(case((MaterialGroup.status == GroupStatus.APPROVED, 1), else_=0)),
+                        0,
+                    ).label("reviewed_count"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    (MaterialGroup.status == GroupStatus.UNREVIEWED)
+                                    & (MaterialGroup.photo_count > 0),
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("unreviewed_count"),
+                )
+                .where(MaterialGroup.team_id == team_id, MaterialGroup.legacy_task_id.is_not(None))
+                .group_by(MaterialGroup.legacy_task_id)
+            ).all()
+            stats_by_task = {
+                int(row.legacy_task_id): {
+                    "total_groups": int(row.total_groups or 0),
+                    "uploaded_count": int(row.uploaded_count or 0),
+                    "reviewed_count": int(row.reviewed_count or 0),
+                    "unreviewed_count": int(row.unreviewed_count or 0),
+                }
+                for row in group_rows
+                if row.legacy_task_id is not None
+            }
+            task_rows = []
+            for row in task_rows_raw:
+                stats = stats_by_task.get(int(row.legacy_id or 0), _empty_task_stats())
+                task_rows.append(
+                    {
+                        "id": row.legacy_id if row.legacy_id is not None else str(row.id),
+                        "terminal": row.terminal or "",
+                        "claimed_by": row.review_claimed_by or "",
+                        "construction_assigned_to": row.construction_claimed_by or "",
+                        "total_groups": stats.get("total_groups", 0),
+                        "uploaded_count": stats.get("uploaded_count", 0),
+                        "reviewed_count": stats.get("reviewed_count", 0),
+                        "unreviewed_count": stats.get("unreviewed_count", 0),
+                    }
+                )
+            total_catalog_rows = session.scalar(
+                select(func.count()).select_from(TotalCatalogRow).where(TotalCatalogRow.team_id == team_id)
+            )
+            summary = {
+                "total_catalog_rows": int(total_catalog_rows or 0),
+                "groups": sum(int(row.get("total_groups") or 0) for row in task_rows),
+                "photo_rows_linked": sum(int(row.get("uploaded_count") or 0) for row in task_rows),
+                "approved_groups": sum(int(row.get("reviewed_count") or 0) for row in task_rows),
+                "reviewed_groups": sum(int(row.get("reviewed_count") or 0) for row in task_rows),
+                "unreviewed_groups": sum(int(row.get("unreviewed_count") or 0) for row in task_rows),
+            }
+            return _build_task_status_summary(task_rows, summary)
 
     def installer_daily_workload(self, installer: str) -> dict[str, Any]:
         target = str(installer or "").strip()
