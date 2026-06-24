@@ -1,6 +1,6 @@
 # 项目看板合并异常与缺照卡片
 
-- 状态：本地验证通过，待发布
+- 状态：已发布
 - 日期：2026-06-24
 - 规则版本：Rules v1
 - 应用基线：V3.0.2
@@ -36,6 +36,19 @@
 - `C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -m pytest tests\test_api.py`：46 passed，1 个 Starlette/httpx deprecation warning。
 - `git diff --check`：通过，仅有 Git LF/CRLF 工作区提示。
 - `rg "3\.0\.4|V3\.0\.4" ...`：版本相关文件和 Vue 静态产物无旧版本残留。
+
+## 生产发布结果
+
+- 提交/标签：`7c21885` / `v3.0.5`。
+- 服务器：`106.14.122.43`。
+- 发布目录：`/opt/module-manager-v2/releases/v3.0.2-20260624_000900-b353ce2`（`/opt/module-manager-v2/current` 指向该目录）。
+- 发布前备份：`/opt/module-manager-v2/backups/runtime/20260624-023942`。
+- 生产保护：未覆盖 `.env`，未覆盖 `/opt/module-manager-v2/data`，未覆盖 `v2-api/app/static/uploads`。
+- 服务：`module-manager-v2.service` 重启后为 `active`。
+- 发布后健康检查：磁盘 27%，service/nginx active，最近备份为本次备份。
+- 页面检查：`/health`、`/login`、`/project-board`、`/task-hall`、`/construction` 返回 200；`/openapi.json` 返回预期 404。
+- 线上版本确认：`/vue/index.html` 标题为 `Module Manager V3.0.5`。
+- 线上功能确认：`ProjectBoardView-CT6STBqQ.js` 包含“异常与缺照”，不再包含“缺照片”单独文本。
 
 ## 风险/回滚
 
