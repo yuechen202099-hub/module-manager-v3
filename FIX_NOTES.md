@@ -4,6 +4,48 @@ Last updated: 2026-06-24
 
 本文件记录维护期每次修改。后续修 Bug 时只追加本次相关内容，不重复全项目扫描。
 
+## 2026-06-24 - V3.0.4 项目看板换表清单
+
+### 修改原因
+
+V3.0.3 已支持未匹配资料人工换表匹配，但管理员缺少集中入口查看已成功匹配到资料组的换表记录。新增“换表清单”用于追踪旧表号、新表号、地址、资料组和操作人。
+
+### 修改文件
+
+- `v2-api/app/services/local_simulation.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/app/api/routes/local_test.py`
+- `v2-api/tests/test_local_simulation.py`
+- `v2-api/tests/test_state_repository.py`
+- `v2-web/src/api/types.ts`
+- `v2-web/src/api/services.ts`
+- `v2-web/src/views/ProjectBoardView.vue`
+- `v2-api/app/static/vue/`
+
+### 修改内容
+
+- 新增 `/local-test/replacements` 只读接口。
+- 项目看板新增“换表清单”入口和弹窗。
+- 换表清单展示旧表号、新表号、终端、地址、资料组、照片数、操作人和操作时间。
+- 支持搜索、刷新和 CSV 导出。
+- 应用版本升级到 V3.0.4。
+
+### 影响范围
+
+仅新增换表记录查看能力；不新增数据库表，不执行 Alembic，不直接修改生产数据。
+
+### 验证方法
+
+- `pytest test_list_replacement_records_includes_matched_manual_replacements`
+- `pytest test_replacement_rematch_adds_delivery_export_remark`
+- `pytest test_json_state_repository_delegates_core_task_operations`
+- `pytest test_system_status_requires_admin_and_reports_runtime_state`
+- `py_compile`
+- `verify_vue_migration_gate.py`
+- `verify-static-pages.py`
+- `vue-tsc --noEmit`
+- `vite build`
+
 ## 2026-06-24 - V3.0.3 项目看板未匹配资料换表匹配
 
 ### 修改原因

@@ -1328,6 +1328,16 @@ def unmatched_records(
     return ok(request, state_repository().list_unmatched_records(query=query, limit=limit, offset=offset))
 
 
+@router.get("/replacements")
+def replacement_records(
+    request: Request,
+    query: str = "",
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    return ok(request, state_repository().list_replacement_records(query=query, limit=limit, offset=offset))
+
+
 @router.post("/unmatched/dedupe")
 def dedupe_unmatched(payload: UnmatchedDedupeRequest, request: Request):
     return ok(request, state_repository().dedupe_unmatched_records(actor=payload.actor))

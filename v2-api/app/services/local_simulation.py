@@ -1469,6 +1469,73 @@ def list_unmatched_records(query: str = "", limit: int = 100, offset: int = 0) -
     return {"total": len(records), "items": records[offset : offset + limit]}
 
 
+def replacement_record_payload(group: dict[str, Any]) -> dict[str, Any] | None:
+    old_meter_no = str(group.get("replacement_old_meter_no") or "").strip()
+    if not old_meter_no:
+        return None
+    return {
+        "group_id": group.get("id", ""),
+        "task_id": group.get("task_id", ""),
+        "terminal": group.get("terminal", ""),
+        "address": group.get("address", ""),
+        "status": group.get("status", ""),
+        "photo_count": int(group.get("photo_count") or len(group.get("photos") or []) or 0),
+        "meter_no": group.get("meter_no", ""),
+        "meter_match_key": group.get("meter_match_key", ""),
+        "old_meter_no": old_meter_no,
+        "new_meter_no": str(group.get("replacement_new_meter_no") or "").strip(),
+        "replacement_by": str(group.get("replacement_by") or "").strip(),
+        "replacement_at": str(group.get("replacement_at") or "").strip(),
+    }
+
+
+def list_replacement_records_from_groups(
+    groups: list[dict[str, Any]],
+    query: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    records = [payload for group in groups if (payload := replacement_record_payload(group))]
+    q = query.strip().lower()
+    if q:
+        terms = [item for item in re.split(r"\s+", q) if item]
+        records = [
+            item
+            for item in records
+            if all(
+                term
+                in " ".join(
+                    str(item.get(key) or "").lower()
+                    for key in (
+                        "group_id",
+                        "terminal",
+                        "address",
+                        "meter_no",
+                        "meter_match_key",
+                        "old_meter_no",
+                        "new_meter_no",
+                        "replacement_by",
+                    )
+                )
+                for term in terms
+            )
+        ]
+    records.sort(
+        key=lambda item: (
+            str(item.get("replacement_at") or ""),
+            str(item.get("terminal") or ""),
+            str(item.get("old_meter_no") or ""),
+        ),
+        reverse=True,
+    )
+    return {"total": len(records), "items": records[offset : offset + limit]}
+
+
+def list_replacement_records(query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    groups = [ensure_group_photo_storage_fields(group) for group in get_state().get("groups", [])]
+    return list_replacement_records_from_groups(groups, query=query, limit=limit, offset=offset)
+
+
 def dedupe_unmatched_records(actor: str) -> dict[str, Any]:
     state = get_state()
     records = [ensure_unmatched_record(item) for item in state.get("scan_unmatched", [])]

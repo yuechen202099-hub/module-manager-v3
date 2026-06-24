@@ -40,6 +40,7 @@ from app.services.local_simulation import (
     list_exception_groups,
     list_task_groups,
     list_groups,
+    list_replacement_records,
     list_unmatched_records,
     list_tasks,
     normalize_cell,
@@ -999,6 +1000,46 @@ def test_replacement_rematch_adds_delivery_export_remark(synthetic_state: dict) 
     assert result["matched"] is True
     assert target_rows
     assert any(row[remark_index] == f"换表：旧表号 {target['meter_no']}" for row in target_rows)
+
+
+def test_list_replacement_records_includes_matched_manual_replacements(synthetic_state: dict) -> None:
+    target = synthetic_state["groups"][0]
+    original_meter_no = target["meter_no"]
+    apply_synced_scan_records(
+        [
+            {
+                "file_id": "replacement-list-1",
+                "source_file": "replacement-list-source",
+                "barcode": "NEW-METER-LIST-001",
+                "meter_no": "NEW-METER-LIST-001",
+                "meter_match_key": "NEW-METER-LIST-001",
+                "terminal": target["terminal"],
+                "collector": "collector-list",
+                "module_asset_no": "module-list",
+                "photo_urls": "https://example.test/replacement-list-a.jpg",
+            }
+        ]
+    )
+    record = list_unmatched_records(query="NEW-METER-LIST-001")["items"][0]
+
+    rematch_unmatched_record(
+        record["unmatched_id"],
+        actor="alice",
+        meter_no="NEW-METER-LIST-001",
+        old_meter_no=original_meter_no,
+        terminal=target["terminal"],
+    )
+
+    result = list_replacement_records(query="NEW-METER-LIST-001")
+
+    assert result["total"] == 1
+    item = result["items"][0]
+    assert item["group_id"] == target["id"]
+    assert item["terminal"] == target["terminal"]
+    assert item["address"] == target["address"]
+    assert item["old_meter_no"] == original_meter_no
+    assert item["new_meter_no"] == "NEW-METER-LIST-001"
+    assert item["replacement_by"] == "alice"
 
 
 def test_admin_can_create_empty_group_and_import_missing_photos(synthetic_state: dict) -> None:

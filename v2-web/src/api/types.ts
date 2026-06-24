@@ -317,6 +317,21 @@ export type UnmatchedRecord = {
   raw?: Record<string, unknown>
 }
 
+export type ReplacementRecord = {
+  groupId: string
+  taskId: string | number
+  terminal: string
+  address: string
+  status: string
+  photoCount: number
+  meterNo: string
+  meterMatchKey: string
+  oldMeterNo: string
+  newMeterNo: string
+  replacementBy: string
+  replacementAt: string
+}
+
 export type UnmatchedDedupeResult = {
   total: number
   kept: number

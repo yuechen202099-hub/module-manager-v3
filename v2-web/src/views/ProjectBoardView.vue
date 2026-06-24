@@ -12,6 +12,7 @@ import {
   fetchExceptionGroups,
   fetchInstallerWorkload,
   fetchProjectSummary,
+  fetchReplacementRecords,
   fetchSystemStatus,
   fetchTasks,
   fetchUnmatchedRecords,
@@ -30,6 +31,7 @@ import type {
   InstallerWorkloadRow,
   MaterialGroup,
   ProjectSummary,
+  ReplacementRecord,
   ReviewTask,
   UnmatchedRecord,
   UserAccount,
@@ -83,6 +85,10 @@ const unmatchedDeduping = ref(false)
 const unmatchedRematchingId = ref('')
 const unmatchedQuery = ref('')
 const unmatchedRows = ref<UnmatchedRecord[]>([])
+const replacementDialogVisible = ref(false)
+const replacementLoading = ref(false)
+const replacementQuery = ref('')
+const replacementRows = ref<ReplacementRecord[]>([])
 const exceptionDialogVisible = ref(false)
 const exceptionLoading = ref(false)
 const exceptionAssigningGroupId = ref('')
@@ -205,6 +211,12 @@ const unmatchedDialogStats = computed(() => {
     pending: unmatchedRows.value.filter((item) => !item.projectOutside && !item.assignedTo).length,
   }
 })
+const replacementDialogStats = computed(() => ({
+  total: replacementRows.value.length,
+  terminals: new Set(replacementRows.value.map((item) => item.terminal).filter(Boolean)).size,
+  operators: new Set(replacementRows.value.map((item) => item.replacementBy).filter(Boolean)).size,
+  photos: replacementRows.value.reduce((sum, item) => sum + Number(item.photoCount || 0), 0),
+}))
 const constructorOptions = computed(() =>
   accountUsers.value
     .filter((user) => user.status !== 'disabled' && user.roles?.includes('constructor'))
@@ -308,6 +320,13 @@ function formatWorkDuration(minutes: number) {
 function formatDecimal(value: number, digits = 2) {
   if (!Number.isFinite(Number(value))) return '0'
   return Number(value).toFixed(digits).replace(/\.?0+$/, '')
+}
+
+function formatDateTime(value = '') {
+  if (!value) return '-'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString('zh-CN', { hour12: false })
 }
 
 function roleLabel(role: string) {
@@ -718,6 +737,42 @@ async function openUnmatchedDialog() {
   await loadUnmatchedRows()
 }
 
+async function loadReplacementRows() {
+  replacementLoading.value = true
+  try {
+    replacementRows.value = await fetchReplacementRecords(replacementQuery.value)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '换表清单加载失败')
+  } finally {
+    replacementLoading.value = false
+  }
+}
+
+async function openReplacementDialog() {
+  replacementDialogVisible.value = true
+  await loadReplacementRows()
+}
+
+function exportReplacementCsv() {
+  const rows = [
+    ['资料组ID', '终端', '地址', '旧表号', '新表号', '当前表号', '照片数', '操作人', '操作时间', '状态'],
+    ...replacementRows.value.map((item) => [
+      item.groupId,
+      item.terminal,
+      item.address,
+      item.oldMeterNo,
+      item.newMeterNo,
+      item.meterNo,
+      item.photoCount,
+      item.replacementBy,
+      formatDateTime(item.replacementAt),
+      item.status,
+    ]),
+  ]
+  const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}`
+  downloadText(`换表清单-${new Date().toISOString().slice(0, 10)}.csv`, csv)
+}
+
 function exportUnmatchedCsv() {
   const rows = [
     ['未匹配ID', '表号/扫码内容', '短表号', '终端', '地址', '采集器', '模块', '安装人员', '照片数', '状态', '指派施工员', '项目外施工', '备注', '来源文件'],
@@ -789,6 +844,7 @@ async function replaceUnmatchedMeter(row: UnmatchedRecord) {
       ElMessage.warning('未匹配到旧表地址，已保存换表记录')
     }
     await Promise.all([loadUnmatchedRows(), loadBoard()])
+    if (replacementDialogVisible.value) await loadReplacementRows()
   } catch (error) {
     if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '换表失败')
   } finally {
@@ -889,12 +945,17 @@ onUnmounted(() => {
             <strong>{{ summary.scanUnmatched }}</strong>
             <small>点击查看清单</small>
           </button>
-          <button class="risk-card risk-card-button bad" type="button" @click="openExceptionDialog">
-            <span>异常资料组</span>
-            <strong>{{ summary.exceptionGroups }}</strong>
-            <small>查看并派发</small>
-          </button>
-          <article class="risk-card warn">
+        <button class="risk-card risk-card-button bad" type="button" @click="openExceptionDialog">
+          <span>异常资料组</span>
+          <strong>{{ summary.exceptionGroups }}</strong>
+          <small>查看并派发</small>
+        </button>
+        <button class="risk-card risk-card-button warn" type="button" @click="openReplacementDialog">
+          <span>换表清单</span>
+          <strong>{{ replacementRows.length || '查看' }}</strong>
+          <small>人工换表记录</small>
+        </button>
+        <article class="risk-card warn">
             <span>未施工未扫码</span>
             <strong>{{ summary.unconstructedGroups }}</strong>
           </article>
@@ -1290,6 +1351,75 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="exceptionDialogVisible = false">关闭</el-button>
         <el-button type="primary" :disabled="!filteredExceptionRows.length" @click="exportExceptionGroupCsv">导出当前清单</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="replacementDialogVisible" title="换表清单" width="1080px" class="unmatched-board-dialog">
+      <div class="unmatched-dialog-head">
+        <div class="unmatched-dialog-stats">
+          <article>
+            <span>换表记录</span>
+            <strong>{{ replacementDialogStats.total }}</strong>
+          </article>
+          <article>
+            <span>涉及终端</span>
+            <strong>{{ replacementDialogStats.terminals }}</strong>
+          </article>
+          <article>
+            <span>操作人</span>
+            <strong>{{ replacementDialogStats.operators }}</strong>
+          </article>
+          <article>
+            <span>照片数</span>
+            <strong>{{ replacementDialogStats.photos }}</strong>
+          </article>
+        </div>
+        <div class="unmatched-dialog-tools">
+          <el-input
+            v-model="replacementQuery"
+            clearable
+            placeholder="搜索旧表号、新表号、地址、终端或操作人"
+            @keyup.enter="loadReplacementRows"
+            @clear="loadReplacementRows"
+          />
+          <el-button :loading="replacementLoading" @click="loadReplacementRows">刷新</el-button>
+          <el-button :disabled="!replacementRows.length" @click="exportReplacementCsv">导出清单</el-button>
+        </div>
+      </div>
+      <el-alert
+        class="claim-alert"
+        type="info"
+        :closable="false"
+        title="这里展示通过未匹配资料人工录入旧表号后，已成功匹配到总清单资料组的换表记录。"
+      />
+      <el-table v-loading="replacementLoading" :data="replacementRows" height="520" size="small">
+        <el-table-column type="index" width="54" label="#" />
+        <el-table-column label="旧表号 / 新表号" min-width="180">
+          <template #default="{ row }">
+            <strong>{{ row.oldMeterNo || '-' }}</strong>
+            <small class="table-subline">新：{{ row.newMeterNo || '-' }}</small>
+          </template>
+        </el-table-column>
+        <el-table-column prop="terminal" label="终端" min-width="120" />
+        <el-table-column prop="address" label="匹配地址" min-width="280" show-overflow-tooltip />
+        <el-table-column label="资料组" min-width="150">
+          <template #default="{ row }">
+            <strong>{{ row.groupId || '-' }}</strong>
+            <small class="table-subline">当前：{{ row.meterNo || '-' }}</small>
+          </template>
+        </el-table-column>
+        <el-table-column prop="photoCount" label="照片" width="76" />
+        <el-table-column prop="replacementBy" label="操作人" width="110" />
+        <el-table-column label="操作时间" min-width="180">
+          <template #default="{ row }">
+            <span>{{ formatDateTime(row.replacementAt) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="status" label="资料状态" width="110" />
+      </el-table>
+      <template #footer>
+        <el-button @click="replacementDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :disabled="!replacementRows.length" @click="exportReplacementCsv">导出当前清单</el-button>
       </template>
     </el-dialog>
 

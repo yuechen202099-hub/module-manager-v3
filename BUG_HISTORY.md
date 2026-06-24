@@ -16,6 +16,7 @@ Last updated: 2026-06-24
 
 | ID | Bug | 复现方式 | 修复状态 | 修复时间 | 涉及文件 |
 | --- | --- | --- | --- | --- | --- |
+| BH-0139 | 管理员缺少集中入口查看人工换表后已匹配到资料组的记录 | 在 `/project-board` 完成未匹配资料换表匹配后，只能从交付资料包备注间接看到换表结果，无法集中查看旧表号/新表号/地址/资料组 | 已在 `V3.0.4` 本地修复并通过关键回归、类型检查和构建；生产发布需继续满足备份、健康检查和 patch sync 规则 | 2026-06-24 | `ProjectBoardView.vue`、`services.ts`、`types.ts`、`local_test.py`、`local_simulation.py`、`state_repository.py` |
 | BH-0138 | 换表场景下如果只按新表号处理，会导致未匹配资料需要人工线下补地址，交付资料包缺少旧表号说明 | 在 `/project-board` 打开未匹配资料弹窗，现场换表扫码资料携带新表号时，旧版本无法直接输入旧表号匹配总清单地址，最终资料包也没有换表备注 | 已在 `V3.0.3` 本地修复并通过关键回归、类型检查和构建；生产发布需继续满足备份、健康检查和 patch sync 规则 | 2026-06-24 | `ProjectBoardView.vue`、`local_simulation.py`、`state_repository.py`、`test_local_simulation.py` |
 | BH-0134 | 管理员施工进度只显示未施工数量，不能下钻查看清单 | 管理员打开 `/construction`，终端卡只能看到“未施工数”，无法直接核对未施工表号和地址 | 已修复，本地类型检查和构建通过 | 2026-06-23 | `v2-web/src/views/ConstructionView.vue` |
 | BH-0101 | 项目看板左上版本号 `V2.4.11` 显示不全 | 打开生产 `/project-board`，左上角品牌版本徽标被裁切 | 已修复 | 2026-06-21 | `v2-web/src/styles/base.css`、`v2-web/src/styles/main.css` |

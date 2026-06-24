@@ -3403,3 +3403,24 @@ Date: 2026-06-23
   - 生产备份：`/opt/module-manager-v2/backups/runtime/20260624-004854`，包含 `local_state.json`、`users.json`、`env.backup`、`uploads.tar.gz` 和 `postgres.dump`。
   - 发布后健康检查通过：`module-manager-v2.service=active`、`nginx=active`、磁盘使用率 27%。
   - 页面探测：`/health`、`/login`、`/project-board`、`/task-hall`、`/construction`、`/vue/assets/index-Bb3LQB_W.js` 返回 200；`/openapi.json` 返回预期 404；`https://www.sgcc.online/login` 返回 200。
+
+# V3.0.4 - Project Board Replacement Record List
+
+- 日期：2026-06-24
+- 页面/模块：项目看板、换表记录查询
+- 改动：
+  - 新增 `/local-test/replacements` 只读接口，从已匹配资料组上的换表字段生成清单。
+  - 项目看板新增“换表清单”入口和弹窗。
+  - 清单展示旧表号、新表号、终端、地址、资料组、照片数、操作人和操作时间。
+  - 支持搜索、刷新和 CSV 导出。
+  - 应用版本从 V3.0.3 升级到 V3.0.4。
+- 数据安全：
+  - 不改数据库结构。
+  - 不执行 Alembic。
+  - 不直接修改生产 `.env`、`data`、`uploads`、OSS 或 PostgreSQL 数据。
+- 验证：
+  - 换表清单、换表备注、仓库代理和系统版本回归测试通过：`4 passed`。
+  - `py_compile`、Vue 迁移门禁、静态页面校验、`vue-tsc --noEmit`、`vite build`、`git diff --check` 通过。
+- 发布状态：
+  - 本地已验证并准备 patch sync。
+  - 生产发布必须先完成生产备份和 `scripts/production_health_check.sh`。

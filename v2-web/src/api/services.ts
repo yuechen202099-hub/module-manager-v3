@@ -9,6 +9,7 @@ import type {
   MaterialGroup,
   Project,
   ProjectSummary,
+  ReplacementRecord,
   ReviewPhoto,
   ReviewTask,
   TaskStatus,
@@ -198,6 +199,21 @@ type BackendUnmatchedRecord = {
   field_task_type?: string
   source_file?: string
   raw?: Record<string, unknown>
+}
+
+type BackendReplacementRecord = {
+  group_id?: string
+  task_id?: string | number
+  terminal?: string
+  address?: string
+  status?: string
+  photo_count?: number
+  meter_no?: string
+  meter_match_key?: string
+  old_meter_no?: string
+  new_meter_no?: string
+  replacement_by?: string
+  replacement_at?: string
 }
 
 type BackendUserAccount = {
@@ -552,6 +568,23 @@ function mapUnmatchedRecord(raw: BackendUnmatchedRecord): UnmatchedRecord {
     fieldTaskType: raw.field_task_type || '',
     sourceFile: raw.source_file || '',
     raw: raw.raw || {},
+  }
+}
+
+function mapReplacementRecord(raw: BackendReplacementRecord): ReplacementRecord {
+  return {
+    groupId: raw.group_id || '',
+    taskId: raw.task_id || '',
+    terminal: raw.terminal || '',
+    address: raw.address || '',
+    status: raw.status || '',
+    photoCount: Number(raw.photo_count || 0),
+    meterNo: raw.meter_no || '',
+    meterMatchKey: raw.meter_match_key || '',
+    oldMeterNo: raw.old_meter_no || '',
+    newMeterNo: raw.new_meter_no || '',
+    replacementBy: raw.replacement_by || '',
+    replacementAt: raw.replacement_at || '',
   }
 }
 
@@ -1124,6 +1157,15 @@ export async function fetchUnmatchedRecords(query = ''): Promise<UnmatchedRecord
   if (query.trim()) params.set('query', query.trim())
   const data = await api<{ total: number; items: BackendUnmatchedRecord[] }>(`/local-test/unmatched?${params.toString()}`)
   return (data.items || []).map(mapUnmatchedRecord)
+}
+
+export async function fetchReplacementRecords(query = ''): Promise<ReplacementRecord[]> {
+  const params = new URLSearchParams({ limit: '500' })
+  if (query.trim()) params.set('query', query.trim())
+  const data = await api<{ total: number; items: BackendReplacementRecord[] }>(
+    `/local-test/replacements?${params.toString()}`,
+  )
+  return (data.items || []).map(mapReplacementRecord)
 }
 
 export async function dedupeUnmatchedRecords(): Promise<UnmatchedDedupeResult> {

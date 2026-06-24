@@ -20,6 +20,11 @@ def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytes
     )
     monkeypatch.setattr(
         repository.local_simulation,
+        "list_replacement_records",
+        lambda query="", limit=100, offset=0: {"total": 1, "items": [{"group_id": "g-1"}]},
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
         "list_exception_groups",
         lambda reviewer="", limit=100, offset=0: {"total": 1, "items": [{"id": "g-1"}]},
     )
@@ -39,6 +44,7 @@ def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytes
     assert repo.list_tasks() == [{"id": 7, "terminal": "T-007"}]
     assert repo.summary() == {"summary": {"groups": 2}, "paths": {}}
     assert repo.list_unmatched_records(query="x") == {"total": 1, "items": [{"unmatched_id": "u-1"}]}
+    assert repo.list_replacement_records(query="new") == {"total": 1, "items": [{"group_id": "g-1"}]}
     assert repo.list_exception_groups(reviewer="reviewer-a") == {"total": 1, "items": [{"id": "g-1"}]}
     assert repo.update_group_metadata("g-1", actor="reviewer-a", updates={"collector": "c"}) == {
         "group": {"id": "g-1", "actor": "reviewer-a", "updates": {"collector": "c"}}

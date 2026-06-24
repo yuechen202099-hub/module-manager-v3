@@ -777,6 +777,10 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_replacement_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1176,6 +1180,9 @@ class JsonStateRepository(StateRepository):
 
     def list_unmatched_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         return local_simulation.list_unmatched_records(query=query, limit=limit, offset=offset)
+
+    def list_replacement_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        return local_simulation.list_replacement_records(query=query, limit=limit, offset=offset)
 
     def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:
         return local_simulation.dedupe_unmatched_records(actor=actor)
@@ -2281,6 +2288,19 @@ class PostgresStateRepository(StateRepository):
                 .limit(limit)
             ).all()
             return {"total": int(total), "items": [_unmatched_payload(record) for record in records]}
+
+    def list_replacement_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        with self._session() as session:
+            groups = session.scalars(
+                select(MaterialGroup).where(MaterialGroup.team_id == local_simulation.current_team_id())
+            ).all()
+            group_payloads = [_group_payload(session, group, include_photos=False) for group in groups]
+        return local_simulation.list_replacement_records_from_groups(
+            group_payloads,
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
 
     def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
