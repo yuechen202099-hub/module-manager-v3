@@ -52,6 +52,62 @@ def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytes
     assert repo.claim_task(7, "reviewer-a") == {"id": 7, "claimed_by": "reviewer-a"}
 
 
+def test_postgres_unmatched_payload_counts_image_urls() -> None:
+    record = SimpleNamespace(
+        legacy_id="u-image",
+        record_type="scan",
+        status="open",
+        terminal="T-IMG",
+        meter_no="M-IMG",
+        meter_match_key="M-IMG",
+        barcode="M-IMG",
+        collector="collector",
+        module_asset_no="module",
+        address="image road",
+        payload={"image_urls": ["https://example.test/a.jpg", "https://example.test/b.jpg"]},
+    )
+
+    payload = repository._unmatched_payload(record)
+
+    assert payload["photo_urls"] == ["https://example.test/a.jpg", "https://example.test/b.jpg"]
+    assert payload["photo_count"] == 2
+
+
+def test_unmatched_duplicate_key_blocks_reimport_after_association() -> None:
+    existing = SimpleNamespace(
+        legacy_id="scan-unmatched-old",
+        record_type="scan",
+        status="associated",
+        terminal="T-REPLACE",
+        meter_no="NEW-REPLACE-001",
+        meter_match_key="NEW-REPLACE-001",
+        barcode="NEW-REPLACE-001",
+        collector="collector",
+        module_asset_no="module",
+        address="replacement road",
+        payload={
+            "meter_no": "NEW-REPLACE-001",
+            "barcode": "NEW-REPLACE-001",
+            "meter_match_key": "NEW-REPLACE-001",
+            "terminal": "T-REPLACE",
+            "image_urls": ["https://example.test/replacement.jpg"],
+            "replacement_old_meter_no": "OLD-REPLACE-001",
+        },
+    )
+
+    incoming = {
+        "meter_no": "NEW-REPLACE-001",
+        "barcode": "NEW-REPLACE-001",
+        "meter_match_key": "NEW-REPLACE-001",
+        "terminal": "T-REPLACE",
+        "image_urls": ["https://example.test/replacement.jpg"],
+    }
+
+    assert repository._unmatched_duplicate_keys([existing]) == {
+        repository.local_simulation.make_unmatched_duplicate_key(incoming)
+    }
+
+
 def test_dual_backend_keeps_json_as_authoritative_source(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository.settings, "state_backend", "dual")
     monkeypatch.setattr(repository.local_simulation, "release_task", lambda task_id, reviewer, force=False: {"id": task_id, "force": force})

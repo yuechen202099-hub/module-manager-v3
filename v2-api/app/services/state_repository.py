@@ -658,7 +658,7 @@ def _delivery_group_manifest(group: dict[str, Any]) -> dict[str, Any]:
 
 def _unmatched_payload(record: UnmatchedRecord) -> dict[str, Any]:
     payload = record.payload or {}
-    photo_urls = payload.get("photo_urls") or payload.get("images") or []
+    photo_urls = payload.get("photo_urls") or payload.get("image_urls") or payload.get("images") or []
     if isinstance(photo_urls, str):
         photo_urls = [item.strip() for item in re.split(r"[\r\n,]+", photo_urls) if item.strip()]
     if not isinstance(photo_urls, list):
@@ -693,6 +693,15 @@ def _unmatched_payload(record: UnmatchedRecord) -> dict[str, Any]:
         "source_file": payload.get("source_file") or "",
         "raw": payload,
     }
+
+
+def _unmatched_duplicate_keys(records: list[UnmatchedRecord]) -> set[str]:
+    keys: set[str] = set()
+    for record in records:
+        key = local_simulation.make_unmatched_duplicate_key(_unmatched_payload(record))
+        if not key.startswith("id:"):
+            keys.add(key)
+    return keys
 
 
 class StateRepository(ABC):

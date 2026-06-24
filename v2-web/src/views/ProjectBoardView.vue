@@ -5,6 +5,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 import {
   assignConstructionExceptionOrder,
+  deleteUnmatchedRecord,
   deleteUserAccount,
   dedupeUnmatchedRecords,
   exportExceptionMeters,
@@ -82,6 +83,7 @@ const workloadSegment = ref<InstallerWorkSegment | null>(null)
 const unmatchedDialogVisible = ref(false)
 const unmatchedLoading = ref(false)
 const unmatchedDeduping = ref(false)
+const unmatchedDeletingId = ref('')
 const unmatchedRematchingId = ref('')
 const unmatchedQuery = ref('')
 const unmatchedRows = ref<UnmatchedRecord[]>([])
@@ -824,6 +826,32 @@ async function cleanupDuplicateUnmatchedRows() {
   }
 }
 
+async function deleteUnmatchedRow(row: UnmatchedRecord) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除未匹配记录 ${row.barcode || row.meterNo || row.unmatchedId}？删除后该记录会从未匹配清单移除。`,
+      '删除未匹配记录',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+  unmatchedDeletingId.value = row.unmatchedId
+  try {
+    await deleteUnmatchedRecord(row.unmatchedId, '项目看板人工删除未匹配记录')
+    ElMessage.success('未匹配记录已删除')
+    await Promise.all([loadUnmatchedRows(), loadBoard()])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '删除未匹配记录失败')
+  } finally {
+    unmatchedDeletingId.value = ''
+  }
+}
+
 async function replaceUnmatchedMeter(row: UnmatchedRecord) {
   try {
     const { value } = await ElMessageBox.prompt('录入旧表号，用旧表号匹配总清单地址并绑定终端', '换表匹配', {
@@ -1485,7 +1513,7 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column prop="assignedTo" label="指派" width="110" />
         <el-table-column prop="sourceFile" label="来源文件" min-width="150" show-overflow-tooltip />
-        <el-table-column label="操作" width="96" fixed="right">
+        <el-table-column label="操作" width="156" fixed="right">
           <template #default="{ row }">
             <el-button
               size="small"
@@ -1495,6 +1523,15 @@ onUnmounted(() => {
               @click="replaceUnmatchedMeter(row)"
             >
               换表
+            </el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :loading="unmatchedDeletingId === row.unmatchedId"
+              @click="deleteUnmatchedRow(row)"
+            >
+              删除
             </el-button>
           </template>
         </el-table-column>

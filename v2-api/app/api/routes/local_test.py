@@ -52,7 +52,7 @@ from app.services.photo_storage import (
     static_upload_root,
     validate_image_content,
 )
-from app.services.state_repository import StateBackendNotReady, get_state_repository
+from app.services.state_repository import StateBackendNotReady, _unmatched_duplicate_keys, get_state_repository
 from app.services.local_simulation import (
     add_photo_urls_to_group,
     assign_construction_task,
@@ -87,6 +87,7 @@ from app.services.local_simulation import (
     list_construction_task_groups,
     list_construction_tasks,
     list_groups,
+    make_unmatched_duplicate_key,
     list_team_states,
     list_task_groups,
     list_tasks,
@@ -412,10 +413,14 @@ def _postgres_import_scan_records(records: list[dict], progress_callback=None) -
             (str(photo.group_id), str(photo.sha256 or ""))
             for photo in session.scalars(select(Photo).where(Photo.team_id == team_id, Photo.sha256.is_not(None), Photo.sha256 != "")).all()
         }
+        existing_unmatched_records = list(
+            session.scalars(select(UnmatchedRecord).where(UnmatchedRecord.team_id == team_id)).all()
+        )
         existing_unmatched = {
             str(record.legacy_id or "")
-            for record in session.scalars(select(UnmatchedRecord).where(UnmatchedRecord.team_id == team_id)).all()
+            for record in existing_unmatched_records
         }
+        existing_unmatched_keys = _unmatched_duplicate_keys(existing_unmatched_records)
 
         for index, record in enumerate(records, start=1):
             match_key = str(record.get("meter_match_key") or "")
@@ -423,7 +428,10 @@ def _postgres_import_scan_records(records: list[dict], progress_callback=None) -
             if group is None:
                 groups_unmatched += 1
                 legacy_id = f"scan-unmatched-{hashlib.sha256((team_id + '|' + str(record.get('barcode') or '') + '|' + str(index)).encode('utf-8')).hexdigest()[:24]}"
-                if legacy_id not in existing_unmatched:
+                duplicate_key = make_unmatched_duplicate_key({**record, "unmatched_id": legacy_id})
+                if legacy_id not in existing_unmatched and (
+                    duplicate_key.startswith("id:") or duplicate_key not in existing_unmatched_keys
+                ):
                     session.add(
                         UnmatchedRecord(
                             team_id=team_id,
@@ -441,6 +449,8 @@ def _postgres_import_scan_records(records: list[dict], progress_callback=None) -
                         )
                     )
                     existing_unmatched.add(legacy_id)
+                    if not duplicate_key.startswith("id:"):
+                        existing_unmatched_keys.add(duplicate_key)
                     unmatched_records += 1
                 continue
 

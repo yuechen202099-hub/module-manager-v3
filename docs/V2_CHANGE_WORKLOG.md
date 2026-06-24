@@ -3472,3 +3472,44 @@ Date: 2026-06-23
 - 页面检查：`/health`、`/login`、`/project-board`、`/task-hall`、`/construction` 返回 200；`/openapi.json` 返回预期 404。
 - 线上版本确认：`/vue/index.html` 标题为 `Module Manager V3.0.5`。
 - 线上功能确认：`ProjectBoardView-CT6STBqQ.js` 包含“异常与缺照”，不再包含“缺照片”单独文本。
+
+# V3.0.6 - Unmatched Replacement Workflow Fix
+
+- 日期：2026-06-24
+- 分支：`ops/OPS-20260624-001-meter-replace-dispatch`
+- 页面/模块：项目看板未匹配清单、换表匹配、PostgreSQL 扫码导入未匹配记录
+- 任务记录：`ops-v3/tasks/V3.0.2/2026-06-24-unmatched-replacement-workflow-fix.md`
+
+## Change
+
+- PostgreSQL 未匹配 payload 展示兼容 `image_urls`，导入时有图的未匹配记录在清单中继续显示照片数。
+- PostgreSQL 扫码导入新增已处理未匹配 duplicate key 保护：已换表关联、人工删除或其他已处理的同一未匹配记录不会因下次导入重新回流。
+- 项目看板未匹配清单每行新增“删除”按钮，调用已有未匹配删除接口并刷新清单/看板统计。
+- 换表关联沿用未匹配记录中的照片/采集器/模块等当前数据写入目标资料组；目标资料组有照片后进入已采集/异常处理口径，不停留为未施工。
+- 应用版本从 V3.0.5 升级到 V3.0.6。
+
+## Files
+
+- `v2-api/app/api/routes/local_test.py`
+- `v2-api/app/services/state_repository.py`
+- `v2-api/tests/test_state_repository.py`
+- `v2-web/src/views/ProjectBoardView.vue`
+- `scripts/verify_unmatched_replacement_workflow.py`
+- `v2-api/app/static/vue/`
+- 版本号相关文件：`v2-api/app/main.py`、`v2-api/app/services/ops_status.py`、`v2-api/pyproject.toml`、`v2-api/tests/test_api.py`、`v2-web/package.json`、`v2-web/index.html`、`v2-web/src/components/AppLayout.vue`、`v2-web/src/layouts/AppLayout.vue`、`v2-web/src/views/LoginView.vue`
+
+## Validation
+
+- `python scripts\verify_unmatched_replacement_workflow.py`：通过。
+- `python scripts\verify_project_board_exception_merge.py`：通过。
+- `python -m py_compile v2-api\app\api\routes\local_test.py v2-api\app\services\state_repository.py v2-api\app\main.py v2-api\app\services\ops_status.py`：通过。
+- `python -m pytest tests\test_state_repository.py -q`：11 passed。
+- `python -m pytest tests\test_api.py tests\test_local_simulation.py tests\test_state_repository.py`：104 passed，1 个 Starlette/httpx deprecation warning。
+- `python scripts\verify_vue_migration_gate.py`：通过。
+- `npm run build`：通过。
+- `python scripts\verify-static-pages.py`：通过。
+- `git diff --check`：通过，仅有 Git LF/CRLF 工作区提示。
+
+## Production Result
+
+- 待发布。
