@@ -3422,5 +3422,9 @@ Date: 2026-06-23
   - 换表清单、换表备注、仓库代理和系统版本回归测试通过：`4 passed`。
   - `py_compile`、Vue 迁移门禁、静态页面校验、`vue-tsc --noEmit`、`vite build`、`git diff --check` 通过。
 - 发布状态：
-  - 本地已验证并准备 patch sync。
-  - 生产发布必须先完成生产备份和 `scripts/production_health_check.sh`。
+  - 已发布到 `106.14.122.43:/opt/module-manager-v2/current`，发布方式为 patch sync。
+  - 提交/标签：`b3f7cfc` / `v3.0.4`。
+  - 生产备份：`/opt/module-manager-v2/backups/runtime/20260624-011733`，包含 `local_state.json`、`users.json`、`env.backup`、`uploads.tar.gz` 和 `postgres.dump`。
+  - 发布后健康检查通过：`module-manager-v2.service=active`、`nginx=active`、磁盘使用率 27%。
+  - 页面探测：`/health`、`/login`、`/project-board`、`/task-hall`、`/construction`、`/vue/assets/index-Bvvbn8bU.js`、`/vue/assets/ProjectBoardView-uva5WQkn.js` 返回 200；`/openapi.json` 返回预期 404；`https://www.sgcc.online/login` 返回 200。
+  - 新接口内部校验：`list_replacement_records(limit=3)` 返回 `total=5`、`sample_count=3`。
