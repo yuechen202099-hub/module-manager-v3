@@ -1,6 +1,6 @@
 # 项目看板未匹配资料换表匹配与导出备注
 
-- 状态：已验证
+- 状态：已发布
 - 日期：2026-06-24
 - 规则版本：Rules v1
 - 应用基线：V3.0.2
@@ -49,6 +49,17 @@
 - `vite build`：通过，已刷新 `v2-api/app/static/vue/` 生产静态资源。
 - `git diff --check`：通过。
 - `rg "V3\.0\.2|3\.0\.2" v2-api v2-web`：无残留应用版本标识。
+
+## 生产发布
+
+- 发布时间：2026-06-24
+- 提交/标签：`9343549` / `v3.0.3`
+- 发布方式：patch sync 到 `106.14.122.43:/opt/module-manager-v2/current`，仅同步本次变更源码、文档和 `v2-api/app/static/vue/` 构建产物；未覆盖生产 `.env`、`data`、`uploads`。
+- 生产备份：`/opt/module-manager-v2/backups/runtime/20260624-004854`
+- 备份内容：`local_state.json`、`users.json`、`env.backup`、`uploads.tar.gz`、`postgres.dump`，`postgres.dump.status=ok`。
+- 生产校验：`production_health_check.sh` 通过，`module-manager-v2.service=active`，`nginx=active`，磁盘使用率 27%。
+- 页面探测：`/health`、`/login`、`/project-board`、`/task-hall`、`/construction`、`/vue/assets/index-Bb3LQB_W.js` 返回 200；`/openapi.json` 返回预期 404；`https://www.sgcc.online/login` 返回 200。
+- 线上版本确认：`/login` 可见 `V3.0.3`，后端版本文件和 Vue 入口均为 `3.0.3`。
 
 ## 风险/回滚
 
