@@ -16,8 +16,8 @@ export type ConstructionGroupIdentity = {
 }
 
 export function isAllZeroConstructionCode(value?: string | number) {
-  const normalized = String(value || '').replace(/\D/g, '')
-  return normalized.length >= 6 && /^0+$/.test(normalized)
+  const normalized = String(value ?? '').replace(/\D/g, '')
+  return normalized.length > 0 && /^0+$/.test(normalized)
 }
 
 export function isPlaceholderConstructionAddress(value?: string) {

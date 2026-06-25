@@ -3016,6 +3016,45 @@ def _photo_work_datetime(photo: dict[str, Any]) -> datetime | None:
     return None
 
 
+PLACEHOLDER_CONSTRUCTION_ADDRESS_MARKER = "\u5f85\u5bfc\u5165\u603b\u6e05\u5355\u5730\u5740"
+
+
+def is_all_zero_construction_code(value: Any) -> bool:
+    normalized = re.sub(r"\D", "", str(value if value is not None else ""))
+    return bool(normalized) and all(char == "0" for char in normalized)
+
+
+def is_placeholder_construction_group_identity(
+    *,
+    group_id: Any = "",
+    meter_no: Any = "",
+    meter_match_key: Any = "",
+    address: Any = "",
+) -> bool:
+    return (
+        is_all_zero_construction_code(group_id)
+        or is_all_zero_construction_code(meter_no)
+        or is_all_zero_construction_code(meter_match_key)
+        or PLACEHOLDER_CONSTRUCTION_ADDRESS_MARKER in str(address or "")
+    )
+
+
+def assert_not_placeholder_construction_group(
+    *,
+    group_id: Any = "",
+    meter_no: Any = "",
+    meter_match_key: Any = "",
+    address: Any = "",
+) -> None:
+    if is_placeholder_construction_group_identity(
+        group_id=group_id,
+        meter_no=meter_no,
+        meter_match_key=meter_match_key,
+        address=address,
+    ):
+        raise ValueError("\u65e0\u5de5\u5355\uff1a\u626b\u7801\u7ed3\u679c\u4e0d\u5728\u5f53\u524d\u65bd\u5de5\u5de5\u5355\u4e2d\uff0800000000 \u5360\u4f4d\u8d44\u6599\u7ec4\u4e0d\u80fd\u4e0a\u4f20\uff09")
+
+
 def _installer_exception_group_payload(group: dict[str, Any]) -> dict[str, Any]:
     reasons = build_exception_reasons(group)
     return {
@@ -4429,6 +4468,12 @@ def upload_construction_group_batch(
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
+    assert_not_placeholder_construction_group(
+        group_id=group.get("id"),
+        meter_no=group.get("meter_no") or group.get("barcode"),
+        meter_match_key=group.get("meter_match_key"),
+        address=group.get("address"),
+    )
     task = ensure_construction_task_fields(find_task(group["task_id"]))
     if task.get("construction_claimed_by") != actor:
         raise ValueError("Construction task must be claimed by the current constructor before upload")

@@ -814,6 +814,90 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert task["id"] not in {item["id"] for item in after_release}
 
 
+def test_construction_upload_rejects_placeholder_group_id_before_file_save() -> None:
+    admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
+    admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
+    constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
+
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    task = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][0]
+    client.patch(
+        f"/local-test/construction/tasks/{task['id']}/open",
+        headers=admin_headers,
+        json={"actor": "admin"},
+    )
+    client.patch(
+        f"/local-test/construction/tasks/{task['id']}/assign",
+        headers=admin_headers,
+        json={"actor": "admin", "constructor": "constructor"},
+    )
+    upload_dir = Path("v2-api/app/static/uploads/construction")
+
+    def saved_upload_files() -> set[str]:
+        if not upload_dir.exists():
+            return set()
+        return {str(path.relative_to(upload_dir)) for path in upload_dir.rglob("*") if path.is_file()}
+
+    before_files = saved_upload_files()
+    uploaded = client.post(
+        "/local-test/construction/groups/00000000/upload-batch",
+        headers=constructor_headers,
+        data={
+            "actor": "constructor",
+            "client_batch_id": "batch-placeholder-api",
+            "client_completed_at": "2026-06-08T09:30:00",
+            "collector": "collector-api",
+            "module_asset_no": "module-api",
+            "photo_slots": ["before_box", "module_meter", "after_box"],
+            "client_photo_ids": ["photo-a", "photo-b", "photo-c"],
+        },
+        files=[
+            ("files", ("before.jpg", b"placeholder-before", "image/jpeg")),
+            ("files", ("meter.jpg", b"placeholder-meter", "image/jpeg")),
+            ("files", ("after.jpg", b"placeholder-after", "image/jpeg")),
+        ],
+    )
+
+    assert uploaded.status_code == 400
+    assert "00000000" in uploaded.json()["detail"]
+    assert saved_upload_files() == before_files
+
+    group = client.get(
+        f"/local-test/construction/tasks/{task['id']}/groups?limit=1&summary=true",
+        headers=constructor_headers,
+    ).json()["data"]["items"][0]
+    client.patch(
+        f"/local-test/groups/{group['id']}/metadata",
+        headers=admin_headers,
+        json={"actor": "admin", "updates": {"meter_no": "00000000"}},
+    )
+
+    before_files = saved_upload_files()
+    placeholder_meter_upload = client.post(
+        f"/local-test/construction/groups/{group['id']}/upload-batch",
+        headers=constructor_headers,
+        data={
+            "actor": "constructor",
+            "client_batch_id": "batch-placeholder-meter",
+            "client_completed_at": "2026-06-08T09:40:00",
+            "collector": "collector-api",
+            "module_asset_no": "module-api",
+            "photo_slots": ["before_box", "module_meter", "after_box"],
+            "client_photo_ids": ["photo-a", "photo-b", "photo-c"],
+        },
+        files=[
+            ("files", ("before.jpg", b"placeholder-meter-before", "image/jpeg")),
+            ("files", ("meter.jpg", b"placeholder-meter-meter", "image/jpeg")),
+            ("files", ("after.jpg", b"placeholder-meter-after", "image/jpeg")),
+        ],
+    )
+
+    assert placeholder_meter_upload.status_code == 400
+    assert "00000000" in placeholder_meter_upload.json()["detail"]
+    assert saved_upload_files() == before_files
+
+
 def test_exception_group_assignment_is_visible_to_constructor() -> None:
     admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
     reviewer_login = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})

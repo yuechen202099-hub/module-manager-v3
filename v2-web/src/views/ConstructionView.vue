@@ -248,7 +248,9 @@ const visibleExceptionTaskCards = computed(() => {
 })
 
 const visibleUnmatchedTaskCards = computed(() =>
-  unmatchedRecords.value.filter((record) => record.assignedTo === actor.value),
+  unmatchedRecords.value.filter(
+    (record) => record.assignedTo === actor.value && isCollectableConstructionGroup(unmatchedRecordToConstructionGroup(record)),
+  ),
 )
 
 const taskPickerTitle = computed(() => {
@@ -775,6 +777,19 @@ function orderToGroup(order: ConstructionExceptionOrder): MaterialGroup {
     exceptionOrderId: order.id,
     exceptionNote: order.note,
     photos: order.group?.photos || [],
+  }
+}
+
+function unmatchedRecordToConstructionGroup(record: UnmatchedRecord): MaterialGroup {
+  return {
+    id: record.unmatchedId || record.meterNo || record.barcode,
+    taskId: '',
+    address: record.address || '',
+    meterNo: record.meterNo || record.barcode || '',
+    meterMatchKey: record.meterMatchKey || '',
+    terminal: record.terminal || '',
+    status: 'pending',
+    photoCount: record.photoCount || 0,
   }
 }
 

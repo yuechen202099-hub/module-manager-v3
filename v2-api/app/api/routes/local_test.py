@@ -78,6 +78,8 @@ from app.services.local_simulation import (
     get_delivery_cached_photo_path,
     get_task_progress,
     get_state,
+    assert_not_placeholder_construction_group,
+    is_all_zero_construction_code,
     group_target_summary,
     import_scan_template_xlsx,
     import_total_catalog_xlsx,
@@ -197,6 +199,21 @@ def state_repository():
         return get_state_repository()
     except StateBackendNotReady as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def validate_construction_upload_group_before_file_save(group_id: str) -> None:
+    group = state_repository().get_group(group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+    try:
+        assert_not_placeholder_construction_group(
+            group_id=group.get("id") or group_id,
+            meter_no=group.get("meter_no"),
+            meter_match_key=group.get("meter_match_key"),
+            address=group.get("address"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def request_auth_payload(request: Request) -> dict:
@@ -1802,6 +1819,9 @@ async def construction_group_upload_batch(
     client_photo_ids: list[str] = Form(default=[]),
     files: list[UploadFile] = File(default=[]),
 ):
+    if is_all_zero_construction_code(group_id):
+        raise HTTPException(status_code=400, detail="No work order: 00000000 placeholder group cannot upload")
+    validate_construction_upload_group_before_file_save(group_id)
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
     records: list[dict] = []

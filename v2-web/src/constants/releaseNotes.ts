@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.25'
+export const APP_VERSION = '3.0.26'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,17 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.26',
+    date: '2026-06-26',
+    type: 'BUG 修复',
+    title: '施工占位工单后端硬拦截',
+    items: [
+      'upload-batch 接口在读取并保存照片前先拦截 00000000 占位资料组，防止旧页面或直接 API 绕过前端校验。',
+      'PostgreSQL 和 JSON 两条上传路径都会再次校验资料组 ID、表号、匹配键和地址，命中占位组时直接提示无工单。',
+      '系统状态版本同步到 V3.0.26，施工员未匹配任务入口也会过滤 00000000 或待导入总清单地址类占位记录。',
+    ],
+  },
   {
     version: 'V3.0.25',
     date: '2026-06-26',

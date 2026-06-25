@@ -77,6 +77,17 @@ const normalGroup = {
   photoCount: 0,
 }
 
+const numericZeroGroup = {
+  id: 0,
+  taskId: 'task-1',
+  meterNo: 0,
+  meterMatchKey: 0,
+  terminal: 'T-001',
+  address: '',
+  status: 'pending',
+  photoCount: 0,
+}
+
 assert.equal(guards.isPlaceholderConstructionDraft(placeholderDraftWithPhotos), true)
 assert.equal(guards.isEmptyPlaceholderConstructionDraft(placeholderDraftWithPhotos), false)
 assert.equal(guards.isUploadableConstructionDraft(placeholderDraftWithPhotos), false)
@@ -93,5 +104,16 @@ assert.match(guards.constructionGroupOpenBlockReason(placeholderGroup), /无工�
 assert.equal(guards.isPlaceholderConstructionGroup(normalGroup), false)
 assert.equal(guards.isCollectableConstructionGroup(normalGroup), true)
 assert.equal(guards.constructionGroupOpenBlockReason(normalGroup), '')
+
+assert.equal(guards.isAllZeroConstructionCode(0), true)
+assert.equal(guards.isPlaceholderConstructionGroup(numericZeroGroup), true)
+assert.equal(guards.isCollectableConstructionGroup(numericZeroGroup), false)
+
+const constructionView = fs.readFileSync(path.join(root, 'v2-web', 'src', 'views', 'ConstructionView.vue'), 'utf8')
+assert.match(
+  constructionView,
+  /visibleUnmatchedTaskCards[\s\S]*isCollectableConstructionGroup[\s\S]*unmatchedRecordToConstructionGroup/,
+  'unmatched construction task cards must filter placeholder records',
+)
 
 console.log('construction placeholder draft guard checks passed')
