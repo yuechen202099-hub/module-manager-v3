@@ -36,6 +36,13 @@ import type {
   UserAccount,
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
+import {
+  constructionDraftUploadBlockReason,
+  constructionGroupOpenBlockReason,
+  isCollectableConstructionGroup,
+  isEmptyPlaceholderConstructionDraft,
+  isPlaceholderConstructionDraft,
+} from '@/utils/constructionDraftGuards'
 
 type GroupFilter = 'unbuilt' | 'cached' | 'exception' | 'all'
 type PhotoSource = 'camera' | 'album'
@@ -234,6 +241,7 @@ const visibleExceptionTaskCards = computed(() => {
   const map = new Map<string, ConstructionExceptionOrder>()
   for (const order of source) {
     if (order.assignedTo !== actor.value) continue
+    if (!isCollectableConstructionGroup(order.group || orderToGroup(order))) continue
     map.set(order.id || `${order.taskId}-${order.groupId}`, order)
   }
   return [...map.values()]
@@ -283,23 +291,11 @@ const exceptionGroupIdSet = computed(() => new Set(exceptionOrders.value.map((or
 function draftGroupId(draft: CacheDraft) {
   return String(draft.groupId || draft.group_id || '')
 }
-function isAllZeroCode(value?: string | number) {
-  const normalized = String(value || '').replace(/\D/g, '')
-  return normalized.length >= 6 && /^0+$/.test(normalized)
-}
-function isInvalidPlaceholderDraft(draft: CacheDraft) {
-  const noPhotos = !(draft.photos || []).length
-  const noCollector = !String(draft.collector || '').trim()
-  const noWorkOrder = !String(draft.work_order_id || '').trim()
-  const placeholderId = isAllZeroCode(draft.groupId) || isAllZeroCode(draft.group_id) || isAllZeroCode(draft.meter_no)
-  const placeholderAddress = String(draft.address || '').includes('待导入总清单地址')
-  return noPhotos && noCollector && noWorkOrder && placeholderId && placeholderAddress
-}
 function isExceptionDraft(draft: CacheDraft) {
   const groupId = draftGroupId(draft)
   return Boolean(draft.work_order_id) || Boolean(groupId && exceptionGroupIdSet.value.has(groupId))
 }
-const cachedTaskDrafts = computed(() => taskDrafts.value.filter((draft) => !isExceptionDraft(draft) && !isInvalidPlaceholderDraft(draft)))
+const cachedTaskDrafts = computed(() => taskDrafts.value.filter((draft) => !isExceptionDraft(draft) && !isPlaceholderConstructionDraft(draft)))
 const readyCachedDrafts = computed(() => cachedTaskDrafts.value.filter((draft) => draftReady(draft)))
 const draftByGroupId = computed(() => {
   const map = new Map<string, CacheDraft>()
@@ -322,10 +318,16 @@ const groupFilterCounts = computed(() => {
   const keyword = normalizeSearch(groupQuery.value)
   const cachedGroupIds = new Set(cachedTaskDrafts.value.map((draft) => draftGroupId(draft)).filter(Boolean))
   const exceptionGroupIds = exceptionGroupIdSet.value
-  const byQuery = groups.value.filter((group) => matchesGroupQuery(group, keyword) && !group.exceptionOrderId && !exceptionGroupIds.has(String(group.id)))
+  const byQuery = groups.value.filter(
+    (group) =>
+      isCollectableConstructionGroup(group) &&
+      matchesGroupQuery(group, keyword) &&
+      !group.exceptionOrderId &&
+      !exceptionGroupIds.has(String(group.id)),
+  )
   const exceptionGroups = exceptionOrders.value
     .map((order) => order.group || orderToGroup(order))
-    .filter((group) => matchesGroupQuery(group, keyword))
+    .filter((group) => isCollectableConstructionGroup(group) && matchesGroupQuery(group, keyword))
   const countedCachedGroupIds = new Set<string>(byQuery.filter((group) => cachedGroupIds.has(String(group.id))).map((group) => String(group.id)))
   const standaloneCached = cachedTaskDrafts.value.filter((draft) => {
     const groupId = draftGroupId(draft)
@@ -361,6 +363,7 @@ const workItems = computed<WorkItem[]>(() => {
 
   for (const group of groups.value) {
     if (group.exceptionOrderId || exceptionGroupIds.has(String(group.id))) continue
+    if (!isCollectableConstructionGroup(group)) continue
     const draft = cachedDraftByGroupId.value.get(group.id)
     items.push({ key: `group-${group.id}`, kind: draft ? 'cached' : 'group', group, draft })
     seen.add(group.id)
@@ -368,6 +371,7 @@ const workItems = computed<WorkItem[]>(() => {
 
   for (const order of exceptionOrders.value) {
     const group = order.group || groupMap.get(order.groupId) || orderToGroup(order)
+    if (!isCollectableConstructionGroup(group)) continue
     const draft = draftByGroupId.value.get(order.groupId)
     items.push({
       key: `exception-${order.id || order.groupId}`,
@@ -424,8 +428,9 @@ const unbuiltDialogTitle = computed(() => {
 
 const filteredUnbuiltDialogGroups = computed(() => {
   const keyword = normalizeSearch(unbuiltDialogQuery.value)
-  if (!keyword) return unbuiltDialogGroups.value
-  return unbuiltDialogGroups.value.filter((group) => matchesGroupQuery(group, keyword))
+  const collectableGroups = unbuiltDialogGroups.value.filter(isCollectableConstructionGroup)
+  if (!keyword) return collectableGroups
+  return collectableGroups.filter((group) => matchesGroupQuery(group, keyword))
 })
 
 const missingRequiredSlots = computed(() => {
@@ -447,6 +452,7 @@ const activeExistingPhotos = computed(() => activeGroup.value?.photos?.filter((p
 
 const canUploadCurrent = computed(() => {
   if (!activeGroup.value) return false
+  if (constructionGroupOpenBlockReason(activeGroup.value)) return false
   if (!form.moduleAssetNo.trim()) return false
   if (missingRequiredSlots.value.length) return false
   return Boolean(Object.values(selectedFiles.value).some(Boolean) || activeOrder.value)
@@ -1275,11 +1281,11 @@ async function withStore<T>(
 async function loadDrafts() {
   try {
     const allDrafts = await withStore<CacheDraft[]>(DRAFT_STORE, 'readonly', (store) => store.getAll())
-    const invalidDrafts = allDrafts.filter(isInvalidPlaceholderDraft)
+    const invalidDrafts = allDrafts.filter(isEmptyPlaceholderConstructionDraft)
     if (invalidDrafts.length) {
       await Promise.all(invalidDrafts.map((draft) => deleteDraft(draft.client_batch_id)))
     }
-    drafts.value = allDrafts.filter((draft) => !isInvalidPlaceholderDraft(draft))
+    drafts.value = allDrafts.filter((draft) => !isEmptyPlaceholderConstructionDraft(draft))
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '缓存读取失败'
   }
@@ -1352,7 +1358,12 @@ function missingSlotsForDraft(draft: CacheDraft) {
 }
 
 function draftReady(draft: CacheDraft) {
-  return Boolean((draft.groupId || draft.group_id) && draft.module_asset_no && missingSlotsForDraft(draft).length === 0)
+  return Boolean(
+    (draft.groupId || draft.group_id) &&
+      draft.module_asset_no &&
+      !constructionDraftUploadBlockReason(draft) &&
+      missingSlotsForDraft(draft).length === 0,
+  )
 }
 
 function draftCompletedAt(draft: CacheDraft) {
@@ -1501,6 +1512,8 @@ async function flushCurrentDraftPersist() {
 
 async function uploadDraft(draft: CacheDraft) {
   if (!online()) throw new Error('当前离线，已保留本地缓存')
+  const blockedReason = constructionDraftUploadBlockReason(draft)
+  if (blockedReason) throw new Error(blockedReason)
   if (!draft.module_asset_no?.trim()) throw new Error('模块资产编号为必填项')
   const missing = missingSlotsForDraft(draft)
   if (missing.length) throw new Error(`缺少必填照片：${missing.join('、')}`)
@@ -1670,7 +1683,7 @@ async function openUnbuiltDialog(task: ReviewTask, options: { preserveQuery?: bo
   unbuiltDialogLoading.value = true
   try {
     const items = await fetchConstructionTaskGroups(task.id)
-    unbuiltDialogGroups.value = sortGroupsByAddress(items)
+    unbuiltDialogGroups.value = sortGroupsByAddress(items.filter(isCollectableConstructionGroup))
   } catch (error) {
     unbuiltDialogError.value = error instanceof Error ? error.message : '未施工清单加载失败'
   } finally {
@@ -1753,8 +1766,8 @@ async function useSnapshot(taskId: string, reason = '') {
   const snapshot = await getTerminalSnapshot(taskId)
   if (!snapshot) throw new Error(reason || '当前终端没有可用离线包，请先在有网时打开一次')
   offlineMode.value = true
-  groups.value = sortGroupsByAddress(snapshot.groups || [])
-  exceptionOrders.value = snapshot.exceptionOrders || []
+  groups.value = sortGroupsByAddress((snapshot.groups || []).filter(isCollectableConstructionGroup))
+  exceptionOrders.value = (snapshot.exceptionOrders || []).filter((order) => isCollectableConstructionGroup(order.group || orderToGroup(order)))
   const exists = tasks.value.some((task) => task.id === snapshot.task.id)
   if (!exists) tasks.value = [snapshot.task, ...tasks.value]
 }
@@ -1827,10 +1840,12 @@ async function loadGroups() {
       fetchConstructionTaskGroups(selectedTaskId.value),
       fetchConstructionExceptionOrders(selectedTaskId.value),
     ])
-    groups.value = sortGroupsByAddress(taskGroups)
-    exceptionOrders.value = orders
+    const collectableGroups = taskGroups.filter(isCollectableConstructionGroup)
+    const collectableOrders = orders.filter((order) => isCollectableConstructionGroup(order.group || orderToGroup(order)))
+    groups.value = sortGroupsByAddress(collectableGroups)
+    exceptionOrders.value = collectableOrders
     offlineMode.value = false
-    if (selectedTask.value) await putTerminalSnapshot(selectedTask.value, taskGroups, orders)
+    if (selectedTask.value) await putTerminalSnapshot(selectedTask.value, collectableGroups, collectableOrders)
   } catch (error) {
     try {
       await useSnapshot(selectedTaskId.value, error instanceof Error ? error.message : '')
@@ -1846,6 +1861,11 @@ async function loadGroups() {
 
 async function openWorkItem(item: WorkItem) {
   await flushCurrentDraftPersist()
+  const blockedReason = constructionGroupOpenBlockReason(item.group)
+  if (blockedReason) {
+    ElMessage.warning(blockedReason)
+    return
+  }
   selectedItemKey.value = item.key
   activeOrder.value = item.order || null
   activeGroup.value = item.group
@@ -1893,7 +1913,7 @@ function openByMeter(value = quickMeter.value) {
   const item = findWorkItemByMeterCode(value)
   if (!item) {
     groupQuery.value = value
-    ElMessage.warning('当前终端未找到该表号，可切换终端后再试')
+    ElMessage.warning('无工单：扫码结果不在当前施工工单中')
     return
   }
   groupFilter.value = 'all'
