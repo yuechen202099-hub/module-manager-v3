@@ -1,0 +1,81 @@
+@import "./tokens.css";
+
+.v2-status {
+  --status-fg: var(--v2-neutral);
+  --status-bg: var(--v2-neutral-soft);
+  --status-border: var(--v2-neutral-border);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--status-border);
+  border-radius: var(--v2-radius-sm);
+  background: var(--status-bg);
+  color: var(--status-fg);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.v2-status::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.v2-status--pending {
+  --status-fg: var(--v2-neutral);
+  --status-bg: var(--v2-neutral-soft);
+  --status-border: var(--v2-neutral-border);
+}
+
+.v2-status--reviewing,
+.v2-status--in-review {
+  --status-fg: var(--v2-primary);
+  --status-bg: var(--v2-primary-soft);
+  --status-border: var(--v2-primary-border);
+}
+
+.v2-status--complete,
+.v2-status--completed {
+  --status-fg: var(--v2-success);
+  --status-bg: var(--v2-success-soft);
+  --status-border: var(--v2-success-border);
+}
+
+.v2-status--exception,
+.v2-status--error {
+  --status-fg: var(--v2-danger);
+  --status-bg: var(--v2-danger-soft);
+  --status-border: var(--v2-danger-border);
+}
+
+.v2-status--incomplete,
+.v2-status--warning {
+  --status-fg: var(--v2-warning);
+  --status-bg: var(--v2-warning-soft);
+  --status-border: var(--v2-warning-border);
+}
+
+.v2-status--locked {
+  --status-fg: var(--v2-locked);
+  --status-bg: var(--v2-locked-soft);
+  --status-border: var(--v2-locked-border);
+}
+
+.v2-row-state--selected {
+  background: #eef5ff;
+  box-shadow: inset 3px 0 0 var(--v2-primary);
+}
+
+.v2-row-state--stale {
+  color: var(--v2-text-muted);
+}
+
+.v2-row-state--danger {
+  background: var(--v2-danger-soft);
+}
