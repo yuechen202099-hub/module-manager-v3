@@ -5,6 +5,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { fetchAuthConfig } from '@/api/services'
+import { APP_VERSION } from '@/constants/releaseNotes'
 import type { AuthDemoAccount } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
@@ -72,7 +73,7 @@ onMounted(() => {
   <main class="login-page">
     <section class="login-card">
       <div class="login-intro">
-          <span class="login-mark">V3.0.24</span>
+          <span class="login-mark">V{{ APP_VERSION }}</span>
         <div>
           <strong>模块更换项目管理器</strong>
           <p>工程审阅、施工采集、异常闭环</p>

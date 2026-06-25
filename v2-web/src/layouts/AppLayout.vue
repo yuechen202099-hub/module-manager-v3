@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { exportTerminalDeliveryPackage, fetchScanImportJob, startScanImportJob } from '@/api/services'
+import { APP_VERSION, releaseNotes } from '@/constants/releaseNotes'
 import { staticPages } from '@/router/staticPages'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -38,6 +39,8 @@ const roleLabel = computed(() => {
 })
 const isEmbedded = computed(() => route.query.embedded === '1')
 const isConstructionRoute = computed(() => route.path === '/construction')
+const isAdmin = computed(() => auth.user?.role === 'admin' || auth.user?.roles?.includes('admin'))
+const releaseNotesVisible = ref(false)
 const refreshEventKey = 'module_manager_refresh_event'
 const refreshVersionKey = 'module_manager_refresh_version'
 let refreshVersion = Number(localStorage.getItem(refreshVersionKey) || 0)
@@ -253,7 +256,7 @@ async function startShellScanImport(message: { file?: File; filename?: string })
   <div class="app-shell" :class="{ embedded: isEmbedded, 'construction-route': isConstructionRoute }">
     <header v-if="!isEmbedded" class="topbar">
       <div class="topbar-brand">
-        <span class="brand-mark">V3.0.24</span>
+        <span class="brand-mark">V{{ APP_VERSION }}</span>
         <div class="brand-copy">
           <strong>模块更换项目管理器</strong>
           <span>{{ workspace.activeProject?.name || '工程审阅与施工采集工作台' }}</span>
@@ -276,6 +279,7 @@ async function startShellScanImport(message: { file?: File; filename?: string })
 
       <div class="header-actions">
         <span class="page-chip">{{ pageTitle }}</span>
+        <ElButton v-if="isAdmin" :icon="Tickets" plain @click="releaseNotesVisible = true">更新内容</ElButton>
         <span class="user-chip">{{ roleLabel }} / {{ auth.displayName }}</span>
         <ElTooltip content="退出登录" placement="bottom">
           <ElButton :icon="SwitchButton" circle @click="logout" />
@@ -292,6 +296,23 @@ async function startShellScanImport(message: { file?: File; filename?: string })
       <span>{{ shellJobDetail }}</span>
       <ElProgress :percentage="shellJobPercent" :show-text="false" />
     </aside>
+
+    <ElDialog v-model="releaseNotesVisible" title="更新内容" width="720px" class="release-notes-dialog" append-to-body>
+      <div class="release-notes">
+        <article v-for="note in releaseNotes" :key="note.version" class="release-note">
+          <header>
+            <div>
+              <strong>{{ note.version }}</strong>
+              <span>{{ note.date }} / {{ note.type }}</span>
+            </div>
+            <ElTag effect="light">{{ note.title }}</ElTag>
+          </header>
+          <ul>
+            <li v-for="item in note.items" :key="item">{{ item }}</li>
+          </ul>
+        </article>
+      </div>
+    </ElDialog>
   </div>
 </template>
 
@@ -338,5 +359,49 @@ async function startShellScanImport(message: { file?: File; filename?: string })
     bottom: calc(10px + env(safe-area-inset-bottom, 0px));
     width: calc(100vw - 20px);
   }
+}
+
+.release-notes {
+  display: grid;
+  gap: 14px;
+}
+
+.release-note {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--v2-border, #d7e1ec);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.release-note header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.release-note header div {
+  display: grid;
+  gap: 4px;
+}
+
+.release-note strong {
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 16px;
+}
+
+.release-note span,
+.release-note li {
+  color: var(--v2-text-muted, #64748b);
+  line-height: 1.7;
+}
+
+.release-note ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
 }
 </style>
