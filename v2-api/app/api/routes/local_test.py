@@ -199,7 +199,7 @@ def state_repository():
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-def request_is_admin(request: Request) -> bool:
+def request_auth_payload(request: Request) -> dict:
     payload = getattr(request.state, "auth", None) or {}
     if not payload:
         authorization = request.headers.get("authorization", "")
@@ -208,7 +208,22 @@ def request_is_admin(request: Request) -> bool:
                 payload = decode_access_token(authorization.split(" ", 1)[1].strip())
             except ValueError:
                 payload = {}
+    return payload
+
+
+def request_is_admin(request: Request) -> bool:
+    payload = request_auth_payload(request)
     return "admin" in set(payload.get("roles") or [])
+
+
+def request_is_constructor(request: Request) -> bool:
+    payload = request_auth_payload(request)
+    return "constructor" in set(payload.get("roles") or [])
+
+
+def forbid_constructor_project_board(request: Request) -> None:
+    if request_is_constructor(request):
+        raise HTTPException(status_code=403, detail="Constructors are not allowed to access project board data")
 
 
 def store_scan_import_job(job_id: str, update: dict) -> dict:
@@ -907,11 +922,15 @@ async def import_total_catalog(request: Request, file: UploadFile = File(...)):
 
 @router.get("/summary")
 def summary(request: Request):
+    forbid_constructor_project_board(request)
     return ok(request, state_repository().summary())
 
 
 @router.get("/events")
-async def local_events(scope: str = Query(default="project-board")):
+async def local_events(request: Request, scope: str = Query(default="project-board")):
+    if scope == "project-board":
+        forbid_constructor_project_board(request)
+
     async def stream():
         sequence = 0
         ready_payload = {
@@ -946,6 +965,7 @@ async def local_events(scope: str = Query(default="project-board")):
 
 @router.get("/installers/{installer}/daily-workload")
 def installer_daily_workload(installer: str, request: Request):
+    forbid_constructor_project_board(request)
     return ok(request, state_repository().installer_daily_workload(installer))
 
 
@@ -1542,6 +1562,7 @@ def tasks(request: Request):
 
 @router.get("/tasks/status")
 def task_status(request: Request):
+    forbid_constructor_project_board(request)
     return ok(request, state_repository().task_status())
 
 

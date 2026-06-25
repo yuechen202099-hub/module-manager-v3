@@ -26,6 +26,17 @@ export type UserAccount = {
   lastLoginAt?: string
   lastLoginIp?: string
   lastLoginDevice?: string
+  loginHistory?: UserLoginHistoryItem[]
+}
+
+export type UserLoginHistoryItem = {
+  at: string
+  ip: string
+  device: string
+  ipCommonUser?: string
+  ipCommonUserName?: string
+  ipCommonUserCount?: number
+  ipLoginCount?: number
 }
 
 export type CurrentUser = {
@@ -83,6 +94,7 @@ export type ReviewTask = {
   terminal?: string
   address?: string
   addressSearchText?: string
+  meterSearchText?: string
   totalGroups: number
   claimedGroups: number
   completedGroups: number
@@ -240,6 +252,15 @@ export type InstallerWorkloadRow = {
   workDurationMinutes: number
   workDurationHours: number
   workDurationLabel: string
+  workDurationMinutesV2: number
+  workDurationHoursV2: number
+  workDurationLabelV2: string
+  workDurationBaseMinutesV2: number
+  workDurationDeltaMinutesV2: number
+  denseBonusMinutesV2: number
+  denseBonusWindowsV2: InstallerDenseBonusWindow[]
+  completionPerEffectiveHourV2: number
+  weightedCompletionPerEffectiveHourV2: number
   workSpanMinutes: number
   workSpanLabel: string
   breakThresholdMinutes: number
@@ -251,6 +272,18 @@ export type InstallerWorkloadRow = {
   hourlySegments: InstallerWorkSegment[]
   twoHourSegments: InstallerWorkSegment[]
   exceptionGroups: InstallerExceptionGroup[]
+}
+
+export type InstallerDenseBonusWindow = {
+  startAt: string
+  endAt: string
+  startTime: string
+  endTime: string
+  gapCount: number
+  underThreeCount: number
+  underFiveCount: number
+  bonusMinutes: number
+  rule: string
 }
 
 export type InstallerWorkSegment = {

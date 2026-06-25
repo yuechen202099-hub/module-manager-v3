@@ -147,6 +147,8 @@ const selectedItemKey = ref('')
 const taskPickerOpen = ref(false)
 const groupFilter = ref<GroupFilter>('all')
 const groupQuery = ref('')
+const taskQuery = ref('')
+const submittedTaskQuery = ref('')
 const quickMeter = ref('')
 const errorMessage = ref('')
 const collectOpen = ref(false)
@@ -219,6 +221,14 @@ const visibleTasks = computed(() => {
   })
 })
 
+const taskSearchKeyword = computed(() => normalizeSearch(submittedTaskQuery.value))
+
+const filteredVisibleTasks = computed(() => {
+  const keyword = taskSearchKeyword.value
+  if (taskPickerMode.value !== 'terminal' || !keyword) return visibleTasks.value
+  return visibleTasks.value.filter((task) => matchesTaskQuery(task, keyword))
+})
+
 const visibleExceptionTaskCards = computed(() => {
   const source = fieldExceptionOrders.value.length ? fieldExceptionOrders.value : exceptionOrders.value
   const map = new Map<string, ConstructionExceptionOrder>()
@@ -245,6 +255,18 @@ const taskPickerSubtitle = computed(() => {
   if (taskPickerMode.value === 'exception') return '被指派的异常组可直接进入施工处理'
   if (taskPickerMode.value === 'unmatched') return '现场确认未匹配地址、换表或项目外施工'
   return '只显示当前账号已被指派的施工终端'
+})
+
+const taskPickerCount = computed(() => {
+  if (taskPickerMode.value === 'terminal') return filteredVisibleTasks.value.length
+  if (taskPickerMode.value === 'exception') return visibleExceptionTaskCards.value.length
+  if (taskPickerMode.value === 'unmatched') return visibleUnmatchedTaskCards.value.length
+  return visibleTasks.value.length
+})
+
+const taskEmptyDescription = computed(() => {
+  if (taskPickerMode.value === 'terminal' && submittedTaskQuery.value.trim()) return '未找到匹配表号的施工工单'
+  return isAdmin.value ? '暂无已指派未完成终端' : '暂无指派施工终端'
 })
 
 const selectedTask = computed(() => visibleTasks.value.find((task) => task.id === selectedTaskId.value) || null)
@@ -523,6 +545,73 @@ function matchesGroupQuery(group: MaterialGroup, query: string) {
   if (!queryCandidates.size) return false
   const groupCandidates = groupMeterCandidates(group)
   return [...queryCandidates].some((candidate) => groupCandidates.has(candidate))
+}
+
+function taskSearchBlob(task: ReviewTask) {
+  return normalizeSearch(
+    `${task.terminal || ''} ${task.id || ''} ${task.address || ''} ${task.addressSearchText || ''} ${
+      task.meterSearchText || ''
+    }`,
+  )
+}
+
+function taskMeterCandidates(task: ReviewTask) {
+  const candidates = new Set<string>()
+  ;[task.meterSearchText, task.terminal, task.id].forEach((value) => {
+    String(value || '')
+      .split(/\s+/)
+      .forEach((part) => meterCodeCandidates(part).forEach((candidate) => candidates.add(candidate)))
+  })
+  return candidates
+}
+
+function taskMeterParts(task: ReviewTask) {
+  return String(task.meterSearchText || '')
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+}
+
+function taskMatchedMeterLabel(task: ReviewTask) {
+  const query = submittedTaskQuery.value.trim()
+  if (!query) return ''
+  const queryCandidates = meterCodeCandidates(query)
+  const parts = taskMeterParts(task)
+  for (const part of parts) {
+    const partCandidates = meterCodeCandidates(part)
+    if ([...queryCandidates].some((candidate) => partCandidates.has(candidate))) return part
+  }
+  const normalized = normalizeSearch(query)
+  return parts.find((part) => normalizeSearch(part).includes(normalized)) || query
+}
+
+function matchesTaskQuery(task: ReviewTask, query: string) {
+  const tokens = queryTokens(query)
+  if (!tokens.length) return true
+  const blob = taskSearchBlob(task)
+  if (tokens.every((token) => fuzzyIncludes(blob, token))) return true
+  const queryCandidates = meterCodeCandidates(query)
+  if (!queryCandidates.size) return false
+  const taskCandidates = taskMeterCandidates(task)
+  return [...queryCandidates].some((candidate) => taskCandidates.has(candidate))
+}
+
+function clearTaskSearch() {
+  taskQuery.value = ''
+  submittedTaskQuery.value = ''
+}
+
+function submitTaskSearch() {
+  submittedTaskQuery.value = taskQuery.value.trim()
+  if (!submittedTaskQuery.value) return
+  const [firstMatch] = filteredVisibleTasks.value
+  if (!firstMatch) {
+    selectedTaskId.value = ''
+    ElMessage.warning('未找到匹配表号的施工工单')
+    return
+  }
+  selectedTaskId.value = firstMatch.id
+  ElMessage.success(`已找到终端 ${firstMatch.terminal || firstMatch.id}`)
 }
 
 function findWorkItemByMeterCode(value: string) {
@@ -1551,6 +1640,8 @@ async function selectTask(task: ReviewTask) {
   if (isAdmin.value) {
     selectedTaskId.value = task.id
     taskPickerMode.value = 'terminal'
+    taskQuery.value = ''
+    submittedTaskQuery.value = ''
     taskPickerOpen.value = true
     return
   }
@@ -1558,6 +1649,8 @@ async function selectTask(task: ReviewTask) {
   taskPickerMode.value = 'terminal'
   selectedTaskId.value = task.id
   selectedItemKey.value = ''
+  taskQuery.value = ''
+  submittedTaskQuery.value = ''
   groupQuery.value = ''
   quickMeter.value = ''
   groupFilter.value = 'all'
@@ -1885,12 +1978,23 @@ onBeforeUnmount(() => {
           </div>
           <div class="head-actions">
             <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
-            <el-tag effect="light">{{ visibleTasks.length }}</el-tag>
+            <el-tag effect="light">{{ taskPickerCount }}</el-tag>
             <el-button size="small" :icon="Refresh" :loading="loadingTasks" @click="loadTasks">刷新</el-button>
             <el-button size="small" class="construction-panel-logout" @click="logoutConstruction">退出</el-button>
           </div>
         </div>
         <div v-loading="loadingTasks" class="task-list">
+          <div v-if="taskPickerMode === 'terminal'" class="task-search-row">
+            <el-input
+              v-model="taskQuery"
+              :prefix-icon="Search"
+              clearable
+              placeholder="输入表号搜索工单"
+              @clear="clearTaskSearch"
+              @keyup.enter="submitTaskSearch"
+            />
+            <el-button type="primary" :icon="Search" @click="submitTaskSearch">搜索</el-button>
+          </div>
           <article
             v-if="taskPickerMode === 'terminal' && !isAdmin && visibleExceptionTaskCards.length"
             class="field-task-card kind-exception field-task-entry"
@@ -1954,7 +2058,7 @@ onBeforeUnmount(() => {
 
           <article
             v-if="taskPickerMode === 'terminal'"
-            v-for="task in visibleTasks"
+            v-for="task in filteredVisibleTasks"
             :key="task.id"
             class="task-card"
             :class="{ active: task.id === selectedTaskId }"
@@ -1969,6 +2073,10 @@ onBeforeUnmount(() => {
               <el-tag :type="task.constructionClaimedBy || task.assignedConstructor ? 'success' : 'info'" effect="light">
                 {{ taskStatus(task) }}
               </el-tag>
+            </div>
+            <div v-if="submittedTaskQuery && taskMatchedMeterLabel(task)" class="task-meter-hit">
+              <span>匹配表号</span>
+              <strong>{{ taskMatchedMeterLabel(task) }}</strong>
             </div>
             <div v-if="isAdmin" class="task-assignee">
               <span>施工员</span>
@@ -2004,8 +2112,8 @@ onBeforeUnmount(() => {
             </div>
           </article>
           <el-empty
-            v-if="!loadingTasks && taskPickerMode === 'terminal' && !visibleTasks.length"
-            :description="isAdmin ? '暂无已指派未完成终端' : '暂无指派施工终端'"
+            v-if="!loadingTasks && taskPickerMode === 'terminal' && !filteredVisibleTasks.length"
+            :description="taskEmptyDescription"
           />
         </div>
       </aside>
@@ -2657,6 +2765,45 @@ onBeforeUnmount(() => {
 .task-list {
   min-height: 0;
   max-height: none;
+}
+
+.task-search-row {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 2px 0 6px;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(8px);
+}
+
+.task-meter-hit {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid #b7d7f8;
+  border-radius: 9px;
+  background: #f4f9ff;
+  color: #0b5cab;
+}
+
+.task-meter-hit span {
+  font-size: 12px;
+  color: #4d6b88;
+}
+
+.task-meter-hit strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .field-task-picker-list {

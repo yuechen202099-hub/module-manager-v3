@@ -61,6 +61,7 @@ type BackendTask = {
   terminal?: string
   address?: string
   address_search_text?: string
+  meter_search_text?: string
   name?: string
   status?: string
   claimed_by?: string
@@ -247,6 +248,15 @@ type BackendUserAccount = {
   last_login_at?: string
   last_login_ip?: string
   last_login_device?: string
+  login_history?: Array<{
+    at?: string
+    ip?: string
+    device?: string
+    ip_common_user?: string
+    ip_common_user_name?: string
+    ip_common_user_count?: number
+    ip_login_count?: number
+  }>
 }
 
 type BackendInstallerWorkload = {
@@ -265,6 +275,25 @@ type BackendInstallerWorkload = {
     work_duration_minutes?: number
     work_duration_hours?: number
     work_duration_label?: string
+    work_duration_minutes_v2?: number
+    work_duration_hours_v2?: number
+    work_duration_label_v2?: string
+    work_duration_base_minutes_v2?: number
+    work_duration_delta_minutes_v2?: number
+    dense_bonus_minutes_v2?: number
+    dense_bonus_windows_v2?: Array<{
+      start_at?: string
+      end_at?: string
+      start_time?: string
+      end_time?: string
+      gap_count?: number
+      under_three_count?: number
+      under_five_count?: number
+      bonus_minutes?: number
+      rule?: string
+    }>
+    completion_per_effective_hour_v2?: number
+    weighted_completion_per_effective_hour_v2?: number
     work_span_minutes?: number
     work_span_label?: string
     break_threshold_minutes?: number
@@ -431,6 +460,7 @@ function mapTask(raw: BackendTask): ReviewTask {
     terminal: raw.terminal || '',
     address: raw.address || '',
     addressSearchText: raw.address_search_text || raw.address || '',
+    meterSearchText: raw.meter_search_text || '',
     totalGroups: renovationCount,
     claimedGroups: uploadedCount,
     completedGroups: reviewedCount,
@@ -642,6 +672,15 @@ function mapUserAccount(raw: BackendUserAccount): UserAccount {
     lastLoginAt: raw.last_login_at || '',
     lastLoginIp: raw.last_login_ip || '',
     lastLoginDevice: raw.last_login_device || '',
+    loginHistory: (raw.login_history || []).map((item) => ({
+      at: item.at || '',
+      ip: item.ip || '',
+      device: item.device || '',
+      ipCommonUser: item.ip_common_user || '',
+      ipCommonUserName: item.ip_common_user_name || '',
+      ipCommonUserCount: Number(item.ip_common_user_count || 0),
+      ipLoginCount: Number(item.ip_login_count || 0),
+    })),
   }
 }
 
@@ -1105,6 +1144,25 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
       workDurationMinutes: Number(item.work_duration_minutes || 0),
       workDurationHours: Number(item.work_duration_hours || 0),
       workDurationLabel: String(item.work_duration_label || '0分钟'),
+      workDurationMinutesV2: Number(item.work_duration_minutes_v2 || 0),
+      workDurationHoursV2: Number(item.work_duration_hours_v2 || 0),
+      workDurationLabelV2: String(item.work_duration_label_v2 || '0分钟'),
+      workDurationBaseMinutesV2: Number(item.work_duration_base_minutes_v2 || 0),
+      workDurationDeltaMinutesV2: Number(item.work_duration_delta_minutes_v2 || 0),
+      denseBonusMinutesV2: Number(item.dense_bonus_minutes_v2 || 0),
+      denseBonusWindowsV2: (item.dense_bonus_windows_v2 || []).map((window) => ({
+        startAt: String(window.start_at || ''),
+        endAt: String(window.end_at || ''),
+        startTime: String(window.start_time || ''),
+        endTime: String(window.end_time || ''),
+        gapCount: Number(window.gap_count || 0),
+        underThreeCount: Number(window.under_three_count || 0),
+        underFiveCount: Number(window.under_five_count || 0),
+        bonusMinutes: Number(window.bonus_minutes || 0),
+        rule: String(window.rule || ''),
+      })),
+      completionPerEffectiveHourV2: Number(item.completion_per_effective_hour_v2 || 0),
+      weightedCompletionPerEffectiveHourV2: Number(item.weighted_completion_per_effective_hour_v2 || 0),
       workSpanMinutes: Number(item.work_span_minutes || 0),
       workSpanLabel: String(item.work_span_label || '0分钟'),
       breakThresholdMinutes: Number(item.break_threshold_minutes || 60),

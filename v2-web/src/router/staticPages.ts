@@ -3,6 +3,7 @@ export type StaticPageKey =
   | 'claim-tasks'
   | 'task-hall'
   | 'construction'
+  | 'account-management'
   | 'sync-config'
 
 export type StaticPageMigrationStatus = 'native_vue'
@@ -47,6 +48,14 @@ export const staticPages: StaticPageRoute[] = [
     subtitle: '手机采集、扫码、拍照、离线缓存',
     routePath: '/construction',
     roles: ['admin', 'constructor'],
+    migrationStatus: 'native_vue',
+  },
+  {
+    key: 'account-management',
+    title: '账号管理',
+    subtitle: '账号、角色与登录审计',
+    routePath: '/account-management',
+    roles: ['admin'],
     migrationStatus: 'native_vue',
   },
   {

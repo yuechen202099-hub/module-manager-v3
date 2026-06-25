@@ -815,6 +815,42 @@ button {
   max-width: 118px;
 }
 
+.native-claim-page .task-card-top .status-badge.el-tag {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--v2-radius-sm);
+  border-width: 1px;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 760;
+  letter-spacing: 0;
+  line-height: 20px;
+}
+
+.native-claim-page .task-card-top .status-badge--success.el-tag {
+  border-color: rgba(23, 117, 83, 0.28);
+  background: #effaf4;
+  color: #116448;
+}
+
+.native-claim-page .task-card-top .status-badge--primary.el-tag {
+  border-color: rgba(10, 114, 216, 0.22);
+  background: #eef6ff;
+  color: #075eb5;
+}
+
+.native-claim-page .task-card-top .status-badge--warning.el-tag {
+  border-color: rgba(161, 92, 0, 0.26);
+  background: #fff7e8;
+  color: #7a5200;
+}
+
+.native-claim-page .task-card-top .status-badge--info.el-tag {
+  border-color: rgba(82, 96, 113, 0.22);
+  background: #f5f7fa;
+  color: #526071;
+}
+
 .native-claim-page .task-title-block {
   display: grid;
   gap: 3px;

@@ -294,6 +294,9 @@ def _apply_photo_quality_exception_status(
 def _empty_task_stats() -> dict[str, Any]:
     return {
         "total_groups": 0,
+        "address": "",
+        "address_search_text": "",
+        "meter_search_text": "",
         "uploaded_count": 0,
         "reviewed_count": 0,
         "unreviewed_count": 0,
@@ -393,6 +396,7 @@ def _task_payload(task: Task, stats: dict[str, Any] | None = None) -> dict[str, 
         "terminal": task.terminal or "",
         "address": str(resolved_stats.get("address") or ""),
         "address_search_text": str(resolved_stats.get("address_search_text") or ""),
+        "meter_search_text": str(resolved_stats.get("meter_search_text") or ""),
         "name": task.title,
         "status": _legacy_task_status(task),
         "claimed_by": claimed_by,
@@ -1889,6 +1893,16 @@ class PostgresStateRepository(StateRepository):
                 MaterialGroup.legacy_task_id,
                 func.min(MaterialGroup.installation_address).label("address"),
                 func.string_agg(MaterialGroup.installation_address.distinct(), " ").label("address_search_text"),
+                func.string_agg(
+                    func.concat(
+                        func.coalesce(MaterialGroup.display_meter_no, ""),
+                        " ",
+                        func.coalesce(MaterialGroup.meter_match_key, ""),
+                        " ",
+                        func.coalesce(MaterialGroup.legacy_id, ""),
+                    ).distinct(),
+                    " ",
+                ).label("meter_search_text"),
                 func.count(MaterialGroup.id).label("total_groups"),
                 func.coalesce(func.sum(case((MaterialGroup.photo_count > 0, 1), else_=0)), 0).label("uploaded_count"),
                 func.coalesce(
@@ -1908,6 +1922,7 @@ class PostgresStateRepository(StateRepository):
                 "total_groups": int(row.total_groups or 0),
                 "address": str(row.address or ""),
                 "address_search_text": str(row.address_search_text or ""),
+                "meter_search_text": str(row.meter_search_text or ""),
                 "uploaded_count": int(row.uploaded_count or 0),
                 "reviewed_count": int(row.reviewed_count or 0),
                 "unreviewed_count": int(row.unreviewed_count or 0),

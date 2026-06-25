@@ -52,6 +52,13 @@ const exceptionCategories = [
 
 type GroupFilter = 'reviewable' | 'exception' | 'unconstructed' | 'archived' | 'all'
 type ReviewTaskMode = 'terminal' | 'exception' | 'unmatched'
+type LoadGroupsOptions = {
+  autoOpen?: boolean
+}
+type GroupDetail = {
+  group: MaterialGroup
+  photos: ReviewPhoto[]
+}
 
 const auth = useAuthStore()
 const actor = computed(() => auth.user?.username || auth.user?.id || currentActor())
@@ -86,6 +93,8 @@ const imageVersion = ref(0)
 const pendingArchivePhotoIds = ref<Set<string>>(new Set())
 const failedThumbnailPhotoIds = ref<Set<string>>(new Set())
 const imagePreloadCache = new Set<string>()
+const groupDetailCache = new Map<string, GroupDetail>()
+const groupDetailRequests = new Map<string, Promise<GroupDetail>>()
 let archiveQueue = Promise.resolve()
 let backgroundRefreshTimer: number | null = null
 let fieldTasksWarmupTimer = 0
@@ -460,6 +469,58 @@ function preloadImages(items: ReviewPhoto[]) {
   })
 }
 
+async function fetchGroupDetailCached(groupId: string) {
+  const cached = groupDetailCache.get(groupId)
+  if (cached) return cached
+  const existing = groupDetailRequests.get(groupId)
+  if (existing) return existing
+  const request = fetchGroup(groupId)
+    .then((detail) => {
+      groupDetailCache.set(groupId, detail)
+      return detail
+    })
+    .finally(() => {
+      groupDetailRequests.delete(groupId)
+    })
+  groupDetailRequests.set(groupId, request)
+  return request
+}
+
+function preloadGroupImages(groupId: string, items: ReviewPhoto[]) {
+  items.slice(0, 8).forEach((photo) => {
+    if (!hasReadablePhotoSource(photo)) return
+    const direct = photoDirectThumbnailUrl(photo)
+    const url = direct || groupPhotoContentUrl(groupId, photo.id, 'thumbnail')
+    if (!url || imagePreloadCache.has(url)) return
+    imagePreloadCache.add(url)
+    const image = new Image()
+    image.decoding = 'async'
+    image.loading = 'eager'
+    image.src = url
+  })
+}
+
+function firstReviewWarmupGroup() {
+  return (
+    visibleGroups.value.find((group) => Number(group.photoCount || 0) > 0 && !isGroupDone(group)) ||
+    visibleGroups.value.find((group) => Number(group.photoCount || 0) > 0) ||
+    groups.value.find((group) => Number(group.photoCount || 0) > 0)
+  )
+}
+
+async function warmupFirstReviewGroup(taskId: string) {
+  const group = firstReviewWarmupGroup()
+  if (!group || activeTaskMode.value !== 'terminal' || selectedTaskId.value !== taskId) return
+  try {
+    const detail = await fetchGroupDetailCached(group.id)
+    if (activeTaskMode.value !== 'terminal' || selectedTaskId.value !== taskId) return
+    syncGroupEntry(detail.group)
+    preloadGroupImages(detail.group.id, detail.photos)
+  } catch {
+    // 静默预热失败不提示用户；真正点开时仍会走正常加载和错误提示。
+  }
+}
+
 function handleMainImageLoad() {
   imageLoading.value = false
   imageLoadError.value = false
@@ -569,7 +630,7 @@ async function loadTasks() {
       selectedTaskId.value = myTasks.value[0]?.id || ''
     }
     if (selectedTaskId.value) {
-      await loadGroups(selectedTaskId.value)
+      await loadGroups(selectedTaskId.value, { autoOpen: false })
     } else {
       groups.value = []
       activeGroup.value = null
@@ -613,7 +674,7 @@ async function loadFieldTasks(force = false) {
   return fieldTasksRequest
 }
 
-async function loadGroups(taskId: string) {
+async function loadGroups(taskId: string, options: LoadGroupsOptions = {}) {
   activeTaskMode.value = 'terminal'
   selectedTaskId.value = taskId
   loadingGroups.value = true
@@ -623,7 +684,13 @@ async function loadGroups(taskId: string) {
   resetImageState()
   groupRequestSeq += 1
   try {
+    groupDetailCache.clear()
+    groupDetailRequests.clear()
     groups.value = await fetchTaskGroups(taskId)
+    if (options.autoOpen === false) {
+      void warmupFirstReviewGroup(taskId)
+      return
+    }
     const first =
       visibleGroups.value.find((group) => Number(group.photoCount || 0) > 0 && !isGroupDone(group)) || visibleGroups.value[0]
     if (first) {
@@ -639,17 +706,21 @@ async function loadGroups(taskId: string) {
 async function loadGroup(groupId: string, preferredPhotoId = '') {
   const requestSeq = ++groupRequestSeq
   const cachedGroup = groups.value.find((group) => String(group.id) === String(groupId))
-  loadingGroup.value = !cachedGroup
+  const cachedDetail = groupDetailCache.get(groupId)
+  loadingGroup.value = !cachedGroup && !cachedDetail
   selectedGroupId.value = groupId
   failedThumbnailPhotoIds.value = new Set()
-  if (cachedGroup) {
-    activeGroup.value = { ...cachedGroup, photos: cachedGroup.photos || [] }
-    photos.value = cachedGroup.photos || []
+  if (cachedDetail || cachedGroup) {
+    const group = cachedDetail?.group || cachedGroup!
+    const groupPhotos = cachedDetail?.photos || group?.photos || []
+    activeGroup.value = { ...group, photos: groupPhotos }
+    photos.value = groupPhotos
     selectPhoto(photos.value.find((photo) => !isPhotoArchived(photo)) || photos.value[0] || null)
+  } else {
+    resetImageState()
   }
-  resetImageState()
   try {
-    const result = await fetchGroup(groupId)
+    const result = await fetchGroupDetailCached(groupId)
     if (requestSeq !== groupRequestSeq || selectedGroupId.value !== groupId) return
     activeGroup.value = result.group
     photos.value = result.photos
@@ -707,6 +778,9 @@ async function scrollActiveGroupIntoView() {
 
 function syncGroupEntry(group: MaterialGroup) {
   groups.value = groups.value.map((item) => (item.id === group.id ? { ...item, ...group, photos: group.photos || item.photos } : item))
+  if (group.photos) {
+    groupDetailCache.set(group.id, { group, photos: group.photos })
+  }
 }
 
 function makeGroupVisible(group: MaterialGroup) {
@@ -818,7 +892,7 @@ async function refreshTasksSilently() {
   if (activeTaskMode.value !== 'terminal') return
   if (currentTaskId && !myTasks.value.some((task) => task.id === currentTaskId)) {
     selectedTaskId.value = myTasks.value[0]?.id || ''
-    if (selectedTaskId.value) await loadGroups(selectedTaskId.value)
+    if (selectedTaskId.value) await loadGroups(selectedTaskId.value, { autoOpen: false })
   }
 }
 
@@ -1335,7 +1409,7 @@ async function releaseExceptionOrderAssignment(order: ConstructionExceptionOrder
 }
 
 async function selectNextUnfinishedGroup(completedGroupId = '') {
-  await loadGroups(selectedTaskId.value)
+  await loadGroups(selectedTaskId.value, { autoOpen: false })
   const next = firstUnfinishedGroup(completedGroupId)
   if (next) {
     makeGroupVisible(next)
@@ -1566,7 +1640,14 @@ onUnmounted(() => {
           <div class="review-card-main">
             <div class="review-card-title">
               <strong>{{ group.meterNo || group.id }}</strong>
-              <ElTag :type="groupStatusTag(group).type" effect="light">{{ groupStatusTag(group).label }}</ElTag>
+              <ElTag
+                class="review-group-status-badge"
+                :class="`status-badge--${groupStatusTag(group).type}`"
+                :type="groupStatusTag(group).type"
+                effect="plain"
+              >
+                {{ groupStatusTag(group).label }}
+              </ElTag>
             </div>
             <span>{{ group.terminal }} / {{ group.address || '未匹配地址' }}</span>
             <small>
@@ -2540,6 +2621,46 @@ onUnmounted(() => {
 .review-card-title :deep(.el-tag) {
   flex: 0 0 auto;
   max-width: 88px;
+}
+
+.review-card-title :deep(.review-group-status-badge.el-tag) {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--v2-radius-sm);
+  border-width: 1px;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 760;
+  letter-spacing: 0;
+  line-height: 20px;
+}
+
+.review-card-title :deep(.review-group-status-badge .el-tag__content) {
+  line-height: 1;
+}
+
+.review-card-title :deep(.review-group-status-badge.status-badge--primary.el-tag) {
+  border-color: rgba(10, 114, 216, 0.22);
+  background: #eef6ff;
+  color: #075eb5;
+}
+
+.review-card-title :deep(.review-group-status-badge.status-badge--success.el-tag) {
+  border-color: rgba(23, 117, 83, 0.28);
+  background: #effaf4;
+  color: #116448;
+}
+
+.review-card-title :deep(.review-group-status-badge.status-badge--warning.el-tag) {
+  border-color: rgba(161, 92, 0, 0.26);
+  background: #fff7e8;
+  color: #7a5200;
+}
+
+.review-card-title :deep(.review-group-status-badge.status-badge--info.el-tag) {
+  border-color: rgba(82, 96, 113, 0.22);
+  background: #f5f7fa;
+  color: #526071;
 }
 
 .review-card-main {

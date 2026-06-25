@@ -2,7 +2,7 @@
   color-scheme: light;
 
   --v2-font-sans: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif;
-  --v2-font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --v2-font-mono: var(--v2-font-sans);
 
   --v2-bg-app: #f5f7fb;
   --v2-bg-surface: #ffffff;

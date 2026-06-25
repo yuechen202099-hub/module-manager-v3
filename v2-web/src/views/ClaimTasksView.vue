@@ -570,7 +570,9 @@ onUnmounted(() => {
               <span>{{ taskReviewerLabel(task) }}</span>
               <span v-if="task.address" class="task-address-line">{{ task.address }}</span>
             </div>
-            <ElTag :type="statusType(task)" effect="plain">{{ statusLabel(task) }}</ElTag>
+            <ElTag class="status-badge" :class="`status-badge--${statusType(task)}`" :type="statusType(task)" effect="plain">
+              {{ statusLabel(task) }}
+            </ElTag>
           </div>
 
           <div class="task-primary-line">

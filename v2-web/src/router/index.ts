@@ -9,8 +9,14 @@ const nativePageComponents = {
   'claim-tasks': () => import('@/views/ClaimTasksView.vue'),
   'task-hall': () => import('@/views/TaskHallView.vue'),
   construction: () => import('@/views/ConstructionView.vue'),
+  'account-management': () => import('@/views/AccountManagementView.vue'),
   'sync-config': () => import('@/views/SyncConfigView.vue'),
 } as const
+
+function defaultRouteForRole(role = '') {
+  if (role === 'constructor') return { name: 'construction' }
+  return { name: 'project-board' }
+}
 
 const router = createRouter({
   history: createWebHistory('/'),
@@ -87,7 +93,17 @@ router.beforeEach((to) => {
   }
 
   if (to.name === 'login' && auth.isAuthenticated) {
-    return { name: 'project-board' }
+    return defaultRouteForRole(auth.user?.role)
+  }
+
+  const allowedRoles = (to.meta.roles as string[] | undefined) || []
+  if (allowedRoles.length && auth.user) {
+    const role = auth.user?.role || ''
+    const roles = new Set<string>([role, ...(auth.user?.roles || [])].filter(Boolean).map(String))
+    const isAllowed = allowedRoles.some((item) => roles.has(item)) || roles.has('admin')
+    if (!isAllowed) {
+      return defaultRouteForRole(role)
+    }
   }
 
   return true

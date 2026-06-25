@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DataBoard, FolderChecked, List, SwitchButton, Tickets } from '@element-plus/icons-vue'
+import { DataBoard, FolderChecked, List, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -22,6 +22,7 @@ const navigation = computed(() => {
     'claim-tasks': Tickets,
     'task-hall': List,
     construction: FolderChecked,
+    'account-management': UserFilled,
     'sync-config': DataBoard,
   }
   return staticPages
@@ -252,7 +253,7 @@ async function startShellScanImport(message: { file?: File; filename?: string })
   <div class="app-shell" :class="{ embedded: isEmbedded, 'construction-route': isConstructionRoute }">
     <header v-if="!isEmbedded" class="topbar">
       <div class="topbar-brand">
-        <span class="brand-mark">V3.0.8</span>
+        <span class="brand-mark">V3.0.24</span>
         <div class="brand-copy">
           <strong>模块更换项目管理器</strong>
           <span>{{ workspace.activeProject?.name || '工程审阅与施工采集工作台' }}</span>

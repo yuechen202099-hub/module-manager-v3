@@ -13,6 +13,7 @@ from app.core.security import hash_password, verify_password
 
 VALID_ROLES = {"admin", "reviewer", "constructor"}
 VALID_STATUSES = {"active", "disabled"}
+LOGIN_HISTORY_LIMIT = 30
 _lock = threading.RLock()
 _memory_users: dict[str, dict[str, Any]] = {}
 
@@ -42,7 +43,68 @@ def users_path() -> Path | None:
     return Path(configured)
 
 
-def public_user(user: dict[str, Any]) -> dict[str, Any]:
+def _login_history(user: dict[str, Any]) -> list[dict[str, str]]:
+    raw_history = user.get("login_history") if isinstance(user.get("login_history"), list) else []
+    history: list[dict[str, str]] = []
+    for raw_item in raw_history:
+        if not isinstance(raw_item, dict):
+            continue
+        item = {
+            "at": str(raw_item.get("at") or raw_item.get("login_at") or "").strip(),
+            "ip": str(raw_item.get("ip") or raw_item.get("login_ip") or "").strip()[:128],
+            "device": str(raw_item.get("device") or raw_item.get("user_agent") or "").strip()[:256],
+        }
+        if item["at"] or item["ip"] or item["device"]:
+            history.append(item)
+    if not history and (user.get("last_login_at") or user.get("last_login_ip") or user.get("last_login_device")):
+        history.append(
+            {
+                "at": str(user.get("last_login_at") or "").strip(),
+                "ip": str(user.get("last_login_ip") or "").strip()[:128],
+                "device": str(user.get("last_login_device") or "").strip()[:256],
+            }
+        )
+    return history[:LOGIN_HISTORY_LIMIT]
+
+
+def _ip_common_users(users: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    counts: dict[str, dict[str, int]] = {}
+    names: dict[str, str] = {}
+    for username, user in users.items():
+        names[username] = str(user.get("name") or username)
+        for item in _login_history(user):
+            ip = item.get("ip", "").strip()
+            if not ip:
+                continue
+            counts.setdefault(ip, {})
+            counts[ip][username] = counts[ip].get(username, 0) + 1
+
+    result: dict[str, dict[str, Any]] = {}
+    for ip, by_user in counts.items():
+        common_user, common_count = sorted(by_user.items(), key=lambda item: (-item[1], item[0]))[0]
+        result[ip] = {
+            "username": common_user,
+            "name": names.get(common_user) or common_user,
+            "count": common_count,
+            "total": sum(by_user.values()),
+        }
+    return result
+
+
+def public_user(user: dict[str, Any], *, ip_common_users: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    history = []
+    for item in _login_history(user):
+        ip = item.get("ip", "")
+        common = (ip_common_users or {}).get(ip, {})
+        history.append(
+            {
+                **item,
+                "ip_common_user": common.get("username", ""),
+                "ip_common_user_name": common.get("name", ""),
+                "ip_common_user_count": common.get("count", 0),
+                "ip_login_count": common.get("total", 0),
+            }
+        )
     return {
         "username": user["username"],
         "name": user.get("name") or user["username"],
@@ -55,6 +117,7 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
         "last_login_at": user.get("last_login_at"),
         "last_login_ip": user.get("last_login_ip"),
         "last_login_device": user.get("last_login_device"),
+        "login_history": history,
     }
 
 
@@ -73,6 +136,7 @@ def _default_admin_user() -> dict[str, Any]:
         "last_login_at": None,
         "last_login_ip": None,
         "last_login_device": None,
+        "login_history": [],
     }
 
 
@@ -141,7 +205,8 @@ def ensure_user_store() -> dict[str, dict[str, Any]]:
 
 def list_users() -> list[dict[str, Any]]:
     users = ensure_user_store()
-    return [public_user(users[key]) for key in sorted(users)]
+    common_users = _ip_common_users(users)
+    return [public_user(users[key], ip_common_users=common_users) for key in sorted(users)]
 
 
 def get_user(username: str) -> dict[str, Any] | None:
@@ -194,6 +259,7 @@ def upsert_user(
             "last_login_at": (existing or {}).get("last_login_at"),
             "last_login_ip": (existing or {}).get("last_login_ip"),
             "last_login_device": (existing or {}).get("last_login_device"),
+            "login_history": _login_history(existing or {}),
         }
         if password:
             user["password_hash"] = hash_password(password)
@@ -242,7 +308,14 @@ def update_last_login(username: str, *, ip: str = "", device: str = "") -> None:
         users = ensure_user_store()
         if normalized_username not in users:
             return
-        users[normalized_username]["last_login_at"] = now_iso()
-        users[normalized_username]["last_login_ip"] = str(ip or "").strip()[:128]
-        users[normalized_username]["last_login_device"] = str(device or "").strip()[:256]
+        previous_history = _login_history(users[normalized_username])
+        login_at = now_iso()
+        login_ip = str(ip or "").strip()[:128]
+        login_device = str(device or "").strip()[:256]
+        users[normalized_username]["last_login_at"] = login_at
+        users[normalized_username]["last_login_ip"] = login_ip
+        users[normalized_username]["last_login_device"] = login_device
+        users[normalized_username]["login_history"] = (
+            [{"at": login_at, "ip": login_ip, "device": login_device}] + previous_history
+        )[:LOGIN_HISTORY_LIMIT]
         _write_users_unlocked(users)

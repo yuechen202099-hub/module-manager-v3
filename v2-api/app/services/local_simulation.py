@@ -36,6 +36,12 @@ DEFAULT_STAGE_CATALOG = Path("C:/Users/Administrator/Desktop/\u7b2c\u4e00\u6279\
 LOCAL_WORK_TZ = timezone(timedelta(hours=8))
 WORK_SESSION_BREAK_MINUTES = 60
 WORK_SEGMENT_HOURS = 2
+WORK_V2_DIRECT_GAP_MINUTES = 25
+WORK_V2_MAX_GAP_MINUTES = 45
+WORK_V2_DENSE_WINDOW_MINUTES = 120
+WORK_V2_DENSE_MIN_GAPS = 15
+WORK_V2_DENSE_FIVE_MINUTE_BONUS = 15
+WORK_V2_DENSE_THREE_MINUTE_BONUS = 25
 DEFAULT_SCAN_FILE = Path("C:/Users/Administrator/Desktop/\u6279\u91cf\u626b\u7801_20260608125555.xlsx")
 REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatched"}
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
@@ -2447,12 +2453,14 @@ def build_terminal_tasks(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
         has_scan_info = scan_rows > 0
         address = first_task_address(terminal_groups)
         address_search_text = task_address_search_text(terminal_groups)
+        meter_search_text = task_meter_search_text(terminal_groups)
         task = {
             "id": task_id,
             "project_id": 1,
             "terminal": terminal,
             "address": address,
             "address_search_text": address_search_text,
+            "meter_search_text": meter_search_text,
             "name": f"终端 {terminal}",
             "status": "published",
             "claimed_by": None,
@@ -2498,6 +2506,19 @@ def task_address_search_text(groups: list[dict[str, Any]]) -> str:
         seen.add(address)
         addresses.append(address)
     return " ".join(addresses)
+
+
+def task_meter_search_text(groups: list[dict[str, Any]]) -> str:
+    values: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for key in ("meter_no", "meter_match_key", "id"):
+            value = str(group.get(key) or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+    return " ".join(values)
 
 
 def build_summary(
@@ -2622,6 +2643,110 @@ def _bucket_start_hour(value: datetime) -> int:
     return (int(value.hour) // WORK_SEGMENT_HOURS) * WORK_SEGMENT_HOURS
 
 
+def _build_shadow_work_time_summary(valid: list[datetime]) -> dict[str, Any]:
+    base_minutes = 0
+    gap_rows: list[dict[str, Any]] = []
+    if len(valid) >= 2:
+        for index, (left, right) in enumerate(zip(valid, valid[1:])):
+            if right <= left:
+                continue
+            gap_minutes = int(round((right - left).total_seconds() / 60))
+            if gap_minutes <= WORK_V2_DIRECT_GAP_MINUTES:
+                counted_minutes = gap_minutes
+            elif gap_minutes <= WORK_V2_MAX_GAP_MINUTES:
+                counted_minutes = WORK_V2_DIRECT_GAP_MINUTES
+            else:
+                counted_minutes = 0
+            base_minutes += counted_minutes
+            gap_rows.append(
+                {
+                    "index": index,
+                    "left": left,
+                    "right": right,
+                    "gap_minutes": gap_minutes,
+                    "counted_minutes": counted_minutes,
+                    "is_valid": gap_minutes <= WORK_V2_MAX_GAP_MINUTES,
+                }
+            )
+    candidates: list[dict[str, Any]] = []
+    for start in valid:
+        window_end = start + timedelta(minutes=WORK_V2_DENSE_WINDOW_MINUTES)
+        window_gaps = [
+            row
+            for row in gap_rows
+            if row["is_valid"] and row["left"] >= start and row["right"] <= window_end
+        ]
+        gap_count = len(window_gaps)
+        if gap_count < WORK_V2_DENSE_MIN_GAPS:
+            continue
+        under_three = sum(1 for row in window_gaps if row["gap_minutes"] < 3)
+        under_five = sum(1 for row in window_gaps if row["gap_minutes"] <= 5)
+        if under_three / gap_count >= 0.9:
+            bonus_minutes = WORK_V2_DENSE_THREE_MINUTE_BONUS
+            rule = "90% gap < 3分钟"
+        elif under_five / gap_count >= 0.9:
+            bonus_minutes = WORK_V2_DENSE_FIVE_MINUTE_BONUS
+            rule = "90% gap <= 5分钟"
+        else:
+            continue
+        candidates.append(
+            {
+                "start_at": start,
+                "end_at": window_end,
+                "gap_indexes": {int(row["index"]) for row in window_gaps},
+                "gap_count": gap_count,
+                "under_three_count": under_three,
+                "under_five_count": under_five,
+                "bonus_minutes": bonus_minutes,
+                "rule": rule,
+            }
+        )
+    selected_windows: list[dict[str, Any]] = []
+    used_gap_indexes: set[int] = set()
+    for candidate in sorted(
+        candidates,
+        key=lambda item: (-int(item["bonus_minutes"]), -int(item["gap_count"]), item["start_at"]),
+    ):
+        gap_indexes = candidate["gap_indexes"]
+        if used_gap_indexes.intersection(gap_indexes):
+            continue
+        used_gap_indexes.update(gap_indexes)
+        selected_windows.append(candidate)
+    dense_bonus_minutes = sum(int(item["bonus_minutes"]) for item in selected_windows)
+    total_minutes = base_minutes + dense_bonus_minutes
+    return {
+        "work_duration_minutes_v2": total_minutes,
+        "work_duration_hours_v2": round(total_minutes / 60, 2) if total_minutes else 0,
+        "work_duration_label_v2": _format_duration_label(total_minutes),
+        "work_duration_base_minutes_v2": base_minutes,
+        "dense_bonus_minutes_v2": dense_bonus_minutes,
+        "dense_bonus_windows_v2": [
+            {
+                "start_at": item["start_at"].isoformat(timespec="minutes"),
+                "end_at": item["end_at"].isoformat(timespec="minutes"),
+                "start_time": _format_time_of_day(item["start_at"]),
+                "end_time": _format_time_of_day(item["end_at"]),
+                "start_hour": int(item["start_at"].hour),
+                "gap_count": int(item["gap_count"]),
+                "under_three_count": int(item["under_three_count"]),
+                "under_five_count": int(item["under_five_count"]),
+                "bonus_minutes": int(item["bonus_minutes"]),
+                "rule": str(item["rule"]),
+            }
+            for item in sorted(selected_windows, key=lambda window: window["start_at"])
+        ],
+        "work_time_algorithm_v2": {
+            "direct_gap_minutes": WORK_V2_DIRECT_GAP_MINUTES,
+            "max_gap_minutes": WORK_V2_MAX_GAP_MINUTES,
+            "dense_window_minutes": WORK_V2_DENSE_WINDOW_MINUTES,
+            "dense_min_gaps": WORK_V2_DENSE_MIN_GAPS,
+            "dense_ratio": 0.9,
+            "dense_five_minute_bonus": WORK_V2_DENSE_FIVE_MINUTE_BONUS,
+            "dense_three_minute_bonus": WORK_V2_DENSE_THREE_MINUTE_BONUS,
+        },
+    }
+
+
 def _is_charging_pile_address(address: str) -> bool:
     return bool(re.search(r"充电桩|车位|车库|地库|地下|配电", address or ""))
 
@@ -2733,22 +2858,38 @@ def build_work_time_summary(
         }
         for hour in range(0, 24, WORK_SEGMENT_HOURS)
     }
+    shadow_summary = _build_shadow_work_time_summary(valid)
     if len(valid) >= 2:
         for left, right in zip(valid, valid[1:]):
             if right <= left:
                 continue
             gap_minutes = int(round((right - left).total_seconds() / 60))
-            if gap_minutes > WORK_SESSION_BREAK_MINUTES:
+            if gap_minutes <= WORK_V2_DIRECT_GAP_MINUTES:
+                counted_minutes = gap_minutes
+            elif gap_minutes <= WORK_V2_MAX_GAP_MINUTES:
+                counted_minutes = WORK_V2_DIRECT_GAP_MINUTES
+            else:
+                counted_minutes = 0
+            if counted_minutes <= 0:
                 continue
-            effective_minutes += gap_minutes
+            effective_minutes += counted_minutes
             cursor = left
-            while cursor < right:
+            counted_until = min(right, left + timedelta(minutes=counted_minutes))
+            while cursor < counted_until:
                 next_hour = (cursor.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
-                segment_end = min(right, next_hour)
+                segment_end = min(counted_until, next_hour)
                 segment_minutes = int(round((segment_end - cursor).total_seconds() / 60))
                 buckets[cursor.hour] += segment_minutes
                 segment_buckets[_bucket_start_hour(cursor)]["minutes"] += segment_minutes
                 cursor = segment_end
+    for window in shadow_summary["dense_bonus_windows_v2"]:
+        bonus_minutes = int(window.get("bonus_minutes") or 0)
+        start_hour = int(window.get("start_hour") or 0)
+        if bonus_minutes <= 0:
+            continue
+        effective_minutes += bonus_minutes
+        buckets[start_hour] += bonus_minutes
+        segment_buckets[_bucket_start_hour(datetime(2000, 1, 1, start_hour))]["minutes"] += bonus_minutes
     completion_records = completion_records or []
     cluster_counts: dict[str, int] = defaultdict(int)
     for record in completion_records:
@@ -2789,12 +2930,23 @@ def build_work_time_summary(
         "work_duration_label": _format_duration_label(effective_minutes),
         "work_span_minutes": span_minutes,
         "work_span_label": _format_duration_label(span_minutes),
-        "break_threshold_minutes": WORK_SESSION_BREAK_MINUTES,
+        "break_threshold_minutes": WORK_V2_MAX_GAP_MINUTES,
         "timepoint_count": len(valid),
         "completion_count": total_completion,
         "completion_per_effective_hour": round(total_completion / effective_hours, 2) if effective_hours else 0,
         "weighted_completion": round(weighted_completion, 2),
         "weighted_completion_per_effective_hour": round(weighted_completion / effective_hours, 2) if effective_hours else 0,
+        **{
+            **shadow_summary,
+            "work_duration_minutes_v2": effective_minutes,
+            "work_duration_hours_v2": round(effective_minutes / 60, 2) if effective_minutes else 0,
+            "work_duration_label_v2": _format_duration_label(effective_minutes),
+        },
+        "work_duration_delta_minutes_v2": 0,
+        "completion_per_effective_hour_v2": round(total_completion / effective_hours, 2) if effective_hours else 0,
+        "weighted_completion_per_effective_hour_v2": round(weighted_completion / effective_hours, 2)
+        if effective_hours
+        else 0,
         "hourly_segments": [
             {
                 "hour": hour,
@@ -2966,6 +3118,7 @@ def refresh_summary() -> None:
         metrics = calculate_task_metrics(task_groups)
         task["address"] = first_task_address(task_groups)
         task["address_search_text"] = task_address_search_text(task_groups)
+        task["meter_search_text"] = task_meter_search_text(task_groups)
         task["total_groups"] = len(task_groups)
         task["completed_groups"] = sum(1 for group in task_groups if is_reviewed_group(group))
         task["exception_groups"] = sum(1 for group in task_groups if is_problem_group(group))
@@ -3007,6 +3160,7 @@ def refresh_task_summary(task_id: int) -> None:
     metrics = calculate_task_metrics(task_groups)
     task["address"] = first_task_address(task_groups)
     task["address_search_text"] = task_address_search_text(task_groups)
+    task["meter_search_text"] = task_meter_search_text(task_groups)
     task["total_groups"] = len(task_groups)
     task["completed_groups"] = sum(1 for group in task_groups if is_reviewed_group(group))
     task["exception_groups"] = sum(1 for group in task_groups if is_problem_group(group))
@@ -3890,6 +4044,7 @@ def list_tasks() -> list[dict[str, Any]]:
         task_groups = groups_by_task.get(int(task.get("id") or 0), [])
         task["address"] = first_task_address(task_groups)
         task["address_search_text"] = task_address_search_text(task_groups)
+        task["meter_search_text"] = task_meter_search_text(task_groups)
     return sorted(
         state["tasks"],
         key=lambda task: (
