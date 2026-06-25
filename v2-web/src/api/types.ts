@@ -269,9 +269,36 @@ export type InstallerWorkloadRow = {
   completionPerEffectiveHour: number
   weightedCompletion: number
   weightedCompletionPerEffectiveHour: number
+  attendanceWindowMinutes: number
+  onlineMinutes: number
+  countableOnlineMinutes: number
+  onlineRatio: number
+  baseOnlineCoefficient: number
+  idlePenaltyCoefficient: number
+  finalOnlineCoefficient: number
+  fusedWorkDurationMinutes: number
+  fusedWorkDurationHours: number
+  fusedWorkDurationLabel: string
+  fusedWeightedCompletionPerEffectiveHour: number
+  idleSegments: InstallerIdleSegment[]
+  freeIdleSegmentUsed: boolean
+  pendingNonIdleCount: number
+  confirmedNonIdleCount: number
+  onlineConfidence: string
   hourlySegments: InstallerWorkSegment[]
   twoHourSegments: InstallerWorkSegment[]
   exceptionGroups: InstallerExceptionGroup[]
+}
+
+export type InstallerIdleSegment = {
+  startAt: string
+  endAt: string
+  startTime: string
+  endTime: string
+  minutes: number
+  hours: number
+  free: boolean
+  penaltyCoefficient: number
 }
 
 export type InstallerDenseBonusWindow = {

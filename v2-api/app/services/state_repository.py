@@ -173,6 +173,15 @@ def _photo_work_datetime(photo: Photo) -> datetime | None:
     return _datetime_from_value(photo.taken_at) or _datetime_from_value(photo.created_at)
 
 
+def _photo_confirmed_non_idle_datetime(photo: Photo) -> datetime | None:
+    raw = photo.raw_data or {}
+    if _photo_is_construction_upload(photo):
+        return _datetime_from_value(raw.get("client_completed_at")) or _datetime_from_value(
+            raw.get("construction_completed_at")
+        )
+    return _photo_work_datetime(photo)
+
+
 def _photo_construction_slot(photo: Photo) -> str:
     raw = photo.raw_data or {}
     for value in (raw.get("construction_slot"), raw.get("slot"), photo.category):
@@ -818,6 +827,20 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def record_construction_activity_event(
+        self,
+        *,
+        event_type: str,
+        actor: str,
+        task_id: str | int | None = None,
+        group_id: str = "",
+        client_batch_id: str = "",
+        occurred_at: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_team_states(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -1220,6 +1243,27 @@ class JsonStateRepository(StateRepository):
 
     def installer_daily_workload(self, installer: str) -> dict[str, Any]:
         return local_simulation.installer_daily_workload(installer)
+
+    def record_construction_activity_event(
+        self,
+        *,
+        event_type: str,
+        actor: str,
+        task_id: str | int | None = None,
+        group_id: str = "",
+        client_batch_id: str = "",
+        occurred_at: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return local_simulation.record_construction_activity_event(
+            event_type=event_type,
+            actor=actor,
+            task_id=task_id,
+            group_id=group_id,
+            client_batch_id=client_batch_id,
+            occurred_at=occurred_at,
+            payload=payload,
+        )
 
     def list_team_states(self) -> list[dict[str, Any]]:
         return local_simulation.list_team_states()
@@ -2034,6 +2078,55 @@ class PostgresStateRepository(StateRepository):
             }
             return _build_task_status_summary(task_rows, summary)
 
+    def _construction_activity_times_for_installer(
+        self,
+        session: Session,
+        installer: str,
+        date_key: str,
+    ) -> dict[str, list[datetime]]:
+        target = str(installer or "").strip()
+        aliases = local_simulation.installer_actor_aliases(target)
+        result = {
+            "heartbeats": [],
+            "pending_non_idle_events": [],
+            "deleted_pending_non_idle_events": [],
+            "upload_action_times": [],
+        }
+        if not target or not date_key:
+            return result
+        action_map = {
+            "construction_heartbeat": "heartbeats",
+            "group_draft_completed": "pending_non_idle_events",
+            "group_draft_deleted": "deleted_pending_non_idle_events",
+            "group_uploaded": "upload_action_times",
+            "construction_upload_batch": "upload_action_times",
+        }
+        if not hasattr(session, "scalars"):
+            return result
+        events = session.scalars(
+            select(AuditLog).where(
+                AuditLog.team_id == local_simulation.current_team_id(),
+                AuditLog.actor_username.in_(tuple(aliases)),
+                AuditLog.action.in_(tuple(action_map.keys())),
+            )
+        ).all()
+        for event in events:
+            bucket = action_map.get(event.action)
+            if not bucket:
+                continue
+            payload = event.payload or {}
+            occurred_at = _datetime_from_value(
+                payload.get("occurred_at") or payload.get("client_completed_at") or event.created_at
+            )
+            if occurred_at and occurred_at.date().isoformat() == date_key:
+                result[bucket].append(
+                    {
+                        "occurred_at": occurred_at,
+                        "client_batch_id": str(payload.get("client_batch_id") or ""),
+                    }
+                )
+        return result
+
     def installer_daily_workload(self, installer: str) -> dict[str, Any]:
         target = str(installer or "").strip()
         if not target:
@@ -2085,9 +2178,16 @@ class PostgresStateRepository(StateRepository):
                 },
             )
             photo_times = [value for value in (_photo_work_datetime(photo) for photo in matched_photos) if value]
+            confirmed_non_idle_times = [
+                value for value in (_photo_confirmed_non_idle_datetime(photo) for photo in matched_photos) if value
+            ]
             same_day_times = [value for value in photo_times if value.date().isoformat() == date_key]
+            same_day_confirmed_non_idle_times = [
+                value for value in confirmed_non_idle_times if value.date().isoformat() == date_key
+            ]
             row["_work_timestamps"].extend(same_day_times or photo_times)
             completed_at = max(same_day_times or photo_times, default=None)
+            confirmed_non_idle_at = max(same_day_confirmed_non_idle_times or confirmed_non_idle_times, default=None)
             if completed_at:
                 row["_completion_records"].append(
                     {
@@ -2098,6 +2198,7 @@ class PostgresStateRepository(StateRepository):
                         "status": _status_value(group.status),
                         "photo_count": len(matched_photos),
                         "completed_at": completed_at,
+                        "confirmed_non_idle_at": confirmed_non_idle_at,
                     }
                 )
             row["group_count"] += 1
@@ -2117,6 +2218,20 @@ class PostgresStateRepository(StateRepository):
             timestamps = row.pop("_work_timestamps", [])
             completion_records = row.pop("_completion_records", [])
             row.update(local_simulation.build_work_time_summary(timestamps, completion_records))
+            with self._session() as session:
+                activity = self._construction_activity_times_for_installer(session, target, str(row["date"]))
+            row.update(
+                local_simulation.build_fused_online_work_summary(
+                    date_key=str(row["date"]),
+                    work_duration_minutes=row.get("work_duration_minutes", 0),
+                    weighted_completion=row.get("weighted_completion", 0),
+                    heartbeats=activity["heartbeats"],
+                    confirmed_completion_times=[record.get("confirmed_non_idle_at") for record in completion_records],
+                    pending_non_idle_events=activity["pending_non_idle_events"],
+                    deleted_pending_non_idle_events=activity["deleted_pending_non_idle_events"],
+                    upload_action_times=activity["upload_action_times"],
+                )
+            )
         items = sorted(rows_by_date.values(), key=lambda item: str(item["date"]), reverse=True)
         return {"installer": target, "items": items}
         with self._session() as session:
@@ -3001,6 +3116,53 @@ class PostgresStateRepository(StateRepository):
                     for row in rows
                 ],
             }
+
+    def record_construction_activity_event(
+        self,
+        *,
+        event_type: str,
+        actor: str,
+        task_id: str | int | None = None,
+        group_id: str = "",
+        client_batch_id: str = "",
+        occurred_at: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if event_type not in local_simulation.CONSTRUCTION_ACTIVITY_ACTIONS:
+            raise ValueError(f"Unsupported construction activity event: {event_type}")
+        actor = str(actor or "").strip() or "constructor"
+        event_payload = {
+            "task_id": task_id,
+            "group_id": str(group_id or ""),
+            "client_batch_id": str(client_batch_id or ""),
+            "occurred_at": occurred_at or datetime.now(UTC).isoformat(),
+            **(payload or {}),
+        }
+        with self._session() as session:
+            self._add_construction_activity_audit(session, event_type, actor, event_payload)
+            session.commit()
+        return {"event_type": event_type, "actor": actor, **event_payload}
+
+    def _add_construction_activity_audit(
+        self,
+        session: Session,
+        event_type: str,
+        actor: str,
+        event_payload: dict[str, Any],
+    ) -> None:
+        session.add(
+            AuditLog(
+                team_id=local_simulation.current_team_id(),
+                legacy_id=f"construction-activity-{uuid4()}",
+                actor_username=actor,
+                action=event_type,
+                entity_type="construction_activity",
+                entity_id=None,
+                payload=event_payload,
+                before_data=None,
+                after_data=None,
+            )
+        )
 
     def list_construction_tasks(self, *, actor: str = "", include_closed: bool = False) -> list[dict[str, Any]]:
         team_id = local_simulation.current_team_id()
@@ -3959,6 +4121,19 @@ class PostgresStateRepository(StateRepository):
             raw["construction_collector"] = collector
             raw["construction_module_asset_no"] = module_asset_no
             group.raw_data = raw
+            self._add_construction_activity_audit(
+                session,
+                "group_uploaded",
+                actor,
+                {
+                    "task_id": group.legacy_task_id,
+                    "group_id": group.legacy_id or str(group.id),
+                    "client_batch_id": client_batch_id,
+                    "occurred_at": client_completed_at or datetime.now(UTC).isoformat(),
+                    "added": result.get("added", 0),
+                    "confirmed_non_idle": bool(_datetime_from_value(client_completed_at) and result.get("added", 0) > 0),
+                },
+            )
             session.commit()
             session.refresh(group)
             return {"group": _group_payload(session, group), **result}
@@ -4241,6 +4416,73 @@ class DualWriteStateRepository(JsonStateRepository):
             category=category,
             note=note,
             force=force,
+        )
+        return result
+
+    def record_construction_activity_event(
+        self,
+        *,
+        event_type: str,
+        actor: str,
+        task_id: str | int | None = None,
+        group_id: str = "",
+        client_batch_id: str = "",
+        occurred_at: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result = super().record_construction_activity_event(
+            event_type=event_type,
+            actor=actor,
+            task_id=task_id,
+            group_id=group_id,
+            client_batch_id=client_batch_id,
+            occurred_at=occurred_at,
+            payload=payload,
+        )
+        self._mirror_write(
+            "record_construction_activity_event",
+            event_type=event_type,
+            actor=actor,
+            task_id=task_id,
+            group_id=group_id,
+            client_batch_id=client_batch_id,
+            occurred_at=occurred_at,
+            payload=payload,
+        )
+        return result
+
+    def upload_construction_group_batch(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        client_batch_id: str,
+        collector: str,
+        module_asset_no: str,
+        photos: list[dict[str, Any]],
+        creator: str = "",
+        client_completed_at: str = "",
+    ) -> dict[str, Any]:
+        result = super().upload_construction_group_batch(
+            group_id,
+            actor=actor,
+            client_batch_id=client_batch_id,
+            collector=collector,
+            module_asset_no=module_asset_no,
+            photos=photos,
+            creator=creator,
+            client_completed_at=client_completed_at,
+        )
+        self._mirror_write(
+            "upload_construction_group_batch",
+            group_id,
+            actor=actor,
+            client_batch_id=client_batch_id,
+            collector=collector,
+            module_asset_no=module_asset_no,
+            photos=photos,
+            creator=creator,
+            client_completed_at=client_completed_at,
         )
         return result
 

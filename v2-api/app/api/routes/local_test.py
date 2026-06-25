@@ -238,6 +238,21 @@ def request_is_constructor(request: Request) -> bool:
     return "constructor" in set(payload.get("roles") or [])
 
 
+def bound_construction_actor(request: Request, actor: str) -> str:
+    clean_actor = str(actor or "").strip()
+    if request_is_admin(request):
+        return clean_actor
+    payload = request_auth_payload(request)
+    subject = str(payload.get("sub") or "").strip()
+    if not subject:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not clean_actor:
+        return subject
+    if clean_actor != subject:
+        raise HTTPException(status_code=403, detail="Construction actor must match the signed-in user")
+    return clean_actor
+
+
 def forbid_constructor_project_board(request: Request) -> None:
     if request_is_constructor(request):
         raise HTTPException(status_code=403, detail="Constructors are not allowed to access project board data")
@@ -730,6 +745,21 @@ class ClaimRequest(BaseModel):
 
 class ConstructionActorRequest(BaseModel):
     actor: str = "constructor"
+
+
+class ConstructionHeartbeatRequest(BaseModel):
+    actor: str = "constructor"
+    task_id: str | int | None = None
+    occurred_at: str = ""
+
+
+class ConstructionNonIdleEventRequest(BaseModel):
+    event_type: str
+    actor: str = "constructor"
+    task_id: str | int | None = None
+    group_id: str = ""
+    client_batch_id: str = ""
+    occurred_at: str = ""
 
 
 class ConstructionAssignRequest(BaseModel):
@@ -1784,6 +1814,40 @@ def construction_task_release(task_id: int, payload: ConstructionActorRequest, r
     return ok(request, task)
 
 
+@router.post("/construction/heartbeat")
+def construction_heartbeat(payload: ConstructionHeartbeatRequest, request: Request):
+    actor = bound_construction_actor(request, payload.actor)
+    try:
+        event = state_repository().record_construction_activity_event(
+            event_type="construction_heartbeat",
+            actor=actor,
+            task_id=payload.task_id,
+            occurred_at=payload.occurred_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, event)
+
+
+@router.post("/construction/non-idle-events")
+def construction_non_idle_event(payload: ConstructionNonIdleEventRequest, request: Request):
+    if payload.event_type not in {"group_draft_completed", "group_draft_deleted", "group_uploaded"}:
+        raise HTTPException(status_code=400, detail="Unsupported construction non-idle event")
+    actor = bound_construction_actor(request, payload.actor)
+    try:
+        event = state_repository().record_construction_activity_event(
+            event_type=payload.event_type,
+            actor=actor,
+            task_id=payload.task_id,
+            group_id=payload.group_id,
+            client_batch_id=payload.client_batch_id,
+            occurred_at=payload.occurred_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, event)
+
+
 @router.get("/construction/tasks/{task_id}/groups")
 def construction_task_groups(
     task_id: int,
@@ -1821,6 +1885,7 @@ async def construction_group_upload_batch(
 ):
     if is_all_zero_construction_code(group_id):
         raise HTTPException(status_code=400, detail="No work order: 00000000 placeholder group cannot upload")
+    actor = bound_construction_actor(request, actor)
     validate_construction_upload_group_before_file_save(group_id)
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")

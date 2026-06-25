@@ -108,6 +108,22 @@ def test_unmatched_duplicate_key_blocks_reimport_after_association() -> None:
     }
 
 
+def test_postgres_construction_photo_without_client_completion_is_not_confirmed_non_idle() -> None:
+    photo = SimpleNamespace(
+        raw_data={"upload_source": "construction-mobile", "client_completed_at": ""},
+        source="",
+        taken_at=None,
+        created_at=datetime(2026, 6, 22, 10, 30),
+    )
+
+    assert repository._photo_work_datetime(photo) == datetime(2026, 6, 22, 10, 30)
+    assert repository._photo_confirmed_non_idle_datetime(photo) is None
+
+    photo.raw_data["client_completed_at"] = "2026-06-22T09:30:00"
+
+    assert repository._photo_confirmed_non_idle_datetime(photo) == datetime(2026, 6, 22, 9, 30)
+
+
 def test_dual_backend_keeps_json_as_authoritative_source(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository.settings, "state_backend", "dual")
     monkeypatch.setattr(repository.local_simulation, "release_task", lambda task_id, reviewer, force=False: {"id": task_id, "force": force})
@@ -130,6 +146,12 @@ def test_dual_backend_mirrors_core_writes_after_json_success(monkeypatch: pytest
 
         def reset_group_to_unconstructed(self, *args, **kwargs):
             calls.append(("reset_group_to_unconstructed", args, kwargs))
+
+        def record_construction_activity_event(self, *args, **kwargs):
+            calls.append(("record_construction_activity_event", args, kwargs))
+
+        def upload_construction_group_batch(self, *args, **kwargs):
+            calls.append(("upload_construction_group_batch", args, kwargs))
 
     monkeypatch.setattr(repository.settings, "state_backend", "dual")
     monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", MirrorRepository)
@@ -158,6 +180,16 @@ def test_dual_backend_mirrors_core_writes_after_json_success(monkeypatch: pytest
             "force": force,
         },
     )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "record_construction_activity_event",
+        lambda **kwargs: {"event_type": kwargs["event_type"], "actor": kwargs["actor"]},
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "upload_construction_group_batch",
+        lambda group_id, **kwargs: {"group": {"id": group_id}, "added": len(kwargs["photos"])},
+    )
 
     repo = repository.get_state_repository()
 
@@ -166,10 +198,58 @@ def test_dual_backend_mirrors_core_writes_after_json_success(monkeypatch: pytest
         "collector": "c"
     }
     assert repo.reset_group_to_unconstructed("g-1", actor="reviewer-a", reason="wrong", force=True)["force"] is True
+    assert (
+        repo.record_construction_activity_event(
+            event_type="construction_heartbeat",
+            actor="constructor",
+            task_id=7,
+            occurred_at="2026-06-22T09:00:00",
+        )["actor"]
+        == "constructor"
+    )
+    assert (
+        repo.upload_construction_group_batch(
+            "g-1",
+            actor="constructor",
+            client_batch_id="batch-1",
+            collector="collector",
+            module_asset_no="module",
+            photos=[{"url": "/uploads/a.jpg"}],
+            creator="施工员",
+            client_completed_at="2026-06-22T09:30:00",
+        )["added"]
+        == 1
+    )
     assert calls == [
         ("classify_photo", ("g-1", "p-1", "after_box", "reviewer-a"), {}),
         ("update_group_metadata", ("g-1",), {"actor": "reviewer-a", "updates": {"collector": "c"}}),
         ("reset_group_to_unconstructed", ("g-1",), {"actor": "reviewer-a", "reason": "wrong", "force": True}),
+        (
+            "record_construction_activity_event",
+            (),
+            {
+                "event_type": "construction_heartbeat",
+                "actor": "constructor",
+                "task_id": 7,
+                "group_id": "",
+                "client_batch_id": "",
+                "occurred_at": "2026-06-22T09:00:00",
+                "payload": None,
+            },
+        ),
+        (
+            "upload_construction_group_batch",
+            ("g-1",),
+            {
+                "actor": "constructor",
+                "client_batch_id": "batch-1",
+                "collector": "collector",
+                "module_asset_no": "module",
+                "photos": [{"url": "/uploads/a.jpg"}],
+                "creator": "施工员",
+                "client_completed_at": "2026-06-22T09:30:00",
+            },
+        ),
     ]
 
 

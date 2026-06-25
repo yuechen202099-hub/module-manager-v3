@@ -42,6 +42,12 @@ WORK_V2_DENSE_WINDOW_MINUTES = 120
 WORK_V2_DENSE_MIN_GAPS = 15
 WORK_V2_DENSE_FIVE_MINUTE_BONUS = 15
 WORK_V2_DENSE_THREE_MINUTE_BONUS = 25
+ONLINE_HEARTBEAT_MAX_GAP_MINUTES = 5
+ONLINE_BONUS_MAX_RATIO = 0.25
+ONLINE_WORKDAY_START_HOUR = 9
+ONLINE_WORKDAY_END_HOUR = 17
+IDLE_THRESHOLD_MINUTES = 60
+IDLE_PENALTY_LADDER = (0.0, 0.1, 0.3, 0.5)
 DEFAULT_SCAN_FILE = Path("C:/Users/Administrator/Desktop/\u6279\u91cf\u626b\u7801_20260608125555.xlsx")
 REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatched"}
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
@@ -2254,6 +2260,39 @@ def append_audit_event(action: str, actor: str, payload: dict[str, Any]) -> dict
     return event
 
 
+CONSTRUCTION_ACTIVITY_ACTIONS = {
+    "construction_heartbeat",
+    "group_draft_completed",
+    "group_uploaded",
+    "group_draft_deleted",
+}
+
+
+def record_construction_activity_event(
+    *,
+    event_type: str,
+    actor: str,
+    task_id: str | int | None = None,
+    group_id: str = "",
+    client_batch_id: str = "",
+    occurred_at: str = "",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if event_type not in CONSTRUCTION_ACTIVITY_ACTIONS:
+        raise ValueError(f"Unsupported construction activity event: {event_type}")
+    actor = str(actor or "").strip() or "constructor"
+    event_payload = {
+        "task_id": task_id,
+        "group_id": str(group_id or ""),
+        "client_batch_id": str(client_batch_id or ""),
+        "occurred_at": occurred_at or now_iso(),
+        **(payload or {}),
+    }
+    append_audit_event(event_type, actor, event_payload)
+    save_all_team_states()
+    return {"event_type": event_type, "actor": actor, **event_payload}
+
+
 def list_audit_events(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     events = list(reversed(get_state().get("audit_events", [])))
     return {"total": len(events), "items": events[offset : offset + limit]}
@@ -2643,6 +2682,229 @@ def _bucket_start_hour(value: datetime) -> int:
     return (int(value.hour) // WORK_SEGMENT_HOURS) * WORK_SEGMENT_HOURS
 
 
+def _day_boundary(date_key: str, hour: int) -> datetime | None:
+    try:
+        day = datetime.fromisoformat(f"{date_key}T00:00:00")
+    except ValueError:
+        return None
+    return day.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+
+def _same_day_datetimes(values: list[Any] | tuple[Any, ...] | None, date_key: str) -> list[datetime]:
+    result: list[datetime] = []
+    for value in values or []:
+        candidate = value.get("occurred_at") if isinstance(value, dict) else value
+        parsed = _datetime_from_value(candidate)
+        if parsed and parsed.date().isoformat() == date_key:
+            result.append(parsed.replace(second=0, microsecond=0))
+    return sorted(result)
+
+
+def _same_day_activity_events(values: list[Any] | tuple[Any, ...] | None, date_key: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for index, value in enumerate(values or []):
+        if isinstance(value, dict):
+            occurred_at = _datetime_from_value(value.get("occurred_at") or value.get("client_completed_at"))
+            client_batch_id = str(value.get("client_batch_id") or "")
+        else:
+            occurred_at = _datetime_from_value(value)
+            client_batch_id = ""
+        if occurred_at and occurred_at.date().isoformat() == date_key:
+            events.append(
+                {
+                    "occurred_at": occurred_at.replace(second=0, microsecond=0),
+                    "client_batch_id": client_batch_id or f"event-{index}",
+                }
+            )
+    return events
+
+
+def installer_actor_aliases(installer: str) -> set[str]:
+    target = str(installer or "").strip()
+    aliases = {target} if target else set()
+    if not target:
+        return aliases
+    try:
+        from app.services.account_store import ensure_user_store
+
+        users = ensure_user_store()
+    except Exception:
+        return aliases
+    for username, user in users.items():
+        clean_username = str(username or "").strip()
+        display_name = str((user or {}).get("name") or clean_username).strip()
+        if target in {clean_username, display_name}:
+            if clean_username:
+                aliases.add(clean_username)
+            if display_name:
+                aliases.add(display_name)
+    return aliases
+
+
+def _unresolved_pending_non_idle_count(
+    pending_events: list[dict[str, Any]],
+    deleted_events: list[dict[str, Any]],
+    uploaded_events: list[dict[str, Any]],
+) -> int:
+    deleted_keys = {event["client_batch_id"] for event in deleted_events if event.get("client_batch_id")}
+    uploaded_keys = {event["client_batch_id"] for event in uploaded_events if event.get("client_batch_id")}
+    resolved_keys = deleted_keys | uploaded_keys
+    return sum(1 for event in pending_events if event.get("client_batch_id") not in resolved_keys)
+
+
+def _minutes_between(left: datetime, right: datetime) -> int:
+    if right <= left:
+        return 0
+    return int(round((right - left).total_seconds() / 60))
+
+
+def _merge_online_segments(heartbeats: list[datetime]) -> list[tuple[datetime, datetime]]:
+    if not heartbeats:
+        return []
+    ordered = sorted({value.replace(second=0, microsecond=0) for value in heartbeats})
+    segments: list[tuple[datetime, datetime]] = []
+    start = previous = ordered[0]
+    for heartbeat in ordered[1:]:
+        gap_minutes = _minutes_between(previous, heartbeat)
+        if gap_minutes <= ONLINE_HEARTBEAT_MAX_GAP_MINUTES:
+            previous = heartbeat
+            continue
+        segments.append((start, previous))
+        start = previous = heartbeat
+    segments.append((start, previous))
+    return segments
+
+
+def _clip_segment_minutes(start: datetime, end: datetime, window_start: datetime, window_end: datetime) -> int:
+    clipped_start = max(start, window_start)
+    clipped_end = min(end, window_end)
+    return _minutes_between(clipped_start, clipped_end)
+
+
+def _idle_penalty_for_index(index: int) -> float:
+    if index < len(IDLE_PENALTY_LADDER):
+        return IDLE_PENALTY_LADDER[index]
+    return IDLE_PENALTY_LADDER[-1] + 0.2 * (index - len(IDLE_PENALTY_LADDER) + 1)
+
+
+def _build_idle_segments(
+    online_segments: list[tuple[datetime, datetime]],
+    confirmed_completion_times: list[datetime],
+    window_start: datetime,
+    window_end: datetime,
+) -> list[dict[str, Any]]:
+    idle_segments: list[dict[str, Any]] = []
+    for start, end in online_segments:
+        clipped_start = max(start, window_start)
+        clipped_end = min(end, window_end)
+        if clipped_end <= clipped_start:
+            continue
+        completions = [
+            value
+            for value in confirmed_completion_times
+            if clipped_start <= value <= clipped_end
+        ]
+        anchors = [clipped_start, *completions, clipped_end]
+        for left, right in zip(anchors, anchors[1:]):
+            idle_minutes = _minutes_between(left, right)
+            if idle_minutes < IDLE_THRESHOLD_MINUTES:
+                continue
+            idle_segments.append(
+                {
+                    "start_at": left.isoformat(timespec="minutes"),
+                    "end_at": right.isoformat(timespec="minutes"),
+                    "start_time": _format_time_of_day(left),
+                    "end_time": _format_time_of_day(right),
+                    "minutes": idle_minutes,
+                    "hours": round(idle_minutes / 60, 2),
+                }
+            )
+    for index, segment in enumerate(idle_segments):
+        penalty = round(_idle_penalty_for_index(index), 2)
+        segment["free"] = index == 0
+        segment["penalty_coefficient"] = penalty
+    return idle_segments
+
+
+def build_fused_online_work_summary(
+    *,
+    date_key: str,
+    work_duration_minutes: int | float,
+    weighted_completion: int | float,
+    heartbeats: list[Any] | tuple[Any, ...] | None,
+    confirmed_completion_times: list[Any] | tuple[Any, ...] | None,
+    pending_non_idle_events: list[Any] | tuple[Any, ...] | None = None,
+    deleted_pending_non_idle_events: list[Any] | tuple[Any, ...] | None = None,
+    upload_action_times: list[Any] | tuple[Any, ...] | None = None,
+) -> dict[str, Any]:
+    work_minutes = max(0, int(round(float(work_duration_minutes or 0))))
+    weighted = float(weighted_completion or 0)
+    day_start = _day_boundary(date_key, ONLINE_WORKDAY_START_HOUR)
+    day_end = _day_boundary(date_key, ONLINE_WORKDAY_END_HOUR)
+    heartbeat_times = _same_day_datetimes(heartbeats, date_key)
+    confirmed_times = _same_day_datetimes(confirmed_completion_times, date_key)
+    pending_events = _same_day_activity_events(pending_non_idle_events, date_key)
+    deleted_pending_events = _same_day_activity_events(deleted_pending_non_idle_events, date_key)
+    uploaded_events = _same_day_activity_events(upload_action_times, date_key)
+    pending_count = _unresolved_pending_non_idle_count(pending_events, deleted_pending_events, uploaded_events)
+    base_payload = {
+        "attendance_window_minutes": 0,
+        "online_minutes": 0,
+        "countable_online_minutes": 0,
+        "online_ratio": 0,
+        "base_online_coefficient": 1,
+        "idle_penalty_coefficient": 0,
+        "final_online_coefficient": 1,
+        "fused_work_duration_minutes": work_minutes,
+        "fused_work_duration_hours": round(work_minutes / 60, 2) if work_minutes else 0,
+        "fused_work_duration_label": _format_duration_label(work_minutes),
+        "fused_weighted_completion_per_effective_hour": round(weighted / (work_minutes / 60), 2) if work_minutes else 0,
+        "idle_segments": [],
+        "free_idle_segment_used": False,
+        "pending_non_idle_count": pending_count,
+        "confirmed_non_idle_count": len(confirmed_times),
+        "online_confidence": "low",
+    }
+    if not day_start or not day_end or not heartbeat_times:
+        return base_payload
+
+    window_start = day_start
+    window_end = day_end
+    attendance_window_minutes = _minutes_between(window_start, window_end)
+    if attendance_window_minutes <= 0:
+        return base_payload
+
+    online_segments = _merge_online_segments(heartbeat_times)
+    countable_online_minutes = sum(
+        _clip_segment_minutes(start, end, window_start, window_end)
+        for start, end in online_segments
+    )
+    online_ratio = min(1.0, max(0.0, countable_online_minutes / attendance_window_minutes))
+    base_online_coefficient = 1 + online_ratio * ONLINE_BONUS_MAX_RATIO
+    idle_segments = _build_idle_segments(online_segments, confirmed_times, window_start, window_end)
+    idle_penalty_coefficient = round(sum(float(segment["penalty_coefficient"]) for segment in idle_segments[1:]), 2)
+    final_online_coefficient = max(0.0, base_online_coefficient - idle_penalty_coefficient)
+    fused_minutes = min(attendance_window_minutes, int(round(work_minutes * final_online_coefficient)))
+    fused_hours = fused_minutes / 60 if fused_minutes else 0
+    return {
+        **base_payload,
+        "attendance_window_minutes": attendance_window_minutes,
+        "online_minutes": countable_online_minutes,
+        "countable_online_minutes": countable_online_minutes,
+        "online_ratio": round(online_ratio, 4),
+        "base_online_coefficient": round(base_online_coefficient, 2),
+        "idle_penalty_coefficient": idle_penalty_coefficient,
+        "final_online_coefficient": round(final_online_coefficient, 2),
+        "fused_work_duration_minutes": fused_minutes,
+        "fused_work_duration_hours": round(fused_hours, 2) if fused_hours else 0,
+        "fused_work_duration_label": _format_duration_label(fused_minutes),
+        "fused_weighted_completion_per_effective_hour": round(weighted / fused_hours, 2) if fused_hours else 0,
+        "idle_segments": idle_segments,
+        "free_idle_segment_used": bool(idle_segments),
+        "online_confidence": "normal",
+    }
+
+
 def _build_shadow_work_time_summary(valid: list[datetime]) -> dict[str, Any]:
     base_minutes = 0
     gap_rows: list[dict[str, Any]] = []
@@ -3016,6 +3278,50 @@ def _photo_work_datetime(photo: dict[str, Any]) -> datetime | None:
     return None
 
 
+def _photo_confirmed_non_idle_datetime(photo: dict[str, Any]) -> datetime | None:
+    if _photo_is_construction_upload(photo):
+        return _datetime_from_value(photo.get("client_completed_at")) or _datetime_from_value(
+            photo.get("construction_completed_at")
+        )
+    return _photo_work_datetime(photo)
+
+
+def construction_activity_times_for_installer(installer: str, date_key: str) -> dict[str, list[datetime]]:
+    target = str(installer or "").strip()
+    aliases = installer_actor_aliases(target)
+    result = {
+        "heartbeats": [],
+        "pending_non_idle_events": [],
+        "deleted_pending_non_idle_events": [],
+        "upload_action_times": [],
+    }
+    if not target or not date_key:
+        return result
+    action_map = {
+        "construction_heartbeat": "heartbeats",
+        "group_draft_completed": "pending_non_idle_events",
+        "group_draft_deleted": "deleted_pending_non_idle_events",
+        "group_uploaded": "upload_action_times",
+        "construction_upload_batch": "upload_action_times",
+    }
+    for event in state_for_team().get("audit_events", []):
+        if str(event.get("actor") or "").strip() not in aliases:
+            continue
+        bucket = action_map.get(str(event.get("action") or ""))
+        if not bucket:
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        occurred_at = _datetime_from_value(payload.get("occurred_at") or payload.get("client_completed_at") or event.get("created_at"))
+        if occurred_at and occurred_at.date().isoformat() == date_key:
+            result[bucket].append(
+                {
+                    "occurred_at": occurred_at,
+                    "client_batch_id": str(payload.get("client_batch_id") or ""),
+                }
+            )
+    return result
+
+
 PLACEHOLDER_CONSTRUCTION_ADDRESS_MARKER = "\u5f85\u5bfc\u5165\u603b\u6e05\u5355\u5730\u5740"
 
 
@@ -3109,9 +3415,16 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
             },
         )
         photo_times = [value for value in (_photo_work_datetime(photo) for photo in matched_photos) if value]
+        confirmed_non_idle_times = [
+            value for value in (_photo_confirmed_non_idle_datetime(photo) for photo in matched_photos) if value
+        ]
         same_day_times = [value for value in photo_times if value.date().isoformat() == date_key]
+        same_day_confirmed_non_idle_times = [
+            value for value in confirmed_non_idle_times if value.date().isoformat() == date_key
+        ]
         row["_work_timestamps"].extend(same_day_times or photo_times)
         completed_at = max(same_day_times or photo_times, default=None)
+        confirmed_non_idle_at = max(same_day_confirmed_non_idle_times or confirmed_non_idle_times, default=None)
         if completed_at:
             row["_completion_records"].append(
                 {
@@ -3122,6 +3435,7 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
                     "status": str(group.get("status") or ""),
                     "photo_count": len(matched_photos),
                     "completed_at": completed_at,
+                    "confirmed_non_idle_at": confirmed_non_idle_at,
                 }
             )
         row["group_count"] += 1
@@ -3137,6 +3451,19 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
         timestamps = row.pop("_work_timestamps", [])
         completion_records = row.pop("_completion_records", [])
         row.update(build_work_time_summary(timestamps, completion_records))
+        activity = construction_activity_times_for_installer(target, str(row["date"]))
+        row.update(
+            build_fused_online_work_summary(
+                date_key=str(row["date"]),
+                work_duration_minutes=row.get("work_duration_minutes", 0),
+                weighted_completion=row.get("weighted_completion", 0),
+                heartbeats=activity["heartbeats"],
+                confirmed_completion_times=[record.get("confirmed_non_idle_at") for record in completion_records],
+                pending_non_idle_events=activity["pending_non_idle_events"],
+                deleted_pending_non_idle_events=activity["deleted_pending_non_idle_events"],
+                upload_action_times=activity["upload_action_times"],
+            )
+        )
     items = sorted(rows.values(), key=lambda item: str(item["date"]), reverse=True)
     return {"installer": target, "items": items}
 
@@ -4578,6 +4905,15 @@ def upload_construction_group_batch(
             "added": added,
             "skipped_duplicates": skipped_duplicates,
         },
+    )
+    record_construction_activity_event(
+        event_type="group_uploaded",
+        actor=actor,
+        task_id=group.get("task_id"),
+        group_id=group_id,
+        client_batch_id=client_batch_id,
+        occurred_at=client_completed_at or now_iso(),
+        payload={"added": added, "confirmed_non_idle": bool(_datetime_from_value(client_completed_at) and added > 0)},
     )
     refresh_summary()
     return {"group": group, "task": task, "added": added, "skipped_duplicates": skipped_duplicates}

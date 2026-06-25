@@ -198,6 +198,7 @@ const workloadTotals = computed(() =>
       unreviewedCount: total.unreviewedCount + item.unreviewedCount,
       workDurationMinutes: total.workDurationMinutes + item.workDurationMinutes,
       workDurationMinutesV2: total.workDurationMinutesV2 + item.workDurationMinutesV2,
+      fusedWorkDurationMinutes: total.fusedWorkDurationMinutes + item.fusedWorkDurationMinutes,
       completionCount: total.completionCount + item.completionCount,
       weightedCompletion: total.weightedCompletion + item.weightedCompletion,
     }),
@@ -209,6 +210,7 @@ const workloadTotals = computed(() =>
       unreviewedCount: 0,
       workDurationMinutes: 0,
       workDurationMinutesV2: 0,
+      fusedWorkDurationMinutes: 0,
       completionCount: 0,
       weightedCompletion: 0,
     },
@@ -1296,6 +1298,10 @@ onUnmounted(() => {
           <span>加权完成</span>
           <strong>{{ formatDecimal(workloadTotals.weightedCompletion, 1) }}</strong>
         </article>
+        <article>
+          <span>计入工时</span>
+          <strong>{{ formatWorkDuration(workloadTotals.fusedWorkDurationMinutes) }}</strong>
+        </article>
       </div>
       <el-table v-loading="workloadLoading" :data="workloadRows" height="360" size="small">
         <el-table-column prop="date" label="日期" min-width="120" />
@@ -1331,6 +1337,21 @@ onUnmounted(() => {
         <el-table-column prop="weightedCompletionPerEffectiveHour" label="加权效率" width="110">
           <template #default="{ row }">
             <span>{{ formatDecimal(row.weightedCompletionPerEffectiveHour) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="计入工时" width="110">
+          <template #default="{ row }">
+            <span>{{ row.fusedWorkDurationLabel || formatWorkDuration(row.fusedWorkDurationMinutes) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="融合效率" width="96">
+          <template #default="{ row }">
+            <span>{{ formatDecimal(row.fusedWeightedCompletionPerEffectiveHour) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="在线系数" width="96">
+          <template #default="{ row }">
+            <span>{{ formatDecimal(row.finalOnlineCoefficient) }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="denseBonusMinutesV2" label="补偿" width="86">
@@ -1692,6 +1713,22 @@ onUnmounted(() => {
           <article>
             <span>加权效率</span>
             <strong>{{ formatDecimal(workloadTimeRow.weightedCompletionPerEffectiveHour) }}</strong>
+          </article>
+          <article>
+            <span>在线补偿系数</span>
+            <strong>{{ formatDecimal(workloadTimeRow.baseOnlineCoefficient) }}</strong>
+          </article>
+          <article>
+            <span>挂机扣减</span>
+            <strong>-{{ formatDecimal(workloadTimeRow.idlePenaltyCoefficient) }}</strong>
+          </article>
+          <article>
+            <span>最终系数</span>
+            <strong>{{ formatDecimal(workloadTimeRow.finalOnlineCoefficient) }}</strong>
+          </article>
+          <article>
+            <span>融合加权效率</span>
+            <strong>{{ formatDecimal(workloadTimeRow.fusedWeightedCompletionPerEffectiveHour) }}</strong>
           </article>
         </div>
         <p class="work-time-note">

@@ -302,6 +302,31 @@ type BackendInstallerWorkload = {
     completion_per_effective_hour?: number
     weighted_completion?: number
     weighted_completion_per_effective_hour?: number
+    attendance_window_minutes?: number
+    online_minutes?: number
+    countable_online_minutes?: number
+    online_ratio?: number
+    base_online_coefficient?: number
+    idle_penalty_coefficient?: number
+    final_online_coefficient?: number
+    fused_work_duration_minutes?: number
+    fused_work_duration_hours?: number
+    fused_work_duration_label?: string
+    fused_weighted_completion_per_effective_hour?: number
+    idle_segments?: Array<{
+      start_at?: string
+      end_at?: string
+      start_time?: string
+      end_time?: string
+      minutes?: number
+      hours?: number
+      free?: boolean
+      penalty_coefficient?: number
+    }>
+    free_idle_segment_used?: boolean
+    pending_non_idle_count?: number
+    confirmed_non_idle_count?: number
+    online_confidence?: string
     hourly_segments?: Array<{
       hour?: number
       label?: string
@@ -1119,6 +1144,42 @@ export async function uploadConstructionBatch(
   }
 }
 
+export async function recordConstructionHeartbeat(payload: {
+  actor: string
+  taskId?: string | number
+  occurredAt?: string
+}): Promise<void> {
+  await api('/local-test/construction/heartbeat', {
+    method: 'POST',
+    body: JSON.stringify({
+      actor: payload.actor,
+      task_id: payload.taskId || '',
+      occurred_at: payload.occurredAt || new Date().toISOString(),
+    }),
+  })
+}
+
+export async function recordConstructionNonIdleEvent(payload: {
+  eventType: 'group_draft_completed' | 'group_draft_deleted' | 'group_uploaded'
+  actor: string
+  taskId?: string | number
+  groupId?: string
+  clientBatchId?: string
+  occurredAt?: string
+}): Promise<void> {
+  await api('/local-test/construction/non-idle-events', {
+    method: 'POST',
+    body: JSON.stringify({
+      event_type: payload.eventType,
+      actor: payload.actor,
+      task_id: payload.taskId || '',
+      group_id: payload.groupId || '',
+      client_batch_id: payload.clientBatchId || '',
+      occurred_at: payload.occurredAt || new Date().toISOString(),
+    }),
+  })
+}
+
 export async function fetchProjectSummary(): Promise<{ summary: ProjectSummary; paths: Record<string, unknown> }> {
   const data = await api<{ summary: BackendSummary; paths?: Record<string, unknown> }>('/local-test/summary')
   return { summary: mapSummary(data.summary || {}), paths: data.paths || {} }
@@ -1171,6 +1232,31 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
       completionPerEffectiveHour: Number(item.completion_per_effective_hour || 0),
       weightedCompletion: Number(item.weighted_completion || 0),
       weightedCompletionPerEffectiveHour: Number(item.weighted_completion_per_effective_hour || 0),
+      attendanceWindowMinutes: Number(item.attendance_window_minutes || 0),
+      onlineMinutes: Number(item.online_minutes || 0),
+      countableOnlineMinutes: Number(item.countable_online_minutes || 0),
+      onlineRatio: Number(item.online_ratio || 0),
+      baseOnlineCoefficient: Number(item.base_online_coefficient ?? 1),
+      idlePenaltyCoefficient: Number(item.idle_penalty_coefficient || 0),
+      finalOnlineCoefficient: Number(item.final_online_coefficient ?? 1),
+      fusedWorkDurationMinutes: Number(item.fused_work_duration_minutes ?? item.work_duration_minutes ?? 0),
+      fusedWorkDurationHours: Number(item.fused_work_duration_hours || 0),
+      fusedWorkDurationLabel: String(item.fused_work_duration_label || item.work_duration_label || '0鍒嗛挓'),
+      fusedWeightedCompletionPerEffectiveHour: Number(item.fused_weighted_completion_per_effective_hour || 0),
+      idleSegments: (item.idle_segments || []).map((segment) => ({
+        startAt: String(segment.start_at || ''),
+        endAt: String(segment.end_at || ''),
+        startTime: String(segment.start_time || ''),
+        endTime: String(segment.end_time || ''),
+        minutes: Number(segment.minutes || 0),
+        hours: Number(segment.hours || 0),
+        free: Boolean(segment.free),
+        penaltyCoefficient: Number(segment.penalty_coefficient || 0),
+      })),
+      freeIdleSegmentUsed: Boolean(item.free_idle_segment_used),
+      pendingNonIdleCount: Number(item.pending_non_idle_count || 0),
+      confirmedNonIdleCount: Number(item.confirmed_non_idle_count || 0),
+      onlineConfidence: String(item.online_confidence || ''),
       hourlySegments: (
         item.hourly_segments?.length
           ? item.hourly_segments

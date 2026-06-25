@@ -1,4 +1,5 @@
 from copy import deepcopy
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from importlib.util import find_spec
@@ -66,6 +67,177 @@ requires_sample_workbooks = pytest.mark.skipif(
     not all(path.exists() for path in SAMPLE_FILES) or find_spec("openpyxl") is None,
     reason="local sample workbooks or openpyxl are not available",
 )
+
+
+def dt(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 6, 22, hour, minute)
+
+
+def heartbeat_range(start_hour: int, start_minute: int, end_hour: int, end_minute: int, step_minutes: int = 5):
+    current = dt(start_hour, start_minute)
+    end = dt(end_hour, end_minute)
+    values = []
+    while current <= end:
+        values.append(current)
+        current = current + local_simulation.timedelta(minutes=step_minutes)
+    return values
+
+
+def test_fused_online_work_summary_rewards_countable_online_time_without_exceeding_attendance_window() -> None:
+    summary = local_simulation.build_fused_online_work_summary(
+        date_key="2026-06-22",
+        work_duration_minutes=360,
+        weighted_completion=36,
+        heartbeats=heartbeat_range(9, 0, 17, 0),
+        confirmed_completion_times=[dt(9, 40), dt(10, 30), dt(11, 20), dt(12, 10), dt(13), dt(13, 50), dt(14, 40), dt(15, 30), dt(16, 20)],
+    )
+
+    assert summary["attendance_window_minutes"] == 480
+    assert summary["online_minutes"] == 480
+    assert summary["countable_online_minutes"] == 480
+    assert summary["online_ratio"] == 1
+    assert summary["base_online_coefficient"] == 1.25
+    assert summary["idle_penalty_coefficient"] == 0
+    assert summary["final_online_coefficient"] == 1.25
+    assert summary["fused_work_duration_minutes"] == 450
+    assert summary["fused_weighted_completion_per_effective_hour"] == 4.8
+
+
+def test_fused_online_work_summary_caps_online_and_fused_minutes_to_attendance_window() -> None:
+    summary = local_simulation.build_fused_online_work_summary(
+        date_key="2026-06-22",
+        work_duration_minutes=600,
+        weighted_completion=24,
+        heartbeats=heartbeat_range(8, 0, 18, 0),
+        confirmed_completion_times=[dt(9, 40), dt(10, 30), dt(11, 20), dt(12, 10), dt(13), dt(13, 50), dt(14, 40), dt(15, 30), dt(16, 20)],
+    )
+
+    assert summary["attendance_window_minutes"] == 480
+    assert summary["countable_online_minutes"] == 480
+    assert summary["online_ratio"] == 1
+    assert summary["fused_work_duration_minutes"] == 480
+
+
+def test_fused_online_work_summary_ignores_online_time_before_9_and_after_17() -> None:
+    summary = local_simulation.build_fused_online_work_summary(
+        date_key="2026-06-22",
+        work_duration_minutes=120,
+        weighted_completion=10,
+        heartbeats=heartbeat_range(8, 0, 10, 0) + heartbeat_range(17, 0, 17, 30),
+        confirmed_completion_times=[dt(9, 30), dt(10, 25)],
+    )
+
+    assert summary["attendance_window_minutes"] == 480
+    assert summary["online_minutes"] == 60
+    assert summary["countable_online_minutes"] == 60
+    assert summary["online_ratio"] == 0.125
+
+
+def test_fused_online_work_summary_applies_idle_penalty_after_first_idle_hour() -> None:
+    summary = local_simulation.build_fused_online_work_summary(
+        date_key="2026-06-22",
+        work_duration_minutes=300,
+        weighted_completion=30,
+        heartbeats=heartbeat_range(9, 0, 14, 0),
+        confirmed_completion_times=[dt(10), dt(12), dt(14)],
+    )
+
+    assert summary["free_idle_segment_used"] is True
+    assert len(summary["idle_segments"]) == 3
+    assert summary["idle_penalty_coefficient"] == 0.4
+    assert summary["final_online_coefficient"] == 0.76
+    assert summary["fused_work_duration_minutes"] == 227
+
+
+def test_fused_online_work_summary_never_returns_negative_final_online_coefficient() -> None:
+    summary = local_simulation.build_fused_online_work_summary(
+        date_key="2026-06-22",
+        work_duration_minutes=300,
+        weighted_completion=30,
+        heartbeats=heartbeat_range(9, 0, 17, 0),
+        confirmed_completion_times=[dt(10), dt(11), dt(12), dt(13), dt(14), dt(15)],
+    )
+
+    assert summary["idle_penalty_coefficient"] > 1
+    assert summary["final_online_coefficient"] == 0
+    assert summary["fused_work_duration_minutes"] == 0
+
+
+def test_fused_online_work_summary_deleted_pending_draft_does_not_count_as_confirmed_non_idle() -> None:
+    summary = local_simulation.build_fused_online_work_summary(
+        date_key="2026-06-22",
+        work_duration_minutes=120,
+        weighted_completion=12,
+        heartbeats=heartbeat_range(9, 0, 11, 0),
+        confirmed_completion_times=[],
+        pending_non_idle_events=[dt(9, 30)],
+        deleted_pending_non_idle_events=[dt(9, 35)],
+    )
+
+    assert summary["pending_non_idle_count"] == 0
+    assert summary["confirmed_non_idle_count"] == 0
+    assert len(summary["idle_segments"]) == 1
+
+
+def test_fused_online_work_summary_uploaded_group_counts_client_completed_at_as_confirmed_non_idle() -> None:
+    summary = local_simulation.build_fused_online_work_summary(
+        date_key="2026-06-22",
+        work_duration_minutes=120,
+        weighted_completion=12,
+        heartbeats=heartbeat_range(9, 0, 11, 0),
+        confirmed_completion_times=[dt(9, 30), dt(10, 25)],
+        pending_non_idle_events=[{"occurred_at": dt(9, 20), "client_batch_id": "batch-1"}],
+        upload_action_times=[{"occurred_at": dt(9, 35), "client_batch_id": "batch-1"}],
+    )
+
+    assert summary["pending_non_idle_count"] == 0
+    assert summary["confirmed_non_idle_count"] == 2
+    assert summary["idle_segments"] == []
+
+
+def test_fused_online_work_summary_upload_action_time_does_not_refresh_idle_time() -> None:
+    summary = local_simulation.build_fused_online_work_summary(
+        date_key="2026-06-22",
+        work_duration_minutes=120,
+        weighted_completion=12,
+        heartbeats=heartbeat_range(9, 0, 11, 0),
+        confirmed_completion_times=[],
+        upload_action_times=[dt(10, 30)],
+    )
+
+    assert len(summary["idle_segments"]) == 1
+    assert summary["confirmed_non_idle_count"] == 0
+
+
+def test_construction_photo_without_client_completion_is_not_confirmed_non_idle() -> None:
+    photo = {
+        "upload_source": "construction-mobile",
+        "created_at": "2026-06-22T10:30:00",
+        "client_completed_at": "",
+    }
+
+    assert local_simulation._photo_work_datetime(photo) == dt(10, 30)
+    assert local_simulation._photo_confirmed_non_idle_datetime(photo) is None
+
+    photo["client_completed_at"] = "2026-06-22T09:30:00"
+
+    assert local_simulation._photo_confirmed_non_idle_datetime(photo) == dt(9, 30)
+
+
+def test_fused_online_work_summary_without_attendance_window_keeps_original_kpi_low_confidence() -> None:
+    summary = local_simulation.build_fused_online_work_summary(
+        date_key="2026-06-22",
+        work_duration_minutes=90,
+        weighted_completion=9,
+        heartbeats=[],
+        confirmed_completion_times=[dt(10)],
+    )
+
+    assert summary["attendance_window_minutes"] == 0
+    assert summary["online_confidence"] == "low"
+    assert summary["final_online_coefficient"] == 1
+    assert summary["fused_work_duration_minutes"] == 90
+    assert summary["fused_weighted_completion_per_effective_hour"] == 6
 
 
 def fake_catalog_rows(source: str) -> list[dict]:

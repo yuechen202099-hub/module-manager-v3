@@ -22,6 +22,8 @@ import {
   fetchGroup,
   fetchUnmatchedRecords,
   fetchUserAccounts,
+  recordConstructionHeartbeat,
+  recordConstructionNonIdleEvent,
   releaseConstructionTask,
   submitConstructionExceptionOrder,
   uploadConstructionBatch,
@@ -127,6 +129,8 @@ const DB_NAME = 'module-manager-construction-v1'
 const DRAFT_STORE = 'drafts'
 const SNAPSHOT_STORE = 'terminal_snapshots'
 const SCANNER_START_TIMEOUT_MS = 7000
+const HEARTBEAT_INTERVAL_MS = 60_000
+const AUTO_UPLOAD_INTERVAL_MS = 5 * 60_000
 const collator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' })
 
 const auth = useAuthStore()
@@ -182,6 +186,8 @@ let scanCandidate = ''
 let scanCandidateHits = 0
 let scanLocked = false
 let draftPersistTimer = 0
+let heartbeatTimer = 0
+let autoUploadTimer = 0
 let suspendDraftAutoPersist = false
 
 const form = reactive({
@@ -1466,10 +1472,47 @@ function buildCurrentDraft(): CacheDraft {
 
 async function persistCurrentDraft() {
   if (!activeGroup.value || !selectedTask.value) return
+  const previousDraft = activeGroup.value ? draftByGroupId.value.get(String(activeGroup.value.id)) : null
   const draft = buildCurrentDraft()
-  if (draftHasContent(draft)) await putDraft(draft)
-  else await deleteDraft(draft.client_batch_id)
+  if (draftHasContent(draft)) {
+    await putDraft(draft)
+    if (draft.client_completed_at && !previousDraft?.client_completed_at) {
+      void sendConstructionNonIdleEvent('group_draft_completed', draft)
+    }
+  } else await deleteDraft(draft.client_batch_id)
   await loadDrafts()
+}
+
+async function sendConstructionHeartbeat() {
+  if (isAdmin.value || !online() || !selectedTaskId.value) return
+  try {
+    await recordConstructionHeartbeat({
+      actor: actor.value,
+      taskId: selectedTaskId.value,
+      occurredAt: new Date().toISOString(),
+    })
+  } catch (error) {
+    console.warn('construction heartbeat failed', error)
+  }
+}
+
+async function sendConstructionNonIdleEvent(
+  eventType: 'group_draft_completed' | 'group_draft_deleted' | 'group_uploaded',
+  draft: CacheDraft,
+) {
+  if (isAdmin.value || !online()) return
+  try {
+    await recordConstructionNonIdleEvent({
+      eventType,
+      actor: draft.actor || actor.value,
+      taskId: draft.taskId || selectedTaskId.value,
+      groupId: String(draft.groupId || draft.group_id || ''),
+      clientBatchId: draft.client_batch_id,
+      occurredAt: eventType === 'group_draft_completed' ? draft.client_completed_at || new Date().toISOString() : new Date().toISOString(),
+    })
+  } catch (error) {
+    console.warn('construction non-idle event failed', error)
+  }
 }
 
 async function saveCurrentDraft(options: { silent?: boolean } = {}) {
@@ -1495,6 +1538,7 @@ async function removeCachedDraft(draft?: CacheDraft | null) {
     })
     const wasActive = activeCachedDraft.value?.client_batch_id === draft.client_batch_id
     await deleteDraft(draft.client_batch_id)
+    if (draft.client_completed_at) void sendConstructionNonIdleEvent('group_draft_deleted', draft)
     await loadDrafts()
     if (wasActive) {
       selectedItemKey.value = ''
@@ -1616,6 +1660,22 @@ async function uploadAllCached() {
   uploading.value = false
   ElMessage.success(`缓存上传完成：成功 ${success}，失败 ${failed}`)
   await reloadAfterUpload()
+}
+
+async function autoUploadCachedDrafts() {
+  if (isAdmin.value || uploading.value || !online() || !readyCachedDrafts.value.length) return
+  uploading.value = true
+  let changed = false
+  for (const draft of [...readyCachedDrafts.value]) {
+    try {
+      await uploadDraft(draft)
+      changed = true
+    } catch (error) {
+      console.warn('construction cached draft auto upload failed', error)
+    }
+  }
+  uploading.value = false
+  if (changed) await reloadAfterUpload()
 }
 
 async function submitSelectedConstructionTask() {
@@ -1954,9 +2014,20 @@ watch(
   },
 )
 
+watch(selectedTaskId, () => {
+  void sendConstructionHeartbeat()
+})
+
 onMounted(() => {
   window.addEventListener('message', handleExternalRefresh)
   void loadTasks()
+  void sendConstructionHeartbeat()
+  heartbeatTimer = window.setInterval(() => {
+    void sendConstructionHeartbeat()
+  }, HEARTBEAT_INTERVAL_MS)
+  autoUploadTimer = window.setInterval(() => {
+    void autoUploadCachedDrafts()
+  }, AUTO_UPLOAD_INTERVAL_MS)
 })
 
 watch(collectOpen, (open, oldOpen) => {
@@ -1966,6 +2037,8 @@ watch(collectOpen, (open, oldOpen) => {
 onBeforeUnmount(() => {
   window.removeEventListener('message', handleExternalRefresh)
   window.clearTimeout(draftPersistTimer)
+  window.clearInterval(heartbeatTimer)
+  window.clearInterval(autoUploadTimer)
   void flushCurrentDraftPersist()
   closeScanner()
   clearPreviews()

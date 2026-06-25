@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.26'
+export const APP_VERSION = '3.0.27'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.27',
+    date: '2026-06-26',
+    type: '小更新',
+    title: '在线时长融合 KPI',
+    items: [
+      '施工采集页新增在线心跳，施工员进入工单后按分钟级记录在线可信时长，不使用 GPS 或浏览器定位。',
+      '安装人员 KPI 保留原有效工时、完成量、地址难度权重和 2 小时分段效率，同时新增在线补偿系数、挂机扣减、计入工时和融合加权效率。',
+      '资料组本地完成只作为待落实非挂机事件；只有上传成功后才转为正式非挂机证据，删除缓存会撤销待落实状态。',
+      '施工页每 5 分钟静默尝试上传完整缓存，上传动作本身不刷新挂机时间，失败会继续保留本地缓存。',
+    ],
+  },
   {
     version: 'V3.0.26',
     date: '2026-06-26',

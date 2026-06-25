@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.15"
+    assert data["version"] == "3.0.27"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -793,6 +793,7 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
         json={"reviewer": "reviewer"},
     )
     assert deleted_collector.status_code == 200
+
     deleted_group = deleted_collector.json()["data"]["group"]
     assert deleted_group["status"] == "exception"
     assert deleted_group["exception_note"] == "缺采集器照片"
@@ -812,6 +813,118 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
         headers=constructor_headers,
     ).json()["data"]["items"]
     assert task["id"] not in {item["id"] for item in after_release}
+
+
+def test_construction_online_events_feed_fused_installer_workload() -> None:
+    admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
+    client.post(
+        "/auth/users",
+        headers=admin_headers,
+        json={
+            "username": "constructor",
+            "password": "construct123",
+            "name": "施工员",
+            "roles": ["constructor"],
+            "team_id": "demo-team",
+            "status": "active",
+        },
+    )
+    constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
+    constructor_name = constructor_login.json()["data"]["user"]["name"]
+    constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
+
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    client.post("/local-test/scan/clear", headers=admin_headers)
+    task = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][0]
+    client.patch(
+        f"/local-test/construction/tasks/{task['id']}/assign",
+        headers=admin_headers,
+        json={"actor": "admin", "constructor": "constructor"},
+    )
+    groups = client.get(
+        f"/local-test/construction/tasks/{task['id']}/groups?limit=1000&summary=true",
+        headers=constructor_headers,
+    ).json()["data"]["items"]
+
+    current = datetime(2026, 6, 8, 9, 0)
+    spoofed = client.post(
+        "/local-test/construction/heartbeat",
+        headers=constructor_headers,
+        json={"actor": "other-installer", "task_id": task["id"], "occurred_at": current.isoformat()},
+    )
+    assert spoofed.status_code == 403
+    while current <= datetime(2026, 6, 8, 11, 0):
+        heartbeat = client.post(
+            "/local-test/construction/heartbeat",
+            headers=constructor_headers,
+            json={"actor": "constructor", "task_id": task["id"], "occurred_at": current.isoformat()},
+        )
+        assert heartbeat.status_code == 200
+        current = current + local_simulation.timedelta(minutes=5)
+
+    draft_done = client.post(
+        "/local-test/construction/non-idle-events",
+        headers=constructor_headers,
+        json={
+            "event_type": "group_draft_completed",
+            "actor": "constructor",
+            "task_id": task["id"],
+            "group_id": groups[0]["id"],
+            "client_batch_id": "deleted-draft",
+            "occurred_at": "2026-06-08T09:20:00",
+        },
+    )
+    draft_deleted = client.post(
+        "/local-test/construction/non-idle-events",
+        headers=constructor_headers,
+        json={
+            "event_type": "group_draft_deleted",
+            "actor": "constructor",
+            "task_id": task["id"],
+            "group_id": groups[0]["id"],
+            "client_batch_id": "deleted-draft",
+            "occurred_at": "2026-06-08T09:25:00",
+        },
+    )
+    assert draft_done.status_code == 200
+    assert draft_deleted.status_code == 200
+
+    for index, completed_at in enumerate(("2026-06-08T09:30:00", "2026-06-08T10:10:00")):
+        upload = client.post(
+            f"/local-test/construction/groups/{groups[index]['id']}/upload-batch",
+            headers=constructor_headers,
+            data={
+                "actor": "constructor",
+                "client_batch_id": f"online-kpi-batch-{uuid4().hex}-{index}",
+                "client_completed_at": completed_at,
+                "collector": f"collector-{index}",
+                "module_asset_no": f"module-{index}",
+                "photo_slots": ["before_box", "after_box", "module_meter", "collector_barcode"],
+                "client_photo_ids": [f"before-{index}", f"after-{index}", f"meter-{index}", f"collector-{index}"],
+            },
+            files=[
+                ("files", ("before.jpg", f"before-{index}".encode(), "image/jpeg")),
+                ("files", ("after.jpg", f"after-{index}".encode(), "image/jpeg")),
+                ("files", ("meter.jpg", f"meter-{index}".encode(), "image/jpeg")),
+                ("files", ("collector.jpg", f"collector-{index}".encode(), "image/jpeg")),
+            ],
+        )
+        assert upload.status_code == 200
+
+    workload = client.get(f"/local-test/installers/{constructor_name}/daily-workload", headers=admin_headers)
+
+    assert workload.status_code == 200
+    item = next(row for row in workload.json()["data"]["items"] if row["date"] == "2026-06-08")
+    assert item["attendance_window_minutes"] == 480
+    assert item["countable_online_minutes"] == 120
+    assert item["base_online_coefficient"] == 1.06
+    assert item["idle_penalty_coefficient"] == 0
+    assert item["final_online_coefficient"] == 1.06
+    assert item["pending_non_idle_count"] == 0
+    assert item["confirmed_non_idle_count"] == 2
+    assert item["fused_work_duration_minutes"] >= item["work_duration_minutes"]
+    assert item["fused_work_duration_minutes"] <= item["attendance_window_minutes"]
 
 
 def test_construction_upload_rejects_placeholder_group_id_before_file_save() -> None:
