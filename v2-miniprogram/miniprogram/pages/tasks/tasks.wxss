@@ -1,6 +1,0 @@
-.hero-actions {
-  margin-top: 22rpx;
-  display: flex;
-  gap: 14rpx;
-  flex-wrap: wrap;
-}
