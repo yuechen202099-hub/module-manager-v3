@@ -1,9 +1,9 @@
-﻿# Module Manager V2 Production Server Release
+# Module Manager V2 Production Server Release
 
 ## Package
 
-- Name: module-manager-v2-server-3.0.38
-- Version: 3.0.38
+- Name: module-manager-v2-server-3.0.39
+- Version: 3.0.39
 - Generated at: 2026-06-27 02:36:58 +08:00
 
 ## Included

@@ -5,6 +5,7 @@ import re
 import hashlib
 import json
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,10 @@ REVIEWABLE_STATUSES = {"pending", "incomplete", "approved", "exception", "unmatc
 OPEN_STATUSES = {"pending", "incomplete", "unmatched"}
 MAX_ACTIVE_CONSTRUCTION_TASKS_PER_CONSTRUCTOR = 5
 LOCAL_WORK_TZ = timezone(timedelta(hours=8))
+MISSING_MODULE_ASSET_REASON = "\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7"
+INSUFFICIENT_GROUP_PHOTO_REASON = "\u8d44\u6599\u7ec4\u7167\u7247\u4e0d\u8db3 4 \u5f20"
+MISSING_COLLECTOR_INFO_REASON = "\u7f3a\u5c11\u91c7\u96c6\u5668\u4fe1\u606f"
+MODULE_DUPLICATE_REASON_PREFIX = "\u6a21\u5757\u53f7\u91cd\u590d"
 
 
 class StateBackendNotReady(RuntimeError):
@@ -298,6 +303,138 @@ def _apply_photo_quality_exception_status(
     else:
         raw["exception_reasons"] = group.exception_reasons
     group.raw_data = raw
+
+
+def _auto_archive_exception_note(note: str) -> bool:
+    text = str(note or "").strip()
+    if not text:
+        return False
+    if text in {
+        MISSING_MODULE_ASSET_REASON,
+        INSUFFICIENT_GROUP_PHOTO_REASON,
+        MISSING_COLLECTOR_INFO_REASON,
+        local_simulation.MISSING_COLLECTOR_PHOTO_REASON,
+        local_simulation.MISSING_COLLECTOR_PHOTO_LABEL,
+    }:
+        return True
+    return text.startswith(f"{MODULE_DUPLICATE_REASON_PREFIX}:")
+
+
+def _has_manual_exception_marker(group: MaterialGroup) -> bool:
+    raw = dict(group.raw_data or {})
+    return bool(str(raw.get("exception_category") or "").strip())
+
+
+def _validate_group_archive_with_module_map(
+    group: dict[str, Any],
+    module_groups: dict[str, set[str]],
+) -> list[str]:
+    photos = group.get("photos", [])
+    reasons: list[str] = []
+    if not photos:
+        return reasons
+    slots = local_simulation.group_photo_slots(group)
+    missing_collector_only = (
+        local_simulation.CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots)
+        and "collector_barcode" not in slots
+    )
+    if len(photos) < 4 and not missing_collector_only:
+        reasons.append(INSUFFICIENT_GROUP_PHOTO_REASON)
+    if missing_collector_only:
+        reasons.append(local_simulation.MISSING_COLLECTOR_PHOTO_REASON)
+    if photos and not any(str(photo.get("collector") or "").strip() for photo in photos):
+        reasons.append(MISSING_COLLECTOR_INFO_REASON)
+    module_asset_values = local_simulation.group_module_asset_values(group)
+    if photos and not module_asset_values:
+        reasons.append(MISSING_MODULE_ASSET_REASON)
+    group_id = str(group.get("id") or "")
+    duplicate_modules = sorted(
+        {
+            asset_no
+            for asset_no in module_asset_values
+            if len(module_groups.get(asset_no, set()) - {group_id}) > 0
+        }
+    )
+    if duplicate_modules:
+        reasons.append(f"{MODULE_DUPLICATE_REASON_PREFIX}: {', '.join(duplicate_modules[:3])}")
+    return reasons
+
+
+def _collect_material_group_module_map(session: Session, team_id: str) -> dict[str, set[str]]:
+    module_groups: dict[str, set[str]] = defaultdict(set)
+    group_ids: dict[Any, str] = {}
+    groups = session.scalars(select(MaterialGroup).where(MaterialGroup.team_id == team_id)).all()
+    for group in groups:
+        group_id = group.legacy_id or str(group.id)
+        group_ids[group.id] = group_id
+        raw = group.raw_data or {}
+        for value in (
+            raw.get("module_asset_no"),
+            raw.get("asset_no"),
+            raw.get("construction_module_asset_no"),
+        ):
+            normalized = str(value or "").strip()
+            if normalized:
+                module_groups[normalized].add(group_id)
+    photos = session.scalars(
+        select(Photo).where(
+            Photo.team_id == team_id,
+            Photo.is_active.is_(True),
+            Photo.asset_no.is_not(None),
+        )
+    ).all()
+    for photo in photos:
+        group_id = group_ids.get(photo.group_id)
+        normalized = str(photo.asset_no or "").strip()
+        if group_id and normalized:
+            module_groups[normalized].add(group_id)
+    return module_groups
+
+
+def _refresh_group_archive_exceptions(
+    session: Session,
+    group: MaterialGroup,
+    module_groups: dict[str, set[str]],
+) -> bool:
+    if _has_manual_exception_marker(group):
+        return False
+    payload = _group_payload(session, group, include_photos=True)
+    reasons = _validate_group_archive_with_module_map(payload, module_groups)
+    before_reasons = [str(item).strip() for item in (group.exception_reasons or []) if str(item).strip()]
+    before_note = str(group.exception_note or "").strip()
+    before = (
+        tuple(before_reasons),
+        before_note,
+        bool(group.has_archive_blocker),
+        str(group.exception_status or ""),
+        _status_value(group.status),
+    )
+    raw = dict(group.raw_data or {})
+    group.exception_reasons = reasons
+    group.has_archive_blocker = bool(reasons)
+    group.exception_status = "open" if reasons else None
+    raw["exception_reasons"] = reasons
+    if reasons:
+        if not before_note or _auto_archive_exception_note(before_note):
+            group.exception_note = "; ".join(local_simulation.display_exception_reasons(reasons))
+            raw["exception_note"] = group.exception_note
+    else:
+        if _auto_archive_exception_note(before_note):
+            group.exception_note = ""
+            raw["exception_note"] = ""
+        if group.status in {GroupStatus.INCOMPLETE, GroupStatus.REJECTED} and not group.exception_note and not group.review_note:
+            group.status = GroupStatus.UNREVIEWED
+            raw["status"] = "pending"
+    group.raw_data = raw
+    after_reasons = [str(item).strip() for item in (group.exception_reasons or []) if str(item).strip()]
+    after = (
+        tuple(after_reasons),
+        str(group.exception_note or "").strip(),
+        bool(group.has_archive_blocker),
+        str(group.exception_status or ""),
+        _status_value(group.status),
+    )
+    return before != after
 
 
 def _empty_task_stats() -> dict[str, Any]:
@@ -3091,6 +3228,14 @@ class PostgresStateRepository(StateRepository):
                 )
             )
         with self._session() as session:
+            candidates = session.scalars(statement).all()
+            if candidates:
+                module_groups = _collect_material_group_module_map(session, team_id)
+                changed = False
+                for group in candidates:
+                    changed = _refresh_group_archive_exceptions(session, group, module_groups) or changed
+                if changed:
+                    session.commit()
             total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
             groups = session.scalars(
                 statement.order_by(MaterialGroup.terminal, MaterialGroup.display_meter_no, MaterialGroup.legacy_id)

@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.38'
+export const APP_VERSION = '3.0.39'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.39',
+    date: '2026-06-27',
+    type: 'BUG 修复',
+    title: '待派发异常历史模块误报清理',
+    items: [
+      '修复 PostgreSQL 异常派发列表仍显示历史“缺少模块资产编号”的问题；列表读取前会使用数据库资料组和照片字段重新校验归档异常。',
+      '资料组已经存在 construction_module_asset_no、module_asset_no 或照片模块号时，不再因为旧 exception_note 继续进入待派发异常。',
+      '过期的自动异常备注会在刷新异常列表时落库清理，并把无真实异常的资料组恢复为待审状态。',
+      '保留真实异常：缺少采集器信息、资料组照片不足、模块号重复仍会继续展示并可派发处理。',
+    ],
+  },
   {
     version: 'V3.0.38',
     date: '2026-06-27',

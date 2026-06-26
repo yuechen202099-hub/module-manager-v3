@@ -546,6 +546,245 @@ def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -
     assert repository.local_simulation.MISSING_COLLECTOR_PHOTO_REASON not in group.exception_reasons
 
 
+def test_postgres_exception_listing_revalidates_stale_missing_module_note() -> None:
+    def photo(slot: str, asset_no: str = ""):
+        return SimpleNamespace(
+            id=f"photo-{slot}",
+            legacy_id=f"p-{slot}",
+            group_id="group-uuid",
+            team_id="default-team",
+            is_active=True,
+            raw_data={"construction_slot": slot},
+            category=slot,
+            asset_no=asset_no,
+            image_url="https://example.test/photo.jpg",
+            source_url="",
+            storage_type="",
+            storage_key="",
+            storage_bucket="",
+            sha256="",
+            archive_filename="",
+            archive_status="",
+            sort_order=1,
+            created_at=datetime(2026, 6, 8, 9, 30),
+            barcode="",
+            collector="collector-a",
+            creator="installer-a",
+        )
+
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-stale-module",
+        legacy_task_id=1,
+        task_id=None,
+        team_id="default-team",
+        display_meter_no="110020000001",
+        meter_match_key="110020000001",
+        terminal="350000000001",
+        installation_address="addr",
+        status=repository.GroupStatus.REJECTED,
+        raw_data={
+            "status": "exception",
+            "construction_module_asset_no": "MOD-001",
+            "exception_note": "\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7",
+            "exception_reasons": [],
+        },
+        last_photo_imported_at=None,
+        exception_status=None,
+        has_archive_blocker=False,
+        exception_reasons=[],
+        exception_note="\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7",
+        review_note="",
+        reviewer="",
+        reviewed_at=None,
+        photo_count=4,
+        updated_at=None,
+    )
+    photos = [
+        photo("before_box"),
+        photo("module_meter", "MOD-001"),
+        photo("after_box"),
+        photo("collector_barcode"),
+    ]
+
+    class FakeScalars:
+        def __init__(self, items):
+            self._items = items
+
+        def all(self):
+            return self._items
+
+    class FakeSession:
+        def __init__(self):
+            self.committed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def _matches_exception_statement(self):
+            return (
+                group.photo_count > 0
+                and (
+                    group.status in {repository.GroupStatus.INCOMPLETE, repository.GroupStatus.REJECTED}
+                    or group.has_archive_blocker
+                    or group.exception_status == "open"
+                )
+            )
+
+        def scalar(self, _statement):
+            return 1 if self._matches_exception_statement() else 0
+
+        def scalars(self, statement):
+            text = str(statement)
+            if "FROM material_groups" in text:
+                if (
+                    "material_groups.status IN" in text
+                    or "material_groups.has_archive_blocker" in text
+                    or "material_groups.exception_status" in text
+                ):
+                    return FakeScalars([group] if self._matches_exception_statement() else [])
+                return FakeScalars([group])
+            if "FROM photos" in text:
+                return FakeScalars(photos)
+            return FakeScalars([])
+
+        def get(self, _model, _key):
+            return None
+
+        def commit(self):
+            self.committed = True
+
+    fake_session = FakeSession()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+    result = TestPostgresRepository().list_exception_groups(limit=100, offset=0)
+
+    assert result["total"] == 0
+    assert result["items"] == []
+    assert group.exception_note == ""
+    assert group.raw_data["exception_note"] == ""
+    assert group.status == repository.GroupStatus.UNREVIEWED
+    assert fake_session.committed is True
+
+
+def test_postgres_exception_listing_preserves_manual_exception_note() -> None:
+    def photo(slot: str, asset_no: str = ""):
+        return SimpleNamespace(
+            id=f"photo-{slot}",
+            legacy_id=f"p-{slot}",
+            group_id="group-uuid",
+            team_id="default-team",
+            is_active=True,
+            raw_data={"construction_slot": slot},
+            category=slot,
+            asset_no=asset_no,
+            image_url="https://example.test/photo.jpg",
+            source_url="",
+            storage_type="",
+            storage_key="",
+            storage_bucket="",
+            sha256="",
+            archive_filename="",
+            archive_status="",
+            sort_order=1,
+            created_at=datetime(2026, 6, 8, 9, 30),
+            barcode="",
+            collector="collector-a",
+            creator="installer-a",
+        )
+
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-manual-module",
+        legacy_task_id=1,
+        task_id=None,
+        team_id="default-team",
+        display_meter_no="110020000002",
+        meter_match_key="110020000002",
+        terminal="350000000001",
+        installation_address="addr",
+        status=repository.GroupStatus.REJECTED,
+        raw_data={
+            "status": "exception",
+            "construction_module_asset_no": "MOD-002",
+            "exception_note": "\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7",
+            "exception_category": "manual_quality",
+        },
+        last_photo_imported_at=None,
+        exception_status=None,
+        has_archive_blocker=True,
+        exception_reasons=["manual_quality", "\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7"],
+        exception_note="\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7",
+        review_note="",
+        reviewer="reviewer-a",
+        reviewed_at=None,
+        photo_count=4,
+        updated_at=None,
+    )
+    photos = [
+        photo("before_box"),
+        photo("module_meter", "MOD-002"),
+        photo("after_box"),
+        photo("collector_barcode"),
+    ]
+
+    class FakeScalars:
+        def __init__(self, items):
+            self._items = items
+
+        def all(self):
+            return self._items
+
+    class FakeSession:
+        def __init__(self):
+            self.committed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, _statement):
+            return 1
+
+        def scalars(self, statement):
+            text = str(statement)
+            if "FROM material_groups" in text:
+                return FakeScalars([group])
+            if "FROM photos" in text:
+                return FakeScalars(photos)
+            return FakeScalars([])
+
+        def get(self, _model, _key):
+            return None
+
+        def commit(self):
+            self.committed = True
+
+    fake_session = FakeSession()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+    result = TestPostgresRepository().list_exception_groups(limit=100, offset=0)
+
+    assert result["total"] == 1
+    assert result["items"][0]["id"] == "g-manual-module"
+    assert group.exception_note == "\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7"
+    assert group.exception_reasons == ["manual_quality", "\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7"]
+    assert group.status == repository.GroupStatus.REJECTED
+    assert group.has_archive_blocker is True
+    assert fake_session.committed is False
+
+
 def test_postgres_photo_accuracy_summary_counts_raw_photo_metadata() -> None:
     photos = [
         SimpleNamespace(raw_data={"barcode_check_status": "matched"}),
