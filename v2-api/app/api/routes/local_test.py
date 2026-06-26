@@ -985,6 +985,20 @@ def summary(request: Request):
     return ok(request, state_repository().summary())
 
 
+@router.get("/photo-barcode/review-groups")
+def photo_barcode_review_groups(
+    request: Request,
+    status: str = Query(default="unreadable"),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _admin: dict = Depends(require_admin),
+):
+    return ok(
+        request,
+        state_repository().list_photo_barcode_review_groups(status=status, limit=limit, offset=offset),
+    )
+
+
 @router.get("/events")
 async def local_events(request: Request, scope: str = Query(default="project-board")):
     if scope == "project-board":

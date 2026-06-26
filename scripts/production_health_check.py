@@ -97,11 +97,17 @@ def main() -> int:
         "photo_accuracy_unreadable",
         "photo_accuracy_not_required",
         "photo_accuracy_rate",
+        "group_barcode_accuracy_checked",
+        "group_barcode_accuracy_passed",
+        "group_barcode_accuracy_failed",
+        "group_barcode_accuracy_unreadable",
+        "group_barcode_accuracy_not_required",
+        "group_barcode_accuracy_rate",
     }
     missing = sorted(required_summary_keys - set(summary))
     if missing:
-        raise AssertionError("Summary missing photo accuracy fields: " + ", ".join(missing))
-    print("[OK] summary contains photo accuracy fields")
+        raise AssertionError("Summary missing barcode accuracy fields: " + ", ".join(missing))
+    print("[OK] summary contains photo and group barcode accuracy fields")
     return 0
 
 

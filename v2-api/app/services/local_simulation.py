@@ -163,6 +163,12 @@ def empty_summary() -> dict[str, Any]:
         "photo_accuracy_unreadable": 0,
         "photo_accuracy_not_required": 0,
         "photo_accuracy_rate": 0.0,
+        "group_barcode_accuracy_checked": 0,
+        "group_barcode_accuracy_passed": 0,
+        "group_barcode_accuracy_failed": 0,
+        "group_barcode_accuracy_unreadable": 0,
+        "group_barcode_accuracy_not_required": 0,
+        "group_barcode_accuracy_rate": 0.0,
     }
 
 
@@ -2610,6 +2616,7 @@ def build_summary(
     photo_accuracy = photo_barcode_check.summarize_photo_accuracy(
         photo for group in groups for photo in group.get("photos", [])
     )
+    group_barcode_accuracy = photo_barcode_check.summarize_group_barcode_accuracy(groups)
     return {
         "total_catalog_rows": len(total_rows),
         "stage_catalog_rows": len(stage_rows),
@@ -2635,6 +2642,7 @@ def build_summary(
         ),
         "review_progress": calculate_progress(groups),
         **photo_accuracy,
+        **group_barcode_accuracy,
     }
 
 
@@ -3639,6 +3647,7 @@ def refresh_after_photo_classification(
             photo for group in state["groups"] for photo in group.get("photos", [])
         )
     )
+    summary.update(photo_barcode_check.summarize_group_barcode_accuracy(state["groups"]))
     group_count = int(summary.get("groups", 0))
     summary["review_progress"] = round(int(summary.get("reviewed_groups", 0)) / group_count, 4) if group_count else 0.0
     if state["projects"]:

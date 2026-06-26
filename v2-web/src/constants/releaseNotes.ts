@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.39'
+export const APP_VERSION = '3.0.40'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.40',
+    date: '2026-06-27',
+    type: '小更新',
+    title: '资料组条码准确率与人工复核清单',
+    items: [
+      '图片准确率调整为资料组整体口径：一组照片内累计识别并匹配表号、模块号、采集器号三项，即判定该资料组通过。',
+      '不再要求某一张指定照片必须识别出某一类条码，避免分类后单张照片无法识别导致整组误报。',
+      '驾驶舱新增管理员可点击的“资料组条码准确率”，弹窗列出无法识别或异常不匹配资料组，便于人工复核。',
+      '复核清单展示表号、模块号、采集器号、安装人员、缺失项、已识别值、异常值和照片缩略图。',
+    ],
+  },
   {
     version: 'V3.0.39',
     date: '2026-06-27',

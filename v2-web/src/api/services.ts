@@ -8,6 +8,7 @@ import type {
   ImportJob,
   InstallerWorkload,
   MaterialGroup,
+  PhotoBarcodeReviewGroup,
   Project,
   ProjectSummary,
   ReplacementRecord,
@@ -192,7 +193,41 @@ type BackendSummary = {
   photo_accuracy_unreadable?: number
   photo_accuracy_not_required?: number
   photo_accuracy_rate?: number
+  group_barcode_accuracy_checked?: number
+  group_barcode_accuracy_passed?: number
+  group_barcode_accuracy_failed?: number
+  group_barcode_accuracy_unreadable?: number
+  group_barcode_accuracy_not_required?: number
+  group_barcode_accuracy_rate?: number
   installer_distribution?: Array<{ installer?: string; group_count?: number; share?: number }>
+}
+
+type BackendPhotoBarcodeReviewPhoto = {
+  id?: string | number
+  category?: string
+  category_label?: string
+  image_url?: string
+  thumbnail_url?: string
+  barcode_check_status?: string
+  barcode_check_values?: unknown[]
+  barcode_check_normalized_values?: unknown[]
+}
+
+type BackendPhotoBarcodeReviewGroup = {
+  group_id?: string
+  meter_no?: string
+  module_asset_no?: string
+  collector?: string
+  terminal?: string
+  address?: string
+  installer?: string
+  status?: string
+  missing_fields?: string[]
+  missing_expected_fields?: string[]
+  expected?: Record<string, string[]>
+  detected_values?: Record<string, string[]>
+  unmatched_values?: string[]
+  photos?: BackendPhotoBarcodeReviewPhoto[]
 }
 
 type BackendImportJob = {
@@ -678,6 +713,12 @@ function mapSummary(raw: BackendSummary): ProjectSummary {
     photoAccuracyUnreadable: Number(raw.photo_accuracy_unreadable || 0),
     photoAccuracyNotRequired: Number(raw.photo_accuracy_not_required || 0),
     photoAccuracyRate: Number(raw.photo_accuracy_rate || 0),
+    groupBarcodeAccuracyChecked: Number(raw.group_barcode_accuracy_checked || 0),
+    groupBarcodeAccuracyPassed: Number(raw.group_barcode_accuracy_passed || 0),
+    groupBarcodeAccuracyFailed: Number(raw.group_barcode_accuracy_failed || 0),
+    groupBarcodeAccuracyUnreadable: Number(raw.group_barcode_accuracy_unreadable || 0),
+    groupBarcodeAccuracyNotRequired: Number(raw.group_barcode_accuracy_not_required || 0),
+    groupBarcodeAccuracyRate: Number(raw.group_barcode_accuracy_rate || 0),
     installerDistribution: (raw.installer_distribution || []).map((item) => ({
       installer: item.installer || '未填写',
       groupCount: Number(item.group_count || 0),
@@ -948,6 +989,36 @@ export async function searchGroups(options: { query?: string; terminal?: string;
     total: Number(data.total || 0),
     terminals: data.terminals || [],
     items: (data.items || []).map(mapGroup),
+  }
+}
+
+function mapPhotoBarcodeReviewGroup(raw: BackendPhotoBarcodeReviewGroup): PhotoBarcodeReviewGroup {
+  return {
+    groupId: raw.group_id || '',
+    meterNo: raw.meter_no || '',
+    moduleAssetNo: raw.module_asset_no || '',
+    collector: raw.collector || '',
+    terminal: raw.terminal || '',
+    address: raw.address || '',
+    installer: raw.installer || '',
+    status: raw.status || '',
+    missingFields: raw.missing_fields || [],
+    missingExpectedFields: raw.missing_expected_fields || [],
+    expected: raw.expected || {},
+    detectedValues: raw.detected_values || {},
+    unmatchedValues: raw.unmatched_values || [],
+    photos: (raw.photos || []).map((photo) => ({
+      id: String(photo.id || ''),
+      category: photo.category || '',
+      categoryLabel: photo.category_label || '',
+      imageUrl: photo.image_url || '',
+      thumbnailUrl: photo.thumbnail_url || photo.image_url || '',
+      barcodeCheckStatus: photo.barcode_check_status || '',
+      barcodeCheckValues: (photo.barcode_check_values || []).map((item) => String(item || '')).filter(Boolean),
+      barcodeCheckNormalizedValues: (photo.barcode_check_normalized_values || [])
+        .map((item) => String(item || ''))
+        .filter(Boolean),
+    })),
   }
 }
 
@@ -1318,6 +1389,14 @@ export async function recordConstructionNonIdleEvent(payload: {
 export async function fetchProjectSummary(): Promise<{ summary: ProjectSummary; paths: Record<string, unknown> }> {
   const data = await api<{ summary: BackendSummary; paths?: Record<string, unknown> }>('/local-test/summary')
   return { summary: mapSummary(data.summary || {}), paths: data.paths || {} }
+}
+
+export async function fetchPhotoBarcodeReviewGroups(status = 'unreadable'): Promise<PhotoBarcodeReviewGroup[]> {
+  const params = new URLSearchParams({ status, limit: '500' })
+  const data = await api<{ total: number; items: BackendPhotoBarcodeReviewGroup[] }>(
+    `/local-test/photo-barcode/review-groups?${params.toString()}`,
+  )
+  return (data.items || []).map(mapPhotoBarcodeReviewGroup)
 }
 
 export async function fetchInstallerWorkload(installer: string): Promise<InstallerWorkload> {

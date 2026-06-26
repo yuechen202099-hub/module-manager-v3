@@ -21,6 +21,7 @@ BARCODE_REQUIRED_CATEGORY_TYPES = {
 }
 
 REQUIRED_STATUSES = {"matched", "mismatched", "unreadable"}
+GROUP_BARCODE_TYPES = ("meter", "module", "collector")
 
 BARCODE_CHECK_FIELDS = (
     "barcode_check_status",
@@ -157,6 +158,116 @@ def summarize_photo_accuracy(photos: Iterable[dict[str, Any]]) -> dict[str, Any]
     }
 
 
+def expected_group_barcode_values(group: dict[str, Any]) -> dict[str, list[str]]:
+    context = _group_expected_context(group)
+    return {
+        barcode_type: expected_values_for_group(context, barcode_type)
+        for barcode_type in GROUP_BARCODE_TYPES
+    }
+
+
+def build_group_barcode_check(group: dict[str, Any]) -> dict[str, Any]:
+    expected_values = expected_group_barcode_values(group)
+    missing_expected_fields = [
+        barcode_type for barcode_type in GROUP_BARCODE_TYPES if not expected_values.get(barcode_type)
+    ]
+    detected_values: dict[str, list[str]] = {barcode_type: [] for barcode_type in GROUP_BARCODE_TYPES}
+    matched_fields: list[str] = []
+    unmatched_values: list[str] = []
+
+    for photo in group.get("photos") or []:
+        for value in _photo_barcode_values(photo):
+            matched_type = _match_group_barcode_type(value, expected_values)
+            if matched_type:
+                _append_unique(detected_values[matched_type], value)
+                _append_unique(matched_fields, matched_type)
+            else:
+                _append_unique(unmatched_values, value)
+
+    missing_fields = [
+        barcode_type
+        for barcode_type in GROUP_BARCODE_TYPES
+        if barcode_type not in matched_fields and barcode_type not in missing_expected_fields
+    ]
+    if missing_expected_fields:
+        status = "not_required"
+    elif unmatched_values:
+        status = "mismatched"
+    elif missing_fields:
+        status = "unreadable"
+    else:
+        status = "matched"
+
+    return {
+        "group_barcode_check_status": status,
+        "group_barcode_missing_fields": missing_fields,
+        "group_barcode_missing_expected_fields": missing_expected_fields,
+        "group_barcode_expected_values": expected_values,
+        "group_barcode_detected_values": detected_values,
+        "group_barcode_matched_fields": matched_fields,
+        "group_barcode_unmatched_values": unmatched_values,
+    }
+
+
+def summarize_group_barcode_accuracy(groups: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    passed = 0
+    failed = 0
+    unreadable = 0
+    not_required = 0
+    for group in groups:
+        status = str(build_group_barcode_check(group).get("group_barcode_check_status") or "")
+        if status == "matched":
+            passed += 1
+        elif status == "mismatched":
+            failed += 1
+        elif status == "unreadable":
+            unreadable += 1
+        elif status == "not_required":
+            not_required += 1
+    checked = passed + failed + unreadable
+    return {
+        "group_barcode_accuracy_checked": checked,
+        "group_barcode_accuracy_passed": passed,
+        "group_barcode_accuracy_failed": failed,
+        "group_barcode_accuracy_unreadable": unreadable,
+        "group_barcode_accuracy_not_required": not_required,
+        "group_barcode_accuracy_rate": round(passed / checked, 4) if checked else 0.0,
+    }
+
+
+def list_group_barcode_review_items(
+    groups: Iterable[dict[str, Any]],
+    *,
+    statuses: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    target_statuses = statuses or {"unreadable", "mismatched"}
+    items: list[dict[str, Any]] = []
+    for group in groups:
+        check = build_group_barcode_check(group)
+        status = str(check.get("group_barcode_check_status") or "")
+        if status not in target_statuses:
+            continue
+        items.append(
+            {
+                "group_id": str(group.get("id") or group.get("group_id") or ""),
+                "meter_no": str(group.get("meter_no") or group.get("barcode") or ""),
+                "module_asset_no": str(group.get("module_asset_no") or group.get("asset_no") or ""),
+                "collector": str(group.get("collector") or group.get("construction_collector") or ""),
+                "terminal": str(group.get("terminal") or ""),
+                "address": str(group.get("address") or group.get("installation_address") or ""),
+                "installer": str(group.get("installer") or group.get("creator") or ""),
+                "status": status,
+                "missing_fields": check["group_barcode_missing_fields"],
+                "missing_expected_fields": check["group_barcode_missing_expected_fields"],
+                "expected": check["group_barcode_expected_values"],
+                "detected_values": check["group_barcode_detected_values"],
+                "unmatched_values": check["group_barcode_unmatched_values"],
+                "photos": [_group_review_photo_payload(group, photo) for photo in group.get("photos") or []],
+            }
+        )
+    return items
+
+
 def default_barcode_scanner(photo: dict[str, Any]) -> list[str]:
     try:
         import zxingcpp  # type: ignore
@@ -185,6 +296,73 @@ def _scan_values(photo: dict[str, Any], *, scanner: BarcodeScanner | None) -> li
         values = []
     cleaned = [str(item or "").strip() for item in values]
     return list(dict.fromkeys(item for item in cleaned if item))
+
+
+def _photo_barcode_values(photo: dict[str, Any]) -> list[str]:
+    raw_values = photo.get("barcode_check_normalized_values") or photo.get("barcode_check_values") or []
+    if not isinstance(raw_values, list):
+        raw_values = [raw_values]
+    values = [normalize_barcode_value(value) for value in raw_values]
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _match_group_barcode_type(value: str, expected_values: dict[str, list[str]]) -> str:
+    for barcode_type in GROUP_BARCODE_TYPES:
+        if value in expected_values.get(barcode_type, []):
+            return barcode_type
+    return ""
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    if value and value not in items:
+        items.append(value)
+
+
+def _group_expected_context(group: dict[str, Any]) -> dict[str, Any]:
+    context = dict(group)
+    photo_fallbacks = {
+        "meter_no": ("meter_no", "barcode"),
+        "meter_match_key": ("meter_match_key",),
+        "collector": ("collector", "construction_collector", "construction_collector_no"),
+        "module_asset_no": ("module_asset_no", "asset_no", "construction_module_asset_no"),
+        "asset_no": ("asset_no", "module_asset_no", "construction_module_asset_no"),
+    }
+    for target_key, source_keys in photo_fallbacks.items():
+        if str(context.get(target_key) or "").strip():
+            continue
+        for photo in group.get("photos") or []:
+            value = next((photo.get(source_key) for source_key in source_keys if photo.get(source_key)), "")
+            if value:
+                context[target_key] = value
+                break
+    return context
+
+
+def _group_review_photo_payload(group: dict[str, Any], photo: dict[str, Any]) -> dict[str, Any]:
+    group_id = str(group.get("id") or group.get("group_id") or "")
+    photo_id = str(photo.get("id") or photo.get("photo_id") or "")
+    image_url = str(photo.get("image_url") or photo.get("url") or photo.get("preview_url") or "")
+    content_url = f"/local-test/groups/{group_id}/photos/{photo_id}/content" if group_id and photo_id else ""
+    if content_url and (not image_url or image_url.lower().startswith("oss://")):
+        image_url = content_url
+    thumbnail_url = str(photo.get("thumbnail_url") or "")
+    if not thumbnail_url:
+        if content_url:
+            thumbnail_url = f"{content_url}?kind=thumbnail"
+        elif "/content" in image_url:
+            thumbnail_url = image_url if "kind=" in image_url else f"{image_url}?kind=thumbnail"
+        elif image_url:
+            thumbnail_url = image_url
+    return {
+        "id": photo_id,
+        "category": str(photo.get("category") or ""),
+        "category_label": str(photo.get("category_label") or ""),
+        "image_url": image_url,
+        "thumbnail_url": thumbnail_url,
+        "barcode_check_status": str(photo.get("barcode_check_status") or ""),
+        "barcode_check_values": list(photo.get("barcode_check_values") or []),
+        "barcode_check_normalized_values": _photo_barcode_values(photo),
+    }
 
 
 def _photo_local_path(photo: dict[str, Any]) -> Path | None:

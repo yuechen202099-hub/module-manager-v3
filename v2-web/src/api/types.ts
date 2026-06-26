@@ -251,7 +251,41 @@ export type ProjectSummary = {
   photoAccuracyUnreadable: number
   photoAccuracyNotRequired: number
   photoAccuracyRate: number
+  groupBarcodeAccuracyChecked: number
+  groupBarcodeAccuracyPassed: number
+  groupBarcodeAccuracyFailed: number
+  groupBarcodeAccuracyUnreadable: number
+  groupBarcodeAccuracyNotRequired: number
+  groupBarcodeAccuracyRate: number
   installerDistribution: Array<{ installer: string; groupCount: number; share: number }>
+}
+
+export type PhotoBarcodeReviewPhoto = {
+  id: string
+  category: string
+  categoryLabel: string
+  imageUrl: string
+  thumbnailUrl: string
+  barcodeCheckStatus: string
+  barcodeCheckValues: string[]
+  barcodeCheckNormalizedValues: string[]
+}
+
+export type PhotoBarcodeReviewGroup = {
+  groupId: string
+  meterNo: string
+  moduleAssetNo: string
+  collector: string
+  terminal: string
+  address: string
+  installer: string
+  status: string
+  missingFields: string[]
+  missingExpectedFields: string[]
+  expected: Record<string, string[]>
+  detectedValues: Record<string, string[]>
+  unmatchedValues: string[]
+  photos: PhotoBarcodeReviewPhoto[]
 }
 
 export type InstallerWorkloadRow = {

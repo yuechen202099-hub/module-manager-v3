@@ -652,6 +652,48 @@ def _photo_accuracy_summary(photos: list[Any]) -> dict[str, Any]:
     return photo_barcode_check.summarize_photo_accuracy(payloads)
 
 
+def _group_barcode_payload(group: Any, photos: list[Any]) -> dict[str, Any]:
+    if isinstance(group, dict):
+        payload = dict(group)
+    else:
+        payload = _group_barcode_context(group)
+        raw = getattr(group, "raw_data", {}) or {}
+        for key in ("installer", "creator"):
+            if raw.get(key):
+                payload[key] = raw[key]
+    photo_payloads = []
+    for photo in photos:
+        if isinstance(photo, dict):
+            photo_payloads.append(photo)
+        else:
+            photo_payloads.append(_photo_payload(photo))
+    payload["photos"] = photo_payloads
+    return payload
+
+
+def _group_barcode_accuracy_summary(groups: list[Any], photos_by_group_id: dict[str, list[Any]]) -> dict[str, Any]:
+    payloads = [
+        _group_barcode_payload(group, photos_by_group_id.get(_group_lookup_id(group), []))
+        for group in groups
+    ]
+    return photo_barcode_check.summarize_group_barcode_accuracy(payloads)
+
+
+def _group_lookup_id(group: Any) -> str:
+    if isinstance(group, dict):
+        return str(group.get("id") or group.get("group_id") or "")
+    return str(getattr(group, "id", ""))
+
+
+def _group_barcode_review_statuses(status: str) -> set[str]:
+    normalized = str(status or "unreadable").strip().lower()
+    if normalized in {"all", "review"}:
+        return {"unreadable", "mismatched"}
+    if normalized in {"mismatched", "failed"}:
+        return {"mismatched"}
+    return {"unreadable"}
+
+
 def _group_barcode_context(group: Any) -> dict[str, Any]:
     raw = getattr(group, "raw_data", {}) or {}
     return {
@@ -1069,6 +1111,16 @@ class StateRepository(ABC):
 
     @abstractmethod
     def list_groups(self, *, limit: int = 100, offset: int = 0, status: str | None = None) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_photo_barcode_review_groups(
+        self,
+        *,
+        status: str = "unreadable",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -1513,6 +1565,18 @@ class JsonStateRepository(StateRepository):
 
     def list_groups(self, *, limit: int = 100, offset: int = 0, status: str | None = None) -> dict[str, Any]:
         return local_simulation.list_groups(limit=limit, offset=offset, status=status)
+
+    def list_photo_barcode_review_groups(
+        self,
+        *,
+        status: str = "unreadable",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        groups = local_simulation.list_groups(limit=100000, offset=0).get("items", [])
+        statuses = _group_barcode_review_statuses(status)
+        items = photo_barcode_check.list_group_barcode_review_items(groups, statuses=statuses)
+        return {"total": len(items), "items": items[offset : offset + limit]}
 
     def search_group_targets(
         self,
@@ -2104,11 +2168,14 @@ class PostgresStateRepository(StateRepository):
                 )
             ).all()
             photo_accuracy_rows = session.scalars(
-                select(Photo.raw_data).where(
+                select(Photo).where(
                     Photo.team_id == team_id,
                     Photo.is_active.is_(True),
                     Photo.group_id.is_not(None),
                 )
+            ).all()
+            group_barcode_rows = session.scalars(
+                select(MaterialGroup).where(MaterialGroup.team_id == team_id)
             ).all()
 
         groups = int(group_stats.groups or 0)
@@ -2128,6 +2195,10 @@ class PostgresStateRepository(StateRepository):
             for installer, group_ids in installer_items
         ]
         photo_accuracy = _photo_accuracy_summary(list(photo_accuracy_rows))
+        photos_by_group_id: dict[str, list[Any]] = defaultdict(list)
+        for photo in photo_accuracy_rows:
+            photos_by_group_id[str(photo.group_id)].append(photo)
+        group_barcode_accuracy = _group_barcode_accuracy_summary(list(group_barcode_rows), photos_by_group_id)
         return {
             "summary": {
                 "team_id": team_id,
@@ -2151,6 +2222,7 @@ class PostgresStateRepository(StateRepository):
                 "unclassified_photos": 0,
                 "review_progress": round(reviewed_groups / groups, 4) if groups else 0.0,
                 **photo_accuracy,
+                **group_barcode_accuracy,
             },
             "paths": {},
         }
@@ -2654,6 +2726,43 @@ class PostgresStateRepository(StateRepository):
                 "total": len(groups),
                 "items": [_group_payload(session, group, include_photos=True) for group in page],
             }
+
+    def list_photo_barcode_review_groups(
+        self,
+        *,
+        status: str = "unreadable",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            groups = list(
+                session.scalars(
+                    select(MaterialGroup)
+                    .where(MaterialGroup.team_id == team_id)
+                    .order_by(MaterialGroup.terminal, MaterialGroup.display_meter_no, MaterialGroup.legacy_id)
+                ).all()
+            )
+            photos = list(
+                session.scalars(
+                    select(Photo)
+                    .where(
+                        Photo.team_id == team_id,
+                        Photo.is_active.is_(True),
+                        Photo.group_id.is_not(None),
+                    )
+                    .order_by(Photo.group_id, Photo.sort_order, Photo.created_at, Photo.legacy_id)
+                ).all()
+            )
+        photos_by_group_id: dict[str, list[Any]] = defaultdict(list)
+        for photo in photos:
+            photos_by_group_id[str(photo.group_id)].append(photo)
+        payloads = [_group_barcode_payload(group, photos_by_group_id.get(str(group.id), [])) for group in groups]
+        statuses = _group_barcode_review_statuses(status)
+        items = photo_barcode_check.list_group_barcode_review_items(payloads, statuses=statuses)
+        capped_limit = max(1, min(int(limit or 100), 500))
+        safe_offset = max(0, int(offset or 0))
+        return {"total": len(items), "items": items[safe_offset : safe_offset + capped_limit]}
 
     def search_group_targets(
         self,

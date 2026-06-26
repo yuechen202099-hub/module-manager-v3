@@ -7,7 +7,13 @@ from types import SimpleNamespace
 from PIL import Image
 
 from app.services import photo_barcode_check
-from app.services.photo_barcode_check import check_photo_barcode, default_barcode_scanner, summarize_photo_accuracy
+from app.services.photo_barcode_check import (
+    build_group_barcode_check,
+    check_photo_barcode,
+    default_barcode_scanner,
+    summarize_group_barcode_accuracy,
+    summarize_photo_accuracy,
+)
 
 
 def scanner(values: list[str]):
@@ -103,6 +109,142 @@ def test_photo_accuracy_summary_counts_only_required_categories() -> None:
         "photo_accuracy_not_required": 1,
         "photo_accuracy_rate": 0.3333,
     }
+
+
+def test_group_barcode_check_passes_when_required_values_are_spread_across_photos() -> None:
+    group = {
+        "meter_no": "110000288056",
+        "module_asset_no": "MOD-001",
+        "collector": "COLLECTOR-001",
+        "photos": [
+            {"barcode_check_normalized_values": ["COLLECTOR001"], "barcode_check_status": "matched"},
+            {"barcode_check_normalized_values": ["110000288056"], "barcode_check_status": "matched"},
+            {"barcode_check_normalized_values": ["MOD001"], "barcode_check_status": "matched"},
+            {"barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
+        ],
+    }
+
+    result = build_group_barcode_check(group)
+
+    assert result["group_barcode_check_status"] == "matched"
+    assert result["group_barcode_missing_fields"] == []
+    assert set(result["group_barcode_matched_fields"]) == {"meter", "module", "collector"}
+
+
+def test_group_barcode_check_marks_unreadable_when_one_required_value_is_missing() -> None:
+    group = {
+        "meter_no": "110000288056",
+        "module_asset_no": "MOD-001",
+        "collector": "COLLECTOR-001",
+        "photos": [
+            {"barcode_check_normalized_values": ["110000288056"], "barcode_check_status": "matched"},
+            {"barcode_check_normalized_values": ["MOD001"], "barcode_check_status": "matched"},
+            {"barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
+        ],
+    }
+
+    result = build_group_barcode_check(group)
+
+    assert result["group_barcode_check_status"] == "unreadable"
+    assert result["group_barcode_missing_fields"] == ["collector"]
+    assert result["group_barcode_detected_values"]["meter"] == ["110000288056"]
+    assert result["group_barcode_detected_values"]["module"] == ["MOD001"]
+
+
+def test_group_barcode_check_marks_mismatched_when_detected_value_belongs_to_no_group_field() -> None:
+    group = {
+        "meter_no": "110000288056",
+        "module_asset_no": "MOD-001",
+        "collector": "COLLECTOR-001",
+        "photos": [
+            {"barcode_check_normalized_values": ["110000288056"], "barcode_check_status": "matched"},
+            {"barcode_check_normalized_values": ["MOD001"], "barcode_check_status": "matched"},
+            {"barcode_check_normalized_values": ["COLLECTOR999"], "barcode_check_status": "mismatched"},
+        ],
+    }
+
+    result = build_group_barcode_check(group)
+
+    assert result["group_barcode_check_status"] == "mismatched"
+    assert result["group_barcode_unmatched_values"] == ["COLLECTOR999"]
+
+
+def test_group_barcode_accuracy_summary_uses_group_denominator() -> None:
+    summary = summarize_group_barcode_accuracy(
+        [
+            {
+                "meter_no": "110000288056",
+                "module_asset_no": "MOD-001",
+                "collector": "COLLECTOR-001",
+                "photos": [
+                    {"barcode_check_normalized_values": ["110000288056"]},
+                    {"barcode_check_normalized_values": ["MOD001"]},
+                    {"barcode_check_normalized_values": ["COLLECTOR001"]},
+                ],
+            },
+            {
+                "meter_no": "110000288057",
+                "module_asset_no": "MOD-002",
+                "collector": "COLLECTOR-002",
+                "photos": [{"barcode_check_normalized_values": ["110000288057"]}],
+            },
+            {"meter_no": "110000288058", "module_asset_no": "", "collector": "COLLECTOR-003", "photos": []},
+        ]
+    )
+
+    assert summary == {
+        "group_barcode_accuracy_checked": 2,
+        "group_barcode_accuracy_passed": 1,
+        "group_barcode_accuracy_failed": 0,
+        "group_barcode_accuracy_unreadable": 1,
+        "group_barcode_accuracy_not_required": 1,
+        "group_barcode_accuracy_rate": 0.5,
+    }
+
+
+def test_group_barcode_unreadable_items_include_human_review_fields() -> None:
+    items = photo_barcode_check.list_group_barcode_review_items(
+        [
+            {
+                "id": "group-1",
+                "meter_no": "110000288056",
+                "module_asset_no": "MOD-001",
+                "collector": "COLLECTOR-001",
+                "terminal": "T-01",
+                "address": "A区1号",
+                "installer": "张三",
+                "photos": [
+                    {
+                        "id": "photo-1",
+                        "category": "meter_barcode",
+                        "image_url": "/local-test/groups/group-1/photos/photo-1/content",
+                        "barcode_check_normalized_values": ["110000288056"],
+                        "barcode_check_status": "matched",
+                    }
+                ],
+            },
+            {
+                "id": "group-2",
+                "meter_no": "110000288057",
+                "module_asset_no": "MOD-002",
+                "collector": "COLLECTOR-002",
+                "photos": [
+                    {"id": "photo-2", "barcode_check_normalized_values": ["110000288057"]},
+                    {"id": "photo-3", "barcode_check_normalized_values": ["MOD002"]},
+                    {"id": "photo-4", "barcode_check_normalized_values": ["COLLECTOR002"]},
+                ],
+            },
+        ],
+        statuses={"unreadable"},
+    )
+
+    assert len(items) == 1
+    assert items[0]["group_id"] == "group-1"
+    assert items[0]["missing_fields"] == ["module", "collector"]
+    assert items[0]["expected"]["module"] == ["MOD001"]
+    assert items[0]["detected_values"]["meter"] == ["110000288056"]
+    assert items[0]["photos"][0]["thumbnail_url"] == "/local-test/groups/group-1/photos/photo-1/content?kind=thumbnail"
+    assert items[0]["installer"] == "张三"
 
 
 def tiny_jpeg_bytes() -> bytes:

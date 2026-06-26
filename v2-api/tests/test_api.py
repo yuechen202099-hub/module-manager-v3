@@ -309,7 +309,24 @@ def test_production_account_config_and_api_token_gate(monkeypatch, tmp_path) -> 
         "photo_accuracy_unreadable",
         "photo_accuracy_not_required",
         "photo_accuracy_rate",
+        "group_barcode_accuracy_checked",
+        "group_barcode_accuracy_passed",
+        "group_barcode_accuracy_failed",
+        "group_barcode_accuracy_unreadable",
+        "group_barcode_accuracy_not_required",
+        "group_barcode_accuracy_rate",
     }.issubset(summary_payload)
+    reviewer_review_list = production_client.get(
+        "/local-test/photo-barcode/review-groups",
+        headers={"Authorization": f"bearer {reviewer_token}"},
+    )
+    assert reviewer_review_list.status_code == 403
+    admin_review_list = production_client.get(
+        "/local-test/photo-barcode/review-groups?status=unreadable",
+        headers=admin_headers,
+    )
+    assert admin_review_list.status_code == 200
+    assert {"total", "items"}.issubset(admin_review_list.json()["data"])
 
     users_after_login = production_client.get("/auth/users", headers=admin_headers)
     reviewer_user = next(item for item in users_after_login.json()["data"]["items"] if item["username"] == "reviewer-a")

@@ -12,7 +12,9 @@ import {
   exportExceptionMeters,
   fetchConstructionExceptionOrders,
   fetchExceptionGroups,
+  fetchGroupPhotoObjectUrl,
   fetchInstallerWorkload,
+  fetchPhotoBarcodeReviewGroups,
   fetchProjectSummary,
   fetchReplacementRecords,
   fetchSystemStatus,
@@ -32,6 +34,7 @@ import type {
   InstallerWorkSegment,
   InstallerWorkloadRow,
   MaterialGroup,
+  PhotoBarcodeReviewGroup,
   ProjectSummary,
   ReplacementRecord,
   TaskStatusSummary,
@@ -59,6 +62,12 @@ const emptySummary: ProjectSummary = {
   photoAccuracyUnreadable: 0,
   photoAccuracyNotRequired: 0,
   photoAccuracyRate: 0,
+  groupBarcodeAccuracyChecked: 0,
+  groupBarcodeAccuracyPassed: 0,
+  groupBarcodeAccuracyFailed: 0,
+  groupBarcodeAccuracyUnreadable: 0,
+  groupBarcodeAccuracyNotRequired: 0,
+  groupBarcodeAccuracyRate: 0,
   installerDistribution: [],
 }
 
@@ -127,6 +136,11 @@ const exceptionQuery = ref('')
 const exceptionRows = ref<MaterialGroup[]>([])
 const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
 const exceptionAssignDraft = reactive<Record<string, string>>({})
+const photoBarcodeDialogVisible = ref(false)
+const photoBarcodeLoading = ref(false)
+const photoBarcodeStatus = ref<'unreadable' | 'mismatched' | 'all'>('unreadable')
+const photoBarcodeRows = ref<PhotoBarcodeReviewGroup[]>([])
+const photoBarcodeObjectUrls = reactive<Record<string, string>>({})
 
 const BOARD_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 let boardEventAbortController: AbortController | null = null
@@ -135,11 +149,11 @@ let boardFallbackTimer = 0
 const isAdmin = computed(() => Boolean(auth.user?.roles?.includes('admin') || auth.user?.role === 'admin'))
 const scannedRate = computed(() => (summary.value.groups ? summary.value.scannedGroups / summary.value.groups : 0))
 const archiveRate = computed(() => (summary.value.groups ? summary.value.approvedGroups / summary.value.groups : 0))
-const photoAccuracyRate = computed(() => summary.value.photoAccuracyRate || 0)
+const photoAccuracyRate = computed(() => summary.value.groupBarcodeAccuracyRate || summary.value.photoAccuracyRate || 0)
 const photoAccuracyCaption = computed(() => {
-  const checked = summary.value.photoAccuracyChecked
-  if (!checked) return `暂无应检图片，${summary.value.photoAccuracyNotRequired} 张不参与`
-  return `通过 ${summary.value.photoAccuracyPassed} / 应检 ${checked}，失败 ${summary.value.photoAccuracyFailed}，无法识别 ${summary.value.photoAccuracyUnreadable}`
+  const checked = summary.value.groupBarcodeAccuracyChecked
+  if (!checked) return `暂无可判断资料组，${summary.value.groupBarcodeAccuracyNotRequired} 组资料不足`
+  return `通过 ${summary.value.groupBarcodeAccuracyPassed} / 应检 ${checked}，异常 ${summary.value.groupBarcodeAccuracyFailed}，无法识别 ${summary.value.groupBarcodeAccuracyUnreadable}`
 })
 const terminalCockpit = computed(() => {
   const total = taskStatus.value.total
@@ -316,6 +330,11 @@ const unmatchedDialogStats = computed(() => {
     pending: unmatchedRows.value.filter((item) => !item.projectOutside && !item.assignedTo).length,
   }
 })
+const photoBarcodeDialogStats = computed(() => ({
+  total: photoBarcodeRows.value.length,
+  unreadable: photoBarcodeRows.value.filter((item) => item.status === 'unreadable').length,
+  mismatched: photoBarcodeRows.value.filter((item) => item.status === 'mismatched').length,
+}))
 const replacementDialogStats = computed(() => ({
   total: replacementRows.value.length,
   terminals: new Set(replacementRows.value.map((item) => item.terminal).filter(Boolean)).size,
@@ -422,6 +441,62 @@ function formatDateTime(value = '') {
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) return value
   return parsed.toLocaleString('zh-CN', { hour12: false })
+}
+
+function barcodeFieldLabel(field: string) {
+  if (field === 'meter') return '表号'
+  if (field === 'module') return '模块'
+  if (field === 'collector') return '采集器'
+  return field || '-'
+}
+
+function barcodeFieldList(fields: string[]) {
+  return fields.map(barcodeFieldLabel).join('、') || '-'
+}
+
+function barcodeValues(values?: string[]) {
+  return values?.filter(Boolean).join('、') || '-'
+}
+
+function barcodePhotoKey(groupId: string, photoId: string, kind: 'thumbnail' | 'preview' = 'thumbnail') {
+  return `${groupId}:${photoId}:${kind}`
+}
+
+function clearPhotoBarcodeObjectUrls() {
+  for (const [key, url] of Object.entries(photoBarcodeObjectUrls)) {
+    URL.revokeObjectURL(url)
+    delete photoBarcodeObjectUrls[key]
+  }
+}
+
+function photoBarcodeImageUrl(row: PhotoBarcodeReviewGroup, photoId: string, kind: 'thumbnail' | 'preview' = 'thumbnail') {
+  return (
+    photoBarcodeObjectUrls[barcodePhotoKey(row.groupId, photoId, kind)] ||
+    photoBarcodeObjectUrls[barcodePhotoKey(row.groupId, photoId, 'preview')] ||
+    ''
+  )
+}
+
+function groupBarcodePreviewUrls(row: PhotoBarcodeReviewGroup) {
+  return row.photos.map((photo) => photoBarcodeImageUrl(row, photo.id, 'preview')).filter(Boolean)
+}
+
+async function loadPhotoBarcodeObjectUrls(rows: PhotoBarcodeReviewGroup[]) {
+  clearPhotoBarcodeObjectUrls()
+  const tasks: Promise<void>[] = []
+  for (const row of rows) {
+    for (const photo of row.photos) {
+      if (!row.groupId || !photo.id) continue
+      tasks.push(
+        fetchGroupPhotoObjectUrl(row.groupId, photo.id, 'preview')
+          .then((url) => {
+            photoBarcodeObjectUrls[barcodePhotoKey(row.groupId, photo.id, 'preview')] = url
+          })
+          .catch(() => undefined),
+      )
+    }
+  }
+  await Promise.all(tasks)
 }
 
 async function loadAccounts() {
@@ -911,6 +986,29 @@ async function loadUnmatchedRows() {
   }
 }
 
+async function loadPhotoBarcodeRows() {
+  photoBarcodeLoading.value = true
+  try {
+    const rows = await fetchPhotoBarcodeReviewGroups(photoBarcodeStatus.value)
+    photoBarcodeRows.value = rows
+    await loadPhotoBarcodeObjectUrls(rows)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '条码识别清单加载失败')
+  } finally {
+    photoBarcodeLoading.value = false
+  }
+}
+
+async function openPhotoBarcodeDialog() {
+  if (!isAdmin.value) return
+  photoBarcodeDialogVisible.value = true
+  await loadPhotoBarcodeRows()
+}
+
+function handlePhotoBarcodeDialogClosed() {
+  clearPhotoBarcodeObjectUrls()
+}
+
 async function openUnmatchedDialog() {
   unmatchedDialogVisible.value = true
   await loadUnmatchedRows()
@@ -1077,6 +1175,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('message', handleExternalRefresh)
   disconnectBoardEvents()
+  clearPhotoBarcodeObjectUrls()
 })
 </script>
 
@@ -1155,8 +1254,18 @@ onUnmounted(() => {
             <span>未施工未扫码</span>
             <strong>{{ summary.unconstructedGroups }}</strong>
           </article>
-          <article class="risk-card good">
-            <span>图片准确率</span>
+          <button
+            v-if="isAdmin"
+            class="risk-card risk-card-button good"
+            type="button"
+            @click="openPhotoBarcodeDialog"
+          >
+            <span>资料组条码准确率</span>
+            <strong>{{ percent(photoAccuracyRate) }}</strong>
+            <small>{{ photoAccuracyCaption }}</small>
+          </button>
+          <article v-else class="risk-card good">
+            <span>资料组条码准确率</span>
             <strong>{{ percent(photoAccuracyRate) }}</strong>
             <small>{{ photoAccuracyCaption }}</small>
           </article>
@@ -1581,6 +1690,105 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="replacementDialogVisible = false">关闭</el-button>
         <el-button type="primary" :disabled="!replacementRows.length" @click="exportReplacementCsv">导出当前清单</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="photoBarcodeDialogVisible"
+      title="条码无法识别清单"
+      width="1180px"
+      class="unmatched-board-dialog"
+      @closed="handlePhotoBarcodeDialogClosed"
+    >
+      <div class="unmatched-dialog-head">
+        <div class="unmatched-dialog-stats">
+          <article>
+            <span>当前清单</span>
+            <strong>{{ photoBarcodeDialogStats.total }}</strong>
+          </article>
+          <article>
+            <span>无法识别</span>
+            <strong>{{ photoBarcodeDialogStats.unreadable }}</strong>
+          </article>
+          <article>
+            <span>异常不匹配</span>
+            <strong>{{ photoBarcodeDialogStats.mismatched }}</strong>
+          </article>
+        </div>
+        <div class="unmatched-dialog-tools unmatched-record-tools">
+          <el-select v-model="photoBarcodeStatus" size="small" class="barcode-status-select" @change="loadPhotoBarcodeRows">
+            <el-option label="无法识别" value="unreadable" />
+            <el-option label="异常不匹配" value="mismatched" />
+            <el-option label="全部需复核" value="all" />
+          </el-select>
+          <el-button :loading="photoBarcodeLoading" @click="loadPhotoBarcodeRows">刷新</el-button>
+        </div>
+      </div>
+      <el-alert
+        class="claim-alert"
+        type="info"
+        :closable="false"
+        title="按资料组整体判断：4 张照片内累计识别到本组表号、模块号、采集器号即通过；清单仅列出需要人工复核的资料组。"
+      />
+      <el-table v-loading="photoBarcodeLoading" :data="photoBarcodeRows" height="540" size="small">
+        <el-table-column type="index" width="54" label="#" />
+        <el-table-column label="资料组" min-width="180">
+          <template #default="{ row }">
+            <strong>{{ row.meterNo || '-' }}</strong>
+            <small class="table-subline">{{ row.groupId }}</small>
+          </template>
+        </el-table-column>
+        <el-table-column prop="terminal" label="终端" min-width="110" />
+        <el-table-column prop="moduleAssetNo" label="模块号" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="collector" label="采集器号" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="installer" label="安装人员" width="110" />
+        <el-table-column label="状态" width="120">
+          <template #default="{ row }">
+            <el-tag v-if="row.status === 'mismatched'" type="danger" effect="plain">异常不匹配</el-tag>
+            <el-tag v-else type="warning" effect="plain">无法识别</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="缺失项" min-width="150">
+          <template #default="{ row }">
+            {{ barcodeFieldList(row.missingFields) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="已识别值" min-width="240" show-overflow-tooltip>
+          <template #default="{ row }">
+            表号：{{ barcodeValues(row.detectedValues.meter) }}；
+            模块：{{ barcodeValues(row.detectedValues.module) }}；
+            采集器：{{ barcodeValues(row.detectedValues.collector) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="异常值" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ barcodeValues(row.unmatchedValues) }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="address" label="地址" min-width="220" show-overflow-tooltip />
+        <el-table-column label="照片" min-width="230" fixed="right">
+          <template #default="{ row }">
+            <div v-if="row.photos?.length" class="barcode-photo-list">
+              <el-image
+                v-for="photo in row.photos"
+                :key="photo.id"
+                :src="photoBarcodeImageUrl(row, photo.id)"
+                :preview-src-list="groupBarcodePreviewUrls(row)"
+                fit="cover"
+                class="barcode-photo-thumb"
+                preview-teleported
+              >
+                <template #error>
+                  <span class="barcode-photo-error">无图</span>
+                </template>
+              </el-image>
+            </div>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="photoBarcodeDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -2268,6 +2476,34 @@ onUnmounted(() => {
   font-weight: 760;
   line-height: 1.35;
   text-align: center;
+}
+
+.barcode-status-select {
+  min-width: 138px;
+}
+
+.barcode-photo-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.barcode-photo-thumb {
+  width: 42px;
+  height: 42px;
+  border-radius: 6px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  background: #f8fafc;
+}
+
+.barcode-photo-error {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  color: var(--v2-text-muted, #64748b);
+  font-size: 11px;
 }
 @media (max-width: 1280px) {
   .account-form-grid {
