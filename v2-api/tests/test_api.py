@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.27"
+    assert data["version"] == "3.0.28"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]

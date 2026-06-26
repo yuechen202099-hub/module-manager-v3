@@ -37,6 +37,7 @@ import type {
   UnmatchedRecord,
   UserAccount,
 } from '@/api/types'
+import { APP_VERSION } from '@/constants/releaseNotes'
 import { useAuthStore } from '@/stores/auth'
 import {
   constructionDraftUploadBlockReason,
@@ -2060,6 +2061,7 @@ onBeforeUnmount(() => {
         </p>
       </div>
       <div class="top-actions">
+        <span class="construction-version">V{{ APP_VERSION }}</span>
         <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
         <el-button :icon="Refresh" :loading="loadingTasks || loadingGroups" @click="loadTasks">刷新</el-button>
         <el-button
@@ -2085,6 +2087,7 @@ onBeforeUnmount(() => {
             <span>{{ taskPickerSubtitle }}</span>
           </div>
           <div class="head-actions">
+            <span class="construction-version">V{{ APP_VERSION }}</span>
             <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
             <el-tag effect="light">{{ taskPickerCount }}</el-tag>
             <el-button size="small" :icon="Refresh" :loading="loadingTasks" @click="loadTasks">刷新</el-button>
@@ -2769,6 +2772,13 @@ onBeforeUnmount(() => {
 
 .construction-top h2 {
   font-size: 17px;
+}
+
+.construction-version {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .muted,

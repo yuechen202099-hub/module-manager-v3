@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.27'
+const EXPECTED_VERSION = '3.0.28'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 

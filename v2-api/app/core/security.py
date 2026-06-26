@@ -5,6 +5,7 @@ import hmac
 import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from jose import JWTError, jwt
 
@@ -13,6 +14,7 @@ from app.core.config import settings
 HASH_ITERATIONS = 260_000
 HASH_ALGORITHM = "sha256"
 JWT_ALGORITHM = "HS256"
+AUTH_VALIDITY_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def hash_password(password: str, *, salt: str | None = None) -> str:
@@ -46,8 +48,14 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
+def access_token_expires_at() -> datetime:
+    now_local = datetime.now(UTC).astimezone(AUTH_VALIDITY_TIMEZONE)
+    next_midnight_local = (now_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return next_midnight_local.astimezone(UTC)
+
+
 def create_access_token(user: dict[str, Any]) -> str:
-    expires_at = datetime.now(UTC) + timedelta(minutes=settings.jwt_expire_minutes)
+    expires_at = access_token_expires_at()
     payload = {
         "sub": user["username"],
         "name": user.get("name") or user.get("display_name") or user["username"],

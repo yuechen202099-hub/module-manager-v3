@@ -417,9 +417,38 @@ function formHeaders(): HeadersInit {
   return headers
 }
 
+function clearLocalAuthSession() {
+  if (typeof localStorage === 'undefined') return
+  localStorage.removeItem('v2-web-token')
+  localStorage.removeItem('v2-web-user')
+  localStorage.removeItem('module_manager_session')
+  localStorage.removeItem('module_manager_reviewer')
+}
+
+function redirectToLogin() {
+  if (typeof window === 'undefined') return
+  if (window.location.pathname === '/login') return
+  const target = `${window.location.pathname}${window.location.search}${window.location.hash}`
+  const query = target && target !== '/' ? `?redirect=${encodeURIComponent(target)}` : ''
+  window.location.assign(`/login${query}`)
+}
+
+function handleUnauthorizedResponse(response: Response) {
+  if (response.status === 401) {
+    clearLocalAuthSession()
+    redirectToLogin()
+  }
+}
+
+async function fetchWithAuth(path: string, init: RequestInit = {}) {
+  const response = await fetch(path, init)
+  handleUnauthorizedResponse(response)
+  return response
+}
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = String(init.method || 'GET').toUpperCase()
-  const response = await fetch(path, {
+  const response = await fetchWithAuth(path, {
     ...init,
     headers: {
       ...authHeaders(),
@@ -435,7 +464,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 async function formApi<T>(path: string, formData: FormData): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetchWithAuth(path, {
     method: 'POST',
     headers: formHeaders(),
     body: formData,
@@ -1547,7 +1576,7 @@ export async function fetchGroupPhotoObjectUrl(
   version = '',
 ): Promise<string> {
   const url = `${groupPhotoContentUrl(groupId, photoId, kind)}${version ? `&v=${encodeURIComponent(version)}` : ''}`
-  const response = await fetch(url, { headers: formHeaders() })
+  const response = await fetchWithAuth(url, { headers: formHeaders() })
   if (!response.ok) {
     throw new Error(response.statusText || `HTTP ${response.status}`)
   }
@@ -1604,7 +1633,7 @@ function triggerBrowserDownload(blob: Blob, filename: string) {
 }
 
 async function downloadExcel(path: string, body: Record<string, unknown>, fallbackName: string): Promise<void> {
-  const response = await fetch(path, {
+  const response = await fetchWithAuth(path, {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify(body),
@@ -1621,7 +1650,7 @@ export async function exportTaskDetail(taskId: string): Promise<void> {
 }
 
 export async function exportExceptionMeters(reviewer = ''): Promise<void> {
-  const response = await fetch('/exports/exception-meters', {
+  const response = await fetchWithAuth('/exports/exception-meters', {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify({ reviewer, team_id: currentTeamId() }),
@@ -1795,12 +1824,14 @@ async function fetchImageBlob(url: string) {
   const requestUrl = new URL(url, window.location.origin)
   const sameOrigin = requestUrl.origin === window.location.origin
   try {
-    const response = await fetch(requestUrl.href, sameOrigin ? { headers: formHeaders() } : {})
+    const response = sameOrigin
+      ? await fetchWithAuth(requestUrl.href, { headers: formHeaders() })
+      : await fetch(requestUrl.href)
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
     return await response.blob()
   } catch (directError) {
     if (sameOrigin) throw directError
-    const proxyResponse = await fetch(`/local-test/photo-proxy?url=${encodeURIComponent(requestUrl.href)}`, {
+    const proxyResponse = await fetchWithAuth(`/local-test/photo-proxy?url=${encodeURIComponent(requestUrl.href)}`, {
       headers: formHeaders(),
     })
     if (!proxyResponse.ok) throw directError

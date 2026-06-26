@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.27'
+export const APP_VERSION = '3.0.28'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,17 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.28',
+    date: '2026-06-26',
+    type: '小更新',
+    title: '登录有效期与施工页版本号',
+    items: [
+      '登录有效期调整为当天有效，按北京时间当天结束后自动失效。',
+      '登录过期后，项目、施工、导出、图片等需要登录的操作会清理本地登录态并跳转到登录页面。',
+      '施工采集页新增当前版本号展示，施工员打开页面即可确认正在使用的生产版本。',
+    ],
+  },
   {
     version: 'V3.0.27',
     date: '2026-06-26',
