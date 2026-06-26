@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
-from app.services.matching import build_total_catalog_match_key
+from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key
 from app.services.photo_storage import parse_oss_image_url, sign_oss_server_url, static_upload_root, validate_image_content
 
 BarcodeScanner = Callable[[dict[str, Any]], Iterable[str]]
@@ -176,6 +176,34 @@ def build_group_barcode_check(group: dict[str, Any]) -> dict[str, Any]:
     unmatched_values: list[str] = []
 
     for photo in group.get("photos") or []:
+        legacy_matched_type = _legacy_matched_group_barcode_type(photo)
+        if legacy_matched_type and legacy_matched_type not in missing_expected_fields:
+            legacy_values = _legacy_matched_group_barcode_values(photo)
+            matched_value = next(
+                (
+                    value
+                    for value in legacy_values
+                    if _match_group_barcode_type(value, expected_values) == legacy_matched_type
+                ),
+                "",
+            )
+            if matched_value:
+                _append_unique(matched_fields, legacy_matched_type)
+                _append_unique(detected_values[legacy_matched_type], matched_value)
+                for value in _photo_barcode_values(photo):
+                    matched_type = _match_group_barcode_type(value, expected_values)
+                    if matched_type:
+                        _append_unique(detected_values[matched_type], value)
+                        _append_unique(matched_fields, matched_type)
+            else:
+                for value in legacy_values:
+                    matched_type = _match_group_barcode_type(value, expected_values)
+                    if matched_type:
+                        _append_unique(detected_values[matched_type], value)
+                        _append_unique(matched_fields, matched_type)
+                    else:
+                        _append_unique(unmatched_values, value)
+            continue
         for value in _photo_barcode_values(photo):
             matched_type = _match_group_barcode_type(value, expected_values)
             if matched_type:
@@ -310,12 +338,34 @@ def _match_group_barcode_type(value: str, expected_values: dict[str, list[str]])
     for barcode_type in GROUP_BARCODE_TYPES:
         if value in expected_values.get(barcode_type, []):
             return barcode_type
+        if barcode_type == "meter":
+            try:
+                if build_long_scan_match_key(value) in expected_values.get("meter", []):
+                    return "meter"
+            except ValueError:
+                pass
     return ""
 
 
 def _append_unique(items: list[str], value: str) -> None:
     if value and value not in items:
         items.append(value)
+
+
+def _legacy_matched_group_barcode_type(photo: dict[str, Any]) -> str:
+    status = str(photo.get("barcode_check_status") or "").strip()
+    expected_type = str(photo.get("barcode_check_expected_type") or "").strip()
+    if status == "matched" and expected_type in GROUP_BARCODE_TYPES:
+        return expected_type
+    return ""
+
+
+def _legacy_matched_group_barcode_values(photo: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    _append_unique(values, normalize_barcode_value(photo.get("barcode_check_matched_value")))
+    for value in _photo_barcode_values(photo):
+        _append_unique(values, value)
+    return values
 
 
 def _group_expected_context(group: dict[str, Any]) -> dict[str, Any]:

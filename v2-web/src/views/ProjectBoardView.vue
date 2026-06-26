@@ -140,6 +140,9 @@ const photoBarcodeDialogVisible = ref(false)
 const photoBarcodeLoading = ref(false)
 const photoBarcodeStatus = ref<'unreadable' | 'mismatched' | 'all'>('unreadable')
 const photoBarcodeRows = ref<PhotoBarcodeReviewGroup[]>([])
+const photoBarcodeTotal = ref(0)
+const photoBarcodePage = ref(1)
+const photoBarcodePageSize = ref(20)
 const photoBarcodeObjectUrls = reactive<Record<string, string>>({})
 
 const BOARD_REFRESH_INTERVAL_MS = 15 * 60 * 1000
@@ -331,9 +334,15 @@ const unmatchedDialogStats = computed(() => {
   }
 })
 const photoBarcodeDialogStats = computed(() => ({
-  total: photoBarcodeRows.value.length,
-  unreadable: photoBarcodeRows.value.filter((item) => item.status === 'unreadable').length,
-  mismatched: photoBarcodeRows.value.filter((item) => item.status === 'mismatched').length,
+  total: photoBarcodeTotal.value,
+  unreadable:
+    photoBarcodeStatus.value === 'unreadable'
+      ? photoBarcodeTotal.value
+      : photoBarcodeRows.value.filter((item) => item.status === 'unreadable').length,
+  mismatched:
+    photoBarcodeStatus.value === 'mismatched'
+      ? photoBarcodeTotal.value
+      : photoBarcodeRows.value.filter((item) => item.status === 'mismatched').length,
 }))
 const replacementDialogStats = computed(() => ({
   total: replacementRows.value.length,
@@ -989,9 +998,15 @@ async function loadUnmatchedRows() {
 async function loadPhotoBarcodeRows() {
   photoBarcodeLoading.value = true
   try {
-    const rows = await fetchPhotoBarcodeReviewGroups(photoBarcodeStatus.value)
-    photoBarcodeRows.value = rows
-    await loadPhotoBarcodeObjectUrls(rows)
+    const result = await fetchPhotoBarcodeReviewGroups(
+      photoBarcodeStatus.value,
+      photoBarcodePage.value,
+      photoBarcodePageSize.value,
+    )
+    photoBarcodeTotal.value = result.total
+    photoBarcodeRows.value = result.items
+    clearPhotoBarcodeObjectUrls()
+    await loadPhotoBarcodeObjectUrls(result.items)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '条码识别清单加载失败')
   } finally {
@@ -1002,11 +1017,22 @@ async function loadPhotoBarcodeRows() {
 async function openPhotoBarcodeDialog() {
   if (!isAdmin.value) return
   photoBarcodeDialogVisible.value = true
+  photoBarcodePage.value = 1
   await loadPhotoBarcodeRows()
 }
 
 function handlePhotoBarcodeDialogClosed() {
   clearPhotoBarcodeObjectUrls()
+}
+
+async function handlePhotoBarcodeStatusChange() {
+  photoBarcodePage.value = 1
+  await loadPhotoBarcodeRows()
+}
+
+async function handlePhotoBarcodePageChange(page: number) {
+  photoBarcodePage.value = page
+  await loadPhotoBarcodeRows()
 }
 
 async function openUnmatchedDialog() {
@@ -1716,7 +1742,7 @@ onUnmounted(() => {
           </article>
         </div>
         <div class="unmatched-dialog-tools unmatched-record-tools">
-          <el-select v-model="photoBarcodeStatus" size="small" class="barcode-status-select" @change="loadPhotoBarcodeRows">
+          <el-select v-model="photoBarcodeStatus" size="small" class="barcode-status-select" @change="handlePhotoBarcodeStatusChange">
             <el-option label="无法识别" value="unreadable" />
             <el-option label="异常不匹配" value="mismatched" />
             <el-option label="全部需复核" value="all" />
@@ -1787,6 +1813,17 @@ onUnmounted(() => {
           </template>
         </el-table-column>
       </el-table>
+      <div class="barcode-review-pagination">
+        <el-pagination
+          v-model:current-page="photoBarcodePage"
+          :page-size="photoBarcodePageSize"
+          :total="photoBarcodeTotal"
+          layout="total, prev, pager, next"
+          small
+          background
+          @current-change="handlePhotoBarcodePageChange"
+        />
+      </div>
       <template #footer>
         <el-button @click="photoBarcodeDialogVisible = false">关闭</el-button>
       </template>
@@ -2505,6 +2542,14 @@ onUnmounted(() => {
   color: var(--v2-text-muted, #64748b);
   font-size: 11px;
 }
+
+.barcode-review-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+  overflow-x: auto;
+}
+
 @media (max-width: 1280px) {
   .account-form-grid {
     grid-template-columns: repeat(3, minmax(160px, 1fr));
@@ -2526,6 +2571,10 @@ onUnmounted(() => {
 
   .unmatched-dialog-tools {
     grid-template-columns: 1fr;
+  }
+
+  .barcode-review-pagination {
+    justify-content: flex-start;
   }
 
   .work-time-chart {

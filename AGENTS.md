@@ -2,7 +2,7 @@
 
 ## Production SOP Override
 
-- Current production baseline: `V3.0.40`.
+- Current production baseline: `V3.0.42`.
 - Production maintenance branch: `production/v3.0.35`.
 - Production SOP entrypoint: `docs/sop/README.md`.
 - Production release records: `ops/releases/`.
@@ -21,7 +21,7 @@
 
 ## 当前基线
 
-- 当前应用基线：`V3.0.40`。
+- 当前应用基线：`V3.0.42`。
 - 文档和协作规则使用独立规则版本，不自动修改应用版本。
 - 详细生产 SOP 见 `docs/sop/README.md`。
 

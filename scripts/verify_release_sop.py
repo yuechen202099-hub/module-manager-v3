@@ -17,6 +17,8 @@ REQUIRED_FILES = [
     "docs/sop/07-rollback-and-incident-review.md",
     "docs/sop/08-business-acceptance-templates.md",
     "ops/releases/README.md",
+    "ops/releases/V3.0.42.md",
+    "ops/releases/V3.0.41.md",
     "ops/releases/V3.0.40.md",
     "ops/releases/V3.0.39.md",
     "ops/releases/V3.0.38.md",
@@ -64,6 +66,8 @@ def main() -> int:
         "docs/sop/06-production-deploy-runbook.md",
         "docs/sop/07-rollback-and-incident-review.md",
         "docs/sop/08-business-acceptance-templates.md",
+        "ops/releases/V3.0.42.md",
+        "ops/releases/V3.0.41.md",
         "ops/releases/V3.0.40.md",
         "ops/releases/V3.0.39.md",
         "ops/releases/V3.0.38.md",
@@ -73,14 +77,14 @@ def main() -> int:
             fail(f"verify-client-release.py must require {path}")
 
     agents = read("AGENTS.md")
-    if "V3.0.40" not in agents:
-        fail("AGENTS.md must state current production baseline V3.0.40")
+    if "V3.0.42" not in agents:
+        fail("AGENTS.md must state current production baseline V3.0.42")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
 
     manifest = read("RELEASE_MANIFEST.md")
-    if "3.0.40" not in manifest:
-        fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.40")
+    if "3.0.42" not in manifest:
+        fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.42")
 
     print("[OK] release SOP files and references are consistent")
     return 0

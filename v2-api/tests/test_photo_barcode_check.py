@@ -131,6 +131,173 @@ def test_group_barcode_check_passes_when_required_values_are_spread_across_photo
     assert set(result["group_barcode_matched_fields"]) == {"meter", "module", "collector"}
 
 
+def test_group_barcode_check_keeps_legacy_matched_photo_evidence() -> None:
+    group = {
+        "meter_no": "110000288056",
+        "module_asset_no": "MOD-001",
+        "collector": "COLLECTOR-001",
+        "photos": [
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "meter",
+                "barcode_check_matched_value": "110000288056",
+                "barcode_check_normalized_values": [],
+            },
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "module",
+                "barcode_check_matched_value": "MOD001",
+                "barcode_check_normalized_values": ["OLDMODULEVALUE"],
+            },
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "collector",
+                "barcode_check_matched_value": "COLLECTOR001",
+            },
+        ],
+    }
+
+    result = build_group_barcode_check(group)
+
+    assert result["group_barcode_check_status"] == "matched"
+    assert result["group_barcode_missing_fields"] == []
+    assert result["group_barcode_unmatched_values"] == []
+    assert result["group_barcode_detected_values"]["meter"] == ["110000288056"]
+    assert result["group_barcode_detected_values"]["module"] == ["MOD001"]
+    assert result["group_barcode_detected_values"]["collector"] == ["COLLECTOR001"]
+    assert set(result["group_barcode_matched_fields"]) == {"meter", "module", "collector"}
+
+
+def test_group_barcode_check_counts_long_meter_code_from_legacy_module_photo() -> None:
+    group = {
+        "meter_no": "110000281742",
+        "meter_match_key": "0000281742",
+        "module_asset_no": "3130054512250026172609",
+        "collector": "3130009381930003253416",
+        "photos": [
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "collector",
+                "barcode_check_matched_value": "3130009381930003253416",
+                "barcode_check_normalized_values": ["3130009381930003253416"],
+            },
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "module",
+                "barcode_check_matched_value": "3130054512250026172609",
+                "barcode_check_normalized_values": ["3130001111800002817421", "3130054512250026172609"],
+            },
+        ],
+    }
+
+    result = build_group_barcode_check(group)
+
+    assert result["group_barcode_check_status"] == "matched"
+    assert result["group_barcode_missing_fields"] == []
+    assert result["group_barcode_detected_values"]["meter"] == ["3130001111800002817421"]
+    assert result["group_barcode_detected_values"]["module"] == ["3130054512250026172609"]
+    assert result["group_barcode_detected_values"]["collector"] == ["3130009381930003253416"]
+
+
+def test_group_barcode_check_accepts_legacy_meter_long_code_with_noise() -> None:
+    group = {
+        "meter_no": "110000281742",
+        "meter_match_key": "0000281742",
+        "module_asset_no": "3130054512250026172609",
+        "collector": "3130009381930003253416",
+        "photos": [
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "meter",
+                "barcode_check_matched_value": "3130001111800002817421",
+                "barcode_check_normalized_values": ["3130001111800002817421", "NOISE999"],
+            },
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "module",
+                "barcode_check_matched_value": "3130054512250026172609",
+                "barcode_check_normalized_values": ["3130054512250026172609"],
+            },
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "collector",
+                "barcode_check_matched_value": "3130009381930003253416",
+                "barcode_check_normalized_values": ["3130009381930003253416"],
+            },
+        ],
+    }
+
+    result = build_group_barcode_check(group)
+
+    assert result["group_barcode_check_status"] == "matched"
+    assert result["group_barcode_missing_fields"] == []
+    assert result["group_barcode_unmatched_values"] == []
+    assert result["group_barcode_detected_values"]["meter"] == ["3130001111800002817421"]
+
+
+def test_group_barcode_check_keeps_legacy_mismatched_photo_as_review_item() -> None:
+    group = {
+        "meter_no": "110000288056",
+        "module_asset_no": "MOD-001",
+        "collector": "COLLECTOR-001",
+        "photos": [
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "meter",
+                "barcode_check_matched_value": "110000288056",
+            },
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "module",
+                "barcode_check_matched_value": "MOD001",
+            },
+            {
+                "barcode_check_status": "mismatched",
+                "barcode_check_expected_type": "collector",
+                "barcode_check_normalized_values": ["COLLECTOR999"],
+            },
+        ],
+    }
+
+    result = build_group_barcode_check(group)
+
+    assert result["group_barcode_check_status"] == "mismatched"
+    assert result["group_barcode_missing_fields"] == ["collector"]
+    assert result["group_barcode_unmatched_values"] == ["COLLECTOR999"]
+
+
+def test_group_barcode_check_rejects_stale_legacy_matched_value() -> None:
+    group = {
+        "meter_no": "110000288056",
+        "module_asset_no": "MOD-001",
+        "collector": "COLLECTOR-001",
+        "photos": [
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "meter",
+                "barcode_check_matched_value": "110000288056",
+            },
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "module",
+                "barcode_check_matched_value": "MOD999",
+            },
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_expected_type": "collector",
+                "barcode_check_matched_value": "COLLECTOR001",
+            },
+        ],
+    }
+
+    result = build_group_barcode_check(group)
+
+    assert result["group_barcode_check_status"] == "mismatched"
+    assert result["group_barcode_missing_fields"] == ["module"]
+    assert result["group_barcode_unmatched_values"] == ["MOD999"]
+    assert result["group_barcode_detected_values"]["module"] == []
+
+
 def test_group_barcode_check_marks_unreadable_when_one_required_value_is_missing() -> None:
     group = {
         "meter_no": "110000288056",

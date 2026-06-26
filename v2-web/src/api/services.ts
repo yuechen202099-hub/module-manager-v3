@@ -1391,12 +1391,25 @@ export async function fetchProjectSummary(): Promise<{ summary: ProjectSummary; 
   return { summary: mapSummary(data.summary || {}), paths: data.paths || {} }
 }
 
-export async function fetchPhotoBarcodeReviewGroups(status = 'unreadable'): Promise<PhotoBarcodeReviewGroup[]> {
-  const params = new URLSearchParams({ status, limit: '500' })
+export async function fetchPhotoBarcodeReviewGroups(
+  status = 'unreadable',
+  page = 1,
+  pageSize = 20,
+): Promise<{ total: number; items: PhotoBarcodeReviewGroup[] }> {
+  const safePage = Math.max(1, Math.floor(Number(page) || 1))
+  const safePageSize = Math.max(1, Math.min(100, Math.floor(Number(pageSize) || 20)))
+  const params = new URLSearchParams({
+    status,
+    limit: String(safePageSize),
+    offset: String((safePage - 1) * safePageSize),
+  })
   const data = await api<{ total: number; items: BackendPhotoBarcodeReviewGroup[] }>(
     `/local-test/photo-barcode/review-groups?${params.toString()}`,
   )
-  return (data.items || []).map(mapPhotoBarcodeReviewGroup)
+  return {
+    total: Number(data.total || 0),
+    items: (data.items || []).map(mapPhotoBarcodeReviewGroup),
+  }
 }
 
 export async function fetchInstallerWorkload(installer: string): Promise<InstallerWorkload> {
