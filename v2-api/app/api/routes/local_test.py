@@ -1404,6 +1404,8 @@ def group_targets(
     limit: int = Query(default=30, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
+    if settings.app_env.lower() in {"prod", "production"} and not request_is_admin(request):
+        raise HTTPException(status_code=403, detail="Only administrators can search group targets")
     return ok(
         request,
         state_repository().search_group_targets(query=query, terminal=terminal, limit=limit, offset=offset),

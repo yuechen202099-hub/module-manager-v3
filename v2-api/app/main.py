@@ -28,7 +28,7 @@ def create_app() -> FastAPI:
     production_mode = settings.app_env.lower() in {"prod", "production"}
     app = FastAPI(
         title="Module Manager V2 API",
-        version="3.0.31",
+        version="3.0.32",
         lifespan=lifespan,
         docs_url=None if production_mode else "/docs",
         redoc_url=None if production_mode else "/redoc",
@@ -152,6 +152,10 @@ def create_app() -> FastAPI:
 
     @app.get("/project-board")
     def project_board_page():
+        return vue_index_response()
+
+    @app.get("/global-search")
+    def global_search_page():
         return vue_index_response()
 
     @app.get("/account-management")

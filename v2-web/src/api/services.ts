@@ -4,6 +4,7 @@ import type {
   ConstructionExceptionOrder,
   ConstructionUploadPayload,
   CurrentUser,
+  GroupSearchResult,
   ImportJob,
   InstallerWorkload,
   MaterialGroup,
@@ -913,6 +914,20 @@ export async function fetchTaskGroups(taskId = '1'): Promise<MaterialGroup[]> {
     `/local-test/tasks/${encodeURIComponent(taskId)}/groups?limit=1000&scan_only=false&summary=true`,
   )
   return (data.items || []).map(mapGroup)
+}
+
+export async function searchGroups(options: { query?: string; terminal?: string; limit?: number; offset?: number }): Promise<GroupSearchResult> {
+  const params = new URLSearchParams()
+  params.set('query', options.query || '')
+  if (options.terminal) params.set('terminal', options.terminal)
+  params.set('limit', String(options.limit || 30))
+  params.set('offset', String(options.offset || 0))
+  const data = await api<{ total: number; terminals?: string[]; items?: BackendGroup[] }>(`/groups/search?${params.toString()}`)
+  return {
+    total: Number(data.total || 0),
+    terminals: data.terminals || [],
+    items: (data.items || []).map(mapGroup),
+  }
 }
 
 export async function fetchGroup(groupId: string): Promise<{ group: MaterialGroup; photos: ReviewPhoto[] }> {

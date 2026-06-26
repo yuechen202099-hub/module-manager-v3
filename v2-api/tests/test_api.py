@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.31"
+    assert data["version"] == "3.0.32"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -1202,6 +1202,12 @@ def test_construction_page_is_available() -> None:
     assert_vue_shell_response(client.get("/construction"))
     assert_vue_shell_response(client.get("/construction?embedded=1"))
 
+
+def test_global_search_page_is_available() -> None:
+    assert_vue_shell_response(client.get("/global-search"))
+    assert_vue_shell_response(client.get("/global-search?embedded=1"))
+
+
 def test_unmatched_page_redirects_to_review_workbench() -> None:
     response = client.get("/unmatched?embedded=1", follow_redirects=False)
 
@@ -1217,6 +1223,77 @@ def test_group_target_route_is_searchable() -> None:
     payload = response.json()["data"]
     assert "items" in payload
     assert len(payload["items"]) <= 5
+
+
+def test_admin_global_group_search_is_admin_only(monkeypatch, tmp_path) -> None:
+    from app.api.routes import local_test
+
+    production_settings = SimpleNamespace(
+        app_env="production",
+        demo_auth_enabled=False,
+        admin_username="root-admin",
+        admin_password="RootPass12345",
+        admin_team_id="global-search-team",
+        auth_users_path=str(tmp_path / "users.json"),
+        jwt_secret="jwt-secret-for-global-search-test-12345",
+        jwt_expire_minutes=60,
+        state_backend="json",
+    )
+    monkeypatch.setattr(auth, "settings", production_settings)
+    monkeypatch.setattr(account_store, "settings", production_settings)
+    monkeypatch.setattr(security, "settings", production_settings)
+    monkeypatch.setattr(local_test, "settings", production_settings)
+    monkeypatch.setattr(main_module, "settings", production_settings)
+    production_client = TestClient(main_module.create_app())
+
+    admin_login = production_client.post(
+        "/auth/login",
+        json={"username": "root-admin", "password": "RootPass12345"},
+    )
+    assert admin_login.status_code == 200
+    admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
+
+    created = production_client.post(
+        "/auth/users",
+        headers=admin_headers,
+        json={
+            "username": "reviewer-a",
+            "password": "ReviewPass12345",
+            "name": "Reviewer A",
+            "roles": ["reviewer"],
+            "team_id": "global-search-team",
+            "status": "active",
+        },
+    )
+    assert created.status_code == 200
+    reviewer_login = production_client.post(
+        "/auth/login",
+        json={"username": "reviewer-a", "password": "ReviewPass12345"},
+    )
+    assert reviewer_login.status_code == 200
+    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
+
+    bootstrap = production_client.post("/local-test/bootstrap", headers=admin_headers)
+    assert bootstrap.status_code == 200
+
+    forbidden = production_client.get("/groups/search?query=350&limit=5", headers=reviewer_headers)
+    assert forbidden.status_code == 403
+    legacy_forbidden = production_client.get("/local-test/group-targets?query=350&limit=5", headers=reviewer_headers)
+    assert legacy_forbidden.status_code == 403
+
+    blank = production_client.get("/groups/search", headers=admin_headers)
+    assert blank.status_code == 200
+    assert blank.json()["data"]["total"] == 0
+    assert blank.json()["data"]["items"] == []
+
+    response = production_client.get("/groups/search?query=350&limit=5", headers=admin_headers)
+    assert response.status_code == 200
+    legacy_response = production_client.get("/local-test/group-targets?query=350&limit=5", headers=admin_headers)
+    assert legacy_response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["total"] >= 1
+    assert len(payload["items"]) <= 5
+    assert {"id", "task_id", "terminal", "meter_no", "status", "photo_count"}.issubset(payload["items"][0])
 
 
 def test_unmatched_create_group_route_creates_terminal_task() -> None:

@@ -2,6 +2,7 @@ export type StaticPageKey =
   | 'project-board'
   | 'claim-tasks'
   | 'task-hall'
+  | 'global-search'
   | 'construction'
   | 'account-management'
   | 'sync-config'
@@ -40,6 +41,14 @@ export const staticPages: StaticPageRoute[] = [
     subtitle: '图片分类、异常处理、补图',
     routePath: '/task-hall',
     roles: ['admin', 'reviewer'],
+    migrationStatus: 'native_vue',
+  },
+  {
+    key: 'global-search',
+    title: '资料组定位',
+    subtitle: '按表号、模块号、采集器号定位资料组',
+    routePath: '/global-search',
+    roles: ['admin'],
     migrationStatus: 'native_vue',
   },
   {

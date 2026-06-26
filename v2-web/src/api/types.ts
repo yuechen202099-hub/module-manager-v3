@@ -160,6 +160,12 @@ export type MaterialGroup = {
   photos?: ReviewPhoto[]
 }
 
+export type GroupSearchResult = {
+  total: number
+  terminals: string[]
+  items: MaterialGroup[]
+}
+
 export type ReviewPhoto = {
   id: string
   url: string

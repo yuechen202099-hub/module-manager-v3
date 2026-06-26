@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.31'
+export const APP_VERSION = '3.0.32'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.32',
+    date: '2026-06-26',
+    type: '小更新',
+    title: '管理员资料组定位',
+    items: [
+      '新增管理员专用“资料组定位”页面，可通过表号、模块号、采集器号、终端和地址定位资料组。',
+      '新增正式只读搜索接口 /groups/search，并限制为管理员角色访问。',
+      '搜索结果展示终端、任务、状态、照片数、审阅员和地址，并支持跳转审阅工作台、施工采集页和复制资料组 ID。',
+      '搜索结果只来自真实资料组数据，不使用测试资料组或 00000000 兜底数据。',
+    ],
+  },
   {
     version: 'V3.0.31',
     date: '2026-06-26',

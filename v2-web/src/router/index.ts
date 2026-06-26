@@ -8,6 +8,7 @@ const nativePageComponents = {
   'project-board': () => import('@/views/ProjectBoardView.vue'),
   'claim-tasks': () => import('@/views/ClaimTasksView.vue'),
   'task-hall': () => import('@/views/TaskHallView.vue'),
+  'global-search': () => import('@/views/GlobalSearchView.vue'),
   construction: () => import('@/views/ConstructionView.vue'),
   'account-management': () => import('@/views/AccountManagementView.vue'),
   'sync-config': () => import('@/views/SyncConfigView.vue'),
@@ -86,7 +87,7 @@ const router = createRouter({
   ],
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const auth = useAuthStore()
   if (!to.meta.public && !auth.isAuthenticated) {
     return { name: 'login', query: { redirect: to.fullPath } }
@@ -97,7 +98,15 @@ router.beforeEach((to) => {
   }
 
   const allowedRoles = (to.meta.roles as string[] | undefined) || []
-  if (allowedRoles.length && auth.user) {
+  if (allowedRoles.length) {
+    if (!auth.user) {
+      try {
+        await auth.hydrateFromLegacySession()
+      } catch {
+        auth.logout()
+        return { name: 'login', query: { redirect: to.fullPath } }
+      }
+    }
     const role = auth.user?.role || ''
     const roles = new Set<string>([role, ...(auth.user?.roles || [])].filter(Boolean).map(String))
     const isAllowed = allowedRoles.some((item) => roles.has(item)) || roles.has('admin')

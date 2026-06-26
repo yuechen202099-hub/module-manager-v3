@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DataBoard, FolderChecked, List, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
+import { DataBoard, FolderChecked, List, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -22,6 +22,7 @@ const navigation = computed(() => {
     'project-board': DataBoard,
     'claim-tasks': Tickets,
     'task-hall': List,
+    'global-search': Search,
     construction: FolderChecked,
     'account-management': UserFilled,
     'sync-config': DataBoard,
