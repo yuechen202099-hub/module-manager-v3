@@ -252,6 +252,9 @@ export type InstallerWorkloadRow = {
   workDurationMinutes: number
   workDurationHours: number
   workDurationLabel: string
+  efficiencyDurationMinutes: number
+  efficiencyDurationHours: number
+  efficiencyDurationLabel: string
   workDurationMinutesV2: number
   workDurationHoursV2: number
   workDurationLabelV2: string
@@ -279,6 +282,9 @@ export type InstallerWorkloadRow = {
   fusedWorkDurationMinutes: number
   fusedWorkDurationHours: number
   fusedWorkDurationLabel: string
+  fusedEfficiencyDurationMinutes: number
+  fusedEfficiencyDurationHours: number
+  fusedEfficiencyDurationLabel: string
   fusedWeightedCompletionPerEffectiveHour: number
   idleSegments: InstallerIdleSegment[]
   freeIdleSegmentUsed: boolean
@@ -320,6 +326,8 @@ export type InstallerWorkSegment = {
   label: string
   minutes: number
   durationLabel: string
+  efficiencyMinutes?: number
+  efficiencyDurationLabel?: string
   completionCount?: number
   weightedCompletion?: number
   completionPerEffectiveHour?: number

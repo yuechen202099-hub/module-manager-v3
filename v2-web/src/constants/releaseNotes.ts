@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.29'
+export const APP_VERSION = '3.0.30'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,17 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.30',
+    date: '2026-06-26',
+    type: '小更新',
+    title: 'KPI 效率计时口径修正',
+    items: [
+      '安装人员 KPI 新增效率计时口径，在线补偿和连续完成补偿不再进入效率分母。',
+      '计入工时仍受在线系数、挂机扣减和考勤窗口约束，最终上限不超过考勤时间。',
+      '融合加权效率改为使用未补偿且不超过考勤窗口的效率计时，避免补偿时间拉低施工效率。',
+    ],
+  },
   {
     version: 'V3.0.29',
     date: '2026-06-26',

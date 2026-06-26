@@ -2227,6 +2227,7 @@ class PostgresStateRepository(StateRepository):
                     weighted_completion=row.get("weighted_completion", 0),
                     heartbeats=activity["heartbeats"],
                     confirmed_completion_times=[record.get("confirmed_non_idle_at") for record in completion_records],
+                    efficiency_duration_minutes=row.get("efficiency_duration_minutes", 0),
                     pending_non_idle_events=activity["pending_non_idle_events"],
                     deleted_pending_non_idle_events=activity["deleted_pending_non_idle_events"],
                     upload_action_times=activity["upload_action_times"],

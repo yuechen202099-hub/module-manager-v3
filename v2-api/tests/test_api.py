@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.29"
+    assert data["version"] == "3.0.30"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -925,6 +925,8 @@ def test_construction_online_events_feed_fused_installer_workload() -> None:
     assert item["confirmed_non_idle_count"] == 2
     assert item["fused_work_duration_minutes"] >= item["work_duration_minutes"]
     assert item["fused_work_duration_minutes"] <= item["attendance_window_minutes"]
+    assert item["fused_efficiency_duration_minutes"] <= item["attendance_window_minutes"]
+    assert item["fused_efficiency_duration_minutes"] <= item["fused_work_duration_minutes"]
 
 
 def test_construction_upload_rejects_placeholder_group_id_before_file_save() -> None:
@@ -1505,22 +1507,24 @@ def test_installer_daily_workload_includes_work_time_segments() -> None:
     assert item["date"] == "2026-06-22"
     assert item["start_time"] == "08:10"
     assert item["end_time"] == "11:00"
-    assert item["work_duration_minutes"] == 70
-    assert item["work_duration_label"] == "1小时10分钟"
+    assert item["work_duration_minutes"] == 50
+    assert item["efficiency_duration_minutes"] == 50
+    assert item["work_duration_label"]
     assert item["work_span_minutes"] == 170
-    assert item["break_threshold_minutes"] == 60
+    assert item["break_threshold_minutes"] == 45
     assert item["timepoint_count"] == 4
     assert item["completion_count"] == 3
-    assert item["completion_per_effective_hour"] == 2.57
+    assert item["completion_per_effective_hour"] == 3.6
     assert item["weighted_completion"] >= 2.25
     segments = {segment["hour"]: segment["minutes"] for segment in item["hourly_segments"]}
-    assert segments[8] == 50
-    assert segments[9] == 20
+    assert segments[8] == 35
+    assert segments[9] == 15
     assert segments[10] == 0
     two_hour = {segment["start_hour"]: segment for segment in item["two_hour_segments"]}
-    assert two_hour[8]["minutes"] == 70
+    assert two_hour[8]["minutes"] == 50
+    assert two_hour[8]["efficiency_minutes"] == 50
     assert two_hour[8]["completion_count"] == 2
-    assert two_hour[8]["completion_per_effective_hour"] == 1.71
+    assert two_hour[8]["completion_per_effective_hour"] == 2.4
     assert len(two_hour[8]["addresses"]) == 2
     assert two_hour[10]["minutes"] == 0
     assert two_hour[10]["completion_count"] == 1

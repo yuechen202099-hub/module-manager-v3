@@ -100,7 +100,8 @@ def test_fused_online_work_summary_rewards_countable_online_time_without_exceedi
     assert summary["idle_penalty_coefficient"] == 0
     assert summary["final_online_coefficient"] == 1.25
     assert summary["fused_work_duration_minutes"] == 450
-    assert summary["fused_weighted_completion_per_effective_hour"] == 4.8
+    assert summary["fused_efficiency_duration_minutes"] == 360
+    assert summary["fused_weighted_completion_per_effective_hour"] == 6
 
 
 def test_fused_online_work_summary_caps_online_and_fused_minutes_to_attendance_window() -> None:
@@ -116,6 +117,7 @@ def test_fused_online_work_summary_caps_online_and_fused_minutes_to_attendance_w
     assert summary["countable_online_minutes"] == 480
     assert summary["online_ratio"] == 1
     assert summary["fused_work_duration_minutes"] == 480
+    assert summary["fused_efficiency_duration_minutes"] == 480
 
 
 def test_fused_online_work_summary_ignores_online_time_before_9_and_after_17() -> None:
@@ -237,7 +239,25 @@ def test_fused_online_work_summary_without_attendance_window_keeps_original_kpi_
     assert summary["online_confidence"] == "low"
     assert summary["final_online_coefficient"] == 1
     assert summary["fused_work_duration_minutes"] == 90
+    assert summary["fused_efficiency_duration_minutes"] == 90
     assert summary["fused_weighted_completion_per_effective_hour"] == 6
+
+
+def test_work_time_bonus_minutes_do_not_reduce_efficiency() -> None:
+    timestamps = [dt(9, minute) for minute in range(0, 32, 2)]
+    completion_records = [
+        {"group_id": "g1", "address": "A road 1", "completed_at": dt(9, 4)},
+        {"group_id": "g2", "address": "A road 2", "completed_at": dt(9, 16)},
+        {"group_id": "g3", "address": "A road 3", "completed_at": dt(9, 28)},
+    ]
+
+    summary = local_simulation.build_work_time_summary(timestamps, completion_records)
+
+    assert summary["work_duration_base_minutes_v2"] == 30
+    assert summary["dense_bonus_minutes_v2"] == 25
+    assert summary["work_duration_minutes"] == 55
+    assert summary["efficiency_duration_minutes"] == 30
+    assert summary["completion_per_effective_hour"] == 6
 
 
 def fake_catalog_rows(source: str) -> list[dict]:

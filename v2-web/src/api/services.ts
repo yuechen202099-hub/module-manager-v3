@@ -275,6 +275,9 @@ type BackendInstallerWorkload = {
     work_duration_minutes?: number
     work_duration_hours?: number
     work_duration_label?: string
+    efficiency_duration_minutes?: number
+    efficiency_duration_hours?: number
+    efficiency_duration_label?: string
     work_duration_minutes_v2?: number
     work_duration_hours_v2?: number
     work_duration_label_v2?: string
@@ -312,6 +315,9 @@ type BackendInstallerWorkload = {
     fused_work_duration_minutes?: number
     fused_work_duration_hours?: number
     fused_work_duration_label?: string
+    fused_efficiency_duration_minutes?: number
+    fused_efficiency_duration_hours?: number
+    fused_efficiency_duration_label?: string
     fused_weighted_completion_per_effective_hour?: number
     idle_segments?: Array<{
       start_at?: string
@@ -340,6 +346,8 @@ type BackendInstallerWorkload = {
       label?: string
       minutes?: number
       duration_label?: string
+      efficiency_minutes?: number
+      efficiency_duration_label?: string
       completion_count?: number
       weighted_completion?: number
       completion_per_effective_hour?: number
@@ -1233,6 +1241,9 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
       endTime: String(item.end_time || ''),
       workDurationMinutes: Number(item.work_duration_minutes || 0),
       workDurationHours: Number(item.work_duration_hours || 0),
+      efficiencyDurationMinutes: Number(item.efficiency_duration_minutes ?? item.work_duration_minutes ?? 0),
+      efficiencyDurationHours: Number(item.efficiency_duration_hours || 0),
+      efficiencyDurationLabel: String(item.efficiency_duration_label || item.work_duration_label || '0分钟'),
       workDurationLabel: String(item.work_duration_label || '0分钟'),
       workDurationMinutesV2: Number(item.work_duration_minutes_v2 || 0),
       workDurationHoursV2: Number(item.work_duration_hours_v2 || 0),
@@ -1270,7 +1281,14 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
       finalOnlineCoefficient: Number(item.final_online_coefficient ?? 1),
       fusedWorkDurationMinutes: Number(item.fused_work_duration_minutes ?? item.work_duration_minutes ?? 0),
       fusedWorkDurationHours: Number(item.fused_work_duration_hours || 0),
-      fusedWorkDurationLabel: String(item.fused_work_duration_label || item.work_duration_label || '0鍒嗛挓'),
+      fusedEfficiencyDurationMinutes: Number(
+        item.fused_efficiency_duration_minutes ?? item.efficiency_duration_minutes ?? item.work_duration_minutes ?? 0,
+      ),
+      fusedEfficiencyDurationHours: Number(item.fused_efficiency_duration_hours || 0),
+      fusedEfficiencyDurationLabel: String(
+        item.fused_efficiency_duration_label || item.efficiency_duration_label || item.work_duration_label || '0分钟',
+      ),
+      fusedWorkDurationLabel: String(item.fused_work_duration_label || item.work_duration_label || '0分钟'),
       fusedWeightedCompletionPerEffectiveHour: Number(item.fused_weighted_completion_per_effective_hour || 0),
       idleSegments: (item.idle_segments || []).map((segment) => ({
         startAt: String(segment.start_at || ''),
@@ -1308,6 +1326,8 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
               hour: index * 2,
               start_hour: index * 2,
               end_hour: index * 2 + 2,
+              efficiency_minutes: 0,
+              efficiency_duration_label: '0分钟',
               label: `${String(index * 2).padStart(2, '0')}:00-${String(index * 2 + 2).padStart(2, '0')}:00`,
               minutes: 0,
               duration_label: '0分钟',
@@ -1324,6 +1344,8 @@ export async function fetchInstallerWorkload(installer: string): Promise<Install
         endHour: Number(segment.end_hour ?? Number(segment.start_hour ?? segment.hour ?? 0) + 2),
         label: String(segment.label || ''),
         minutes: Number(segment.minutes || 0),
+        efficiencyMinutes: Number(segment.efficiency_minutes ?? segment.minutes ?? 0),
+        efficiencyDurationLabel: String(segment.efficiency_duration_label || segment.duration_label || '0分钟'),
         durationLabel: String(segment.duration_label || '0分钟'),
         completionCount: Number(segment.completion_count || 0),
         weightedCompletion: Number(segment.weighted_completion || 0),

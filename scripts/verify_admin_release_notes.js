@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.29'
+const EXPECTED_VERSION = '3.0.30'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -20,6 +20,7 @@ assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll(
 assert.match(releaseNotes, /version:\s*'V3\.0\.26'/, 'release notes must include V3.0.26')
 assert.match(releaseNotes, /version:\s*'V3\.0\.25'/, 'release notes must include V3.0.25')
 assert.match(releaseNotes, /version:\s*'V3\.0\.24'/, 'release notes must include V3.0.24')
+assert.match(releaseNotes, /KPI 效率计时口径修正/, 'release notes must describe the KPI efficiency timing update in Chinese')
 assert.match(releaseNotes, /在线时长融合 KPI/, 'release notes must describe the KPI online fusion update in Chinese')
 assert.match(releaseNotes, /00000000/, 'release notes must keep the construction placeholder fix')
 assert.doesNotMatch(releaseNotes, /TODO|TBD|placeholder/i, 'release notes must not contain placeholders')

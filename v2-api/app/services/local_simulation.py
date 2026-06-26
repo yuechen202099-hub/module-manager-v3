@@ -2833,11 +2833,16 @@ def build_fused_online_work_summary(
     weighted_completion: int | float,
     heartbeats: list[Any] | tuple[Any, ...] | None,
     confirmed_completion_times: list[Any] | tuple[Any, ...] | None,
+    efficiency_duration_minutes: int | float | None = None,
     pending_non_idle_events: list[Any] | tuple[Any, ...] | None = None,
     deleted_pending_non_idle_events: list[Any] | tuple[Any, ...] | None = None,
     upload_action_times: list[Any] | tuple[Any, ...] | None = None,
 ) -> dict[str, Any]:
     work_minutes = max(0, int(round(float(work_duration_minutes or 0))))
+    raw_efficiency_minutes = work_minutes if efficiency_duration_minutes is None else int(
+        round(float(efficiency_duration_minutes or 0))
+    )
+    base_efficiency_minutes = max(0, raw_efficiency_minutes)
     weighted = float(weighted_completion or 0)
     day_start = _day_boundary(date_key, ONLINE_WORKDAY_START_HOUR)
     day_end = _day_boundary(date_key, ONLINE_WORKDAY_END_HOUR)
@@ -2858,7 +2863,12 @@ def build_fused_online_work_summary(
         "fused_work_duration_minutes": work_minutes,
         "fused_work_duration_hours": round(work_minutes / 60, 2) if work_minutes else 0,
         "fused_work_duration_label": _format_duration_label(work_minutes),
-        "fused_weighted_completion_per_effective_hour": round(weighted / (work_minutes / 60), 2) if work_minutes else 0,
+        "fused_efficiency_duration_minutes": base_efficiency_minutes,
+        "fused_efficiency_duration_hours": round(base_efficiency_minutes / 60, 2) if base_efficiency_minutes else 0,
+        "fused_efficiency_duration_label": _format_duration_label(base_efficiency_minutes),
+        "fused_weighted_completion_per_effective_hour": round(weighted / (base_efficiency_minutes / 60), 2)
+        if base_efficiency_minutes
+        else 0,
         "idle_segments": [],
         "free_idle_segment_used": False,
         "pending_non_idle_count": pending_count,
@@ -2886,6 +2896,8 @@ def build_fused_online_work_summary(
     final_online_coefficient = max(0.0, base_online_coefficient - idle_penalty_coefficient)
     fused_minutes = min(attendance_window_minutes, int(round(work_minutes * final_online_coefficient)))
     fused_hours = fused_minutes / 60 if fused_minutes else 0
+    fused_efficiency_minutes = min(attendance_window_minutes, base_efficiency_minutes)
+    fused_efficiency_hours = fused_efficiency_minutes / 60 if fused_efficiency_minutes else 0
     return {
         **base_payload,
         "attendance_window_minutes": attendance_window_minutes,
@@ -2898,7 +2910,12 @@ def build_fused_online_work_summary(
         "fused_work_duration_minutes": fused_minutes,
         "fused_work_duration_hours": round(fused_hours, 2) if fused_hours else 0,
         "fused_work_duration_label": _format_duration_label(fused_minutes),
-        "fused_weighted_completion_per_effective_hour": round(weighted / fused_hours, 2) if fused_hours else 0,
+        "fused_efficiency_duration_minutes": fused_efficiency_minutes,
+        "fused_efficiency_duration_hours": round(fused_efficiency_hours, 2) if fused_efficiency_hours else 0,
+        "fused_efficiency_duration_label": _format_duration_label(fused_efficiency_minutes),
+        "fused_weighted_completion_per_effective_hour": round(weighted / fused_efficiency_hours, 2)
+        if fused_efficiency_hours
+        else 0,
         "idle_segments": idle_segments,
         "free_idle_segment_used": bool(idle_segments),
         "online_confidence": "normal",
@@ -3114,6 +3131,7 @@ def build_work_time_summary(
             "end_hour": min(24, hour + WORK_SEGMENT_HOURS),
             "label": _two_hour_label(hour),
             "minutes": 0,
+            "efficiency_minutes": 0,
             "completion_count": 0,
             "weighted_completion": 0.0,
             "addresses": [],
@@ -3142,7 +3160,9 @@ def build_work_time_summary(
                 segment_end = min(counted_until, next_hour)
                 segment_minutes = int(round((segment_end - cursor).total_seconds() / 60))
                 buckets[cursor.hour] += segment_minutes
-                segment_buckets[_bucket_start_hour(cursor)]["minutes"] += segment_minutes
+                segment = segment_buckets[_bucket_start_hour(cursor)]
+                segment["minutes"] += segment_minutes
+                segment["efficiency_minutes"] += segment_minutes
                 cursor = segment_end
     for window in shadow_summary["dense_bonus_windows_v2"]:
         bonus_minutes = int(window.get("bonus_minutes") or 0)
@@ -3170,18 +3190,21 @@ def build_work_time_summary(
     weighted_completion = 0.0
     for segment in segment_buckets.values():
         minutes = int(segment["minutes"])
+        efficiency_minutes = int(segment["efficiency_minutes"])
         completion_count = int(segment["completion_count"])
         weighted = round(float(segment["weighted_completion"]), 2)
-        hours = minutes / 60 if minutes else 0
+        efficiency_hours = efficiency_minutes / 60 if efficiency_minutes else 0
         total_completion += completion_count
         weighted_completion += weighted
         segment["duration_label"] = _format_duration_label(minutes)
-        segment["completion_per_effective_hour"] = round(completion_count / hours, 2) if hours else 0
-        segment["weighted_completion_per_effective_hour"] = round(weighted / hours, 2) if hours else 0
+        segment["efficiency_duration_label"] = _format_duration_label(efficiency_minutes)
+        segment["completion_per_effective_hour"] = round(completion_count / efficiency_hours, 2) if efficiency_hours else 0
+        segment["weighted_completion_per_effective_hour"] = round(weighted / efficiency_hours, 2) if efficiency_hours else 0
         segment["weighted_completion"] = weighted
         segment["address_count"] = len(segment["addresses"])
         two_hour_segments.append(segment)
-    effective_hours = effective_minutes / 60 if effective_minutes else 0
+    efficiency_minutes = int(shadow_summary.get("work_duration_base_minutes_v2") or effective_minutes)
+    efficiency_hours = efficiency_minutes / 60 if efficiency_minutes else 0
     return {
         "start_at": start.isoformat(timespec="minutes") if start else "",
         "end_at": end.isoformat(timespec="minutes") if end else "",
@@ -3190,14 +3213,19 @@ def build_work_time_summary(
         "work_duration_minutes": effective_minutes,
         "work_duration_hours": round(effective_minutes / 60, 2) if effective_minutes else 0,
         "work_duration_label": _format_duration_label(effective_minutes),
+        "efficiency_duration_minutes": efficiency_minutes,
+        "efficiency_duration_hours": round(efficiency_hours, 2) if efficiency_hours else 0,
+        "efficiency_duration_label": _format_duration_label(efficiency_minutes),
         "work_span_minutes": span_minutes,
         "work_span_label": _format_duration_label(span_minutes),
         "break_threshold_minutes": WORK_V2_MAX_GAP_MINUTES,
         "timepoint_count": len(valid),
         "completion_count": total_completion,
-        "completion_per_effective_hour": round(total_completion / effective_hours, 2) if effective_hours else 0,
+        "completion_per_effective_hour": round(total_completion / efficiency_hours, 2) if efficiency_hours else 0,
         "weighted_completion": round(weighted_completion, 2),
-        "weighted_completion_per_effective_hour": round(weighted_completion / effective_hours, 2) if effective_hours else 0,
+        "weighted_completion_per_effective_hour": round(weighted_completion / efficiency_hours, 2)
+        if efficiency_hours
+        else 0,
         **{
             **shadow_summary,
             "work_duration_minutes_v2": effective_minutes,
@@ -3205,9 +3233,9 @@ def build_work_time_summary(
             "work_duration_label_v2": _format_duration_label(effective_minutes),
         },
         "work_duration_delta_minutes_v2": 0,
-        "completion_per_effective_hour_v2": round(total_completion / effective_hours, 2) if effective_hours else 0,
-        "weighted_completion_per_effective_hour_v2": round(weighted_completion / effective_hours, 2)
-        if effective_hours
+        "completion_per_effective_hour_v2": round(total_completion / efficiency_hours, 2) if efficiency_hours else 0,
+        "weighted_completion_per_effective_hour_v2": round(weighted_completion / efficiency_hours, 2)
+        if efficiency_hours
         else 0,
         "hourly_segments": [
             {
@@ -3459,6 +3487,7 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
                 weighted_completion=row.get("weighted_completion", 0),
                 heartbeats=activity["heartbeats"],
                 confirmed_completion_times=[record.get("confirmed_non_idle_at") for record in completion_records],
+                efficiency_duration_minutes=row.get("efficiency_duration_minutes", 0),
                 pending_non_idle_events=activity["pending_non_idle_events"],
                 deleted_pending_non_idle_events=activity["deleted_pending_non_idle_events"],
                 upload_action_times=activity["upload_action_times"],
