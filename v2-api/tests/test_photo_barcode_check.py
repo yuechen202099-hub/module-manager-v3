@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.services.photo_barcode_check import check_photo_barcode, summarize_photo_accuracy
+import sys
+from io import BytesIO
+from types import SimpleNamespace
+
+from PIL import Image
+
+from app.services import photo_barcode_check
+from app.services.photo_barcode_check import check_photo_barcode, default_barcode_scanner, summarize_photo_accuracy
 
 
 def scanner(values: list[str]):
@@ -96,3 +103,62 @@ def test_photo_accuracy_summary_counts_only_required_categories() -> None:
         "photo_accuracy_not_required": 1,
         "photo_accuracy_rate": 0.3333,
     }
+
+
+def tiny_jpeg_bytes() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def fake_zxing(expected_size: tuple[int, int] = (8, 8)):
+    def read_barcodes(image):
+        assert not isinstance(image, (str, bytes))
+        assert image.size == expected_size
+        return [SimpleNamespace(text="ABC-123")]
+
+    return SimpleNamespace(read_barcodes=read_barcodes)
+
+
+def test_default_barcode_scanner_decodes_local_image_before_zxing(tmp_path, monkeypatch) -> None:
+    image_path = tmp_path / "barcode.jpg"
+    image_path.write_bytes(tiny_jpeg_bytes())
+    monkeypatch.setitem(sys.modules, "zxingcpp", fake_zxing())
+
+    values = default_barcode_scanner({"local_path": str(image_path)})
+
+    assert values == ["ABC123"]
+
+
+def test_default_barcode_scanner_downloads_oss_image_with_server_signed_url(monkeypatch) -> None:
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return tiny_jpeg_bytes()
+
+    requested_urls: list[str] = []
+
+    def fake_urlopen(url: str, timeout: int):
+        requested_urls.append(url)
+        assert timeout == 8
+        return FakeResponse()
+
+    monkeypatch.setitem(sys.modules, "zxingcpp", fake_zxing())
+    monkeypatch.setattr(photo_barcode_check, "sign_oss_server_url", lambda key: f"https://signed.test/{key}", raising=False)
+    monkeypatch.setattr(photo_barcode_check.urllib.request, "urlopen", fake_urlopen)
+
+    values = default_barcode_scanner(
+        {
+            "storage_type": "oss",
+            "storage_key": "module-manager-v2/default-team/photos/aa/photo.jpg",
+            "image_url": "oss://bucket/module-manager-v2/default-team/photos/aa/photo.jpg",
+        }
+    )
+
+    assert values == ["ABC123"]
+    assert requested_urls == ["https://signed.test/module-manager-v2/default-team/photos/aa/photo.jpg"]

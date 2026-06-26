@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.37'
+export const APP_VERSION = '3.0.38'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.38',
+    date: '2026-06-27',
+    type: 'BUG 修复',
+    title: '模块号异常误报与图片条码识别修复',
+    items: [
+      '修复资料组明明已有模块号，却在归档或异常列表中提示“缺少模块资产编号”的问题；校验现在会统一识别资料组和照片上的模块号字段。',
+      '重复模块号判断同步使用统一字段口径，避免界面可见模块号与后台校验结果不一致。',
+      '修复 OSS 照片参与图片准确率复核时无法被后台扫码器读取的问题，后台会通过服务端签名地址读取原图。',
+      '修复 zxing-cpp 调用方式，照片会先经过 Pillow 解码后再执行条形码识别，避免全部落为“无法识别”。',
+    ],
+  },
   {
     version: 'V3.0.37',
     date: '2026-06-27',

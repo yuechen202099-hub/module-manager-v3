@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import re
-import tempfile
 import urllib.request
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 from app.services.matching import build_total_catalog_match_key
+from app.services.photo_storage import parse_oss_image_url, sign_oss_server_url, static_upload_root, validate_image_content
 
 BarcodeScanner = Callable[[dict[str, Any]], Iterable[str]]
 
@@ -162,23 +163,18 @@ def default_barcode_scanner(photo: dict[str, Any]) -> list[str]:
     except Exception:
         return []
 
-    path = _photo_local_path(photo)
-    cleanup = False
-    if path is None:
-        path = _download_photo_to_temp(photo)
-        cleanup = path is not None
-    if path is None:
+    image = _photo_image(photo)
+    if image is None:
         return []
     try:
-        return [normalize_barcode_value(item.text) for item in zxingcpp.read_barcodes(str(path)) if item.text]
+        return [normalize_barcode_value(item.text) for item in zxingcpp.read_barcodes(image) if item.text]
     except Exception:
         return []
     finally:
-        if cleanup:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        try:
+            image.close()
+        except Exception:
+            pass
 
 
 def _scan_values(photo: dict[str, Any], *, scanner: BarcodeScanner | None) -> list[str]:
@@ -192,33 +188,82 @@ def _scan_values(photo: dict[str, Any], *, scanner: BarcodeScanner | None) -> li
 
 
 def _photo_local_path(photo: dict[str, Any]) -> Path | None:
-    for key in ("local_path", "path", "file_path", "object_key"):
+    for key in ("local_path", "path", "file_path", "object_key", "storage_key"):
         value = str(photo.get(key) or "").strip()
         if not value:
             continue
         path = Path(value)
         if path.exists():
             return path
-    image_url = str(photo.get("image_url") or photo.get("url") or "").strip()
-    parsed = urlparse(image_url)
-    if parsed.scheme in {"", "file"}:
-        path = Path(parsed.path or image_url)
+    storage_type = str(photo.get("storage_type") or "").strip()
+    storage_key = str(photo.get("storage_key") or "").strip()
+    if storage_type == "local_upload" and storage_key:
+        path = static_upload_root() / storage_key.lstrip("/")
         if path.exists():
             return path
+    for key in ("image_url", "url", "source_url", "delivery_cache_url", "preview_url", "thumbnail_url"):
+        image_url = str(photo.get(key) or "").strip()
+        if not image_url:
+            continue
+        if image_url.startswith("/static/uploads/"):
+            path = static_upload_root() / image_url.removeprefix("/static/uploads/").lstrip("/")
+            if path.exists():
+                return path
+        parsed = urlparse(image_url)
+        if parsed.scheme in {"", "file"}:
+            path = Path(parsed.path or image_url)
+            if path.exists():
+                return path
     return None
 
 
-def _download_photo_to_temp(photo: dict[str, Any]) -> Path | None:
-    image_url = str(photo.get("preview_url") or photo.get("image_url") or photo.get("url") or "").strip()
-    if not image_url.lower().startswith(("http://", "https://")):
+def _photo_image(photo: dict[str, Any]):
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+
+    path = _photo_local_path(photo)
+    try:
+        if path is not None:
+            image = Image.open(path)
+            image.load()
+            return image
+        content = _download_photo_content(photo)
+        if not content:
+            return None
+        validate_image_content(content, source="barcode photo")
+        image = Image.open(BytesIO(content))
+        image.load()
+        return image
+    except Exception:
+        return None
+
+
+def _download_photo_content(photo: dict[str, Any]) -> bytes | None:
+    image_url = _download_photo_url(photo)
+    if not image_url:
         return None
     try:
         with urllib.request.urlopen(image_url, timeout=8) as response:
-            content = response.read(8 * 1024 * 1024)
+            return response.read(8 * 1024 * 1024)
     except Exception:
         return None
-    suffix = Path(urlparse(image_url).path).suffix or ".jpg"
-    handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    with handle:
-        handle.write(content)
-    return Path(handle.name)
+
+
+def _download_photo_url(photo: dict[str, Any]) -> str:
+    storage_type = str(photo.get("storage_type") or "").strip()
+    storage_key = str(photo.get("storage_key") or "").strip()
+    image_url = str(photo.get("image_url") or photo.get("url") or photo.get("source_url") or "").strip()
+    if storage_type == "oss" or image_url.startswith("oss://"):
+        key = storage_key or parse_oss_image_url(image_url)[1]
+        if key:
+            try:
+                return sign_oss_server_url(key)
+            except RuntimeError:
+                return ""
+    for key in ("image_url", "source_url", "url", "preview_url", "delivery_cache_url", "thumbnail_url"):
+        value = str(photo.get(key) or "").strip()
+        if value.lower().startswith(("http://", "https://")):
+            return value
+    return ""

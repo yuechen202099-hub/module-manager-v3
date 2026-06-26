@@ -19,7 +19,7 @@ Run on server before deployment:
 
 ```bash
 APP=/opt/module-manager-v2
-bash "$APP/current/scripts/production_backup.sh" "$APP" V3.0.37
+bash "$APP/current/scripts/production_backup.sh" "$APP" V3.0.38
 ```
 
 Backup must include:
@@ -34,8 +34,8 @@ Backup must include:
 ## Upload And Hash
 
 ```powershell
-scp -i <key.pem> .\build\server-release\module-manager-v2-server-3.0.37.zip root@<server>:/tmp/
-ssh -i <key.pem> root@<server> "sha256sum /tmp/module-manager-v2-server-3.0.37.zip"
+scp -i <key.pem> .\build\server-release\module-manager-v2-server-3.0.38.zip root@<server>:/tmp/
+ssh -i <key.pem> root@<server> "sha256sum /tmp/module-manager-v2-server-3.0.38.zip"
 ```
 
 The server hash must equal the local hash.
@@ -44,7 +44,7 @@ The server hash must equal the local hash.
 
 ```bash
 APP=/opt/module-manager-v2
-VERSION=3.0.37
+VERSION=3.0.38
 STAMP=$(date +%Y%m%d_%H%M%S)
 REL=$APP/releases/v$VERSION-$STAMP
 mkdir -p "$REL"
@@ -61,7 +61,7 @@ systemctl is-active nginx
 
 ```bash
 APP=/opt/module-manager-v2
-"$APP/venv/bin/python" "$APP/current/scripts/production_health_check.py" --base-url http://127.0.0.1 --expected-version 3.0.37 --env "$APP/.env"
+"$APP/venv/bin/python" "$APP/current/scripts/production_health_check.py" --base-url http://127.0.0.1 --expected-version 3.0.38 --env "$APP/.env"
 ```
 
 Also verify the public entry:

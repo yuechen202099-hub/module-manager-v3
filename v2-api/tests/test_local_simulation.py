@@ -1433,6 +1433,38 @@ def test_archive_blocks_duplicate_module_and_missing_required_scan_fields(synthe
     assert "缺少模块资产编号" in module_group["exception_note"]
 
 
+def test_archive_validation_accepts_group_level_module_asset_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local_simulation, "collect_module_group_map", lambda: {})
+    group = {
+        "id": "group-with-module",
+        "module_asset_no": "MOD-001",
+        "photos": [
+            {"id": f"photo-{index}", "collector": "COLLECTOR-001"}
+            for index in range(4)
+        ],
+    }
+
+    reasons = local_simulation.validate_group_archive(group)
+
+    assert "缺少模块资产编号" not in reasons
+
+
+def test_archive_validation_detects_duplicate_module_number_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local_simulation, "collect_module_group_map", lambda: {"MOD-001": {"other-group"}})
+    group = {
+        "id": "group-with-duplicate-module",
+        "construction_module_asset_no": "MOD-001",
+        "photos": [
+            {"id": f"photo-{index}", "collector": "COLLECTOR-001"}
+            for index in range(4)
+        ],
+    }
+
+    reasons = local_simulation.validate_group_archive(group)
+
+    assert any(reason.startswith("模块号重复") for reason in reasons)
+
+
 @pytest.mark.skipif(find_spec("openpyxl") is None, reason="openpyxl is not available")
 def test_import_scan_template_xlsx_reads_business_fields_and_hyperlink(synthetic_state: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     from io import BytesIO

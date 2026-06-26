@@ -3803,13 +3803,30 @@ def calculate_completeness_rate(groups: list[dict[str, Any]], scan_only: bool = 
     return round(collected_slots / required_slots, 4)
 
 
+def group_module_asset_values(group: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for value in (
+        group.get("module_asset_no"),
+        group.get("asset_no"),
+        group.get("construction_module_asset_no"),
+    ):
+        normalized = str(value or "").strip()
+        if normalized:
+            values.append(normalized)
+    for photo in group.get("photos", []):
+        for value in (photo.get("asset_no"), photo.get("module_asset_no")):
+            normalized = str(value or "").strip()
+            if normalized:
+                values.append(normalized)
+    return list(dict.fromkeys(values))
+
+
 def collect_module_group_map() -> dict[str, set[str]]:
     module_groups: dict[str, set[str]] = defaultdict(set)
     for group in get_state()["groups"]:
-        for photo in group.get("photos", []):
-            asset_no = str(photo.get("asset_no") or "").strip()
-            if asset_no:
-                module_groups[asset_no].add(group["id"])
+        group_id = str(group.get("id") or "")
+        for asset_no in group_module_asset_values(group):
+            module_groups[asset_no].add(group_id)
     return module_groups
 
 
@@ -3826,15 +3843,15 @@ def validate_group_archive(group: dict[str, Any]) -> list[str]:
         reasons.append(MISSING_COLLECTOR_PHOTO_REASON)
     if photos and not any(str(photo.get("collector") or "").strip() for photo in photos):
         reasons.append("缺少采集器信息")
-    if photos and not any(str(photo.get("asset_no") or "").strip() for photo in photos):
+    module_asset_values = group_module_asset_values(group)
+    if photos and not module_asset_values:
         reasons.append("缺少模块资产编号")
     module_groups = collect_module_group_map()
     duplicate_modules = sorted(
         {
-            str(photo.get("asset_no") or "").strip()
-            for photo in photos
-            if str(photo.get("asset_no") or "").strip()
-            and len(module_groups.get(str(photo.get("asset_no") or "").strip(), set()) - {group["id"]}) > 0
+            asset_no
+            for asset_no in module_asset_values
+            if len(module_groups.get(asset_no, set()) - {str(group.get("id") or "")}) > 0
         }
     )
     if duplicate_modules:

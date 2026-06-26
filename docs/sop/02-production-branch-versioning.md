@@ -3,7 +3,7 @@
 ## Current Baseline
 
 - Production maintenance branch: `production/v3.0.35`
-- Current production app version: `V3.0.37`
+- Current production app version: `V3.0.38`
 - Development environment `3.0.56` must not be mixed into this production line.
 
 ## Branch Rules
@@ -40,8 +40,8 @@ Before release, verify the same version appears in:
 After a production release is verified, create or update a git tag for the released version when the repository policy allows it:
 
 ```powershell
-git tag v3.0.37 <commit>
-git push origin v3.0.37
+git tag v3.0.38 <commit>
+git push origin v3.0.38
 ```
 
 If tag creation is skipped, explain why in the release record.

@@ -133,7 +133,7 @@ It blocks default secrets, demo auth, weak admin credentials, and incomplete dep
 Build a clean production server release package:
 
 ```powershell
-.\scripts\build-client-release.ps1 -Version 3.0.37
+.\scripts\build-client-release.ps1 -Version 3.0.38
 ```
 
 The release package is created under `build/server-release/` and includes `RELEASE_MANIFEST.md` with version, generated time, included files, excluded local artifacts, verification commands, and production notes. The historical `build/client-release/` path is for old demo documents only and must not be used for production deployment.

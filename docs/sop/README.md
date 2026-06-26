@@ -2,7 +2,7 @@
 
 This directory is the standard operating procedure entrypoint for the production maintenance line.
 
-Current production baseline: `V3.0.37`.
+Current production baseline: `V3.0.38`.
 
 Use these SOPs for every production-impacting change:
 

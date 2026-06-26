@@ -33,9 +33,9 @@ assertContains(services, 'photo_accuracy_checked', 'BackendSummary must include 
 assertContains(board, '图片准确率', 'ProjectBoardView must show the image accuracy label in Chinese')
 assertContains(board, 'photoAccuracyRate', 'ProjectBoardView must use the mapped accuracy rate')
 assertContains(board, 'photoAccuracyPassed', 'ProjectBoardView must show passed count')
-assertContains(releaseNotes, 'V3.0.37', 'Release notes must include V3.0.37')
+assertContains(releaseNotes, 'V3.0.38', 'Release notes must include V3.0.38')
 assertContains(releaseNotes, '图片准确率', 'Release notes must describe the photo accuracy feature in Chinese')
-assertContains(apiMain, 'version="3.0.37"', 'FastAPI app version must be 3.0.37')
-assertContains(opsStatus, 'return "3.0.37"', 'system status version must be 3.0.37')
+assertContains(apiMain, 'version="3.0.38"', 'FastAPI app version must be 3.0.38')
+assertContains(opsStatus, 'return "3.0.38"', 'system status version must be 3.0.38')
 
 console.log('photo barcode accuracy checks passed')
