@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.30'
+export const APP_VERSION = '3.0.31'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,19 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.31',
+    date: '2026-06-26',
+    type: 'BUG 修复',
+    title: '施工采集 00000000 工单修复',
+    items: [
+      '修复施工采集页在线补取资料组详情失败时误回退到测试资料组，导致当前工单显示为 00000000 的问题。',
+      '移除生产 API 服务层对测试资料组的兜底引用，接口失败时保留当前真实工单概要，不再注入 00000000 示例数据。',
+      '临时关闭施工采集页每 5 分钟自动上传缓存，先阻断联网状态下误上传半成品缓存的风险。',
+      '保留手动上传当前缓存和批量上传缓存入口，施工员确认工单无误后仍可主动上传。',
+      '离线缓存、扫码无工单提示、上传前占位工单拦截继续保留。',
+    ],
+  },
   {
     version: 'V3.0.30',
     date: '2026-06-26',

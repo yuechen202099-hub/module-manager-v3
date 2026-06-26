@@ -131,7 +131,6 @@ const DRAFT_STORE = 'drafts'
 const SNAPSHOT_STORE = 'terminal_snapshots'
 const SCANNER_START_TIMEOUT_MS = 7000
 const HEARTBEAT_INTERVAL_MS = 60_000
-const AUTO_UPLOAD_INTERVAL_MS = 5 * 60_000
 const collator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' })
 
 const auth = useAuthStore()
@@ -188,7 +187,6 @@ let scanCandidateHits = 0
 let scanLocked = false
 let draftPersistTimer = 0
 let heartbeatTimer = 0
-let autoUploadTimer = 0
 let suspendDraftAutoPersist = false
 
 const form = reactive({
@@ -1663,22 +1661,6 @@ async function uploadAllCached() {
   await reloadAfterUpload()
 }
 
-async function autoUploadCachedDrafts() {
-  if (isAdmin.value || uploading.value || !online() || !readyCachedDrafts.value.length) return
-  uploading.value = true
-  let changed = false
-  for (const draft of [...readyCachedDrafts.value]) {
-    try {
-      await uploadDraft(draft)
-      changed = true
-    } catch (error) {
-      console.warn('construction cached draft auto upload failed', error)
-    }
-  }
-  uploading.value = false
-  if (changed) await reloadAfterUpload()
-}
-
 async function submitSelectedConstructionTask() {
   const task = selectedTask.value
   if (!task) return
@@ -2026,9 +2008,6 @@ onMounted(() => {
   heartbeatTimer = window.setInterval(() => {
     void sendConstructionHeartbeat()
   }, HEARTBEAT_INTERVAL_MS)
-  autoUploadTimer = window.setInterval(() => {
-    void autoUploadCachedDrafts()
-  }, AUTO_UPLOAD_INTERVAL_MS)
 })
 
 watch(collectOpen, (open, oldOpen) => {
@@ -2039,7 +2018,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('message', handleExternalRefresh)
   window.clearTimeout(draftPersistTimer)
   window.clearInterval(heartbeatTimer)
-  window.clearInterval(autoUploadTimer)
   void flushCurrentDraftPersist()
   closeScanner()
   clearPreviews()

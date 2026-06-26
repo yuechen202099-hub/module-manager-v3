@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.30'
+const EXPECTED_VERSION = '3.0.31'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -17,6 +17,10 @@ assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file mus
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
 assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
+assert.match(releaseNotes, /施工采集 00000000 工单修复/, 'release notes must describe the construction 00000000 fix in Chinese')
+assert.match(releaseNotes, /每 5 分钟自动上传缓存/, 'release notes must describe the construction auto upload shutdown in Chinese')
+assert.match(releaseNotes, /测试资料组/, 'release notes must describe the mock group fallback root cause in Chinese')
+assert.match(releaseNotes, /00000000/, 'release notes must describe the construction 00000000 fix')
 assert.match(releaseNotes, /version:\s*'V3\.0\.26'/, 'release notes must include V3.0.26')
 assert.match(releaseNotes, /version:\s*'V3\.0\.25'/, 'release notes must include V3.0.25')
 assert.match(releaseNotes, /version:\s*'V3\.0\.24'/, 'release notes must include V3.0.24')

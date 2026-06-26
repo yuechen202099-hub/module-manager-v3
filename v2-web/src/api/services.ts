@@ -1,4 +1,4 @@
-import { mockGroups, mockPhotos, mockProjects, mockTasks, mockUser } from './mock'
+import { mockProjects, mockTasks, mockUser } from './mock'
 import type {
   AuthConfig,
   ConstructionExceptionOrder,
@@ -909,24 +909,15 @@ export async function releaseAllClaimedTasks(): Promise<{ released: number }> {
 }
 
 export async function fetchTaskGroups(taskId = '1'): Promise<MaterialGroup[]> {
-  try {
-    const data = await api<{ total: number; items: BackendGroup[] }>(
-      `/local-test/tasks/${encodeURIComponent(taskId)}/groups?limit=1000&scan_only=false&summary=true`,
-    )
-    return (data.items || []).map(mapGroup)
-  } catch {
-    return mockGroups.filter((group) => group.taskId === taskId)
-  }
+  const data = await api<{ total: number; items: BackendGroup[] }>(
+    `/local-test/tasks/${encodeURIComponent(taskId)}/groups?limit=1000&scan_only=false&summary=true`,
+  )
+  return (data.items || []).map(mapGroup)
 }
 
 export async function fetchGroup(groupId: string): Promise<{ group: MaterialGroup; photos: ReviewPhoto[] }> {
-  try {
-    const group = mapGroup(await api<BackendGroup>(`/local-test/groups/${encodeURIComponent(groupId)}`))
-    return { group, photos: group.photos || [] }
-  } catch {
-    const group = mockGroups.find((item) => item.id === groupId) || mockGroups[0]
-    return { group, photos: mockPhotos }
-  }
+  const group = mapGroup(await api<BackendGroup>(`/local-test/groups/${encodeURIComponent(groupId)}`))
+  return { group, photos: group.photos || [] }
 }
 
 export async function saveReview(
