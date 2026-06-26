@@ -3934,6 +3934,30 @@ def ensure_group_photo_storage_fields(group: dict[str, Any]) -> dict[str, Any]:
     return group
 
 
+def group_target_installer(group: dict[str, Any]) -> str:
+    for value in (
+        group.get("installer"),
+        group.get("constructor"),
+        group.get("replacement_by"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    try:
+        task = ensure_construction_task_fields(find_task(int(group.get("task_id") or 0)))
+    except (KeyError, TypeError, ValueError):
+        task = {}
+    for value in (
+        task.get("construction_claimed_by"),
+        task.get("assigned_constructor"),
+        task.get("claimed_by"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def group_target_text(group: dict[str, Any]) -> str:
     values = [
         group.get("id"),
@@ -3942,7 +3966,7 @@ def group_target_text(group: dict[str, Any]) -> str:
         group.get("meter_match_key"),
         group.get("address"),
         group.get("status"),
-        group.get("installer"),
+        group_target_installer(group),
         group.get("creator"),
         group.get("collector"),
         group.get("module_asset_no"),
@@ -3980,7 +4004,7 @@ def group_target_summary(group: dict[str, Any], *, include_photos: bool = False)
         "reviewer": group.get("reviewer", ""),
         "review_note": group.get("review_note", ""),
         "exception_note": group.get("exception_note", ""),
-        "installer": group.get("installer", ""),
+        "installer": group_target_installer(group),
         "collector": group.get("collector", "") or first_photo_field("collector"),
         "module_asset_no": group.get("module_asset_no", "") or first_photo_field("module_asset_no") or first_photo_field("asset_no"),
         "creator": group.get("creator", "") or first_photo_field("creator"),
@@ -5341,6 +5365,54 @@ def reset_group_to_unreviewed(group_id: str, actor: str, reason: str = "", force
     )
     refresh_summary()
     return {"group": group}
+
+
+def bulk_archive_groups(group_ids: list[str], actor: str, reason: str = "") -> dict[str, Any]:
+    actor = actor.strip() or "admin"
+    unique_ids = list(dict.fromkeys(str(item).strip() for item in group_ids if str(item).strip()))
+    if not unique_ids:
+        raise ValueError("At least one group is required")
+    archived_groups: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    now = now_iso()
+    for group_id in unique_ids:
+        group = get_group(group_id)
+        if group is None:
+            skipped.append({"group_id": group_id, "reason": "not_found"})
+            continue
+        photos = [photo for photo in group.get("photos", []) if photo.get("is_active", True)]
+        if not photos:
+            skipped.append({"group_id": group_id, "reason": "no_active_photos"})
+            continue
+        for photo in photos:
+            category = str(photo.get("category") or "unclassified")
+            label = str(photo.get("category_label") or PHOTO_CATEGORIES.get(category, PHOTO_CATEGORIES["unclassified"]))
+            photo["category"] = category
+            photo["category_label"] = label
+            photo["archive_status"] = "archived"
+            photo["archive_filename"] = photo.get("archive_filename") or build_archive_filename(label, photo.get("image_url", ""))
+            photo["archived_at"] = now
+            photo["classified_by"] = photo.get("classified_by") or actor
+        update_group_archive_status(group, actor)
+        group["bulk_archive_reason"] = reason.strip()
+        mark_delivery_cache_stale(group, "admin bulk archive")
+        archived_groups.append(group)
+    append_audit_event(
+        "admin_groups_bulk_archive",
+        actor,
+        {
+            "group_ids": unique_ids,
+            "archived_count": len(archived_groups),
+            "skipped": skipped,
+            "reason": reason.strip(),
+        },
+    )
+    refresh_summary()
+    return {
+        "archived_count": len(archived_groups),
+        "skipped": skipped,
+        "groups": [group_target_summary(group, include_photos=True) for group in archived_groups],
+    }
 
 
 def return_group_to_exception_order(

@@ -312,6 +312,8 @@ def resolve_group_collection_for_response(payload: dict[str, Any]) -> dict[str, 
     result = deepcopy(payload)
     if isinstance(result.get("items"), list):
         result["items"] = [resolve_group_for_response(item) if isinstance(item, dict) else item for item in result["items"]]
+    if isinstance(result.get("groups"), list):
+        result["groups"] = [resolve_group_for_response(item) if isinstance(item, dict) else item for item in result["groups"]]
     return result
 
 

@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onUnmounted, reactive, ref } from 'vue'
 
 import {
+  bulkArchiveAdminGroups,
   resetAdminGroupToUnconstructed,
   resetAdminGroupToUnreviewed,
   searchGroups,
@@ -41,6 +42,7 @@ const saving = ref(false)
 const total = ref(0)
 const terminals = ref<string[]>([])
 const groups = ref<MaterialGroup[]>([])
+const selectedGroups = ref<MaterialGroup[]>([])
 const errorMessage = ref('')
 const editOpen = ref(false)
 const activeGroup = ref<MaterialGroup | null>(null)
@@ -73,6 +75,7 @@ const editForm = reactive<EditableGroupForm>({
 
 const trimmedQuery = computed(() => query.value.trim())
 const canSearch = computed(() => Boolean(trimmedQuery.value || terminal.value))
+const selectedCount = computed(() => selectedGroups.value.length)
 
 const statusLabels: Record<string, string> = {
   pending: '待审阅',
@@ -112,9 +115,11 @@ async function runSearch() {
     total.value = result.total
     terminals.value = result.terminals
     groups.value = result.items
+    selectedGroups.value = []
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '搜索失败'
     groups.value = []
+    selectedGroups.value = []
     total.value = 0
   } finally {
     loading.value = false
@@ -127,6 +132,7 @@ function resetSearch() {
   searched.value = false
   errorMessage.value = ''
   groups.value = []
+  selectedGroups.value = []
   total.value = 0
 }
 
@@ -184,7 +190,44 @@ function openEdit(group: MaterialGroup) {
 
 function replaceGroup(updated: MaterialGroup) {
   groups.value = groups.value.map((item) => (item.id === updated.id ? updated : item))
+  selectedGroups.value = selectedGroups.value.map((item) => (item.id === updated.id ? updated : item))
   activeGroup.value = updated
+}
+
+function handleSelectionChange(selection: MaterialGroup[]) {
+  selectedGroups.value = selection
+}
+
+async function archiveSelectedGroups() {
+  if (!selectedGroups.value.length) {
+    ElMessage.warning('请先勾选需要归档的资料组')
+    return
+  }
+  const ids = selectedGroups.value.map((item) => item.id)
+  try {
+    await ElMessageBox.confirm(`确认批量归档已勾选的 ${ids.length} 个资料组？系统会写入审计记录。`, '批量归档', {
+      type: 'warning',
+      confirmButtonText: '确认归档',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  saving.value = true
+  try {
+    const result = await bulkArchiveAdminGroups(ids, '管理员后台批量归档')
+    const updatedById = new Map(result.groups.map((item) => [item.id, item]))
+    groups.value = groups.value.map((item) => updatedById.get(item.id) || item)
+    selectedGroups.value = selectedGroups.value
+      .map((item) => updatedById.get(item.id) || item)
+      .filter((item) => !updatedById.has(item.id))
+    const skippedText = result.skipped.length ? `，跳过 ${result.skipped.length} 个` : ''
+    ElMessage.success(`已归档 ${result.archivedCount} 个资料组${skippedText}`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '批量归档失败')
+  } finally {
+    saving.value = false
+  }
 }
 
 async function saveEdit() {
@@ -426,6 +469,11 @@ async function decodeScannerFile(event: Event) {
           <span v-if="searched">共 {{ total }} 条，支持横向滚动查看字段</span>
           <span v-else>等待输入条件</span>
         </div>
+        <div class="result-actions">
+          <el-button type="primary" :disabled="!selectedCount" :loading="saving" @click="archiveSelectedGroups">
+            批量归档<span v-if="selectedCount">（{{ selectedCount }}）</span>
+          </el-button>
+        </div>
       </div>
 
       <el-alert v-if="errorMessage" type="error" :title="errorMessage" show-icon :closable="false" />
@@ -433,7 +481,16 @@ async function decodeScannerFile(event: Event) {
       <el-empty v-if="!loading && searched && !groups.length && !errorMessage" description="没有找到资料组" />
       <el-empty v-else-if="!loading && !searched" description="输入条件后开始定位资料组" />
 
-      <el-table v-else v-loading="loading" :data="groups" height="calc(100vh - 330px)" class="result-table">
+      <el-table
+        v-else
+        v-loading="loading"
+        :data="groups"
+        row-key="id"
+        height="calc(100vh - 330px)"
+        class="result-table"
+        @selection-change="handleSelectionChange"
+      >
+        <el-table-column type="selection" width="48" fixed="left" />
         <el-table-column prop="id" label="资料组ID" min-width="170" show-overflow-tooltip />
         <el-table-column label="表号" min-width="150">
           <template #default="{ row }">
@@ -461,10 +518,13 @@ async function decodeScannerFile(event: Event) {
                 :src="photoDisplayUrl(photo)"
                 :preview-src-list="groupPreviewUrls(row)"
                 fit="cover"
-                lazy
                 preview-teleported
                 class="photo-thumb"
-              />
+              >
+                <template #error>
+                  <span class="photo-thumb-error">加载失败</span>
+                </template>
+              </el-image>
             </div>
             <span v-else class="empty-cell">-</span>
           </template>
@@ -650,6 +710,12 @@ async function decodeScannerFile(event: Event) {
   gap: 8px;
 }
 
+.result-actions {
+  display: flex;
+  justify-content: flex-end;
+  min-width: max-content;
+}
+
 .photo-thumb-list {
   display: flex;
   gap: 6px;
@@ -663,6 +729,18 @@ async function decodeScannerFile(event: Event) {
   border: 1px solid var(--v2-border);
   border-radius: 6px;
   background: var(--v2-surface-soft);
+}
+
+.photo-thumb-error {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  padding: 4px;
+  color: var(--v2-text-muted);
+  font-size: 10px;
+  line-height: 1.1;
+  text-align: center;
 }
 
 .empty-cell {
@@ -761,6 +839,11 @@ async function decodeScannerFile(event: Event) {
   .reset-actions {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .result-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }
 </style>

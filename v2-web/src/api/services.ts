@@ -987,6 +987,29 @@ export async function resetAdminGroupToUnconstructed(
   }
 }
 
+export async function bulkArchiveAdminGroups(groupIds: string[], reason = ''): Promise<{
+  archivedCount: number
+  skipped: Array<{ groupId: string; reason: string }>
+  groups: MaterialGroup[]
+}> {
+  const data = await api<{
+    archived_count?: number
+    skipped?: Array<{ group_id?: string; reason?: string }>
+    groups?: BackendGroup[]
+  }>('/groups/bulk-archive', {
+    method: 'POST',
+    body: JSON.stringify({ group_ids: groupIds, reason }),
+  })
+  return {
+    archivedCount: Number(data.archived_count || 0),
+    skipped: (data.skipped || []).map((item) => ({
+      groupId: String(item.group_id || ''),
+      reason: String(item.reason || ''),
+    })),
+    groups: (data.groups || []).map(mapGroup),
+  }
+}
+
 export async function fetchGroup(groupId: string): Promise<{ group: MaterialGroup; photos: ReviewPhoto[] }> {
   const group = mapGroup(await api<BackendGroup>(`/local-test/groups/${encodeURIComponent(groupId)}`))
   return { group, photos: group.photos || [] }

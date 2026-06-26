@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.35'
+export const APP_VERSION = '3.0.36'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.36',
+    date: '2026-06-26',
+    type: '小更新',
+    title: '管理员资料组后台批量归档与缩略图修复',
+    items: [
+      '修复资料组后台照片缩略图在表格滚动区域内只显示空框的问题，缩略图改为直接加载并保留点击预览。',
+      '安装人员列改为优先展示资料组真实安装人员或施工任务领取人，不再把照片创建人混入安装人员字段。',
+      '资料组后台新增多选框和批量归档按钮，管理员可勾选多个资料组后一次性归档。',
+      '批量归档会写入管理员审计记录，并继续执行照片数量、采集器号、模块号等既有归档校验。',
+    ],
+  },
   {
     version: 'V3.0.35',
     date: '2026-06-26',

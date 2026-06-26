@@ -502,6 +502,9 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
                 .order_by(Photo.sort_order, Photo.created_at, Photo.legacy_id)
             ).all()
         ]
+    task = None
+    if group.task_id:
+        task = session.get(Task, group.task_id)
     payload = {
         "id": group.legacy_id or str(group.id),
         "task_id": group.legacy_task_id,
@@ -519,6 +522,7 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
         "has_archive_blocker": group.has_archive_blocker,
         "photos": photos,
     }
+    task_installer = task.construction_claimed_by if task is not None else ""
     raw = group.raw_data or {}
     for key in (
         "collector",
@@ -535,6 +539,8 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
     ):
         if key in raw and key not in payload:
             payload[key] = raw[key]
+    if not str(payload.get("installer") or "").strip() and task_installer:
+        payload["installer"] = task_installer
     return payload
 
 
@@ -573,7 +579,7 @@ def _group_target_summary(group: dict[str, Any], *, include_photos: bool = False
         "reviewer": group.get("reviewer", ""),
         "review_note": group.get("review_note", ""),
         "exception_note": group.get("exception_note", ""),
-        "installer": group.get("installer", ""),
+        "installer": group.get("installer", "") or group.get("constructor", ""),
         "collector": group.get("collector", "") or first_photo_field("collector"),
         "module_asset_no": group.get("module_asset_no", "") or first_photo_field("module_asset_no") or first_photo_field("asset_no"),
         "creator": group.get("creator", "") or first_photo_field("creator"),
@@ -1259,6 +1265,10 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def bulk_archive_groups(self, group_ids: list[str], *, actor: str, reason: str = "") -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def return_group_to_exception_order(
         self,
         group_id: str,
@@ -1758,6 +1768,9 @@ class JsonStateRepository(StateRepository):
         force: bool = False,
     ) -> dict[str, Any]:
         return local_simulation.reset_group_to_unreviewed(group_id, actor=actor, reason=reason, force=force)
+
+    def bulk_archive_groups(self, group_ids: list[str], *, actor: str, reason: str = "") -> dict[str, Any]:
+        return local_simulation.bulk_archive_groups(group_ids, actor=actor, reason=reason)
 
     def return_group_to_exception_order(
         self,
@@ -2485,6 +2498,18 @@ class PostgresStateRepository(StateRepository):
                 )
                 .exists()
             )
+            task_match = (
+                select(Task.id)
+                .where(
+                    Task.team_id == team_id,
+                    Task.id == MaterialGroup.task_id,
+                    or_(
+                        Task.construction_claimed_by.ilike(pattern),
+                        cast(Task.raw_data, String).ilike(pattern),
+                    ),
+                )
+                .exists()
+            )
             statement = statement.where(
                 or_(
                     MaterialGroup.legacy_id.ilike(pattern),
@@ -2495,6 +2520,7 @@ class PostgresStateRepository(StateRepository):
                     MaterialGroup.reviewer.ilike(pattern),
                     cast(MaterialGroup.raw_data, String).ilike(pattern),
                     photo_match,
+                    task_match,
                 )
             )
         with self._session() as session:
@@ -4511,6 +4537,123 @@ class PostgresStateRepository(StateRepository):
             session.refresh(group)
             return {"group": _group_payload(session, group)}
 
+    def bulk_archive_groups(self, group_ids: list[str], *, actor: str, reason: str = "") -> dict[str, Any]:
+        unique_ids = list(dict.fromkeys(str(item).strip() for item in group_ids if str(item).strip()))
+        if not unique_ids:
+            raise ValueError("At least one group is required")
+        archived_groups: list[MaterialGroup] = []
+        skipped: list[dict[str, str]] = []
+        now = datetime.now(UTC)
+        with self._session() as session:
+            for group_id in unique_ids:
+                try:
+                    group = self._group_by_legacy_id(session, group_id, lock=True)
+                except KeyError:
+                    skipped.append({"group_id": group_id, "reason": "not_found"})
+                    continue
+                photos = session.scalars(
+                    select(Photo)
+                    .where(
+                        Photo.team_id == group.team_id,
+                        Photo.group_id == group.id,
+                        Photo.is_active.is_(True),
+                    )
+                    .order_by(Photo.sort_order, Photo.created_at, Photo.legacy_id)
+                ).all()
+                if not photos:
+                    skipped.append({"group_id": group_id, "reason": "no_active_photos"})
+                    continue
+                before = _group_payload(session, group, include_photos=True)
+                for photo in photos:
+                    raw = dict(photo.raw_data or {})
+                    category = photo.category or raw.get("category") or "unclassified"
+                    label = raw.get("category_label") or local_simulation.PHOTO_CATEGORIES.get(
+                        category,
+                        local_simulation.PHOTO_CATEGORIES["unclassified"],
+                    )
+                    image_url = photo.image_url or photo.source_url or ""
+                    photo.category = category
+                    photo.archive_status = "archived"
+                    photo.archive_filename = photo.archive_filename or local_simulation.build_archive_filename(label, image_url)
+                    photo.archived_at = now
+                    photo.classified_by = photo.classified_by or actor
+                    raw.update(
+                        {
+                            "category": category,
+                            "category_label": label,
+                            "archive_status": "archived",
+                            "archive_filename": photo.archive_filename,
+                            "archived_at": now.isoformat(),
+                            "bulk_archived_by": actor,
+                        }
+                    )
+                    photo.raw_data = raw
+
+                validation_group = _group_payload(session, group, include_photos=True)
+                reasons = local_simulation.validate_group_archive(validation_group)
+                raw_data = dict(group.raw_data or {})
+                group.exception_reasons = reasons
+                group.has_archive_blocker = bool(reasons)
+                group.exception_status = "open" if reasons else None
+                raw_data["exception_reasons"] = reasons
+                raw_data["bulk_archive_reason"] = reason.strip()
+                if reasons:
+                    group.status = GroupStatus.REJECTED
+                    group.exception_note = "; ".join(local_simulation.display_exception_reasons(reasons))
+                    raw_data["status"] = "exception"
+                    raw_data["exception_note"] = group.exception_note
+                else:
+                    group.status = GroupStatus.APPROVED
+                    group.reviewer = actor
+                    group.review_note = "批量归档"
+                    group.exception_note = ""
+                    group.reviewed_at = now
+                    raw_data["status"] = "approved"
+                    raw_data["reviewer"] = actor
+                    raw_data["review_note"] = group.review_note
+                    raw_data["exception_note"] = ""
+                group.raw_data = raw_data
+                archived_groups.append(group)
+                session.add(
+                    AuditLog(
+                        team_id=local_simulation.current_team_id(),
+                        legacy_id=f"admin-groups-bulk-archive-{uuid4()}",
+                        actor_username=actor,
+                        action="admin_groups_bulk_archive",
+                        entity_type="material_group",
+                        entity_id=group.id,
+                        before_data=before,
+                        after_data=_group_payload(session, group, include_photos=True),
+                        payload={"group_id": group.legacy_id or str(group.id), "reason": reason.strip()},
+                    )
+                )
+            session.add(
+                AuditLog(
+                    team_id=local_simulation.current_team_id(),
+                    legacy_id=f"admin-groups-bulk-archive-summary-{uuid4()}",
+                    actor_username=actor,
+                    action="admin_groups_bulk_archive",
+                    entity_type="material_group",
+                    entity_id=None,
+                    before_data={},
+                    after_data={},
+                    payload={
+                        "group_ids": unique_ids,
+                        "archived_count": len(archived_groups),
+                        "skipped": skipped,
+                        "reason": reason.strip(),
+                    },
+                )
+            )
+            session.commit()
+            for group in archived_groups:
+                session.refresh(group)
+            return {
+                "archived_count": len(archived_groups),
+                "skipped": skipped,
+                "groups": [_group_target_summary(_group_payload(session, group, include_photos=True), include_photos=True) for group in archived_groups],
+            }
+
     def return_group_to_exception_order(
         self,
         group_id: str,
@@ -4639,6 +4782,11 @@ class DualWriteStateRepository(JsonStateRepository):
     ) -> dict[str, Any]:
         result = super().reset_group_to_unreviewed(group_id, actor=actor, reason=reason, force=force)
         self._mirror_write("reset_group_to_unreviewed", group_id, actor=actor, reason=reason, force=force)
+        return result
+
+    def bulk_archive_groups(self, group_ids: list[str], *, actor: str, reason: str = "") -> dict[str, Any]:
+        result = super().bulk_archive_groups(group_ids, actor=actor, reason=reason)
+        self._mirror_write("bulk_archive_groups", group_ids, actor=actor, reason=reason)
         return result
 
     def return_group_to_exception_order(

@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.35"
+    assert data["version"] == "3.0.36"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -1324,6 +1324,18 @@ def test_admin_global_group_search_is_admin_only(monkeypatch, tmp_path) -> None:
     assert first_group["collector"] == "search-display-collector"
     assert first_group["module_asset_no"] == "search-display-module"
     assert first_group["creator"] == "search-display-creator"
+    task_id = int(first_group["task_id"])
+    team_token = local_simulation.set_current_team("global-search-team")
+    try:
+        local_simulation.assign_construction_task(task_id, actor="root-admin", constructor="installer-search-a")
+    finally:
+        local_simulation.reset_current_team(team_token)
+    assigned = production_client.get(
+        f"/groups/search?query={target_group['meter_no']}&limit=1",
+        headers=admin_headers,
+    )
+    assert assigned.status_code == 200
+    assert assigned.json()["data"]["items"][0]["installer"] == "installer-search-a"
     first_photo = first_group["photos"][0]
     assert {"id", "thumbnail_url", "preview_url", "collector", "module_asset_no", "creator"}.issubset(first_photo)
     assert first_photo["thumbnail_url"] or first_photo["preview_url"] or first_photo["image_url"]
@@ -1457,12 +1469,47 @@ def test_admin_group_backoffice_edit_and_resets_are_audited(monkeypatch, tmp_pat
     assert reset_construction_payload["group"]["photo_count"] == 0
     assert reset_construction_payload["soft_deleted_photos"] >= 0
 
+    target_for_archive = production_client.get("/groups/search?query=350&limit=1", headers=admin_headers).json()["data"][
+        "items"
+    ][0]
+    archive_photos = production_client.post(
+        "/local-test/scan/import-url-rows",
+        headers=admin_headers,
+        json={
+            "rows": [
+                {
+                    "barcode": target_for_archive["meter_no"],
+                    "meter_match_key": target_for_archive["meter_match_key"],
+                    "terminal": target_for_archive["terminal"],
+                    "collector": "archive-collector",
+                    "module_asset_no": "archive-module",
+                    "creator": "archive-creator",
+                    "photo_urls": "https://example.test/archive-a.jpg,https://example.test/archive-b.jpg",
+                }
+            ]
+        },
+    )
+    assert archive_photos.status_code == 200
+    archive_response = production_client.post(
+        "/groups/bulk-archive",
+        headers=admin_headers,
+        json={"group_ids": [target_for_archive["id"]], "reason": "admin bulk archive smoke"},
+    )
+    assert archive_response.status_code == 200
+    archive_payload = archive_response.json()["data"]
+    assert archive_payload["archived_count"] == 1
+    archived_group = archive_payload["groups"][0]
+    assert archived_group["id"] == target_for_archive["id"]
+    assert archived_group["photos"]
+    assert all(photo["archive_status"] == "archived" for photo in archived_group["photos"])
+
     audit = production_client.get("/local-test/audit-log?limit=20", headers=admin_headers)
     assert audit.status_code == 200
     actions = [item["action"] for item in audit.json()["data"]["items"]]
     assert "admin_group_metadata_update" in actions
     assert "admin_group_reset_unreviewed" in actions
     assert "group_reset_to_unconstructed" in actions
+    assert "admin_groups_bulk_archive" in actions
 
 
 def test_unmatched_create_group_route_creates_terminal_task() -> None:

@@ -21,6 +21,11 @@ class GroupResetRequest(BaseModel):
     reason: str = ""
 
 
+class GroupBulkArchiveRequest(BaseModel):
+    group_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
 def state_repository():
     try:
         return get_state_repository()
@@ -43,6 +48,26 @@ def search_groups(
     token = local_simulation.set_current_team(team_id)
     try:
         result = state_repository().search_group_targets(query=query, terminal=terminal, limit=limit, offset=offset)
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
+
+
+@router.post("/bulk-archive")
+def bulk_archive_groups(
+    payload: GroupBulkArchiveRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().bulk_archive_groups(
+            payload.group_ids,
+            actor=_admin_actor(admin_payload),
+            reason=payload.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         local_simulation.reset_current_team(token)
     return ok(request, resolve_group_collection_for_response(result))

@@ -453,6 +453,48 @@ def test_postgres_group_search_includes_raw_display_fields() -> None:
         for statement in captured
     )
     assert "CAST(material_groups.raw_data AS VARCHAR) ILIKE" in compiled
+    assert "tasks.construction_claimed_by ILIKE" in compiled
+    assert "tasks.review_claimed_by ILIKE" not in compiled
+
+
+def test_postgres_group_payload_does_not_treat_reviewer_as_installer() -> None:
+    class FakeSession:
+        def scalars(self, _statement):
+            class Result:
+                def all(self):
+                    return []
+
+            return Result()
+
+        def get(self, model, key):
+            assert model is repository.Task
+            assert key == "task-uuid"
+            return SimpleNamespace(construction_claimed_by="", review_claimed_by="reviewer-a")
+
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-1",
+        legacy_task_id=124,
+        task_id="task-uuid",
+        meter_match_key="M-1",
+        display_meter_no="METER-1",
+        terminal="TERM-1",
+        installation_address="addr",
+        status=repository.GroupStatus.UNREVIEWED,
+        photo_count=0,
+        reviewer="",
+        reviewed_at=None,
+        review_note="",
+        exception_note="",
+        exception_reasons=[],
+        has_archive_blocker=False,
+        raw_data={},
+        team_id="default-team",
+    )
+
+    payload = repository._group_payload(FakeSession(), group, include_photos=False)
+
+    assert payload.get("installer", "") == ""
 
 
 def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -> None:
