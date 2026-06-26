@@ -245,6 +245,12 @@ export type ProjectSummary = {
   photoRowsLinked: number
   scanUnmatched: number
   reviewProgress: number
+  photoAccuracyChecked: number
+  photoAccuracyPassed: number
+  photoAccuracyFailed: number
+  photoAccuracyUnreadable: number
+  photoAccuracyNotRequired: number
+  photoAccuracyRate: number
   installerDistribution: Array<{ installer: string; groupCount: number; share: number }>
 }
 

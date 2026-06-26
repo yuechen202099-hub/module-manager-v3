@@ -546,6 +546,85 @@ def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -
     assert repository.local_simulation.MISSING_COLLECTOR_PHOTO_REASON not in group.exception_reasons
 
 
+def test_postgres_photo_accuracy_summary_counts_raw_photo_metadata() -> None:
+    photos = [
+        SimpleNamespace(raw_data={"barcode_check_status": "matched"}),
+        SimpleNamespace(raw_data={"barcode_check_status": "mismatched"}),
+        SimpleNamespace(raw_data={"barcode_check_status": "unreadable"}),
+        SimpleNamespace(raw_data={"barcode_check_status": "not_required"}),
+        SimpleNamespace(raw_data={}),
+    ]
+
+    assert repository._photo_accuracy_summary(photos) == {
+        "photo_accuracy_checked": 3,
+        "photo_accuracy_passed": 1,
+        "photo_accuracy_failed": 1,
+        "photo_accuracy_unreadable": 1,
+        "photo_accuracy_not_required": 1,
+        "photo_accuracy_rate": 0.3333,
+    }
+
+
+def test_postgres_summary_photo_accuracy_filters_to_grouped_photos(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_scalars = []
+
+    class FakeOneResult:
+        def one(self):
+            return SimpleNamespace(
+                groups=0,
+                photo_rows_linked=0,
+                scanned_groups=0,
+                approved_groups=0,
+                reviewed_groups=0,
+                unreviewed_groups=0,
+                exception_groups=0,
+                incomplete_groups=0,
+                unconstructed_groups=0,
+            )
+
+    class FakeAllResult:
+        def all(self):
+            return []
+
+    class FakeScalars:
+        def __init__(self, statement):
+            captured_scalars.append(statement)
+
+        def all(self):
+            return []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, _statement):
+            return 0
+
+        def execute(self, _statement):
+            if not hasattr(self, "_executed_group_stats"):
+                self._executed_group_stats = True
+                return FakeOneResult()
+            return FakeAllResult()
+
+        def scalars(self, statement):
+            return FakeScalars(statement)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "alpha-team")
+
+    TestPostgresRepository().summary()
+
+    assert captured_scalars
+    compiled = str(captured_scalars[-1].compile(dialect=postgresql.dialect()))
+    assert "photos.group_id IS NOT NULL" in compiled
+
+
 def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository.settings, "state_backend", "json")
     monkeypatch.setattr(

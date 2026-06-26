@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.36'
+export const APP_VERSION = '3.0.37'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.37',
+    date: '2026-06-27',
+    type: '小更新',
+    title: '图片条码复核与图片准确率',
+    items: [
+      '审阅完成图片分类后，系统会对照片执行一次条形码复核，并与表号、采集器号、模块号进行对应校验。',
+      '表号、采集器、模块等应带条码的照片会进入图片准确率统计；现场照等非条码照片不拉低准确率。',
+      '驾驶舱新增“图片准确率”数据标签，展示通过、失败、无法识别和不参与统计的照片数量。',
+      '后端保留每张照片的复核状态、扫码值、期望值和复核时间，便于后续追溯。',
+    ],
+  },
   {
     version: 'V3.0.36',
     date: '2026-06-26',

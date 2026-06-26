@@ -53,6 +53,12 @@ const emptySummary: ProjectSummary = {
   photoRowsLinked: 0,
   scanUnmatched: 0,
   reviewProgress: 0,
+  photoAccuracyChecked: 0,
+  photoAccuracyPassed: 0,
+  photoAccuracyFailed: 0,
+  photoAccuracyUnreadable: 0,
+  photoAccuracyNotRequired: 0,
+  photoAccuracyRate: 0,
   installerDistribution: [],
 }
 
@@ -129,6 +135,12 @@ let boardFallbackTimer = 0
 const isAdmin = computed(() => Boolean(auth.user?.roles?.includes('admin') || auth.user?.role === 'admin'))
 const scannedRate = computed(() => (summary.value.groups ? summary.value.scannedGroups / summary.value.groups : 0))
 const archiveRate = computed(() => (summary.value.groups ? summary.value.approvedGroups / summary.value.groups : 0))
+const photoAccuracyRate = computed(() => summary.value.photoAccuracyRate || 0)
+const photoAccuracyCaption = computed(() => {
+  const checked = summary.value.photoAccuracyChecked
+  if (!checked) return `暂无应检图片，${summary.value.photoAccuracyNotRequired} 张不参与`
+  return `通过 ${summary.value.photoAccuracyPassed} / 应检 ${checked}，失败 ${summary.value.photoAccuracyFailed}，无法识别 ${summary.value.photoAccuracyUnreadable}`
+})
 const terminalCockpit = computed(() => {
   const total = taskStatus.value.total
   const scanned = taskStatus.value.scanned
@@ -1142,6 +1154,11 @@ onUnmounted(() => {
           <article class="risk-card warn">
             <span>未施工未扫码</span>
             <strong>{{ summary.unconstructedGroups }}</strong>
+          </article>
+          <article class="risk-card good">
+            <span>图片准确率</span>
+            <strong>{{ percent(photoAccuracyRate) }}</strong>
+            <small>{{ photoAccuracyCaption }}</small>
           </article>
         </div>
       </section>

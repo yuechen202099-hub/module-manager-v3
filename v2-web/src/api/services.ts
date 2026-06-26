@@ -186,6 +186,12 @@ type BackendSummary = {
   photo_rows_linked?: number
   scan_unmatched?: number
   review_progress?: number
+  photo_accuracy_checked?: number
+  photo_accuracy_passed?: number
+  photo_accuracy_failed?: number
+  photo_accuracy_unreadable?: number
+  photo_accuracy_not_required?: number
+  photo_accuracy_rate?: number
   installer_distribution?: Array<{ installer?: string; group_count?: number; share?: number }>
 }
 
@@ -666,6 +672,12 @@ function mapSummary(raw: BackendSummary): ProjectSummary {
     photoRowsLinked: Number(raw.photo_rows_linked || 0),
     scanUnmatched: Number(raw.scan_unmatched || 0),
     reviewProgress: Number(raw.review_progress || 0),
+    photoAccuracyChecked: Number(raw.photo_accuracy_checked || 0),
+    photoAccuracyPassed: Number(raw.photo_accuracy_passed || 0),
+    photoAccuracyFailed: Number(raw.photo_accuracy_failed || 0),
+    photoAccuracyUnreadable: Number(raw.photo_accuracy_unreadable || 0),
+    photoAccuracyNotRequired: Number(raw.photo_accuracy_not_required || 0),
+    photoAccuracyRate: Number(raw.photo_accuracy_rate || 0),
     installerDistribution: (raw.installer_distribution || []).map((item) => ({
       installer: item.installer || '未填写',
       groupCount: Number(item.group_count || 0),

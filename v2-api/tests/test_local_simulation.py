@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.services import local_simulation
+from app.services import photo_barcode_check
 from app.services.local_simulation import (
     DEFAULT_SCAN_FILE,
     DEFAULT_TOTAL_CATALOG,
@@ -44,6 +45,7 @@ from app.services.local_simulation import (
     list_replacement_records,
     list_unmatched_records,
     list_tasks,
+    bulk_archive_groups,
     normalize_cell,
     release_task,
     rematch_unmatched_record,
@@ -740,6 +742,80 @@ def test_downloaded_photo_can_be_classified(synthetic_state: dict) -> None:
     assert classified["archive_filename"] == "\u91c7\u96c6\u5668\u6761\u5f62\u7801.jpg"
     assert classified["archived_at"]
     assert synthetic_state["summary"]["unclassified_photos"] == 4
+
+
+def test_classifying_photo_runs_barcode_check_and_updates_accuracy_summary(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(photo_barcode_check, "default_barcode_scanner", lambda photo: ["collector"])
+    first_group = synthetic_state["groups"][0]
+    photo = first_group["photos"][0]
+
+    claim_task(1, reviewer="alice")
+    classified = classify_photo(first_group["id"], photo["id"], "collector_barcode", reviewer="alice")
+    summary = get_state()["summary"]
+
+    assert classified["barcode_check_status"] == "matched"
+    assert classified["barcode_check_expected_type"] == "collector"
+    assert classified["barcode_check_values"] == ["collector"]
+    assert summary["photo_accuracy_checked"] == 1
+    assert summary["photo_accuracy_passed"] == 1
+    assert summary["photo_accuracy_failed"] == 0
+    assert summary["photo_accuracy_unreadable"] == 0
+    assert summary["photo_accuracy_not_required"] == 0
+    assert summary["photo_accuracy_rate"] == 1
+
+
+def test_bulk_archive_runs_barcode_check_for_preclassified_photos(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(photo_barcode_check, "default_barcode_scanner", lambda photo: ["collector"])
+    group = synthetic_state["groups"][0]
+    photo = group["photos"][0]
+    photo["category"] = "collector_barcode"
+    photo["category_label"] = local_simulation.PHOTO_CATEGORIES["collector_barcode"]
+
+    result = bulk_archive_groups([group["id"]], actor="admin", reason="accuracy smoke")
+    archived_photo = result["groups"][0]["photos"][0]
+    summary = get_state()["summary"]
+
+    assert archived_photo["barcode_check_status"] == "matched"
+    assert summary["photo_accuracy_checked"] == 1
+    assert summary["photo_accuracy_passed"] == 1
+
+
+def test_bulk_archive_preserves_existing_barcode_check_for_preclassified_photos(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(photo: dict) -> list[str]:
+        raise AssertionError(f"already checked photo was scanned again: {photo.get('id')}")
+
+    monkeypatch.setattr(photo_barcode_check, "default_barcode_scanner", fail_if_called)
+    group = synthetic_state["groups"][0]
+    photo = group["photos"][0]
+    photo.update(
+        {
+            "category": "collector_barcode",
+            "category_label": local_simulation.PHOTO_CATEGORIES["collector_barcode"],
+            "barcode_check_status": "matched",
+            "barcode_check_expected_type": "collector",
+            "barcode_check_values": ["collector"],
+            "barcode_check_normalized_values": ["COLLECTOR"],
+            "barcode_check_expected_values": ["COLLECTOR"],
+            "barcode_check_matched_value": "COLLECTOR",
+            "barcode_checked_at": "2026-06-27T00:00:00+00:00",
+            "barcode_check_error": "",
+        }
+    )
+
+    result = bulk_archive_groups([group["id"]], actor="admin", reason="preserve accuracy")
+    archived_photo = result["groups"][0]["photos"][0]
+
+    assert archived_photo["barcode_check_status"] == "matched"
+    assert archived_photo["barcode_checked_at"] == "2026-06-27T00:00:00+00:00"
 
 
 def test_previewable_url_photo_can_be_classified_without_download_status(synthetic_state: dict) -> None:

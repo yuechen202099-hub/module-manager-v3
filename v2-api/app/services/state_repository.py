@@ -31,7 +31,7 @@ from app.models import (
     TotalCatalogRow,
     UnmatchedRecord,
 )
-from app.services import local_simulation
+from app.services import local_simulation, photo_barcode_check
 
 
 logger = logging.getLogger(__name__)
@@ -465,7 +465,7 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
     if not image_url and (photo.storage_type or "").strip() == "oss" and photo.storage_key:
         image_url = f"oss://{photo.storage_bucket or ''}/{photo.storage_key}"
     raw = photo.raw_data or {}
-    return {
+    payload = {
         "id": photo.legacy_id or str(photo.id),
         "url": image_url,
         "image_url": image_url,
@@ -488,6 +488,47 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
         "module_asset_no": photo.asset_no or "",
         "creator": photo.creator or "",
         "upload_source": raw.get("upload_source") or raw.get("storage_source") or "",
+    }
+    for key in (
+        "barcode_check_status",
+        "barcode_check_expected_type",
+        "barcode_check_values",
+        "barcode_check_normalized_values",
+        "barcode_check_expected_values",
+        "barcode_check_matched_value",
+        "barcode_checked_at",
+        "barcode_check_error",
+    ):
+        if key in raw:
+            payload[key] = raw[key]
+    return payload
+
+
+def _photo_accuracy_summary(photos: list[Any]) -> dict[str, Any]:
+    payloads = []
+    for photo in photos:
+        if isinstance(photo, dict):
+            raw = photo
+        else:
+            raw = getattr(photo, "raw_data", {}) or {}
+        payloads.append(raw)
+    return photo_barcode_check.summarize_photo_accuracy(payloads)
+
+
+def _group_barcode_context(group: Any) -> dict[str, Any]:
+    raw = getattr(group, "raw_data", {}) or {}
+    return {
+        "id": getattr(group, "legacy_id", None) or str(getattr(group, "id", "")),
+        "task_id": getattr(group, "legacy_task_id", None) or "",
+        "meter_no": getattr(group, "display_meter_no", None) or raw.get("meter_no") or raw.get("barcode") or "",
+        "meter_match_key": getattr(group, "meter_match_key", None) or raw.get("meter_match_key") or "",
+        "terminal": getattr(group, "terminal", None) or raw.get("terminal") or "",
+        "address": getattr(group, "installation_address", None) or raw.get("address") or "",
+        "collector": raw.get("collector") or "",
+        "module_asset_no": raw.get("module_asset_no") or raw.get("asset_no") or "",
+        "asset_no": raw.get("asset_no") or raw.get("module_asset_no") or "",
+        "construction_collector": raw.get("construction_collector") or "",
+        "construction_module_asset_no": raw.get("construction_module_asset_no") or "",
     }
 
 
@@ -1925,6 +1966,13 @@ class PostgresStateRepository(StateRepository):
                     Photo.group_id.is_not(None),
                 )
             ).all()
+            photo_accuracy_rows = session.scalars(
+                select(Photo.raw_data).where(
+                    Photo.team_id == team_id,
+                    Photo.is_active.is_(True),
+                    Photo.group_id.is_not(None),
+                )
+            ).all()
 
         groups = int(group_stats.groups or 0)
         reviewed_groups = int(group_stats.reviewed_groups or 0)
@@ -1942,6 +1990,7 @@ class PostgresStateRepository(StateRepository):
             }
             for installer, group_ids in installer_items
         ]
+        photo_accuracy = _photo_accuracy_summary(list(photo_accuracy_rows))
         return {
             "summary": {
                 "team_id": team_id,
@@ -1964,6 +2013,7 @@ class PostgresStateRepository(StateRepository):
                 "downloaded_photos": 0,
                 "unclassified_photos": 0,
                 "review_progress": round(reviewed_groups / groups, 4) if groups else 0.0,
+                **photo_accuracy,
             },
             "paths": {},
         }
@@ -3807,6 +3857,7 @@ class PostgresStateRepository(StateRepository):
             photo.archive_filename = local_simulation.build_archive_filename(category_label, image_url)
             photo.archived_at = datetime.now(UTC)
             raw_data = dict(photo.raw_data or {})
+            group_context = _group_barcode_context(group)
             raw_data.update(
                 {
                     "category": category,
@@ -3816,6 +3867,17 @@ class PostgresStateRepository(StateRepository):
                     "archive_filename": photo.archive_filename,
                     "archived_at": photo.archived_at.isoformat() if photo.archived_at else "",
                 }
+            )
+            raw_data.update(
+                photo_barcode_check.check_photo_barcode(
+                    {
+                        **_photo_payload(photo),
+                        "category": category,
+                        "category_label": category_label,
+                        "image_url": image_url,
+                    },
+                    group_context,
+                )
             )
             photo.raw_data = raw_data
             session.commit()
@@ -4564,6 +4626,7 @@ class PostgresStateRepository(StateRepository):
                     skipped.append({"group_id": group_id, "reason": "no_active_photos"})
                     continue
                 before = _group_payload(session, group, include_photos=True)
+                group_context = _group_barcode_context(group)
                 for photo in photos:
                     raw = dict(photo.raw_data or {})
                     category = photo.category or raw.get("category") or "unclassified"
@@ -4586,6 +4649,18 @@ class PostgresStateRepository(StateRepository):
                             "archived_at": now.isoformat(),
                             "bulk_archived_by": actor,
                         }
+                    )
+                    raw.update(
+                        photo_barcode_check.ensure_photo_barcode_check(
+                            {
+                                **_photo_payload(photo),
+                                "category": category,
+                                "category_label": label,
+                                "image_url": image_url,
+                                **raw,
+                            },
+                            group_context,
+                        )
                     )
                     photo.raw_data = raw
 

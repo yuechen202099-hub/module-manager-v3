@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.36"
+    assert data["version"] == "3.0.37"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -300,7 +300,16 @@ def test_production_account_config_and_api_token_gate(monkeypatch, tmp_path) -> 
         headers={"Authorization": f"bearer {reviewer_token}", "X-Team-Id": "other-team"},
     )
     assert summary.status_code == 200
-    assert summary.json()["data"]["summary"]["team_id"] == "north-team-01"
+    summary_payload = summary.json()["data"]["summary"]
+    assert summary_payload["team_id"] == "north-team-01"
+    assert {
+        "photo_accuracy_checked",
+        "photo_accuracy_passed",
+        "photo_accuracy_failed",
+        "photo_accuracy_unreadable",
+        "photo_accuracy_not_required",
+        "photo_accuracy_rate",
+    }.issubset(summary_payload)
 
     users_after_login = production_client.get("/auth/users", headers=admin_headers)
     reviewer_user = next(item for item in users_after_login.json()["data"]["items"] if item["username"] == "reviewer-a")

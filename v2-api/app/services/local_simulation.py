@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from app.core.config import settings
 from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key
+from app.services import photo_barcode_check
 from app.services.photo_storage import (
     active_storage_backend,
     parse_oss_image_url,
@@ -156,6 +157,12 @@ def empty_summary() -> dict[str, Any]:
         "downloaded_photos": 0,
         "unclassified_photos": 0,
         "review_progress": 0.0,
+        "photo_accuracy_checked": 0,
+        "photo_accuracy_passed": 0,
+        "photo_accuracy_failed": 0,
+        "photo_accuracy_unreadable": 0,
+        "photo_accuracy_not_required": 0,
+        "photo_accuracy_rate": 0.0,
     }
 
 
@@ -2600,6 +2607,9 @@ def build_summary(
     scanned_groups = sum(1 for item in groups if item.get("photo_count", 0) > 0)
     reviewed_groups = sum(1 for item in groups if is_reviewed_group(item))
     exception_groups = sum(1 for item in groups if is_problem_group(item))
+    photo_accuracy = photo_barcode_check.summarize_photo_accuracy(
+        photo for group in groups for photo in group.get("photos", [])
+    )
     return {
         "total_catalog_rows": len(total_rows),
         "stage_catalog_rows": len(stage_rows),
@@ -2624,6 +2634,7 @@ def build_summary(
             1 for group in groups for photo in group.get("photos", []) if photo.get("category") == "unclassified"
         ),
         "review_progress": calculate_progress(groups),
+        **photo_accuracy,
     }
 
 
@@ -3623,6 +3634,11 @@ def refresh_after_photo_classification(
         summary["unclassified_photos"] = max(0, int(summary.get("unclassified_photos", 0)) - 1)
     elif previous_category != "unclassified" and next_category == "unclassified":
         summary["unclassified_photos"] = int(summary.get("unclassified_photos", 0)) + 1
+    summary.update(
+        photo_barcode_check.summarize_photo_accuracy(
+            photo for group in state["groups"] for photo in group.get("photos", [])
+        )
+    )
     group_count = int(summary.get("groups", 0))
     summary["review_progress"] = round(int(summary.get("reviewed_groups", 0)) / group_count, 4) if group_count else 0.0
     if state["projects"]:
@@ -5393,6 +5409,7 @@ def bulk_archive_groups(group_ids: list[str], actor: str, reason: str = "") -> d
             photo["archive_filename"] = photo.get("archive_filename") or build_archive_filename(label, photo.get("image_url", ""))
             photo["archived_at"] = now
             photo["classified_by"] = photo.get("classified_by") or actor
+            photo.update(photo_barcode_check.ensure_photo_barcode_check(photo, group))
         update_group_archive_status(group, actor)
         group["bulk_archive_reason"] = reason.strip()
         mark_delivery_cache_stale(group, "admin bulk archive")
@@ -5481,6 +5498,7 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
     photo["archive_status"] = "archived"
     photo["archive_filename"] = build_archive_filename(photo["category_label"], photo.get("image_url", ""))
     photo["archived_at"] = now_iso()
+    photo.update(photo_barcode_check.check_photo_barcode(photo, group))
     state = get_state()
     state["photo_events"].append(
         {
@@ -5511,7 +5529,7 @@ def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str,
     for index, item in enumerate(group["photos"], start=1):
         item["index"] = index
     group["status"] = "incomplete" if group["photo_count"] < 4 else "pending"
-    group["reviewer"] = ""
+    group["reviewer"] = None
     group["review_note"] = ""
     group["exception_note"] = ""
     group["reviewed_at"] = None
