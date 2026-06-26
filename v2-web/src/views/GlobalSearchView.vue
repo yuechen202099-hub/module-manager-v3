@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import { BrowserMultiFormatReader } from '@zxing/browser'
 import { Camera, CopyDocument, EditPen, Refresh, Search, Warning } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, nextTick, reactive, ref } from 'vue'
+import { computed, nextTick, onUnmounted, reactive, ref } from 'vue'
 
 import {
   resetAdminGroupToUnconstructed,
@@ -48,9 +49,12 @@ const scannerOpen = ref(false)
 const scannerStatus = ref('将条形码放入取景框，识别后会自动搜索。')
 const scannerManual = ref('')
 const scannerVideo = ref<HTMLVideoElement | null>(null)
+const scannerFileInput = ref<HTMLInputElement | null>(null)
 let scannerStream: MediaStream | null = null
 let scannerTimer = 0
 let scannerLocked = false
+let zxingControls: { stop: () => void } | null = null
+const zxingReader = new BrowserMultiFormatReader()
 
 const editForm = reactive<EditableGroupForm>({
   meterNo: '',
@@ -288,10 +292,14 @@ function applyScannedValue(value: string) {
 function stopScanner() {
   if (scannerTimer) window.clearInterval(scannerTimer)
   scannerTimer = 0
+  zxingControls?.stop()
+  zxingControls = null
   scannerStream?.getTracks().forEach((track) => track.stop())
   scannerStream = null
   if (scannerVideo.value) scannerVideo.value.srcObject = null
 }
+
+onUnmounted(stopScanner)
 
 function closeScanner() {
   stopScanner()
@@ -305,16 +313,28 @@ async function startScanner() {
   scannerStatus.value = '正在启动相机，请允许浏览器使用摄像头。'
   await nextTick()
   const Detector = (window as typeof window & { BarcodeDetector?: BarcodeDetectorConstructor }).BarcodeDetector
-  if (!Detector || !window.isSecureContext || typeof navigator.mediaDevices?.getUserMedia !== 'function') {
-    scannerStatus.value = '当前浏览器不支持实时扫码，请手动输入或使用系统扫码后粘贴。'
+  if (!window.isSecureContext || typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+    scannerStatus.value = '浏览器只允许 HTTPS 页面打开摄像头。请使用 https:// 地址访问，或拍照/选图后识别，也可手动输入。'
     return
   }
   try {
+    if (!scannerVideo.value) return
+    if (!Detector) {
+      zxingControls = await zxingReader.decodeFromConstraints(
+        { video: { facingMode: { ideal: 'environment' } }, audio: false },
+        scannerVideo.value,
+        (result, error) => {
+          if (result?.getText()) applyScannedValue(result.getText())
+          if (error && error.name !== 'NotFoundException') scannerStatus.value = '识别失败，请保持条码清晰或拍照后识别。'
+        },
+      )
+      scannerStatus.value = '正在识别条码...'
+      return
+    }
     scannerStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' } },
       audio: false,
     })
-    if (!scannerVideo.value) return
     scannerVideo.value.srcObject = scannerStream
     await scannerVideo.value.play()
     const detector = new Detector({ formats: ['code_128', 'code_39', 'ean_13', 'qr_code'] })
@@ -330,12 +350,35 @@ async function startScanner() {
       }
     }, 500)
   } catch {
-    scannerStatus.value = '相机启动失败，请检查浏览器权限后重试，或手动输入。'
+    scannerStatus.value = '相机启动失败，请检查浏览器权限后重试，或拍照/选图后识别。'
   }
 }
 
 function applyManualScan() {
   applyScannedValue(scannerManual.value)
+}
+
+function openScannerFilePicker() {
+  scannerFileInput.value?.click()
+}
+
+async function decodeScannerFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  const image = new Image()
+  const url = URL.createObjectURL(file)
+  try {
+    image.src = url
+    await image.decode()
+    const result = await zxingReader.decodeFromImageElement(image)
+    applyScannedValue(result.getText())
+  } catch {
+    scannerStatus.value = '照片未识别到条码，请换一张更清晰的照片或手动输入。'
+  } finally {
+    URL.revokeObjectURL(url)
+    input.value = ''
+  }
 }
 </script>
 
@@ -425,10 +468,12 @@ function applyManualScan() {
       <div class="scanner-box">
         <video ref="scannerVideo" class="scanner-video" playsinline muted />
         <p>{{ scannerStatus }}</p>
+        <input ref="scannerFileInput" type="file" accept="image/*" capture="environment" class="scanner-file-input" @change="decodeScannerFile" />
         <el-input v-model="scannerManual" placeholder="无法扫码时可手动输入" @keyup.enter="applyManualScan" />
       </div>
       <template #footer>
         <el-button @click="closeScanner">取消</el-button>
+        <el-button @click="openScannerFilePicker">拍照识别</el-button>
         <el-button type="primary" @click="applyManualScan">使用输入内容</el-button>
       </template>
     </el-dialog>
@@ -587,6 +632,14 @@ function applyManualScan() {
   border-radius: 8px;
   background: #111827;
   object-fit: cover;
+}
+
+.scanner-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .scanner-box p {

@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.33'
+export const APP_VERSION = '3.0.34'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.34',
+    date: '2026-06-26',
+    type: 'BUG 修复',
+    title: '管理员资料组后台扫码修复',
+    items: [
+      '修复部分手机浏览器点击扫码后无法打开实时识别的问题，原生 BarcodeDetector 不可用时改用 ZXing 扫码兼容方案。',
+      '在非 HTTPS 页面下明确提示浏览器摄像头限制，引导管理员使用 https:// 地址访问。',
+      '新增拍照识别兜底入口，实时摄像头不可用时仍可拍照或选择条码图片后尝试识别。',
+      '保留手动输入入口，弱网、权限被拒绝或照片无法识别时仍可继续定位资料组。',
+    ],
+  },
   {
     version: 'V3.0.33',
     date: '2026-06-26',
