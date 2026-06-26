@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.28'
+export const APP_VERSION = '3.0.29'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,16 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.29',
+    date: '2026-06-26',
+    type: '小更新',
+    title: '施工页版本号展示优化',
+    items: [
+      '优化施工采集页版本号位置，从操作按钮区移到标题说明行末尾，降低视觉突兀感。',
+      '保留施工页可见版本号，施工员仍可确认当前生产版本。',
+    ],
+  },
   {
     version: 'V3.0.28',
     date: '2026-06-26',

@@ -37,7 +37,11 @@ assert.match(
 
 const constructionView = read('v2-web/src/views/ConstructionView.vue')
 assert.match(constructionView, /APP_VERSION/, 'construction page must import and render APP_VERSION')
-assert.match(constructionView, /construction-version/, 'construction page must expose a visible version label')
+assert.match(constructionView, /construction-version-inline/, 'construction page must expose a subtle inline version label')
 assert.match(constructionView, /V\{\{\s*APP_VERSION\s*\}\}/, 'construction page must render the version number')
+const topActions = constructionView.match(/<div class="top-actions">([\s\S]*?)<\/div>\s*<\/header>/)?.[1] || ''
+const headActions = constructionView.match(/<div class="head-actions">([\s\S]*?)<\/div>\s*<\/div>\s*<div v-loading/)?.[1] || ''
+assert.doesNotMatch(topActions, /construction-version/, 'desktop construction version must not sit in the action button area')
+assert.doesNotMatch(headActions, /construction-version/, 'mobile construction version must not sit in the action button area')
 
 console.log('daily login and construction version checks passed')

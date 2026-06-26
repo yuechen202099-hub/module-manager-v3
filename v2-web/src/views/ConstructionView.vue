@@ -2058,10 +2058,10 @@ onBeforeUnmount(() => {
               ? '查看当前团队已指派施工员且未完成的施工终端；指派与改派仍在任务领取。'
               : '扫码、拍照、本地缓存、上传与提交施工任务；指派请前往任务领取。'
           }}
+          <span class="construction-version-inline">V{{ APP_VERSION }}</span>
         </p>
       </div>
       <div class="top-actions">
-        <span class="construction-version">V{{ APP_VERSION }}</span>
         <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
         <el-button :icon="Refresh" :loading="loadingTasks || loadingGroups" @click="loadTasks">刷新</el-button>
         <el-button
@@ -2083,11 +2083,15 @@ onBeforeUnmount(() => {
       <aside v-show="inTaskPicker" class="panel task-panel">
         <div class="panel-head">
           <div>
-            <h3>{{ taskPickerTitle }}</h3>
-            <span>{{ taskPickerSubtitle }}</span>
+            <h3>
+              {{ taskPickerTitle }}
+              <span class="construction-version-inline">V{{ APP_VERSION }}</span>
+            </h3>
+            <span class="task-picker-subtitle">
+              {{ taskPickerSubtitle }}
+            </span>
           </div>
           <div class="head-actions">
-            <span class="construction-version">V{{ APP_VERSION }}</span>
             <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
             <el-tag effect="light">{{ taskPickerCount }}</el-tag>
             <el-button size="small" :icon="Refresh" :loading="loadingTasks" @click="loadTasks">刷新</el-button>
@@ -2774,13 +2778,6 @@ onBeforeUnmount(() => {
   font-size: 17px;
 }
 
-.construction-version {
-  color: #667085;
-  font-size: 12px;
-  font-weight: 800;
-  white-space: nowrap;
-}
-
 .muted,
 .panel-head span,
 .sheet-head span,
@@ -2795,6 +2792,26 @@ onBeforeUnmount(() => {
   text-overflow: clip;
   white-space: normal;
   word-break: break-word;
+}
+
+.construction-version-inline {
+  display: inline-block;
+  margin-left: 8px;
+  color: #98a2b3;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.panel-head h3 .construction-version-inline {
+  display: inline-block;
+  color: #98a2b3;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  vertical-align: 1px;
+  white-space: nowrap;
 }
 
 .top-actions {
@@ -4601,6 +4618,13 @@ onBeforeUnmount(() => {
     white-space: normal;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
+  }
+
+  .panel-head h3 .construction-version-inline {
+    display: inline-block;
+    line-height: 1.2;
+    vertical-align: 1px;
+    -webkit-line-clamp: unset;
   }
 
   .task-list {
