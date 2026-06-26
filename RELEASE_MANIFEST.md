@@ -2,9 +2,9 @@
 
 ## Package
 
-- Name: module-manager-v2-server-3.0.15
-- Version: 3.0.15
-- Generated at: 2026-06-24 16:35:13 +08:00
+- Name: module-manager-v2-server-3.0.37
+- Version: 3.0.37
+- Generated at: 2026-06-27 01:34:00 +08:00
 
 ## Included
 
@@ -17,7 +17,8 @@
 - Client acceptance gate, demo startup, smoke-check, strict Vue migration verification, PostgreSQL cutover audit, production-readiness verification, and release verification scripts under scripts
 - Local static review images and the demo data seed script for pre-production smoke checks
 - Nginx and systemd deployment samples under infra
-- Client acceptance, final audit, visual QA, signoff, demo, and deployment documents under docs
+- Client acceptance, final audit, visual QA, signoff, demo, deployment, and production SOP documents under docs
+- Production release and incident record templates under ops
 
 ## Excluded
 
@@ -42,6 +43,8 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py
+
 ## Verified During Packaging
 
 - Release smoke check passes unless -SkipSmoke was used
@@ -53,6 +56,7 @@
 - Production mode disables /docs, /redoc, and /openapi.json by default
 - Required client documents and deployment samples are present
 - Client signoff checklist is included for payment acceptance
+- Production SOP files and release record templates are present
 
 ## Production Notes
 
@@ -62,3 +66,5 @@
 - Confirm /docs, /redoc, and /openapi.json return 404 in production
 - Enable HTTPS before real project data is exposed
 - Configure PostgreSQL backup before production import
+- Use `build/server-release/` packages for production deployment
+- Record each production release under `ops/releases/`

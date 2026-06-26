@@ -56,15 +56,24 @@ docker-compose.yml
 
 Before showing the first web build to the client, use `docs/CLIENT_DEMO_READINESS.md` as the demo checklist. Use `docs/CLIENT_DEMO_SCRIPT.md` as the talk track for login, project board, spreadsheet import, task claiming, keyboard review, exception handling, and deployment readiness. Use `docs/CLIENT_ACCEPTANCE_REPORT.md` as the client-facing acceptance summary, `docs/CLIENT_SIGNOFF_CHECKLIST.md` as the payment/signoff checklist, and `docs/CLIENT_FINAL_AUDIT.md` as the final evidence checklist before sending the release package.
 
-## Product Evaluation
+## Production SOP
 
-The local product evaluation rules are stored in `docs/PRODUCT_EVALUATION_RULES.md`. After any meaningful production patch or workflow change, generate an evaluation report:
+The production maintenance SOP entrypoint is `docs/sop/README.md`. Every production-impacting change should follow the relevant SOP and create a release record under `ops/releases/`.
+
+Required production references:
+
+- Demand intake and priority: `docs/sop/01-demand-intake-and-priority.md`
+- Production branch and versioning: `docs/sop/02-production-branch-versioning.md`
+- Release package and hash: `docs/sop/05-release-package-and-hash.md`
+- Production deploy runbook: `docs/sop/06-production-deploy-runbook.md`
+- Rollback and incident review: `docs/sop/07-rollback-and-incident-review.md`
+- Business acceptance templates: `docs/sop/08-business-acceptance-templates.md`
+
+Verify SOP references after changing release process files:
 
 ```powershell
-python scripts/generate_product_evaluation.py
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py
 ```
-
-Reports are stored in `docs/evaluations/`. The evaluation covers engineering management fit, product structure, review efficiency, construction collection, offline cache, data structure, code structure, frontend/mobile, server, image storage, security, operations, observability, tests, and cost control.
 
 ## Vue Migration Gate
 
@@ -77,7 +86,8 @@ python scripts/verify_vue_migration_gate.py
 Build the Vue shell into the FastAPI static directory:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-vue-shell.ps1
+cd v2-web
+npm run build
 ```
 
 Before removing the frontend-structure risk from product scoring:
@@ -120,13 +130,13 @@ Run production readiness verification on the server before exposing real project
 
 It blocks default secrets, demo auth, weak admin credentials, and incomplete deployment samples.
 
-Build a clean client release package:
+Build a clean production server release package:
 
 ```powershell
-.\scripts\build-client-release.ps1
+.\scripts\build-client-release.ps1 -Version 3.0.37
 ```
 
-The release package is created under `build/client-release/` and includes `RELEASE_MANIFEST.md` with version, generated time, included files, excluded local artifacts, verification commands, and production notes.
+The release package is created under `build/server-release/` and includes `RELEASE_MANIFEST.md` with version, generated time, included files, excluded local artifacts, verification commands, and production notes. The historical `build/client-release/` path is for old demo documents only and must not be used for production deployment.
 
 ## Legacy Local Simulation
 

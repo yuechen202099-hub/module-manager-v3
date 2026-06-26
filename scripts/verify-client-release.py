@@ -20,6 +20,15 @@ REQUIRED_FILES = {
     "docs/SERVER_DEPLOYMENT_PREP.md",
     "docs/PROJECT_DECISIONS.md",
     "docs/STATIC_TO_VUE_MIGRATION.md",
+    "docs/sop/README.md",
+    "docs/sop/01-demand-intake-and-priority.md",
+    "docs/sop/02-production-branch-versioning.md",
+    "docs/sop/03-change-analysis-and-tdd.md",
+    "docs/sop/04-subagent-review-template.md",
+    "docs/sop/05-release-package-and-hash.md",
+    "docs/sop/06-production-deploy-runbook.md",
+    "docs/sop/07-rollback-and-incident-review.md",
+    "docs/sop/08-business-acceptance-templates.md",
     "docs/database/postgresql-schema.md",
     "infra/nginx/module-manager-v2.conf",
     "infra/module-manager-v2.service",
@@ -32,6 +41,12 @@ REQUIRED_FILES = {
     "scripts/verify_postgres_cutover_gate.py",
     "scripts/verify-production-readiness.py",
     "scripts/verify-client-release.py",
+    "scripts/verify_release_sop.py",
+    "scripts/production_backup.sh",
+    "scripts/production_health_check.py",
+    "ops/releases/README.md",
+    "ops/releases/V3.0.37.md",
+    "ops/incidents/P0-template.md",
     "v2-api/app/main.py",
     "v2-api/app/static/favicon.svg",
     "v2-api/app/static/vue/index.html",
@@ -117,6 +132,7 @@ def verify_package(zip_path: Path) -> None:
         "Confirm /docs, /redoc, and /openapi.json return 404 in production",
         "Vue strict-native production pages are required",
         "PostgreSQL cutover audit must be reviewed before production deployment",
+        "Production SOP files and release record templates are present",
     ]:
         if text not in manifest:
             fail(f"Release manifest missing production safety note: {text}")
@@ -133,7 +149,6 @@ def default_latest_zip() -> Path:
     candidates = sorted(
         [
             *root.glob("build/server-release/module-manager-v2-server-*.zip"),
-            *root.glob("build/client-release/module-manager-v2-client-demo-*.zip"),
         ],
         key=lambda item: item.stat().st_mtime,
     )

@@ -73,6 +73,8 @@ Copy-ReleaseItem "docs\SERVER_DEPLOYMENT_PREP.md" "docs\SERVER_DEPLOYMENT_PREP.m
 Copy-ReleaseItem "docs\PROJECT_DECISIONS.md" "docs\PROJECT_DECISIONS.md"
 Copy-ReleaseItem "docs\STATIC_TO_VUE_MIGRATION.md" "docs\STATIC_TO_VUE_MIGRATION.md"
 Copy-ReleaseItem "docs\database\postgresql-schema.md" "docs\database\postgresql-schema.md"
+Copy-ReleaseItem "docs\sop" "docs\sop"
+Copy-ReleaseItem "ops" "ops"
 
 Copy-ReleaseItem "infra" "infra"
 Copy-ReleaseItem "scripts\build-client-release.ps1" "scripts\build-client-release.ps1"
@@ -84,6 +86,9 @@ Copy-ReleaseItem "scripts\verify_vue_migration_gate.py" "scripts\verify_vue_migr
 Copy-ReleaseItem "scripts\verify_postgres_cutover_gate.py" "scripts\verify_postgres_cutover_gate.py"
 Copy-ReleaseItem "scripts\verify-production-readiness.py" "scripts\verify-production-readiness.py"
 Copy-ReleaseItem "scripts\verify-client-release.py" "scripts\verify-client-release.py"
+Copy-ReleaseItem "scripts\verify_release_sop.py" "scripts\verify_release_sop.py"
+Copy-ReleaseItem "scripts\production_backup.sh" "scripts\production_backup.sh"
+Copy-ReleaseItem "scripts\production_health_check.py" "scripts\production_health_check.py"
 
 Copy-ReleaseItem "v2-api\app" "v2-api\app"
 Copy-ReleaseItem "v2-api\alembic" "v2-api\alembic"
@@ -139,7 +144,8 @@ $manifest = @"
 - Client acceptance gate, demo startup, smoke-check, strict Vue migration verification, PostgreSQL cutover audit, production-readiness verification, and release verification scripts under scripts
 - Local static review images and the demo data seed script for pre-production smoke checks
 - Nginx and systemd deployment samples under infra
-- Client acceptance, final audit, visual QA, signoff, demo, and deployment documents under docs
+- Client acceptance, final audit, visual QA, signoff, demo, deployment, and production SOP documents under docs
+- Production release and incident record templates under ops
 
 ## Excluded
 
@@ -164,6 +170,8 @@ $manifest = @"
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py
+
 ## Verified During Packaging
 
 - Release smoke check passes unless -SkipSmoke was used
@@ -175,6 +183,7 @@ $manifest = @"
 - Production mode disables /docs, /redoc, and /openapi.json by default
 - Required client documents and deployment samples are present
 - Client signoff checklist is included for payment acceptance
+- Production SOP files and release record templates are present
 
 ## Production Notes
 
@@ -184,6 +193,8 @@ $manifest = @"
 - Confirm /docs, /redoc, and /openapi.json return 404 in production
 - Enable HTTPS before real project data is exposed
 - Configure PostgreSQL backup before production import
+- Use build/server-release packages for production deployment
+- Record each production release under ops/releases/
 "@
 Set-Content -LiteralPath $manifestPath -Value $manifest -Encoding UTF8
 

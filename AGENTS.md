@@ -1,5 +1,15 @@
 # 项目协作入口
 
+## Production SOP Override
+
+- Current production baseline: `V3.0.37`.
+- Production maintenance branch: `production/v3.0.35`.
+- Production SOP entrypoint: `docs/sop/README.md`.
+- Production release records: `ops/releases/`.
+- P0 incident records: `ops/incidents/`.
+- Documentation/SOP-only changes do not bump the application version.
+- Runtime changes follow the version rule: small feature or bug fix `+0.01`, major workflow change `+0.1` after user confirmation.
+
 ## 生产底线
 
 - 禁止覆盖生产 `.env`。
@@ -11,16 +21,16 @@
 
 ## 当前基线
 
-- 当前应用基线：`V3.0.2`。
+- 当前应用基线：`V3.0.37`。
 - 文档和协作规则使用独立规则版本，不自动修改应用版本。
-- 详细协作规则见 `docs/WORK_RULES.md`。
+- 详细生产 SOP 见 `docs/sop/README.md`。
 
 ## 工作方式
 
 - 默认由 Codex 作为总执行者：读取上下文、拆解任务、修改、验证、记录、汇报。
 - 普通代码修复和小功能直接执行并验证。
 - 高风险动作必须先获得用户明确确认：生产发布异常流程、数据库迁移、数据修复、删除文件、大范围重构、权限规则变更、核心业务规则变更、版本号大版本或 minor 升级。
-- 所有代码改动都要在 `ops-v3/tasks/V3.0.2/` 下建立简短任务记录。
+- 所有生产发布都要在 `ops/releases/` 下建立版本记录；P0 事故要在 `ops/incidents/` 下建立复盘记录。
 - 默认中文输出；命令、路径、版本号、接口名和代码标识可保留英文。
 
 ## 必读和代码发现

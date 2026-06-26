@@ -71,7 +71,7 @@ if (-not $NoBuild) {
         powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version $Version
     }
 
-    $zipPath = Join-Path $root "build\client-release\module-manager-v2-client-demo-$Version.zip"
+    $zipPath = Join-Path $root "build\server-release\module-manager-v2-server-$Version.zip"
     Invoke-Step "Verify release package" {
         .\.venv\Scripts\python.exe .\scripts\verify-client-release.py $zipPath
     }
@@ -85,5 +85,5 @@ Write-Host "  Port: $Port"
 Write-Host "  Version: $Version"
 Write-Host "  Remaining manual upload files: $remainingUploads"
 if (-not $NoBuild) {
-    Write-Host "  Release zip: build\client-release\module-manager-v2-client-demo-$Version.zip"
+    Write-Host "  Release zip: build\server-release\module-manager-v2-server-$Version.zip"
 }
