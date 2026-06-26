@@ -3942,6 +3942,12 @@ def group_target_text(group: dict[str, Any]) -> str:
         group.get("meter_match_key"),
         group.get("address"),
         group.get("status"),
+        group.get("installer"),
+        group.get("creator"),
+        group.get("collector"),
+        group.get("module_asset_no"),
+        group.get("construction_collector"),
+        group.get("construction_module_asset_no"),
     ]
     for photo in group.get("photos", []):
         values.extend(
@@ -3956,9 +3962,14 @@ def group_target_text(group: dict[str, Any]) -> str:
     return " ".join(str(value or "") for value in values).lower()
 
 
-def group_target_summary(group: dict[str, Any]) -> dict[str, Any]:
+def group_target_summary(group: dict[str, Any], *, include_photos: bool = False) -> dict[str, Any]:
     photo_count = group.get("photo_count", 0)
-    return {
+    photos = [photo for photo in group.get("photos", []) if photo.get("is_active", True)]
+
+    def first_photo_field(field: str) -> str:
+        return next((str(photo.get(field) or "") for photo in photos if photo.get(field)), "")
+
+    payload = {
         "id": group["id"],
         "task_id": group.get("task_id"),
         "terminal": group.get("terminal", ""),
@@ -3969,8 +3980,10 @@ def group_target_summary(group: dict[str, Any]) -> dict[str, Any]:
         "reviewer": group.get("reviewer", ""),
         "review_note": group.get("review_note", ""),
         "exception_note": group.get("exception_note", ""),
-        "collector": group.get("collector", ""),
-        "module_asset_no": group.get("module_asset_no", ""),
+        "installer": group.get("installer", ""),
+        "collector": group.get("collector", "") or first_photo_field("collector"),
+        "module_asset_no": group.get("module_asset_no", "") or first_photo_field("module_asset_no") or first_photo_field("asset_no"),
+        "creator": group.get("creator", "") or first_photo_field("creator"),
         "construction_collector": group.get("construction_collector", ""),
         "construction_module_asset_no": group.get("construction_module_asset_no", ""),
         "photo_count": photo_count,
@@ -3978,6 +3991,9 @@ def group_target_summary(group: dict[str, Any]) -> dict[str, Any]:
         "has_archive_blocker": group.get("has_archive_blocker", False),
         "exception_reasons": group.get("exception_reasons", []),
     }
+    if include_photos:
+        payload["photos"] = photos
+    return payload
 
 
 def apply_construction_status(group: dict[str, Any]) -> dict[str, Any]:
@@ -4008,7 +4024,7 @@ def search_group_targets(query: str = "", terminal: str = "", limit: int = 30, o
     return {
         "total": len(groups),
         "terminals": terminals,
-        "items": [group_target_summary(item) for item in groups[offset : offset + limit]],
+        "items": [group_target_summary(item, include_photos=True) for item in groups[offset : offset + limit]],
     }
 
 

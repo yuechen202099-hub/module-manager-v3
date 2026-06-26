@@ -134,6 +134,14 @@ function statusLabel(status: string) {
   return statusLabels[status] || status || '未知'
 }
 
+function photoDisplayUrl(photo: NonNullable<MaterialGroup['photos']>[number]) {
+  return photo.thumbnailUrl || photo.previewUrl || photo.imageUrl || photo.url
+}
+
+function groupPreviewUrls(group: MaterialGroup) {
+  return (group.photos || []).map(photoDisplayUrl).filter(Boolean)
+}
+
 function firstPhotoField(group: MaterialGroup, field: 'collector' | 'moduleAssetNo') {
   return group.photos?.find((photo) => photo[field])?.[field] || ''
 }
@@ -434,6 +442,7 @@ async function decodeScannerFile(event: Event) {
         </el-table-column>
         <el-table-column prop="meterMatchKey" label="匹配键" min-width="140" show-overflow-tooltip />
         <el-table-column prop="terminal" label="终端" min-width="130" />
+        <el-table-column prop="installer" label="安装人员" min-width="120" show-overflow-tooltip />
         <el-table-column label="任务ID" width="90">
           <template #default="{ row }">#{{ row.taskId || '-' }}</template>
         </el-table-column>
@@ -443,9 +452,29 @@ async function decodeScannerFile(event: Event) {
           </template>
         </el-table-column>
         <el-table-column prop="photoCount" label="照片数" width="82" />
+        <el-table-column label="照片缩略图" min-width="190">
+          <template #default="{ row }">
+            <div v-if="row.photos?.length" class="photo-thumb-list">
+              <el-image
+                v-for="photo in row.photos.slice(0, 4)"
+                :key="photo.id"
+                :src="photoDisplayUrl(photo)"
+                :preview-src-list="groupPreviewUrls(row)"
+                fit="cover"
+                lazy
+                preview-teleported
+                class="photo-thumb"
+              />
+            </div>
+            <span v-else class="empty-cell">-</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="reviewer" label="审阅员" min-width="110" />
         <el-table-column prop="reviewNote" label="审阅备注" min-width="180" show-overflow-tooltip />
         <el-table-column prop="exceptionNote" label="异常备注" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="collector" label="扫码采集器号" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="moduleAssetNo" label="扫码模块号" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="creator" label="创建人" min-width="110" show-overflow-tooltip />
         <el-table-column prop="constructionCollector" label="施工采集器号" min-width="150" show-overflow-tooltip />
         <el-table-column prop="constructionModuleAssetNo" label="施工模块号" min-width="150" show-overflow-tooltip />
         <el-table-column prop="address" label="地址" min-width="300" show-overflow-tooltip />
@@ -619,6 +648,25 @@ async function decodeScannerFile(event: Event) {
 .row-actions {
   display: flex;
   gap: 8px;
+}
+
+.photo-thumb-list {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.photo-thumb {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border: 1px solid var(--v2-border);
+  border-radius: 6px;
+  background: var(--v2-surface-soft);
+}
+
+.empty-cell {
+  color: var(--v2-text-muted);
 }
 
 .scanner-box {

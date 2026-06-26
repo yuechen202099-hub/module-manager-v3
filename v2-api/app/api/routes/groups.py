@@ -7,6 +7,7 @@ from app.core.responses import ok
 from app.api.routes.auth import require_admin
 from app.schemas.review import ExceptionCreate, GroupReviewUpdate
 from app.services import local_simulation
+from app.services.photo_storage import resolve_group_collection_for_response
 from app.services.state_repository import StateBackendNotReady, get_state_repository
 
 router = APIRouter(prefix="/groups")
@@ -44,7 +45,7 @@ def search_groups(
         result = state_repository().search_group_targets(query=query, terminal=terminal, limit=limit, offset=offset)
     finally:
         local_simulation.reset_current_team(token)
-    return ok(request, result)
+    return ok(request, resolve_group_collection_for_response(result))
 
 
 def _admin_actor(admin_payload: dict) -> str:

@@ -285,15 +285,17 @@ def resolve_photo_for_response(photo: dict[str, Any]) -> dict[str, Any]:
     item = deepcopy(photo)
     canonical_url = str(item.get("image_url") or "")
     item["canonical_image_url"] = canonical_url
+    item["module_asset_no"] = item.get("module_asset_no") or item.get("asset_no") or ""
+    item["collector"] = item.get("collector") or ""
+    item["creator"] = item.get("creator") or ""
     resolved_url = resolve_photo_image_url(item)
     thumbnail_url = resolve_photo_thumbnail_url(item)
     preview_url = resolve_photo_preview_url(item)
     if resolved_url:
         item["image_url"] = resolved_url
-    if thumbnail_url:
-        item["thumbnail_url"] = thumbnail_url
-    if preview_url:
-        item["preview_url"] = preview_url
+    fallback_url = resolved_url or canonical_url or str(item.get("url") or "")
+    item["thumbnail_url"] = thumbnail_url or fallback_url
+    item["preview_url"] = preview_url or fallback_url
     return item
 
 

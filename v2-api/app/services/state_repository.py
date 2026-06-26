@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import String, and_, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -555,9 +555,14 @@ def _installer_exception_group_payload(group: MaterialGroup, photo_count: int) -
     }
 
 
-def _group_target_summary(group: dict[str, Any]) -> dict[str, Any]:
+def _group_target_summary(group: dict[str, Any], *, include_photos: bool = False) -> dict[str, Any]:
     photo_count = int(group.get("photo_count") or 0)
-    return {
+    photos = group.get("photos", [])
+
+    def first_photo_field(field: str) -> str:
+        return next((str(photo.get(field) or "") for photo in photos if isinstance(photo, dict) and photo.get(field)), "")
+
+    payload = {
         "id": group["id"],
         "task_id": group.get("task_id"),
         "terminal": group.get("terminal", ""),
@@ -568,8 +573,10 @@ def _group_target_summary(group: dict[str, Any]) -> dict[str, Any]:
         "reviewer": group.get("reviewer", ""),
         "review_note": group.get("review_note", ""),
         "exception_note": group.get("exception_note", ""),
-        "collector": group.get("collector", ""),
-        "module_asset_no": group.get("module_asset_no", ""),
+        "installer": group.get("installer", ""),
+        "collector": group.get("collector", "") or first_photo_field("collector"),
+        "module_asset_no": group.get("module_asset_no", "") or first_photo_field("module_asset_no") or first_photo_field("asset_no"),
+        "creator": group.get("creator", "") or first_photo_field("creator"),
         "construction_collector": group.get("construction_collector", ""),
         "construction_module_asset_no": group.get("construction_module_asset_no", ""),
         "photo_count": photo_count,
@@ -577,6 +584,9 @@ def _group_target_summary(group: dict[str, Any]) -> dict[str, Any]:
         "has_archive_blocker": group.get("has_archive_blocker", False),
         "exception_reasons": group.get("exception_reasons", []),
     }
+    if include_photos:
+        payload["photos"] = photos
+    return payload
 
 
 def _apply_construction_status(group: dict[str, Any]) -> dict[str, Any]:
@@ -659,6 +669,12 @@ def _group_target_text(group: dict[str, Any]) -> str:
         group.get("meter_match_key"),
         group.get("address"),
         group.get("status"),
+        group.get("installer"),
+        group.get("creator"),
+        group.get("collector"),
+        group.get("module_asset_no"),
+        group.get("construction_collector"),
+        group.get("construction_module_asset_no"),
     ]
     for photo in group.get("photos", []):
         values.extend(
@@ -2477,6 +2493,7 @@ class PostgresStateRepository(StateRepository):
                     MaterialGroup.meter_match_key.ilike(pattern),
                     MaterialGroup.installation_address.ilike(pattern),
                     MaterialGroup.reviewer.ilike(pattern),
+                    cast(MaterialGroup.raw_data, String).ilike(pattern),
                     photo_match,
                 )
             )
@@ -2496,7 +2513,10 @@ class PostgresStateRepository(StateRepository):
             return {
                 "total": int(total),
                 "terminals": [str(item) for item in terminal_rows],
-                "items": [_group_target_summary(_group_payload(session, group, include_photos=False)) for group in groups],
+                "items": [
+                    _group_target_summary(_group_payload(session, group, include_photos=True), include_photos=True)
+                    for group in groups
+                ],
             }
 
     def list_catalog_rows(

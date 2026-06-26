@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.34"
+    assert data["version"] == "3.0.35"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -1294,6 +1294,39 @@ def test_admin_global_group_search_is_admin_only(monkeypatch, tmp_path) -> None:
     assert payload["total"] >= 1
     assert len(payload["items"]) <= 5
     assert {"id", "task_id", "terminal", "meter_no", "status", "photo_count"}.issubset(payload["items"][0])
+    target_group = payload["items"][0]
+    import_photos = production_client.post(
+        "/local-test/scan/import-url-rows",
+        headers=admin_headers,
+        json={
+            "rows": [
+                {
+                    "barcode": target_group["meter_no"],
+                    "meter_match_key": target_group["meter_match_key"],
+                    "terminal": target_group["terminal"],
+                    "collector": "search-display-collector",
+                    "module_asset_no": "search-display-module",
+                    "creator": "search-display-creator",
+                    "photo_urls": "https://example.test/search-display.jpg",
+                }
+            ]
+        },
+    )
+    assert import_photos.status_code == 200
+
+    enriched = production_client.get(
+        f"/groups/search?query={target_group['meter_no']}&limit=1",
+        headers=admin_headers,
+    )
+    assert enriched.status_code == 200
+    first_group = enriched.json()["data"]["items"][0]
+    assert first_group["installer"] == target_group.get("installer", "")
+    assert first_group["collector"] == "search-display-collector"
+    assert first_group["module_asset_no"] == "search-display-module"
+    assert first_group["creator"] == "search-display-creator"
+    first_photo = first_group["photos"][0]
+    assert {"id", "thumbnail_url", "preview_url", "collector", "module_asset_no", "creator"}.issubset(first_photo)
+    assert first_photo["thumbnail_url"] or first_photo["preview_url"] or first_photo["image_url"]
 
 
 def test_admin_group_backoffice_edit_and_resets_are_audited(monkeypatch, tmp_path) -> None:

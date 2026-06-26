@@ -153,8 +153,10 @@ export type MaterialGroup = {
   exceptionNote?: string
   exceptionReasons?: string[]
   hasArchiveBlocker?: boolean
+  installer?: string
   collector?: string
   moduleAssetNo?: string
+  creator?: string
   constructionCollector?: string
   constructionModuleAssetNo?: string
   constructionStatus?: string

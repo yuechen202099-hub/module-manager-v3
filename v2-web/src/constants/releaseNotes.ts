@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.34'
+export const APP_VERSION = '3.0.35'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.35',
+    date: '2026-06-26',
+    type: '小更新',
+    title: '管理员资料组搜索字段增强',
+    items: [
+      '管理员资料组后台搜索结果新增安装人员、扫码采集器号、扫码模块号、创建人等只读字段展示。',
+      '搜索结果新增照片缩略图列，资料组已有照片时可直接查看只读缩略图并预览原图。',
+      '后端搜索接口同步返回照片摘要和可访问的缩略图/预览图地址，避免前端拿到原始不可展示图片地址。',
+      '扫码照片中的采集器号、模块号和创建人会作为资料组搜索列表的展示兜底字段，便于管理员快速定位现场资料。',
+    ],
+  },
   {
     version: 'V3.0.34',
     date: '2026-06-26',

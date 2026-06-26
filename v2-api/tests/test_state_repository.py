@@ -5,6 +5,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.services import state_repository as repository
 
@@ -414,6 +415,44 @@ def test_postgres_installer_workload_uses_material_group_installation_address() 
     assert item["date"] == "2026-06-08"
     assert item["start_time"] == "09:30"
     assert segment_addresses[0]["address"] == group.installation_address
+
+
+def test_postgres_group_search_includes_raw_display_fields() -> None:
+    captured: list[object] = []
+
+    class FakeScalars:
+        def __init__(self, items):
+            self._items = items
+
+        def all(self):
+            return self._items
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            captured.append(statement)
+            return 0
+
+        def scalars(self, statement):
+            captured.append(statement)
+            return FakeScalars([])
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+    TestPostgresRepository().search_group_targets(query="安装人员A", terminal="", limit=5, offset=0)
+
+    compiled = "\n".join(
+        str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for statement in captured
+    )
+    assert "CAST(material_groups.raw_data AS VARCHAR) ILIKE" in compiled
 
 
 def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -> None:
