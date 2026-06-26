@@ -96,7 +96,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.32"
+    assert data["version"] == "3.0.33"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -1294,6 +1294,142 @@ def test_admin_global_group_search_is_admin_only(monkeypatch, tmp_path) -> None:
     assert payload["total"] >= 1
     assert len(payload["items"]) <= 5
     assert {"id", "task_id", "terminal", "meter_no", "status", "photo_count"}.issubset(payload["items"][0])
+
+
+def test_admin_group_backoffice_edit_and_resets_are_audited(monkeypatch, tmp_path) -> None:
+    from app.api.routes import local_test
+
+    production_settings = SimpleNamespace(
+        app_env="production",
+        demo_auth_enabled=False,
+        admin_username="root-admin",
+        admin_password="RootPass12345",
+        admin_team_id="group-admin-team",
+        auth_users_path=str(tmp_path / "users.json"),
+        jwt_secret="jwt-secret-for-group-admin-test-12345",
+        jwt_expire_minutes=60,
+        state_backend="json",
+    )
+    monkeypatch.setattr(auth, "settings", production_settings)
+    monkeypatch.setattr(account_store, "settings", production_settings)
+    monkeypatch.setattr(security, "settings", production_settings)
+    monkeypatch.setattr(local_test, "settings", production_settings)
+    monkeypatch.setattr(main_module, "settings", production_settings)
+    production_client = TestClient(main_module.create_app())
+
+    admin_login = production_client.post(
+        "/auth/login",
+        json={"username": "root-admin", "password": "RootPass12345"},
+    )
+    assert admin_login.status_code == 200
+    admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
+
+    created = production_client.post(
+        "/auth/users",
+        headers=admin_headers,
+        json={
+            "username": "reviewer-a",
+            "password": "ReviewPass12345",
+            "name": "Reviewer A",
+            "roles": ["reviewer"],
+            "team_id": "group-admin-team",
+            "status": "active",
+        },
+    )
+    assert created.status_code == 200
+    reviewer_login = production_client.post(
+        "/auth/login",
+        json={"username": "reviewer-a", "password": "ReviewPass12345"},
+    )
+    assert reviewer_login.status_code == 200
+    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
+
+    assert production_client.post("/local-test/bootstrap", headers=admin_headers).status_code == 200
+    group = production_client.get("/groups/search?query=350&limit=1", headers=admin_headers).json()["data"]["items"][0]
+
+    forbidden = production_client.patch(
+        f"/groups/{group['id']}/metadata",
+        headers=reviewer_headers,
+        json={"updates": {"address": "reviewer should not edit"}},
+    )
+    assert forbidden.status_code == 403
+    legacy_privileged_forbidden = production_client.patch(
+        f"/local-test/groups/{group['id']}/metadata",
+        headers=reviewer_headers,
+        json={"actor": "forged-admin", "updates": {"status": "approved", "reviewer": "forged-admin"}},
+    )
+    assert legacy_privileged_forbidden.status_code == 403
+    legacy_terminal_forbidden = production_client.patch(
+        f"/local-test/groups/{group['id']}/terminal",
+        headers=reviewer_headers,
+        json={"actor": "forged-admin", "terminal": "FORGED-TERM"},
+    )
+    assert legacy_terminal_forbidden.status_code == 403
+
+    edited = production_client.patch(
+        f"/groups/{group['id']}/metadata",
+        headers=admin_headers,
+        json={
+            "updates": {
+                "meter_no": "ADMIN-METER-001",
+                "terminal": "ADMIN-TERM-001",
+                "address": "admin edited address",
+                "status": "approved",
+                "reviewer": "manual-reviewer",
+                "review_note": "manual review note",
+                "exception_note": "manual exception note",
+                "collector": "admin collector",
+                "module_asset_no": "admin module",
+            }
+        },
+    )
+    assert edited.status_code == 200
+    edited_payload = edited.json()["data"]
+    edited_group = edited_payload["group"]
+    assert edited_group["meter_no"] == "ADMIN-METER-001"
+    assert edited_group["terminal"] == "ADMIN-TERM-001"
+    assert edited_group["address"] == "admin edited address"
+    assert edited_group["status"] == "approved"
+    assert edited_group["reviewer"] == "manual-reviewer"
+    assert edited_group["collector"] == "admin collector"
+    assert edited_group["module_asset_no"] == "admin module"
+    assert set(edited_payload["changed_fields"]) >= {"meter_no", "terminal", "address", "status", "reviewer"}
+
+    searched = production_client.get("/groups/search?query=ADMIN-METER-001&limit=1", headers=admin_headers)
+    assert searched.status_code == 200
+    searched_group = searched.json()["data"]["items"][0]
+    assert searched_group["collector"] == "admin collector"
+    assert searched_group["module_asset_no"] == "admin module"
+    assert searched_group["exception_note"] == "manual exception note"
+
+    reset_review = production_client.patch(
+        f"/groups/{group['id']}/reset-unreviewed",
+        headers=admin_headers,
+        json={"reason": "admin smoke reset review"},
+    )
+    assert reset_review.status_code == 200
+    reset_review_group = reset_review.json()["data"]["group"]
+    assert reset_review_group["status"] == "pending"
+    assert reset_review_group["reviewer"] == ""
+    assert reset_review_group["review_note"] == ""
+    assert reset_review_group["exception_note"] == ""
+
+    reset_construction = production_client.patch(
+        f"/groups/{group['id']}/reset-unconstructed",
+        headers=admin_headers,
+        json={"reason": "admin smoke reset construction"},
+    )
+    assert reset_construction.status_code == 200
+    reset_construction_payload = reset_construction.json()["data"]
+    assert reset_construction_payload["group"]["photo_count"] == 0
+    assert reset_construction_payload["soft_deleted_photos"] >= 0
+
+    audit = production_client.get("/local-test/audit-log?limit=20", headers=admin_headers)
+    assert audit.status_code == 200
+    actions = [item["action"] for item in audit.json()["data"]["items"]]
+    assert "admin_group_metadata_update" in actions
+    assert "admin_group_reset_unreviewed" in actions
+    assert "group_reset_to_unconstructed" in actions
 
 
 def test_unmatched_create_group_route_creates_terminal_task() -> None:

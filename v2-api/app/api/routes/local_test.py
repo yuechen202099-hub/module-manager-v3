@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from app.core.config import settings
 from app.core.responses import ok
 from app.core.security import decode_access_token
+from app.api.routes.auth import require_admin
 from app.database import SessionLocal
 from app.models import (
     GroupStatus,
@@ -231,6 +232,17 @@ def request_auth_payload(request: Request) -> dict:
 def request_is_admin(request: Request) -> bool:
     payload = request_auth_payload(request)
     return "admin" in set(payload.get("roles") or [])
+
+
+def require_production_admin_payload(request: Request) -> dict:
+    if settings.app_env.lower() not in {"prod", "production"}:
+        return request_auth_payload(request)
+    return require_admin(request.headers.get("authorization"))
+
+
+def request_actor(request: Request, fallback: str = "admin") -> str:
+    payload = request_auth_payload(request)
+    return str(payload.get("username") or payload.get("sub") or fallback).strip() or fallback
 
 
 def request_is_constructor(request: Request) -> bool:
@@ -1974,8 +1986,10 @@ def create_empty_group(payload: EmptyGroupRequest, request: Request):
 
 @router.patch("/groups/{group_id}/terminal")
 def change_group_terminal(group_id: str, payload: GroupTerminalRequest, request: Request):
+    admin_payload = require_production_admin_payload(request)
+    actor = str(admin_payload.get("username") or admin_payload.get("sub") or payload.actor or "admin").strip() or "admin"
     try:
-        result = state_repository().update_group_terminal(group_id, terminal=payload.terminal, actor=payload.actor)
+        result = state_repository().update_group_terminal(group_id, terminal=payload.terminal, actor=actor)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
@@ -1985,8 +1999,22 @@ def change_group_terminal(group_id: str, payload: GroupTerminalRequest, request:
 
 @router.patch("/groups/{group_id}/metadata")
 def change_group_metadata(group_id: str, payload: GroupMetadataRequest, request: Request):
+    admin_payload = request_auth_payload(request)
+    if settings.app_env.lower() in {"prod", "production"}:
+        privileged_fields = {
+            "terminal",
+            "status",
+            "reviewer",
+            "review_note",
+            "exception_note",
+            "construction_collector",
+            "construction_module_asset_no",
+        }
+        if privileged_fields.intersection(payload.updates or {}):
+            admin_payload = require_production_admin_payload(request)
+    actor = str(admin_payload.get("username") or admin_payload.get("sub") or payload.actor or "admin").strip() or "admin"
     try:
-        result = state_repository().update_group_metadata(group_id, actor=payload.actor, updates=payload.updates)
+        result = state_repository().update_group_metadata(group_id, actor=actor, updates=payload.updates)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     return ok(request, response_payload(result))

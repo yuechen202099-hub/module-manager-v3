@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.32'
+export const APP_VERSION = '3.0.33'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,19 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.33',
+    date: '2026-06-26',
+    type: '小更新',
+    title: '管理员资料组后台',
+    items: [
+      '将“资料组定位”升级为管理员资料组后台，保留搜索布局并横向展开资料组字段。',
+      '手机端新增扫码入口，可通过摄像头识别条码后自动定位资料组，不支持实时扫码时可手动输入。',
+      '管理员可编辑表号、匹配键、终端、地址、状态、审阅备注、异常备注、采集器号和模块号等业务字段。',
+      '新增“回退至未审阅”和“回退至未施工”操作；未审阅回退保留照片，未施工回退软删除照片。',
+      '所有管理员编辑和回退操作都会写入审计记录，记录操作者、资料组、变更字段、前后值和原因。',
+    ],
+  },
   {
     version: 'V3.0.32',
     date: '2026-06-26',

@@ -2134,12 +2134,30 @@ def update_group_terminal(group_id: str, terminal: str, actor: str) -> dict[str,
     return {"group": group, "task": task}
 
 
-def update_group_metadata(group_id: str, actor: str, updates: dict[str, Any]) -> dict[str, Any]:
+def update_group_metadata(
+    group_id: str,
+    actor: str,
+    updates: dict[str, Any],
+    audit_action: str = "update_group_metadata",
+) -> dict[str, Any]:
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
-    allowed_group_fields = {"meter_no", "address", "meter_match_key"}
+    allowed_group_fields = {
+        "meter_no",
+        "address",
+        "meter_match_key",
+        "terminal",
+        "status",
+        "reviewer",
+        "review_note",
+        "exception_note",
+        "construction_collector",
+        "construction_module_asset_no",
+    }
     previous = {field: group.get(field) for field in allowed_group_fields}
+    for field in ("collector", "module_asset_no", "creator"):
+        previous[field] = group.get(field)
     previous_reasons = list(group.get("exception_reasons") or [])
     previous_auto_note = "; ".join(str(item) for item in previous_reasons if str(item).strip())
     for field in allowed_group_fields:
@@ -2154,6 +2172,7 @@ def update_group_metadata(group_id: str, actor: str, updates: dict[str, Any]) ->
         if incoming not in updates:
             continue
         value = str(updates.get(incoming) or "").strip()
+        group[incoming] = value
         for photo in group.get("photos", []):
             photo[photo_field] = value
     reasons = validate_group_archive(group)
@@ -2170,13 +2189,22 @@ def update_group_metadata(group_id: str, actor: str, updates: dict[str, Any]) ->
             group["status"] = "incomplete" if group.get("photo_count", 0) < 4 else "pending"
             group["review_note"] = ""
             group["reviewed_at"] = None
-    append_audit_event(
-        "update_group_metadata",
-        actor,
-        {"group_id": group_id, "previous": previous, "updates": {key: updates.get(key) for key in sorted(updates)}},
+    changed_fields = sorted(
+        field for field in allowed_group_fields.union(photo_field_map) if field in updates and previous.get(field) != group.get(field)
     )
+    if changed_fields:
+        append_audit_event(
+            audit_action,
+            actor,
+            {
+                "group_id": group_id,
+                "changed_fields": changed_fields,
+                "previous": {field: previous.get(field) for field in changed_fields},
+                "updates": {field: group.get(field) for field in changed_fields},
+            },
+        )
     refresh_summary()
-    return {"group": group}
+    return {"group": group, "changed_fields": changed_fields}
 
 
 def add_photo_urls_to_group(
@@ -3940,6 +3968,11 @@ def group_target_summary(group: dict[str, Any]) -> dict[str, Any]:
         "status": group.get("status", ""),
         "reviewer": group.get("reviewer", ""),
         "review_note": group.get("review_note", ""),
+        "exception_note": group.get("exception_note", ""),
+        "collector": group.get("collector", ""),
+        "module_asset_no": group.get("module_asset_no", ""),
+        "construction_collector": group.get("construction_collector", ""),
+        "construction_module_asset_no": group.get("construction_module_asset_no", ""),
         "photo_count": photo_count,
         "construction_status": "unconstructed" if photo_count == 0 else "scanned",
         "has_archive_blocker": group.get("has_archive_blocker", False),
@@ -5242,7 +5275,7 @@ def reset_group_to_unconstructed(group_id: str, actor: str, reason: str = "", fo
     group.setdefault("deleted_photos", []).extend(moved)
     group["photos"] = []
     group["photo_count"] = 0
-    for key in ("construction_collector", "construction_module_asset_no", "constructor"):
+    for key in ("construction_collector", "construction_module_asset_no", "constructor", "collector", "module_asset_no"):
         group.pop(key, None)
     group["status"] = "pending"
     group["reviewer"] = None
@@ -5260,6 +5293,38 @@ def reset_group_to_unconstructed(group_id: str, actor: str, reason: str = "", fo
     )
     refresh_summary()
     return {"group": group, "soft_deleted_photos": len(moved)}
+
+
+def reset_group_to_unreviewed(group_id: str, actor: str, reason: str = "", force: bool = False) -> dict[str, Any]:
+    group = get_group(group_id)
+    if group is None:
+        raise KeyError(group_id)
+    if not force:
+        ensure_task_claimed_by(group, actor)
+    before = {
+        "status": group.get("status"),
+        "reviewer": group.get("reviewer"),
+        "review_note": group.get("review_note"),
+        "exception_note": group.get("exception_note"),
+        "exception_reasons": list(group.get("exception_reasons") or []),
+        "has_archive_blocker": bool(group.get("has_archive_blocker")),
+        "reviewed_at": group.get("reviewed_at"),
+    }
+    group["status"] = "pending"
+    group["reviewer"] = ""
+    group["review_note"] = ""
+    group["exception_note"] = ""
+    group["exception_reasons"] = []
+    group["has_archive_blocker"] = False
+    group["reviewed_at"] = None
+    mark_delivery_cache_stale(group, "reset to unreviewed")
+    append_audit_event(
+        "admin_group_reset_unreviewed",
+        actor,
+        {"group_id": group_id, "reason": reason, "previous": before, "next_status": "pending"},
+    )
+    refresh_summary()
+    return {"group": group}
 
 
 def return_group_to_exception_order(
@@ -5358,7 +5423,7 @@ def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str,
     for index, item in enumerate(group["photos"], start=1):
         item["index"] = index
     group["status"] = "incomplete" if group["photo_count"] < 4 else "pending"
-    group["reviewer"] = None
+    group["reviewer"] = ""
     group["review_note"] = ""
     group["exception_note"] = ""
     group["reviewed_at"] = None

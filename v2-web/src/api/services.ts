@@ -142,6 +142,9 @@ type BackendGroup = {
   exception_note?: string
   exception_reasons?: string[]
   has_archive_blocker?: boolean
+  collector?: string
+  module_asset_no?: string
+  asset_no?: string
   construction_collector?: string
   construction_module_asset_no?: string
   construction_status?: string
@@ -613,6 +616,8 @@ function mapGroup(raw: BackendGroup): MaterialGroup {
     exceptionNote: raw.exception_note || '',
     exceptionReasons: Array.isArray(raw.exception_reasons) ? raw.exception_reasons.filter(Boolean) : [],
     hasArchiveBlocker: Boolean(raw.has_archive_blocker),
+    collector: raw.collector || '',
+    moduleAssetNo: raw.module_asset_no || raw.asset_no || '',
     constructionCollector: raw.construction_collector || '',
     constructionModuleAssetNo: raw.construction_module_asset_no || '',
     constructionStatus: raw.construction_status || '',
@@ -927,6 +932,54 @@ export async function searchGroups(options: { query?: string; terminal?: string;
     total: Number(data.total || 0),
     terminals: data.terminals || [],
     items: (data.items || []).map(mapGroup),
+  }
+}
+
+export async function updateAdminGroupMetadata(
+  groupId: string,
+  updates: Record<string, unknown>,
+): Promise<{ group: MaterialGroup; changedFields: string[] }> {
+  const data = await api<{ group?: BackendGroup; changed_fields?: string[] }>(
+    `/groups/${encodeURIComponent(groupId)}/metadata`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ updates }),
+    },
+  )
+  return {
+    group: mapGroup(data.group || ({} as BackendGroup)),
+    changedFields: (data.changed_fields || []).map(String),
+  }
+}
+
+export async function resetAdminGroupToUnreviewed(
+  groupId: string,
+  reason = '',
+): Promise<{ group: MaterialGroup }> {
+  const data = await api<{ group?: BackendGroup }>(
+    `/groups/${encodeURIComponent(groupId)}/reset-unreviewed`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ reason }),
+    },
+  )
+  return { group: mapGroup(data.group || ({} as BackendGroup)) }
+}
+
+export async function resetAdminGroupToUnconstructed(
+  groupId: string,
+  reason = '',
+): Promise<{ group: MaterialGroup; softDeletedPhotos: number }> {
+  const data = await api<{ group?: BackendGroup; soft_deleted_photos?: number }>(
+    `/groups/${encodeURIComponent(groupId)}/reset-unconstructed`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ reason }),
+    },
+  )
+  return {
+    group: mapGroup(data.group || ({} as BackendGroup)),
+    softDeletedPhotos: Number(data.soft_deleted_photos || 0),
   }
 }
 

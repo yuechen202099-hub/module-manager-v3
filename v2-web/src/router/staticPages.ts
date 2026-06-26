@@ -45,8 +45,8 @@ export const staticPages: StaticPageRoute[] = [
   },
   {
     key: 'global-search',
-    title: '资料组定位',
-    subtitle: '按表号、模块号、采集器号定位资料组',
+    title: '资料组后台',
+    subtitle: '定位、编辑和回退资料组',
     routePath: '/global-search',
     roles: ['admin'],
     migrationStatus: 'native_vue',

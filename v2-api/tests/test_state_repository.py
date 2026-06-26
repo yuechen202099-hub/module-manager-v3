@@ -31,7 +31,9 @@ def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytes
     monkeypatch.setattr(
         repository.local_simulation,
         "update_group_metadata",
-        lambda group_id, actor, updates: {"group": {"id": group_id, "actor": actor, "updates": updates}},
+        lambda group_id, actor, updates, audit_action="update_group_metadata": {
+            "group": {"id": group_id, "actor": actor, "updates": updates}
+        },
     )
     monkeypatch.setattr(
         repository.local_simulation,
@@ -168,7 +170,12 @@ def test_dual_backend_mirrors_core_writes_after_json_success(monkeypatch: pytest
     monkeypatch.setattr(
         repository.local_simulation,
         "update_group_metadata",
-        lambda group_id, actor, updates: {"group_id": group_id, "actor": actor, "updates": updates},
+        lambda group_id, actor, updates, audit_action="update_group_metadata": {
+            "group_id": group_id,
+            "actor": actor,
+            "updates": updates,
+            "audit_action": audit_action,
+        },
     )
     monkeypatch.setattr(
         repository.local_simulation,
@@ -222,7 +229,11 @@ def test_dual_backend_mirrors_core_writes_after_json_success(monkeypatch: pytest
     )
     assert calls == [
         ("classify_photo", ("g-1", "p-1", "after_box", "reviewer-a"), {}),
-        ("update_group_metadata", ("g-1",), {"actor": "reviewer-a", "updates": {"collector": "c"}}),
+        (
+            "update_group_metadata",
+            ("g-1",),
+            {"actor": "reviewer-a", "updates": {"collector": "c"}, "audit_action": "update_group_metadata"},
+        ),
         ("reset_group_to_unconstructed", ("g-1",), {"actor": "reviewer-a", "reason": "wrong", "force": True}),
         (
             "record_construction_activity_event",

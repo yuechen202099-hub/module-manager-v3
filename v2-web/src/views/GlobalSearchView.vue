@@ -1,22 +1,71 @@
 <script setup lang="ts">
-import { CopyDocument, FolderOpened, Refresh, Search, View } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
-import { computed, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { Camera, CopyDocument, EditPen, Refresh, Search, Warning } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, nextTick, reactive, ref } from 'vue'
 
-import { searchGroups } from '@/api/services'
-import type { MaterialGroup } from '@/api/types'
+import {
+  resetAdminGroupToUnconstructed,
+  resetAdminGroupToUnreviewed,
+  searchGroups,
+  updateAdminGroupMetadata,
+} from '@/api/services'
+import type { MaterialGroup, TaskStatus } from '@/api/types'
 
-const router = useRouter()
+type EditableGroupForm = {
+  meterNo: string
+  meterMatchKey: string
+  terminal: string
+  address: string
+  status: TaskStatus
+  reviewer: string
+  reviewNote: string
+  exceptionNote: string
+  collector: string
+  moduleAssetNo: string
+  constructionCollector: string
+  constructionModuleAssetNo: string
+}
+
+type BarcodeDetectorInstance = {
+  detect: (source: HTMLVideoElement) => Promise<Array<{ rawValue?: string }>>
+}
+
+type BarcodeDetectorConstructor = new (options?: { formats?: string[] }) => BarcodeDetectorInstance
 
 const query = ref('')
 const terminal = ref('')
 const loading = ref(false)
 const searched = ref(false)
+const saving = ref(false)
 const total = ref(0)
 const terminals = ref<string[]>([])
 const groups = ref<MaterialGroup[]>([])
 const errorMessage = ref('')
+const editOpen = ref(false)
+const activeGroup = ref<MaterialGroup | null>(null)
+const resetReason = ref('')
+const scannerOpen = ref(false)
+const scannerStatus = ref('将条形码放入取景框，识别后会自动搜索。')
+const scannerManual = ref('')
+const scannerVideo = ref<HTMLVideoElement | null>(null)
+let scannerStream: MediaStream | null = null
+let scannerTimer = 0
+let scannerLocked = false
+
+const editForm = reactive<EditableGroupForm>({
+  meterNo: '',
+  meterMatchKey: '',
+  terminal: '',
+  address: '',
+  status: 'pending',
+  reviewer: '',
+  reviewNote: '',
+  exceptionNote: '',
+  collector: '',
+  moduleAssetNo: '',
+  constructionCollector: '',
+  constructionModuleAssetNo: '',
+})
 
 const trimmedQuery = computed(() => query.value.trim())
 const canSearch = computed(() => Boolean(trimmedQuery.value || terminal.value))
@@ -26,6 +75,7 @@ const statusLabels: Record<string, string> = {
   unreviewed: '待审阅',
   incomplete: '需补充',
   exception: '异常',
+  rejected: '异常',
   approved: '已通过',
   complete: '已完成',
   locked: '已锁定',
@@ -33,9 +83,16 @@ const statusLabels: Record<string, string> = {
   published: '已发布',
 }
 
+const statusOptions: Array<{ label: string; value: TaskStatus }> = [
+  { label: '待审阅', value: 'pending' },
+  { label: '需补充', value: 'incomplete' },
+  { label: '已通过', value: 'approved' },
+  { label: '异常', value: 'exception' },
+]
+
 async function runSearch() {
   if (!canSearch.value) {
-    ElMessage.warning('请输入表号、模块号、采集器号或选择终端')
+    ElMessage.warning('请输入表号、模块号、采集器号、地址，或选择终端')
     return
   }
   loading.value = true
@@ -73,31 +130,130 @@ function statusLabel(status: string) {
   return statusLabels[status] || status || '未知'
 }
 
-function taskIdOf(group: MaterialGroup) {
-  return String(group.taskId || '').trim()
+function firstPhotoField(group: MaterialGroup, field: 'collector' | 'moduleAssetNo') {
+  return group.photos?.find((photo) => photo[field])?.[field] || ''
 }
 
-function openReview(group: MaterialGroup) {
-  void router.push({
-    path: '/task-hall',
-    query: {
-      taskId: taskIdOf(group),
-      groupId: group.id,
-    },
-  })
+function groupEditableValues(group: MaterialGroup): Record<string, string> {
+  return {
+    meter_no: group.meterNo || '',
+    meter_match_key: group.meterMatchKey || '',
+    terminal: group.terminal || '',
+    address: group.address || '',
+    status: group.status || 'pending',
+    reviewer: group.reviewer || '',
+    review_note: group.reviewNote || '',
+    exception_note: group.exceptionNote || '',
+    collector: group.collector || firstPhotoField(group, 'collector'),
+    module_asset_no: group.moduleAssetNo || firstPhotoField(group, 'moduleAssetNo'),
+    construction_collector: group.constructionCollector || '',
+    construction_module_asset_no: group.constructionModuleAssetNo || '',
+  }
 }
 
-function openConstruction(group: MaterialGroup) {
-  void router.push({
-    path: '/construction',
-    query: {
-      taskId: taskIdOf(group),
-      groupId: group.id,
-    },
-  })
+function openEdit(group: MaterialGroup) {
+  activeGroup.value = group
+  const values = groupEditableValues(group)
+  editForm.meterNo = values.meter_no
+  editForm.meterMatchKey = values.meter_match_key
+  editForm.terminal = values.terminal
+  editForm.address = values.address
+  editForm.status = values.status as TaskStatus
+  editForm.reviewer = values.reviewer
+  editForm.reviewNote = values.review_note
+  editForm.exceptionNote = values.exception_note
+  editForm.collector = values.collector
+  editForm.moduleAssetNo = values.module_asset_no
+  editForm.constructionCollector = values.construction_collector
+  editForm.constructionModuleAssetNo = values.construction_module_asset_no
+  resetReason.value = ''
+  editOpen.value = true
 }
 
-async function copyValue(value: string, label: string) {
+function replaceGroup(updated: MaterialGroup) {
+  groups.value = groups.value.map((item) => (item.id === updated.id ? updated : item))
+  activeGroup.value = updated
+}
+
+async function saveEdit() {
+  if (!activeGroup.value) return
+  saving.value = true
+  try {
+    const before = groupEditableValues(activeGroup.value)
+    const next: Record<string, string> = {
+      meter_no: editForm.meterNo,
+      meter_match_key: editForm.meterMatchKey,
+      terminal: editForm.terminal,
+      address: editForm.address,
+      status: editForm.status,
+      reviewer: editForm.reviewer,
+      review_note: editForm.reviewNote,
+      exception_note: editForm.exceptionNote,
+      collector: editForm.collector,
+      module_asset_no: editForm.moduleAssetNo,
+      construction_collector: editForm.constructionCollector,
+      construction_module_asset_no: editForm.constructionModuleAssetNo,
+    }
+    const updates = Object.fromEntries(
+      Object.entries(next).filter(([field, value]) => String(value || '').trim() !== String(before[field] || '').trim()),
+    )
+    const result = await updateAdminGroupMetadata(activeGroup.value.id, updates)
+    replaceGroup(result.group)
+    ElMessage.success(result.changedFields.length ? `已保存 ${result.changedFields.length} 项变更` : '没有字段变化')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function resetUnreviewed() {
+  if (!activeGroup.value) return
+  try {
+    await ElMessageBox.confirm('确认将该资料组回退至未审阅？照片会保留，审阅状态和异常状态会清空。', '回退至未审阅', {
+      type: 'warning',
+      confirmButtonText: '确认回退',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  saving.value = true
+  try {
+    const result = await resetAdminGroupToUnreviewed(activeGroup.value.id, resetReason.value)
+    replaceGroup(result.group)
+    ElMessage.success('已回退至未审阅')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '回退失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function resetUnconstructed() {
+  if (!activeGroup.value) return
+  try {
+    await ElMessageBox.confirm('确认将该资料组回退至未施工？当前照片会被软删除，施工与审阅状态会清空。', '回退至未施工', {
+      type: 'error',
+      confirmButtonText: '确认回退',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  saving.value = true
+  try {
+    const result = await resetAdminGroupToUnconstructed(activeGroup.value.id, resetReason.value)
+    replaceGroup(result.group)
+    ElMessage.success(`已回退至未施工，软删除照片 ${result.softDeletedPhotos} 张`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '回退失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function copyValue(value: string | number | undefined, label: string) {
   const text = String(value || '').trim()
   if (!text) {
     ElMessage.warning(`${label}为空`)
@@ -119,6 +275,68 @@ async function copyValue(value: string, label: string) {
     ElMessage.success(`已复制${label}`)
   }
 }
+
+function applyScannedValue(value: string) {
+  const text = value.trim()
+  if (!text || scannerLocked) return
+  scannerLocked = true
+  query.value = text
+  closeScanner()
+  void runSearch()
+}
+
+function stopScanner() {
+  if (scannerTimer) window.clearInterval(scannerTimer)
+  scannerTimer = 0
+  scannerStream?.getTracks().forEach((track) => track.stop())
+  scannerStream = null
+  if (scannerVideo.value) scannerVideo.value.srcObject = null
+}
+
+function closeScanner() {
+  stopScanner()
+  scannerOpen.value = false
+}
+
+async function startScanner() {
+  scannerOpen.value = true
+  scannerManual.value = ''
+  scannerLocked = false
+  scannerStatus.value = '正在启动相机，请允许浏览器使用摄像头。'
+  await nextTick()
+  const Detector = (window as typeof window & { BarcodeDetector?: BarcodeDetectorConstructor }).BarcodeDetector
+  if (!Detector || !window.isSecureContext || typeof navigator.mediaDevices?.getUserMedia !== 'function') {
+    scannerStatus.value = '当前浏览器不支持实时扫码，请手动输入或使用系统扫码后粘贴。'
+    return
+  }
+  try {
+    scannerStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } },
+      audio: false,
+    })
+    if (!scannerVideo.value) return
+    scannerVideo.value.srcObject = scannerStream
+    await scannerVideo.value.play()
+    const detector = new Detector({ formats: ['code_128', 'code_39', 'ean_13', 'qr_code'] })
+    scannerStatus.value = '正在识别条码...'
+    scannerTimer = window.setInterval(async () => {
+      if (!scannerVideo.value || scannerLocked) return
+      try {
+        const codes = await detector.detect(scannerVideo.value)
+        const value = codes.find((item) => item.rawValue)?.rawValue || ''
+        if (value) applyScannedValue(value)
+      } catch {
+        scannerStatus.value = '识别失败，请保持条码清晰或手动输入。'
+      }
+    }, 500)
+  } catch {
+    scannerStatus.value = '相机启动失败，请检查浏览器权限后重试，或手动输入。'
+  }
+}
+
+function applyManualScan() {
+  applyScannedValue(scannerManual.value)
+}
 </script>
 
 <template>
@@ -126,8 +344,8 @@ async function copyValue(value: string, label: string) {
     <div class="panel search-panel">
       <div class="search-heading">
         <div>
-          <p class="eyebrow">资料组定位</p>
-          <h2>全局搜索</h2>
+          <p class="eyebrow">管理员后台</p>
+          <h2>资料组后台</h2>
         </div>
         <el-tag type="warning" effect="plain">管理员</el-tag>
       </div>
@@ -144,6 +362,7 @@ async function copyValue(value: string, label: string) {
         <el-select v-model="terminal" clearable filterable size="large" placeholder="终端">
           <el-option v-for="item in terminals" :key="item" :label="item" :value="item" />
         </el-select>
+        <el-button size="large" :icon="Camera" @click="startScanner">扫码</el-button>
         <el-button type="primary" size="large" :icon="Search" :loading="loading" @click="runSearch">搜索</el-button>
         <el-button size="large" :icon="Refresh" @click="resetSearch">重置</el-button>
       </div>
@@ -152,8 +371,8 @@ async function copyValue(value: string, label: string) {
     <div class="panel result-panel">
       <div class="result-heading">
         <div>
-          <h3>搜索结果</h3>
-          <span v-if="searched">共 {{ total }} 条</span>
+          <h3>资料组字段</h3>
+          <span v-if="searched">共 {{ total }} 条，支持横向滚动查看字段</span>
           <span v-else>等待输入条件</span>
         </div>
       </div>
@@ -164,13 +383,15 @@ async function copyValue(value: string, label: string) {
       <el-empty v-else-if="!loading && !searched" description="输入条件后开始定位资料组" />
 
       <el-table v-else v-loading="loading" :data="groups" height="calc(100vh - 330px)" class="result-table">
+        <el-table-column prop="id" label="资料组ID" min-width="170" show-overflow-tooltip />
         <el-table-column label="表号" min-width="150">
           <template #default="{ row }">
             <button class="plain-link" @click="copyValue(row.meterNo, '表号')">{{ row.meterNo || '-' }}</button>
           </template>
         </el-table-column>
-        <el-table-column prop="terminal" label="终端" min-width="120" />
-        <el-table-column label="任务" width="90">
+        <el-table-column prop="meterMatchKey" label="匹配键" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="terminal" label="终端" min-width="130" />
+        <el-table-column label="任务ID" width="90">
           <template #default="{ row }">#{{ row.taskId || '-' }}</template>
         </el-table-column>
         <el-table-column label="状态" width="100">
@@ -178,28 +399,111 @@ async function copyValue(value: string, label: string) {
             <el-tag size="small" effect="plain">{{ statusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="照片" width="82">
-          <template #default="{ row }">{{ row.photoCount }}</template>
-        </el-table-column>
+        <el-table-column prop="photoCount" label="照片数" width="82" />
         <el-table-column prop="reviewer" label="审阅员" min-width="110" />
-        <el-table-column prop="address" label="地址" min-width="260" show-overflow-tooltip />
-        <el-table-column label="操作" width="220" fixed="right">
+        <el-table-column prop="reviewNote" label="审阅备注" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="exceptionNote" label="异常备注" min-width="180" show-overflow-tooltip />
+        <el-table-column prop="constructionCollector" label="施工采集器号" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="constructionModuleAssetNo" label="施工模块号" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="address" label="地址" min-width="300" show-overflow-tooltip />
+        <el-table-column label="操作" width="128" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
-              <el-tooltip content="查看审阅" placement="top">
-                <el-button :icon="View" circle @click="openReview(row)" />
+              <el-tooltip content="复制资料组ID" placement="top">
+                <el-button :icon="CopyDocument" circle @click="copyValue(row.id, '资料组ID')" />
               </el-tooltip>
-              <el-tooltip content="打开施工" placement="top">
-                <el-button :icon="FolderOpened" circle @click="openConstruction(row)" />
-              </el-tooltip>
-              <el-tooltip content="复制资料组 ID" placement="top">
-                <el-button :icon="CopyDocument" circle @click="copyValue(row.id, '资料组 ID')" />
+              <el-tooltip content="编辑资料组" placement="top">
+                <el-button type="primary" :icon="EditPen" circle @click="openEdit(row)" />
               </el-tooltip>
             </div>
           </template>
         </el-table-column>
       </el-table>
     </div>
+
+    <el-dialog v-model="scannerOpen" title="扫码定位资料组" width="min(420px, 92vw)" class="scanner-dialog" @closed="stopScanner">
+      <div class="scanner-box">
+        <video ref="scannerVideo" class="scanner-video" playsinline muted />
+        <p>{{ scannerStatus }}</p>
+        <el-input v-model="scannerManual" placeholder="无法扫码时可手动输入" @keyup.enter="applyManualScan" />
+      </div>
+      <template #footer>
+        <el-button @click="closeScanner">取消</el-button>
+        <el-button type="primary" @click="applyManualScan">使用输入内容</el-button>
+      </template>
+    </el-dialog>
+
+    <el-drawer v-model="editOpen" title="编辑资料组" size="min(560px, 100vw)" class="edit-drawer">
+      <div v-if="activeGroup" class="edit-body">
+        <el-alert
+          type="warning"
+          :closable="false"
+          show-icon
+          title="所有保存和回退操作都会写入审计记录。资料组ID、任务ID、照片数为只读字段。"
+        />
+        <div class="readonly-grid">
+          <span>资料组ID</span><strong>{{ activeGroup.id }}</strong>
+          <span>任务ID</span><strong>{{ activeGroup.taskId || '-' }}</strong>
+          <span>照片数</span><strong>{{ activeGroup.photoCount }}</strong>
+        </div>
+        <el-form label-position="top" class="edit-form">
+          <el-form-item label="表号">
+            <el-input v-model="editForm.meterNo" />
+          </el-form-item>
+          <el-form-item label="匹配键">
+            <el-input v-model="editForm.meterMatchKey" />
+          </el-form-item>
+          <el-form-item label="终端">
+            <el-input v-model="editForm.terminal" />
+          </el-form-item>
+          <el-form-item label="状态">
+            <el-select v-model="editForm.status">
+              <el-option v-for="item in statusOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="地址" class="wide-field">
+            <el-input v-model="editForm.address" type="textarea" :rows="2" />
+          </el-form-item>
+          <el-form-item label="审阅员">
+            <el-input v-model="editForm.reviewer" />
+          </el-form-item>
+          <el-form-item label="审阅备注">
+            <el-input v-model="editForm.reviewNote" />
+          </el-form-item>
+          <el-form-item label="异常备注" class="wide-field">
+            <el-input v-model="editForm.exceptionNote" type="textarea" :rows="2" />
+          </el-form-item>
+          <el-form-item label="扫码采集器号">
+            <el-input v-model="editForm.collector" />
+          </el-form-item>
+          <el-form-item label="扫码模块号">
+            <el-input v-model="editForm.moduleAssetNo" />
+          </el-form-item>
+          <el-form-item label="施工采集器号">
+            <el-input v-model="editForm.constructionCollector" />
+          </el-form-item>
+          <el-form-item label="施工模块号">
+            <el-input v-model="editForm.constructionModuleAssetNo" />
+          </el-form-item>
+        </el-form>
+
+        <div class="danger-zone">
+          <div>
+            <el-icon><Warning /></el-icon>
+            <strong>回退操作</strong>
+          </div>
+          <el-input v-model="resetReason" placeholder="填写回退原因，写入审计记录" />
+          <div class="reset-actions">
+            <el-button :loading="saving" @click="resetUnreviewed">回退至未审阅</el-button>
+            <el-button type="danger" plain :loading="saving" @click="resetUnconstructed">回退至未施工</el-button>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="editOpen = false">关闭</el-button>
+        <el-button type="primary" :loading="saving" @click="saveEdit">保存并审计</el-button>
+      </template>
+    </el-drawer>
   </section>
 </template>
 
@@ -238,7 +542,7 @@ async function copyValue(value: string, label: string) {
 
 .search-bar {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) minmax(160px, 220px) auto auto;
+  grid-template-columns: minmax(240px, 1fr) minmax(160px, 220px) auto auto auto;
   gap: 10px;
   margin-top: 14px;
   align-items: center;
@@ -272,14 +576,90 @@ async function copyValue(value: string, label: string) {
   gap: 8px;
 }
 
+.scanner-box {
+  display: grid;
+  gap: 12px;
+}
+
+.scanner-video {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 8px;
+  background: #111827;
+  object-fit: cover;
+}
+
+.scanner-box p {
+  margin: 0;
+  color: var(--v2-text-muted);
+  font-size: 13px;
+}
+
+.edit-body {
+  display: grid;
+  gap: 14px;
+}
+
+.readonly-grid {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: 8px 12px;
+  padding: 12px;
+  border: 1px solid var(--v2-border);
+  border-radius: 8px;
+  background: var(--v2-surface-soft);
+  font-size: 13px;
+}
+
+.readonly-grid span {
+  color: var(--v2-text-muted);
+}
+
+.readonly-grid strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.edit-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0 12px;
+}
+
+.wide-field {
+  grid-column: 1 / -1;
+}
+
+.danger-zone {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #f3c6c6;
+  border-radius: 8px;
+  background: #fff7f7;
+}
+
+.danger-zone > div:first-child,
+.reset-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 @media (max-width: 860px) {
   .search-heading,
   .result-heading {
     align-items: flex-start;
   }
 
-  .search-bar {
+  .search-bar,
+  .edit-form {
     grid-template-columns: 1fr;
+  }
+
+  .reset-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 </style>

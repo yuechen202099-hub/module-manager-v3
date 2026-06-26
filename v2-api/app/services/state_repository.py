@@ -526,6 +526,8 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
         "asset_no",
         "creator",
         "installer",
+        "construction_collector",
+        "construction_module_asset_no",
         "replacement_old_meter_no",
         "replacement_new_meter_no",
         "replacement_by",
@@ -565,6 +567,11 @@ def _group_target_summary(group: dict[str, Any]) -> dict[str, Any]:
         "status": group.get("status", ""),
         "reviewer": group.get("reviewer", ""),
         "review_note": group.get("review_note", ""),
+        "exception_note": group.get("exception_note", ""),
+        "collector": group.get("collector", ""),
+        "module_asset_no": group.get("module_asset_no", ""),
+        "construction_collector": group.get("construction_collector", ""),
+        "construction_module_asset_no": group.get("construction_module_asset_no", ""),
         "photo_count": photo_count,
         "construction_status": "unconstructed" if photo_count == 0 else "scanned",
         "has_archive_blocker": group.get("has_archive_blocker", False),
@@ -968,7 +975,14 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_group_metadata(self, group_id: str, *, actor: str, updates: dict[str, Any]) -> dict[str, Any]:
+    def update_group_metadata(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        updates: dict[str, Any],
+        audit_action: str = "update_group_metadata",
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -1218,6 +1232,17 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def reset_group_to_unreviewed(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        reason: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def return_group_to_exception_order(
         self,
         group_id: str,
@@ -1414,8 +1439,15 @@ class JsonStateRepository(StateRepository):
     def list_exception_groups(self, *, reviewer: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         return local_simulation.list_exception_groups(reviewer=reviewer, limit=limit, offset=offset)
 
-    def update_group_metadata(self, group_id: str, *, actor: str, updates: dict[str, Any]) -> dict[str, Any]:
-        return local_simulation.update_group_metadata(group_id, actor=actor, updates=updates)
+    def update_group_metadata(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        updates: dict[str, Any],
+        audit_action: str = "update_group_metadata",
+    ) -> dict[str, Any]:
+        return local_simulation.update_group_metadata(group_id, actor=actor, updates=updates, audit_action=audit_action)
 
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         return local_simulation.claim_task(task_id, reviewer)
@@ -1700,6 +1732,16 @@ class JsonStateRepository(StateRepository):
         force: bool = False,
     ) -> dict[str, Any]:
         return local_simulation.reset_group_to_unconstructed(group_id, actor=actor, reason=reason, force=force)
+
+    def reset_group_to_unreviewed(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        reason: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        return local_simulation.reset_group_to_unreviewed(group_id, actor=actor, reason=reason, force=force)
 
     def return_group_to_exception_order(
         self,
@@ -2964,9 +3006,17 @@ class PostgresStateRepository(StateRepository):
                 "items": [_group_payload(session, group, include_photos=False) for group in groups],
             }
 
-    def update_group_metadata(self, group_id: str, *, actor: str, updates: dict[str, Any]) -> dict[str, Any]:
+    def update_group_metadata(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        updates: dict[str, Any],
+        audit_action: str = "update_group_metadata",
+    ) -> dict[str, Any]:
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
+            before = _group_payload(session, group, include_photos=False)
             raw_data = dict(group.raw_data or {})
             if "meter_no" in updates:
                 group.display_meter_no = str(updates.get("meter_no") or "").strip()
@@ -2974,12 +3024,40 @@ class PostgresStateRepository(StateRepository):
             if "meter_match_key" in updates:
                 group.meter_match_key = str(updates.get("meter_match_key") or "").strip() or None
                 raw_data["meter_match_key"] = group.meter_match_key or ""
+            if "terminal" in updates:
+                group.terminal = str(updates.get("terminal") or "").strip()
+                raw_data["terminal"] = group.terminal or ""
             if "address" in updates:
                 group.installation_address = str(updates.get("address") or "").strip()
                 raw_data["address"] = group.installation_address
+            if "status" in updates:
+                status_value = str(updates.get("status") or "").strip()
+                status_map = {
+                    "pending": GroupStatus.UNREVIEWED,
+                    "unreviewed": GroupStatus.UNREVIEWED,
+                    "incomplete": GroupStatus.INCOMPLETE,
+                    "approved": GroupStatus.APPROVED,
+                    "exception": GroupStatus.REJECTED,
+                    "rejected": GroupStatus.REJECTED,
+                }
+                mapped_status = status_map.get(status_value)
+                if mapped_status is None:
+                    raise ValueError(f"Unsupported group status: {status_value}")
+                group.status = mapped_status
+                raw_data["status"] = status_value
+            if "reviewer" in updates:
+                group.reviewer = str(updates.get("reviewer") or "").strip() or None
+                raw_data["reviewer"] = group.reviewer or ""
+            if "review_note" in updates:
+                group.review_note = str(updates.get("review_note") or "").strip()
+                raw_data["review_note"] = group.review_note
             if "exception_note" in updates:
                 group.exception_note = str(updates.get("exception_note") or "").strip()
                 raw_data["exception_note"] = group.exception_note
+            if "construction_collector" in updates:
+                raw_data["construction_collector"] = str(updates.get("construction_collector") or "").strip()
+            if "construction_module_asset_no" in updates:
+                raw_data["construction_module_asset_no"] = str(updates.get("construction_module_asset_no") or "").strip()
 
             photo_updates = {
                 "collector": "collector",
@@ -3007,10 +3085,61 @@ class PostgresStateRepository(StateRepository):
                     photo.raw_data = photo_raw
 
             group.raw_data = raw_data
+            validation_group = _group_payload(session, group, include_photos=True)
+            reasons = local_simulation.validate_group_archive(validation_group)
+            group.exception_reasons = reasons
+            group.has_archive_blocker = bool(reasons)
+            group.exception_status = "open" if reasons else None
+            raw_data["exception_reasons"] = reasons
+            if reasons and "status" not in updates and group.status == GroupStatus.APPROVED:
+                group.status = GroupStatus.INCOMPLETE
+                raw_data["status"] = "incomplete"
+            if (
+                "status" not in updates
+                and group.status in {GroupStatus.INCOMPLETE, GroupStatus.REJECTED}
+                and not reasons
+                and not group.exception_note
+            ):
+                group.status = GroupStatus.UNREVIEWED
+                raw_data["status"] = "pending"
+            group.raw_data = raw_data
             group.updated_at = datetime.now(UTC)
+            after = _group_payload(session, group, include_photos=False)
+            comparable_fields = {
+                "meter_no",
+                "meter_match_key",
+                "terminal",
+                "address",
+                "status",
+                "reviewer",
+                "review_note",
+                "exception_note",
+                "collector",
+                "module_asset_no",
+                "creator",
+                "construction_collector",
+                "construction_module_asset_no",
+            }
+            changed_fields = sorted(
+                field for field in comparable_fields if field in updates and str(before.get(field) or "") != str(after.get(field) or "")
+            )
+            if changed_fields:
+                session.add(
+                    AuditLog(
+                        team_id=local_simulation.current_team_id(),
+                        legacy_id=f"{audit_action}-{uuid4()}",
+                        actor_username=actor,
+                        action=audit_action,
+                        entity_type="material_group",
+                        entity_id=group.id,
+                        before_data={field: before.get(field) for field in changed_fields},
+                        after_data={field: after.get(field) for field in changed_fields},
+                        payload={"group_id": group.legacy_id or str(group.id), "changed_fields": changed_fields},
+                    )
+                )
             session.commit()
             session.refresh(group)
-            return {"group": _group_payload(session, group)}
+            return {"group": _group_payload(session, group), "changed_fields": changed_fields}
 
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         with self._session() as session:
@@ -4253,6 +4382,7 @@ class PostgresStateRepository(StateRepository):
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, actor, force=force)
+            before = _group_payload(session, group, include_photos=False)
             photos = session.scalars(
                 select(Photo).where(
                     Photo.group_id == group.id,
@@ -4275,13 +4405,91 @@ class PostgresStateRepository(StateRepository):
             group.status = GroupStatus.UNREVIEWED
             group.reviewer = None
             group.review_note = ""
+            group.exception_status = None
             group.exception_note = ""
             group.exception_reasons = []
             group.has_archive_blocker = False
             group.reviewed_at = None
+            session.add(
+                AuditLog(
+                    team_id=local_simulation.current_team_id(),
+                    legacy_id=f"group-reset-to-unconstructed-{uuid4()}",
+                    actor_username=actor,
+                    action="group_reset_to_unconstructed",
+                    entity_type="material_group",
+                    entity_id=group.id,
+                    before_data=before,
+                    after_data={
+                        "status": "pending",
+                        "photo_count": 0,
+                        "reviewer": "",
+                        "review_note": "",
+                        "exception_note": "",
+                    },
+                    payload={
+                        "group_id": group.legacy_id or str(group.id),
+                        "soft_deleted_photos": len(photos),
+                        "reason": reason,
+                    },
+                )
+            )
             session.commit()
             session.refresh(group)
             return {"group": _group_payload(session, group), "soft_deleted_photos": len(photos)}
+
+    def reset_group_to_unreviewed(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        reason: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=True)
+            self._ensure_task_claimed_by(session, group, actor, force=force)
+            before = _group_payload(session, group, include_photos=False)
+            raw_data = dict(group.raw_data or {})
+            raw_data.update(
+                {
+                    "status": "pending",
+                    "reviewer": "",
+                    "review_note": "",
+                    "exception_note": "",
+                    "exception_reasons": [],
+                    "reset_to_unreviewed_reason": reason,
+                }
+            )
+            group.raw_data = raw_data
+            group.status = GroupStatus.UNREVIEWED
+            group.reviewer = None
+            group.review_note = ""
+            group.exception_status = None
+            group.exception_note = ""
+            group.exception_reasons = []
+            group.has_archive_blocker = False
+            group.reviewed_at = None
+            session.add(
+                AuditLog(
+                    team_id=local_simulation.current_team_id(),
+                    legacy_id=f"admin-group-reset-unreviewed-{uuid4()}",
+                    actor_username=actor,
+                    action="admin_group_reset_unreviewed",
+                    entity_type="material_group",
+                    entity_id=group.id,
+                    before_data=before,
+                    after_data={
+                        "status": "pending",
+                        "reviewer": "",
+                        "review_note": "",
+                        "exception_note": "",
+                    },
+                    payload={"group_id": group.legacy_id or str(group.id), "reason": reason},
+                )
+            )
+            session.commit()
+            session.refresh(group)
+            return {"group": _group_payload(session, group)}
 
     def return_group_to_exception_order(
         self,
@@ -4377,9 +4585,16 @@ class DualWriteStateRepository(JsonStateRepository):
         self._mirror_write("delete_photo", group_id, photo_id, reviewer)
         return result
 
-    def update_group_metadata(self, group_id: str, *, actor: str, updates: dict[str, Any]) -> dict[str, Any]:
-        result = super().update_group_metadata(group_id, actor=actor, updates=updates)
-        self._mirror_write("update_group_metadata", group_id, actor=actor, updates=updates)
+    def update_group_metadata(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        updates: dict[str, Any],
+        audit_action: str = "update_group_metadata",
+    ) -> dict[str, Any]:
+        result = super().update_group_metadata(group_id, actor=actor, updates=updates, audit_action=audit_action)
+        self._mirror_write("update_group_metadata", group_id, actor=actor, updates=updates, audit_action=audit_action)
         return result
 
     def reset_group_to_unconstructed(
@@ -4392,6 +4607,18 @@ class DualWriteStateRepository(JsonStateRepository):
     ) -> dict[str, Any]:
         result = super().reset_group_to_unconstructed(group_id, actor=actor, reason=reason, force=force)
         self._mirror_write("reset_group_to_unconstructed", group_id, actor=actor, reason=reason, force=force)
+        return result
+
+    def reset_group_to_unreviewed(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        reason: str = "",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        result = super().reset_group_to_unreviewed(group_id, actor=actor, reason=reason, force=force)
+        self._mirror_write("reset_group_to_unreviewed", group_id, actor=actor, reason=reason, force=force)
         return result
 
     def return_group_to_exception_order(
