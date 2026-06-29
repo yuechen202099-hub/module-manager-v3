@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -14,13 +14,19 @@ from app.core.responses import error_response, ok
 from app.core.security import decode_access_token
 from app.services.local_simulation import save_all_team_states
 from app.services.ezcodes_scheduler import sync_manager
+from app.services.project_board_cache import (
+    start_project_board_summary_cache,
+    stop_project_board_summary_cache,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    start_project_board_summary_cache()
     try:
         yield
     finally:
+        stop_project_board_summary_cache()
         sync_manager.stop_periodic()
 
 
@@ -28,7 +34,7 @@ def create_app() -> FastAPI:
     production_mode = settings.app_env.lower() in {"prod", "production"}
     app = FastAPI(
         title="Module Manager V2 API",
-        version="3.0.42",
+        version="3.0.68",
         lifespan=lifespan,
         docs_url=None if production_mode else "/docs",
         redoc_url=None if production_mode else "/redoc",

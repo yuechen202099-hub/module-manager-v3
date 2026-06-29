@@ -1,52 +1,7 @@
-<script setup lang="ts">
-const importChecks = [
-  '供应商后台不提供稳定 API，后台同步主流程已停用。',
-  '正式数据进入系统统一改为表格导入，由项目看板承载导入入口。',
-  '总清单仍是安装地址唯一来源，扫码表格只补充扫码、采集器、模块和照片 URL。',
-]
-
-const importSteps = [
-  {
-    title: '导出表格',
-    detail: '从供应商系统导出扫码表格，保留表号、采集器、模块、照片 URL 和安装人员。',
-  },
-  {
-    title: '项目看板导入',
-    detail: '在项目看板上传总清单和扫码表格，系统按表号、终端和照片指纹匹配资料组。',
-  },
-  {
-    title: '领取并分类',
-    detail: '任务按终端领取，审阅员在审阅工作台用快捷键完成照片分类和归档。',
-  },
-]
-</script>
-
 <template>
   <section class="native-sync-page">
     <div class="panel sync-hero">
       <p class="eyebrow">导入配置</p>
-      <h2>后台同步已停用</h2>
-      <p class="muted">
-        该页面只保留历史说明。V2.3.1 静态基准已取消后台爬取同步，正式流程统一走项目看板的总清单和扫码表格导入。
-      </p>
-    </div>
-
-    <div class="panel sync-rules">
-      <h3>当前规则</h3>
-      <ul>
-        <li v-for="item in importChecks" :key="item">{{ item }}</li>
-      </ul>
-    </div>
-
-    <div class="panel sync-rules">
-      <h3>表格导入流程</h3>
-      <div class="sync-steps">
-        <article v-for="(step, index) in importSteps" :key="step.title" class="sync-step">
-          <b>{{ index + 1 }}</b>
-          <strong>{{ step.title }}</strong>
-          <span>{{ step.detail }}</span>
-        </article>
-      </div>
     </div>
 
     <div class="panel sync-actions">

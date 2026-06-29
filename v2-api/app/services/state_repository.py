@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import String, and_, case, cast, func, or_, select
+from sqlalchemy import String, and_, case, cast, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -32,6 +32,7 @@ from app.models import (
     TotalCatalogRow,
     UnmatchedRecord,
 )
+from app.services import account_store
 from app.services import local_simulation, photo_barcode_check
 
 
@@ -527,6 +528,50 @@ def _build_task_status_summary(
     }
 
 
+def _installer_display_name(value: Any, cache: dict[str, str] | None = None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if cache is not None and text in cache:
+        return cache[text]
+    display = text
+    try:
+        user = account_store.get_user(text)
+    except ValueError:
+        user = None
+    if user:
+        display = str(user.get("name") or user.get("username") or text).strip() or text
+    if cache is not None:
+        cache[text] = display
+    return display
+
+
+def _installer_distribution_from_counts(
+    counts: dict[str, int],
+    *,
+    completed_count: int = 0,
+    name_cache: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    resolved_name_cache = name_cache if name_cache is not None else {}
+    display_counts: dict[str, int] = defaultdict(int)
+    for installer, count in counts.items():
+        display_name = _installer_display_name(installer, resolved_name_cache)
+        if display_name and int(count or 0) > 0:
+            display_counts[display_name] += int(count)
+    total = max(int(completed_count or 0), sum(int(value or 0) for value in counts.values()))
+    if total <= 0:
+        return []
+    return [
+        {
+            "installer": installer,
+            "group_count": int(count),
+            "share": round(int(count) / total, 4),
+        }
+        for installer, count in sorted(display_counts.items(), key=lambda item: (-int(item[1]), item[0]))
+        if installer and int(count or 0) > 0
+    ]
+
+
 def _task_payload(task: Task, stats: dict[str, Any] | None = None) -> dict[str, Any]:
     resolved_stats = stats or _empty_task_stats()
     total_groups = int(resolved_stats.get("total_groups", 0))
@@ -560,7 +605,15 @@ def _task_payload(task: Task, stats: dict[str, Any] | None = None) -> dict[str, 
         "reviewed_count": reviewed_count,
         "unreviewed_count": unreviewed_count,
         "review_rate": review_rate,
+        "installer_distribution": resolved_stats.get("installer_distribution") or [],
     }
+
+
+def _task_board_payload(task: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(task)
+    payload["address_search_text"] = ""
+    payload["meter_search_text"] = ""
+    return payload
 
 
 def _construction_task_payload(task: Task, stats: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -631,14 +684,33 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
         "barcode_check_expected_type",
         "barcode_check_values",
         "barcode_check_normalized_values",
+        "barcode_check_ocr_values",
+        "barcode_check_ocr_normalized_values",
         "barcode_check_expected_values",
         "barcode_check_matched_value",
         "barcode_checked_at",
         "barcode_check_error",
+        "barcode_check_method",
     ):
         if key in raw:
             payload[key] = raw[key]
     return payload
+
+
+def _photo_accuracy_summary_from_counts(counts: dict[str, int]) -> dict[str, Any]:
+    passed = int(counts.get("matched") or 0)
+    failed = int(counts.get("mismatched") or 0)
+    unreadable = int(counts.get("unreadable") or 0)
+    not_required = int(counts.get("not_required") or 0)
+    checked = passed + failed + unreadable
+    return {
+        "photo_accuracy_checked": checked,
+        "photo_accuracy_passed": passed,
+        "photo_accuracy_failed": failed,
+        "photo_accuracy_unreadable": unreadable,
+        "photo_accuracy_not_required": not_required,
+        "photo_accuracy_rate": round(passed / checked, 4) if checked else 0.0,
+    }
 
 
 def _photo_accuracy_summary(photos: list[Any]) -> dict[str, Any]:
@@ -650,6 +722,68 @@ def _photo_accuracy_summary(photos: list[Any]) -> dict[str, Any]:
             raw = getattr(photo, "raw_data", {}) or {}
         payloads.append(raw)
     return photo_barcode_check.summarize_photo_accuracy(payloads)
+
+
+def _row_value(row: Any, key: str, default: Any = "") -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and key in mapping:
+        return mapping[key]
+    return getattr(row, key, default)
+
+
+def _photo_barcode_payload_from_row(row: Any) -> dict[str, Any]:
+    raw = dict(_row_value(row, "raw_data", {}) or {})
+    payload = {
+        "id": _row_value(row, "legacy_id") or str(_row_value(row, "photo_id", "")),
+        "category": _row_value(row, "category") or raw.get("category") or raw.get("construction_slot") or "unclassified",
+        "barcode": _row_value(row, "barcode") or raw.get("barcode") or "",
+        "collector": _row_value(row, "collector") or raw.get("collector") or "",
+        "module_asset_no": _row_value(row, "asset_no") or raw.get("module_asset_no") or raw.get("asset_no") or "",
+    }
+    for key in (
+        "barcode_check_status",
+        "barcode_check_expected_type",
+        "barcode_check_values",
+        "barcode_check_normalized_values",
+        "barcode_check_ocr_values",
+        "barcode_check_ocr_normalized_values",
+        "barcode_check_expected_values",
+        "barcode_check_matched_value",
+        "barcode_checked_at",
+        "barcode_check_error",
+        "barcode_check_method",
+    ):
+        if key in raw:
+            payload[key] = raw[key]
+    return payload
+
+
+def _group_barcode_payload_from_row(row: Any) -> dict[str, Any]:
+    raw = dict(_row_value(row, "raw_data", {}) or {})
+    return {
+        "id": str(_row_value(row, "group_id") or _row_value(row, "id") or ""),
+        "legacy_id": _row_value(row, "legacy_id") or "",
+        "task_id": _row_value(row, "legacy_task_id") or "",
+        "meter_no": _row_value(row, "display_meter_no") or raw.get("meter_no") or raw.get("barcode") or "",
+        "meter_match_key": _row_value(row, "meter_match_key") or raw.get("meter_match_key") or "",
+        "terminal": _row_value(row, "terminal") or raw.get("terminal") or "",
+        "address": _row_value(row, "installation_address") or raw.get("address") or "",
+        "collector": raw.get("collector") or "",
+        "module_asset_no": raw.get("module_asset_no") or raw.get("asset_no") or "",
+        "asset_no": raw.get("asset_no") or raw.get("module_asset_no") or "",
+        "construction_collector": raw.get("construction_collector") or "",
+        "construction_module_asset_no": raw.get("construction_module_asset_no") or "",
+        "group_barcode_manual_confirmed": bool(raw.get("group_barcode_manual_confirmed")),
+        "group_barcode_manual_confirmed_fields": raw.get("group_barcode_manual_confirmed_fields") or [],
+        "group_barcode_manual_confirmed_by": raw.get("group_barcode_manual_confirmed_by") or "",
+        "group_barcode_manual_confirmed_at": raw.get("group_barcode_manual_confirmed_at") or "",
+        "installer": raw.get("installer") or "",
+        "creator": raw.get("creator") or "",
+        "status": _row_value(row, "status") or raw.get("status") or "",
+        "photo_count": int(_row_value(row, "photo_count", 0) or 0),
+    }
 
 
 def _group_barcode_payload(group: Any, photos: list[Any]) -> dict[str, Any]:
@@ -671,12 +805,76 @@ def _group_barcode_payload(group: Any, photos: list[Any]) -> dict[str, Any]:
     return payload
 
 
-def _group_barcode_accuracy_summary(groups: list[Any], photos_by_group_id: dict[str, list[Any]]) -> dict[str, Any]:
-    payloads = [
-        _group_barcode_payload(group, photos_by_group_id.get(_group_lookup_id(group), []))
-        for group in groups
-    ]
-    return photo_barcode_check.summarize_group_barcode_accuracy(payloads)
+def _group_photo_category_summary(photos: list[Any]) -> dict[str, Any]:
+    photo_payloads = [_photo_barcode_payload_from_row(photo) if not isinstance(photo, dict) else photo for photo in photos]
+    classified_count = sum(
+        1
+        for photo in photo_payloads
+        if str(photo.get("category") or "").strip()
+        and str(photo.get("category") or "").strip() != "unclassified"
+    )
+    total = len(photo_payloads)
+    return {
+        "photo_category_classified_count": classified_count,
+        "photo_category_total_count": total,
+        "photo_category_complete": bool(total) and classified_count == total,
+    }
+
+
+def _group_barcode_status_summary(group: dict[str, Any]) -> dict[str, Any]:
+    check = photo_barcode_check.build_group_barcode_check(group)
+    matched_fields = [str(item) for item in check.get("group_barcode_matched_fields", []) if str(item).strip()]
+    return {
+        "group_barcode_check_status": check.get("group_barcode_check_status", ""),
+        "group_barcode_missing_fields": check.get("group_barcode_missing_fields", []),
+        "group_barcode_missing_expected_fields": check.get("group_barcode_missing_expected_fields", []),
+        "group_barcode_matched_fields": matched_fields,
+        "group_barcode_detected_values": check.get("group_barcode_detected_values", {}),
+        "group_barcode_passed_count": len(set(matched_fields)),
+        "group_barcode_total_count": len(photo_barcode_check.GROUP_BARCODE_TYPES),
+        "group_barcode_manual_confirmed": bool(check.get("group_barcode_manual_confirmed")),
+        "group_barcode_manual_confirmed_by": check.get("group_barcode_manual_confirmed_by", ""),
+        "group_barcode_manual_confirmed_at": check.get("group_barcode_manual_confirmed_at", ""),
+    }
+
+
+def _group_barcode_accuracy_summary(
+    groups: list[Any],
+    photos_by_group_id: dict[str, list[Any]],
+    *,
+    total_groups: int | None = None,
+) -> dict[str, Any]:
+    passed = 0
+    failed = 0
+    unreadable = 0
+    not_required = max(0, int(total_groups or 0) - len(groups)) if total_groups is not None else 0
+    for group in groups:
+        photos = photos_by_group_id.get(_group_lookup_id(group))
+        if photos is None and isinstance(group, dict):
+            photos = list(group.get("photos") or [])
+        photos = photos or []
+        if len(photos) != photo_barcode_check.GROUP_BARCODE_REQUIRED_PHOTO_COUNT:
+            not_required += 1
+            continue
+        payload = _group_barcode_payload(group, photos)
+        status = str(photo_barcode_check.build_group_barcode_check(payload).get("group_barcode_check_status") or "")
+        if status == "matched":
+            passed += 1
+        elif status == "mismatched":
+            failed += 1
+        elif status == "unreadable":
+            unreadable += 1
+        elif status == "not_required":
+            not_required += 1
+    checked = passed + failed + unreadable
+    return {
+        "group_barcode_accuracy_checked": checked,
+        "group_barcode_accuracy_passed": passed,
+        "group_barcode_accuracy_failed": failed,
+        "group_barcode_accuracy_unreadable": unreadable,
+        "group_barcode_accuracy_not_required": not_required,
+        "group_barcode_accuracy_rate": round(passed / checked, 4) if checked else 0.0,
+    }
 
 
 def _group_lookup_id(group: Any) -> str:
@@ -708,6 +906,12 @@ def _group_barcode_context(group: Any) -> dict[str, Any]:
         "asset_no": raw.get("asset_no") or raw.get("module_asset_no") or "",
         "construction_collector": raw.get("construction_collector") or "",
         "construction_module_asset_no": raw.get("construction_module_asset_no") or "",
+        "group_barcode_manual_confirmed": bool(raw.get("group_barcode_manual_confirmed")),
+        "group_barcode_manual_confirmed_fields": raw.get("group_barcode_manual_confirmed_fields") or [],
+        "group_barcode_manual_confirmed_by": raw.get("group_barcode_manual_confirmed_by") or "",
+        "group_barcode_manual_confirmed_at": raw.get("group_barcode_manual_confirmed_at") or "",
+        "status": _legacy_group_status(group),
+        "photo_count": int(getattr(group, "photo_count", 0) or 0),
     }
 
 
@@ -752,6 +956,10 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
         "installer",
         "construction_collector",
         "construction_module_asset_no",
+        "group_barcode_manual_confirmed",
+        "group_barcode_manual_confirmed_fields",
+        "group_barcode_manual_confirmed_by",
+        "group_barcode_manual_confirmed_at",
         "replacement_old_meter_no",
         "replacement_new_meter_no",
         "replacement_by",
@@ -809,6 +1017,8 @@ def _group_target_summary(group: dict[str, Any], *, include_photos: bool = False
         "construction_status": "unconstructed" if photo_count == 0 else "scanned",
         "has_archive_blocker": group.get("has_archive_blocker", False),
         "exception_reasons": group.get("exception_reasons", []),
+        **_group_photo_category_summary(photos),
+        **_group_barcode_status_summary(_group_barcode_payload(group, photos)),
     }
     if include_photos:
         payload["photos"] = photos
@@ -1051,7 +1261,7 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_tasks(self) -> list[dict[str, Any]]:
+    def list_tasks(self, *, summary_only: bool = False) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     def task_status(self) -> dict[str, Any]:
@@ -1067,7 +1277,7 @@ class StateRepository(ABC):
                 "reviewed_count": task.get("reviewed_count"),
                 "unreviewed_count": task.get("unreviewed_count"),
             }
-            for task in self.list_tasks()
+            for task in self.list_tasks(summary_only=True)
         ]
         return _build_task_status_summary(task_rows, self.summary().get("summary", {}))
 
@@ -1357,6 +1567,20 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def rescan_photo_barcode(
+        self,
+        group_id: str,
+        photo_id: str,
+        reviewer: str,
+        category: str = "",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def confirm_group_barcode_manually(self, group_id: str, *, actor: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1516,8 +1740,11 @@ class JsonStateRepository(StateRepository):
         state = local_simulation.get_state()
         return {"summary": state["summary"], "paths": state["paths"]}
 
-    def list_tasks(self) -> list[dict[str, Any]]:
-        return local_simulation.list_tasks()
+    def list_tasks(self, *, summary_only: bool = False) -> list[dict[str, Any]]:
+        tasks = local_simulation.list_tasks()
+        if not summary_only:
+            return tasks
+        return [_task_board_payload(task) for task in tasks]
 
     def task_status(self) -> dict[str, Any]:
         return local_simulation.task_status_summary()
@@ -1576,7 +1803,16 @@ class JsonStateRepository(StateRepository):
         groups = local_simulation.list_groups(limit=100000, offset=0).get("items", [])
         statuses = _group_barcode_review_statuses(status)
         items = photo_barcode_check.list_group_barcode_review_items(groups, statuses=statuses)
-        return {"total": len(items), "items": items[offset : offset + limit]}
+        capped_limit = max(1, min(int(limit or 100), 100000))
+        safe_offset = max(0, int(offset or 0))
+        return {
+            "total": len(items),
+            "limit": capped_limit,
+            "offset": safe_offset,
+            "page": (safe_offset // capped_limit) + 1,
+            "page_size": capped_limit,
+            "items": items[safe_offset : safe_offset + capped_limit],
+        }
 
     def search_group_targets(
         self,
@@ -1847,6 +2083,18 @@ class JsonStateRepository(StateRepository):
 
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
         return local_simulation.classify_photo(group_id, photo_id, category, reviewer)
+
+    def rescan_photo_barcode(
+        self,
+        group_id: str,
+        photo_id: str,
+        reviewer: str,
+        category: str = "",
+    ) -> dict[str, Any]:
+        return local_simulation.rescan_photo_barcode(group_id, photo_id, reviewer, category)
+
+    def confirm_group_barcode_manually(self, group_id: str, *, actor: str) -> dict[str, Any]:
+        return local_simulation.confirm_group_barcode_manually(group_id, actor=actor)
 
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
         return local_simulation.delete_group_photo(group_id, photo_id, reviewer)
@@ -2167,22 +2415,69 @@ class PostgresStateRepository(StateRepository):
                     Photo.group_id.is_not(None),
                 )
             ).all()
-            photo_accuracy_rows = session.scalars(
-                select(Photo).where(
+            photo_status_expr = Photo.raw_data.op("->>")("barcode_check_status")
+            photo_accuracy_rows = session.execute(
+                select(
+                    photo_status_expr.label("status"),
+                    func.count(Photo.id).label("count"),
+                )
+                .where(
                     Photo.team_id == team_id,
                     Photo.is_active.is_(True),
                     Photo.group_id.is_not(None),
                 )
+                .group_by(photo_status_expr)
             ).all()
-            group_barcode_rows = session.scalars(
-                select(MaterialGroup).where(MaterialGroup.team_id == team_id)
+            active_photo_counts = (
+                select(Photo.group_id.label("group_id"), func.count(Photo.id).label("active_photo_count"))
+                .where(Photo.team_id == team_id, Photo.is_active.is_(True), Photo.group_id.is_not(None))
+                .group_by(Photo.group_id)
+                .subquery()
+            )
+            group_barcode_rows = session.execute(
+                select(
+                    MaterialGroup.id.label("group_id"),
+                    MaterialGroup.legacy_id,
+                    MaterialGroup.legacy_task_id,
+                    MaterialGroup.display_meter_no,
+                    MaterialGroup.meter_match_key,
+                    MaterialGroup.terminal,
+                    MaterialGroup.installation_address,
+                    MaterialGroup.status,
+                    MaterialGroup.photo_count,
+                    MaterialGroup.raw_data,
+                )
+                .join(active_photo_counts, active_photo_counts.c.group_id == MaterialGroup.id)
+                .where(MaterialGroup.team_id == team_id, active_photo_counts.c.active_photo_count == 4)
             ).all()
+            complete_group_ids = [row.group_id for row in group_barcode_rows]
+            group_barcode_photo_rows = []
+            if complete_group_ids:
+                group_barcode_photo_rows = session.execute(
+                    select(
+                        Photo.id.label("photo_id"),
+                        Photo.legacy_id,
+                        Photo.group_id,
+                        Photo.category,
+                        Photo.barcode,
+                        Photo.collector,
+                        Photo.asset_no,
+                        Photo.raw_data,
+                    )
+                    .where(
+                        Photo.team_id == team_id,
+                        Photo.is_active.is_(True),
+                        Photo.group_id.in_(complete_group_ids),
+                    )
+                    .order_by(Photo.group_id, Photo.sort_order, Photo.created_at, Photo.legacy_id)
+                ).all()
 
         groups = int(group_stats.groups or 0)
         reviewed_groups = int(group_stats.reviewed_groups or 0)
         installer_group_ids: dict[str, set[str]] = {}
+        installer_name_cache: dict[str, str] = {}
         for row in installer_pairs:
-            installer = str(row.creator or "").strip() or "未填写"
+            installer = _installer_display_name(row.creator, installer_name_cache) or "未填写"
             installer_group_ids.setdefault(installer, set()).add(str(row.group_id))
         installer_items = sorted(installer_group_ids.items(), key=lambda item: (-len(item[1]), item[0]))[:8]
         installer_total = sum(len(group_ids) for _, group_ids in installer_items)
@@ -2194,11 +2489,17 @@ class PostgresStateRepository(StateRepository):
             }
             for installer, group_ids in installer_items
         ]
-        photo_accuracy = _photo_accuracy_summary(list(photo_accuracy_rows))
+        photo_accuracy = _photo_accuracy_summary_from_counts(
+            {str(row.status or ""): int(row.count or 0) for row in photo_accuracy_rows}
+        )
         photos_by_group_id: dict[str, list[Any]] = defaultdict(list)
-        for photo in photo_accuracy_rows:
-            photos_by_group_id[str(photo.group_id)].append(photo)
-        group_barcode_accuracy = _group_barcode_accuracy_summary(list(group_barcode_rows), photos_by_group_id)
+        for photo in group_barcode_photo_rows:
+            photos_by_group_id[str(photo.group_id)].append(_photo_barcode_payload_from_row(photo))
+        group_barcode_accuracy = _group_barcode_accuracy_summary(
+            [_group_barcode_payload_from_row(row) for row in group_barcode_rows],
+            photos_by_group_id,
+            total_groups=groups,
+        )
         return {
             "summary": {
                 "team_id": team_id,
@@ -2261,24 +2562,50 @@ class PostgresStateRepository(StateRepository):
         if task is None or task.review_claimed_by != actor:
             raise ValueError("Task must be claimed by the current reviewer before review or classification")
 
-    def _task_stats_map(self, session: Session, team_id: str) -> dict[int, dict[str, Any]]:
+    def _task_stats_map(self, session: Session, team_id: str, *, include_search_text: bool = True) -> dict[int, dict[str, Any]]:
+        installer_expr = func.coalesce(
+            func.nullif(func.trim(MaterialGroup.raw_data.op("->>")("installer")), ""),
+            func.nullif(func.trim(MaterialGroup.raw_data.op("->>")("constructor")), ""),
+            func.nullif(func.trim(MaterialGroup.raw_data.op("->>")("creator")), ""),
+        )
+        photo_installer_expr = func.nullif(func.trim(Photo.creator), "")
+        active_photo_exists = (
+            select(Photo.id)
+            .where(
+                Photo.group_id == MaterialGroup.id,
+                Photo.team_id == MaterialGroup.team_id,
+                Photo.is_active.is_(True),
+            )
+            .exists()
+        )
+        uploaded_group_condition = or_(MaterialGroup.photo_count > 0, active_photo_exists)
+        address_search_expr = (
+            func.string_agg(MaterialGroup.installation_address.distinct(), " ")
+            if include_search_text
+            else literal("")
+        )
+        meter_search_expr = (
+            func.string_agg(
+                func.concat(
+                    func.coalesce(MaterialGroup.display_meter_no, ""),
+                    " ",
+                    func.coalesce(MaterialGroup.meter_match_key, ""),
+                    " ",
+                    func.coalesce(MaterialGroup.legacy_id, ""),
+                ).distinct(),
+                " ",
+            )
+            if include_search_text
+            else literal("")
+        )
         rows = session.execute(
             select(
                 MaterialGroup.legacy_task_id,
                 func.min(MaterialGroup.installation_address).label("address"),
-                func.string_agg(MaterialGroup.installation_address.distinct(), " ").label("address_search_text"),
-                func.string_agg(
-                    func.concat(
-                        func.coalesce(MaterialGroup.display_meter_no, ""),
-                        " ",
-                        func.coalesce(MaterialGroup.meter_match_key, ""),
-                        " ",
-                        func.coalesce(MaterialGroup.legacy_id, ""),
-                    ).distinct(),
-                    " ",
-                ).label("meter_search_text"),
+                address_search_expr.label("address_search_text"),
+                meter_search_expr.label("meter_search_text"),
                 func.count(MaterialGroup.id).label("total_groups"),
-                func.coalesce(func.sum(case((MaterialGroup.photo_count > 0, 1), else_=0)), 0).label("uploaded_count"),
+                func.coalesce(func.sum(case((uploaded_group_condition, 1), else_=0)), 0).label("uploaded_count"),
                 func.coalesce(
                     func.sum(case((MaterialGroup.status == GroupStatus.APPROVED, 1), else_=0)),
                     0,
@@ -2291,7 +2618,7 @@ class PostgresStateRepository(StateRepository):
             .where(MaterialGroup.team_id == team_id)
             .group_by(MaterialGroup.legacy_task_id)
         ).all()
-        return {
+        stats_by_task = {
             int(row.legacy_task_id): {
                 "total_groups": int(row.total_groups or 0),
                 "address": str(row.address or ""),
@@ -2304,8 +2631,72 @@ class PostgresStateRepository(StateRepository):
             for row in rows
             if row.legacy_task_id is not None
         }
+        installer_rows = session.execute(
+            select(
+                MaterialGroup.legacy_task_id,
+                photo_installer_expr.label("installer"),
+                func.count(MaterialGroup.id.distinct()).label("group_count"),
+            )
+            .join(
+                Photo,
+                and_(
+                    Photo.group_id == MaterialGroup.id,
+                    Photo.team_id == MaterialGroup.team_id,
+                    Photo.is_active.is_(True),
+                ),
+            )
+            .where(
+                MaterialGroup.team_id == team_id,
+                MaterialGroup.legacy_task_id.is_not(None),
+                photo_installer_expr.is_not(None),
+            )
+            .group_by(MaterialGroup.legacy_task_id, photo_installer_expr)
+        ).all()
+        groups_with_photo_installer = (
+            select(Photo.group_id)
+            .where(
+                Photo.team_id == team_id,
+                Photo.is_active.is_(True),
+                Photo.group_id.is_not(None),
+                photo_installer_expr.is_not(None),
+            )
+            .distinct()
+            .subquery()
+        )
+        fallback_installer_rows = session.execute(
+            select(
+                MaterialGroup.legacy_task_id,
+                installer_expr.label("installer"),
+                func.count(MaterialGroup.id).label("group_count"),
+            )
+            .where(
+                MaterialGroup.team_id == team_id,
+                MaterialGroup.legacy_task_id.is_not(None),
+                uploaded_group_condition,
+                installer_expr.is_not(None),
+                ~MaterialGroup.id.in_(select(groups_with_photo_installer.c.group_id)),
+            )
+            .group_by(MaterialGroup.legacy_task_id, installer_expr)
+        ).all()
+        installer_counts_by_task: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for row in [*installer_rows, *fallback_installer_rows]:
+            if row.legacy_task_id is None:
+                continue
+            installer = str(row.installer or "").strip()
+            if not installer:
+                continue
+            installer_counts_by_task[int(row.legacy_task_id)][installer] += int(row.group_count or 0)
+        installer_name_cache: dict[str, str] = {}
+        for task_id, installer_counts in installer_counts_by_task.items():
+            stats = stats_by_task.setdefault(task_id, _empty_task_stats())
+            stats["installer_distribution"] = _installer_distribution_from_counts(
+                installer_counts,
+                completed_count=int(stats.get("uploaded_count") or 0),
+                name_cache=installer_name_cache,
+            )
+        return stats_by_task
 
-    def _task_stats(self, session: Session, task: Task) -> dict[str, int]:
+    def _task_stats(self, session: Session, task: Task) -> dict[str, Any]:
         if task.legacy_id is None:
             return _empty_task_stats()
         return self._task_stats_map(session, task.team_id or local_simulation.current_team_id()).get(
@@ -2313,7 +2704,7 @@ class PostgresStateRepository(StateRepository):
             _empty_task_stats(),
         )
 
-    def list_tasks(self) -> list[dict[str, Any]]:
+    def list_tasks(self, *, summary_only: bool = False) -> list[dict[str, Any]]:
         with self._session() as session:
             team_id = local_simulation.current_team_id()
             tasks = session.scalars(
@@ -2321,9 +2712,15 @@ class PostgresStateRepository(StateRepository):
                 .where(Task.team_id == team_id)
                 .order_by(Task.terminal, Task.legacy_id)
             ).all()
-            stats_by_task = self._task_stats_map(session, team_id)
+            stats_by_task = self._task_stats_map(session, team_id, include_search_text=not summary_only)
+            payloads = [
+                _task_payload(task, stats_by_task.get(int(task.legacy_id or 0), _empty_task_stats()))
+                for task in tasks
+            ]
+            if summary_only:
+                payloads = [_task_board_payload(task) for task in payloads]
             return sorted(
-                [_task_payload(task, stats_by_task.get(int(task.legacy_id or 0), _empty_task_stats())) for task in tasks],
+                payloads,
                 key=lambda item: (not item.get("can_claim", False), str(item.get("terminal", "")), item["id"]),
             )
 
@@ -2760,9 +3157,16 @@ class PostgresStateRepository(StateRepository):
         payloads = [_group_barcode_payload(group, photos_by_group_id.get(str(group.id), [])) for group in groups]
         statuses = _group_barcode_review_statuses(status)
         items = photo_barcode_check.list_group_barcode_review_items(payloads, statuses=statuses)
-        capped_limit = max(1, min(int(limit or 100), 500))
+        capped_limit = max(1, min(int(limit or 100), 100000))
         safe_offset = max(0, int(offset or 0))
-        return {"total": len(items), "items": items[safe_offset : safe_offset + capped_limit]}
+        return {
+            "total": len(items),
+            "limit": capped_limit,
+            "offset": safe_offset,
+            "page": (safe_offset // capped_limit) + 1,
+            "page_size": capped_limit,
+            "items": items[safe_offset : safe_offset + capped_limit],
+        }
 
     def search_group_targets(
         self,
@@ -2949,6 +3353,36 @@ class PostgresStateRepository(StateRepository):
             )
             page = group_payloads[offset : offset + limit]
             if summary_only:
+                page_group_model_ids = [
+                    group.id
+                    for group in groups
+                    if any(str(item.get("id") or "") == str(group.legacy_id or group.id) for item in page)
+                ]
+                photos_by_group_model_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
+                if page_group_model_ids:
+                    photo_rows = session.execute(
+                        select(
+                            Photo.group_id,
+                            Photo.id.label("photo_id"),
+                            Photo.legacy_id,
+                            Photo.category,
+                            Photo.barcode,
+                            Photo.collector,
+                            Photo.asset_no,
+                            Photo.raw_data,
+                        )
+                        .where(
+                            Photo.team_id == local_simulation.current_team_id(),
+                            Photo.group_id.in_(page_group_model_ids),
+                            Photo.is_active.is_(True),
+                        )
+                        .order_by(Photo.group_id, Photo.sort_order, Photo.created_at, Photo.legacy_id)
+                    ).all()
+                    for row in photo_rows:
+                        photos_by_group_model_id[str(row.group_id)].append(_photo_barcode_payload_from_row(row))
+                legacy_to_model_id = {str(group.legacy_id or group.id): str(group.id) for group in groups}
+                for item in page:
+                    item["photos"] = photos_by_group_model_id.get(legacy_to_model_id.get(str(item.get("id") or ""), ""), [])
                 return {"total": len(group_payloads), "items": [_group_target_summary(group) for group in page]}
             return {
                 "total": len(group_payloads),
@@ -4138,6 +4572,145 @@ class PostgresStateRepository(StateRepository):
             session.refresh(photo)
             return _photo_payload(photo)
 
+    def rescan_photo_barcode(
+        self,
+        group_id: str,
+        photo_id: str,
+        reviewer: str,
+        category: str = "",
+    ) -> dict[str, Any]:
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id)
+            self._ensure_task_claimed_by(session, group, reviewer)
+            photo = session.scalar(
+                select(Photo).where(
+                    Photo.team_id == local_simulation.current_team_id(),
+                    Photo.group_id == group.id,
+                    Photo.legacy_id == photo_id,
+                    Photo.is_active.is_(True),
+                )
+            )
+            if photo is None:
+                raise KeyError(photo_id)
+            next_category = str(category or photo.category or "unclassified").strip() or "unclassified"
+            if next_category not in local_simulation.PHOTO_CATEGORIES:
+                raise ValueError(f"Unsupported photo category: {next_category}")
+            now = datetime.now(UTC)
+            category_label = local_simulation.PHOTO_CATEGORIES.get(
+                next_category,
+                local_simulation.PHOTO_CATEGORIES["unclassified"],
+            )
+            if next_category != photo.category:
+                photo.category = next_category
+                photo.classified_by = reviewer
+                photo.classified_at = now
+            raw_data = dict(photo.raw_data or {})
+            raw_data.update(
+                {
+                    "category": next_category,
+                    "category_label": category_label,
+                    "classified_by": photo.classified_by or reviewer,
+                    "barcode_rescanned_by": reviewer,
+                    "barcode_rescanned_at": now.isoformat(),
+                }
+            )
+            image_url = photo.image_url or photo.source_url or ""
+            group_context = _group_barcode_context(group)
+            raw_data.update(
+                photo_barcode_check.check_photo_barcode(
+                    {
+                        **_photo_payload(photo),
+                        **raw_data,
+                        "category": next_category,
+                        "category_label": category_label,
+                        "image_url": image_url,
+                    },
+                    group_context,
+                    use_ocr=True,
+                )
+            )
+            photo.raw_data = raw_data
+            session.add(
+                AuditLog(
+                    team_id=local_simulation.current_team_id(),
+                    legacy_id=f"photo_barcode_rescan-{uuid4()}",
+                    actor_username=reviewer,
+                    action="photo_barcode_rescan",
+                    entity_type="photo",
+                    entity_id=photo.id,
+                    before_data={},
+                    after_data={
+                        key: raw_data.get(key)
+                        for key in photo_barcode_check.BARCODE_CHECK_FIELDS
+                        if key in raw_data
+                    },
+                    payload={
+                        "group_id": group.legacy_id or str(group.id),
+                        "photo_id": photo.legacy_id or str(photo.id),
+                        "category": next_category,
+                        "status": raw_data.get("barcode_check_status", ""),
+                        "matched_value": raw_data.get("barcode_check_matched_value", ""),
+                        "method": raw_data.get("barcode_check_method", ""),
+                    },
+                )
+            )
+            session.commit()
+            session.refresh(photo)
+            return _photo_payload(photo)
+
+    def confirm_group_barcode_manually(self, group_id: str, *, actor: str) -> dict[str, Any]:
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=True)
+            self._ensure_task_claimed_by(session, group, actor)
+            now = datetime.now(UTC)
+            raw_data = dict(group.raw_data or {})
+            before_data = {
+                key: raw_data.get(key)
+                for key in (
+                    "group_barcode_manual_confirmed",
+                    "group_barcode_manual_confirmed_fields",
+                    "group_barcode_manual_confirmed_by",
+                    "group_barcode_manual_confirmed_at",
+                )
+            }
+            raw_data.update(
+                {
+                    "group_barcode_manual_confirmed": True,
+                    "group_barcode_manual_confirmed_fields": list(photo_barcode_check.GROUP_BARCODE_TYPES),
+                    "group_barcode_manual_confirmed_by": actor,
+                    "group_barcode_manual_confirmed_at": now.isoformat(),
+                }
+            )
+            group.raw_data = raw_data
+            session.add(
+                AuditLog(
+                    team_id=local_simulation.current_team_id(),
+                    legacy_id=f"group_barcode_manual_confirmed-{uuid4()}",
+                    actor_username=actor,
+                    action="group_barcode_manual_confirmed",
+                    entity_type="material_group",
+                    entity_id=group.id,
+                    before_data=before_data,
+                    after_data={
+                        key: raw_data.get(key)
+                        for key in (
+                            "group_barcode_manual_confirmed",
+                            "group_barcode_manual_confirmed_fields",
+                            "group_barcode_manual_confirmed_by",
+                            "group_barcode_manual_confirmed_at",
+                        )
+                    },
+                    payload={
+                        "group_id": group.legacy_id or str(group.id),
+                        "fields": raw_data["group_barcode_manual_confirmed_fields"],
+                        "confirmed_at": raw_data["group_barcode_manual_confirmed_at"],
+                    },
+                )
+            )
+            session.commit()
+            session.refresh(group)
+            return {"group": _group_target_summary(_group_payload(session, group, include_photos=True), include_photos=True)}
+
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
@@ -5070,6 +5643,22 @@ class DualWriteStateRepository(JsonStateRepository):
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
         result = super().classify_photo(group_id, photo_id, category, reviewer)
         self._mirror_write("classify_photo", group_id, photo_id, category, reviewer)
+        return result
+
+    def rescan_photo_barcode(
+        self,
+        group_id: str,
+        photo_id: str,
+        reviewer: str,
+        category: str = "",
+    ) -> dict[str, Any]:
+        result = super().rescan_photo_barcode(group_id, photo_id, reviewer, category)
+        self._mirror_write("rescan_photo_barcode", group_id, photo_id, reviewer, category)
+        return result
+
+    def confirm_group_barcode_manually(self, group_id: str, *, actor: str) -> dict[str, Any]:
+        result = super().confirm_group_barcode_manually(group_id, actor=actor)
+        self._mirror_write("confirm_group_barcode_manually", group_id, actor=actor)
         return result
 
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:

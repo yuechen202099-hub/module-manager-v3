@@ -22,7 +22,7 @@ export const staticPages: StaticPageRoute[] = [
   {
     key: 'project-board',
     title: '项目驾驶舱',
-    subtitle: '项目进度、风险与采集审阅态势',
+    subtitle: '',
     routePath: '/project-board',
     roles: ['admin', 'reviewer'],
     migrationStatus: 'native_vue',
@@ -30,7 +30,7 @@ export const staticPages: StaticPageRoute[] = [
   {
     key: 'claim-tasks',
     title: '任务领取',
-    subtitle: '按终端领取审阅任务',
+    subtitle: '',
     routePath: '/claim-tasks',
     roles: ['admin', 'reviewer'],
     migrationStatus: 'native_vue',
@@ -38,15 +38,15 @@ export const staticPages: StaticPageRoute[] = [
   {
     key: 'task-hall',
     title: '审阅工作台',
-    subtitle: '图片分类、异常处理、补图',
+    subtitle: '',
     routePath: '/task-hall',
     roles: ['admin', 'reviewer'],
     migrationStatus: 'native_vue',
   },
   {
     key: 'global-search',
-    title: '资料组后台',
-    subtitle: '定位、编辑和回退资料组',
+    title: '数据中台',
+    subtitle: '',
     routePath: '/global-search',
     roles: ['admin'],
     migrationStatus: 'native_vue',
@@ -54,7 +54,7 @@ export const staticPages: StaticPageRoute[] = [
   {
     key: 'construction',
     title: '施工采集',
-    subtitle: '手机采集、扫码、拍照、离线缓存',
+    subtitle: '',
     routePath: '/construction',
     roles: ['admin', 'constructor'],
     migrationStatus: 'native_vue',
@@ -62,7 +62,7 @@ export const staticPages: StaticPageRoute[] = [
   {
     key: 'account-management',
     title: '账号管理',
-    subtitle: '账号、角色与登录审计',
+    subtitle: '',
     routePath: '/account-management',
     roles: ['admin'],
     migrationStatus: 'native_vue',
@@ -70,7 +70,7 @@ export const staticPages: StaticPageRoute[] = [
   {
     key: 'sync-config',
     title: '导入配置',
-    subtitle: '历史兼容配置入口',
+    subtitle: '',
     routePath: '/sync-config',
     roles: ['admin'],
     migrationStatus: 'native_vue',

@@ -18,6 +18,18 @@ if ($LASTEXITCODE -ne 0) {
         throw "Dependency installation failed."
 }
 
+Write-Host "Building Vue production bundle..."
+Push-Location .\v2-web
+try {
+    npm run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "Vue production build failed."
+    }
+}
+finally {
+    Pop-Location
+}
+
 if (-not $SkipSmoke) {
     Write-Host "Running release smoke check before packaging..."
     .\.venv\Scripts\python.exe .\scripts\smoke-client-demo.py
@@ -86,8 +98,13 @@ Copy-ReleaseItem "scripts\verify_vue_migration_gate.py" "scripts\verify_vue_migr
 Copy-ReleaseItem "scripts\verify_postgres_cutover_gate.py" "scripts\verify_postgres_cutover_gate.py"
 Copy-ReleaseItem "scripts\verify-production-readiness.py" "scripts\verify-production-readiness.py"
 Copy-ReleaseItem "scripts\verify-client-release.py" "scripts\verify-client-release.py"
+Copy-ReleaseItem "scripts\verify_claim_tasks_completion_status.js" "scripts\verify_claim_tasks_completion_status.js"
 Copy-ReleaseItem "scripts\verify_release_sop.py" "scripts\verify_release_sop.py"
+Copy-ReleaseItem "scripts\verify_project_board_photo_dialog.js" "scripts\verify_project_board_photo_dialog.js"
 Copy-ReleaseItem "scripts\production_backup.sh" "scripts\production_backup.sh"
+Copy-ReleaseItem "scripts\run_photo_barcode_maintenance.sh" "scripts\run_photo_barcode_maintenance.sh"
+Copy-ReleaseItem "scripts\run_photo_barcode_maintenance_slice.sh" "scripts\run_photo_barcode_maintenance_slice.sh"
+Copy-ReleaseItem "scripts\run_photo_barcode_not_matched_rescan.sh" "scripts\run_photo_barcode_not_matched_rescan.sh"
 Copy-ReleaseItem "scripts\production_health_check.py" "scripts\production_health_check.py"
 
 Copy-ReleaseItem "v2-api\app" "v2-api\app"
@@ -112,6 +129,10 @@ $stagedStaticDir = Join-Path $staging "v2-api\app\static"
 if (Test-Path $stagedStaticDir) {
     Get-ChildItem -LiteralPath $stagedStaticDir -File -Filter "*.html" -Force |
         Remove-Item -Force
+    $stagedUploadsDir = Join-Path $stagedStaticDir "uploads"
+    if (Test-Path $stagedUploadsDir) {
+        Remove-Item -Recurse -Force -LiteralPath $stagedUploadsDir
+    }
 }
 
 Get-ChildItem -LiteralPath $staging -Recurse -Directory -Force |

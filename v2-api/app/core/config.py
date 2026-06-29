@@ -50,6 +50,9 @@ class Settings(BaseSettings):
         alias="OSS_PREVIEW_PROCESS",
     )
     delivery_cache_path: str = Field(default="", alias="DELIVERY_CACHE_PATH")
+    project_board_summary_cache_enabled: bool = Field(default=True, alias="PROJECT_BOARD_SUMMARY_CACHE_ENABLED")
+    project_board_summary_cache_seconds: int = Field(default=300, alias="PROJECT_BOARD_SUMMARY_CACHE_SECONDS")
+    project_board_summary_cache_path: str = Field(default="", alias="PROJECT_BOARD_SUMMARY_CACHE_PATH")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

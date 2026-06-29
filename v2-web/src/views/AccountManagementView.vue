@@ -207,8 +207,6 @@ onMounted(() => {
     <div class="account-hero panel">
       <div>
         <p class="eyebrow">账号管理</p>
-        <h2>账号、角色与登录审计</h2>
-        <p class="muted">统一维护账号入口，记录最近 30 次登录，并按 IP 识别常用人员。</p>
       </div>
       <ElButton :icon="Refresh" :loading="loadingAccounts" @click="loadAccounts">刷新</ElButton>
     </div>
@@ -236,7 +234,6 @@ onMounted(() => {
       <div class="panel-heading">
         <div>
           <h3>{{ accountForm.editing ? '编辑账号' : '新增账号' }}</h3>
-          <p class="muted">姓名作为安装人员、施工统计与 KPI 的统一人员口径。</p>
         </div>
       </div>
       <div class="account-form-grid">
@@ -279,7 +276,6 @@ onMounted(() => {
       <div class="panel-heading">
         <div>
           <h3>账号清单</h3>
-          <p class="muted">IP 常用人仅作风险提示，用于发现可能的代做工单。</p>
         </div>
       </div>
       <el-table v-loading="loadingAccounts" :data="accountUsers" height="520" size="small">

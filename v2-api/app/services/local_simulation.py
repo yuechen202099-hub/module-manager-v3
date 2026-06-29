@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from app.core.config import settings
 from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key
+from app.services import account_store
 from app.services import photo_barcode_check
 from app.services.photo_storage import (
     active_storage_backend,
@@ -3980,6 +3981,7 @@ def group_target_installer(group: dict[str, Any]) -> str:
     for value in (
         group.get("installer"),
         group.get("constructor"),
+        group.get("creator"),
         group.get("replacement_by"),
     ):
         text = str(value or "").strip()
@@ -3998,6 +4000,36 @@ def group_target_installer(group: dict[str, Any]) -> str:
         if text:
             return text
     return ""
+
+
+def group_distribution_installer(group: dict[str, Any]) -> str:
+    for value in (
+        group.get("installer"),
+        group.get("constructor"),
+        group.get("creator"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def installer_display_name(value: Any, cache: dict[str, str] | None = None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if cache is not None and text in cache:
+        return cache[text]
+    display = text
+    try:
+        user = account_store.get_user(text)
+    except ValueError:
+        user = None
+    if user:
+        display = str(user.get("name") or user.get("username") or text).strip() or text
+    if cache is not None:
+        cache[text] = display
+    return display
 
 
 def group_target_text(group: dict[str, Any]) -> str:
@@ -4028,6 +4060,39 @@ def group_target_text(group: dict[str, Any]) -> str:
     return " ".join(str(value or "") for value in values).lower()
 
 
+def group_photo_category_summary(photos: list[dict[str, Any]]) -> dict[str, Any]:
+    active_photos = [photo for photo in photos if photo.get("is_active", True)]
+    classified_count = sum(
+        1
+        for photo in active_photos
+        if str(photo.get("category") or "").strip()
+        and str(photo.get("category") or "").strip() != "unclassified"
+    )
+    total = len(active_photos)
+    return {
+        "photo_category_classified_count": classified_count,
+        "photo_category_total_count": total,
+        "photo_category_complete": bool(total) and classified_count == total,
+    }
+
+
+def group_barcode_status_summary(group: dict[str, Any]) -> dict[str, Any]:
+    check = photo_barcode_check.build_group_barcode_check(group)
+    matched_fields = [str(item) for item in check.get("group_barcode_matched_fields", []) if str(item).strip()]
+    return {
+        "group_barcode_check_status": check.get("group_barcode_check_status", ""),
+        "group_barcode_missing_fields": check.get("group_barcode_missing_fields", []),
+        "group_barcode_missing_expected_fields": check.get("group_barcode_missing_expected_fields", []),
+        "group_barcode_matched_fields": matched_fields,
+        "group_barcode_detected_values": check.get("group_barcode_detected_values", {}),
+        "group_barcode_passed_count": len(set(matched_fields)),
+        "group_barcode_total_count": len(photo_barcode_check.GROUP_BARCODE_TYPES),
+        "group_barcode_manual_confirmed": bool(check.get("group_barcode_manual_confirmed")),
+        "group_barcode_manual_confirmed_by": check.get("group_barcode_manual_confirmed_by", ""),
+        "group_barcode_manual_confirmed_at": check.get("group_barcode_manual_confirmed_at", ""),
+    }
+
+
 def group_target_summary(group: dict[str, Any], *, include_photos: bool = False) -> dict[str, Any]:
     photo_count = group.get("photo_count", 0)
     photos = [photo for photo in group.get("photos", []) if photo.get("is_active", True)]
@@ -4056,6 +4121,8 @@ def group_target_summary(group: dict[str, Any], *, include_photos: bool = False)
         "construction_status": "unconstructed" if photo_count == 0 else "scanned",
         "has_archive_blocker": group.get("has_archive_blocker", False),
         "exception_reasons": group.get("exception_reasons", []),
+        **group_photo_category_summary(photos),
+        **group_barcode_status_summary({**group, "photos": photos}),
     }
     if include_photos:
         payload["photos"] = photos
@@ -4544,6 +4611,40 @@ def get_group(group_id: str) -> dict[str, Any] | None:
     return ensure_group_photo_storage_fields(group) if group is not None else None
 
 
+def task_installer_distribution(task_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = defaultdict(int)
+    completed_count = 0
+    name_cache: dict[str, str] = {}
+    for group in task_groups:
+        photos = [photo for photo in group.get("photos", []) if isinstance(photo, dict)]
+        active_photos = [photo for photo in photos if photo.get("is_active") is not False]
+        has_uploaded_evidence = bool(active_photos) or int(group.get("photo_count") or 0) > 0
+        if not has_uploaded_evidence:
+            continue
+        completed_count += 1
+        photo_installers = {
+            installer_display_name(photo.get("creator"), name_cache)
+            for photo in active_photos
+            if str(photo.get("creator") or "").strip()
+        }
+        if photo_installers:
+            for installer in sorted(photo_installers):
+                if installer:
+                    counts[installer] += 1
+            continue
+        installer = installer_display_name(group_distribution_installer(group), name_cache)
+        if installer:
+            counts[installer] += 1
+    total = max(completed_count, sum(counts.values()))
+    if total <= 0:
+        return []
+    return [
+        {"installer": installer, "group_count": count, "share": round(count / total, 4)}
+        for installer, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        if installer and count > 0
+    ]
+
+
 def list_tasks() -> list[dict[str, Any]]:
     state = get_state()
     groups_by_task: dict[int, list[dict[str, Any]]] = defaultdict(list)
@@ -4555,6 +4656,7 @@ def list_tasks() -> list[dict[str, Any]]:
         task["address"] = first_task_address(task_groups)
         task["address_search_text"] = task_address_search_text(task_groups)
         task["meter_search_text"] = task_meter_search_text(task_groups)
+        task["installer_distribution"] = task_installer_distribution(task_groups)
     return sorted(
         state["tasks"],
         key=lambda task: (
@@ -5539,6 +5641,77 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
     update_group_archive_status(group, reviewer)
     refresh_after_photo_classification(before_group, group, previous, category)
     return photo
+
+
+def rescan_photo_barcode(group_id: str, photo_id: str, reviewer: str, category: str = "") -> dict[str, Any]:
+    group = get_group(group_id)
+    if group is None:
+        raise KeyError(group_id)
+    ensure_task_claimed_by(group, reviewer)
+    photo = next((item for item in group["photos"] if item["id"] == photo_id), None)
+    if photo is None:
+        raise KeyError(photo_id)
+    next_category = str(category or photo.get("category") or "unclassified").strip() or "unclassified"
+    if next_category not in PHOTO_CATEGORIES:
+        raise ValueError(f"Unsupported photo category: {next_category}")
+    now = now_iso()
+    if next_category != photo.get("category"):
+        photo["category"] = next_category
+        photo["category_label"] = PHOTO_CATEGORIES[next_category]
+        photo["classified_by"] = reviewer
+        photo["classified_at"] = now
+    photo.update(photo_barcode_check.check_photo_barcode(photo, group, use_ocr=True))
+    photo["barcode_rescanned_by"] = reviewer
+    photo["barcode_rescanned_at"] = now
+    state = get_state()
+    state["photo_events"].append(
+        {
+            "group_id": group_id,
+            "photo_id": photo_id,
+            "category": next_category,
+            "reviewer": reviewer,
+            "event": "barcode_rescan",
+            "status": photo.get("barcode_check_status", ""),
+            "created_at": now,
+        }
+    )
+    append_audit_event(
+        "photo_barcode_rescan",
+        reviewer,
+        {
+            "group_id": group_id,
+            "photo_id": photo_id,
+            "category": next_category,
+            "status": photo.get("barcode_check_status", ""),
+            "matched_value": photo.get("barcode_check_matched_value", ""),
+            "method": photo.get("barcode_check_method", ""),
+        },
+    )
+    refresh_summary()
+    return photo
+
+
+def confirm_group_barcode_manually(group_id: str, actor: str) -> dict[str, Any]:
+    group = get_group(group_id)
+    if group is None:
+        raise KeyError(group_id)
+    ensure_task_claimed_by(group, actor)
+    now = now_iso()
+    group["group_barcode_manual_confirmed"] = True
+    group["group_barcode_manual_confirmed_fields"] = list(photo_barcode_check.GROUP_BARCODE_TYPES)
+    group["group_barcode_manual_confirmed_by"] = actor
+    group["group_barcode_manual_confirmed_at"] = now
+    append_audit_event(
+        "group_barcode_manual_confirmed",
+        actor,
+        {
+            "group_id": group_id,
+            "fields": group["group_barcode_manual_confirmed_fields"],
+            "confirmed_at": now,
+        },
+    )
+    refresh_summary()
+    return {"group": group_target_summary(group, include_photos=True)}
 
 
 def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:

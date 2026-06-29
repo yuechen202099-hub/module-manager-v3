@@ -74,6 +74,53 @@ def assert_vue_shell_response(response) -> None:
     assert "LegacyStaticPageView" not in response.text
 
 
+def demo_admin_headers() -> dict[str, str]:
+    admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    assert admin_login.status_code == 200
+    return {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
+
+
+def seed_photo_barcode_review_groups(count: int = 3) -> list[dict]:
+    client.post("/local-test/bootstrap")
+    state = local_simulation.get_state()
+    seeded: list[dict] = []
+    for index, group in enumerate(state["groups"][:count]):
+        group["status"] = "approved" if index == 0 else "pending"
+        group["reviewer"] = "api-test" if index == 0 else ""
+        group["module_asset_no"] = f"MODULE-{index + 1:03d}"
+        group["asset_no"] = group["module_asset_no"]
+        group["collector"] = f"COLLECTOR-{index + 1:03d}"
+        group["construction_module_asset_no"] = group["module_asset_no"]
+        group["construction_collector"] = group["collector"]
+        group["photos"] = [
+            {
+                "id": f"{group['id']}-photo-{photo_index}",
+                "group_id": group["id"],
+                "sort_order": photo_index,
+                "category": ["before_box", "after_box", "module_meter", "collector_barcode"][photo_index - 1],
+                "category_label": ["before_box", "after_box", "module_meter", "collector_barcode"][photo_index - 1],
+                "image_url": f"https://example.test/{group['id']}-{photo_index}.jpg",
+                "thumbnail_url": f"https://example.test/{group['id']}-{photo_index}-thumb.jpg",
+                "barcode": "",
+                "collector": "",
+                "asset_no": "",
+                "creator": "安装人员A",
+            }
+            for photo_index in range(1, 5)
+        ]
+        group["photo_count"] = 4
+        for photo_index, photo in enumerate(group["photos"][:4]):
+            photo["barcode_check_status"] = "unreadable"
+            photo["barcode_check_expected_type"] = "none"
+            photo["barcode_check_values"] = []
+            photo["barcode_check_normalized_values"] = []
+            photo["barcode_group_evidence_checked"] = True
+        seeded.append(group)
+    local_simulation.save_all_team_states()
+    assert len(seeded) == count
+    return seeded
+
+
 def test_health_check() -> None:
     response = client.get("/health", headers={"x-request-id": "test-request"})
 
@@ -96,7 +143,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.42"
+    assert data["version"] == "3.0.68"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -188,6 +235,51 @@ def test_broken_oss_processed_preview_falls_back_to_original(monkeypatch) -> Non
 
     assert media_type == "image/jpeg"
     assert content == original_bytes
+
+
+def test_group_photo_content_original_oss_uses_unprocessed_source(monkeypatch) -> None:
+    from app.api.routes import local_test
+
+    group = {
+        "id": "g-oss",
+        "photos": [
+            {
+                "id": "p-oss",
+                "image_url": "oss://bucket-a/path/to/photo.jpg",
+                "storage_type": "oss",
+                "storage_key": "path/to/photo.jpg",
+            }
+        ],
+    }
+    captured: dict[str, str] = {}
+
+    class FakeRepository:
+        def get_group(self, group_id: str) -> dict | None:
+            return group if group_id == "g-oss" else None
+
+        def get_delivery_cached_photo_path(self, _group_id: str, _photo_id: str):
+            raise FileNotFoundError
+
+    def fake_read_oss_photo_or_repair(
+        _group_id: str,
+        _photo: dict,
+        _storage_key: str,
+        _parsed_key: str,
+        process: str,
+        *,
+        kind: str = "preview",
+    ) -> tuple[bytes, str]:
+        captured["process"] = process
+        captured["kind"] = kind
+        return b"jpeg", "image/jpeg"
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+    monkeypatch.setattr(local_test, "_read_oss_photo_or_repair", fake_read_oss_photo_or_repair)
+
+    response = client.get("/local-test/groups/g-oss/photos/p-oss/content?kind=original")
+
+    assert response.status_code == 200
+    assert captured == {"process": "", "kind": "original"}
 
 
 def test_login_page_and_demo_auth_are_available() -> None:
@@ -350,6 +442,88 @@ def test_production_account_config_and_api_token_gate(monkeypatch, tmp_path) -> 
     assert delete_self.status_code == 400
 
 
+def test_project_summary_route_reuses_server_snapshot_until_forced(monkeypatch, tmp_path) -> None:
+    from app.api.routes import local_test
+    from app.services.project_board_cache import ProjectBoardSummaryCache
+
+    calls = 0
+    cache = ProjectBoardSummaryCache(cache_root=tmp_path, interval_seconds=300, enabled=True)
+
+    class FakeRepository:
+        def summary(self) -> dict:
+            nonlocal calls
+            calls += 1
+            return {"summary": {"team_id": "default-team", "groups": calls}, "paths": {}}
+
+    monkeypatch.setattr(local_test, "project_board_summary_cache", cache)
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+
+    first = client.get("/local-test/summary")
+    second = client.get("/local-test/summary")
+    forced = client.get("/local-test/summary?refresh=true")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert forced.status_code == 200
+    assert first.json()["data"]["summary"]["groups"] == 1
+    assert second.json()["data"]["summary"]["groups"] == 1
+    assert forced.json()["data"]["summary"]["groups"] == 2
+    assert calls == 2
+
+
+def test_photo_barcode_review_groups_are_paginated_and_include_archived_groups() -> None:
+    headers = demo_admin_headers()
+    seeded = seed_photo_barcode_review_groups(count=3)
+
+    first_page = client.get(
+        "/local-test/photo-barcode/review-groups?status=unreadable&limit=2&offset=0",
+        headers=headers,
+    )
+    second_page = client.get(
+        "/local-test/photo-barcode/review-groups?status=unreadable&limit=2&offset=2",
+        headers=headers,
+    )
+
+    assert first_page.status_code == 200
+    assert second_page.status_code == 200
+    first_payload = first_page.json()["data"]
+    second_payload = second_page.json()["data"]
+    assert first_payload["total"] >= 3
+    assert len(first_payload["items"]) == 2
+    assert len(second_payload["items"]) >= 1
+    assert first_payload["limit"] == 2
+    assert first_payload["offset"] == 0
+    assert second_payload["limit"] == 2
+    assert second_payload["offset"] == 2
+    archived_item = next(item for item in first_payload["items"] + second_payload["items"] if item["group_id"] == seeded[0]["id"])
+    assert archived_item["group_status"] == "approved"
+    assert archived_item["archived"] is True
+
+
+def test_photo_barcode_review_groups_export_returns_admin_workbook() -> None:
+    headers = demo_admin_headers()
+    seed_photo_barcode_review_groups(count=1)
+
+    export_response = client.get(
+        "/local-test/photo-barcode/review-groups/export?status=unreadable",
+        headers=headers,
+    )
+
+    assert export_response.status_code == 200
+    assert export_response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert "attachment" in export_response.headers["content-disposition"]
+    assert export_response.content.startswith(b"PK")
+
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(export_response.content), read_only=True)
+    sheet = workbook.active
+    headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
+    assert "资料组状态" in headers
+    assert "是否已归档" in headers
+    assert "缺失项" in headers
+
+
 def test_account_login_history_keeps_30_rows_and_marks_ip_common_user(monkeypatch, tmp_path) -> None:
     production_settings = SimpleNamespace(
         app_env="production",
@@ -467,6 +641,14 @@ def test_local_test_task_and_review_flow() -> None:
     assert "address" in task
     assert "address_search_text" in task
     assert isinstance(task["address_search_text"], str)
+    assert "installer_distribution" in task
+    assert isinstance(task["installer_distribution"], list)
+    if task["installer_distribution"]:
+        installer_item = task["installer_distribution"][0]
+        assert {"installer", "group_count", "share"}.issubset(installer_item)
+        assert installer_item["installer"]
+        assert installer_item["group_count"] > 0
+        assert 0 < installer_item["share"] <= 1
 
     claim_response = client.post(f"/local-test/tasks/{task['id']}/claim", json={"reviewer": "api-test"})
     assert claim_response.status_code == 200
@@ -514,6 +696,115 @@ def test_local_test_task_and_review_flow() -> None:
     assert "photos" not in category_summary_response.json()["data"]["group"]
     assert delete_response.status_code == 200
     assert delete_response.json()["data"]["deleted_photo"]["id"] == photo["id"]
+
+
+def test_photo_barcode_rescan_route_updates_photo_with_ocr(monkeypatch) -> None:
+    headers = {"X-Team-Id": "rescan-route-test"}
+    client.post("/local-test/bootstrap", headers=headers)
+    task = next(item for item in client.get("/local-test/tasks", headers=headers).json()["data"]["items"] if item["can_claim"])
+    claim_response = client.post(
+        f"/local-test/tasks/{task['id']}/claim",
+        headers=headers,
+        json={"reviewer": "api-test"},
+    )
+    assert claim_response.status_code == 200
+    photo_group = next(
+        item
+        for item in client.get(f"/local-test/tasks/{task['id']}/groups", headers=headers).json()["data"]["items"]
+        if item["photos"]
+    )
+    photo = photo_group["photos"][0]
+
+    def fake_check(photo_payload, _group_payload, **kwargs):
+        assert kwargs["use_ocr"] is True
+        assert photo_payload["category"] == "module_meter"
+        return {
+            "barcode_check_status": "matched",
+            "barcode_check_expected_type": "module",
+            "barcode_check_values": ["MOD-001"],
+            "barcode_check_normalized_values": ["MOD001"],
+            "barcode_check_ocr_values": ["MOD-001"],
+            "barcode_check_ocr_normalized_values": ["MOD001"],
+            "barcode_check_expected_values": ["MOD001"],
+            "barcode_check_matched_value": "MOD001",
+            "barcode_checked_at": "2026-06-28T00:00:00+00:00",
+            "barcode_check_error": "",
+            "barcode_check_method": "ocr",
+        }
+
+    monkeypatch.setattr(local_simulation.photo_barcode_check, "check_photo_barcode", fake_check)
+
+    response = client.post(
+        f"/local-test/groups/{photo_group['id']}/photos/{photo['id']}/barcode-rescan?include_group=true",
+        headers=headers,
+        json={"reviewer": "api-test", "category": "module_meter"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["photo"]["category"] == "module_meter"
+    assert data["photo"]["barcode_check_status"] == "matched"
+    assert data["photo"]["barcode_check_method"] == "ocr"
+    assert data["photo"]["barcode_check_ocr_normalized_values"] == ["MOD001"]
+    assert data["group"]["id"] == photo_group["id"]
+    audits = client.get("/local-test/audit-log?limit=5", headers=headers).json()["data"]["items"]
+    assert any(item["action"] == "photo_barcode_rescan" for item in audits)
+
+    spoof_token = security.create_access_token(
+        {"username": "intruder", "name": "Intruder", "roles": ["reviewer"], "team_id": "rescan-route-test"}
+    )
+    spoofed = client.post(
+        f"/local-test/groups/{photo_group['id']}/photos/{photo['id']}/barcode-rescan?include_group=true",
+        headers={**headers, "Authorization": f"bearer {spoof_token}"},
+        json={"reviewer": "api-test", "category": "module_meter"},
+    )
+    assert spoofed.status_code == 403
+
+
+def test_group_barcode_manual_confirm_route_marks_summary_and_audits() -> None:
+    team_id = "manual-confirm-route-test"
+    headers = {"X-Team-Id": team_id}
+    client.post("/local-test/bootstrap", headers=headers)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        state = local_simulation.get_state()
+        task = next(item for item in state["tasks"] if item["can_claim"])
+        group = next(item for item in state["groups"] if item["task_id"] == task["id"])
+        group.update(
+            {
+                "meter_no": "110000288056",
+                "collector": "COLLECTOR001",
+                "module_asset_no": "MOD001",
+                "photo_count": 4,
+                "photos": [
+                    {"id": "manual-confirm-p1", "category": "before_box", "archive_status": "archived"},
+                    {"id": "manual-confirm-p2", "category": "collector_barcode", "archive_status": "archived"},
+                    {"id": "manual-confirm-p3", "category": "module_meter", "archive_status": "archived"},
+                    {"id": "manual-confirm-p4", "category": "after_box", "archive_status": "archived"},
+                ],
+            }
+        )
+    finally:
+        local_simulation.reset_current_team(token)
+
+    claim_response = client.post(f"/local-test/tasks/{task['id']}/claim", json={"reviewer": "api-test"}, headers=headers)
+    assert claim_response.status_code == 200
+
+    response = client.post(
+        f"/local-test/groups/{group['id']}/barcode-manual-confirm",
+        json={"actor": "api-test"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    payload = response.json()["data"]
+
+    assert payload["group"]["group_barcode_manual_confirmed"] is True
+    assert payload["group"]["group_barcode_passed_count"] == 3
+    assert payload["group"]["group_barcode_check_status"] == "matched"
+
+    audit_response = client.get("/local-test/audit-log?limit=1", headers=headers)
+    assert audit_response.status_code == 200
+    assert audit_response.json()["data"]["items"][0]["action"] == "group_barcode_manual_confirmed"
 
 
 def test_local_test_team_header_isolates_review_state() -> None:

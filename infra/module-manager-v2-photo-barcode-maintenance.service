@@ -1,0 +1,16 @@
+[Unit]
+Description=Module Manager V2 photo barcode maintenance
+After=network.target postgresql.service module-manager-v2.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/module-manager-v2/current
+Environment=BARCODE_MAINTENANCE_BATCH_SIZE=20
+Environment=BARCODE_UNREADABLE_RECHECK_ID=slow-slice-20260627
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+CPUQuota=20%
+MemoryMax=512M
+TimeoutStartSec=20min
+ExecStart=/bin/bash /opt/module-manager-v2/current/scripts/run_photo_barcode_maintenance_slice.sh /opt/module-manager-v2

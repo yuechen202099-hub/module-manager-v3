@@ -2,7 +2,6 @@
 import { MoreFilled, Refresh, Search, Unlock } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
 
 import {
   assignConstructionTask,
@@ -19,7 +18,6 @@ import {
 import type { ReviewTask, TaskStatusSummary, UserAccount } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
-const router = useRouter()
 const auth = useAuthStore()
 const loading = ref(false)
 const releasingAll = ref(false)
@@ -184,19 +182,65 @@ function taskMatchesSearch(task: ReviewTask, query: string) {
   return haystack.includes(query)
 }
 
+function taskTotalGroups(task: ReviewTask) {
+  return Number(task.renovationCount || task.totalGroups || 0)
+}
+
+function isTaskReviewComplete(task: ReviewTask) {
+  const total = taskTotalGroups(task)
+  if (!task.hasScanInfo || total <= 0) return false
+  const reviewed = Number(task.reviewedCount || task.completedGroups || 0)
+  if (reviewed >= total || (Number(task.reviewRate) || 0) >= 1) return true
+  return task.unreviewedCount !== undefined && Number(task.unreviewedCount || 0) <= 0
+}
+
 function taskReviewPercent(task: ReviewTask) {
-  return Math.round((Number(task.reviewRate) || 0) * 100)
+  if (isTaskReviewComplete(task)) return 100
+  return Math.max(0, Math.min(99, Math.floor((Number(task.reviewRate) || 0) * 100)))
+}
+
+function isTaskConstructionComplete(task: ReviewTask) {
+  const total = taskTotalGroups(task)
+  if (total <= 0) return false
+  if (task.constructionUnbuiltCount !== undefined && Number(task.constructionUnbuiltCount || 0) <= 0) return true
+  const uploaded = Number(task.constructionUploadedCount ?? task.uploadedCount ?? 0)
+  return uploaded >= total || (Number(task.uploadRate) || 0) >= 1
+}
+
+function taskConstructionLabel(task: ReviewTask) {
+  return isTaskConstructionComplete(task) ? '已施工' : taskConstructorName(task)
+}
+
+function reviewActionLabel(task: ReviewTask) {
+  if (isTaskReviewComplete(task)) return '已审阅'
+  return task.claimedBy === actor.value ? '释放工单' : '领取'
+}
+
+function isReviewActionDisabled(task: ReviewTask) {
+  if (isTaskReviewComplete(task)) return true
+  return task.claimedBy !== actor.value && (!task.canClaim || (!!task.claimedBy && task.claimedBy !== actor.value && !isAdmin.value))
+}
+
+function constructionActionLabel(task: ReviewTask) {
+  if (isTaskConstructionComplete(task)) return '已施工'
+  return taskConstructorAccount(task) ? '改派施工' : '指派施工'
+}
+
+function isConstructionActionDisabled(task: ReviewTask) {
+  return isTaskConstructionComplete(task)
 }
 
 function statusLabel(task: ReviewTask) {
+  if (isTaskReviewComplete(task)) return '已审阅'
   if (task.claimedBy === actor.value) return '我已领取'
   if (task.claimedBy) return '已被领取'
   if (!task.hasScanInfo) return '无扫码'
-  if (!task.unreviewedCount) return '已审完'
+  if (!task.unreviewedCount) return '已审阅'
   return '可领取'
 }
 
 function statusType(task: ReviewTask) {
+  if (isTaskReviewComplete(task)) return 'success'
   if (task.claimedBy === actor.value) return 'success'
   if (task.claimedBy) return 'warning'
   if (!task.hasScanInfo) return 'info'
@@ -315,6 +359,7 @@ function handleExternalRefresh(event: MessageEvent) {
 }
 
 async function claim(task: ReviewTask) {
+  if (isTaskReviewComplete(task)) return
   errorMessage.value = ''
   try {
     const updated = await claimTaskApi(task.id)
@@ -327,6 +372,7 @@ async function claim(task: ReviewTask) {
 }
 
 async function release(task: ReviewTask) {
+  if (isTaskReviewComplete(task)) return
   errorMessage.value = ''
   try {
     const updated = await releaseTaskApi(task.id)
@@ -355,6 +401,7 @@ async function releaseAll() {
 
 async function openAssignDialog(task: ReviewTask) {
   if (!isAdmin.value) return
+  if (isTaskConstructionComplete(task)) return
   assignmentTargetTask.value = task
   assignmentConstructor.value = taskConstructorAccount(task)
   assignmentDialogVisible.value = true
@@ -450,17 +497,14 @@ async function handleTaskMoreCommand(command: string | number | TaskMoreCommand)
     return
   }
   if (command.action === 'assign') {
+    if (isTaskConstructionComplete(task)) return
     await openAssignDialog(task)
     return
   }
   if (command.action === 'release') {
+    if (isTaskReviewComplete(task)) return
     await release(task)
   }
-}
-
-function openReview(task: ReviewTask) {
-  if (task.claimedBy && task.claimedBy !== actor.value && !isAdmin.value) return
-  void router.push('/task-hall')
 }
 
 onMounted(() => {
@@ -484,8 +528,6 @@ onUnmounted(() => {
     <div class="claim-hero panel">
       <div>
         <p class="eyebrow">任务领取</p>
-        <h2>按终端领取审阅任务</h2>
-        <p class="muted">审阅员只看到仍有未审阅照片的终端；管理员可查看全部终端并指派施工。</p>
       </div>
       <div class="claim-actions">
         <ElButton :icon="Refresh" :loading="loading" @click="refreshTasks">刷新</ElButton>
@@ -596,8 +638,8 @@ onUnmounted(() => {
 
           <div v-if="isAdmin" class="task-construction-line">
             <span>
-              施工：<strong>{{ taskConstructorName(task) }}</strong>
-              <small v-if="taskConstructorAccountHint(task)">{{ taskConstructorAccountHint(task) }}</small>
+              施工：<strong>{{ taskConstructionLabel(task) }}</strong>
+              <small v-if="!isTaskConstructionComplete(task) && taskConstructorAccountHint(task)">{{ taskConstructorAccountHint(task) }}</small>
             </span>
             <span v-if="task.constructionExceptionCount">异常 {{ task.constructionExceptionCount }}</span>
           </div>
@@ -606,18 +648,20 @@ onUnmounted(() => {
             <ElButton
               size="small"
               type="primary"
-              :disabled="!task.canClaim || (!!task.claimedBy && task.claimedBy !== actor && !isAdmin)"
-              @click="claim(task)"
+              :disabled="isReviewActionDisabled(task)"
+              @click="task.claimedBy === actor ? release(task) : claim(task)"
             >
-              {{ task.claimedBy === actor ? '继续持有' : '领取' }}
+              {{ reviewActionLabel(task) }}
             </ElButton>
             <ElButton
+              v-if="isAdmin"
               size="small"
               type="primary"
-              :disabled="!!task.claimedBy && task.claimedBy !== actor && !isAdmin"
-              @click="openReview(task)"
+              :loading="assigningTaskId === task.id"
+              :disabled="isConstructionActionDisabled(task)"
+              @click="openAssignDialog(task)"
             >
-              进入审阅
+              {{ constructionActionLabel(task) }}
             </ElButton>
             <ElDropdown
               v-if="isAdmin"
@@ -634,10 +678,10 @@ onUnmounted(() => {
                     导出终端包（{{ exportScopeByTask[task.id] === 'all' ? '全部' : '已归档' }}）
                   </ElDropdownItem>
                   <ElDropdownItem :command="{ action: 'export-detail', taskId: task.id }">导出明细</ElDropdownItem>
-                  <ElDropdownItem divided :command="{ action: 'assign', taskId: task.id }">
-                    {{ task.assignedConstructor || task.constructionClaimedBy ? '改派施工' : '指派施工' }}
+                  <ElDropdownItem divided :command="{ action: 'assign', taskId: task.id }" :disabled="isConstructionActionDisabled(task)">
+                    {{ constructionActionLabel(task) }}
                   </ElDropdownItem>
-                  <ElDropdownItem :command="{ action: 'release', taskId: task.id }" :disabled="!task.claimedBy && !isAdmin">暂存释放</ElDropdownItem>
+                  <ElDropdownItem :command="{ action: 'release', taskId: task.id }" :disabled="isTaskReviewComplete(task) || (!task.claimedBy && !isAdmin)">暂存释放</ElDropdownItem>
                   <ElDropdownItem divided :command="{ action: 'scope-reviewed', taskId: task.id }">导出范围：已归档</ElDropdownItem>
                   <ElDropdownItem :command="{ action: 'scope-all', taskId: task.id }">导出范围：全部</ElDropdownItem>
                 </ElDropdownMenu>

@@ -26,6 +26,7 @@ from app.services.local_simulation import (
     claim_task,
     clear_scan_data,
     assign_construction_task,
+    confirm_group_barcode_manually,
     create_blank_unmatched_record,
     create_empty_group_for_terminal,
     create_group_from_unmatched_record,
@@ -560,6 +561,120 @@ def test_summary_reports_installer_group_share(synthetic_state: dict) -> None:
     assert "未填写" not in distribution
 
 
+def test_task_installer_distribution_uses_group_installer_only(synthetic_state: dict) -> None:
+    synthetic_state["tasks"][0]["construction_claimed_by"] = "task-owner"
+    groups = [
+        {"task_id": 1, "photo_count": 1, "installer": "alice "},
+        {"task_id": 1, "photo_count": 1, "constructor": " alice"},
+        {"task_id": 1, "photo_count": 1, "creator": "bob"},
+        {"task_id": 1, "photo_count": 1},
+        {"task_id": 1, "photo_count": 0, "installer": "ignored"},
+    ]
+
+    distribution = {item["installer"]: item for item in local_simulation.task_installer_distribution(groups)}
+
+    assert distribution["alice"]["group_count"] == 2
+    assert distribution["alice"]["share"] == 0.5
+    assert distribution["bob"]["group_count"] == 1
+    assert distribution["bob"]["share"] == 0.25
+    assert "task-owner" not in distribution
+    assert "ignored" not in distribution
+
+
+def test_task_installer_distribution_displays_account_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_user(username: str):
+        if username == "xa":
+            return {"username": "xa", "name": "樊哲浩"}
+        return None
+
+    monkeypatch.setattr(local_simulation.account_store, "get_user", fake_get_user)
+
+    distribution = local_simulation.task_installer_distribution(
+        [
+            {"task_id": 1, "photo_count": 1, "creator": "xa"},
+            {"task_id": 1, "photo_count": 1, "creator": "樊哲浩"},
+        ]
+    )
+
+    assert distribution == [{"installer": "樊哲浩", "group_count": 2, "share": 1.0}]
+
+
+def test_task_installer_distribution_prefers_photo_creator(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_user(username: str):
+        if username == "xa":
+            return {"username": "xa", "name": "樊哲浩"}
+        return None
+
+    monkeypatch.setattr(local_simulation.account_store, "get_user", fake_get_user)
+
+    distribution = local_simulation.task_installer_distribution(
+        [
+            {
+                "task_id": 1,
+                "photo_count": 2,
+                "creator": "raw-installer",
+                "photos": [{"creator": "xa"}, {"creator": "xa"}],
+            },
+            {
+                "task_id": 1,
+                "photo_count": 2,
+                "photos": [{"creator": "白红运"}, {"creator": "龙翔"}],
+            },
+        ]
+    )
+
+    assert distribution == [
+        {"installer": "樊哲浩", "group_count": 1, "share": 0.3333},
+        {"installer": "白红运", "group_count": 1, "share": 0.3333},
+        {"installer": "龙翔", "group_count": 1, "share": 0.3333},
+    ]
+
+
+def test_task_installer_distribution_counts_active_photo_creator_when_photo_count_is_stale() -> None:
+    distribution = local_simulation.task_installer_distribution(
+        [
+            {
+                "task_id": 1,
+                "photo_count": 0,
+                "installer": "raw-installer",
+                "photos": [{"creator": "photo-installer", "is_active": True}],
+            }
+        ]
+    )
+
+    assert distribution == [{"installer": "photo-installer", "group_count": 1, "share": 1.0}]
+
+
+def test_task_installer_distribution_ignores_inactive_photo_creator_before_fallback() -> None:
+    distribution = local_simulation.task_installer_distribution(
+        [
+            {
+                "task_id": 1,
+                "photo_count": 1,
+                "installer": "raw-installer",
+                "photos": [{"creator": "deleted-installer", "is_active": False}],
+            }
+        ]
+    )
+
+    assert distribution == [{"installer": "raw-installer", "group_count": 1, "share": 1.0}]
+
+
+def test_task_installer_distribution_does_not_use_replacement_by_as_installer() -> None:
+    distribution = local_simulation.task_installer_distribution(
+        [
+            {
+                "task_id": 1,
+                "photo_count": 1,
+                "replacement_by": "replacement-only",
+                "photos": [{"creator": "", "is_active": True}],
+            }
+        ]
+    )
+
+    assert distribution == []
+
+
 def test_normalize_cell_repairs_latin1_mojibake() -> None:
     mojibake = "\u00e5\u00ae\u009d\u00e5\u00b1\u00b1\u00e5\u008c\u00ba\u00e9\u0094\u00a6\u00e7\u00a7\u008b\u00e8\u00b7\u00af1152\u00e5\u008f\u00b7"
 
@@ -663,6 +778,91 @@ def test_task_groups_can_return_lightweight_summaries(synthetic_state: dict) -> 
     assert "photos" not in result["items"][0]
     assert "photo_count" in result["items"][0]
     assert "reviewer" in result["items"][0]
+
+
+def test_task_group_summary_includes_barcode_coverage_and_category_state(synthetic_state: dict) -> None:
+    group = synthetic_state["groups"][0]
+    group.update(
+        {
+            "meter_no": "110000288056",
+            "meter_match_key": "0000288056",
+            "collector": "COLLECTOR001",
+            "module_asset_no": "MOD001",
+            "photo_count": 4,
+            "photos": [
+                {
+                    "id": "p-meter",
+                    "category": "before_box",
+                    "archive_status": "archived",
+                    "barcode_check_status": "matched",
+                    "barcode_check_expected_type": "meter",
+                    "barcode_check_matched_value": "110000288056",
+                    "barcode_check_normalized_values": ["110000288056"],
+                },
+                {
+                    "id": "p-collector",
+                    "category": "collector_barcode",
+                    "archive_status": "archived",
+                    "barcode_check_status": "matched",
+                    "barcode_check_expected_type": "collector",
+                    "barcode_check_matched_value": "COLLECTOR001",
+                    "barcode_check_normalized_values": ["COLLECTOR001"],
+                },
+                {
+                    "id": "p-module",
+                    "category": "module_meter",
+                    "archive_status": "archived",
+                    "barcode_check_status": "matched",
+                    "barcode_check_expected_type": "module",
+                    "barcode_check_matched_value": "MOD001",
+                    "barcode_check_normalized_values": ["MOD001"],
+                },
+                {
+                    "id": "p-after",
+                    "category": "after_box",
+                    "archive_status": "archived",
+                },
+            ],
+        }
+    )
+
+    result = list_task_groups(group["task_id"], summary_only=True)
+    item = next(item for item in result["items"] if item["id"] == group["id"])
+
+    assert "photos" not in item
+    assert item["group_barcode_check_status"] == "matched"
+    assert item["group_barcode_passed_count"] == 3
+    assert set(item["group_barcode_matched_fields"]) == {"meter", "module", "collector"}
+    assert item["photo_category_complete"] is True
+
+
+def test_manual_group_barcode_confirmation_audits_and_marks_group_passed(synthetic_state: dict) -> None:
+    group = synthetic_state["groups"][0]
+    group.update(
+        {
+            "meter_no": "110000288056",
+            "collector": "COLLECTOR001",
+            "module_asset_no": "MOD001",
+            "photo_count": 4,
+            "photos": [
+                {"id": "p1", "category": "before_box", "archive_status": "archived"},
+                {"id": "p2", "category": "collector_barcode", "archive_status": "archived"},
+                {"id": "p3", "category": "module_meter", "archive_status": "archived"},
+                {"id": "p4", "category": "after_box", "archive_status": "archived"},
+            ],
+        }
+    )
+    claim_task(group["task_id"], "alice")
+
+    result = confirm_group_barcode_manually(group["id"], actor="alice")
+    updated = result["group"]
+    events = list_audit_events(limit=5)["items"]
+
+    assert updated["group_barcode_manual_confirmed"] is True
+    assert updated["group_barcode_check_status"] == "matched"
+    assert updated["group_barcode_passed_count"] == 3
+    assert events[0]["action"] == "group_barcode_manual_confirmed"
+    assert events[0]["payload"]["group_id"] == group["id"]
 
 
 def test_task_groups_are_ordered_for_review_queue(synthetic_state: dict) -> None:

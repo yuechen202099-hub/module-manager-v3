@@ -6,6 +6,7 @@ import { computed, nextTick, onUnmounted, reactive, ref } from 'vue'
 
 import {
   bulkArchiveAdminGroups,
+  fetchGroupPhotoObjectUrl,
   resetAdminGroupToUnconstructed,
   resetAdminGroupToUnreviewed,
   searchGroups,
@@ -46,6 +47,10 @@ const selectedGroups = ref<MaterialGroup[]>([])
 const errorMessage = ref('')
 const editOpen = ref(false)
 const activeGroup = ref<MaterialGroup | null>(null)
+const photoDialogOpen = ref(false)
+const photoDialogLoading = ref(false)
+const photoGroup = ref<MaterialGroup | null>(null)
+const groupPhotoObjectUrls = reactive<Record<string, string>>({})
 const resetReason = ref('')
 const scannerOpen = ref(false)
 const scannerStatus = ref('将条形码放入取景框，识别后会自动搜索。')
@@ -140,12 +145,74 @@ function statusLabel(status: string) {
   return statusLabels[status] || status || '未知'
 }
 
-function photoDisplayUrl(photo: NonNullable<MaterialGroup['photos']>[number]) {
-  return photo.thumbnailUrl || photo.previewUrl || photo.imageUrl || photo.url
+function barcodeProgress(row: MaterialGroup) {
+  const totalCount = Number(row.groupBarcodeTotalCount || 3)
+  const passedCount = Math.max(0, Math.min(totalCount, Number(row.groupBarcodePassedCount || 0)))
+  return { passedCount, totalCount }
 }
 
-function groupPreviewUrls(group: MaterialGroup) {
-  return (group.photos || []).map(photoDisplayUrl).filter(Boolean)
+function barcodeProgressLabel(row: MaterialGroup) {
+  const { passedCount, totalCount } = barcodeProgress(row)
+  return `扫码通过${passedCount}/${totalCount}`
+}
+
+function barcodeProgressType(row: MaterialGroup) {
+  const { passedCount, totalCount } = barcodeProgress(row)
+  if (totalCount > 0 && passedCount >= totalCount) return 'success'
+  if (passedCount > 0) return 'warning'
+  return 'danger'
+}
+
+function photoCategoryLabel(row: MaterialGroup) {
+  const classified = Number(row.photoCategoryClassifiedCount || 0)
+  const totalCount = Number(row.photoCategoryTotalCount || row.photoCount || 0)
+  if (row.photoCategoryComplete) return `已分类${classified}/${totalCount}`
+  return `未完成${classified}/${totalCount}`
+}
+
+function groupPhotoKey(groupId: string, photoId: string) {
+  return `${groupId}:${photoId}`
+}
+
+function groupPhotoUrl(groupId: string, photoId: string) {
+  return groupPhotoObjectUrls[groupPhotoKey(groupId, photoId)] || ''
+}
+
+function clearGroupPhotoObjectUrls() {
+  for (const [key, url] of Object.entries(groupPhotoObjectUrls)) {
+    URL.revokeObjectURL(url)
+    delete groupPhotoObjectUrls[key]
+  }
+}
+
+function groupPreviewUrls(group: MaterialGroup | null) {
+  if (!group) return []
+  return (group.photos || []).map((photo) => groupPhotoUrl(group.id, photo.id)).filter(Boolean)
+}
+
+async function openGroupPhotos(group: MaterialGroup) {
+  photoGroup.value = group
+  photoDialogOpen.value = true
+  photoDialogLoading.value = true
+  clearGroupPhotoObjectUrls()
+  try {
+    await Promise.all(
+      (group.photos || []).map((photo) =>
+        fetchGroupPhotoObjectUrl(group.id, photo.id, 'preview')
+          .then((url) => {
+            groupPhotoObjectUrls[groupPhotoKey(group.id, photo.id)] = url
+          })
+          .catch(() => undefined),
+      ),
+    )
+  } finally {
+    photoDialogLoading.value = false
+  }
+}
+
+function handlePhotoDialogClosed() {
+  photoGroup.value = null
+  clearGroupPhotoObjectUrls()
 }
 
 function firstPhotoField(group: MaterialGroup, field: 'collector' | 'moduleAssetNo') {
@@ -439,7 +506,7 @@ async function decodeScannerFile(event: Event) {
       <div class="search-heading">
         <div>
           <p class="eyebrow">管理员后台</p>
-          <h2>资料组后台</h2>
+          <h2>数据中台</h2>
         </div>
         <el-tag type="warning" effect="plain">管理员</el-tag>
       </div>
@@ -508,24 +575,24 @@ async function decodeScannerFile(event: Event) {
             <el-tag size="small" effect="plain">{{ statusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="photoCount" label="照片数" width="82" />
-        <el-table-column label="照片缩略图" min-width="190">
+        <el-table-column label="扫码状态" width="130">
           <template #default="{ row }">
-            <div v-if="row.photos?.length" class="photo-thumb-list">
-              <el-image
-                v-for="photo in row.photos.slice(0, 4)"
-                :key="photo.id"
-                :src="photoDisplayUrl(photo)"
-                :preview-src-list="groupPreviewUrls(row)"
-                fit="cover"
-                preview-teleported
-                class="photo-thumb"
-              >
-                <template #error>
-                  <span class="photo-thumb-error">加载失败</span>
-                </template>
-              </el-image>
-            </div>
+            <el-tag size="small" effect="plain" :type="barcodeProgressType(row)">
+              {{ barcodeProgressLabel(row) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="图片分类" width="120">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain" :type="row.photoCategoryComplete ? 'success' : 'warning'">
+              {{ photoCategoryLabel(row) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="photoCount" label="照片数" width="82" />
+        <el-table-column label="照片" width="116">
+          <template #default="{ row }">
+            <el-button v-if="row.photos?.length" link type="primary" @click="openGroupPhotos(row)">查看 {{ row.photoCount }} 张</el-button>
             <span v-else class="empty-cell">-</span>
           </template>
         </el-table-column>
@@ -567,14 +634,37 @@ async function decodeScannerFile(event: Event) {
       </template>
     </el-dialog>
 
+    <el-dialog
+      v-model="photoDialogOpen"
+      :title="`资料组照片 - ${photoGroup?.meterNo || photoGroup?.id || ''}`"
+      width="960px"
+      class="group-photo-dialog"
+      append-to-body
+      @closed="handlePhotoDialogClosed"
+    >
+      <div v-loading="photoDialogLoading" class="group-photo-grid">
+        <article v-for="photo in photoGroup?.photos || []" :key="photo.id" class="group-photo-card">
+          <el-image
+            :src="groupPhotoUrl(photoGroup?.id || '', photo.id)"
+            :preview-src-list="groupPreviewUrls(photoGroup)"
+            fit="contain"
+            preview-teleported
+            class="group-photo-image"
+          >
+            <template #error>
+              <span class="photo-thumb-error">图片加载失败</span>
+            </template>
+          </el-image>
+          <div class="group-photo-meta">
+            <strong>{{ photo.categoryLabel || photo.category || '未分类' }}</strong>
+            <span>{{ photo.archiveFilename || photo.name || photo.id }}</span>
+          </div>
+        </article>
+      </div>
+    </el-dialog>
+
     <el-drawer v-model="editOpen" title="编辑资料组" size="min(560px, 100vw)" class="edit-drawer">
       <div v-if="activeGroup" class="edit-body">
-        <el-alert
-          type="warning"
-          :closable="false"
-          show-icon
-          title="所有保存和回退操作都会写入审计记录。资料组ID、任务ID、照片数为只读字段。"
-        />
         <div class="readonly-grid">
           <span>资料组ID</span><strong>{{ activeGroup.id }}</strong>
           <span>任务ID</span><strong>{{ activeGroup.taskId || '-' }}</strong>
@@ -716,21 +806,6 @@ async function decodeScannerFile(event: Event) {
   min-width: max-content;
 }
 
-.photo-thumb-list {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.photo-thumb {
-  width: 38px;
-  height: 38px;
-  flex: 0 0 auto;
-  border: 1px solid var(--v2-border);
-  border-radius: 6px;
-  background: var(--v2-surface-soft);
-}
-
 .photo-thumb-error {
   display: grid;
   width: 100%;
@@ -741,6 +816,45 @@ async function decodeScannerFile(event: Event) {
   font-size: 10px;
   line-height: 1.1;
   text-align: center;
+}
+
+.group-photo-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-height: 220px;
+}
+
+.group-photo-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.group-photo-image {
+  width: 100%;
+  height: 260px;
+  border: 1px solid var(--v2-border);
+  border-radius: 8px;
+  background: var(--v2-surface-soft);
+}
+
+.group-photo-meta {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.group-photo-meta strong,
+.group-photo-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-photo-meta span {
+  color: var(--v2-text-muted);
 }
 
 .empty-cell {
@@ -844,6 +958,14 @@ async function decodeScannerFile(event: Event) {
   .result-actions {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .group-photo-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .group-photo-image {
+    height: 220px;
   }
 }
 </style>

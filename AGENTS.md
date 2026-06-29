@@ -2,7 +2,7 @@
 
 ## Production SOP Override
 
-- Current production baseline: `V3.0.42`.
+- Current production baseline: `V3.0.68`.
 - Production maintenance branch: `production/v3.0.35`.
 - Production SOP entrypoint: `docs/sop/README.md`.
 - Production release records: `ops/releases/`.
@@ -21,7 +21,7 @@
 
 ## 当前基线
 
-- 当前应用基线：`V3.0.42`。
+- 当前应用基线：`V3.0.68`。
 - 文档和协作规则使用独立规则版本，不自动修改应用版本。
 - 详细生产 SOP 见 `docs/sop/README.md`。
 
@@ -36,6 +36,7 @@
 ## 必读和代码发现
 
 - 每次改动前先读取本文件和与任务相关的文档。
+- 新 agent 接手前必须读取 `docs/AGENT_REQUIRED_READING.md`，它记录当前生产分支、版本基线、插件/skill、发布边界和常用验证命令。
 - 推荐优先使用 codebase-memory-mcp 图谱工具理解代码；图谱不可用或结果不足时，直接使用 `rg`、文件读取和本地测试。
 - 修改前尊重当前工作区状态，不回退用户已有改动，除非用户明确要求。
 

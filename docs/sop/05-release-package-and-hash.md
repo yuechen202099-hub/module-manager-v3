@@ -17,14 +17,14 @@ The old `build/client-release` path is for historical demo notes only and must n
 ## Build Command
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version 3.0.38
+powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version <version>
 ```
 
 ## Verification Commands
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.0.38.zip
-Get-FileHash .\build\server-release\module-manager-v2-server-3.0.38.zip -Algorithm SHA256
+.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-<version>.zip
+Get-FileHash .\build\server-release\module-manager-v2-server-<version>.zip -Algorithm SHA256
 ```
 
 ## Static Asset Gate

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -32,7 +33,12 @@ REQUIRED_FILES = {
     "docs/database/postgresql-schema.md",
     "infra/nginx/module-manager-v2.conf",
     "infra/module-manager-v2.service",
+    "infra/module-manager-v2-photo-barcode-maintenance.service",
+    "infra/module-manager-v2-photo-barcode-maintenance.timer",
     "scripts/build-client-release.ps1",
+    "scripts/run_photo_barcode_maintenance.sh",
+    "scripts/run_photo_barcode_maintenance_slice.sh",
+    "scripts/run_photo_barcode_not_matched_rescan.sh",
     "scripts/run-client-acceptance-gate.ps1",
     "scripts/run-client-demo.ps1",
     "scripts/smoke-client-demo.py",
@@ -41,10 +47,37 @@ REQUIRED_FILES = {
     "scripts/verify_postgres_cutover_gate.py",
     "scripts/verify-production-readiness.py",
     "scripts/verify-client-release.py",
+    "scripts/verify_claim_tasks_completion_status.js",
     "scripts/verify_release_sop.py",
+    "scripts/verify_project_board_photo_dialog.js",
     "scripts/production_backup.sh",
     "scripts/production_health_check.py",
     "ops/releases/README.md",
+    "ops/releases/V3.0.68.md",
+    "ops/releases/V3.0.67.md",
+    "ops/releases/V3.0.66.md",
+    "ops/releases/V3.0.65.md",
+    "ops/releases/V3.0.64.md",
+    "ops/releases/V3.0.63.md",
+    "ops/releases/V3.0.62.md",
+    "ops/releases/V3.0.61.md",
+    "ops/releases/V3.0.60.md",
+    "ops/releases/V3.0.59.md",
+    "ops/releases/V3.0.58.md",
+    "ops/releases/V3.0.56.md",
+    "ops/releases/V3.0.55.md",
+    "ops/releases/V3.0.54.md",
+    "ops/releases/V3.0.53.md",
+    "ops/releases/V3.0.52.md",
+    "ops/releases/V3.0.51.md",
+    "ops/releases/V3.0.50.md",
+    "ops/releases/V3.0.49.md",
+    "ops/releases/V3.0.48.md",
+    "ops/releases/V3.0.47.md",
+    "ops/releases/V3.0.46.md",
+    "ops/releases/V3.0.45.md",
+    "ops/releases/V3.0.44.md",
+    "ops/releases/V3.0.43.md",
     "ops/releases/V3.0.42.md",
     "ops/releases/V3.0.41.md",
     "ops/releases/V3.0.40.md",
@@ -62,6 +95,8 @@ REQUIRED_FILES = {
     "v2-api/requirements.txt",
     "v2-api/requirements-dev.txt",
     "v2-api/tests/test_api.py",
+    "v2-api/tests/test_recompute_photo_barcode_checks.py",
+    "v2-api/scripts/recompute_photo_barcode_checks.py",
     "v2-api/scripts/migrate_json_to_postgres.py",
     "v2-api/scripts/migrate_photos_to_oss.py",
     "v2-web/Dockerfile",
@@ -80,6 +115,10 @@ FORBIDDEN_PARTS = {
 FORBIDDEN_SUFFIXES = {
     ".pyc",
     ".pyo",
+}
+
+FORBIDDEN_PREFIXES = {
+    "v2-api/app/static/uploads/",
 }
 
 
@@ -107,6 +146,23 @@ def verify_package(zip_path: Path) -> None:
             )
         names = {normalize_zip_name(name) for name in raw_names}
         manifest = archive.read("RELEASE_MANIFEST.md").decode("utf-8") if "RELEASE_MANIFEST.md" in names else ""
+        package_version = ""
+        version_match = re.search(r"^- Version:\s*(?P<version>\S+)", manifest, re.MULTILINE)
+        if version_match:
+            package_version = version_match.group("version")
+        static_index = (
+            archive.read("v2-api/app/static/vue/index.html").decode("utf-8")
+            if "v2-api/app/static/vue/index.html" in names
+            else ""
+        )
+        static_js = ""
+        if package_version:
+            for name in sorted(names):
+                if name.startswith("v2-api/app/static/vue/assets/") and name.endswith(".js"):
+                    chunk = archive.read(name).decode("utf-8", errors="ignore")
+                    if package_version in chunk:
+                        static_js = chunk
+                        break
 
     missing = sorted(REQUIRED_FILES - names)
     if missing:
@@ -114,6 +170,9 @@ def verify_package(zip_path: Path) -> None:
 
     forbidden_hits: list[str] = []
     for name in names:
+        if any(name.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
+            forbidden_hits.append(name)
+            continue
         parts = set(Path(name).parts)
         if parts & FORBIDDEN_PARTS:
             forbidden_hits.append(name)
@@ -141,6 +200,11 @@ def verify_package(zip_path: Path) -> None:
     ]:
         if text not in manifest:
             fail(f"Release manifest missing production safety note: {text}")
+    if package_version:
+        if f"Module Manager V{package_version}" not in static_index:
+            fail(f"Vue static index title must be V{package_version}")
+        if package_version not in static_js:
+            fail(f"Vue static assets must include APP_VERSION {package_version}; rebuild v2-web before packaging")
 
     print(f"[OK] release zip exists: {zip_path}")
     print(f"[OK] release zip size: {zip_path.stat().st_size} bytes")

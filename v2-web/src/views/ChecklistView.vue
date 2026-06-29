@@ -32,7 +32,6 @@ const rows = [
     <div class="toolbar">
       <div>
         <h2>清单管理</h2>
-        <p>保留总清单为地址唯一来源，阶段清单只参与切片。</p>
       </div>
       <ElButton type="primary" :icon="Upload" @click="ElMessage.info('导入任务接口待接入')">上传清单</ElButton>
     </div>

@@ -10,6 +10,7 @@ import {
   deleteUnmatchedRecord,
   dedupeUnmatchedRecords,
   exportExceptionMeters,
+  exportPhotoBarcodeReviewGroups,
   fetchConstructionExceptionOrders,
   fetchExceptionGroups,
   fetchGroupPhotoObjectUrl,
@@ -18,6 +19,7 @@ import {
   fetchProjectSummary,
   fetchReplacementRecords,
   fetchSystemStatus,
+  fetchTasks,
   fetchTaskStatus,
   fetchUnmatchedRecords,
   fetchUserAccounts,
@@ -37,6 +39,7 @@ import type {
   PhotoBarcodeReviewGroup,
   ProjectSummary,
   ReplacementRecord,
+  ReviewTask,
   TaskStatusSummary,
   UnmatchedRecord,
   UserAccount,
@@ -97,6 +100,7 @@ const importingTotal = ref(false)
 const importingScan = ref(false)
 const summary = ref<ProjectSummary>({ ...emptySummary })
 const taskStatus = ref<TaskStatusSummary>({ ...emptyTaskStatus })
+const terminalTasks = ref<ReviewTask[]>([])
 const systemStatus = ref<Record<string, unknown> | null>(null)
 const activeJob = ref<ImportJob | null>(null)
 const errorMessage = ref('')
@@ -138,16 +142,29 @@ const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
 const exceptionAssignDraft = reactive<Record<string, string>>({})
 const photoBarcodeDialogVisible = ref(false)
 const photoBarcodeLoading = ref(false)
+const photoBarcodeExporting = ref(false)
 const photoBarcodeStatus = ref<'unreadable' | 'mismatched' | 'all'>('unreadable')
 const photoBarcodeRows = ref<PhotoBarcodeReviewGroup[]>([])
 const photoBarcodeTotal = ref(0)
 const photoBarcodePage = ref(1)
 const photoBarcodePageSize = ref(20)
 const photoBarcodeObjectUrls = reactive<Record<string, string>>({})
+const photoBarcodePhotoErrors = reactive<Record<string, string>>({})
+const photoBarcodePhotoDialogVisible = ref(false)
+const photoBarcodePhotoLoading = ref(false)
+const activePhotoBarcodeGroup = ref<PhotoBarcodeReviewGroup | null>(null)
+const photoBarcodeImagePreviewVisible = ref(false)
+const activePhotoBarcodeImageUrl = ref('')
+const activePhotoBarcodeImageTitle = ref('')
+const terminalStatusDialogVisible = ref(false)
+const terminalStatusFilter = ref<'all' | 'completed' | 'incomplete' | 'pending_archive' | 'archived'>('all')
+const terminalStatusPage = ref(1)
+const terminalStatusPageSize = ref(20)
 
 const BOARD_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 let boardEventAbortController: AbortController | null = null
 let boardFallbackTimer = 0
+let photoBarcodeLoadSerial = 0
 
 const isAdmin = computed(() => Boolean(auth.user?.roles?.includes('admin') || auth.user?.role === 'admin'))
 const scannedRate = computed(() => (summary.value.groups ? summary.value.scannedGroups / summary.value.groups : 0))
@@ -158,42 +175,51 @@ const photoAccuracyCaption = computed(() => {
   if (!checked) return `暂无可判断资料组，${summary.value.groupBarcodeAccuracyNotRequired} 组资料不足`
   return `通过 ${summary.value.groupBarcodeAccuracyPassed} / 应检 ${checked}，异常 ${summary.value.groupBarcodeAccuracyFailed}，无法识别 ${summary.value.groupBarcodeAccuracyUnreadable}`
 })
-const terminalCockpit = computed(() => {
-  const total = taskStatus.value.total
-  const scanned = taskStatus.value.scanned
-  const uploaded = taskStatus.value.uploaded
-  const reviewing = taskStatus.value.reviewing
-  const archived = taskStatus.value.archived
-  const claimed = taskStatus.value.claimed
-  const constructionAssigned = taskStatus.value.constructionAssigned
-  const avgUploadRate = taskStatus.value.avgUploadRate
-  const avgReviewRate = taskStatus.value.avgReviewRate
-  return {
-    total,
-    scanned,
-    uploaded,
-    reviewing,
-    archived,
-    claimed,
-    constructionAssigned,
-    avgUploadRate,
-    avgReviewRate,
-  }
+const barcodeMetricCards = computed(() => [
+  {
+    label: '通过',
+    value: summary.value.groupBarcodeAccuracyPassed,
+    tone: 'success',
+  },
+  {
+    label: '待人工',
+    value: summary.value.groupBarcodeAccuracyFailed + summary.value.groupBarcodeAccuracyUnreadable,
+    tone: 'warning',
+  },
+  {
+    label: '资料不足',
+    value: summary.value.groupBarcodeAccuracyNotRequired,
+    tone: 'muted',
+  },
+])
+type TerminalStatusFilter = 'all' | 'completed' | 'incomplete' | 'pending_archive' | 'archived'
+
+const terminalTotal = computed(() => terminalTasks.value.length || taskStatus.value.total)
+const terminalCompletedCount = computed(() => terminalTasks.value.filter(isTerminalConstructionCompleted).length)
+const terminalIncompleteCount = computed(() => terminalTasks.value.filter((task) => !isTerminalConstructionCompleted(task)).length)
+const terminalPendingArchiveCount = computed(() => terminalTasks.value.filter(isTerminalPendingArchive).length)
+const terminalArchivedCount = computed(() => terminalTasks.value.filter(isTerminalArchived).length)
+const cockpitFlow = computed<Array<{ key: TerminalStatusFilter; label: string; value: number }>>(() => [
+  { key: 'all', label: '终端总数', value: terminalTotal.value },
+  { key: 'completed', label: '已完成施工', value: terminalCompletedCount.value },
+  { key: 'incomplete', label: '未完成施工', value: terminalIncompleteCount.value },
+  { key: 'pending_archive', label: '待归档', value: terminalPendingArchiveCount.value },
+  { key: 'archived', label: '已归档', value: terminalArchivedCount.value },
+])
+const terminalStatusTitle = computed(() => cockpitFlow.value.find((item) => item.key === terminalStatusFilter.value)?.label || '终端明细')
+const terminalStatusRows = computed(() => {
+  if (terminalStatusFilter.value === 'completed') return terminalTasks.value.filter(isTerminalConstructionCompleted)
+  if (terminalStatusFilter.value === 'incomplete') return terminalTasks.value.filter((task) => !isTerminalConstructionCompleted(task))
+  if (terminalStatusFilter.value === 'pending_archive') return terminalTasks.value.filter(isTerminalPendingArchive)
+  if (terminalStatusFilter.value === 'archived') return terminalTasks.value.filter(isTerminalArchived)
+  return terminalTasks.value
 })
-const cockpitFlow = computed(() => [
-  { label: '终端总数', value: terminalCockpit.value.total, hint: '导入形成的终端范围' },
-  { label: '已扫码', value: terminalCockpit.value.scanned, hint: '扫码表已关联终端' },
-  { label: '有上传', value: terminalCockpit.value.uploaded, hint: '已有现场照片回流' },
-  { label: '待审阅', value: terminalCockpit.value.reviewing, hint: '仍有未审照片' },
-  { label: '已闭环', value: terminalCockpit.value.archived, hint: '终端审阅完成' },
-])
+const pagedTerminalStatusRows = computed(() => {
+  const start = (terminalStatusPage.value - 1) * terminalStatusPageSize.value
+  return terminalStatusRows.value.slice(start, start + terminalStatusPageSize.value)
+})
 const exceptionRiskTotal = computed(() => summary.value.exceptionGroups)
-const cockpitSignals = computed(() => [
-  { label: '审阅领取', value: terminalCockpit.value.claimed, caption: '已被审阅员持有的终端', tone: 'info' },
-  { label: '施工指派', value: terminalCockpit.value.constructionAssigned, caption: '已指派施工员的终端', tone: 'success' },
-])
 const reviewRingStyle = computed(() => ringStyle(archiveRate.value, '#0a72d8', '#e8eef5'))
-const uploadRingStyle = computed(() => ringStyle(terminalCockpit.value.avgUploadRate, '#0f7892', '#e8eef5'))
 const reviewGap = computed(() => Math.max(0, summary.value.groups - summary.value.approvedGroups))
 const jobPercent = computed(() => {
   if (!activeJob.value) return 0
@@ -408,8 +434,84 @@ function percent(value: number) {
 }
 
 function flowPercent(value: number) {
-  const total = Math.max(terminalCockpit.value.total, 1)
+  const total = Math.max(terminalTotal.value, 1)
   return Math.max(0, Math.min(100, Math.round((Number(value || 0) / total) * 100)))
+}
+
+function taskTotalGroups(task: ReviewTask) {
+  return Math.max(0, Number(task.renovationCount ?? task.totalGroups ?? 0))
+}
+
+function taskUploadedCount(task: ReviewTask) {
+  return Math.max(0, Number(task.constructionUploadedCount ?? task.uploadedCount ?? task.claimedGroups ?? 0))
+}
+
+function taskReviewedCount(task: ReviewTask) {
+  return Math.max(0, Number(task.reviewedCount ?? task.completedGroups ?? 0))
+}
+
+function taskUnreviewedCount(task: ReviewTask) {
+  const total = taskTotalGroups(task)
+  return Math.max(0, Number(task.unreviewedCount ?? total - taskReviewedCount(task)))
+}
+
+function taskUnbuiltCount(task: ReviewTask) {
+  const total = taskTotalGroups(task)
+  return Math.max(0, Number(task.constructionUnbuiltCount ?? total - taskUploadedCount(task)))
+}
+
+function terminalPendingArchiveGroupCount(task: ReviewTask) {
+  if (!isTerminalConstructionCompleted(task) || isTerminalArchived(task)) return 0
+  return taskUnreviewedCount(task)
+}
+
+function isTerminalConstructionCompleted(task: ReviewTask) {
+  const total = taskTotalGroups(task)
+  return total > 0 && taskUnbuiltCount(task) <= 0
+}
+
+function isTerminalArchived(task: ReviewTask) {
+  return taskUploadedCount(task) > 0 && taskUnreviewedCount(task) <= 0
+}
+
+function isTerminalPendingArchive(task: ReviewTask) {
+  return isTerminalConstructionCompleted(task) && !isTerminalArchived(task)
+}
+
+function formatInstallerShare(share: number) {
+  if (!Number.isFinite(Number(share)) || Number(share) <= 0) return '0%'
+  return `${Math.round(Number(share) * 100)}%`
+}
+
+function terminalInstallerText(task: ReviewTask) {
+  const groupedInstallers = (task.installerDistribution || [])
+    .filter((item) => item.installer && item.groupCount > 0)
+    .sort((left, right) => right.share - left.share || right.groupCount - left.groupCount || left.installer.localeCompare(right.installer, 'zh-CN'))
+  if (groupedInstallers.length) {
+    const visible = groupedInstallers
+      .slice(0, 3)
+      .map((item) => `${item.installer} ${formatInstallerShare(item.share)}`)
+    const hiddenCount = groupedInstallers.length - visible.length
+    return hiddenCount > 0 ? `${visible.join('、')} 等 ${groupedInstallers.length} 人` : visible.join('、')
+  }
+  return '-'
+}
+
+function terminalReviewerText(task: ReviewTask) {
+  return task.claimedByName || task.claimedBy || task.ownerName || '-'
+}
+
+function terminalStatusLabel(task: ReviewTask) {
+  if (isTerminalArchived(task)) return '已归档'
+  if (isTerminalPendingArchive(task)) return '待归档'
+  if (isTerminalConstructionCompleted(task)) return '已完成施工'
+  return '未完成施工'
+}
+
+function openTerminalStatusDialog(key: TerminalStatusFilter) {
+  terminalStatusFilter.value = key
+  terminalStatusPage.value = 1
+  terminalStatusDialogVisible.value = true
 }
 
 function ringStyle(value: number, active: string, track: string) {
@@ -467,18 +569,48 @@ function barcodeValues(values?: string[]) {
   return values?.filter(Boolean).join('、') || '-'
 }
 
-function barcodePhotoKey(groupId: string, photoId: string, kind: 'thumbnail' | 'preview' = 'thumbnail') {
+function barcodeReviewStatusLabel(status: string) {
+  if (status === 'mismatched') return '异常不匹配'
+  if (status === 'unreadable') return '无法识别'
+  return status || '-'
+}
+
+function groupStatusLabel(status: string) {
+  if (status === 'approved') return '已归档'
+  if (status === 'pending' || status === 'unreviewed') return '未审阅'
+  if (status === 'incomplete') return '资料不完整'
+  if (status === 'exception' || status === 'rejected') return '异常'
+  if (status === 'unmatched') return '未匹配'
+  return status || '-'
+}
+
+function barcodePhotoKey(groupId: string, photoId: string, kind: 'thumbnail' | 'preview' | 'original' = 'thumbnail') {
   return `${groupId}:${photoId}:${kind}`
 }
 
-function clearPhotoBarcodeObjectUrls() {
+function clearPhotoBarcodeObjectUrls(invalidateLoads = true) {
+  if (invalidateLoads) {
+    photoBarcodeLoadSerial += 1
+  }
   for (const [key, url] of Object.entries(photoBarcodeObjectUrls)) {
     URL.revokeObjectURL(url)
     delete photoBarcodeObjectUrls[key]
   }
+  for (const key of Object.keys(photoBarcodePhotoErrors)) {
+    delete photoBarcodePhotoErrors[key]
+  }
 }
 
-function photoBarcodeImageUrl(row: PhotoBarcodeReviewGroup, photoId: string, kind: 'thumbnail' | 'preview' = 'thumbnail') {
+function isPhotoBarcodeLoadCurrent(loadSerial: number, groupId: string) {
+  return (
+    photoBarcodePhotoDialogVisible.value &&
+    photoBarcodeLoadSerial === loadSerial &&
+    activePhotoBarcodeGroup.value?.groupId === groupId
+  )
+}
+
+function photoBarcodeImageUrl(row: PhotoBarcodeReviewGroup | null, photoId: string, kind: 'thumbnail' | 'preview' = 'thumbnail') {
+  if (!row) return ''
   return (
     photoBarcodeObjectUrls[barcodePhotoKey(row.groupId, photoId, kind)] ||
     photoBarcodeObjectUrls[barcodePhotoKey(row.groupId, photoId, 'preview')] ||
@@ -486,26 +618,96 @@ function photoBarcodeImageUrl(row: PhotoBarcodeReviewGroup, photoId: string, kin
   )
 }
 
-function groupBarcodePreviewUrls(row: PhotoBarcodeReviewGroup) {
-  return row.photos.map((photo) => photoBarcodeImageUrl(row, photo.id, 'preview')).filter(Boolean)
+function openPhotoBarcodeImagePreview(row: PhotoBarcodeReviewGroup | null, photo: PhotoBarcodeReviewGroup['photos'][number]) {
+  const url = photoBarcodeImageUrl(row, photo.id, 'preview')
+  if (!url) return
+  activePhotoBarcodeImageUrl.value = url
+  activePhotoBarcodeImageTitle.value = `${photo.categoryLabel || photo.category || '资料组照片'} - ${
+    row?.meterNo || row?.groupId || ''
+  }`
+  photoBarcodeImagePreviewVisible.value = true
+}
+
+function handlePhotoBarcodeRenderedError(row: PhotoBarcodeReviewGroup | null, photo: PhotoBarcodeReviewGroup['photos'][number]) {
+  if (!row) return
+  const key = barcodePhotoKey(row.groupId, photo.id, 'preview')
+  const url = photoBarcodeObjectUrls[key]
+  if (url) {
+    URL.revokeObjectURL(url)
+    delete photoBarcodeObjectUrls[key]
+  }
+  photoBarcodePhotoErrors[key] = '图片加载失败'
+  if (activePhotoBarcodeImageUrl.value === url) {
+    activePhotoBarcodeImageUrl.value = ''
+    photoBarcodeImagePreviewVisible.value = false
+  }
 }
 
 async function loadPhotoBarcodeObjectUrls(rows: PhotoBarcodeReviewGroup[]) {
   clearPhotoBarcodeObjectUrls()
+  const loadSerial = photoBarcodeLoadSerial
   const tasks: Promise<void>[] = []
   for (const row of rows) {
     for (const photo of row.photos) {
       if (!row.groupId || !photo.id) continue
+      const key = barcodePhotoKey(row.groupId, photo.id, 'preview')
       tasks.push(
-        fetchGroupPhotoObjectUrl(row.groupId, photo.id, 'preview')
-          .then((url) => {
-            photoBarcodeObjectUrls[barcodePhotoKey(row.groupId, photo.id, 'preview')] = url
-          })
-          .catch(() => undefined),
+        (async () => {
+          let objectUrl = ''
+          try {
+            try {
+              objectUrl = await fetchGroupPhotoObjectUrl(row.groupId, photo.id, 'preview')
+            } catch {
+              if (!isPhotoBarcodeLoadCurrent(loadSerial, row.groupId)) {
+                return
+              }
+              objectUrl = await fetchGroupPhotoObjectUrl(row.groupId, photo.id, 'original')
+            }
+            if (!objectUrl) {
+              return
+            }
+            if (!isPhotoBarcodeLoadCurrent(loadSerial, row.groupId)) {
+              URL.revokeObjectURL(objectUrl)
+              return
+            }
+            const previousUrl = photoBarcodeObjectUrls[key]
+            if (previousUrl && previousUrl !== objectUrl) {
+              URL.revokeObjectURL(previousUrl)
+            }
+            photoBarcodeObjectUrls[key] = objectUrl
+          } catch (error) {
+            if (objectUrl) {
+              URL.revokeObjectURL(objectUrl)
+            }
+            if (isPhotoBarcodeLoadCurrent(loadSerial, row.groupId)) {
+              photoBarcodePhotoErrors[key] = error instanceof Error ? error.message : '图片加载失败'
+            }
+          }
+        })()
       )
     }
   }
   await Promise.all(tasks)
+}
+
+async function openPhotoBarcodePhotos(row: PhotoBarcodeReviewGroup) {
+  activePhotoBarcodeGroup.value = row
+  photoBarcodePhotoDialogVisible.value = true
+  photoBarcodePhotoLoading.value = true
+  clearPhotoBarcodeObjectUrls()
+  try {
+    await loadPhotoBarcodeObjectUrls([row])
+  } finally {
+    photoBarcodePhotoLoading.value = false
+  }
+}
+
+function handlePhotoBarcodePhotoDialogClosed() {
+  activePhotoBarcodeGroup.value = null
+  photoBarcodeImagePreviewVisible.value = false
+  activePhotoBarcodeImageUrl.value = ''
+  activePhotoBarcodeImageTitle.value = ''
+  clearPhotoBarcodeObjectUrls()
 }
 
 async function loadAccounts() {
@@ -532,16 +734,18 @@ async function loadSystemHealth() {
   }
 }
 
-async function loadBoard() {
+async function loadBoard(options: { forceSummaryRefresh?: boolean } = {}) {
   loading.value = true
   errorMessage.value = ''
   try {
-    const [summaryResult, statusResult] = await Promise.all([
-      fetchProjectSummary(),
+    const [summaryResult, statusResult, taskResult] = await Promise.all([
+      fetchProjectSummary({ refresh: options.forceSummaryRefresh }),
       fetchTaskStatus(),
+      fetchTasks({ summary: true }),
     ])
     summary.value = summaryResult.summary
     taskStatus.value = statusResult
+    terminalTasks.value = taskResult
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '项目看板加载失败'
   } finally {
@@ -550,7 +754,7 @@ async function loadBoard() {
 }
 
 async function refreshBoard() {
-  await loadBoard()
+  await loadBoard({ forceSummaryRefresh: true })
   void loadSystemHealth()
 }
 
@@ -1005,8 +1209,6 @@ async function loadPhotoBarcodeRows() {
     )
     photoBarcodeTotal.value = result.total
     photoBarcodeRows.value = result.items
-    clearPhotoBarcodeObjectUrls()
-    await loadPhotoBarcodeObjectUrls(result.items)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '条码识别清单加载失败')
   } finally {
@@ -1033,6 +1235,25 @@ async function handlePhotoBarcodeStatusChange() {
 async function handlePhotoBarcodePageChange(page: number) {
   photoBarcodePage.value = page
   await loadPhotoBarcodeRows()
+}
+
+async function handlePhotoBarcodePageSizeChange(size: number) {
+  photoBarcodePageSize.value = size
+  photoBarcodePage.value = 1
+  await loadPhotoBarcodeRows()
+}
+
+async function exportPhotoBarcodeRows() {
+  if (!isAdmin.value || photoBarcodeExporting.value) return
+  photoBarcodeExporting.value = true
+  try {
+    await exportPhotoBarcodeReviewGroups(photoBarcodeStatus.value)
+    ElMessage.success('条码复核清单已导出')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '导出条码复核清单失败')
+  } finally {
+    photoBarcodeExporting.value = false
+  }
 }
 
 async function openUnmatchedDialog() {
@@ -1210,8 +1431,6 @@ onUnmounted(() => {
     <div class="board-hero panel">
       <div>
         <p class="eyebrow">项目驾驶舱</p>
-        <h2>进度、风险、采集与审阅态势</h2>
-        <p class="muted">保留项目级导入、进度、风险和系统状态；终端级导出与施工指派统一前往任务领取。</p>
       </div>
       <div class="claim-actions">
         <label class="el-button el-button--primary" :class="{ 'is-loading': importingTotal }">
@@ -1250,6 +1469,33 @@ onUnmounted(() => {
         <span class="metric-label">已归档</span>
         <strong class="metric-value">{{ summary.approvedGroups }}</strong>
       </article>
+      <button
+        v-if="isAdmin"
+        class="metric barcode-metric barcode-metric-button"
+        type="button"
+        @click="openPhotoBarcodeDialog"
+      >
+        <span class="metric-label">条码准确率</span>
+        <strong class="metric-value">{{ percent(photoAccuracyRate) }}</strong>
+        <span class="barcode-metric-caption">{{ photoAccuracyCaption }}</span>
+        <span class="barcode-metric-mini-grid">
+          <span v-for="item in barcodeMetricCards" :key="item.label" class="barcode-metric-mini" :class="`tone-${item.tone}`">
+            <small>{{ item.label }}</small>
+            <b>{{ item.value }}</b>
+          </span>
+        </span>
+      </button>
+      <article v-else class="metric barcode-metric">
+        <span class="metric-label">条码准确率</span>
+        <strong class="metric-value">{{ percent(photoAccuracyRate) }}</strong>
+        <span class="barcode-metric-caption">{{ photoAccuracyCaption }}</span>
+        <span class="barcode-metric-mini-grid">
+          <span v-for="item in barcodeMetricCards" :key="item.label" class="barcode-metric-mini" :class="`tone-${item.tone}`">
+            <small>{{ item.label }}</small>
+            <b>{{ item.value }}</b>
+          </span>
+        </span>
+      </article>
     </div>
 
     <div class="board-grid">
@@ -1269,31 +1515,14 @@ onUnmounted(() => {
           <button class="risk-card risk-card-button bad" type="button" @click="openUnmatchedDialog">
             <span>扫码未匹配</span>
             <strong>{{ summary.scanUnmatched }}</strong>
-            <small>点击查看清单</small>
           </button>
           <button class="risk-card risk-card-button bad" type="button" @click="openExceptionDialog">
             <span>异常与缺照</span>
             <strong>{{ exceptionRiskTotal }}</strong>
-            <small>含缺照，查看并派发</small>
           </button>
           <article class="risk-card warn">
             <span>未施工未扫码</span>
             <strong>{{ summary.unconstructedGroups }}</strong>
-          </article>
-          <button
-            v-if="isAdmin"
-            class="risk-card risk-card-button good"
-            type="button"
-            @click="openPhotoBarcodeDialog"
-          >
-            <span>资料组条码准确率</span>
-            <strong>{{ percent(photoAccuracyRate) }}</strong>
-            <small>{{ photoAccuracyCaption }}</small>
-          </button>
-          <article v-else class="risk-card good">
-            <span>资料组条码准确率</span>
-            <strong>{{ percent(photoAccuracyRate) }}</strong>
-            <small>{{ photoAccuracyCaption }}</small>
           </article>
         </div>
       </section>
@@ -1336,7 +1565,6 @@ onUnmounted(() => {
                 />
               </el-select>
             </label>
-            <span class="muted installer-scope-hint">{{ installerScopeHint }}</span>
           </div>
         </div>
         <div v-if="filteredInstallerDistribution.length" v-loading="installerWorkloadLoading" class="installer-list">
@@ -1360,12 +1588,17 @@ onUnmounted(() => {
       <div class="construction-panel-head">
         <div>
           <h3>终端流转态势</h3>
-          <span>仅展示聚合态势，不承载单终端导出、审阅跳转或施工指派操作。</span>
         </div>
       </div>
       <div class="cockpit-body">
         <div class="cockpit-flow" aria-label="终端流转阶段">
-          <article v-for="item in cockpitFlow" :key="item.label" class="flow-node">
+          <button
+            v-for="item in cockpitFlow"
+            :key="item.key"
+            class="flow-node flow-node-button"
+            type="button"
+            @click="openTerminalStatusDialog(item.key)"
+          >
             <div>
               <span>{{ item.label }}</span>
               <strong>{{ item.value }}</strong>
@@ -1373,40 +1606,47 @@ onUnmounted(() => {
             <div class="flow-track" aria-hidden="true">
               <i :style="{ width: `${flowPercent(item.value)}%` }" />
             </div>
-            <small>{{ item.hint }} / {{ flowPercent(item.value) }}%</small>
-          </article>
-        </div>
-
-        <div class="cockpit-rings">
-          <article>
-            <div class="cockpit-ring" :style="reviewRingStyle">
-              <span>{{ percent(archiveRate) }}</span>
-            </div>
-            <div>
-              <strong>归档闭环率</strong>
-              <small>{{ reviewGap }} 个资料组待闭环</small>
-            </div>
-          </article>
-          <article>
-            <div class="cockpit-ring teal" :style="uploadRingStyle">
-              <span>{{ percent(terminalCockpit.avgUploadRate) }}</span>
-            </div>
-            <div>
-              <strong>终端平均上传率</strong>
-              <small>{{ terminalCockpit.uploaded }} 个终端已有照片回流</small>
-            </div>
-          </article>
-        </div>
-
-        <div class="cockpit-signals">
-          <article v-for="signal in cockpitSignals" :key="signal.label" :class="['signal-card', signal.tone]">
-            <span>{{ signal.label }}</span>
-            <strong>{{ signal.value }}</strong>
-            <small>{{ signal.caption }}</small>
-          </article>
+          </button>
         </div>
       </div>
     </section>
+
+    <el-dialog v-model="terminalStatusDialogVisible" :title="`${terminalStatusTitle}终端明细`" width="1180px">
+      <el-table :data="pagedTerminalStatusRows" border stripe>
+        <el-table-column prop="terminal" label="终端号" min-width="150" show-overflow-tooltip />
+        <el-table-column label="总资料组" width="100" align="right">
+          <template #default="{ row }">{{ taskTotalGroups(row) }}</template>
+        </el-table-column>
+        <el-table-column label="已施工数量" width="120" align="right">
+          <template #default="{ row }">{{ taskUploadedCount(row) }}</template>
+        </el-table-column>
+        <el-table-column label="未施工数量" width="120" align="right">
+          <template #default="{ row }">{{ taskUnbuiltCount(row) }}</template>
+        </el-table-column>
+        <el-table-column label="待归档数量" width="120" align="right">
+          <template #default="{ row }">{{ terminalPendingArchiveGroupCount(row) }}</template>
+        </el-table-column>
+        <el-table-column label="安装人员" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">{{ terminalInstallerText(row) }}</template>
+        </el-table-column>
+        <el-table-column label="审阅人员" min-width="140" show-overflow-tooltip>
+          <template #default="{ row }">{{ terminalReviewerText(row) }}</template>
+        </el-table-column>
+        <el-table-column label="状态" min-width="110">
+          <template #default="{ row }">{{ terminalStatusLabel(row) }}</template>
+        </el-table-column>
+        <el-table-column prop="address" label="地址" min-width="220" show-overflow-tooltip />
+      </el-table>
+      <div class="dialog-pagination">
+        <el-pagination
+          v-model:current-page="terminalStatusPage"
+          background
+          layout="total, prev, pager, next"
+          :total="terminalStatusRows.length"
+          :page-size="terminalStatusPageSize"
+        />
+      </div>
+    </el-dialog>
 
     <section v-if="systemRows.length" class="panel system-status">
       <h3>系统状态</h3>
@@ -1414,10 +1654,6 @@ onUnmounted(() => {
         <span>{{ label }}</span>
         <strong>{{ value }}</strong>
       </div>
-      <p class="system-note">
-        数据文件指当前业务状态快照（例如 local_state.json）的大小，不等同于照片容量；照片容量请以 uploads 或 OSS
-        存储统计为准。
-      </p>
     </section>
 
     <el-dialog v-model="workloadDialogVisible" :title="`${workloadInstaller} 每日工作量`" width="1180px">
@@ -1569,12 +1805,6 @@ onUnmounted(() => {
           <el-button v-if="isAdmin" :disabled="!constructorOptions.length" @click="loadAccounts">刷新施工员</el-button>
         </div>
       </div>
-      <el-alert
-        class="claim-alert"
-        type="info"
-        :closable="false"
-        title="异常与缺照记录可直接派发给施工员。施工员会在施工采集页看到异常任务卡，进入后只补充缺失或错误的数据。"
-      />
       <el-table v-loading="exceptionLoading" :data="filteredExceptionRows" height="520" size="small">
         <el-table-column type="index" width="52" label="#" />
         <el-table-column label="表号 / 资料组" min-width="150">
@@ -1748,6 +1978,7 @@ onUnmounted(() => {
             <el-option label="全部需复核" value="all" />
           </el-select>
           <el-button :loading="photoBarcodeLoading" @click="loadPhotoBarcodeRows">刷新</el-button>
+          <el-button :loading="photoBarcodeExporting" :disabled="!photoBarcodeTotal" @click="exportPhotoBarcodeRows">导出清单</el-button>
         </div>
       </div>
       <el-alert
@@ -1768,6 +1999,12 @@ onUnmounted(() => {
         <el-table-column prop="moduleAssetNo" label="模块号" min-width="150" show-overflow-tooltip />
         <el-table-column prop="collector" label="采集器号" min-width="150" show-overflow-tooltip />
         <el-table-column prop="installer" label="安装人员" width="110" />
+        <el-table-column label="资料状态" width="110">
+          <template #default="{ row }">
+            <el-tag v-if="row.archived" type="success" effect="plain">已归档</el-tag>
+            <span v-else>{{ groupStatusLabel(row.groupStatus) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="120">
           <template #default="{ row }">
             <el-tag v-if="row.status === 'mismatched'" type="danger" effect="plain">异常不匹配</el-tag>
@@ -1792,41 +2029,77 @@ onUnmounted(() => {
           </template>
         </el-table-column>
         <el-table-column prop="address" label="地址" min-width="220" show-overflow-tooltip />
-        <el-table-column label="照片" min-width="230" fixed="right">
+        <el-table-column label="照片" width="120" fixed="right">
           <template #default="{ row }">
-            <div v-if="row.photos?.length" class="barcode-photo-list">
-              <el-image
-                v-for="photo in row.photos"
-                :key="photo.id"
-                :src="photoBarcodeImageUrl(row, photo.id)"
-                :preview-src-list="groupBarcodePreviewUrls(row)"
-                fit="cover"
-                class="barcode-photo-thumb"
-                preview-teleported
-              >
-                <template #error>
-                  <span class="barcode-photo-error">无图</span>
-                </template>
-              </el-image>
-            </div>
-            <span v-else>-</span>
+            <el-button link type="primary" :disabled="!row.photos?.length" @click="openPhotoBarcodePhotos(row)">
+              查看 {{ row.photoCount || row.photos?.length || 0 }} 张
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
       <div class="barcode-review-pagination">
         <el-pagination
           v-model:current-page="photoBarcodePage"
-          :page-size="photoBarcodePageSize"
+          v-model:page-size="photoBarcodePageSize"
           :total="photoBarcodeTotal"
-          layout="total, prev, pager, next"
+          :page-sizes="[10, 20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
           small
           background
           @current-change="handlePhotoBarcodePageChange"
+          @size-change="handlePhotoBarcodePageSizeChange"
         />
       </div>
       <template #footer>
         <el-button @click="photoBarcodeDialogVisible = false">关闭</el-button>
       </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="photoBarcodePhotoDialogVisible"
+      :title="`资料组照片 - ${activePhotoBarcodeGroup?.meterNo || activePhotoBarcodeGroup?.groupId || ''}`"
+      width="960px"
+      class="barcode-photo-dialog"
+      append-to-body
+      @closed="handlePhotoBarcodePhotoDialogClosed"
+    >
+      <div v-loading="photoBarcodePhotoLoading" class="barcode-photo-detail-grid">
+        <article v-for="photo in activePhotoBarcodeGroup?.photos || []" :key="photo.id" class="barcode-photo-detail">
+          <button
+            v-if="photoBarcodeImageUrl(activePhotoBarcodeGroup, photo.id, 'preview')"
+            type="button"
+            class="barcode-photo-detail-image barcode-photo-image-button"
+            :aria-label="`查看${photo.categoryLabel || photo.category || '资料组'}照片`"
+            @click="openPhotoBarcodeImagePreview(activePhotoBarcodeGroup, photo)"
+          >
+            <img
+              :src="photoBarcodeImageUrl(activePhotoBarcodeGroup, photo.id, 'preview')"
+              :alt="photo.categoryLabel || photo.category || '资料组照片'"
+              @error="handlePhotoBarcodeRenderedError(activePhotoBarcodeGroup, photo)"
+            />
+          </button>
+          <div v-else class="barcode-photo-detail-image barcode-photo-placeholder">
+            {{ photoBarcodePhotoErrors[barcodePhotoKey(activePhotoBarcodeGroup?.groupId || '', photo.id, 'preview')] || '图片加载中' }}
+          </div>
+          <div class="barcode-photo-detail-meta">
+            <strong>{{ photo.categoryLabel || photo.category || '未分类' }}</strong>
+            <span>{{ barcodeReviewStatusLabel(photo.barcodeCheckStatus) }}</span>
+            <small>{{ barcodeValues(photo.barcodeCheckNormalizedValues.length ? photo.barcodeCheckNormalizedValues : photo.barcodeCheckValues) }}</small>
+          </div>
+        </article>
+      </div>
+    </el-dialog>
+
+    <el-dialog
+      v-model="photoBarcodeImagePreviewVisible"
+      :title="activePhotoBarcodeImageTitle"
+      width="min(92vw, 1080px)"
+      class="barcode-image-preview-dialog"
+      append-to-body
+    >
+      <div class="barcode-image-preview-stage">
+        <img v-if="activePhotoBarcodeImageUrl" :src="activePhotoBarcodeImageUrl" :alt="activePhotoBarcodeImageTitle" />
+      </div>
     </el-dialog>
 
     <el-dialog v-model="unmatchedDialogVisible" title="未匹配清单" width="1040px" class="unmatched-board-dialog">
@@ -2034,12 +2307,6 @@ onUnmounted(() => {
     </el-dialog>
 
     <el-dialog v-model="workloadSegmentDialogVisible" :title="workloadSegmentTitle" width="920px">
-      <el-alert
-        class="claim-alert"
-        type="info"
-        :closable="false"
-        title="效率权重：同楼/同区集中地址降低权重；缺少室号、零散地址、充电桩/车位提高权重。权重用于 KPI 修正，不改变原始完成量。"
-      />
       <el-table :data="workloadSegment?.addresses || []" height="430" size="small">
         <el-table-column prop="completedTime" label="时间" width="76" />
         <el-table-column prop="meterNo" label="表号" min-width="130" />
@@ -2063,12 +2330,6 @@ onUnmounted(() => {
     </el-dialog>
 
     <el-dialog v-model="workloadExceptionDialogVisible" :title="workloadExceptionTitle" width="860px">
-      <el-alert
-        class="claim-alert"
-        type="info"
-        :closable="false"
-        title="点击日期异常数后展示该安装人员当天产生的异常资料组，便于按人、按天追溯问题。"
-      />
       <el-table :data="workloadExceptionGroups" height="420" size="small">
         <el-table-column prop="meterNo" label="表号" min-width="130" />
         <el-table-column prop="terminal" label="终端" min-width="130" />
@@ -2098,7 +2359,82 @@ onUnmounted(() => {
 }
 
 .native-board-page .board-metrics {
-  grid-template-columns: repeat(3, minmax(136px, 1fr));
+  grid-template-columns: repeat(4, minmax(136px, 1fr));
+}
+
+.barcode-metric {
+  gap: 8px;
+  min-height: 166px;
+}
+
+.barcode-metric-button {
+  border: 1px solid var(--v2-border-soft, #dde5ee);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.barcode-metric-button:hover {
+  border-color: rgba(10, 114, 216, 0.32);
+  box-shadow: var(--v2-shadow-raised, 0 1px 2px rgba(15, 26, 36, 0.05));
+  transform: translateY(-1px);
+}
+
+.barcode-metric-caption {
+  display: -webkit-box;
+  min-height: 34px;
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.barcode-metric-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.barcode-metric-mini {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(100, 116, 139, 0.16);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.barcode-metric-mini small {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.barcode-metric-mini b {
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.barcode-metric-mini.tone-success {
+  background: #f0fdf4;
+  border-color: rgba(22, 163, 74, 0.18);
+}
+
+.barcode-metric-mini.tone-warning {
+  background: #fff7ed;
+  border-color: rgba(234, 88, 12, 0.18);
+}
+
+.barcode-metric-mini.tone-muted {
+  background: #f8fafc;
 }
 
 .native-board-page .risk-grid {
@@ -2107,6 +2443,29 @@ onUnmounted(() => {
 
 .native-board-page .cockpit-signals {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.native-board-page .cockpit-body {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.flow-node-button {
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.flow-node-button:hover {
+  border-color: rgba(10, 114, 216, 0.32);
+  box-shadow: var(--v2-shadow-raised, 0 1px 2px rgba(15, 26, 36, 0.05));
+  transform: translateY(-1px);
+}
+
+.dialog-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
 }
 
 .installer-scope-tools {
@@ -2519,28 +2878,89 @@ onUnmounted(() => {
   min-width: 138px;
 }
 
-.barcode-photo-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
+.barcode-photo-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-height: 220px;
 }
 
-.barcode-photo-thumb {
-  width: 42px;
-  height: 42px;
-  border-radius: 6px;
+.barcode-photo-detail {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.barcode-photo-detail-image {
+  width: 100%;
+  height: 260px;
   border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
   background: #f8fafc;
 }
 
-.barcode-photo-error {
+.barcode-photo-image-button {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  appearance: none;
+  font: inherit;
+  cursor: zoom-in;
+}
+
+.barcode-photo-image-button img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+}
+
+.barcode-photo-placeholder {
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
+  padding: 12px;
   color: var(--v2-text-muted, #64748b);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.barcode-photo-detail-meta {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+}
+
+.barcode-photo-detail-meta strong,
+.barcode-photo-detail-meta span,
+.barcode-photo-detail-meta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.barcode-photo-detail-meta strong {
+  color: var(--v2-text-strong, #0f172a);
+}
+
+.barcode-image-preview-stage {
+  display: grid;
+  place-items: center;
+  min-height: 320px;
+  max-height: 78vh;
+  overflow: auto;
+  background: #0f172a;
+  border-radius: 8px;
+}
+
+.barcode-image-preview-stage img {
+  display: block;
+  max-width: 100%;
+  max-height: 78vh;
+  object-fit: contain;
 }
 
 .barcode-review-pagination {
@@ -2551,6 +2971,10 @@ onUnmounted(() => {
 }
 
 @media (max-width: 1280px) {
+  .native-board-page .board-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .account-form-grid {
     grid-template-columns: repeat(3, minmax(160px, 1fr));
   }
@@ -2562,6 +2986,10 @@ onUnmounted(() => {
 }
 
 @media (max-width: 720px) {
+  .native-board-page .board-metrics {
+    grid-template-columns: 1fr;
+  }
+
   .account-form-grid,
   .workload-summary,
   .unmatched-dialog-stats,
@@ -2575,6 +3003,14 @@ onUnmounted(() => {
 
   .barcode-review-pagination {
     justify-content: flex-start;
+  }
+
+  .barcode-photo-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .barcode-photo-detail-image {
+    height: 220px;
   }
 
   .work-time-chart {

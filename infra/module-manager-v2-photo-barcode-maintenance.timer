@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Module Manager V2 photo barcode maintenance in slow silent slices
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=10min
+RandomizedDelaySec=2min
+Persistent=true
+Unit=module-manager-v2-photo-barcode-maintenance.service
+
+[Install]
+WantedBy=timers.target

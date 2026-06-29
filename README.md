@@ -5,6 +5,7 @@ V2.0 upgrades the V1.3 desktop workflow into a low-cost multi-user web system fo
 ## Scope
 
 - Before any change, read `AGENTS.md` first. It is the project required reading and collaboration contract.
+- New agents must also read `docs/AGENT_REQUIRED_READING.md` before touching production maintenance work.
 - 4 reviewers working at the same time.
 - About 23,000 meter groups.
 - About 100,000 photos.

@@ -11,6 +11,7 @@ import { ElIcon } from 'element-plus/es/components/icon/index'
 import { ElInput } from 'element-plus/es/components/input/index'
 import { ElLoading } from 'element-plus/es/components/loading/index'
 import { ElOption, ElSelect } from 'element-plus/es/components/select/index'
+import { ElPagination } from 'element-plus/es/components/pagination/index'
 import { ElProgress } from 'element-plus/es/components/progress/index'
 import { ElRadioButton, ElRadioGroup } from 'element-plus/es/components/radio/index'
 import { ElSegmented } from 'element-plus/es/components/segmented/index'
@@ -38,6 +39,7 @@ const components: Plugin[] = [
   ElIcon,
   ElInput,
   ElOption,
+  ElPagination,
   ElProgress,
   ElRadioButton,
   ElRadioGroup,

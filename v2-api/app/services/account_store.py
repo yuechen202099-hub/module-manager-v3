@@ -195,9 +195,10 @@ def _write_users_unlocked(users: dict[str, dict[str, Any]]) -> None:
 def ensure_user_store() -> dict[str, dict[str, Any]]:
     with _lock:
         users = _read_users_unlocked()
-        admin = _default_admin_user()
-        existing = users.get(admin["username"])
+        admin_username = normalize_username(settings.admin_username)
+        existing = users.get(admin_username)
         if existing is None:
+            admin = _default_admin_user()
             users[admin["username"]] = admin
             _write_users_unlocked(users)
         return users

@@ -1,0 +1,37 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.crt
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node and frontend local output
+v2-web/node_modules/
+v2-web/dist/
+
+# Production/runtime data. Do not publish real data or uploads.
+data/
+v2-api/data/
+v2-api/app/static/uploads/
+
+# Build packages and temporary release artifacts
+build/
+*.zip
+*.tar
+*.tar.gz
+
+# Logs and OS files
+logs/
+*.log
+.DS_Store
+Thumbs.db

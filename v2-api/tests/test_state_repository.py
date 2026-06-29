@@ -128,7 +128,12 @@ def test_postgres_construction_photo_without_client_completion_is_not_confirmed_
 
 
 def test_dual_backend_keeps_json_as_authoritative_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    class MirrorRepository:
+        def release_task(self, *args, **kwargs):
+            return {"mirror": True}
+
     monkeypatch.setattr(repository.settings, "state_backend", "dual")
+    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", MirrorRepository)
     monkeypatch.setattr(repository.local_simulation, "release_task", lambda task_id, reviewer, force=False: {"id": task_id, "force": force})
 
     repo = repository.get_state_repository()
@@ -316,7 +321,16 @@ def test_postgres_classify_photo_persists_archive_fields() -> None:
         creator="",
         raw_data={},
     )
-    group = SimpleNamespace(id="group-uuid", team_id="alpha-team", task_id=None, legacy_task_id=1)
+    group = SimpleNamespace(
+        id="group-uuid",
+        team_id="alpha-team",
+        task_id=None,
+        legacy_id="g-1",
+        legacy_task_id=1,
+        raw_data={},
+        status=repository.GroupStatus.UNREVIEWED,
+        photo_count=1,
+    )
 
     class FakeSession:
         def __enter__(self):
@@ -495,6 +509,76 @@ def test_postgres_group_payload_does_not_treat_reviewer_as_installer() -> None:
     payload = repository._group_payload(FakeSession(), group, include_photos=False)
 
     assert payload.get("installer", "") == ""
+
+
+def test_postgres_task_stats_installer_distribution_trims_group_fields() -> None:
+    captured = []
+
+    class FakeResult:
+        def all(self):
+            return []
+
+    class FakeSession:
+        def execute(self, statement):
+            captured.append(statement)
+            return FakeResult()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+    TestPostgresRepository()._task_stats_map(FakeSession(), "default-team")
+
+    compiled = "\n".join(
+        str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})).lower()
+        for statement in captured
+    )
+    photo_installer_sql = str(
+        captured[1].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).lower()
+    assert "trim(material_groups.raw_data ->> 'installer')" in compiled
+    assert "trim(material_groups.raw_data ->> 'constructor')" in compiled
+    assert "trim(material_groups.raw_data ->> 'creator')" in compiled
+    assert "trim(photos.creator)" in compiled
+    assert "material_groups.photo_count > 0" not in photo_installer_sql
+
+
+def test_installer_distribution_displays_account_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_get_user(username: str):
+        if username == "xa":
+            return {"username": "xa", "name": "樊哲浩"}
+        return None
+
+    monkeypatch.setattr(repository.account_store, "get_user", fake_get_user)
+
+    assert repository._installer_distribution_from_counts(
+        {"xa": 1, "樊哲浩": 2},
+        completed_count=3,
+    ) == [{"installer": "樊哲浩", "group_count": 3, "share": 1.0}]
+
+
+def test_installer_distribution_reuses_shared_name_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_get_user(username: str):
+        calls.append(username)
+        return {"username": username, "name": "樊哲浩"} if username == "xa" else None
+
+    monkeypatch.setattr(repository.account_store, "get_user", fake_get_user)
+    name_cache: dict[str, str] = {}
+
+    assert repository._installer_distribution_from_counts(
+        {"xa": 1},
+        completed_count=1,
+        name_cache=name_cache,
+    ) == [{"installer": "樊哲浩", "group_count": 1, "share": 1.0}]
+    assert repository._installer_distribution_from_counts(
+        {"xa": 2},
+        completed_count=2,
+        name_cache=name_cache,
+    ) == [{"installer": "樊哲浩", "group_count": 2, "share": 1.0}]
+
+    assert calls == ["xa"]
 
 
 def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -> None:
@@ -805,7 +889,7 @@ def test_postgres_photo_accuracy_summary_counts_raw_photo_metadata() -> None:
 
 
 def test_postgres_summary_photo_accuracy_filters_to_grouped_photos(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured_scalars = []
+    captured_execute = []
 
     class FakeOneResult:
         def one(self):
@@ -825,13 +909,6 @@ def test_postgres_summary_photo_accuracy_filters_to_grouped_photos(monkeypatch: 
         def all(self):
             return []
 
-    class FakeScalars:
-        def __init__(self, statement):
-            captured_scalars.append(statement)
-
-        def all(self):
-            return []
-
     class FakeSession:
         def __enter__(self):
             return self
@@ -842,14 +919,15 @@ def test_postgres_summary_photo_accuracy_filters_to_grouped_photos(monkeypatch: 
         def scalar(self, _statement):
             return 0
 
-        def execute(self, _statement):
+        def execute(self, statement):
+            captured_execute.append(statement)
             if not hasattr(self, "_executed_group_stats"):
                 self._executed_group_stats = True
                 return FakeOneResult()
             return FakeAllResult()
 
         def scalars(self, statement):
-            return FakeScalars(statement)
+            raise AssertionError("summary should aggregate photo accuracy without loading Photo ORM rows")
 
     class TestPostgresRepository(repository.PostgresStateRepository):
         def _session(self):
@@ -859,9 +937,158 @@ def test_postgres_summary_photo_accuracy_filters_to_grouped_photos(monkeypatch: 
 
     TestPostgresRepository().summary()
 
-    assert captured_scalars
-    compiled = str(captured_scalars[-1].compile(dialect=postgresql.dialect()))
+    assert captured_execute
+    compiled_statements = [
+        str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for statement in captured_execute
+    ]
+    compiled = next(statement for statement in compiled_statements if "barcode_check_status" in statement)
     assert "photos.group_id IS NOT NULL" in compiled
+
+
+def test_postgres_summary_uses_lightweight_barcode_accuracy_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_execute: list[object] = []
+
+    class FakeOneResult:
+        def one(self):
+            return SimpleNamespace(
+                groups=2,
+                photo_rows_linked=4,
+                scanned_groups=1,
+                approved_groups=0,
+                reviewed_groups=0,
+                unreviewed_groups=1,
+                exception_groups=0,
+                incomplete_groups=0,
+                unconstructed_groups=1,
+            )
+
+    class FakeAllResult:
+        def __init__(self, rows=None):
+            self._rows = rows or []
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, _statement):
+            return 10
+
+        def execute(self, statement):
+            captured_execute.append(statement)
+            index = len(captured_execute)
+            if index == 1:
+                return FakeOneResult()
+            return FakeAllResult([])
+
+        def scalars(self, _statement):
+            raise AssertionError("summary must not load full ORM rows for barcode accuracy")
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "alpha-team")
+
+    result = TestPostgresRepository().summary()["summary"]
+
+    assert result["photo_accuracy_checked"] == 0
+    assert result["group_barcode_accuracy_not_required"] == 2
+    compiled = "\n".join(
+        str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for statement in captured_execute
+    )
+    assert "photos.raw_data ->> 'barcode_check_status'" in compiled
+    assert "count(photos.id)" in compiled.lower()
+
+
+def test_group_barcode_accuracy_summary_skips_payload_build_for_incomplete_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_build_group_barcode_check(group: dict) -> dict:
+        calls.append(str(group.get("id")))
+        return {"group_barcode_check_status": "matched"}
+
+    monkeypatch.setattr(repository.photo_barcode_check, "build_group_barcode_check", fake_build_group_barcode_check)
+    groups = [
+        {"id": "complete", "photos": [{"barcode_check_status": "matched"} for _ in range(4)]},
+        {"id": "incomplete", "photos": [{"barcode_check_status": "matched"} for _ in range(3)]},
+    ]
+
+    assert repository._group_barcode_accuracy_summary(groups, {}) == {
+        "group_barcode_accuracy_checked": 1,
+        "group_barcode_accuracy_passed": 1,
+        "group_barcode_accuracy_failed": 0,
+        "group_barcode_accuracy_unreadable": 0,
+        "group_barcode_accuracy_not_required": 1,
+        "group_barcode_accuracy_rate": 1.0,
+    }
+    assert calls == ["complete"]
+
+
+def test_postgres_list_tasks_board_view_omits_large_search_text() -> None:
+    task = SimpleNamespace(
+        id="task-uuid",
+        legacy_id=7,
+        terminal="T-007",
+        title="终端 T-007",
+        status=repository.TaskStatus.PUBLISHED,
+        review_claimed_by="",
+        claimed_at=None,
+        released_at=None,
+        construction_enabled=True,
+        construction_claimed_by="installer-a",
+        construction_claimed_at=None,
+    )
+
+    class FakeScalars:
+        def all(self):
+            return [task]
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalars(self, _statement):
+            return FakeScalars()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+        def _task_stats_map(self, session, team_id: str, *, include_search_text: bool = True):
+            assert include_search_text is False
+            return {
+                7: {
+                    "total_groups": 4,
+                    "address": "上海市测试路1号",
+                    "address_search_text": "这段很长不应进入驾驶舱首屏",
+                    "meter_search_text": "METER-001 METER-002",
+                    "uploaded_count": 3,
+                    "reviewed_count": 2,
+                    "unreviewed_count": 1,
+                    "installer_distribution": [{"installer": "张三", "group_count": 3, "share": 1.0}],
+                }
+            }
+
+    rows = TestPostgresRepository().list_tasks(summary_only=True)
+
+    assert rows[0]["terminal"] == "T-007"
+    assert rows[0]["address"] == "上海市测试路1号"
+    assert rows[0]["address_search_text"] == ""
+    assert rows[0]["meter_search_text"] == ""
+    assert rows[0]["installer_distribution"][0]["installer"] == "张三"
 
 
 def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -39,6 +39,7 @@ from app.models import (
 )
 from app.services.ops_status import build_system_status
 from app.services.account_store import get_user
+from app.services.project_board_cache import project_board_summary_cache
 from app.services.photo_storage import (
     normalize_suffix,
     parse_oss_image_url,
@@ -125,22 +126,7 @@ from app.services.local_simulation import (
 def response_group_target_summary(group: dict[str, Any] | None) -> dict[str, Any]:
     if not group:
         return {}
-    photo_count = int(group.get("photo_count") or 0)
-    return {
-        "id": group["id"],
-        "task_id": group.get("task_id"),
-        "terminal": group.get("terminal", ""),
-        "meter_no": group.get("meter_no", ""),
-        "meter_match_key": group.get("meter_match_key", ""),
-        "address": group.get("address", ""),
-        "status": group.get("status", ""),
-        "reviewer": group.get("reviewer", ""),
-        "review_note": group.get("review_note", ""),
-        "photo_count": photo_count,
-        "construction_status": "unconstructed" if photo_count == 0 else "scanned",
-        "has_archive_blocker": group.get("has_archive_blocker", False),
-        "exception_reasons": group.get("exception_reasons", []),
-    }
+    return group_target_summary(group)
 
 
 async def use_team_context(request: Request):
@@ -243,6 +229,21 @@ def require_production_admin_payload(request: Request) -> dict:
 def request_actor(request: Request, fallback: str = "admin") -> str:
     payload = request_auth_payload(request)
     return str(payload.get("username") or payload.get("sub") or fallback).strip() or fallback
+
+
+def bound_review_actor(request: Request, reviewer: str, fallback: str = "local-reviewer") -> str:
+    clean_reviewer = str(reviewer or "").strip()
+    if request_is_admin(request):
+        return clean_reviewer or request_actor(request, fallback)
+    payload = request_auth_payload(request)
+    subject = str(payload.get("sub") or payload.get("username") or "").strip()
+    if not subject:
+        if settings.app_env.lower() in {"prod", "production"}:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        return clean_reviewer or fallback
+    if clean_reviewer and clean_reviewer != subject:
+        raise HTTPException(status_code=403, detail="Reviewer must match the signed-in user")
+    return subject
 
 
 def request_is_constructor(request: Request) -> bool:
@@ -827,6 +828,15 @@ class PhotoClassifyRequest(BaseModel):
     reviewer: str = "local-reviewer"
 
 
+class PhotoBarcodeRescanRequest(BaseModel):
+    reviewer: str = "local-reviewer"
+    category: str = ""
+
+
+class GroupBarcodeManualConfirmRequest(BaseModel):
+    actor: str = "local-reviewer"
+
+
 class UrlImportRequest(BaseModel):
     rows: list[dict]
 
@@ -980,9 +990,104 @@ async def import_total_catalog(request: Request, file: UploadFile = File(...)):
 
 
 @router.get("/summary")
-def summary(request: Request):
+def summary(request: Request, refresh: bool = Query(default=False)):
     forbid_constructor_project_board(request)
-    return ok(request, state_repository().summary())
+    team_id = current_team_id()
+    return ok(
+        request,
+        project_board_summary_cache.get(
+            team_id,
+            lambda: state_repository().summary(),
+            force_refresh=refresh,
+        ),
+    )
+
+
+def build_photo_barcode_review_workbook(items: list[dict[str, Any]]) -> bytes:
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:
+        raise RuntimeError("openpyxl is required to export Excel files") from exc
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "条码复核清单"
+    headers = [
+        "状态",
+        "资料组状态",
+        "是否已归档",
+        "缺失项",
+        "表号",
+        "模块号",
+        "采集器号",
+        "终端",
+        "地址",
+        "安装人员",
+        "资料组ID",
+        "已识别表号",
+        "已识别模块",
+        "已识别采集器",
+        "异常值",
+        "照片数量",
+        "照片链接",
+    ]
+    sheet.append(headers)
+    status_labels = {"unreadable": "无法识别", "mismatched": "异常不匹配"}
+    group_status_labels = {"approved": "已归档", "pending": "未审阅", "incomplete": "资料不完整", "exception": "异常"}
+    for item in items:
+        detected = item.get("detected_values") or {}
+        photos = item.get("photos") or []
+        photo_urls = [
+            str(photo.get("image_url") or photo.get("thumbnail_url") or "").strip()
+            for photo in photos
+            if str(photo.get("image_url") or photo.get("thumbnail_url") or "").strip()
+        ]
+        sheet.append(
+            [
+                status_labels.get(str(item.get("status") or ""), str(item.get("status") or "")),
+                group_status_labels.get(str(item.get("group_status") or ""), str(item.get("group_status") or "")),
+                "是" if item.get("archived") else "否",
+                "、".join(str(value) for value in item.get("missing_fields") or []),
+                item.get("meter_no") or "",
+                item.get("module_asset_no") or "",
+                item.get("collector") or "",
+                item.get("terminal") or "",
+                item.get("address") or "",
+                item.get("installer") or "",
+                item.get("group_id") or "",
+                "、".join(str(value) for value in detected.get("meter") or []),
+                "、".join(str(value) for value in detected.get("module") or []),
+                "、".join(str(value) for value in detected.get("collector") or []),
+                "、".join(str(value) for value in item.get("unmatched_values") or []),
+                item.get("photo_count") or len(photos),
+                "\n".join(photo_urls),
+            ]
+        )
+    for column_cells in sheet.columns:
+        max_length = max(len(str(cell.value or "")) for cell in column_cells)
+        sheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 10), 56)
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def excel_response(content: bytes, filename: str) -> Response:
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/photo-barcode/review-groups/export")
+def export_photo_barcode_review_groups(
+    request: Request,
+    status: str = Query(default="unreadable"),
+    _admin: dict = Depends(require_admin),
+):
+    payload = state_repository().list_photo_barcode_review_groups(status=status, limit=100000, offset=0)
+    content = build_photo_barcode_review_workbook(payload.get("items") or [])
+    filename = f"photo-barcode-review-{status}-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    return excel_response(content, filename)
 
 
 @router.get("/photo-barcode/review-groups")
@@ -1372,7 +1477,13 @@ def group_photo_content(group_id: str, photo_id: str, kind: str = Query(default=
 
     if storage_type == "oss" or image_url.startswith("oss://"):
         _, parsed_key = parse_oss_image_url(image_url)
-        process = settings.oss_thumbnail_process if normalized_kind == "thumbnail" else settings.oss_preview_process
+        process = (
+            settings.oss_thumbnail_process
+            if normalized_kind == "thumbnail"
+            else settings.oss_preview_process
+            if normalized_kind == "preview"
+            else ""
+        )
         content, media_type = _read_oss_photo_or_repair(group_id, photo, storage_key, parsed_key, process, kind=normalized_kind)
         return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, max-age=600"})
 
@@ -1631,8 +1742,8 @@ def audit_log(
 
 
 @router.get("/tasks")
-def tasks(request: Request):
-    return ok(request, {"items": state_repository().list_tasks()})
+def tasks(request: Request, summary: bool = Query(default=False)):
+    return ok(request, {"items": state_repository().list_tasks(summary_only=summary)})
 
 
 @router.get("/tasks/status")
@@ -2194,6 +2305,47 @@ def save_photo_category(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, resolve_photo_for_response(photo))
+
+
+@router.post("/groups/{group_id}/photos/{photo_id}/barcode-rescan")
+def rescan_photo_barcode(
+    group_id: str,
+    photo_id: str,
+    payload: PhotoBarcodeRescanRequest,
+    request: Request,
+    include_group: bool = Query(default=False),
+):
+    try:
+        repo = state_repository()
+        reviewer = bound_review_actor(request, payload.reviewer)
+        photo = repo.rescan_photo_barcode(group_id, photo_id, reviewer, payload.category)
+        if include_group:
+            group = repo.get_group(group_id)
+            return ok(
+                request,
+                {"photo": resolve_photo_for_response(photo), "group": response_group_target_summary(group)},
+            )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Photo or group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, resolve_photo_for_response(photo))
+
+
+@router.post("/groups/{group_id}/barcode-manual-confirm")
+def confirm_group_barcode_manually(
+    group_id: str,
+    payload: GroupBarcodeManualConfirmRequest,
+    request: Request,
+):
+    try:
+        actor = bound_review_actor(request, payload.actor)
+        result = state_repository().confirm_group_barcode_manually(group_id, actor=actor)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, response_payload(result))
 
 
 @router.delete("/groups/{group_id}/photos/{photo_id}")

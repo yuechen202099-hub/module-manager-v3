@@ -117,6 +117,7 @@ export type ReviewTask = {
   constructionUploadedCount?: number
   constructionUnbuiltCount?: number
   constructionExceptionCount?: number
+  installerDistribution?: Array<{ installer: string; groupCount: number; share: number }>
 }
 
 export type TaskStatusSummary = {
@@ -161,6 +162,15 @@ export type MaterialGroup = {
   constructionModuleAssetNo?: string
   constructionStatus?: string
   exceptionOrderId?: string
+  groupBarcodeCheckStatus?: string
+  groupBarcodeMatchedFields?: string[]
+  groupBarcodeMissingFields?: string[]
+  groupBarcodePassedCount?: number
+  groupBarcodeTotalCount?: number
+  groupBarcodeManualConfirmed?: boolean
+  photoCategoryClassifiedCount?: number
+  photoCategoryTotalCount?: number
+  photoCategoryComplete?: boolean
   photos?: ReviewPhoto[]
 }
 
@@ -190,6 +200,17 @@ export type ReviewPhoto = {
   collector?: string
   moduleAssetNo?: string
   creator?: string
+  barcodeCheckStatus?: string
+  barcodeCheckExpectedType?: string
+  barcodeCheckValues?: string[]
+  barcodeCheckNormalizedValues?: string[]
+  barcodeCheckOcrValues?: string[]
+  barcodeCheckOcrNormalizedValues?: string[]
+  barcodeCheckExpectedValues?: string[]
+  barcodeCheckMatchedValue?: string
+  barcodeCheckedAt?: string
+  barcodeCheckError?: string
+  barcodeCheckMethod?: string
 }
 
 export type ConstructionPhotoSlot = {
@@ -269,6 +290,9 @@ export type PhotoBarcodeReviewPhoto = {
   barcodeCheckStatus: string
   barcodeCheckValues: string[]
   barcodeCheckNormalizedValues: string[]
+  barcodeCheckOcrValues?: string[]
+  barcodeCheckOcrNormalizedValues?: string[]
+  barcodeCheckMethod?: string
 }
 
 export type PhotoBarcodeReviewGroup = {
@@ -279,6 +303,9 @@ export type PhotoBarcodeReviewGroup = {
   terminal: string
   address: string
   installer: string
+  groupStatus: string
+  archived: boolean
+  photoCount: number
   status: string
   missingFields: string[]
   missingExpectedFields: string[]

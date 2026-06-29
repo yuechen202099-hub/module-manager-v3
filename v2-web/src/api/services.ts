@@ -86,6 +86,7 @@ type BackendTask = {
   construction_uploaded_count?: number
   construction_unbuilt_count?: number
   construction_exception_count?: number
+  installer_distribution?: Array<{ installer?: string; group_count?: number; share?: number }>
 }
 
 type BackendTaskStatusSummary = {
@@ -127,6 +128,17 @@ type BackendPhoto = {
   module_asset_no?: string
   asset_no?: string
   creator?: string
+  barcode_check_status?: string
+  barcode_check_expected_type?: string
+  barcode_check_values?: unknown[]
+  barcode_check_normalized_values?: unknown[]
+  barcode_check_ocr_values?: unknown[]
+  barcode_check_ocr_normalized_values?: unknown[]
+  barcode_check_expected_values?: unknown[]
+  barcode_check_matched_value?: string
+  barcode_checked_at?: string
+  barcode_check_error?: string
+  barcode_check_method?: string
 }
 
 type BackendGroup = {
@@ -152,6 +164,15 @@ type BackendGroup = {
   construction_module_asset_no?: string
   construction_status?: string
   exception_order_id?: string
+  group_barcode_check_status?: string
+  group_barcode_matched_fields?: unknown[]
+  group_barcode_missing_fields?: unknown[]
+  group_barcode_passed_count?: number
+  group_barcode_total_count?: number
+  group_barcode_manual_confirmed?: boolean
+  photo_category_classified_count?: number
+  photo_category_total_count?: number
+  photo_category_complete?: boolean
   photos?: BackendPhoto[]
 }
 
@@ -211,6 +232,9 @@ type BackendPhotoBarcodeReviewPhoto = {
   barcode_check_status?: string
   barcode_check_values?: unknown[]
   barcode_check_normalized_values?: unknown[]
+  barcode_check_ocr_values?: unknown[]
+  barcode_check_ocr_normalized_values?: unknown[]
+  barcode_check_method?: string
 }
 
 type BackendPhotoBarcodeReviewGroup = {
@@ -221,6 +245,9 @@ type BackendPhotoBarcodeReviewGroup = {
   terminal?: string
   address?: string
   installer?: string
+  group_status?: string
+  archived?: boolean
+  photo_count?: number
   status?: string
   missing_fields?: string[]
   missing_expected_fields?: string[]
@@ -592,6 +619,11 @@ function mapTask(raw: BackendTask): ReviewTask {
     constructionUploadedCount: Number(raw.construction_uploaded_count || raw.uploaded_count || 0),
     constructionUnbuiltCount: Number(raw.construction_unbuilt_count || Math.max(renovationCount - uploadedCount, 0)),
     constructionExceptionCount: Number(raw.construction_exception_count || raw.exception_groups || 0),
+    installerDistribution: (raw.installer_distribution || []).map((item) => ({
+      installer: item.installer || '',
+      groupCount: Number(item.group_count || 0),
+      share: Number(item.share || 0),
+    })).filter((item) => item.installer && item.groupCount > 0),
   }
 }
 
@@ -615,6 +647,12 @@ function mapTaskStatusSummary(raw: BackendTaskStatusSummary): TaskStatusSummary 
     totalCatalogRows: Number(raw.total_catalog_rows || 0),
     groups: Number(raw.groups || 0),
   }
+}
+
+function mapStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item || '')).filter(Boolean)
+  const text = String(value || '').trim()
+  return text ? [text] : []
 }
 
 function mapPhoto(raw: BackendPhoto): ReviewPhoto {
@@ -641,6 +679,17 @@ function mapPhoto(raw: BackendPhoto): ReviewPhoto {
     collector: raw.collector || '',
     moduleAssetNo: raw.module_asset_no || raw.asset_no || '',
     creator: raw.creator || '',
+    barcodeCheckStatus: raw.barcode_check_status || '',
+    barcodeCheckExpectedType: raw.barcode_check_expected_type || '',
+    barcodeCheckValues: mapStringArray(raw.barcode_check_values),
+    barcodeCheckNormalizedValues: mapStringArray(raw.barcode_check_normalized_values),
+    barcodeCheckOcrValues: mapStringArray(raw.barcode_check_ocr_values),
+    barcodeCheckOcrNormalizedValues: mapStringArray(raw.barcode_check_ocr_normalized_values),
+    barcodeCheckExpectedValues: mapStringArray(raw.barcode_check_expected_values),
+    barcodeCheckMatchedValue: raw.barcode_check_matched_value || '',
+    barcodeCheckedAt: raw.barcode_checked_at || '',
+    barcodeCheckError: raw.barcode_check_error || '',
+    barcodeCheckMethod: raw.barcode_check_method || '',
   }
 }
 
@@ -667,6 +716,15 @@ function mapGroup(raw: BackendGroup): MaterialGroup {
     constructionModuleAssetNo: raw.construction_module_asset_no || '',
     constructionStatus: raw.construction_status || '',
     exceptionOrderId: raw.exception_order_id || '',
+    groupBarcodeCheckStatus: raw.group_barcode_check_status || '',
+    groupBarcodeMatchedFields: mapStringArray(raw.group_barcode_matched_fields),
+    groupBarcodeMissingFields: mapStringArray(raw.group_barcode_missing_fields),
+    groupBarcodePassedCount: Number(raw.group_barcode_passed_count || 0),
+    groupBarcodeTotalCount: Number(raw.group_barcode_total_count || 3),
+    groupBarcodeManualConfirmed: Boolean(raw.group_barcode_manual_confirmed),
+    photoCategoryClassifiedCount: Number(raw.photo_category_classified_count || 0),
+    photoCategoryTotalCount: Number(raw.photo_category_total_count || 0),
+    photoCategoryComplete: Boolean(raw.photo_category_complete),
     photos: (raw.photos || []).map(mapPhoto),
   }
 }
@@ -929,8 +987,9 @@ export async function fetchProjects(): Promise<Project[]> {
   return mockProjects
 }
 
-export async function fetchTasks(): Promise<ReviewTask[]> {
-  const data = await api<{ items: BackendTask[] }>('/local-test/tasks')
+export async function fetchTasks(options: { summary?: boolean } = {}): Promise<ReviewTask[]> {
+  const query = options.summary ? '?summary=true' : ''
+  const data = await api<{ items: BackendTask[] }>(`/local-test/tasks${query}`)
   return (data.items || []).map(mapTask)
 }
 
@@ -1001,6 +1060,9 @@ function mapPhotoBarcodeReviewGroup(raw: BackendPhotoBarcodeReviewGroup): PhotoB
     terminal: raw.terminal || '',
     address: raw.address || '',
     installer: raw.installer || '',
+    groupStatus: raw.group_status || '',
+    archived: Boolean(raw.archived),
+    photoCount: Number(raw.photo_count || raw.photos?.length || 0),
     status: raw.status || '',
     missingFields: raw.missing_fields || [],
     missingExpectedFields: raw.missing_expected_fields || [],
@@ -1012,15 +1074,16 @@ function mapPhotoBarcodeReviewGroup(raw: BackendPhotoBarcodeReviewGroup): PhotoB
       category: photo.category || '',
       categoryLabel: photo.category_label || '',
       imageUrl: photo.image_url || '',
-      thumbnailUrl: photo.thumbnail_url || photo.image_url || '',
-      barcodeCheckStatus: photo.barcode_check_status || '',
-      barcodeCheckValues: (photo.barcode_check_values || []).map((item) => String(item || '')).filter(Boolean),
-      barcodeCheckNormalizedValues: (photo.barcode_check_normalized_values || [])
-        .map((item) => String(item || ''))
-        .filter(Boolean),
-    })),
+        thumbnailUrl: photo.thumbnail_url || photo.image_url || '',
+        barcodeCheckStatus: photo.barcode_check_status || '',
+        barcodeCheckValues: mapStringArray(photo.barcode_check_values),
+        barcodeCheckNormalizedValues: mapStringArray(photo.barcode_check_normalized_values),
+        barcodeCheckOcrValues: mapStringArray(photo.barcode_check_ocr_values),
+        barcodeCheckOcrNormalizedValues: mapStringArray(photo.barcode_check_ocr_normalized_values),
+        barcodeCheckMethod: photo.barcode_check_method || '',
+      })),
+    }
   }
-}
 
 export async function updateAdminGroupMetadata(
   groupId: string,
@@ -1145,6 +1208,38 @@ export async function classifyPhotoWithGroup(
     }
   }
   return { photo: mapPhoto(data as BackendPhoto) }
+}
+
+export async function rescanPhotoBarcode(
+  groupId: string,
+  photoId: string,
+  category = '',
+): Promise<{ photo: ReviewPhoto; group?: MaterialGroup }> {
+  const data = await api<{ photo?: BackendPhoto; group?: BackendGroup } | BackendPhoto>(
+    `/local-test/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/barcode-rescan?include_group=true`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ reviewer: currentActor(), category }),
+    },
+  )
+  if ('photo' in data || 'group' in data) {
+    return {
+      photo: mapPhoto(data.photo || ({} as BackendPhoto)),
+      group: data.group ? mapGroup(data.group) : undefined,
+    }
+  }
+  return { photo: mapPhoto(data as BackendPhoto) }
+}
+
+export async function confirmGroupBarcodeManually(groupId: string): Promise<{ group?: MaterialGroup }> {
+  const data = await api<{ group?: BackendGroup }>(
+    `/local-test/groups/${encodeURIComponent(groupId)}/barcode-manual-confirm`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ actor: currentActor() }),
+    },
+  )
+  return { group: data.group ? mapGroup(data.group) : undefined }
 }
 
 export async function deleteGroupPhoto(groupId: string, photoId: string): Promise<{ group?: MaterialGroup }> {
@@ -1386,8 +1481,11 @@ export async function recordConstructionNonIdleEvent(payload: {
   })
 }
 
-export async function fetchProjectSummary(): Promise<{ summary: ProjectSummary; paths: Record<string, unknown> }> {
-  const data = await api<{ summary: BackendSummary; paths?: Record<string, unknown> }>('/local-test/summary')
+export async function fetchProjectSummary(
+  options: { refresh?: boolean } = {},
+): Promise<{ summary: ProjectSummary; paths: Record<string, unknown> }> {
+  const query = options.refresh ? '?refresh=true' : ''
+  const data = await api<{ summary: BackendSummary; paths?: Record<string, unknown> }>(`/local-test/summary${query}`)
   return { summary: mapSummary(data.summary || {}), paths: data.paths || {} }
 }
 
@@ -1410,6 +1508,25 @@ export async function fetchPhotoBarcodeReviewGroups(
     total: Number(data.total || 0),
     items: (data.items || []).map(mapPhotoBarcodeReviewGroup),
   }
+}
+
+export async function exportPhotoBarcodeReviewGroups(status = 'unreadable'): Promise<void> {
+  const params = new URLSearchParams({ status })
+  const response = await fetchWithAuth(`/local-test/photo-barcode/review-groups/export?${params.toString()}`, {
+    method: 'GET',
+    headers: formHeaders(),
+  })
+  if (!response.ok) {
+    throw new Error(response.statusText || '导出条码复核清单失败')
+  }
+  const blob = await response.blob()
+  triggerBrowserDownload(
+    blob,
+    filenameFromDisposition(
+      response.headers.get('Content-Disposition') || '',
+      `photo-barcode-review-${Date.now()}.xlsx`,
+    ),
+  )
 }
 
 export async function fetchInstallerWorkload(installer: string): Promise<InstallerWorkload> {
@@ -1796,7 +1913,109 @@ export async function fetchGroupPhotoObjectUrl(
   if (!blob.type.startsWith('image/')) {
     throw new Error('图片接口返回内容不是图片')
   }
-  return URL.createObjectURL(blob)
+  return createVerifiedImageObjectUrl(blob)
+}
+
+async function createVerifiedImageObjectUrl(blob: Blob): Promise<string> {
+  if (!blob.size) {
+    throw new Error('图片内容为空')
+  }
+  const objectUrl = URL.createObjectURL(blob)
+  if (typeof Image === 'undefined') {
+    return objectUrl
+  }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const image = new Image()
+      const timer = window.setTimeout(() => {
+        image.onload = null
+        image.onerror = null
+        reject(new Error('图片解码超时'))
+      }, 10000)
+      image.onload = () => {
+        window.clearTimeout(timer)
+        if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+          if (looksLikeBlankOrPlaceholderImage(image)) {
+            reject(new Error('图片内容疑似空白'))
+            return
+          }
+          resolve()
+          return
+        }
+        reject(new Error('图片尺寸异常'))
+      }
+      image.onerror = () => {
+        window.clearTimeout(timer)
+        reject(new Error('图片无法解码'))
+      }
+      image.src = objectUrl
+    })
+    return objectUrl
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl)
+    throw error
+  }
+}
+
+function looksLikeBlankOrPlaceholderImage(image: HTMLImageElement): boolean {
+  if (typeof document === 'undefined') {
+    return false
+  }
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = 64
+    canvas.height = 64
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) {
+      return false
+    }
+    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
+    let visiblePixels = 0
+    let transparentPixels = 0
+    let lumaSum = 0
+    let lumaSquareSum = 0
+    let grayPixels = 0
+    let brightPixels = 0
+    for (let index = 0; index < pixels.length; index += 4) {
+      const alpha = pixels[index + 3]
+      if (alpha < 8) {
+        transparentPixels += 1
+        continue
+      }
+      const red = pixels[index]
+      const green = pixels[index + 1]
+      const blue = pixels[index + 2]
+      const luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+      visiblePixels += 1
+      lumaSum += luma
+      lumaSquareSum += luma * luma
+      if (Math.abs(red - green) < 3 && Math.abs(green - blue) < 3) {
+        grayPixels += 1
+      }
+      if (luma > 245) {
+        brightPixels += 1
+      }
+    }
+    const totalPixels = canvas.width * canvas.height
+    if (!visiblePixels) {
+      return true
+    }
+    const mean = lumaSum / visiblePixels
+    const variance = Math.max(0, lumaSquareSum / visiblePixels - mean * mean)
+    const stddev = Math.sqrt(variance)
+    const transparentRatio = transparentPixels / totalPixels
+    const grayRatio = grayPixels / visiblePixels
+    const brightRatio = brightPixels / visiblePixels
+    return (
+      transparentRatio > 0.95 ||
+      stddev < 3 ||
+      (brightRatio > 0.98 && stddev < 8) ||
+      (grayRatio > 0.98 && stddev < 5 && mean > 80 && mean < 245)
+    )
+  } catch {
+    return false
+  }
 }
 
 type DeliveryPhotoManifest = {

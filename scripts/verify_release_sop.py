@@ -17,6 +17,30 @@ REQUIRED_FILES = [
     "docs/sop/07-rollback-and-incident-review.md",
     "docs/sop/08-business-acceptance-templates.md",
     "ops/releases/README.md",
+    "ops/releases/V3.0.68.md",
+    "ops/releases/V3.0.67.md",
+    "ops/releases/V3.0.66.md",
+    "ops/releases/V3.0.65.md",
+    "ops/releases/V3.0.64.md",
+    "ops/releases/V3.0.63.md",
+    "ops/releases/V3.0.62.md",
+    "ops/releases/V3.0.61.md",
+    "ops/releases/V3.0.60.md",
+    "ops/releases/V3.0.59.md",
+    "ops/releases/V3.0.58.md",
+    "ops/releases/V3.0.56.md",
+    "ops/releases/V3.0.55.md",
+    "ops/releases/V3.0.54.md",
+    "ops/releases/V3.0.53.md",
+    "ops/releases/V3.0.52.md",
+    "ops/releases/V3.0.51.md",
+    "ops/releases/V3.0.50.md",
+    "ops/releases/V3.0.49.md",
+    "ops/releases/V3.0.48.md",
+    "ops/releases/V3.0.47.md",
+    "ops/releases/V3.0.46.md",
+    "ops/releases/V3.0.45.md",
+    "ops/releases/V3.0.44.md",
     "ops/releases/V3.0.42.md",
     "ops/releases/V3.0.41.md",
     "ops/releases/V3.0.40.md",
@@ -66,6 +90,30 @@ def main() -> int:
         "docs/sop/06-production-deploy-runbook.md",
         "docs/sop/07-rollback-and-incident-review.md",
         "docs/sop/08-business-acceptance-templates.md",
+        "ops/releases/V3.0.68.md",
+        "ops/releases/V3.0.67.md",
+        "ops/releases/V3.0.66.md",
+        "ops/releases/V3.0.65.md",
+        "ops/releases/V3.0.64.md",
+        "ops/releases/V3.0.63.md",
+        "ops/releases/V3.0.62.md",
+        "ops/releases/V3.0.61.md",
+        "ops/releases/V3.0.60.md",
+        "ops/releases/V3.0.59.md",
+        "ops/releases/V3.0.58.md",
+        "ops/releases/V3.0.56.md",
+        "ops/releases/V3.0.55.md",
+        "ops/releases/V3.0.54.md",
+        "ops/releases/V3.0.53.md",
+        "ops/releases/V3.0.52.md",
+        "ops/releases/V3.0.51.md",
+        "ops/releases/V3.0.50.md",
+        "ops/releases/V3.0.49.md",
+        "ops/releases/V3.0.48.md",
+        "ops/releases/V3.0.47.md",
+        "ops/releases/V3.0.45.md",
+        "ops/releases/V3.0.46.md",
+        "ops/releases/V3.0.44.md",
         "ops/releases/V3.0.42.md",
         "ops/releases/V3.0.41.md",
         "ops/releases/V3.0.40.md",
@@ -76,15 +124,28 @@ def main() -> int:
         if path not in release_verifier:
             fail(f"verify-client-release.py must require {path}")
 
+    stale_sop_hits = [
+        path
+        for path in [
+            "docs/sop/README.md",
+            "docs/sop/02-production-branch-versioning.md",
+            "docs/sop/05-release-package-and-hash.md",
+            "docs/sop/06-production-deploy-runbook.md",
+        ]
+        if "3.0.38" in read(path) or "V3.0.38" in read(path)
+    ]
+    if stale_sop_hits:
+        fail("SOP files must not keep stale V3.0.38 deployment examples: " + ", ".join(stale_sop_hits))
+
     agents = read("AGENTS.md")
-    if "V3.0.42" not in agents:
-        fail("AGENTS.md must state current production baseline V3.0.42")
+    if "V3.0.68" not in agents:
+        fail("AGENTS.md must state current production baseline V3.0.68")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
 
     manifest = read("RELEASE_MANIFEST.md")
-    if "3.0.42" not in manifest:
-        fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.42")
+    if "3.0.68" not in manifest:
+        fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.68")
 
     print("[OK] release SOP files and references are consistent")
     return 0

@@ -2215,7 +2215,6 @@ onBeforeUnmount(() => {
         <div class="panel-head group-head">
           <div>
             <h3>{{ selectedTask ? `终端 ${selectedTask.terminal || selectedTask.id}` : '施工区' }}</h3>
-            <span>未施工也会显示，便于现场逐户核对</span>
           </div>
           <div class="head-actions">
             <el-button size="small" @click="returnToTaskPicker">返回任务区</el-button>

@@ -42,6 +42,12 @@ const isEmbedded = computed(() => route.query.embedded === '1')
 const isConstructionRoute = computed(() => route.path === '/construction')
 const isAdmin = computed(() => auth.user?.role === 'admin' || auth.user?.roles?.includes('admin'))
 const releaseNotesVisible = ref(false)
+const releaseNotesPage = ref(1)
+const releaseNotesPageSize = 4
+const pagedReleaseNotes = computed(() => {
+  const start = (releaseNotesPage.value - 1) * releaseNotesPageSize
+  return releaseNotes.slice(start, start + releaseNotesPageSize)
+})
 const refreshEventKey = 'module_manager_refresh_event'
 const refreshVersionKey = 'module_manager_refresh_version'
 let refreshVersion = Number(localStorage.getItem(refreshVersionKey) || 0)
@@ -75,6 +81,11 @@ onUnmounted(() => {
 function logout() {
   auth.logout()
   void router.push({ name: 'login' })
+}
+
+function openReleaseNotes() {
+  releaseNotesPage.value = 1
+  releaseNotesVisible.value = true
 }
 
 function currentTeamId() {
@@ -280,7 +291,7 @@ async function startShellScanImport(message: { file?: File; filename?: string })
 
       <div class="header-actions">
         <span class="page-chip">{{ pageTitle }}</span>
-        <ElButton v-if="isAdmin" :icon="Tickets" plain @click="releaseNotesVisible = true">更新内容</ElButton>
+        <ElButton v-if="isAdmin" :icon="Tickets" plain @click="openReleaseNotes">更新内容</ElButton>
         <span class="user-chip">{{ roleLabel }} / {{ auth.displayName }}</span>
         <ElTooltip content="退出登录" placement="bottom">
           <ElButton :icon="SwitchButton" circle @click="logout" />
@@ -300,7 +311,7 @@ async function startShellScanImport(message: { file?: File; filename?: string })
 
     <ElDialog v-model="releaseNotesVisible" title="更新内容" width="720px" class="release-notes-dialog" append-to-body>
       <div class="release-notes">
-        <article v-for="note in releaseNotes" :key="note.version" class="release-note">
+        <article v-for="note in pagedReleaseNotes" :key="note.version" class="release-note">
           <header>
             <div>
               <strong>{{ note.version }}</strong>
@@ -313,6 +324,16 @@ async function startShellScanImport(message: { file?: File; filename?: string })
           </ul>
         </article>
       </div>
+      <template #footer>
+        <ElPagination
+          v-model:current-page="releaseNotesPage"
+          :page-size="releaseNotesPageSize"
+          :total="releaseNotes.length"
+          layout="total, prev, pager, next"
+          background
+          small
+        />
+      </template>
     </ElDialog>
   </div>
 </template>
@@ -365,6 +386,9 @@ async function startShellScanImport(message: { file?: File; filename?: string })
 .release-notes {
   display: grid;
   gap: 14px;
+  max-height: min(68vh, 760px);
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .release-note {
