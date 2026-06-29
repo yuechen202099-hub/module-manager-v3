@@ -71,10 +71,16 @@ export type ProjectModule = {
   routePath: string
 }
 
+export type ProjectCreatePayload = {
+  name: string
+  description?: string
+  moduleIds: string[]
+}
+
 export type Project = {
   id: string
   name: string
-  status: 'active' | 'archived'
+  status: 'active' | 'archived' | 'draft'
   stage?: string
   systemProgress?: number
   managementProgress?: number

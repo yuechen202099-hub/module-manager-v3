@@ -10,6 +10,7 @@ import type {
   MaterialGroup,
   PhotoBarcodeReviewGroup,
   Project,
+  ProjectCreatePayload,
   ProjectSummary,
   ReplacementRecord,
   ReviewPhoto,
@@ -819,10 +820,11 @@ function mapProjectModules(raw: BackendProjectModule[] = []): Project['modules']
 
 function mapProject(raw: BackendPlatformProject): Project {
   const progress = mapProjectProgress(raw)
+  const status = raw.status === 'draft' ? 'draft' : raw.status === 'archived' ? 'archived' : 'active'
   return {
     id: raw.id,
     name: raw.name,
-    status: raw.status === 'archived' ? 'archived' : 'active',
+    status,
     ...progress,
     totalGroups: Number(raw.total_groups || 0),
     completedGroups: Number(raw.completed_groups || 0),
@@ -1289,6 +1291,28 @@ export async function fetchProjectsWithModules(): Promise<Project[]> {
       }
     }),
   )
+}
+
+export async function createProject(payload: ProjectCreatePayload): Promise<Project> {
+  const data = await api<BackendPlatformProject>('/projects', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: payload.name,
+      description: payload.description || '',
+      module_ids: payload.moduleIds,
+    }),
+  })
+  const project = mapProject(data)
+  const sections = await fetchProjectModuleSections(project.id, project.modules)
+  return {
+    ...project,
+    ...sections.progress,
+    delivery: sections.delivery,
+    field: sections.field,
+    review: sections.review,
+    risks: sections.risks,
+    tasks: sections.tasks,
+  }
 }
 
 export async function fetchProjects(): Promise<Project[]> {

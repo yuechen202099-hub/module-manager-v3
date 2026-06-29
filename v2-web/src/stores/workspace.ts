@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 
 import * as services from '@/api/services'
-import type { MaterialGroup, Project, ReviewPhoto, ReviewTask, TaskStatus } from '@/api/types'
+import type { MaterialGroup, Project, ProjectCreatePayload, ReviewPhoto, ReviewTask, TaskStatus } from '@/api/types'
 
 type WorkspaceState = {
   loading: boolean
@@ -83,6 +83,12 @@ export const useWorkspaceStore = defineStore('workspace', {
     async loadProjects() {
       this.projects = await services.fetchProjects()
       this.ensureActiveProject()
+    },
+    async createProjectDraft(payload: ProjectCreatePayload) {
+      const project = await services.createProject(payload)
+      await this.loadProjects()
+      this.selectProject(project.id)
+      return project
     },
     async bootstrap() {
       this.loading = true

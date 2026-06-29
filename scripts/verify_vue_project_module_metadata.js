@@ -4,6 +4,7 @@ const path = require("path");
 const root = process.cwd();
 const typesSource = fs.readFileSync(path.join(root, "v2-web", "src", "api", "types.ts"), "utf8");
 const servicesSource = fs.readFileSync(path.join(root, "v2-web", "src", "api", "services.ts"), "utf8");
+const workspaceSource = fs.readFileSync(path.join(root, "v2-web", "src", "stores", "workspace.ts"), "utf8");
 const projectsViewSource = fs.readFileSync(path.join(root, "v2-web", "src", "views", "ProjectsView.vue"), "utf8");
 
 const checks = [
@@ -30,6 +31,18 @@ const checks = [
       projectsViewSource.includes("module.routePath") &&
       projectsViewSource.includes("module.name"),
     message: "Projects view must render module actions from project.modules route metadata.",
+  },
+  {
+    ok:
+      typesSource.includes("export type ProjectCreatePayload") &&
+      typesSource.includes("status: 'active' | 'archived' | 'draft'") &&
+      servicesSource.includes("export async function createProject") &&
+      servicesSource.includes("api<BackendPlatformProject>('/projects'") &&
+      servicesSource.includes("method: 'POST'") &&
+      workspaceSource.includes("async createProjectDraft") &&
+      workspaceSource.includes("services.createProject(payload)") &&
+      workspaceSource.includes("this.selectProject(project.id)"),
+    message: "Frontend must expose project draft creation through API services and workspace store.",
   },
 ];
 
