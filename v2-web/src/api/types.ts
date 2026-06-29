@@ -67,10 +67,44 @@ export type Project = {
   id: string
   name: string
   status: 'active' | 'archived'
+  stage?: string
+  systemProgress?: number
+  managementProgress?: number
+  managementLocked?: boolean
   totalGroups: number
   completedGroups: number
   exceptionGroups: number
   updatedAt: string
+  tasks?: {
+    total: number
+    uploaded: number
+    reviewing: number
+    archived: number
+    uploadRate: number
+    reviewRate: number
+  }
+  delivery?: {
+    status: string
+    totalItems: number
+    completedItems: number
+    latestRecord: string
+  }
+  field?: {
+    photoRowsLinked: number
+    unconstructedGroups: number
+    exceptionCount: number
+  }
+  review?: {
+    reviewedGroups: number
+    reviewRate: number
+    pendingGroups: number
+  }
+  risks?: {
+    total: number
+    fieldExceptions: number
+    unconstructedGroups: number
+    deliveryBlockers: number
+  }
 }
 
 export type TaskStatus =

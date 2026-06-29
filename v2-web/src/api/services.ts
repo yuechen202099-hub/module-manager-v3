@@ -1,4 +1,4 @@
-import { mockProjects, mockTasks, mockUser } from './mock'
+import { mockUser } from './mock'
 import type {
   AuthConfig,
   ConstructionExceptionOrder,
@@ -107,6 +107,50 @@ type BackendTaskStatusSummary = {
   unreviewed_count?: number
   total_catalog_rows?: number
   groups?: number
+}
+
+type BackendPlatformProject = {
+  id: string
+  name: string
+  status?: string
+  stage?: string
+  system_progress?: number
+  management_progress?: number
+  management_locked?: boolean
+  total_groups?: number
+  completed_groups?: number
+  exception_groups?: number
+  updated_at?: string
+  tasks?: {
+    total?: number
+    uploaded?: number
+    reviewing?: number
+    archived?: number
+    upload_rate?: number
+    review_rate?: number
+  }
+  delivery?: {
+    status?: string
+    total_items?: number
+    completed_items?: number
+    latest_record?: string
+  }
+  field?: {
+    photo_rows_linked?: number
+    unconstructed_groups?: number
+    exception_count?: number
+  }
+  review?: {
+    reviewed_groups?: number
+    review_rate?: number
+    pending_groups?: number
+  }
+  risks?: {
+    total?: number
+    field_exceptions?: number
+    unconstructed_groups?: number
+    delivery_blockers?: number
+  }
 }
 
 type BackendPhoto = {
@@ -456,8 +500,6 @@ type BackendInstallerWorkload = {
   }>
 }
 
-const delay = (ms = 120) => new Promise((resolve) => window.setTimeout(resolve, ms))
-
 function readLegacySession(): LegacySession | null {
   try {
     return JSON.parse(localStorage.getItem('module_manager_session') || 'null') as LegacySession | null
@@ -580,6 +622,62 @@ function roleFromSession(session: LegacySession | null, username: string): UserR
   if (username === 'admin') return 'admin'
   if (username.includes('constructor') || username.includes('施工')) return 'constructor'
   return 'reviewer'
+}
+
+function mapProject(raw: BackendPlatformProject): Project {
+  return {
+    id: raw.id,
+    name: raw.name,
+    status: raw.status === 'archived' ? 'archived' : 'active',
+    stage: raw.stage || '',
+    systemProgress: Number(raw.system_progress || 0),
+    managementProgress: Number(raw.management_progress || 0),
+    managementLocked: Boolean(raw.management_locked),
+    totalGroups: Number(raw.total_groups || 0),
+    completedGroups: Number(raw.completed_groups || 0),
+    exceptionGroups: Number(raw.exception_groups || 0),
+    updatedAt: raw.updated_at || '',
+    tasks: raw.tasks
+      ? {
+          total: Number(raw.tasks.total || 0),
+          uploaded: Number(raw.tasks.uploaded || 0),
+          reviewing: Number(raw.tasks.reviewing || 0),
+          archived: Number(raw.tasks.archived || 0),
+          uploadRate: Number(raw.tasks.upload_rate || 0),
+          reviewRate: Number(raw.tasks.review_rate || 0),
+        }
+      : undefined,
+    delivery: raw.delivery
+      ? {
+          status: raw.delivery.status || '',
+          totalItems: Number(raw.delivery.total_items || 0),
+          completedItems: Number(raw.delivery.completed_items || 0),
+          latestRecord: raw.delivery.latest_record || '',
+        }
+      : undefined,
+    field: raw.field
+      ? {
+          photoRowsLinked: Number(raw.field.photo_rows_linked || 0),
+          unconstructedGroups: Number(raw.field.unconstructed_groups || 0),
+          exceptionCount: Number(raw.field.exception_count || 0),
+        }
+      : undefined,
+    review: raw.review
+      ? {
+          reviewedGroups: Number(raw.review.reviewed_groups || 0),
+          reviewRate: Number(raw.review.review_rate || 0),
+          pendingGroups: Number(raw.review.pending_groups || 0),
+        }
+      : undefined,
+    risks: raw.risks
+      ? {
+          total: Number(raw.risks.total || 0),
+          fieldExceptions: Number(raw.risks.field_exceptions || 0),
+          unconstructedGroups: Number(raw.risks.unconstructed_groups || 0),
+          deliveryBlockers: Number(raw.risks.delivery_blockers || 0),
+        }
+      : undefined,
+  }
 }
 
 function mapTask(raw: BackendTask): ReviewTask {
@@ -983,8 +1081,8 @@ export async function deleteUserAccount(username: string): Promise<UserAccount> 
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  await delay(60)
-  return mockProjects
+  const data = await api<{ items: BackendPlatformProject[] }>('/projects')
+  return (data.items || []).map(mapProject)
 }
 
 export async function fetchTasks(options: { summary?: boolean } = {}): Promise<ReviewTask[]> {
