@@ -564,6 +564,69 @@ def test_project_draft_registry_persists_work_item_schema(tmp_path):
     assert any(field["key"] == "installer" for field in stored_schema["platform_required_fields"])
 
 
+def test_project_draft_work_item_schema_can_be_updated_and_persisted(tmp_path):
+    store_path = tmp_path / "platform-project-drafts.json"
+    configure_project_draft_store_path(store_path)
+    client = TestClient(app)
+    create_response = client.post(
+        "/projects",
+        json={
+            "name": "Editable Field Model",
+            "module_ids": ["progress", "field", "review"],
+            "work_item_schema": {
+                "primary_field": {"key": "meter_no", "label": "电能表", "source": "import"},
+                "aggregate_field": {"key": "area_no", "label": "台区", "source": "import"},
+                "custom_fields": [
+                    {"key": "module_asset_no", "label": "模块", "source": "field_collection"}
+                ],
+            },
+        },
+    )
+    project_id = create_response.json()["data"]["id"]
+
+    update_response = client.patch(
+        f"/projects/{project_id}/work-item-schema",
+        json={
+            "primary_field": {"key": "terminal_no", "label": "终端", "source": "import"},
+            "aggregate_field": {"key": "station_area", "label": "台区", "source": "import"},
+            "custom_fields": [
+                {
+                    "key": "communication_module",
+                    "label": "通讯模块",
+                    "source": "field_collection",
+                    "capture_method": "scan",
+                    "required": True,
+                    "parent_key": "terminal_no",
+                },
+                {
+                    "key": "carrier_module",
+                    "label": "载波模块",
+                    "source": "field_collection",
+                    "capture_method": "photo",
+                    "data_type": "image",
+                    "parent_key": "terminal_no",
+                },
+            ],
+        },
+    )
+
+    assert update_response.status_code == 200
+    updated_schema = update_response.json()["data"]["work_item_schema"]
+    assert updated_schema["primary_field"]["key"] == "terminal_no"
+    assert updated_schema["primary_field"]["label"] == "终端"
+    assert [field["key"] for field in updated_schema["custom_fields"]] == [
+        "communication_module",
+        "carrier_module",
+    ]
+    assert any(field["key"] == "installer" for field in updated_schema["platform_required_fields"])
+    assert get_project_overview(project_id)["work_item_schema"]["primary_field"]["label"] == "终端"
+
+    payload = json.loads(store_path.read_text(encoding="utf-8"))
+    persisted_schema = payload["projects"][0]["work_item_schema"]
+    assert persisted_schema["primary_field"]["key"] == "terminal_no"
+    assert persisted_schema["custom_fields"][1]["capture_method"] == "photo"
+
+
 def test_project_draft_registry_recovers_projects_after_memory_reset(tmp_path):
     store_path = tmp_path / "platform-project-drafts.json"
     configure_project_draft_store_path(store_path)

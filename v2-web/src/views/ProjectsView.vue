@@ -26,6 +26,12 @@ type CreateFieldForm = {
   kpiEnabled: boolean
 }
 
+type WorkItemSchemaForm = {
+  primaryField: CreateFieldForm
+  aggregateField: CreateFieldForm
+  customFields: CreateFieldForm[]
+}
+
 const workspace = useWorkspaceStore()
 const route = useRoute()
 const router = useRouter()
@@ -72,6 +78,9 @@ const platformRequiredFields = [
 ]
 const createDialogVisible = ref(false)
 const creatingProject = ref(false)
+const schemaDialogVisible = ref(false)
+const savingSchema = ref(false)
+const schemaProject = ref<Project | null>(null)
 const createForm = reactive({
   name: '',
   description: '',
@@ -79,6 +88,11 @@ const createForm = reactive({
   primaryField: defaultPrimaryField(),
   aggregateField: defaultAggregateField(),
   customFields: [defaultCustomField('module_asset_no', '模块', 'scan'), defaultCustomField('collector_no', '采集器', 'scan')],
+})
+const schemaForm = reactive({
+  primaryField: defaultPrimaryField(),
+  aggregateField: defaultAggregateField(),
+  customFields: [defaultCustomField('module_asset_no', '模块', 'scan')],
 })
 
 const moduleOptions = computed(() => {
@@ -166,10 +180,39 @@ function resetCreateForm() {
   ]
 }
 
+function fieldDefinitionToForm(field: ProjectFieldDefinition | undefined, fallback: CreateFieldForm): CreateFieldForm {
+  return {
+    key: field?.key || fallback.key,
+    label: field?.label || fallback.label,
+    dataType: field?.dataType || fallback.dataType,
+    source: field?.source || fallback.source,
+    captureMethod: field?.captureMethod || fallback.captureMethod,
+    required: field?.required ?? fallback.required,
+    parentKey: field?.parentKey || fallback.parentKey,
+    kpiEnabled: field?.kpiEnabled ?? fallback.kpiEnabled,
+  }
+}
+
+function resetSchemaForm(project: Project | null) {
+  const schema = project?.workItemSchema
+  schemaForm.primaryField = fieldDefinitionToForm(schema?.primaryField, defaultPrimaryField())
+  schemaForm.aggregateField = fieldDefinitionToForm(schema?.aggregateField, defaultAggregateField())
+  schemaForm.customFields = schema?.customFields.length
+    ? schema.customFields.map((field) => fieldDefinitionToForm(field, defaultCustomField()))
+    : [defaultCustomField('module_asset_no', '模块', 'scan')]
+}
+
 function fieldParentOptions() {
   return [
     { value: createForm.primaryField.key || 'primary', label: createForm.primaryField.label || '主字段' },
     { value: createForm.aggregateField.key || 'aggregate', label: createForm.aggregateField.label || '聚合字段' },
+  ]
+}
+
+function schemaFieldParentOptions() {
+  return [
+    { value: schemaForm.primaryField.key || 'primary', label: schemaForm.primaryField.label || '主字段' },
+    { value: schemaForm.aggregateField.key || 'aggregate', label: schemaForm.aggregateField.label || '聚合字段' },
   ]
 }
 
@@ -179,6 +222,14 @@ function addCustomField() {
 
 function removeCustomField(index: number) {
   createForm.customFields.splice(index, 1)
+}
+
+function addSchemaCustomField() {
+  schemaForm.customFields.push(defaultCustomField())
+}
+
+function removeSchemaCustomField(index: number) {
+  schemaForm.customFields.splice(index, 1)
 }
 
 function toFieldDefinition(field: CreateFieldForm, fallbackKey: string): ProjectFieldDefinition {
@@ -195,15 +246,33 @@ function toFieldDefinition(field: CreateFieldForm, fallbackKey: string): Project
   }
 }
 
-function buildWorkItemSchemaPayload(): ProjectWorkItemSchema {
+function buildWorkItemSchemaPayload(form: WorkItemSchemaForm = createForm): ProjectWorkItemSchema {
   return {
-    primaryField: toFieldDefinition(createForm.primaryField, 'primary_object'),
-    aggregateField: toFieldDefinition(createForm.aggregateField, 'aggregate_object'),
+    primaryField: toFieldDefinition(form.primaryField, 'primary_object'),
+    aggregateField: toFieldDefinition(form.aggregateField, 'aggregate_object'),
     platformRequiredFields: [],
-    customFields: createForm.customFields
+    customFields: form.customFields
       .filter((field) => field.label.trim())
       .map((field, index) => toFieldDefinition(field, `custom_field_${index + 1}`)),
   }
+}
+
+function validateFieldForm(form: WorkItemSchemaForm) {
+  if (!form.primaryField.label.trim() || !form.aggregateField.label.trim()) {
+    ElMessage.warning('请填写主字段和聚合字段')
+    return false
+  }
+  if (form.customFields.some((field) => !field.label.trim())) {
+    ElMessage.warning('请补全子字段名称，或删除空字段')
+    return false
+  }
+  return true
+}
+
+function openSchemaDialog(project: Project) {
+  schemaProject.value = project
+  resetSchemaForm(project)
+  schemaDialogVisible.value = true
 }
 
 async function submitCreateProject() {
@@ -216,14 +285,7 @@ async function submitCreateProject() {
     ElMessage.warning('请至少选择一个模块')
     return
   }
-  if (!createForm.primaryField.label.trim() || !createForm.aggregateField.label.trim()) {
-    ElMessage.warning('请填写主字段和聚合字段')
-    return
-  }
-  if (createForm.customFields.some((field) => !field.label.trim())) {
-    ElMessage.warning('请补全子字段名称，或删除空字段')
-    return
-  }
+  if (!validateFieldForm(createForm)) return
   creatingProject.value = true
   try {
     const project = await workspace.createProjectDraft({
@@ -239,6 +301,26 @@ async function submitCreateProject() {
     ElMessage.error(error instanceof Error ? error.message : '项目草稿创建失败')
   } finally {
     creatingProject.value = false
+  }
+}
+
+async function submitSchemaUpdate() {
+  const project = schemaProject.value
+  if (!project) return
+  if (project.status !== 'draft') {
+    ElMessage.info('正式项目字段配置需要走变更评审，当前仅开放查看')
+    return
+  }
+  if (!validateFieldForm(schemaForm)) return
+  savingSchema.value = true
+  try {
+    await workspace.updateProjectWorkItemSchema(project.id, buildWorkItemSchemaPayload(schemaForm))
+    schemaDialogVisible.value = false
+    ElMessage.success('字段配置已保存')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '字段配置保存失败')
+  } finally {
+    savingSchema.value = false
   }
 }
 
@@ -384,6 +466,9 @@ function progressStatus(value = 0, riskTotal = 0) {
           <ElTableColumn label="操作" width="360" fixed="right">
             <template #default="{ row }">
               <div class="row-actions">
+                <ElButton size="small" type="primary" plain @click="openSchemaDialog(row)">
+                  字段配置
+                </ElButton>
                 <ElButton
                   v-for="module in projectActionModules(row)"
                   :key="module.id"
@@ -507,6 +592,129 @@ function progressStatus(value = 0, riskTotal = 0) {
         <ElButton type="primary" :loading="creatingProject" @click="submitCreateProject">创建草稿</ElButton>
       </template>
     </ElDialog>
+
+    <ElDialog
+      v-model="schemaDialogVisible"
+      :title="schemaProject ? `字段配置：${schemaProject.name}` : '字段配置'"
+      width="860px"
+    >
+      <ElForm label-position="top">
+        <div class="schema-section first-section">
+          <div class="schema-heading">
+            <strong>工单关键字段</strong>
+            <span>草稿项目可调整，正式项目需走变更评审。</span>
+          </div>
+          <div class="field-grid two-columns">
+            <div class="field-block">
+              <span class="field-block-title">主字段</span>
+              <ElInput v-model="schemaForm.primaryField.label" :disabled="schemaProject?.status !== 'draft'" />
+              <ElInput v-model="schemaForm.primaryField.key" :disabled="schemaProject?.status !== 'draft'" />
+            </div>
+            <div class="field-block">
+              <span class="field-block-title">聚合字段</span>
+              <ElInput v-model="schemaForm.aggregateField.label" :disabled="schemaProject?.status !== 'draft'" />
+              <ElInput v-model="schemaForm.aggregateField.key" :disabled="schemaProject?.status !== 'draft'" />
+            </div>
+          </div>
+        </div>
+
+        <div class="schema-section">
+          <div class="schema-heading">
+            <strong>业务子字段</strong>
+            <ElButton
+              size="small"
+              :icon="Plus"
+              :disabled="schemaProject?.status !== 'draft'"
+              @click="addSchemaCustomField"
+            >
+              添加字段
+            </ElButton>
+          </div>
+          <div class="custom-field-list">
+            <div v-for="(field, index) in schemaForm.customFields" :key="index" class="custom-field-row">
+              <ElInput v-model="field.label" placeholder="字段名称" :disabled="schemaProject?.status !== 'draft'" />
+              <ElInput v-model="field.key" placeholder="字段编码" :disabled="schemaProject?.status !== 'draft'" />
+              <ElSelect v-model="field.source" placeholder="来源" :disabled="schemaProject?.status !== 'draft'">
+                <ElOption
+                  v-for="option in sourceOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </ElSelect>
+              <ElSelect
+                v-model="field.captureMethod"
+                placeholder="采集方式"
+                :disabled="schemaProject?.status !== 'draft'"
+              >
+                <ElOption
+                  v-for="option in captureMethodOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </ElSelect>
+              <ElSelect v-model="field.dataType" placeholder="格式" :disabled="schemaProject?.status !== 'draft'">
+                <ElOption
+                  v-for="option in dataTypeOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </ElSelect>
+              <ElSelect v-model="field.parentKey" placeholder="归属" :disabled="schemaProject?.status !== 'draft'">
+                <ElOption
+                  v-for="option in schemaFieldParentOptions()"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </ElSelect>
+              <ElSwitch
+                v-model="field.required"
+                active-text="必填"
+                inactive-text="可选"
+                :disabled="schemaProject?.status !== 'draft'"
+              />
+              <ElButton
+                size="small"
+                :disabled="schemaProject?.status !== 'draft' || schemaForm.customFields.length <= 1"
+                @click="removeSchemaCustomField(index)"
+              >
+                删除
+              </ElButton>
+            </div>
+          </div>
+        </div>
+
+        <div class="schema-section">
+          <div class="schema-heading">
+            <strong>平台必备字段</strong>
+            <span>用于 KPI、效率、审阅和追溯，系统保留。</span>
+          </div>
+          <div class="required-field-tags">
+            <ElTag
+              v-for="field in schemaProject?.workItemSchema?.platformRequiredFields || []"
+              :key="field.key"
+              type="info"
+            >
+              {{ field.label }}
+            </ElTag>
+          </div>
+        </div>
+      </ElForm>
+      <template #footer>
+        <ElButton @click="schemaDialogVisible = false">关闭</ElButton>
+        <ElButton
+          type="primary"
+          :loading="savingSchema"
+          :disabled="schemaProject?.status !== 'draft'"
+          @click="submitSchemaUpdate"
+        >
+          保存配置
+        </ElButton>
+      </template>
+    </ElDialog>
   </div>
 </template>
 
@@ -556,6 +764,11 @@ function progressStatus(value = 0, riskTotal = 0) {
   gap: 12px;
   padding: 14px 0;
   border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.first-section {
+  padding-top: 0;
+  border-top: 0;
 }
 
 .schema-heading {

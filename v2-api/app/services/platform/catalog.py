@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -574,6 +574,24 @@ def create_project_draft(
             created_at=now,
             updated_at=now,
             work_item_schema=normalized_work_item_schema,
+        )
+        _save_project_drafts_unlocked()
+    return get_project_overview(project_id)
+
+
+def update_project_work_item_schema(
+    project_id: str,
+    work_item_schema: dict[str, Any] | None,
+) -> dict[str, Any]:
+    with _DRAFT_PROJECTS_LOCK:
+        _load_project_drafts_unlocked()
+        if project_id not in _DRAFT_PROJECTS:
+            raise ProjectNotFound(project_id)
+        definition = _DRAFT_PROJECTS[project_id]
+        _DRAFT_PROJECTS[project_id] = replace(
+            definition,
+            updated_at=_now_iso(),
+            work_item_schema=_normalize_work_item_schema(work_item_schema),
         )
         _save_project_drafts_unlocked()
     return get_project_overview(project_id)

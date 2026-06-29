@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request
 
 from app.core.responses import ok
-from app.schemas.project import ProjectCreate
+from app.schemas.project import ProjectCreate, ProjectWorkItemSchemaUpdate
 from app.services.platform.catalog import (
     ProjectConfigurationError,
     ProjectNotFound,
@@ -11,6 +11,7 @@ from app.services.platform.catalog import (
     get_project_section,
     list_project_modules,
     list_project_overviews,
+    update_project_work_item_schema,
 )
 
 router = APIRouter(prefix="/projects")
@@ -56,6 +57,19 @@ def create_project(payload: ProjectCreate, request: Request):
         )
     except ProjectValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except ProjectConfigurationError:
+        raise HTTPException(status_code=500, detail="Project configuration invalid")
+    return ok(request, project)
+
+
+@router.patch("/{project_id}/work-item-schema")
+def update_project_schema(project_id: str, payload: ProjectWorkItemSchemaUpdate, request: Request):
+    try:
+        project = update_project_work_item_schema(project_id, payload.model_dump())
+    except ProjectValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="Project not found")
     except ProjectConfigurationError:
         raise HTTPException(status_code=500, detail="Project configuration invalid")
     return ok(request, project)

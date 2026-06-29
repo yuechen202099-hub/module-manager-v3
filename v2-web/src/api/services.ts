@@ -1396,6 +1396,27 @@ export async function createProject(payload: ProjectCreatePayload): Promise<Proj
   }
 }
 
+export async function updateProjectWorkItemSchema(
+  projectId: string,
+  workItemSchema: ProjectWorkItemSchema,
+): Promise<Project> {
+  const data = await api<BackendPlatformProject>(`/projects/${projectId}/work-item-schema`, {
+    method: 'PATCH',
+    body: JSON.stringify(mapWorkItemSchemaForCreate(workItemSchema)),
+  })
+  const project = mapProject(data)
+  const sections = await fetchProjectModuleSections(project.id, project.modules)
+  return {
+    ...project,
+    ...sections.progress,
+    delivery: sections.delivery,
+    field: sections.field,
+    review: sections.review,
+    risks: sections.risks,
+    tasks: sections.tasks,
+  }
+}
+
 export async function fetchProjects(): Promise<Project[]> {
   return fetchProjectsWithModules()
 }

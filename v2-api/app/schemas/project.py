@@ -19,6 +19,10 @@ class ProjectWorkItemSchemaCreate(BaseModel):
     custom_fields: list[ProjectFieldCreate] = Field(default_factory=list)
 
 
+class ProjectWorkItemSchemaUpdate(ProjectWorkItemSchemaCreate):
+    pass
+
+
 class ProjectCreate(BaseModel):
     name: str
     description: str | None = None

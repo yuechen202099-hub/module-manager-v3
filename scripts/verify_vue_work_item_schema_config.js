@@ -4,6 +4,7 @@ const path = require("path");
 const root = process.cwd();
 const typesSource = fs.readFileSync(path.join(root, "v2-web", "src", "api", "types.ts"), "utf8");
 const servicesSource = fs.readFileSync(path.join(root, "v2-web", "src", "api", "services.ts"), "utf8");
+const workspaceSource = fs.readFileSync(path.join(root, "v2-web", "src", "stores", "workspace.ts"), "utf8");
 const projectsViewSource = fs.readFileSync(path.join(root, "v2-web", "src", "views", "ProjectsView.vue"), "utf8");
 
 const checks = [
@@ -21,7 +22,10 @@ const checks = [
       servicesSource.includes("type BackendProjectWorkItemSchema") &&
       servicesSource.includes("function mapWorkItemSchema") &&
       servicesSource.includes("workItemSchema: mapWorkItemSchema(raw.work_item_schema") &&
-      servicesSource.includes("work_item_schema: mapWorkItemSchemaForCreate(payload.workItemSchema)"),
+      servicesSource.includes("work_item_schema: mapWorkItemSchemaForCreate(payload.workItemSchema)") &&
+      servicesSource.includes("export async function updateProjectWorkItemSchema") &&
+      servicesSource.includes("`/projects/${projectId}/work-item-schema`") &&
+      servicesSource.includes("method: 'PATCH'"),
     message: "Project API service must map backend work item schema in both directions.",
   },
   {
@@ -50,6 +54,23 @@ const checks = [
       projectsViewSource.includes("required") &&
       projectsViewSource.includes("parentKey"),
     message: "Project creation dialog must configure source, format, capture method, requirement, and parent field.",
+  },
+  {
+    ok:
+      projectsViewSource.includes("schemaDialogVisible") &&
+      projectsViewSource.includes("openSchemaDialog") &&
+      projectsViewSource.includes("submitSchemaUpdate") &&
+      projectsViewSource.includes("字段配置") &&
+      projectsViewSource.includes("保存配置") &&
+      projectsViewSource.includes("workspace.updateProjectWorkItemSchema"),
+    message: "Projects view must allow draft project work item schema to be reviewed and updated after creation.",
+  },
+  {
+    ok:
+      workspaceSource.includes("async updateProjectWorkItemSchema") &&
+      workspaceSource.includes("services.updateProjectWorkItemSchema(projectId, workItemSchema)") &&
+      workspaceSource.includes("this.projects.splice"),
+    message: "Workspace store must update the local project list after schema changes.",
   },
 ];
 
