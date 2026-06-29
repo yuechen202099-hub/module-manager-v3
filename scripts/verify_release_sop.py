@@ -50,6 +50,7 @@ REQUIRED_FILES = [
     "ops/incidents/P0-template.md",
     "scripts/production_backup.sh",
     "scripts/production_health_check.py",
+    "scripts/verify_production_baseline.py",
 ]
 
 
@@ -142,6 +143,12 @@ def main() -> int:
         fail("AGENTS.md must state current production baseline V3.0.68")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
+    if "verify_production_baseline.py" not in agents:
+        fail("AGENTS.md must require the production baseline freshness check")
+
+    required_reading = read("docs/AGENT_REQUIRED_READING.md")
+    if "verify_production_baseline.py" not in required_reading:
+        fail("AGENT_REQUIRED_READING.md must list the production baseline freshness check")
 
     manifest = read("RELEASE_MANIFEST.md")
     if "3.0.68" not in manifest:

@@ -44,6 +44,7 @@ REQUIRED_FILES = {
     "scripts/smoke-client-demo.py",
     "scripts/seed-client-demo-data.py",
     "scripts/verify_vue_migration_gate.py",
+    "scripts/verify_production_baseline.py",
     "scripts/verify_postgres_cutover_gate.py",
     "scripts/verify-production-readiness.py",
     "scripts/verify-client-release.py",
