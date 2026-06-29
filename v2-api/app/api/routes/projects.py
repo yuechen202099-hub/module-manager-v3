@@ -2,32 +2,36 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.core.responses import ok
 from app.schemas.project import ProjectCreate
-from app.services.platform.overview import build_replacement_project_overview
-from app.services.state_repository import get_state_repository
+from app.services.platform.catalog import (
+    ProjectNotFound,
+    get_project_overview,
+    get_project_section,
+    list_project_overviews,
+)
 
 router = APIRouter(prefix="/projects")
 
 
-def _replacement_overview():
-    repository = get_state_repository()
-    summary_payload = repository.summary()
-    task_status = repository.task_status()
-    return build_replacement_project_overview(
-        summary=summary_payload.get("summary", {}),
-        task_status=task_status,
-    )
-
-
-def _replacement_overview_or_404(project_id: str):
-    if project_id != "replacement-project":
+def _project_overview_or_404(project_id: str):
+    try:
+        return get_project_overview(project_id)
+    except ProjectNotFound:
         raise HTTPException(status_code=404, detail="Project not found")
-    return _replacement_overview()
+
+
+def _project_section_or_404(project_id: str, section: str):
+    try:
+        return get_project_section(project_id, section)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="Project not found")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Project section not found")
 
 
 @router.get("")
 def list_projects(request: Request):
-    item = _replacement_overview()
-    return ok(request, {"total": 1, "items": [item]})
+    items = list_project_overviews()
+    return ok(request, {"total": len(items), "items": items})
 
 
 @router.post("")
@@ -37,48 +41,34 @@ def create_project(payload: ProjectCreate, request: Request):
 
 @router.get("/{project_id}/progress")
 def get_project_progress(project_id: str, request: Request):
-    overview = _replacement_overview_or_404(project_id)
-    return ok(
-        request,
-        {
-            "stage": overview["stage"],
-            "system_progress": overview["system_progress"],
-            "management_progress": overview["management_progress"],
-            "management_locked": overview["management_locked"],
-        },
-    )
+    return ok(request, _project_section_or_404(project_id, "progress"))
 
 
 @router.get("/{project_id}/delivery")
 def get_project_delivery(project_id: str, request: Request):
-    overview = _replacement_overview_or_404(project_id)
-    return ok(request, overview["delivery"])
+    return ok(request, _project_section_or_404(project_id, "delivery"))
 
 
 @router.get("/{project_id}/field")
 def get_project_field(project_id: str, request: Request):
-    overview = _replacement_overview_or_404(project_id)
-    return ok(request, overview["field"])
+    return ok(request, _project_section_or_404(project_id, "field"))
 
 
 @router.get("/{project_id}/review")
 def get_project_review(project_id: str, request: Request):
-    overview = _replacement_overview_or_404(project_id)
-    return ok(request, overview["review"])
+    return ok(request, _project_section_or_404(project_id, "review"))
 
 
 @router.get("/{project_id}/risks")
 def get_project_risks(project_id: str, request: Request):
-    overview = _replacement_overview_or_404(project_id)
-    return ok(request, overview["risks"])
+    return ok(request, _project_section_or_404(project_id, "risks"))
 
 
 @router.get("/{project_id}/tasks")
 def get_project_tasks(project_id: str, request: Request):
-    overview = _replacement_overview_or_404(project_id)
-    return ok(request, overview["tasks"])
+    return ok(request, _project_section_or_404(project_id, "tasks"))
 
 
 @router.get("/{project_id}")
 def get_project(project_id: str, request: Request):
-    return ok(request, _replacement_overview_or_404(project_id))
+    return ok(request, _project_overview_or_404(project_id))

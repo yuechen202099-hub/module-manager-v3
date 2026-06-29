@@ -3,6 +3,12 @@ import pytest
 
 from app.main import app
 from app.services.platform.adapters.replacement import build_replacement_project_overview as build_adapter_overview
+from app.services.platform.catalog import (
+    ProjectNotFound,
+    get_project_overview,
+    get_project_section,
+    list_project_definitions,
+)
 from app.services.platform.delivery import build_delivery_summary
 from app.services.platform.field import build_field_summary
 from app.services.platform.overview import build_replacement_project_overview
@@ -11,6 +17,31 @@ from app.services.platform.projects import build_project_overview
 from app.services.platform.review import build_review_summary
 from app.services.platform.risks import build_risk_summary
 from app.services.platform.tasks import build_task_summary
+
+
+def test_platform_catalog_lists_replacement_project_definition():
+    definitions = list_project_definitions()
+
+    assert [item["id"] for item in definitions] == ["replacement-project"]
+    assert definitions[0]["name"] == "更换模块项目"
+    assert definitions[0]["status"] == "active"
+
+
+def test_platform_catalog_loads_project_overview_and_sections():
+    overview = get_project_overview("replacement-project")
+    progress = get_project_section("replacement-project", "progress")
+    tasks = get_project_section("replacement-project", "tasks")
+
+    assert overview["id"] == "replacement-project"
+    assert progress["stage"] == overview["stage"]
+    assert tasks["total"] == overview["tasks"]["total"]
+
+
+def test_platform_catalog_rejects_unknown_project_and_section():
+    with pytest.raises(ProjectNotFound):
+        get_project_overview("unknown-project")
+    with pytest.raises(KeyError):
+        get_project_section("replacement-project", "unknown-section")
 
 
 def test_platform_progress_module_calculates_stage_and_progress():
