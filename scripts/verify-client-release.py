@@ -53,6 +53,7 @@ REQUIRED_FILES = {
     "scripts/production_backup.sh",
     "scripts/production_health_check.py",
     "ops/releases/README.md",
+    "ops/releases/V3.0.69.md",
     "ops/releases/V3.0.68.md",
     "ops/releases/V3.0.67.md",
     "ops/releases/V3.0.66.md",

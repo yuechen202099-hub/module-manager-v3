@@ -2,8 +2,8 @@
 
 ## Production SOP Override
 
-- Current production baseline: `V3.0.68`.
-- Production maintenance branch: `production/v3.0.35`.
+- Current production baseline: `V3.0.69`.
+- Production maintenance branch: `production/V3/3.0.69`.
 - Production SOP entrypoint: `docs/sop/README.md`.
 - Production release records: `ops/releases/`.
 - P0 incident records: `ops/incidents/`.
@@ -21,7 +21,9 @@
 
 ## 当前基线
 
-- 当前应用基线：`V3.0.68`。
+- 当前应用基线：`V3.0.69`。
+- 当前生产分支：`production/V3/3.0.69`。
+- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.69`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 文档和协作规则使用独立规则版本，不自动修改应用版本。
 - 详细生产 SOP 见 `docs/sop/README.md`。
 
@@ -58,7 +60,7 @@
 - Vue 是目标生产前端。
 - `v2-api/app/static/*.html` 只作为兼容入口，不新增生产静态 HTML 页面。
 - 涉及前端路由或静态兼容入口时，按风险运行 `python scripts/verify_vue_migration_gate.py`。
-- 微信小程序和 APK 当前暂停主动维护；默认只维护 Web/Vue/API，除非用户明确重新启用。
+- 微信小程序后端接口已在 `V3.0.69` 纳入生产线；小程序前端、APK 或平台扩展不得直接改生产分支，必须从当前生产分支切独立功能分支并通过交接/PR 进入生产维护流程。
 
 ## 验证和发布
 
