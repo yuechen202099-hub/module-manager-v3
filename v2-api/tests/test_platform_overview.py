@@ -2,12 +2,17 @@ from fastapi.testclient import TestClient
 import pytest
 
 from app.main import app
+from app.services.platform import catalog
 from app.services.platform.adapters.replacement import build_replacement_project_overview as build_adapter_overview
 from app.services.platform.catalog import (
+    ProjectConfigurationError,
+    ProjectDefinition,
     ProjectNotFound,
+    get_project_module_definition,
     get_project_overview,
     get_project_section,
     list_project_definitions,
+    list_project_modules,
 )
 from app.services.platform.delivery import build_delivery_summary
 from app.services.platform.field import build_field_summary
@@ -248,6 +253,102 @@ def test_project_modules_endpoint_lists_registered_sections_by_priority():
         "risks": "/project-board",
         "tasks": "/claim-tasks",
     }
+
+
+def test_project_modules_are_limited_by_project_definition(monkeypatch):
+    monkeypatch.setitem(
+        catalog._PROJECT_BY_ID,
+        "limited-project",
+        ProjectDefinition(
+            id="limited-project",
+            name="模块裁剪项目",
+            status="active",
+            adapter="replacement",
+            module_ids=("review", "progress"),
+        ),
+    )
+
+    modules = list_project_modules("limited-project")
+    overview = get_project_overview("limited-project")
+
+    assert [module["id"] for module in modules] == ["progress", "review"]
+    assert overview["id"] == "limited-project"
+    assert overview["name"] == "模块裁剪项目"
+    assert [module["id"] for module in overview["modules"]] == ["progress", "review"]
+    assert "review" in overview
+    assert "delivery" not in overview
+    assert "field" not in overview
+    assert "risks" not in overview
+    assert "tasks" not in overview
+    assert get_project_module_definition("limited-project", "review").id == "review"
+    with pytest.raises(KeyError):
+        get_project_module_definition("limited-project", "delivery")
+
+
+def test_project_modules_report_invalid_project_configuration(monkeypatch):
+    monkeypatch.setitem(
+        catalog._PROJECT_BY_ID,
+        "invalid-module-project",
+        ProjectDefinition(
+            id="invalid-module-project",
+            name="错误模块项目",
+            status="active",
+            adapter="replacement",
+            module_ids=("progress", "unknown-module"),
+        ),
+    )
+
+    with pytest.raises(ProjectConfigurationError, match="unknown-module"):
+        list_project_modules("invalid-module-project")
+
+    client = TestClient(app)
+    response = client.get("/projects/invalid-module-project/modules")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Project configuration invalid"
+
+
+def test_projects_list_reports_invalid_registered_project_configuration(monkeypatch):
+    invalid_project = ProjectDefinition(
+        id="invalid-listed-project",
+        name="列表错误项目",
+        status="active",
+        adapter="replacement",
+        module_ids=("progress", "unknown-module"),
+    )
+    monkeypatch.setattr(catalog, "_PROJECTS", (invalid_project,))
+    monkeypatch.setitem(catalog._PROJECT_BY_ID, invalid_project.id, invalid_project)
+
+    client = TestClient(app)
+    response = client.get("/projects")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Project configuration invalid"
+
+
+def test_project_overview_can_disable_progress_module(monkeypatch):
+    monkeypatch.setitem(
+        catalog._PROJECT_BY_ID,
+        "review-only-project",
+        ProjectDefinition(
+            id="review-only-project",
+            name="只审阅项目",
+            status="active",
+            adapter="replacement",
+            module_ids=("review",),
+        ),
+    )
+
+    overview = get_project_overview("review-only-project")
+
+    assert [module["id"] for module in overview["modules"]] == ["review"]
+    assert "review" in overview
+    assert "stage" not in overview
+    assert "system_progress" not in overview
+    assert "management_progress" not in overview
+    assert "management_locked" not in overview
+    with pytest.raises(KeyError):
+        get_project_section("review-only-project", "progress")
 
 
 @pytest.mark.parametrize(

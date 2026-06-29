@@ -11,12 +11,17 @@ class ProjectNotFound(KeyError):
     """Raised when a platform project id is not registered."""
 
 
+class ProjectConfigurationError(RuntimeError):
+    """Raised when a registered platform project has an invalid definition."""
+
+
 @dataclass(frozen=True)
 class ProjectDefinition:
     id: str
     name: str
     status: str
     adapter: str
+    module_ids: tuple[str, ...]
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -50,6 +55,7 @@ _PROJECTS = (
         name="更换模块项目",
         status="active",
         adapter="replacement",
+        module_ids=("progress", "delivery", "field", "review", "risks", "tasks"),
     ),
 )
 
@@ -65,6 +71,44 @@ _PROJECT_MODULES = (
 )
 
 _PROJECT_MODULE_BY_ID = {module.id: module for module in _PROJECT_MODULES}
+
+_PROJECT_SECTION_KEYS = {
+    "delivery": "delivery",
+    "field": "field",
+    "review": "review",
+    "risks": "risks",
+    "tasks": "tasks",
+}
+
+_PROJECT_PROGRESS_KEYS = ("stage", "system_progress", "management_progress", "management_locked")
+
+
+def _modules_for_project(definition: ProjectDefinition) -> list[ProjectModuleDefinition]:
+    modules = []
+    for module_id in definition.module_ids:
+        try:
+            modules.append(_PROJECT_MODULE_BY_ID[module_id])
+        except KeyError as exc:
+            raise ProjectConfigurationError(
+                f"Project {definition.id} references unknown module {module_id}"
+            ) from exc
+    return sorted(modules, key=lambda module: module.priority)
+
+
+def _apply_project_definition(overview: dict[str, Any], definition: ProjectDefinition) -> dict[str, Any]:
+    modules = _modules_for_project(definition)
+    enabled_module_ids = {module.id for module in modules}
+    overview["id"] = definition.id
+    overview["name"] = definition.name
+    overview["status"] = definition.status
+    overview["modules"] = [module.as_dict(definition.id) for module in modules]
+    if "progress" not in enabled_module_ids:
+        for key in _PROJECT_PROGRESS_KEYS:
+            overview.pop(key, None)
+    for module_id, section_key in _PROJECT_SECTION_KEYS.items():
+        if module_id not in enabled_module_ids:
+            overview.pop(section_key, None)
+    return overview
 
 
 def list_project_definitions() -> list[dict[str, str]]:
@@ -83,16 +127,17 @@ def get_project_definition(project_id: str) -> ProjectDefinition:
 
 
 def list_project_modules(project_id: str) -> list[dict[str, str | int]]:
-    get_project_definition(project_id)
-    return [module.as_dict(project_id) for module in _PROJECT_MODULES]
+    definition = get_project_definition(project_id)
+    return [module.as_dict(project_id) for module in _modules_for_project(definition)]
 
 
 def get_project_module_definition(project_id: str, module_id: str) -> ProjectModuleDefinition:
-    get_project_definition(project_id)
+    definition = get_project_definition(project_id)
+    module_by_id = {module.id: module for module in _modules_for_project(definition)}
     try:
-        return _PROJECT_MODULE_BY_ID[module_id]
-    except KeyError as exc:
-        raise KeyError(module_id) from exc
+        return module_by_id[module_id]
+    except KeyError:
+        raise KeyError(module_id)
 
 
 def get_project_overview(project_id: str) -> dict[str, Any]:
@@ -105,8 +150,7 @@ def get_project_overview(project_id: str) -> dict[str, Any]:
             summary=summary_payload.get("summary", {}),
             task_status=task_status,
         )
-        overview["modules"] = list_project_modules(project_id)
-        return overview
+        return _apply_project_definition(overview, definition)
     raise ProjectNotFound(project_id)
 
 

@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 from app.core.responses import ok
 from app.schemas.project import ProjectCreate
 from app.services.platform.catalog import (
+    ProjectConfigurationError,
     ProjectNotFound,
     get_project_overview,
     get_project_section,
@@ -18,6 +19,8 @@ def _project_overview_or_404(project_id: str):
         return get_project_overview(project_id)
     except ProjectNotFound:
         raise HTTPException(status_code=404, detail="Project not found")
+    except ProjectConfigurationError:
+        raise HTTPException(status_code=500, detail="Project configuration invalid")
 
 
 def _project_section_or_404(project_id: str, section: str):
@@ -25,13 +28,18 @@ def _project_section_or_404(project_id: str, section: str):
         return get_project_section(project_id, section)
     except ProjectNotFound:
         raise HTTPException(status_code=404, detail="Project not found")
+    except ProjectConfigurationError:
+        raise HTTPException(status_code=500, detail="Project configuration invalid")
     except KeyError:
         raise HTTPException(status_code=404, detail="Project section not found")
 
 
 @router.get("")
 def list_projects(request: Request):
-    items = list_project_overviews()
+    try:
+        items = list_project_overviews()
+    except ProjectConfigurationError:
+        raise HTTPException(status_code=500, detail="Project configuration invalid")
     return ok(request, {"total": len(items), "items": items})
 
 
@@ -76,6 +84,8 @@ def list_project_module_definitions(project_id: str, request: Request):
         items = list_project_modules(project_id)
     except ProjectNotFound:
         raise HTTPException(status_code=404, detail="Project not found")
+    except ProjectConfigurationError:
+        raise HTTPException(status_code=500, detail="Project configuration invalid")
     return ok(request, {"project_id": project_id, "total": len(items), "items": items})
 
 
