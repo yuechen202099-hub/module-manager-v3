@@ -7,6 +7,7 @@
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
 - 生产维护分支：`production/v3.0.35`
 - 当前生产应用基线：`V3.0.68`
+- 生产版本会持续更新；任何平台化开发、合并、发布、长会话恢复或接手前，必须先获取 `origin/production/v3.0.35` 和最新生产 tag，确认平台分支已经纳入最新生产修复，不能在过期生产基线上继续扩展平台能力。
 - 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
 - worktree 路径里的 `production-v3.0.24` 是创建时名称，不代表当前线上版本。
 
@@ -68,6 +69,8 @@ cd v2-web; npm run build
 
 ```powershell
 git status -sb
+git fetch origin production/v3.0.35 --tags
+git log --oneline --decorate -5 origin/production/v3.0.35
 git diff --stat
 git diff --cached --stat
 git diff --cached --name-only
