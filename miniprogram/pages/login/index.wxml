@@ -1,0 +1,21 @@
+<view class="page login-page">
+  <view class="login-card panel">
+    <view class="brand">施工采集端</view>
+    <view class="title">施工员登录</view>
+    <view class="subtitle">使用现有施工员账号和密码进入施工采集端。</view>
+
+    <view class="form">
+      <view class="field">
+        <text>施工员账号</text>
+        <input value="{{username}}" data-field="username" bindinput="onInput" placeholder="请输入账号" />
+      </view>
+      <view class="field">
+        <text>密码</text>
+        <input value="{{password}}" data-field="password" bindinput="onInput" password placeholder="请输入密码" />
+      </view>
+    </view>
+
+    <button class="primary-button bind-button" loading="{{loading}}" bindtap="passwordLogin">登录</button>
+    <view class="status">{{status}}</view>
+  </view>
+</view>

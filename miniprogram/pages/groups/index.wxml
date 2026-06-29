@@ -1,0 +1,96 @@
+<view class="page groups-page">
+  <view class="group-header">
+    <view>
+      <view class="eyebrow">施工任务</view>
+      <view class="heading">{{title}}</view>
+    </view>
+    <button class="secondary-button scan-button" bindtap="scanLocate">扫码</button>
+  </view>
+
+  <view class="search-row">
+    <input value="{{keyword}}" bindinput="onSearch" placeholder="搜索表号、地址、采集器、模块" />
+  </view>
+
+  <scroll-view class="filter-tabs" scroll-x>
+    <view
+      wx:for="{{filters}}"
+      wx:key="key"
+      class="filter-tab {{activeFilter === item.key ? 'active' : ''}}"
+      data-filter="{{item.key}}"
+      bindtap="switchFilter"
+    >{{item.label}}</view>
+  </scroll-view>
+
+  <view wx:if="{{activeFilter === 'draft'}}" class="draft-toolbar panel">
+    <text>待上传草稿 {{localDrafts.length}} 组</text>
+    <button class="primary-button batch-button" loading="{{uploading}}" bindtap="batchUpload">批量上传</button>
+  </view>
+
+  <view wx:if="{{error}}" class="error">{{error}}</view>
+
+  <view class="group-list">
+    <view wx:for="{{visibleGroups}}" wx:key="id" class="group-card panel" data-index="{{index}}" bindtap="openGroup">
+      <view class="group-main">
+        <view class="meter">{{item.meter_no || item.id}}</view>
+        <view class="address">{{item.address || '未填写地址'}}</view>
+        <view class="meta">
+          <text>采集器 {{item.construction_collector || item.collector || '-'}}</text>
+          <text>模块 {{item.construction_module_asset_no || item.module_asset_no || '-'}}</text>
+        </view>
+        <view wx:if="{{item.exception_note}}" class="exception-note">{{item.exception_note}}</view>
+      </view>
+      <view wx:if="{{item.localDraft}}" class="status-tag group-status">待上传</view>
+      <view wx:else class="status-tag group-status">{{item.statusLabel || '待施工'}}</view>
+    </view>
+  </view>
+
+  <view wx:if="{{!loading && !visibleGroups.length}}" class="empty panel">暂无资料组</view>
+
+  <view wx:if="{{sheetOpen}}" class="sheet-mask" bindtap="closeSheet"></view>
+  <view wx:if="{{sheetOpen}}" class="collect-sheet">
+    <view class="sheet-handle"></view>
+    <view class="sheet-head">
+      <view>
+        <view class="sheet-title">{{activeGroup.meter_no || activeGroup.id}}</view>
+        <view class="sheet-address">{{activeGroup.address || '未填写地址'}}</view>
+      </view>
+      <button class="secondary-button close-button" bindtap="closeSheet">关闭</button>
+    </view>
+
+    <view class="slot-grid">
+      <view wx:for="{{activeSlots}}" wx:key="key" class="photo-slot" data-slot="{{item.key}}" bindtap="choosePhoto">
+        <image wx:if="{{item.photoPath}}" src="{{item.photoPath}}" mode="aspectFill" />
+        <view wx:else class="slot-empty">+</view>
+        <text>{{item.label}}{{item.required ? ' *' : ''}}</text>
+      </view>
+    </view>
+
+    <view class="field-grid">
+      <view class="field">
+        <text>采集器编号</text>
+        <view class="field-line">
+          <input value="{{activeDraft.collector}}" data-field="collector" bindinput="updateDraftField" placeholder="填写或扫码" />
+          <button class="secondary-button mini-button" data-field="collector" bindtap="scanField">扫</button>
+        </view>
+      </view>
+      <view class="field">
+        <text>模块资产编号</text>
+        <view class="field-line">
+          <input value="{{activeDraft.moduleAssetNo}}" data-field="moduleAssetNo" bindinput="updateDraftField" placeholder="填写或扫码" />
+          <button class="secondary-button mini-button" data-field="moduleAssetNo" bindtap="scanField">扫</button>
+        </view>
+      </view>
+      <view class="field full">
+        <text>异常备注</text>
+        <textarea value="{{activeDraft.exceptionNote}}" data-field="exceptionNote" bindinput="updateDraftField" placeholder="现场异常可在这里备注" />
+      </view>
+    </view>
+
+    <view wx:if="{{activeDraft.lastError}}" class="upload-error">{{activeDraft.lastError}}</view>
+
+    <view class="sheet-actions">
+      <button class="secondary-button action-button" bindtap="saveCurrentDraft">保存草稿</button>
+      <button class="primary-button action-button" loading="{{uploading}}" bindtap="submitCurrentDraft">提交本组</button>
+    </view>
+  </view>
+</view>

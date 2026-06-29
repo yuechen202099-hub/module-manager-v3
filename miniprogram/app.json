@@ -1,0 +1,15 @@
+{
+  "pages": [
+    "pages/login/index",
+    "pages/tasks/index",
+    "pages/groups/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "施工采集端",
+    "navigationBarBackgroundColor": "#f6f9fc",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f6f9fc"
+  },
+  "style": "v2",
+  "sitemapLocation": "sitemap.json"
+}

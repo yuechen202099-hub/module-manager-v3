@@ -1,0 +1,40 @@
+<view class="page tasks-page">
+  <view class="task-header">
+    <view>
+      <view class="eyebrow">我的任务</view>
+      <view class="heading">{{userName || '施工员'}}</view>
+    </view>
+    <button class="secondary-button header-button" bindtap="logout">退出</button>
+  </view>
+
+  <view class="toolbar">
+    <text class="muted">只显示管理员已分配任务</text>
+    <button class="secondary-button refresh-button" loading="{{loading}}" bindtap="refresh">刷新</button>
+  </view>
+
+  <view wx:if="{{error}}" class="error">{{error}}</view>
+
+  <view class="task-list">
+    <view wx:for="{{tasks}}" wx:key="id" class="task-card panel" data-index="{{index}}" bindtap="openTask">
+      <view class="task-card-top">
+        <view>
+          <view class="task-title">{{item.title}}</view>
+          <view class="task-subtitle">终端 {{item.terminal || '-'}}</view>
+        </view>
+        <text class="status-tag">已分配</text>
+      </view>
+      <view class="metric-grid">
+        <view><text>总数</text><strong>{{item.total_groups}}</strong></view>
+        <view><text>已上传</text><strong>{{item.uploaded_count}}</strong></view>
+        <view><text>待施工</text><strong>{{item.unbuilt_count}}</strong></view>
+        <view><text>异常</text><strong>{{item.exception_count}}</strong></view>
+      </view>
+      <view class="updated">更新 {{item.updatedText}}</view>
+    </view>
+  </view>
+
+  <view wx:if="{{!loading && !tasks.length}}" class="empty panel">
+    <view>暂无分配任务</view>
+    <text>请联系管理员在生产端指派施工任务。</text>
+  </view>
+</view>
