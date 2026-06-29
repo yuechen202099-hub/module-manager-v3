@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import re
 from typing import Any
 
 from app.services.platform.adapters.replacement import build_replacement_project_overview
@@ -15,6 +17,10 @@ class ProjectConfigurationError(RuntimeError):
     """Raised when a registered platform project has an invalid definition."""
 
 
+class ProjectValidationError(ValueError):
+    """Raised when a project draft request is invalid."""
+
+
 @dataclass(frozen=True)
 class ProjectDefinition:
     id: str
@@ -22,6 +28,9 @@ class ProjectDefinition:
     status: str
     adapter: str
     module_ids: tuple[str, ...]
+    description: str = ""
+    created_at: str = ""
+    updated_at: str = ""
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -61,6 +70,8 @@ _PROJECTS = (
 
 _PROJECT_BY_ID = {project.id: project for project in _PROJECTS}
 
+_DRAFT_PROJECTS: dict[str, ProjectDefinition] = {}
+
 _PROJECT_MODULES = (
     ProjectModuleDefinition(id="progress", name="项目进度", priority=10, route_path="/project-board"),
     ProjectModuleDefinition(id="delivery", name="项目交付能力", priority=20, route_path="/project-board"),
@@ -81,6 +92,35 @@ _PROJECT_SECTION_KEYS = {
 }
 
 _PROJECT_PROGRESS_KEYS = ("stage", "system_progress", "management_progress", "management_locked")
+
+_PINYIN_SLUGS = {
+    "线路巡检项目": "xian-lu-xun-jian-xiang-mu",
+    "审阅专项": "shen-yue-zhuan-xiang",
+}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _slugify_project_name(name: str) -> str:
+    normalized = re.sub(r"\s+", " ", name.strip())
+    if normalized in _PINYIN_SLUGS:
+        return _PINYIN_SLUGS[normalized]
+    ascii_slug = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")
+    if ascii_slug:
+        return ascii_slug
+    return "draft-project"
+
+
+def _unique_project_id(base_id: str) -> str:
+    existing_ids = {project.id for project in _PROJECTS} | set(_DRAFT_PROJECTS)
+    if base_id not in existing_ids:
+        return base_id
+    index = 2
+    while f"{base_id}-{index}" in existing_ids:
+        index += 1
+    return f"{base_id}-{index}"
 
 
 def _modules_for_project(definition: ProjectDefinition) -> list[ProjectModuleDefinition]:
@@ -112,18 +152,22 @@ def _apply_project_definition(overview: dict[str, Any], definition: ProjectDefin
 
 
 def list_project_definitions() -> list[dict[str, str]]:
-    return [project.as_dict() for project in _PROJECTS]
+    return [project.as_dict() for project in _PROJECTS] + [
+        project.as_dict() for project in _DRAFT_PROJECTS.values()
+    ]
 
 
 def list_project_overviews() -> list[dict[str, Any]]:
-    return [get_project_overview(project.id) for project in _PROJECTS]
+    project_ids = [project.id for project in _PROJECTS] + list(_DRAFT_PROJECTS)
+    return [get_project_overview(project_id) for project_id in project_ids]
 
 
 def get_project_definition(project_id: str) -> ProjectDefinition:
-    try:
+    if project_id in _PROJECT_BY_ID:
         return _PROJECT_BY_ID[project_id]
-    except KeyError as exc:
-        raise ProjectNotFound(project_id) from exc
+    if project_id in _DRAFT_PROJECTS:
+        return _DRAFT_PROJECTS[project_id]
+    raise ProjectNotFound(project_id)
 
 
 def list_project_modules(project_id: str) -> list[dict[str, str | int]]:
@@ -142,6 +186,8 @@ def get_project_module_definition(project_id: str, module_id: str) -> ProjectMod
 
 def get_project_overview(project_id: str) -> dict[str, Any]:
     definition = get_project_definition(project_id)
+    if definition.adapter == "draft":
+        return _build_draft_project_overview(definition)
     if definition.adapter == "replacement":
         repository = get_state_repository()
         summary_payload = repository.summary()
@@ -156,6 +202,8 @@ def get_project_overview(project_id: str) -> dict[str, Any]:
 
 def get_project_section(project_id: str, section: str) -> dict[str, Any]:
     get_project_module_definition(project_id, section)
+    if get_project_definition(project_id).adapter == "draft":
+        return _empty_sections()[section]
     overview = get_project_overview(project_id)
     if section == "progress":
         return {
@@ -167,3 +215,91 @@ def get_project_section(project_id: str, section: str) -> dict[str, Any]:
     if section in {"delivery", "field", "review", "risks", "tasks"}:
         return overview[section]
     raise KeyError(section)
+
+
+def _empty_sections() -> dict[str, dict[str, Any]]:
+    return {
+        "progress": {
+            "stage": "准备中",
+            "system_progress": 0,
+            "management_progress": 0,
+            "management_locked": False,
+        },
+        "delivery": {
+            "status": "preparing",
+            "total_items": 0,
+            "completed_items": 0,
+            "latest_record": "",
+        },
+        "field": {
+            "photo_rows_linked": 0,
+            "unconstructed_groups": 0,
+            "exception_count": 0,
+        },
+        "review": {
+            "reviewed_groups": 0,
+            "review_rate": 0,
+            "pending_groups": 0,
+        },
+        "risks": {
+            "total": 0,
+            "field_exceptions": 0,
+            "unconstructed_groups": 0,
+            "delivery_blockers": 0,
+        },
+        "tasks": {
+            "total": 0,
+            "uploaded": 0,
+            "reviewing": 0,
+            "archived": 0,
+            "upload_rate": 0,
+            "review_rate": 0,
+        },
+    }
+
+
+def _build_draft_project_overview(definition: ProjectDefinition) -> dict[str, Any]:
+    sections = _empty_sections()
+    overview: dict[str, Any] = {
+        "id": definition.id,
+        "name": definition.name,
+        "description": definition.description,
+        "status": definition.status,
+        "total_groups": 0,
+        "completed_groups": 0,
+        "exception_groups": 0,
+        "updated_at": definition.updated_at or definition.created_at,
+    }
+    overview.update(sections["progress"])
+    for section_id in ("delivery", "field", "review", "risks", "tasks"):
+        overview[section_id] = sections[section_id]
+    return _apply_project_definition(overview, definition)
+
+
+def create_project_draft(*, name: str, description: str = "", module_ids: list[str]) -> dict[str, Any]:
+    normalized_name = re.sub(r"\s+", " ", name.strip())
+    if not normalized_name:
+        raise ProjectValidationError("Project name is required")
+    deduped_module_ids = list(dict.fromkeys(module_id.strip() for module_id in module_ids if module_id.strip()))
+    if not deduped_module_ids:
+        raise ProjectValidationError("At least one project module is required")
+    unknown_modules = [module_id for module_id in deduped_module_ids if module_id not in _PROJECT_MODULE_BY_ID]
+    if unknown_modules:
+        raise ProjectValidationError(f"Unknown project module: {unknown_modules[0]}")
+    now = _now_iso()
+    project_id = _unique_project_id(_slugify_project_name(normalized_name))
+    _DRAFT_PROJECTS[project_id] = ProjectDefinition(
+        id=project_id,
+        name=normalized_name,
+        status="draft",
+        adapter="draft",
+        module_ids=tuple(deduped_module_ids),
+        description=description.strip(),
+        created_at=now,
+        updated_at=now,
+    )
+    return get_project_overview(project_id)
+
+
+def reset_project_drafts() -> None:
+    _DRAFT_PROJECTS.clear()

@@ -13,6 +13,7 @@ from app.services.platform.catalog import (
     get_project_section,
     list_project_definitions,
     list_project_modules,
+    reset_project_drafts,
 )
 from app.services.platform.delivery import build_delivery_summary
 from app.services.platform.field import build_field_summary
@@ -22,6 +23,13 @@ from app.services.platform.projects import build_project_overview
 from app.services.platform.review import build_review_summary
 from app.services.platform.risks import build_risk_summary
 from app.services.platform.tasks import build_task_summary
+
+
+@pytest.fixture(autouse=True)
+def clear_project_drafts():
+    reset_project_drafts()
+    yield
+    reset_project_drafts()
 
 
 def test_platform_catalog_lists_replacement_project_definition():
@@ -386,3 +394,70 @@ def test_project_module_endpoints_reject_unknown_project():
     response = client.get("/projects/unknown-project/progress")
 
     assert response.status_code == 404
+
+
+def test_create_project_draft_registers_project_with_selected_modules():
+    client = TestClient(app)
+    response = client.post(
+        "/projects",
+        json={
+            "name": "  线路巡检项目  ",
+            "description": "用于巡检流程接入",
+            "module_ids": ["review", "progress", "field", "progress"],
+        },
+    )
+
+    assert response.status_code == 200
+    draft = response.json()["data"]
+    assert draft["id"] == "xian-lu-xun-jian-xiang-mu"
+    assert draft["name"] == "线路巡检项目"
+    assert draft["description"] == "用于巡检流程接入"
+    assert draft["status"] == "draft"
+    assert [module["id"] for module in draft["modules"]] == ["progress", "field", "review"]
+    assert draft["stage"] == "准备中"
+    assert draft["system_progress"] == 0
+    assert draft["field"]["photo_rows_linked"] == 0
+    assert draft["review"]["pending_groups"] == 0
+    assert "delivery" not in draft
+
+    list_response = client.get("/projects")
+    assert list_response.status_code == 200
+    assert "xian-lu-xun-jian-xiang-mu" in [
+        item["id"] for item in list_response.json()["data"]["items"]
+    ]
+
+
+def test_project_draft_module_endpoints_follow_selected_modules():
+    client = TestClient(app)
+    create_response = client.post(
+        "/projects",
+        json={"name": "审阅专项", "module_ids": ["review"]},
+    )
+    project_id = create_response.json()["data"]["id"]
+
+    modules_response = client.get(f"/projects/{project_id}/modules")
+    assert modules_response.status_code == 200
+    assert [module["id"] for module in modules_response.json()["data"]["items"]] == ["review"]
+
+    review_response = client.get(f"/projects/{project_id}/modules/review")
+    assert review_response.status_code == 200
+    assert review_response.json()["data"]["reviewed_groups"] == 0
+
+    progress_response = client.get(f"/projects/{project_id}/modules/progress")
+    assert progress_response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_detail"),
+    [
+        ({"name": "   ", "module_ids": ["progress"]}, "Project name is required"),
+        ({"name": "空模块", "module_ids": []}, "At least one project module is required"),
+        ({"name": "未知模块", "module_ids": ["unknown"]}, "Unknown project module"),
+    ],
+)
+def test_create_project_draft_rejects_invalid_payload(payload, expected_detail):
+    client = TestClient(app)
+    response = client.post("/projects", json=payload)
+
+    assert response.status_code == 400
+    assert expected_detail in response.json()["detail"]

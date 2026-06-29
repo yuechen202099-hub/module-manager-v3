@@ -5,6 +5,8 @@ from app.schemas.project import ProjectCreate
 from app.services.platform.catalog import (
     ProjectConfigurationError,
     ProjectNotFound,
+    ProjectValidationError,
+    create_project_draft,
     get_project_overview,
     get_project_section,
     list_project_modules,
@@ -45,7 +47,15 @@ def list_projects(request: Request):
 
 @router.post("")
 def create_project(payload: ProjectCreate, request: Request):
-    return ok(request, {"id": "draft", "name": payload.name, "description": payload.description, "status": "draft"})
+    try:
+        project = create_project_draft(
+            name=payload.name,
+            description=payload.description or "",
+            module_ids=payload.module_ids,
+        )
+    except ProjectValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return ok(request, project)
 
 
 @router.get("/{project_id}/progress")
