@@ -29,6 +29,13 @@ function writeActiveProjectId(projectId: string) {
   localStorage.removeItem(activeProjectStorageKey)
 }
 
+type RouteProjectIdValue = string | null | Array<string | null> | undefined
+
+function normalizeRouteProjectId(value: RouteProjectIdValue) {
+  const rawValue = Array.isArray(value) ? value[0] : value
+  return String(rawValue || '').trim()
+}
+
 export const useWorkspaceStore = defineStore('workspace', {
   state: (): WorkspaceState => ({
     loading: false,
@@ -68,6 +75,10 @@ export const useWorkspaceStore = defineStore('workspace', {
       if (this.projects.length && !this.projects.some((project) => project.id === projectId)) return
       this.activeProjectId = projectId
       writeActiveProjectId(projectId)
+    },
+    selectRouteProject(projectId: RouteProjectIdValue) {
+      const normalizedProjectId = normalizeRouteProjectId(projectId)
+      if (normalizedProjectId) this.selectProject(normalizedProjectId)
     },
     async loadProjects() {
       this.projects = await services.fetchProjects()

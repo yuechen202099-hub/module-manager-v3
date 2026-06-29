@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { DataBoard, FolderChecked, List, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { exportTerminalDeliveryPackage, fetchScanImportJob, startScanImportJob } from '@/api/services'
@@ -64,6 +64,7 @@ const shellJobPercent = ref(0)
 const shellJobTone = ref<'info' | 'success' | 'danger'>('info')
 
 onMounted(() => {
+  syncRouteProject()
   void auth.hydrateFromLegacySession()
   if (!workspace.projects.length) {
     void workspace.loadProjects()
@@ -78,6 +79,17 @@ onUnmounted(() => {
   if (shellImportTimer) window.clearInterval(shellImportTimer)
   if (shellJobHideTimer) window.clearTimeout(shellJobHideTimer)
 })
+
+watch(
+  () => route.query.project_id,
+  () => {
+    syncRouteProject()
+  },
+)
+
+function syncRouteProject() {
+  workspace.selectRouteProject(route.query.project_id)
+}
 
 function logout() {
   auth.logout()

@@ -27,8 +27,7 @@ async function loadProjectsFromRoute() {
 }
 
 function selectRouteProject() {
-  const projectId = String(route.query.project_id || '')
-  if (projectId) workspace.selectProject(projectId)
+  workspace.selectRouteProject(route.query.project_id)
 }
 
 function openRoute(path: string, project: Project) {
