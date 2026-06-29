@@ -1,0 +1,103 @@
+.task-header,
+.toolbar,
+.task-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+}
+
+.eyebrow {
+  color: #0a72d8;
+  font-size: 22rpx;
+  font-weight: 800;
+}
+
+.heading {
+  margin-top: 6rpx;
+  color: #111827;
+  font-size: 40rpx;
+  font-weight: 900;
+}
+
+.header-button,
+.refresh-button {
+  min-width: 120rpx;
+  min-height: 60rpx;
+  font-size: 24rpx;
+}
+
+.toolbar {
+  margin-top: 24rpx;
+}
+
+.task-list {
+  display: grid;
+  gap: 18rpx;
+  margin-top: 20rpx;
+}
+
+.task-card {
+  padding: 24rpx;
+}
+
+.task-title {
+  color: #111827;
+  font-size: 32rpx;
+  font-weight: 900;
+}
+
+.task-subtitle {
+  margin-top: 6rpx;
+  color: #667085;
+  font-size: 24rpx;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10rpx;
+  margin-top: 24rpx;
+}
+
+.metric-grid view {
+  min-height: 92rpx;
+  padding: 12rpx;
+  border: 1rpx solid #e4edf6;
+  border-radius: 12rpx;
+  background: #f8fbfd;
+}
+
+.metric-grid text {
+  display: block;
+  color: #667085;
+  font-size: 22rpx;
+}
+
+.metric-grid strong {
+  display: block;
+  margin-top: 8rpx;
+  color: #111827;
+  font-size: 34rpx;
+}
+
+.updated {
+  margin-top: 18rpx;
+  color: #667085;
+  font-size: 22rpx;
+}
+
+.empty,
+.error {
+  margin-top: 24rpx;
+  padding: 28rpx;
+}
+
+.empty view {
+  font-weight: 800;
+}
+
+.empty text,
+.error {
+  color: #667085;
+}
