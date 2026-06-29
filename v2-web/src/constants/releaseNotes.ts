@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.68'
+export const APP_VERSION = '3.0.69'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,17 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.69',
+    date: '2026-06-29',
+    type: '小更新',
+    title: '施工端小程序后端接口',
+    items: [
+      '新增小程序微信绑定登录和一键登录接口，施工员可绑定现有账号后进入小程序。',
+      '新增施工端小程序任务、资料组筛选、单文件上传桥接和离线待上传补提接口。',
+      '小程序接口复用现有施工端任务、资料组、上传和活动记录能力，不改变线上 Web 端既有操作流程。',
+    ],
+  },
   {
     version: 'V3.0.68',
     date: '2026-06-29',

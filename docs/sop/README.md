@@ -2,7 +2,9 @@
 
 This directory is the standard operating procedure entrypoint for the production maintenance line.
 
-Current production baseline: `V3.0.68`.
+Current production baseline: `V3.0.69`.
+
+Current production branch: `production/V3/3.0.69`.
 
 Use these SOPs for every production-impacting change:
 
@@ -14,6 +16,7 @@ Use these SOPs for every production-impacting change:
 - `06-production-deploy-runbook.md` - production deployment runbook
 - `07-rollback-and-incident-review.md` - rollback and incident review
 - `08-business-acceptance-templates.md` - business acceptance templates
+- `09-parallel-development-github-flow.md` - parallel team branch, PR, and version coordination
 
 Release records live under `ops/releases/`.
 Incident records live under `ops/incidents/`.
