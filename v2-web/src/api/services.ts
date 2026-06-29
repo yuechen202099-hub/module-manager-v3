@@ -1184,12 +1184,12 @@ export async function deleteUserAccount(username: string): Promise<UserAccount> 
 export async function fetchProjectModuleSections(projectId: string): Promise<ProjectModuleSections> {
   const id = encodeURIComponent(projectId)
   const [progress, delivery, field, review, risks, tasks] = await Promise.all([
-    api<BackendProjectProgress>(`/projects/${id}/progress`),
-    api<BackendProjectDelivery>(`/projects/${id}/delivery`),
-    api<BackendProjectField>(`/projects/${id}/field`),
-    api<BackendProjectReview>(`/projects/${id}/review`),
-    api<BackendProjectRisks>(`/projects/${id}/risks`),
-    api<BackendProjectTasks>(`/projects/${id}/tasks`),
+    api<BackendProjectProgress>(`/projects/${id}/modules/progress`),
+    api<BackendProjectDelivery>(`/projects/${id}/modules/delivery`),
+    api<BackendProjectField>(`/projects/${id}/modules/field`),
+    api<BackendProjectReview>(`/projects/${id}/modules/review`),
+    api<BackendProjectRisks>(`/projects/${id}/modules/risks`),
+    api<BackendProjectTasks>(`/projects/${id}/modules/tasks`),
   ])
 
   return {
