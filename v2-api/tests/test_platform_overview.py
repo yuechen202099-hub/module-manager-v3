@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from app.main import app
 from app.services.platform.adapters.replacement import build_replacement_project_overview as build_adapter_overview
@@ -161,3 +162,30 @@ def test_project_detail_returns_platform_project():
     payload = response.json()["data"]
     assert payload["id"] == "replacement-project"
     assert "tasks" in payload
+
+
+@pytest.mark.parametrize(
+    ("section", "expected_keys"),
+    [
+        ("progress", {"stage", "system_progress", "management_progress", "management_locked"}),
+        ("delivery", {"status", "total_items", "completed_items"}),
+        ("field", {"photo_rows_linked", "unconstructed_groups", "exception_count"}),
+        ("review", {"reviewed_groups", "review_rate", "pending_groups"}),
+        ("risks", {"total", "field_exceptions", "delivery_blockers"}),
+        ("tasks", {"total", "uploaded", "reviewing", "archived"}),
+    ],
+)
+def test_project_module_endpoints_return_focused_sections(section, expected_keys):
+    client = TestClient(app)
+    response = client.get(f"/projects/replacement-project/{section}")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert set(payload).issuperset(expected_keys)
+
+
+def test_project_module_endpoints_reject_unknown_project():
+    client = TestClient(app)
+    response = client.get("/projects/unknown-project/progress")
+
+    assert response.status_code == 404
