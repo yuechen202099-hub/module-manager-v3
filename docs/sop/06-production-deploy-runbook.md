@@ -71,12 +71,39 @@ curl.exe -k -s -o NUL -w "%{http_code}" https://<server>/health
 curl.exe -k -s -o NUL -w "%{http_code}" https://<server>/project-board
 ```
 
+## Production Release Retention
+
+After the new release passes health checks, keep 5 recent release directories on the server and rely on GitHub branches/tags plus `ops/releases/` for older history.
+
+Always dry-run first:
+
+```bash
+APP=/opt/module-manager-v2
+bash "$APP/current/scripts/cleanup_old_releases.sh" "$APP" 5 --dry-run
+```
+
+If the dry-run only lists old release directories under `$APP/releases`, run the cleanup:
+
+```bash
+APP=/opt/module-manager-v2
+bash "$APP/current/scripts/cleanup_old_releases.sh" "$APP" 5
+```
+
+Rules:
+
+- Keep the latest 5 release directories by modification time.
+- Never delete the directory pointed to by `$APP/current`; if it is outside the latest 5, keep it as an extra safety copy.
+- Remove loose `module-manager-v2-server-*.zip` package archives from `$APP/releases`; release packages are retained by GitHub tags/branches and release records instead.
+- Do not delete `.env`, `data`, `uploads`, backups, database dumps, or anything outside `$APP/releases`.
+- Record the cleanup summary in the release record.
+
 ## Completion Evidence
 
 Record in `ops/releases/V<version>.md`:
 
 - backup directory,
 - release directory,
+- release retention dry-run and cleanup summary,
 - local and server hash,
 - service status,
 - health/API/page check results.
