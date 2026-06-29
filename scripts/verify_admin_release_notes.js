@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.70'
+const EXPECTED_VERSION = '3.0.71'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -17,6 +17,10 @@ assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file mus
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
 assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
+assert.match(releaseNotes, /人工确认条码状态修复/, 'release notes must describe the V3.0.71 manual barcode confirmation fix in Chinese')
+assert.match(releaseNotes, /驾驶舱资料组条码准确率/, 'release notes must describe the V3.0.71 project board accuracy cache fix in Chinese')
+assert.match(releaseNotes, /通过”和“全部”筛选项/, 'release notes must describe the V3.0.71 passed and all filters in Chinese')
+assert.match(releaseNotes, /当前筛选条件下/, 'release notes must describe filtered barcode review search in Chinese')
 assert.match(releaseNotes, /数据中台照片加载修复/, 'release notes must describe the V3.0.70 data center photo fix in Chinese')
 assert.match(releaseNotes, /删除项目驾驶舱系统状态/, 'release notes must describe the V3.0.70 project board system-status removal in Chinese')
 assert.match(releaseNotes, /任务领取完成按钮锁定/, 'release notes must describe the V3.0.68 claim task completed button lock in Chinese')

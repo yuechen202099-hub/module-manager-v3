@@ -190,6 +190,9 @@ class ProjectBoardSummaryCache:
         if worker and worker.is_alive():
             worker.join(timeout=2)
 
+    def invalidate(self, team_id: str) -> None:
+        self._discard_snapshot(_safe_team_id(team_id))
+
     def _snapshot_for_team(self, safe_team_id: str) -> dict[str, Any] | None:
         with self._lock:
             snapshot = self._memory.get(safe_team_id)

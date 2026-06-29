@@ -2,8 +2,8 @@
 
 ## Production SOP Override
 
-- Current production baseline: `V3.0.70`.
-- Production maintenance branch: `production/V3/3.0.70`.
+- Current production baseline: `V3.0.71`.
+- Production maintenance branch: `production/V3/3.0.71`.
 - Production SOP entrypoint: `docs/sop/README.md`.
 - Production release records: `ops/releases/`.
 - P0 incident records: `ops/incidents/`.
@@ -22,9 +22,9 @@
 
 ## 当前基线
 
-- 当前应用基线：`V3.0.70`。
-- 当前生产分支：`production/V3/3.0.70`。
-- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.70`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
+- 当前应用基线：`V3.0.71`。
+- 当前生产分支：`production/V3/3.0.71`。
+- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.71`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 文档和协作规则使用独立规则版本，不自动修改应用版本。
 - 详细生产 SOP 见 `docs/sop/README.md`。
 

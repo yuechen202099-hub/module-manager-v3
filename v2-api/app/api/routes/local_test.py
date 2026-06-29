@@ -188,6 +188,10 @@ def state_repository():
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+def invalidate_project_board_summary_cache() -> None:
+    project_board_summary_cache.invalidate(current_team_id())
+
+
 def validate_construction_upload_group_before_file_save(group_id: str) -> None:
     group = state_repository().get_group(group_id)
     if group is None:
@@ -1031,7 +1035,7 @@ def build_photo_barcode_review_workbook(items: list[dict[str, Any]]) -> bytes:
         "照片链接",
     ]
     sheet.append(headers)
-    status_labels = {"unreadable": "无法识别", "mismatched": "异常不匹配"}
+    status_labels = {"matched": "通过", "unreadable": "无法识别", "mismatched": "异常不匹配"}
     group_status_labels = {"approved": "已归档", "pending": "未审阅", "incomplete": "资料不完整", "exception": "异常"}
     for item in items:
         detected = item.get("detected_values") or {}
@@ -1082,9 +1086,10 @@ def excel_response(content: bytes, filename: str) -> Response:
 def export_photo_barcode_review_groups(
     request: Request,
     status: str = Query(default="unreadable"),
+    query: str = Query(default=""),
     _admin: dict = Depends(require_admin),
 ):
-    payload = state_repository().list_photo_barcode_review_groups(status=status, limit=100000, offset=0)
+    payload = state_repository().list_photo_barcode_review_groups(status=status, query=query, limit=100000, offset=0)
     content = build_photo_barcode_review_workbook(payload.get("items") or [])
     filename = f"photo-barcode-review-{status}-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
     return excel_response(content, filename)
@@ -1094,13 +1099,14 @@ def export_photo_barcode_review_groups(
 def photo_barcode_review_groups(
     request: Request,
     status: str = Query(default="unreadable"),
+    query: str = Query(default=""),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     _admin: dict = Depends(require_admin),
 ):
     return ok(
         request,
-        state_repository().list_photo_barcode_review_groups(status=status, limit=limit, offset=offset),
+        state_repository().list_photo_barcode_review_groups(status=status, query=query, limit=limit, offset=offset),
     )
 
 
@@ -2294,6 +2300,7 @@ def save_photo_category(
     try:
         repo = state_repository()
         photo = repo.classify_photo(group_id, photo_id, payload.category, payload.reviewer)
+        invalidate_project_board_summary_cache()
         if include_group:
             group = repo.get_group(group_id)
             return ok(
@@ -2319,6 +2326,7 @@ def rescan_photo_barcode(
         repo = state_repository()
         reviewer = bound_review_actor(request, payload.reviewer)
         photo = repo.rescan_photo_barcode(group_id, photo_id, reviewer, payload.category)
+        invalidate_project_board_summary_cache()
         if include_group:
             group = repo.get_group(group_id)
             return ok(
@@ -2341,6 +2349,7 @@ def confirm_group_barcode_manually(
     try:
         actor = bound_review_actor(request, payload.actor)
         result = state_repository().confirm_group_barcode_manually(group_id, actor=actor)
+        invalidate_project_board_summary_cache()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:

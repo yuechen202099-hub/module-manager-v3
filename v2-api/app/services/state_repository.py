@@ -885,11 +885,73 @@ def _group_lookup_id(group: Any) -> str:
 
 def _group_barcode_review_statuses(status: str) -> set[str]:
     normalized = str(status or "unreadable").strip().lower()
-    if normalized in {"all", "review"}:
+    if normalized == "all":
+        return {"matched", "unreadable", "mismatched"}
+    if normalized == "review":
         return {"unreadable", "mismatched"}
+    if normalized in {"matched", "passed", "success"}:
+        return {"matched"}
     if normalized in {"mismatched", "failed"}:
         return {"mismatched"}
     return {"unreadable"}
+
+
+def _group_barcode_review_item_matches_query(item: dict[str, Any], query: str) -> bool:
+    keyword = str(query or "").strip().lower()
+    if not keyword:
+        return True
+    values: list[Any] = [
+        item.get("group_id"),
+        item.get("meter_no"),
+        item.get("module_asset_no"),
+        item.get("collector"),
+        item.get("terminal"),
+        item.get("address"),
+        item.get("installer"),
+        item.get("group_status"),
+        item.get("status"),
+        *(item.get("missing_fields") or []),
+        *(item.get("missing_expected_fields") or []),
+        *(item.get("unmatched_values") or []),
+    ]
+    for mapping_key in ("expected", "detected_values"):
+        mapping = item.get(mapping_key) or {}
+        if isinstance(mapping, dict):
+            for key, nested_values in mapping.items():
+                values.append(key)
+                if isinstance(nested_values, list):
+                    values.extend(nested_values)
+                else:
+                    values.append(nested_values)
+    for photo in item.get("photos") or []:
+        if not isinstance(photo, dict):
+            continue
+        values.extend(
+            [
+                photo.get("id"),
+                photo.get("category"),
+                photo.get("category_label"),
+                photo.get("barcode_check_status"),
+                photo.get("barcode_check_method"),
+            ]
+        )
+        for list_key in (
+            "barcode_check_values",
+            "barcode_check_normalized_values",
+            "barcode_check_ocr_values",
+            "barcode_check_ocr_normalized_values",
+        ):
+            list_value = photo.get(list_key)
+            if isinstance(list_value, list):
+                values.extend(list_value)
+    return keyword in " ".join(str(value or "") for value in values).lower()
+
+
+def _filter_group_barcode_review_items(items: list[dict[str, Any]], query: str = "") -> list[dict[str, Any]]:
+    keyword = str(query or "").strip()
+    if not keyword:
+        return items
+    return [item for item in items if _group_barcode_review_item_matches_query(item, keyword)]
 
 
 def _group_barcode_context(group: Any) -> dict[str, Any]:
@@ -1328,6 +1390,7 @@ class StateRepository(ABC):
         self,
         *,
         status: str = "unreadable",
+        query: str = "",
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -1797,12 +1860,14 @@ class JsonStateRepository(StateRepository):
         self,
         *,
         status: str = "unreadable",
+        query: str = "",
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
         groups = local_simulation.list_groups(limit=100000, offset=0).get("items", [])
         statuses = _group_barcode_review_statuses(status)
         items = photo_barcode_check.list_group_barcode_review_items(groups, statuses=statuses)
+        items = _filter_group_barcode_review_items(items, query)
         capped_limit = max(1, min(int(limit or 100), 100000))
         safe_offset = max(0, int(offset or 0))
         return {
@@ -3128,6 +3193,7 @@ class PostgresStateRepository(StateRepository):
         self,
         *,
         status: str = "unreadable",
+        query: str = "",
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -3157,6 +3223,7 @@ class PostgresStateRepository(StateRepository):
         payloads = [_group_barcode_payload(group, photos_by_group_id.get(str(group.id), [])) for group in groups]
         statuses = _group_barcode_review_statuses(status)
         items = photo_barcode_check.list_group_barcode_review_items(payloads, statuses=statuses)
+        items = _filter_group_barcode_review_items(items, query)
         capped_limit = max(1, min(int(limit or 100), 100000))
         safe_offset = max(0, int(offset or 0))
         return {

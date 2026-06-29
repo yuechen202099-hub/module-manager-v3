@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.70'
+export const APP_VERSION = '3.0.71'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.71',
+    date: '2026-06-30',
+    type: 'BUG 修复',
+    title: '人工确认条码状态修复',
+    items: [
+      '审阅工作台人工确认条码异常资料组后，照片状态统一显示为“扫码通过”，不再继续显示条码异常或无法识别。',
+      '驾驶舱资料组条码准确率同步使用人工确认后的资料组级结果，并在人工确认、重新扫码和分类保存后刷新统计缓存。',
+      '条码复核清单新增“通过”和“全部”筛选项，管理员可查看已通过、无法识别、异常不匹配或全部资料组。',
+      '条码复核清单新增搜索框，可在当前筛选条件下按表号、模块号、采集器号、终端和安装人员定位资料组。',
+    ],
+  },
   {
     version: 'V3.0.70',
     date: '2026-06-29',

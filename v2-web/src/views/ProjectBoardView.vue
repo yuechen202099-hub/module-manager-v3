@@ -141,7 +141,8 @@ const exceptionAssignDraft = reactive<Record<string, string>>({})
 const photoBarcodeDialogVisible = ref(false)
 const photoBarcodeLoading = ref(false)
 const photoBarcodeExporting = ref(false)
-const photoBarcodeStatus = ref<'unreadable' | 'mismatched' | 'all'>('unreadable')
+const photoBarcodeStatus = ref<'unreadable' | 'mismatched' | 'matched' | 'all'>('unreadable')
+const photoBarcodeQuery = ref('')
 const photoBarcodeRows = ref<PhotoBarcodeReviewGroup[]>([])
 const photoBarcodeTotal = ref(0)
 const photoBarcodePage = ref(1)
@@ -344,6 +345,10 @@ const unmatchedDialogStats = computed(() => {
 })
 const photoBarcodeDialogStats = computed(() => ({
   total: photoBarcodeTotal.value,
+  matched:
+    photoBarcodeStatus.value === 'matched'
+      ? photoBarcodeTotal.value
+      : photoBarcodeRows.value.filter((item) => item.status === 'matched').length,
   unreadable:
     photoBarcodeStatus.value === 'unreadable'
       ? photoBarcodeTotal.value
@@ -1164,6 +1169,7 @@ async function loadPhotoBarcodeRows() {
       photoBarcodeStatus.value,
       photoBarcodePage.value,
       photoBarcodePageSize.value,
+      photoBarcodeQuery.value,
     )
     photoBarcodeTotal.value = result.total
     photoBarcodeRows.value = result.items
@@ -1190,6 +1196,11 @@ async function handlePhotoBarcodeStatusChange() {
   await loadPhotoBarcodeRows()
 }
 
+async function handlePhotoBarcodeSearch() {
+  photoBarcodePage.value = 1
+  await loadPhotoBarcodeRows()
+}
+
 async function handlePhotoBarcodePageChange(page: number) {
   photoBarcodePage.value = page
   await loadPhotoBarcodeRows()
@@ -1205,7 +1216,7 @@ async function exportPhotoBarcodeRows() {
   if (!isAdmin.value || photoBarcodeExporting.value) return
   photoBarcodeExporting.value = true
   try {
-    await exportPhotoBarcodeReviewGroups(photoBarcodeStatus.value)
+    await exportPhotoBarcodeReviewGroups(photoBarcodeStatus.value, photoBarcodeQuery.value)
     ElMessage.success('条码复核清单已导出')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '导出条码复核清单失败')
@@ -1900,7 +1911,7 @@ onUnmounted(() => {
 
     <el-dialog
       v-model="photoBarcodeDialogVisible"
-      title="条码无法识别清单"
+      title="条码复核清单"
       width="1180px"
       class="unmatched-board-dialog"
       @closed="handlePhotoBarcodeDialogClosed"
@@ -1910,6 +1921,10 @@ onUnmounted(() => {
           <article>
             <span>当前清单</span>
             <strong>{{ photoBarcodeDialogStats.total }}</strong>
+          </article>
+          <article>
+            <span>通过</span>
+            <strong>{{ photoBarcodeDialogStats.matched }}</strong>
           </article>
           <article>
             <span>无法识别</span>
@@ -1922,20 +1937,24 @@ onUnmounted(() => {
         </div>
         <div class="unmatched-dialog-tools unmatched-record-tools">
           <el-select v-model="photoBarcodeStatus" size="small" class="barcode-status-select" @change="handlePhotoBarcodeStatusChange">
+            <el-option label="通过" value="matched" />
             <el-option label="无法识别" value="unreadable" />
             <el-option label="异常不匹配" value="mismatched" />
-            <el-option label="全部需复核" value="all" />
+            <el-option label="全部" value="all" />
           </el-select>
+          <el-input
+            v-model="photoBarcodeQuery"
+            clearable
+            class="barcode-query-input"
+            placeholder="搜索表号、模块、采集器、终端、安装人员"
+            @keyup.enter="handlePhotoBarcodeSearch"
+            @clear="handlePhotoBarcodeSearch"
+          />
+          <el-button :loading="photoBarcodeLoading" @click="handlePhotoBarcodeSearch">搜索</el-button>
           <el-button :loading="photoBarcodeLoading" @click="loadPhotoBarcodeRows">刷新</el-button>
           <el-button :loading="photoBarcodeExporting" :disabled="!photoBarcodeTotal" @click="exportPhotoBarcodeRows">导出清单</el-button>
         </div>
       </div>
-      <el-alert
-        class="claim-alert"
-        type="info"
-        :closable="false"
-        title="按资料组整体判断：4 张照片内累计识别到本组表号、模块号、采集器号即通过；清单仅列出需要人工复核的资料组。"
-      />
       <el-table v-loading="photoBarcodeLoading" :data="photoBarcodeRows" height="540" size="small">
         <el-table-column type="index" width="54" label="#" />
         <el-table-column label="资料组" min-width="180">
@@ -2818,6 +2837,10 @@ onUnmounted(() => {
 
 .barcode-status-select {
   min-width: 138px;
+}
+
+.barcode-query-input {
+  min-width: 260px;
 }
 
 .barcode-photo-detail-grid {
