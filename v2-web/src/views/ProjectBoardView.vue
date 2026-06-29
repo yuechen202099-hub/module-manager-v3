@@ -18,7 +18,6 @@ import {
   fetchPhotoBarcodeReviewGroups,
   fetchProjectSummary,
   fetchReplacementRecords,
-  fetchSystemStatus,
   fetchTasks,
   fetchTaskStatus,
   fetchUnmatchedRecords,
@@ -101,7 +100,6 @@ const importingScan = ref(false)
 const summary = ref<ProjectSummary>({ ...emptySummary })
 const taskStatus = ref<TaskStatusSummary>({ ...emptyTaskStatus })
 const terminalTasks = ref<ReviewTask[]>([])
-const systemStatus = ref<Record<string, unknown> | null>(null)
 const activeJob = ref<ImportJob | null>(null)
 const errorMessage = ref('')
 const accountUsers = ref<UserAccount[]>([])
@@ -227,21 +225,6 @@ const jobPercent = computed(() => {
   const progress = activeJob.value.progress || {}
   const percentValue = Number(progress.percent || progress.percentage || 0)
   return percentValue > 0 ? Math.min(99, Math.round(percentValue)) : 45
-})
-const systemRows = computed<Array<[string, string]>>(() => {
-  if (!systemStatus.value) return []
-  const status = systemStatus.value as Record<string, unknown>
-  const disk = (status.disk || {}) as Record<string, unknown>
-  const stateFile = (status.state_file || status.data || {}) as Record<string, unknown>
-  const service = (status.service || {}) as Record<string, unknown>
-  const backups = (status.backups || {}) as Record<string, unknown>
-  return [
-    ['版本号', String(status.version || 'unknown')],
-    ['服务', String(service.status || status.status || (status.ok ? 'ok' : 'unknown'))],
-    ['磁盘使用', `${String(disk.used_percent || disk.percent || 'unknown')}%`],
-    ['数据文件', formatBytes(Number(stateFile.local_state_size || stateFile.state_size || stateFile.size_bytes || 0))],
-    ['最近备份', String(status.latest_backup_at || backups.latest_modified_at || status.latest_backup || 'unknown')],
-  ]
 })
 const workloadTotals = computed(() =>
   workloadRows.value.reduce(
@@ -521,18 +504,6 @@ function ringStyle(value: number, active: string, track: string) {
   }
 }
 
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let amount = value
-  let index = 0
-  while (amount >= 1024 && index < units.length - 1) {
-    amount /= 1024
-    index += 1
-  }
-  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`
-}
-
 function formatWorkDuration(minutes: number) {
   const safeMinutes = Math.max(0, Math.round(Number(minutes || 0)))
   const hours = Math.floor(safeMinutes / 60)
@@ -722,18 +693,6 @@ async function loadAccounts() {
   }
 }
 
-async function loadSystemHealth() {
-  if (!isAdmin.value) {
-    systemStatus.value = null
-    return
-  }
-  try {
-    systemStatus.value = await fetchSystemStatus()
-  } catch {
-    systemStatus.value = null
-  }
-}
-
 async function loadBoard(options: { forceSummaryRefresh?: boolean } = {}) {
   loading.value = true
   errorMessage.value = ''
@@ -755,7 +714,6 @@ async function loadBoard(options: { forceSummaryRefresh?: boolean } = {}) {
 
 async function refreshBoard() {
   await loadBoard({ forceSummaryRefresh: true })
-  void loadSystemHealth()
 }
 
 async function exportExceptionRows() {
@@ -1415,7 +1373,6 @@ function handleExternalRefresh(event: MessageEvent) {
 
 onMounted(() => {
   void loadBoard()
-  void loadSystemHealth()
   void connectBoardEvents()
   window.addEventListener('message', handleExternalRefresh)
 })
@@ -1647,14 +1604,6 @@ onUnmounted(() => {
         />
       </div>
     </el-dialog>
-
-    <section v-if="systemRows.length" class="panel system-status">
-      <h3>系统状态</h3>
-      <div class="system-row" v-for="[label, value] in systemRows" :key="label">
-        <span>{{ label }}</span>
-        <strong>{{ value }}</strong>
-      </div>
-    </section>
 
     <el-dialog v-model="workloadDialogVisible" :title="`${workloadInstaller} 每日工作量`" width="1180px">
       <div class="workload-summary">
@@ -2620,13 +2569,6 @@ onUnmounted(() => {
 
 .export-scope-select {
   width: 92px;
-}
-
-.system-note {
-  margin: 4px 0 0;
-  color: var(--v2-text-muted, #64748b);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .workload-summary {

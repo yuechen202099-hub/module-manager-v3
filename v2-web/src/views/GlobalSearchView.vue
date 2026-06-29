@@ -12,7 +12,7 @@ import {
   searchGroups,
   updateAdminGroupMetadata,
 } from '@/api/services'
-import type { MaterialGroup, TaskStatus } from '@/api/types'
+import type { MaterialGroup, ReviewPhoto, TaskStatus } from '@/api/types'
 
 type EditableGroupForm = {
   meterNo: string
@@ -51,6 +51,10 @@ const photoDialogOpen = ref(false)
 const photoDialogLoading = ref(false)
 const photoGroup = ref<MaterialGroup | null>(null)
 const groupPhotoObjectUrls = reactive<Record<string, string>>({})
+const groupPhotoErrors = reactive<Record<string, string>>({})
+const groupPhotoPreviewOpen = ref(false)
+const activeGroupPhotoUrl = ref('')
+const activeGroupPhotoTitle = ref('')
 const resetReason = ref('')
 const scannerOpen = ref(false)
 const scannerStatus = ref('将条形码放入取景框，识别后会自动搜索。')
@@ -62,6 +66,7 @@ let scannerTimer = 0
 let scannerLocked = false
 let zxingControls: { stop: () => void } | null = null
 const zxingReader = new BrowserMultiFormatReader()
+let groupPhotoLoadSerial = 0
 
 const editForm = reactive<EditableGroupForm>({
   meterNo: '',
@@ -178,16 +183,44 @@ function groupPhotoUrl(groupId: string, photoId: string) {
   return groupPhotoObjectUrls[groupPhotoKey(groupId, photoId)] || ''
 }
 
-function clearGroupPhotoObjectUrls() {
+function clearGroupPhotoObjectUrls(invalidateLoads = true) {
+  if (invalidateLoads) {
+    groupPhotoLoadSerial += 1
+  }
   for (const [key, url] of Object.entries(groupPhotoObjectUrls)) {
     URL.revokeObjectURL(url)
     delete groupPhotoObjectUrls[key]
   }
+  for (const key of Object.keys(groupPhotoErrors)) {
+    delete groupPhotoErrors[key]
+  }
 }
 
-function groupPreviewUrls(group: MaterialGroup | null) {
-  if (!group) return []
-  return (group.photos || []).map((photo) => groupPhotoUrl(group.id, photo.id)).filter(Boolean)
+function isGroupPhotoLoadCurrent(loadSerial: number, groupId: string) {
+  return photoDialogOpen.value && groupPhotoLoadSerial === loadSerial && photoGroup.value?.id === groupId
+}
+
+function openGroupPhotoPreview(group: MaterialGroup | null, photo: ReviewPhoto) {
+  const url = group ? groupPhotoUrl(group.id, photo.id) : ''
+  if (!url) return
+  activeGroupPhotoUrl.value = url
+  activeGroupPhotoTitle.value = `${photo.categoryLabel || photo.category || '资料组照片'} - ${group?.meterNo || group?.id || ''}`
+  groupPhotoPreviewOpen.value = true
+}
+
+function handleGroupPhotoRenderedError(group: MaterialGroup | null, photo: ReviewPhoto) {
+  if (!group) return
+  const key = groupPhotoKey(group.id, photo.id)
+  const url = groupPhotoObjectUrls[key]
+  if (url) {
+    URL.revokeObjectURL(url)
+    delete groupPhotoObjectUrls[key]
+  }
+  groupPhotoErrors[key] = '图片加载失败'
+  if (activeGroupPhotoUrl.value === url) {
+    activeGroupPhotoUrl.value = ''
+    groupPhotoPreviewOpen.value = false
+  }
 }
 
 async function openGroupPhotos(group: MaterialGroup) {
@@ -195,23 +228,52 @@ async function openGroupPhotos(group: MaterialGroup) {
   photoDialogOpen.value = true
   photoDialogLoading.value = true
   clearGroupPhotoObjectUrls()
+  const loadSerial = groupPhotoLoadSerial
   try {
     await Promise.all(
       (group.photos || []).map((photo) =>
-        fetchGroupPhotoObjectUrl(group.id, photo.id, 'preview')
-          .then((url) => {
-            groupPhotoObjectUrls[groupPhotoKey(group.id, photo.id)] = url
-          })
-          .catch(() => undefined),
+        (async () => {
+          const key = groupPhotoKey(group.id, photo.id)
+          let objectUrl = ''
+          try {
+            try {
+              objectUrl = await fetchGroupPhotoObjectUrl(group.id, photo.id, 'preview')
+            } catch {
+              if (!isGroupPhotoLoadCurrent(loadSerial, group.id)) return
+              objectUrl = await fetchGroupPhotoObjectUrl(group.id, photo.id, 'original')
+            }
+            if (!objectUrl) return
+            if (!isGroupPhotoLoadCurrent(loadSerial, group.id)) {
+              URL.revokeObjectURL(objectUrl)
+              return
+            }
+            const previousUrl = groupPhotoObjectUrls[key]
+            if (previousUrl && previousUrl !== objectUrl) {
+              URL.revokeObjectURL(previousUrl)
+            }
+            groupPhotoObjectUrls[key] = objectUrl
+          } catch (error) {
+            if (objectUrl) URL.revokeObjectURL(objectUrl)
+            if (isGroupPhotoLoadCurrent(loadSerial, group.id)) {
+              groupPhotoErrors[key] = error instanceof Error ? error.message : '图片加载失败'
+            }
+          }
+        })(),
       ),
     )
   } finally {
-    photoDialogLoading.value = false
+    if (isGroupPhotoLoadCurrent(loadSerial, group.id)) {
+      photoDialogLoading.value = false
+    }
   }
 }
 
 function handlePhotoDialogClosed() {
   photoGroup.value = null
+  photoDialogLoading.value = false
+  groupPhotoPreviewOpen.value = false
+  activeGroupPhotoUrl.value = ''
+  activeGroupPhotoTitle.value = ''
   clearGroupPhotoObjectUrls()
 }
 
@@ -355,7 +417,7 @@ async function resetUnreviewed() {
 async function resetUnconstructed() {
   if (!activeGroup.value) return
   try {
-    await ElMessageBox.confirm('确认将该资料组回退至未施工？当前照片会被软删除，施工与审阅状态会清空。', '回退至未施工', {
+    await ElMessageBox.confirm('确认将该资料组回退至未施工？当前照片会被软删除，采集器号、模块号、扫码通过标记、施工与审阅状态都会清空。', '回退至未施工', {
       type: 'error',
       confirmButtonText: '确认回退',
       cancelButtonText: '取消',
@@ -417,7 +479,10 @@ function stopScanner() {
   if (scannerVideo.value) scannerVideo.value.srcObject = null
 }
 
-onUnmounted(stopScanner)
+onUnmounted(() => {
+  stopScanner()
+  clearGroupPhotoObjectUrls()
+})
 
 function closeScanner() {
   stopScanner()
@@ -644,22 +709,39 @@ async function decodeScannerFile(event: Event) {
     >
       <div v-loading="photoDialogLoading" class="group-photo-grid">
         <article v-for="photo in photoGroup?.photos || []" :key="photo.id" class="group-photo-card">
-          <el-image
-            :src="groupPhotoUrl(photoGroup?.id || '', photo.id)"
-            :preview-src-list="groupPreviewUrls(photoGroup)"
-            fit="contain"
-            preview-teleported
-            class="group-photo-image"
+          <button
+            v-if="groupPhotoUrl(photoGroup?.id || '', photo.id)"
+            type="button"
+            class="group-photo-image group-photo-image-button"
+            :aria-label="`查看${photo.categoryLabel || photo.category || '资料组'}照片`"
+            @click="openGroupPhotoPreview(photoGroup, photo)"
           >
-            <template #error>
-              <span class="photo-thumb-error">图片加载失败</span>
-            </template>
-          </el-image>
+            <img
+              :src="groupPhotoUrl(photoGroup?.id || '', photo.id)"
+              :alt="photo.categoryLabel || photo.category || '资料组照片'"
+              @error="handleGroupPhotoRenderedError(photoGroup, photo)"
+            />
+          </button>
+          <div v-else class="group-photo-image photo-thumb-error">
+            {{ groupPhotoErrors[groupPhotoKey(photoGroup?.id || '', photo.id)] || '图片加载中' }}
+          </div>
           <div class="group-photo-meta">
             <strong>{{ photo.categoryLabel || photo.category || '未分类' }}</strong>
             <span>{{ photo.archiveFilename || photo.name || photo.id }}</span>
           </div>
         </article>
+      </div>
+    </el-dialog>
+
+    <el-dialog
+      v-model="groupPhotoPreviewOpen"
+      :title="activeGroupPhotoTitle"
+      width="min(960px, 96vw)"
+      class="group-photo-preview-dialog"
+      append-to-body
+    >
+      <div class="group-photo-preview-stage">
+        <img v-if="activeGroupPhotoUrl" :src="activeGroupPhotoUrl" :alt="activeGroupPhotoTitle || '资料组照片'" />
       </div>
     </el-dialog>
 
@@ -839,6 +921,18 @@ async function decodeScannerFile(event: Event) {
   background: var(--v2-surface-soft);
 }
 
+.group-photo-image-button {
+  overflow: hidden;
+  padding: 0;
+  cursor: zoom-in;
+}
+
+.group-photo-image-button img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .group-photo-meta {
   display: grid;
   gap: 3px;
@@ -855,6 +949,20 @@ async function decodeScannerFile(event: Event) {
 
 .group-photo-meta span {
   color: var(--v2-text-muted);
+}
+
+.group-photo-preview-stage {
+  display: grid;
+  min-height: 60vh;
+  place-items: center;
+  background: #0f172a;
+}
+
+.group-photo-preview-stage img {
+  display: block;
+  max-width: 100%;
+  max-height: 78vh;
+  object-fit: contain;
 }
 
 .empty-cell {

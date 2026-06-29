@@ -5459,8 +5459,21 @@ def reset_group_to_unconstructed(group_id: str, actor: str, reason: str = "", fo
     group.setdefault("deleted_photos", []).extend(moved)
     group["photos"] = []
     group["photo_count"] = 0
-    for key in ("construction_collector", "construction_module_asset_no", "constructor", "collector", "module_asset_no"):
+    for key in ("constructor",):
         group.pop(key, None)
+    group.update(
+        {
+            "construction_collector": "",
+            "construction_module_asset_no": "",
+            "collector": "",
+            "module_asset_no": "",
+            "asset_no": "",
+            "group_barcode_manual_confirmed": False,
+            "group_barcode_manual_confirmed_fields": [],
+            "group_barcode_manual_confirmed_by": "",
+            "group_barcode_manual_confirmed_at": "",
+        }
+    )
     group["status"] = "pending"
     group["reviewer"] = None
     group["review_note"] = ""

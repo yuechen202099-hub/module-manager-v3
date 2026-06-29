@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.69'
+export const APP_VERSION = '3.0.70'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.70',
+    date: '2026-06-29',
+    type: 'BUG 修复',
+    title: '数据中台照片加载修复',
+    items: [
+      '数据中台资料组照片弹窗改为直接渲染图片，避免图片组件拿到地址但画面空白。',
+      '照片预览图加载失败时自动改读原图，仍失败时在照片卡片展示具体错误，不再静默显示空白。',
+      '管理员回退至未施工时同步清空采集器号、模块号和扫码通过标记，避免资料组残留旧施工证据。',
+      '删除项目驾驶舱系统状态卡片，项目看板只保留与项目进度、资料组和资产相关的内容。',
+    ],
+  },
   {
     version: 'V3.0.69',
     date: '2026-06-29',

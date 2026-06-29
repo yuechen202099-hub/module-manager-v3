@@ -372,6 +372,129 @@ def test_postgres_classify_photo_persists_archive_fields() -> None:
     assert photo.raw_data["category_label"] == repository.local_simulation.PHOTO_CATEGORIES["after_box"]
 
 
+def test_postgres_reset_group_to_unconstructed_clears_barcode_evidence() -> None:
+    group = SimpleNamespace(
+        id="group-uuid",
+        team_id="default-team",
+        task_id=None,
+        legacy_id="g-reset",
+        legacy_task_id=1,
+        display_meter_no="METER-RESET",
+        meter_match_key="METER-RESET",
+        terminal="TERM-RESET",
+        installation_address="reset road",
+        status=repository.GroupStatus.APPROVED,
+        photo_count=1,
+        reviewer="reviewer-a",
+        reviewed_at=None,
+        review_note="ok",
+        exception_note="",
+        exception_reasons=[],
+        has_archive_blocker=False,
+        exception_status=None,
+        raw_data={
+            "status": "approved",
+            "collector": "COLLECTOR-OLD",
+            "module_asset_no": "MODULE-OLD",
+            "asset_no": "MODULE-OLD",
+            "construction_collector": "COLLECTOR-OLD",
+            "construction_module_asset_no": "MODULE-OLD",
+            "group_barcode_manual_confirmed": True,
+            "group_barcode_manual_confirmed_fields": ["meter", "module", "collector"],
+            "group_barcode_manual_confirmed_by": "reviewer-a",
+            "group_barcode_manual_confirmed_at": "2026-06-29T10:00:00+08:00",
+        },
+    )
+    photos = [
+        SimpleNamespace(
+            id="photo-uuid",
+            legacy_id="p-reset",
+            group_id=group.id,
+            team_id=group.team_id,
+            is_active=True,
+            deleted_at=None,
+            deleted_by="",
+            delete_reason="",
+        )
+    ]
+
+    class FakeScalars:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return list(self._rows)
+
+    class FakeSession:
+        def __init__(self):
+            self.audit_logs = []
+            self.committed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalars(self, _statement):
+            return FakeScalars([photo for photo in photos if photo.is_active])
+
+        def get(self, _model, _key):
+            return None
+
+        def add(self, item):
+            self.audit_logs.append(item)
+
+        def commit(self):
+            self.committed = True
+
+        def refresh(self, _obj):
+            pass
+
+    fake_session = FakeSession()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+        def _group_by_legacy_id(self, session, group_id: str, *, lock: bool = False):
+            assert group_id == "g-reset"
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, session, checked_group, actor: str, *, force: bool = False) -> None:
+            assert checked_group is group
+            assert actor == "admin"
+            assert force is True
+
+    result = TestPostgresRepository().reset_group_to_unconstructed(
+        "g-reset",
+        actor="admin",
+        reason="重新施工",
+        force=True,
+    )
+
+    assert group.raw_data["collector"] == ""
+    assert group.raw_data["module_asset_no"] == ""
+    assert group.raw_data["asset_no"] == ""
+    assert group.raw_data["construction_collector"] == ""
+    assert group.raw_data["construction_module_asset_no"] == ""
+    assert group.raw_data["group_barcode_manual_confirmed"] is False
+    assert group.raw_data["group_barcode_manual_confirmed_fields"] == []
+    assert group.raw_data["group_barcode_manual_confirmed_by"] == ""
+    assert group.raw_data["group_barcode_manual_confirmed_at"] == ""
+    assert photos[0].is_active is False
+    assert result["group"]["photo_count"] == 0
+    assert result["group"].get("collector", "") == ""
+    assert result["group"].get("module_asset_no", "") == ""
+    assert result["group"].get("construction_collector", "") == ""
+    assert result["group"].get("construction_module_asset_no", "") == ""
+    assert not result["group"].get("group_barcode_manual_confirmed", False)
+    assert result["soft_deleted_photos"] == 1
+    assert fake_session.committed is True
+    assert fake_session.audit_logs
+
+
 def test_postgres_installer_workload_uses_material_group_installation_address() -> None:
     photo = SimpleNamespace(
         id="photo-uuid",

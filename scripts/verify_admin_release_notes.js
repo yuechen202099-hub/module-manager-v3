@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.68'
+const EXPECTED_VERSION = '3.0.70'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -17,6 +17,8 @@ assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file mus
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
 assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
+assert.match(releaseNotes, /数据中台照片加载修复/, 'release notes must describe the V3.0.70 data center photo fix in Chinese')
+assert.match(releaseNotes, /删除项目驾驶舱系统状态/, 'release notes must describe the V3.0.70 project board system-status removal in Chinese')
 assert.match(releaseNotes, /任务领取完成按钮锁定/, 'release notes must describe the V3.0.68 claim task completed button lock in Chinese')
 assert.match(releaseNotes, /主按钮显示“已审阅”并禁用/, 'release notes must describe reviewed action button lock in Chinese')
 assert.match(releaseNotes, /施工按钮显示“已施工”并禁用/, 'release notes must describe construction action button lock in Chinese')
