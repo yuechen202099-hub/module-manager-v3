@@ -92,6 +92,33 @@ def test_verify_production_baseline_rejects_platform_branch_missing_production_c
     assert any("does not contain" in issue for issue in result.issues)
 
 
+def test_verify_production_baseline_uses_latest_production_tag(tmp_path):
+    script = load_script()
+    repo = init_repo(tmp_path)
+    commit_file(repo, "base.txt", "base\n", "base")
+    git(repo, "checkout", "-b", "production/v3.0.35")
+    old_production_commit = commit_file(repo, "production.txt", "production\n", "production")
+    git(repo, "tag", "v3.0.68")
+    latest_production_commit = commit_file(repo, "hotfix.txt", "hotfix\n", "hotfix")
+    git(repo, "tag", "v3.0.69")
+    git(repo, "checkout", "main")
+    git(repo, "merge", "--no-ff", old_production_commit, "-m", "merge old production")
+    commit_file(repo, "platform.txt", "platform\n", "platform")
+
+    result = script.verify_baseline(
+        repo=repo,
+        production_ref="production/v3.0.35",
+        baseline_tag="latest",
+        expected_commit="",
+        current_ref="HEAD",
+    )
+
+    assert result.ok is False
+    assert result.baseline_tag == "v3.0.69"
+    assert result.tag_commit == latest_production_commit
+    assert any("does not contain" in issue for issue in result.issues)
+
+
 def test_verify_production_baseline_requires_tag_to_resolve_to_expected_commit(tmp_path):
     script = load_script()
     repo = init_repo(tmp_path)
