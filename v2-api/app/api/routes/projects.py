@@ -6,6 +6,7 @@ from app.services.platform.catalog import (
     ProjectNotFound,
     get_project_overview,
     get_project_section,
+    list_project_modules,
     list_project_overviews,
 )
 
@@ -67,6 +68,20 @@ def get_project_risks(project_id: str, request: Request):
 @router.get("/{project_id}/tasks")
 def get_project_tasks(project_id: str, request: Request):
     return ok(request, _project_section_or_404(project_id, "tasks"))
+
+
+@router.get("/{project_id}/modules")
+def list_project_module_definitions(project_id: str, request: Request):
+    try:
+        items = list_project_modules(project_id)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return ok(request, {"project_id": project_id, "total": len(items), "items": items})
+
+
+@router.get("/{project_id}/modules/{module_id}")
+def get_project_module(project_id: str, module_id: str, request: Request):
+    return ok(request, _project_section_or_404(project_id, module_id))
 
 
 @router.get("/{project_id}")

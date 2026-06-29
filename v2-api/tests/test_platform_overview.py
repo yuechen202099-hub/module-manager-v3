@@ -215,6 +215,30 @@ def test_project_detail_returns_platform_project():
     payload = response.json()["data"]
     assert payload["id"] == "replacement-project"
     assert "tasks" in payload
+    assert [module["id"] for module in payload["modules"][:4]] == [
+        "progress",
+        "delivery",
+        "field",
+        "review",
+    ]
+    assert payload["modules"][0]["endpoint"] == "/projects/replacement-project/modules/progress"
+
+
+def test_project_modules_endpoint_lists_registered_sections_by_priority():
+    client = TestClient(app)
+    response = client.get("/projects/replacement-project/modules")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["project_id"] == "replacement-project"
+    assert [module["id"] for module in payload["items"]] == [
+        "progress",
+        "delivery",
+        "field",
+        "review",
+        "risks",
+        "tasks",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -235,6 +259,16 @@ def test_project_module_endpoints_return_focused_sections(section, expected_keys
     assert response.status_code == 200
     payload = response.json()["data"]
     assert set(payload).issuperset(expected_keys)
+
+
+def test_project_module_endpoint_returns_section_through_unified_modules_path():
+    client = TestClient(app)
+    response = client.get("/projects/replacement-project/modules/delivery")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["status"] in {"preparing", "ready"}
+    assert {"total_items", "completed_items"}.issubset(payload)
 
 
 def test_project_module_endpoints_reject_unknown_project():
