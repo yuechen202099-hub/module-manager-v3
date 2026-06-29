@@ -1,7 +1,89 @@
-from app.services.platform.overview import build_replacement_project_overview
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services.platform.adapters.replacement import build_replacement_project_overview as build_adapter_overview
+from app.services.platform.delivery import build_delivery_summary
+from app.services.platform.field import build_field_summary
+from app.services.platform.overview import build_replacement_project_overview
+from app.services.platform.progress import build_progress_summary
+from app.services.platform.projects import build_project_overview
+from app.services.platform.review import build_review_summary
+from app.services.platform.risks import build_risk_summary
+from app.services.platform.tasks import build_task_summary
+
+
+def test_platform_progress_module_calculates_stage_and_progress():
+    progress = build_progress_summary(
+        groups=10,
+        reviewed_groups=6,
+        risk_total=5,
+        unconstructed_groups=3,
+        reviewing_tasks=1,
+    )
+
+    assert progress["stage"] == "审阅中"
+    assert progress["system_progress"] == 60
+    assert progress["management_progress"] == 60
+    assert progress["management_locked"] is False
+
+
+def test_platform_summary_modules_keep_independent_boundaries():
+    tasks = build_task_summary(
+        {
+            "total": 4,
+            "uploaded": 2,
+            "reviewing": 1,
+            "archived": 1,
+            "avg_upload_rate": 0.5,
+            "avg_review_rate": 0.6,
+        }
+    )
+    field = build_field_summary(photo_rows_linked=20, unconstructed_groups=3, exception_groups=2)
+    review = build_review_summary(groups=10, reviewed_groups=6, progress=60)
+    risks = build_risk_summary(exception_groups=2, unconstructed_groups=3, delivery_ready=False)
+    delivery = build_delivery_summary(progress=60, risk_total=risks["total"])
+
+    assert tasks["upload_rate"] == 50
+    assert field["exception_count"] == 2
+    assert review["pending_groups"] == 4
+    assert risks["delivery_blockers"] == 5
+    assert delivery["completed_items"] == 2
+
+
+def test_project_module_builds_overview_envelope_from_focused_summaries():
+    overview = build_project_overview(
+        project_id="demo-project",
+        name="演示项目",
+        status="active",
+        progress={"stage": "施工中", "system_progress": 60, "management_progress": 60, "management_locked": False},
+        total_groups=10,
+        completed_groups=6,
+        exception_groups=2,
+        tasks={"total": 4},
+        delivery={"status": "preparing"},
+        field={"exception_count": 2},
+        review={"pending_groups": 4},
+        risks={"total": 5},
+        updated_at="2026-06-29T00:00:00+00:00",
+    )
+
+    assert overview["id"] == "demo-project"
+    assert overview["name"] == "演示项目"
+    assert overview["stage"] == "施工中"
+    assert overview["delivery"]["status"] == "preparing"
+    assert overview["risks"]["total"] == 5
+
+
+def test_replacement_adapter_matches_public_overview_facade():
+    summary = {"groups": 5, "reviewed_groups": 5, "exception_groups": 0, "unconstructed_groups": 0}
+    task_status = {"total": 2, "uploaded": 2, "reviewing": 0, "archived": 2, "avg_upload_rate": 1, "avg_review_rate": 1}
+
+    adapter_overview = build_adapter_overview(summary=summary, task_status=task_status)
+    facade_overview = build_replacement_project_overview(summary=summary, task_status=task_status)
+
+    adapter_overview["updated_at"] = "stable"
+    facade_overview["updated_at"] = "stable"
+    assert adapter_overview == facade_overview
 
 
 def test_build_replacement_project_overview_maps_summary_to_platform_fields():
