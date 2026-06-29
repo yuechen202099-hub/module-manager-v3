@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 import re
+import threading
 from typing import Any
 
+from app.core.config import settings
 from app.services.platform.adapters.replacement import build_replacement_project_overview
 from app.services.state_repository import get_state_repository
 
@@ -71,6 +75,9 @@ _PROJECTS = (
 _PROJECT_BY_ID = {project.id: project for project in _PROJECTS}
 
 _DRAFT_PROJECTS: dict[str, ProjectDefinition] = {}
+_DRAFT_PROJECTS_LOADED = False
+_DRAFT_PROJECT_STORE_PATH_OVERRIDE: Path | None = None
+_DRAFT_PROJECTS_LOCK = threading.RLock()
 
 _PROJECT_MODULES = (
     ProjectModuleDefinition(id="progress", name="项目进度", priority=10, route_path="/project-board"),
@@ -101,6 +108,111 @@ _PINYIN_SLUGS = {
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _project_draft_store_path() -> Path:
+    if _DRAFT_PROJECT_STORE_PATH_OVERRIDE is not None:
+        return _DRAFT_PROJECT_STORE_PATH_OVERRIDE
+    configured = settings.platform_project_drafts_path.strip()
+    if configured:
+        return Path(configured)
+    return Path.cwd() / "data" / "platform-project-drafts.json"
+
+
+def configure_project_draft_store_path(path: Path | str | None) -> None:
+    global _DRAFT_PROJECTS_LOADED, _DRAFT_PROJECT_STORE_PATH_OVERRIDE
+    with _DRAFT_PROJECTS_LOCK:
+        _DRAFT_PROJECT_STORE_PATH_OVERRIDE = Path(path) if path is not None else None
+        _DRAFT_PROJECTS.clear()
+        _DRAFT_PROJECTS_LOADED = False
+
+
+def _project_definition_to_store(project: ProjectDefinition) -> dict[str, Any]:
+    return {
+        "id": project.id,
+        "name": project.name,
+        "status": project.status,
+        "adapter": project.adapter,
+        "module_ids": list(project.module_ids),
+        "description": project.description,
+        "created_at": project.created_at,
+        "updated_at": project.updated_at,
+    }
+
+
+def _project_definition_from_store(raw_project: Any) -> ProjectDefinition | None:
+    if not isinstance(raw_project, dict):
+        return None
+    project_id = str(raw_project.get("id") or "").strip()
+    name = str(raw_project.get("name") or "").strip()
+    if not project_id or not name:
+        return None
+    raw_module_ids = raw_project.get("module_ids")
+    if not isinstance(raw_module_ids, list):
+        raise ProjectConfigurationError(f"Project {project_id} must define module_ids")
+    module_ids = tuple(
+        module_id
+        for module_id in (str(raw_module_id or "").strip() for raw_module_id in raw_module_ids)
+        if module_id
+    )
+    if not module_ids:
+        raise ProjectConfigurationError(f"Project {project_id} must define at least one module")
+    unknown_modules = [module_id for module_id in module_ids if module_id not in _PROJECT_MODULE_BY_ID]
+    if unknown_modules:
+        raise ProjectConfigurationError(
+            f"Project {project_id} references unknown module {unknown_modules[0]}"
+        )
+    return ProjectDefinition(
+        id=project_id,
+        name=name,
+        status=str(raw_project.get("status") or "draft").strip() or "draft",
+        adapter="draft",
+        module_ids=module_ids,
+        description=str(raw_project.get("description") or "").strip(),
+        created_at=str(raw_project.get("created_at") or "").strip(),
+        updated_at=str(raw_project.get("updated_at") or "").strip(),
+    )
+
+
+def _load_project_drafts_unlocked() -> None:
+    global _DRAFT_PROJECTS_LOADED
+    if _DRAFT_PROJECTS_LOADED:
+        return
+    path = _project_draft_store_path()
+    if not path.exists():
+        _DRAFT_PROJECTS_LOADED = True
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProjectConfigurationError(f"Project draft store is unreadable: {path}") from exc
+    raw_projects = payload.get("projects") if isinstance(payload, dict) else None
+    if not isinstance(raw_projects, list):
+        raise ProjectConfigurationError(f"Project draft store has invalid format: {path}")
+    loaded_projects: dict[str, ProjectDefinition] = {}
+    for raw_project in raw_projects:
+        project = _project_definition_from_store(raw_project)
+        if project is not None:
+            loaded_projects[project.id] = project
+    _DRAFT_PROJECTS.clear()
+    _DRAFT_PROJECTS.update(loaded_projects)
+    _DRAFT_PROJECTS_LOADED = True
+
+
+def _save_project_drafts_unlocked() -> None:
+    path = _project_draft_store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "updated_at": _now_iso(),
+        "projects": [
+            _project_definition_to_store(_DRAFT_PROJECTS[project_id])
+            for project_id in sorted(_DRAFT_PROJECTS)
+        ],
+    }
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _slugify_project_name(name: str) -> str:
@@ -152,21 +264,28 @@ def _apply_project_definition(overview: dict[str, Any], definition: ProjectDefin
 
 
 def list_project_definitions() -> list[dict[str, str]]:
+    with _DRAFT_PROJECTS_LOCK:
+        _load_project_drafts_unlocked()
+        draft_projects = list(_DRAFT_PROJECTS.values())
     return [project.as_dict() for project in _PROJECTS] + [
-        project.as_dict() for project in _DRAFT_PROJECTS.values()
+        project.as_dict() for project in draft_projects
     ]
 
 
 def list_project_overviews() -> list[dict[str, Any]]:
-    project_ids = [project.id for project in _PROJECTS] + list(_DRAFT_PROJECTS)
+    with _DRAFT_PROJECTS_LOCK:
+        _load_project_drafts_unlocked()
+        project_ids = [project.id for project in _PROJECTS] + list(_DRAFT_PROJECTS)
     return [get_project_overview(project_id) for project_id in project_ids]
 
 
 def get_project_definition(project_id: str) -> ProjectDefinition:
     if project_id in _PROJECT_BY_ID:
         return _PROJECT_BY_ID[project_id]
-    if project_id in _DRAFT_PROJECTS:
-        return _DRAFT_PROJECTS[project_id]
+    with _DRAFT_PROJECTS_LOCK:
+        _load_project_drafts_unlocked()
+        if project_id in _DRAFT_PROJECTS:
+            return _DRAFT_PROJECTS[project_id]
     raise ProjectNotFound(project_id)
 
 
@@ -277,29 +396,39 @@ def _build_draft_project_overview(definition: ProjectDefinition) -> dict[str, An
 
 
 def create_project_draft(*, name: str, description: str = "", module_ids: list[str]) -> dict[str, Any]:
-    normalized_name = re.sub(r"\s+", " ", name.strip())
-    if not normalized_name:
-        raise ProjectValidationError("Project name is required")
-    deduped_module_ids = list(dict.fromkeys(module_id.strip() for module_id in module_ids if module_id.strip()))
-    if not deduped_module_ids:
-        raise ProjectValidationError("At least one project module is required")
-    unknown_modules = [module_id for module_id in deduped_module_ids if module_id not in _PROJECT_MODULE_BY_ID]
-    if unknown_modules:
-        raise ProjectValidationError(f"Unknown project module: {unknown_modules[0]}")
-    now = _now_iso()
-    project_id = _unique_project_id(_slugify_project_name(normalized_name))
-    _DRAFT_PROJECTS[project_id] = ProjectDefinition(
-        id=project_id,
-        name=normalized_name,
-        status="draft",
-        adapter="draft",
-        module_ids=tuple(deduped_module_ids),
-        description=description.strip(),
-        created_at=now,
-        updated_at=now,
-    )
+    with _DRAFT_PROJECTS_LOCK:
+        _load_project_drafts_unlocked()
+        normalized_name = re.sub(r"\s+", " ", name.strip())
+        if not normalized_name:
+            raise ProjectValidationError("Project name is required")
+        deduped_module_ids = list(dict.fromkeys(module_id.strip() for module_id in module_ids if module_id.strip()))
+        if not deduped_module_ids:
+            raise ProjectValidationError("At least one project module is required")
+        unknown_modules = [module_id for module_id in deduped_module_ids if module_id not in _PROJECT_MODULE_BY_ID]
+        if unknown_modules:
+            raise ProjectValidationError(f"Unknown project module: {unknown_modules[0]}")
+        now = _now_iso()
+        project_id = _unique_project_id(_slugify_project_name(normalized_name))
+        _DRAFT_PROJECTS[project_id] = ProjectDefinition(
+            id=project_id,
+            name=normalized_name,
+            status="draft",
+            adapter="draft",
+            module_ids=tuple(deduped_module_ids),
+            description=description.strip(),
+            created_at=now,
+            updated_at=now,
+        )
+        _save_project_drafts_unlocked()
     return get_project_overview(project_id)
 
 
-def reset_project_drafts() -> None:
-    _DRAFT_PROJECTS.clear()
+def reset_project_drafts(*, remove_store: bool = False) -> None:
+    global _DRAFT_PROJECTS_LOADED
+    with _DRAFT_PROJECTS_LOCK:
+        _DRAFT_PROJECTS.clear()
+        _DRAFT_PROJECTS_LOADED = False
+        if remove_store and _DRAFT_PROJECT_STORE_PATH_OVERRIDE is not None:
+            path = _project_draft_store_path()
+            if path.exists():
+                path.unlink()

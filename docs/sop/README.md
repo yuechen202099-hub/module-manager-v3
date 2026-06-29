@@ -17,6 +17,7 @@ Use these SOPs for every production-impacting change:
 - `07-rollback-and-incident-review.md` - rollback and incident review
 - `08-business-acceptance-templates.md` - business acceptance templates
 - `09-parallel-development-github-flow.md` - parallel team branch, PR, and version coordination
+- `10-platform-project-draft-store.md` - platform project draft registry, migration, and rollback notes
 
 Release records live under `ops/releases/`.
 Incident records live under `ops/incidents/`.

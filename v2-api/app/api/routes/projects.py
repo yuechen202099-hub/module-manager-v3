@@ -55,6 +55,8 @@ def create_project(payload: ProjectCreate, request: Request):
         )
     except ProjectValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except ProjectConfigurationError:
+        raise HTTPException(status_code=500, detail="Project configuration invalid")
     return ok(request, project)
 
 

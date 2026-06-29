@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -8,6 +10,7 @@ from app.services.platform.catalog import (
     ProjectConfigurationError,
     ProjectDefinition,
     ProjectNotFound,
+    configure_project_draft_store_path,
     get_project_module_definition,
     get_project_overview,
     get_project_section,
@@ -26,10 +29,12 @@ from app.services.platform.tasks import build_task_summary
 
 
 @pytest.fixture(autouse=True)
-def clear_project_drafts():
-    reset_project_drafts()
+def clear_project_drafts(tmp_path):
+    configure_project_draft_store_path(tmp_path / "platform-project-drafts.json")
+    reset_project_drafts(remove_store=True)
     yield
-    reset_project_drafts()
+    reset_project_drafts(remove_store=True)
+    configure_project_draft_store_path(None)
 
 
 def test_platform_catalog_lists_replacement_project_definition():
@@ -445,6 +450,45 @@ def test_project_draft_module_endpoints_follow_selected_modules():
 
     progress_response = client.get(f"/projects/{project_id}/modules/progress")
     assert progress_response.status_code == 404
+
+
+def test_project_draft_registry_persists_created_projects(tmp_path):
+    store_path = tmp_path / "platform-project-drafts.json"
+    configure_project_draft_store_path(store_path)
+    client = TestClient(app)
+
+    response = client.post(
+        "/projects",
+        json={"name": "Persistent Draft", "description": "kept on disk", "module_ids": ["progress", "review"]},
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(store_path.read_text(encoding="utf-8"))
+    assert payload["version"] == 1
+    assert payload["projects"][0]["id"] == "persistent-draft"
+    assert payload["projects"][0]["name"] == "Persistent Draft"
+    assert payload["projects"][0]["description"] == "kept on disk"
+    assert payload["projects"][0]["module_ids"] == ["progress", "review"]
+
+
+def test_project_draft_registry_recovers_projects_after_memory_reset(tmp_path):
+    store_path = tmp_path / "platform-project-drafts.json"
+    configure_project_draft_store_path(store_path)
+    client = TestClient(app)
+    create_response = client.post(
+        "/projects",
+        json={"name": "Restart Safe Draft", "module_ids": ["field", "review"]},
+    )
+    project_id = create_response.json()["data"]["id"]
+
+    reset_project_drafts()
+
+    detail_response = client.get(f"/projects/{project_id}")
+    modules_response = client.get(f"/projects/{project_id}/modules")
+
+    assert detail_response.status_code == 200
+    assert detail_response.json()["data"]["id"] == project_id
+    assert [module["id"] for module in modules_response.json()["data"]["items"]] == ["field", "review"]
 
 
 @pytest.mark.parametrize(

@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     project_board_summary_cache_enabled: bool = Field(default=True, alias="PROJECT_BOARD_SUMMARY_CACHE_ENABLED")
     project_board_summary_cache_seconds: int = Field(default=300, alias="PROJECT_BOARD_SUMMARY_CACHE_SECONDS")
     project_board_summary_cache_path: str = Field(default="", alias="PROJECT_BOARD_SUMMARY_CACHE_PATH")
+    platform_project_drafts_path: str = Field(default="", alias="PLATFORM_PROJECT_DRAFTS_PATH")
     wechat_miniprogram_appid: str = Field(default="", alias="WECHAT_MINIPROGRAM_APPID")
     wechat_miniprogram_secret: str = Field(default="", alias="WECHAT_MINIPROGRAM_SECRET")
     wechat_binding_store_path: str = Field(default="", alias="WECHAT_BINDING_STORE_PATH")
