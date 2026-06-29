@@ -143,7 +143,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.69"
+    assert data["version"] == "3.0.70"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -1784,6 +1784,10 @@ def test_admin_group_backoffice_edit_and_resets_are_audited(monkeypatch, tmp_pat
     assert reset_construction.status_code == 200
     reset_construction_payload = reset_construction.json()["data"]
     assert reset_construction_payload["group"]["photo_count"] == 0
+    assert reset_construction_payload["group"]["collector"] == ""
+    assert reset_construction_payload["group"]["module_asset_no"] == ""
+    assert reset_construction_payload["group"]["construction_collector"] == ""
+    assert reset_construction_payload["group"]["construction_module_asset_no"] == ""
     assert reset_construction_payload["soft_deleted_photos"] >= 0
 
     target_for_archive = production_client.get("/groups/search?query=350&limit=1", headers=admin_headers).json()["data"][

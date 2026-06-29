@@ -1213,6 +1213,10 @@ def test_reset_group_to_unconstructed_soft_clears_photos(synthetic_state: dict) 
     )
     group = synthetic_state["groups"][0]
     claim_task(group["task_id"], "alice")
+    group["group_barcode_manual_confirmed"] = True
+    group["group_barcode_manual_confirmed_fields"] = ["meter", "module", "collector"]
+    group["group_barcode_manual_confirmed_by"] = "alice"
+    group["group_barcode_manual_confirmed_at"] = "2026-06-29T10:00:00+08:00"
 
     result = reset_group_to_unconstructed(group["id"], actor="alice", reason="现场返工")
 
@@ -1221,8 +1225,17 @@ def test_reset_group_to_unconstructed_soft_clears_photos(synthetic_state: dict) 
     assert len(group["deleted_photos"]) == 2
     assert group["photo_count"] == 0
     assert group["status"] == "pending"
-    assert group.get("construction_collector") is None
-    assert group.get("construction_module_asset_no") is None
+    assert group.get("collector") == ""
+    assert group.get("module_asset_no") == ""
+    assert group.get("construction_collector") == ""
+    assert group.get("construction_module_asset_no") == ""
+    assert group.get("group_barcode_manual_confirmed") is False
+    assert group.get("group_barcode_manual_confirmed_fields") == []
+    assert group.get("group_barcode_manual_confirmed_by") == ""
+    assert group.get("group_barcode_manual_confirmed_at") == ""
+    barcode_check = photo_barcode_check.build_group_barcode_check(group)
+    assert barcode_check["group_barcode_check_status"] != "matched"
+    assert barcode_check["group_barcode_matched_fields"] == []
     assert group["deleted_photos"][0]["is_active"] is False
 
 

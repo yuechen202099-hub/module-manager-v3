@@ -103,6 +103,7 @@ Copy-ReleaseItem "scripts\verify_claim_tasks_completion_status.js" "scripts\veri
 Copy-ReleaseItem "scripts\verify_release_sop.py" "scripts\verify_release_sop.py"
 Copy-ReleaseItem "scripts\verify_release_retention_policy.py" "scripts\verify_release_retention_policy.py"
 Copy-ReleaseItem "scripts\verify_project_board_photo_dialog.js" "scripts\verify_project_board_photo_dialog.js"
+Copy-ReleaseItem "scripts\verify_project_board_data_center_photos.js" "scripts\verify_project_board_data_center_photos.js"
 Copy-ReleaseItem "scripts\production_backup.sh" "scripts\production_backup.sh"
 Copy-ReleaseItem "scripts\cleanup_old_releases.sh" "scripts\cleanup_old_releases.sh"
 Copy-ReleaseItem "scripts\run_photo_barcode_maintenance.sh" "scripts\run_photo_barcode_maintenance.sh"

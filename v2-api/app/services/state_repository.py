@@ -5332,9 +5332,23 @@ class PostgresStateRepository(StateRepository):
                 photo.deleted_by = actor
                 photo.delete_reason = reason or "reset_to_unconstructed"
             raw_data = dict(group.raw_data or {})
-            for key in ("construction_collector", "construction_module_asset_no", "constructor", "collector", "module_asset_no"):
+            for key in ("constructor",):
                 raw_data.pop(key, None)
-            raw_data.update({"status": "pending", "reset_to_unconstructed_reason": reason})
+            raw_data.update(
+                {
+                    "status": "pending",
+                    "reset_to_unconstructed_reason": reason,
+                    "construction_collector": "",
+                    "construction_module_asset_no": "",
+                    "collector": "",
+                    "module_asset_no": "",
+                    "asset_no": "",
+                    "group_barcode_manual_confirmed": False,
+                    "group_barcode_manual_confirmed_fields": [],
+                    "group_barcode_manual_confirmed_by": "",
+                    "group_barcode_manual_confirmed_at": "",
+                }
+            )
             group.raw_data = raw_data
             group.photo_count = 0
             group.status = GroupStatus.UNREVIEWED
@@ -5360,6 +5374,11 @@ class PostgresStateRepository(StateRepository):
                         "reviewer": "",
                         "review_note": "",
                         "exception_note": "",
+                        "collector": "",
+                        "module_asset_no": "",
+                        "construction_collector": "",
+                        "construction_module_asset_no": "",
+                        "group_barcode_manual_confirmed": False,
                     },
                     payload={
                         "group_id": group.legacy_id or str(group.id),
