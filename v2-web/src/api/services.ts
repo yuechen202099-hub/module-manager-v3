@@ -571,6 +571,37 @@ export function currentTeamId() {
   return session?.team_id || session?.user?.team_id || localStorage.getItem('module_manager_team_id') || 'default-team'
 }
 
+const projectScopedPathPrefixes = [
+  '/catalog',
+  '/exports',
+  '/ezcodes',
+  '/groups',
+  '/jobs',
+  '/local-test',
+  '/scan',
+  '/tasks',
+]
+
+export function currentProjectId() {
+  if (typeof window === 'undefined') return ''
+  const queryProjectId = new URLSearchParams(window.location.search).get('project_id') || ''
+  return queryProjectId || localStorage.getItem('module_manager_active_project_id') || ''
+}
+
+function shouldScopeProjectPath(pathname: string) {
+  return projectScopedPathPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
+}
+
+export function projectScopedPath(path: string, projectId = currentProjectId()) {
+  if (!projectId) return path
+  const fallbackOrigin = typeof window === 'undefined' ? 'http://module-manager.local' : window.location.origin
+  const url = new URL(path, fallbackOrigin)
+  if (!shouldScopeProjectPath(url.pathname) || url.searchParams.has('project_id')) return path
+  url.searchParams.set('project_id', projectId)
+  if (/^https?:\/\//i.test(path)) return url.href
+  return `${url.pathname}${url.search}${url.hash}`
+}
+
 function authHeaders(): HeadersInit {
   const session = readLegacySession()
   const headers: Record<string, string> = {
@@ -618,7 +649,7 @@ function handleUnauthorizedResponse(response: Response) {
 }
 
 async function fetchWithAuth(path: string, init: RequestInit = {}) {
-  const response = await fetch(path, init)
+  const response = await fetch(projectScopedPath(path), init)
   handleUnauthorizedResponse(response)
   return response
 }
@@ -1207,7 +1238,7 @@ export async function fetchTaskStatus(): Promise<TaskStatusSummary> {
 
 export function boardEventsUrl(scope = 'project-board'): string {
   const query = new URLSearchParams({ scope, team_id: currentTeamId() })
-  return `/local-test/events?${query.toString()}`
+  return projectScopedPath(`/local-test/events?${query.toString()}`)
 }
 
 export function boardEventHeaders(): HeadersInit {
@@ -2102,7 +2133,9 @@ export function groupPhotoContentUrl(
     kind,
     team_id: currentTeamId(),
   })
-  return `/local-test/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/content?${params.toString()}`
+  return projectScopedPath(
+    `/local-test/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/content?${params.toString()}`,
+  )
 }
 
 export async function fetchGroupPhotoObjectUrl(
