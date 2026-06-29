@@ -215,6 +215,10 @@ export type ProjectModuleSections = {
   tasks: NonNullable<Project['tasks']>
 }
 
+type ProjectModuleId = keyof ProjectModuleSections
+
+type LoadableProjectModule = Project['modules'][number] & { id: ProjectModuleId }
+
 type BackendPhoto = {
   id: string | number
   url?: string
@@ -771,6 +775,35 @@ function mapProjectRisks(raw: BackendProjectRisks = {}): NonNullable<Project['ri
   }
 }
 
+const fallbackProjectModules: Project['modules'] = [
+  { id: 'progress', name: '项目进度', priority: 10, endpoint: '', routePath: '/project-board' },
+  { id: 'delivery', name: '项目交付能力', priority: 20, endpoint: '', routePath: '/project-board' },
+  { id: 'field', name: '现场施工数据采集', priority: 30, endpoint: '', routePath: '/construction' },
+  { id: 'review', name: '审阅功能', priority: 40, endpoint: '', routePath: '/task-hall' },
+  { id: 'risks', name: '风险预警', priority: 50, endpoint: '', routePath: '/project-board' },
+  { id: 'tasks', name: '任务执行', priority: 60, endpoint: '', routePath: '/claim-tasks' },
+]
+
+function isProjectModuleId(moduleId: string): moduleId is ProjectModuleId {
+  return ['progress', 'delivery', 'field', 'review', 'risks', 'tasks'].includes(moduleId)
+}
+
+function moduleRegistryForLoading(registeredModules: Project['modules']): LoadableProjectModule[] {
+  const modules = registeredModules.length ? registeredModules : fallbackProjectModules
+  return modules.filter((module): module is LoadableProjectModule => isProjectModuleId(module.id))
+}
+
+function emptyProjectModuleSections(): ProjectModuleSections {
+  return {
+    progress: mapProjectProgress(),
+    delivery: mapProjectDelivery(),
+    field: mapProjectField(),
+    review: mapProjectReview(),
+    risks: mapProjectRisks(),
+    tasks: mapProjectTasks(),
+  }
+}
+
 function mapProjectModules(raw: BackendProjectModule[] = []): Project['modules'] {
   return raw
     .map((module) => ({
@@ -1204,25 +1237,39 @@ export async function deleteUserAccount(username: string): Promise<UserAccount> 
   return mapUserAccount(data.user)
 }
 
-export async function fetchProjectModuleSections(projectId: string): Promise<ProjectModuleSections> {
+export async function fetchProjectModuleSections(
+  projectId: string,
+  registeredModules: Project['modules'] = fallbackProjectModules,
+): Promise<ProjectModuleSections> {
   const id = encodeURIComponent(projectId)
-  const [progress, delivery, field, review, risks, tasks] = await Promise.all([
-    api<BackendProjectProgress>(`/projects/${id}/modules/progress`),
-    api<BackendProjectDelivery>(`/projects/${id}/modules/delivery`),
-    api<BackendProjectField>(`/projects/${id}/modules/field`),
-    api<BackendProjectReview>(`/projects/${id}/modules/review`),
-    api<BackendProjectRisks>(`/projects/${id}/modules/risks`),
-    api<BackendProjectTasks>(`/projects/${id}/modules/tasks`),
-  ])
-
-  return {
-    progress: mapProjectProgress(progress),
-    delivery: mapProjectDelivery(delivery),
-    field: mapProjectField(field),
-    review: mapProjectReview(review),
-    risks: mapProjectRisks(risks),
-    tasks: mapProjectTasks(tasks),
-  }
+  const sections = emptyProjectModuleSections()
+  const modules = moduleRegistryForLoading(registeredModules)
+  await Promise.all(
+    modules.map(async (module) => {
+      const modulePath = `/projects/${id}/modules/${encodeURIComponent(module.id)}`
+      switch (module.id) {
+        case 'progress':
+          sections.progress = mapProjectProgress(await api<BackendProjectProgress>(modulePath))
+          break
+        case 'delivery':
+          sections.delivery = mapProjectDelivery(await api<BackendProjectDelivery>(modulePath))
+          break
+        case 'field':
+          sections.field = mapProjectField(await api<BackendProjectField>(modulePath))
+          break
+        case 'review':
+          sections.review = mapProjectReview(await api<BackendProjectReview>(modulePath))
+          break
+        case 'risks':
+          sections.risks = mapProjectRisks(await api<BackendProjectRisks>(modulePath))
+          break
+        case 'tasks':
+          sections.tasks = mapProjectTasks(await api<BackendProjectTasks>(modulePath))
+          break
+      }
+    }),
+  )
+  return sections
 }
 
 export async function fetchProjectsWithModules(): Promise<Project[]> {
@@ -1230,7 +1277,7 @@ export async function fetchProjectsWithModules(): Promise<Project[]> {
   const projects = (data.items || []).map(mapProject)
   return Promise.all(
     projects.map(async (project) => {
-      const sections = await fetchProjectModuleSections(project.id)
+      const sections = await fetchProjectModuleSections(project.id, project.modules)
       return {
         ...project,
         ...sections.progress,
