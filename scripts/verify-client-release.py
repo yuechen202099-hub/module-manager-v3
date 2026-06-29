@@ -51,6 +51,7 @@ REQUIRED_FILES = {
     "scripts/verify_claim_tasks_completion_status.js",
     "scripts/verify_release_sop.py",
     "scripts/verify_project_board_photo_dialog.js",
+    "scripts/verify_vue_draft_project_entry_guard.js",
     "scripts/production_backup.sh",
     "scripts/production_health_check.py",
     "ops/releases/README.md",

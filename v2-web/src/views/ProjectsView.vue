@@ -89,6 +89,10 @@ async function submitCreateProject() {
 }
 
 function openRoute(path: string, project: Project) {
+  if (project.status === 'draft') {
+    ElMessage.info('草稿项目模块待接入，先保留在项目列表中管理')
+    return
+  }
   workspace.selectProject(project.id)
   void router.push({ path, query: { project_id: project.id } })
 }
