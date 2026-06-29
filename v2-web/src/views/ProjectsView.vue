@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -16,6 +16,21 @@ const fallbackModules: ProjectModule[] = [
   { id: 'field', name: '现场采集', priority: 30, endpoint: '', routePath: '/construction' },
   { id: 'review', name: '审阅功能', priority: 40, endpoint: '', routePath: '/task-hall' },
 ]
+const defaultModuleIds = ['progress', 'delivery', 'field', 'review']
+const createDialogVisible = ref(false)
+const creatingProject = ref(false)
+const createForm = reactive({
+  name: '',
+  description: '',
+  moduleIds: [...defaultModuleIds],
+})
+
+const moduleOptions = computed(() => {
+  const knownModules = workspace.projects.flatMap((project) => project.modules)
+  const modules = knownModules.length ? knownModules : fallbackModules
+  const uniqueModules = new Map(modules.map((module) => [module.id, module]))
+  return Array.from(uniqueModules.values()).sort((left, right) => left.priority - right.priority)
+})
 
 onMounted(() => {
   void loadProjectsFromRoute()
@@ -34,6 +49,43 @@ async function loadProjectsFromRoute() {
 
 function selectRouteProject() {
   workspace.selectRouteProject(route.query.project_id)
+}
+
+function openCreateDialog() {
+  createDialogVisible.value = true
+}
+
+function resetCreateForm() {
+  createForm.name = ''
+  createForm.description = ''
+  createForm.moduleIds = [...defaultModuleIds]
+}
+
+async function submitCreateProject() {
+  const name = createForm.name.trim()
+  if (!name) {
+    ElMessage.warning('请填写项目名称')
+    return
+  }
+  if (!createForm.moduleIds.length) {
+    ElMessage.warning('请至少选择一个模块')
+    return
+  }
+  creatingProject.value = true
+  try {
+    const project = await workspace.createProjectDraft({
+      name,
+      description: createForm.description.trim(),
+      moduleIds: createForm.moduleIds,
+    })
+    createDialogVisible.value = false
+    resetCreateForm()
+    ElMessage.success(`已创建项目草稿：${project.name}`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '项目草稿创建失败')
+  } finally {
+    creatingProject.value = false
+  }
 }
 
 function openRoute(path: string, project: Project) {
@@ -70,6 +122,17 @@ function deliveryType(status = '') {
   return status === 'ready' ? 'success' : 'warning'
 }
 
+function statusLabel(status: Project['status']) {
+  if (status === 'draft') return '草稿'
+  return status === 'active' ? '进行中' : '已归档'
+}
+
+function statusType(status: Project['status']) {
+  if (status === 'active') return 'success'
+  if (status === 'draft') return 'warning'
+  return 'info'
+}
+
 function progressStatus(value = 0, riskTotal = 0) {
   if (riskTotal > 0) return 'exception'
   return value >= 100 ? 'success' : undefined
@@ -85,7 +148,7 @@ function progressStatus(value = 0, riskTotal = 0) {
       </div>
       <div class="toolbar-actions">
         <ElButton :icon="Refresh" @click="refreshProjects">刷新</ElButton>
-        <ElButton type="primary" :icon="Plus" @click="ElMessage.info('项目创建接口待接入')">新建项目</ElButton>
+        <ElButton type="primary" :icon="Plus" @click="openCreateDialog">新建项目</ElButton>
       </div>
     </div>
 
@@ -102,9 +165,7 @@ function progressStatus(value = 0, riskTotal = 0) {
           </ElTableColumn>
           <ElTableColumn label="状态" width="110">
             <template #default="{ row }">
-              <ElTag :type="row.status === 'active' ? 'success' : 'info'">
-                {{ row.status === 'active' ? '进行中' : '已归档' }}
-              </ElTag>
+              <ElTag :type="statusType(row.status)">{{ statusLabel(row.status) }}</ElTag>
             </template>
           </ElTableColumn>
           <ElTableColumn label="项目进度" min-width="180">
@@ -179,6 +240,35 @@ function progressStatus(value = 0, riskTotal = 0) {
         </ElTable>
       </div>
     </section>
+
+    <ElDialog v-model="createDialogVisible" title="新建项目草稿" width="520px" @closed="resetCreateForm">
+      <ElForm label-position="top">
+        <ElFormItem label="项目名称" required>
+          <ElInput v-model="createForm.name" maxlength="40" show-word-limit placeholder="例如：线路巡检项目" />
+        </ElFormItem>
+        <ElFormItem label="项目说明">
+          <ElInput
+            v-model="createForm.description"
+            type="textarea"
+            :rows="3"
+            maxlength="160"
+            show-word-limit
+            placeholder="说明这个项目的现场范围、交付目标或接入计划"
+          />
+        </ElFormItem>
+        <ElFormItem label="启用模块" required>
+          <ElCheckboxGroup v-model="createForm.moduleIds" class="module-checkboxes">
+            <ElCheckbox v-for="module in moduleOptions" :key="module.id" :label="module.id">
+              {{ module.name }}
+            </ElCheckbox>
+          </ElCheckboxGroup>
+        </ElFormItem>
+      </ElForm>
+      <template #footer>
+        <ElButton @click="createDialogVisible = false">取消</ElButton>
+        <ElButton type="primary" :loading="creatingProject" @click="submitCreateProject">创建草稿</ElButton>
+      </template>
+    </ElDialog>
   </div>
 </template>
 
@@ -215,6 +305,12 @@ function progressStatus(value = 0, riskTotal = 0) {
 
 .metric-pair {
   justify-content: flex-start;
+}
+
+.module-checkboxes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
 }
 
 :deep(.active-project-row td) {

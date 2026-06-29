@@ -44,6 +44,16 @@ const checks = [
       workspaceSource.includes("this.selectProject(project.id)"),
     message: "Frontend must expose project draft creation through API services and workspace store.",
   },
+  {
+    ok:
+      projectsViewSource.includes("createDialogVisible") &&
+      projectsViewSource.includes("createForm") &&
+      projectsViewSource.includes("ElDialog") &&
+      projectsViewSource.includes("ElCheckboxGroup") &&
+      projectsViewSource.includes("workspace.createProjectDraft") &&
+      !projectsViewSource.includes("项目创建接口待接入"),
+    message: "Projects view must provide a project draft creation dialog.",
+  },
 ];
 
 const failures = checks.filter((check) => !check.ok);
