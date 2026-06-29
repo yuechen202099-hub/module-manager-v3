@@ -68,6 +68,7 @@ export type ProjectModule = {
   name: string
   priority: number
   endpoint: string
+  routePath: string
 }
 
 export type Project = {

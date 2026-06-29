@@ -11,10 +11,10 @@ const workspace = useWorkspaceStore()
 const route = useRoute()
 const router = useRouter()
 const fallbackModules: ProjectModule[] = [
-  { id: 'progress', name: '项目进度', priority: 10, endpoint: '' },
-  { id: 'delivery', name: '项目交付能力', priority: 20, endpoint: '' },
-  { id: 'field', name: '现场采集', priority: 30, endpoint: '' },
-  { id: 'review', name: '审阅功能', priority: 40, endpoint: '' },
+  { id: 'progress', name: '项目进度', priority: 10, endpoint: '', routePath: '/project-board' },
+  { id: 'delivery', name: '项目交付能力', priority: 20, endpoint: '', routePath: '/project-board' },
+  { id: 'field', name: '现场采集', priority: 30, endpoint: '', routePath: '/construction' },
+  { id: 'review', name: '审阅功能', priority: 40, endpoint: '', routePath: '/task-hall' },
 ]
 
 onMounted(() => {
@@ -41,16 +41,9 @@ function openRoute(path: string, project: Project) {
   void router.push({ path, query: { project_id: project.id } })
 }
 
-function projectModuleRoute(moduleId: string) {
-  if (moduleId === 'field') return '/construction'
-  if (moduleId === 'review') return '/task-hall'
-  if (moduleId === 'tasks') return '/claim-tasks'
-  return '/project-board'
-}
-
 function projectActionModules(project: Project) {
   const modules = project.modules.length ? project.modules : fallbackModules
-  return modules.filter((module) => ['progress', 'delivery', 'field', 'review', 'tasks'].includes(module.id))
+  return modules.filter((module) => module.routePath)
 }
 
 function projectRowClass({ row }: { row: Project }) {
@@ -176,7 +169,7 @@ function progressStatus(value = 0, riskTotal = 0) {
                   v-for="module in projectActionModules(row)"
                   :key="module.id"
                   size="small"
-                  @click="openRoute(projectModuleRoute(module.id), row)"
+                  @click="openRoute(module.routePath, row)"
                 >
                   {{ module.name }}
                 </ElButton>

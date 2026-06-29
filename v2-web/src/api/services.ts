@@ -201,6 +201,7 @@ type BackendProjectModule = {
   name?: string
   priority?: number
   endpoint?: string
+  route_path?: string
 }
 
 type ProjectProgressSection = Pick<Project, 'stage' | 'systemProgress' | 'managementProgress' | 'managementLocked'>
@@ -777,8 +778,9 @@ function mapProjectModules(raw: BackendProjectModule[] = []): Project['modules']
       name: String(module.name || '').trim(),
       priority: Number(module.priority || 0),
       endpoint: String(module.endpoint || '').trim(),
+      routePath: String(module.route_path || '').trim(),
     }))
-    .filter((module) => module.id && module.name)
+    .filter((module) => module.id && module.name && module.routePath)
     .sort((left, right) => left.priority - right.priority)
 }
 

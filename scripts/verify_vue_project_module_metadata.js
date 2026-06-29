@@ -8,13 +8,17 @@ const projectsViewSource = fs.readFileSync(path.join(root, "v2-web", "src", "vie
 
 const checks = [
   {
-    ok: typesSource.includes("export type ProjectModule") && typesSource.includes("modules: ProjectModule[]"),
+    ok:
+      typesSource.includes("export type ProjectModule") &&
+      typesSource.includes("modules: ProjectModule[]") &&
+      typesSource.includes("routePath: string"),
     message: "Project type must expose backend module metadata.",
   },
   {
     ok:
       servicesSource.includes("type BackendProjectModule") &&
       servicesSource.includes("function mapProjectModules") &&
+      servicesSource.includes("routePath: String(module.route_path") &&
       servicesSource.includes("modules: mapProjectModules(raw.modules"),
     message: "Project mapper must preserve backend module metadata.",
   },
@@ -22,9 +26,10 @@ const checks = [
     ok:
       projectsViewSource.includes("project.modules") &&
       projectsViewSource.includes("projectActionModules(row)") &&
-      projectsViewSource.includes("projectModuleRoute") &&
+      !projectsViewSource.includes("function projectModuleRoute") &&
+      projectsViewSource.includes("module.routePath") &&
       projectsViewSource.includes("module.name"),
-    message: "Projects view must render module actions from project.modules.",
+    message: "Projects view must render module actions from project.modules route metadata.",
   },
 ];
 

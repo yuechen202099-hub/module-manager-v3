@@ -222,6 +222,7 @@ def test_project_detail_returns_platform_project():
         "review",
     ]
     assert payload["modules"][0]["endpoint"] == "/projects/replacement-project/modules/progress"
+    assert payload["modules"][0]["route_path"] == "/project-board"
 
 
 def test_project_modules_endpoint_lists_registered_sections_by_priority():
@@ -239,6 +240,14 @@ def test_project_modules_endpoint_lists_registered_sections_by_priority():
         "risks",
         "tasks",
     ]
+    assert {module["id"]: module["route_path"] for module in payload["items"]} == {
+        "progress": "/project-board",
+        "delivery": "/project-board",
+        "field": "/construction",
+        "review": "/task-hall",
+        "risks": "/project-board",
+        "tasks": "/claim-tasks",
+    }
 
 
 @pytest.mark.parametrize(

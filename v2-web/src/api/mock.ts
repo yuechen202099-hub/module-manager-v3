@@ -19,10 +19,34 @@ export const mockProjects: Project[] = [
     exceptionGroups: 0,
     updatedAt: '2026-06-19',
     modules: [
-      { id: 'progress', name: '项目进度', priority: 10, endpoint: '/projects/local-test/modules/progress' },
-      { id: 'delivery', name: '项目交付能力', priority: 20, endpoint: '/projects/local-test/modules/delivery' },
-      { id: 'field', name: '现场采集', priority: 30, endpoint: '/projects/local-test/modules/field' },
-      { id: 'review', name: '审阅功能', priority: 40, endpoint: '/projects/local-test/modules/review' },
+      {
+        id: 'progress',
+        name: '项目进度',
+        priority: 10,
+        endpoint: '/projects/local-test/modules/progress',
+        routePath: '/project-board',
+      },
+      {
+        id: 'delivery',
+        name: '项目交付能力',
+        priority: 20,
+        endpoint: '/projects/local-test/modules/delivery',
+        routePath: '/project-board',
+      },
+      {
+        id: 'field',
+        name: '现场采集',
+        priority: 30,
+        endpoint: '/projects/local-test/modules/field',
+        routePath: '/construction',
+      },
+      {
+        id: 'review',
+        name: '审阅功能',
+        priority: 40,
+        endpoint: '/projects/local-test/modules/review',
+        routePath: '/task-hall',
+      },
     ],
   },
 ]

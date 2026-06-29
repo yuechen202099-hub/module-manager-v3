@@ -32,6 +32,7 @@ class ProjectModuleDefinition:
     id: str
     name: str
     priority: int
+    route_path: str
 
     def as_dict(self, project_id: str) -> dict[str, str | int]:
         return {
@@ -39,6 +40,7 @@ class ProjectModuleDefinition:
             "name": self.name,
             "priority": self.priority,
             "endpoint": f"/projects/{project_id}/modules/{self.id}",
+            "route_path": self.route_path,
         }
 
 
@@ -54,12 +56,12 @@ _PROJECTS = (
 _PROJECT_BY_ID = {project.id: project for project in _PROJECTS}
 
 _PROJECT_MODULES = (
-    ProjectModuleDefinition(id="progress", name="项目进度", priority=10),
-    ProjectModuleDefinition(id="delivery", name="项目交付能力", priority=20),
-    ProjectModuleDefinition(id="field", name="现场施工数据采集", priority=30),
-    ProjectModuleDefinition(id="review", name="审阅功能", priority=40),
-    ProjectModuleDefinition(id="risks", name="风险预警", priority=50),
-    ProjectModuleDefinition(id="tasks", name="任务执行", priority=60),
+    ProjectModuleDefinition(id="progress", name="项目进度", priority=10, route_path="/project-board"),
+    ProjectModuleDefinition(id="delivery", name="项目交付能力", priority=20, route_path="/project-board"),
+    ProjectModuleDefinition(id="field", name="现场施工数据采集", priority=30, route_path="/construction"),
+    ProjectModuleDefinition(id="review", name="审阅功能", priority=40, route_path="/task-hall"),
+    ProjectModuleDefinition(id="risks", name="风险预警", priority=50, route_path="/project-board"),
+    ProjectModuleDefinition(id="tasks", name="任务执行", priority=60, route_path="/claim-tasks"),
 )
 
 _PROJECT_MODULE_BY_ID = {module.id: module for module in _PROJECT_MODULES}
