@@ -10,6 +10,7 @@ from pathlib import Path
 REQUIRED_FILES = {
     "README.md",
     "AGENTS.md",
+    ".gitattributes",
     ".env.example",
     "RELEASE_MANIFEST.md",
     "docs/CLIENT_ACCEPTANCE_REPORT.md",
@@ -49,8 +50,10 @@ REQUIRED_FILES = {
     "scripts/verify-client-release.py",
     "scripts/verify_claim_tasks_completion_status.js",
     "scripts/verify_release_sop.py",
+    "scripts/verify_release_retention_policy.py",
     "scripts/verify_project_board_photo_dialog.js",
     "scripts/production_backup.sh",
+    "scripts/cleanup_old_releases.sh",
     "scripts/production_health_check.py",
     "ops/releases/README.md",
     "ops/releases/V3.0.69.md",
@@ -164,6 +167,13 @@ def verify_package(zip_path: Path) -> None:
                     if package_version in chunk:
                         static_js = chunk
                         break
+        crlf_shell_scripts = sorted(
+            name
+            for name in names
+            if name.endswith(".sh") and b"\r\n" in archive.read(name)
+        )
+        if crlf_shell_scripts:
+            fail("Shell scripts must use LF line endings: " + ", ".join(crlf_shell_scripts[:20]))
 
     missing = sorted(REQUIRED_FILES - names)
     if missing:

@@ -18,6 +18,7 @@
 - 代码改动默认 patch 版本 `+0.01`；大流程或主业务规则变更先请用户确认是否 `+0.1`。
 - 文档、SOP、协作规则只改文档版本，不改应用版本。
 - 发布前必须备份生产环境，保留 `.env`、data、uploads、数据库 dump，并记录 release package hash。
+- 每次生产发布健康检查通过后，服务器 `/opt/module-manager-v2/releases` 只保留最近 5 个 release 目录；旧版本留存在 GitHub 分支/tag 和 `ops/releases/` 记录中即可。清理必须先 dry-run，且不得删除 `.env`、data、uploads、backups 或数据库 dump。
 
 ## 业务硬规则
 

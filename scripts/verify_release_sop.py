@@ -50,7 +50,9 @@ REQUIRED_FILES = [
     "ops/releases/V3.0.37.md",
     "ops/incidents/P0-template.md",
     "scripts/production_backup.sh",
+    "scripts/cleanup_old_releases.sh",
     "scripts/production_health_check.py",
+    "scripts/verify_release_retention_policy.py",
 ]
 
 
@@ -148,6 +150,11 @@ def main() -> int:
     manifest = read("RELEASE_MANIFEST.md")
     if "3.0.69" not in manifest:
         fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.69")
+
+    retention_runbook = read("docs/sop/06-production-deploy-runbook.md")
+    for text in ["Production Release Retention", "cleanup_old_releases.sh", "keep 5", "--dry-run"]:
+        if text not in retention_runbook:
+            fail(f"deploy runbook must document release retention: {text}")
 
     print("[OK] release SOP files and references are consistent")
     return 0

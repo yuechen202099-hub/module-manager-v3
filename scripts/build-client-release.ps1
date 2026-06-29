@@ -72,6 +72,7 @@ function Copy-ReleaseItem {
 
 Copy-ReleaseItem "README.md" "README.md"
 Copy-ReleaseItem "AGENTS.md" "AGENTS.md"
+Copy-ReleaseItem ".gitattributes" ".gitattributes"
 Copy-ReleaseItem ".env.example" ".env.example"
 Copy-ReleaseItem "docker-compose.yml" "docker-compose.yml"
 
@@ -100,8 +101,10 @@ Copy-ReleaseItem "scripts\verify-production-readiness.py" "scripts\verify-produc
 Copy-ReleaseItem "scripts\verify-client-release.py" "scripts\verify-client-release.py"
 Copy-ReleaseItem "scripts\verify_claim_tasks_completion_status.js" "scripts\verify_claim_tasks_completion_status.js"
 Copy-ReleaseItem "scripts\verify_release_sop.py" "scripts\verify_release_sop.py"
+Copy-ReleaseItem "scripts\verify_release_retention_policy.py" "scripts\verify_release_retention_policy.py"
 Copy-ReleaseItem "scripts\verify_project_board_photo_dialog.js" "scripts\verify_project_board_photo_dialog.js"
 Copy-ReleaseItem "scripts\production_backup.sh" "scripts\production_backup.sh"
+Copy-ReleaseItem "scripts\cleanup_old_releases.sh" "scripts\cleanup_old_releases.sh"
 Copy-ReleaseItem "scripts\run_photo_barcode_maintenance.sh" "scripts\run_photo_barcode_maintenance.sh"
 Copy-ReleaseItem "scripts\run_photo_barcode_maintenance_slice.sh" "scripts\run_photo_barcode_maintenance_slice.sh"
 Copy-ReleaseItem "scripts\run_photo_barcode_not_matched_rescan.sh" "scripts\run_photo_barcode_not_matched_rescan.sh"
@@ -142,6 +145,15 @@ Get-ChildItem -LiteralPath $staging -Recurse -Directory -Force |
 Get-ChildItem -LiteralPath $staging -Recurse -File -Force |
     Where-Object { $_.Extension -in @(".pyc", ".pyo") } |
     Remove-Item -Force
+
+# Normalize server shell scripts to LF so Linux bash can execute release helpers.
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+Get-ChildItem -LiteralPath $staging -Recurse -File -Filter "*.sh" -Force |
+    ForEach-Object {
+        $content = [System.IO.File]::ReadAllText($_.FullName)
+        $normalized = $content -replace "`r`n", "`n" -replace "`r", "`n"
+        [System.IO.File]::WriteAllText($_.FullName, $normalized, $utf8NoBom)
+    }
 
 $manifestPath = Join-Path $staging "RELEASE_MANIFEST.md"
 $generatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"

@@ -18,6 +18,7 @@
 - 禁止直接修改 OSS 生产对象，除非用户单独确认任务和回滚方案。
 - 禁止直接修改 PostgreSQL 生产数据，除非用户单独确认数据库方案、备份、dry-run 和回滚方案。
 - 禁止在未确认备份、验证和回滚路径前执行生产发布。
+- 生产服务器 release 目录只保留最近 5 个可回滚版本；旧版本以 GitHub tag/branch 和 `ops/releases/` 为长期留档。清理旧 release 前必须 dry-run，且不得触碰 `.env`、data、uploads、backups 或数据库 dump。
 
 ## 当前基线
 
