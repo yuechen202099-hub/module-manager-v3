@@ -5,6 +5,7 @@ import type { MaterialGroup, Project, ReviewPhoto, ReviewTask, TaskStatus } from
 
 type WorkspaceState = {
   loading: boolean
+  activeProjectId: string
   projects: Project[]
   tasks: ReviewTask[]
   groups: MaterialGroup[]
@@ -12,9 +13,26 @@ type WorkspaceState = {
   activePhotos: ReviewPhoto[]
 }
 
+const activeProjectStorageKey = 'module_manager_active_project_id'
+
+function readActiveProjectId() {
+  if (typeof localStorage === 'undefined') return ''
+  return localStorage.getItem(activeProjectStorageKey) || ''
+}
+
+function writeActiveProjectId(projectId: string) {
+  if (typeof localStorage === 'undefined') return
+  if (projectId) {
+    localStorage.setItem(activeProjectStorageKey, projectId)
+    return
+  }
+  localStorage.removeItem(activeProjectStorageKey)
+}
+
 export const useWorkspaceStore = defineStore('workspace', {
   state: (): WorkspaceState => ({
     loading: false,
+    activeProjectId: readActiveProjectId(),
     projects: [],
     tasks: [],
     groups: [],
@@ -22,9 +40,10 @@ export const useWorkspaceStore = defineStore('workspace', {
     activePhotos: [],
   }),
   getters: {
-    activeProject: (state) => state.projects[0] || null,
+    activeProject: (state) =>
+      state.projects.find((project) => project.id === state.activeProjectId) || state.projects[0] || null,
     dashboardStats: (state) => {
-      const project = state.projects[0]
+      const project = state.projects.find((item) => item.id === state.activeProjectId) || state.projects[0]
       return {
         totalGroups: project?.totalGroups || 0,
         completedGroups: project?.completedGroups || 0,
@@ -34,8 +53,25 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
   },
   actions: {
+    ensureActiveProject() {
+      const fallbackProjectId = this.projects[0]?.id || ''
+      const nextProjectId = this.projects.some((project) => project.id === this.activeProjectId)
+        ? this.activeProjectId
+        : fallbackProjectId
+      if (nextProjectId !== this.activeProjectId) {
+        this.activeProjectId = nextProjectId
+        writeActiveProjectId(nextProjectId)
+      }
+    },
+    selectProject(projectId: string) {
+      if (!projectId) return
+      if (this.projects.length && !this.projects.some((project) => project.id === projectId)) return
+      this.activeProjectId = projectId
+      writeActiveProjectId(projectId)
+    },
     async loadProjects() {
       this.projects = await services.fetchProjects()
+      this.ensureActiveProject()
     },
     async bootstrap() {
       this.loading = true
@@ -48,6 +84,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.projects = projects
         this.tasks = tasks
         this.groups = groups
+        this.ensureActiveProject()
       } finally {
         this.loading = false
       }

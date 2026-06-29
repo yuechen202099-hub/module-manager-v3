@@ -1,25 +1,43 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
 import { useWorkspaceStore } from '@/stores/workspace'
+import type { Project } from '@/api/types'
 
 const workspace = useWorkspaceStore()
+const route = useRoute()
 const router = useRouter()
 
 onMounted(() => {
-  void workspace.loadProjects()
+  void loadProjectsFromRoute()
 })
 
 async function refreshProjects() {
   await workspace.loadProjects()
+  selectRouteProject()
   ElMessage.success('项目状态已更新')
 }
 
-function openRoute(path: string) {
-  void router.push(path)
+async function loadProjectsFromRoute() {
+  await workspace.loadProjects()
+  selectRouteProject()
+}
+
+function selectRouteProject() {
+  const projectId = String(route.query.project_id || '')
+  if (projectId) workspace.selectProject(projectId)
+}
+
+function openRoute(path: string, project: Project) {
+  workspace.selectProject(project.id)
+  void router.push({ path, query: { project_id: project.id } })
+}
+
+function projectRowClass({ row }: { row: Project }) {
+  return row.id === workspace.activeProjectId ? 'active-project-row' : ''
 }
 
 function formatUpdatedAt(value: string) {
@@ -63,7 +81,7 @@ function progressStatus(value = 0, riskTotal = 0) {
 
     <section class="panel">
       <div class="panel-body">
-        <ElTable :data="workspace.projects" stripe>
+        <ElTable :data="workspace.projects" stripe :row-class-name="projectRowClass">
           <ElTableColumn label="项目" min-width="220" fixed>
             <template #default="{ row }">
               <div class="project-cell">
@@ -137,10 +155,10 @@ function progressStatus(value = 0, riskTotal = 0) {
           <ElTableColumn label="操作" width="310" fixed="right">
             <template #default="{ row }">
               <div class="row-actions">
-                <ElButton size="small" @click="openRoute('/project-board')">看板</ElButton>
-                <ElButton size="small" @click="openRoute('/claim-tasks')">任务</ElButton>
-                <ElButton size="small" @click="openRoute('/construction')">现场</ElButton>
-                <ElButton size="small" @click="openRoute('/task-hall')">审阅</ElButton>
+                <ElButton size="small" @click="openRoute('/project-board', row)">看板</ElButton>
+                <ElButton size="small" @click="openRoute('/claim-tasks', row)">任务</ElButton>
+                <ElButton size="small" @click="openRoute('/construction', row)">现场</ElButton>
+                <ElButton size="small" @click="openRoute('/task-hall', row)">审阅</ElButton>
               </div>
             </template>
           </ElTableColumn>
@@ -183,5 +201,9 @@ function progressStatus(value = 0, riskTotal = 0) {
 
 .metric-pair {
   justify-content: flex-start;
+}
+
+:deep(.active-project-row td) {
+  background: rgba(37, 99, 235, 0.06) !important;
 }
 </style>

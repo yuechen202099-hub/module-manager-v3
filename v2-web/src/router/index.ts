@@ -5,6 +5,7 @@ import { staticPages } from '@/router/staticPages'
 import { useAuthStore } from '@/stores/auth'
 
 const nativePageComponents = {
+  projects: () => import('@/views/ProjectsView.vue'),
   'project-board': () => import('@/views/ProjectBoardView.vue'),
   'claim-tasks': () => import('@/views/ClaimTasksView.vue'),
   'task-hall': () => import('@/views/TaskHallView.vue'),
@@ -62,9 +63,7 @@ const router = createRouter({
         },
         {
           path: 'projects',
-          name: 'projects',
-          component: () => import('@/views/ProjectsView.vue'),
-          meta: { title: '项目管理' },
+          redirect: '/platform-projects',
         },
         {
           path: 'checklists',

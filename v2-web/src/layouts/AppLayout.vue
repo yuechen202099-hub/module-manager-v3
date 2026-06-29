@@ -19,6 +19,7 @@ const pageTitle = computed(() => String(route.meta.title || '模块更换项目�
 const navigation = computed(() => {
   const role = auth.user?.role || 'reviewer'
   const iconMap = {
+    projects: List,
     'project-board': DataBoard,
     'claim-tasks': Tickets,
     'task-hall': List,
