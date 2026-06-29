@@ -119,6 +119,35 @@ def test_verify_production_baseline_uses_latest_production_tag(tmp_path):
     assert any("does not contain" in issue for issue in result.issues)
 
 
+def test_verify_production_baseline_can_follow_latest_production_ref(tmp_path):
+    script = load_script()
+    repo = init_repo(tmp_path)
+    commit_file(repo, "base.txt", "base\n", "base")
+    git(repo, "checkout", "-b", "production/v3.0.35")
+    commit_file(repo, "production.txt", "production\n", "production")
+    git(repo, "tag", "v3.0.68")
+    git(repo, "checkout", "main")
+    git(repo, "checkout", "-b", "production/V3/3.0.69")
+    latest_production_commit = commit_file(repo, "hotfix.txt", "hotfix\n", "hotfix")
+    git(repo, "tag", "v3.0.69")
+    git(repo, "checkout", "main")
+    commit_file(repo, "platform.txt", "platform\n", "platform")
+
+    result = script.verify_baseline(
+        repo=repo,
+        production_ref="latest",
+        baseline_tag="latest",
+        expected_commit="",
+        current_ref="HEAD",
+    )
+
+    assert result.ok is False
+    assert result.production_ref == "production/V3/3.0.69"
+    assert result.production_commit == latest_production_commit
+    assert result.baseline_tag == "v3.0.69"
+    assert any("does not contain" in issue for issue in result.issues)
+
+
 def test_verify_production_baseline_requires_tag_to_resolve_to_expected_commit(tmp_path):
     script = load_script()
     repo = init_repo(tmp_path)

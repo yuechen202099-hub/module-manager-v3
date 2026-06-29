@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -8,9 +9,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PRODUCTION_REF = "origin/production/v3.0.35"
+DEFAULT_PRODUCTION_REF = "latest"
 DEFAULT_REMOTE = "origin"
-DEFAULT_REMOTE_BRANCH = "production/v3.0.35"
+DEFAULT_REMOTE_BRANCH = "production/*"
 DEFAULT_BASELINE_TAG = "latest"
 DEFAULT_EXPECTED_COMMIT = ""
 
@@ -72,7 +73,44 @@ def latest_production_tag(repo: Path, production_ref: str) -> str:
     return tags[0]
 
 
+def latest_version_tag(repo: Path) -> str:
+    output = git_output(repo, ["tag", "--sort=-v:refname", "--list", "v[0-9]*"])
+    tags = [tag.strip() for tag in output.splitlines() if tag.strip()]
+    if not tags:
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["git", "tag", "--sort=-v:refname", "--list", "v[0-9]*"],
+            stderr="No version tags found",
+        )
+    return tags[0]
+
+
+def production_refs_containing(repo: Path, commit: str, remote: str) -> list[str]:
+    output = git_output(repo, ["branch", "-a", "--contains", commit, "--format=%(refname:short)"])
+    refs = [ref.strip() for ref in output.splitlines() if ref.strip()]
+    prefixes = (f"{remote}/production/", "production/")
+    return sorted(
+        [ref for ref in refs if ref.startswith(prefixes)],
+        key=lambda ref: [int(part) for part in re.findall(r"\d+", ref)],
+        reverse=True,
+    )
+
+
+def latest_production_ref(repo: Path, tag_commit: str, remote: str) -> str:
+    refs = production_refs_containing(repo, tag_commit, remote)
+    if not refs:
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["git", "branch", "-a", "--contains", tag_commit],
+            stderr=f"No production branch contains {tag_commit[:12]}",
+        )
+    return refs[0]
+
+
 def fetch_production_refs(repo: Path, remote: str, branch: str) -> None:
+    if branch in {"", "latest", "production/*"}:
+        run_git(repo, ["fetch", remote, f"+refs/heads/production/*:refs/remotes/{remote}/production/*", "--tags"])
+        return
     run_git(repo, ["fetch", remote, branch, "--tags"])
 
 
@@ -101,37 +139,44 @@ def verify_baseline(
             issues.append(f"{label} {ref} is not available locally: {command_error_text(exc)}")
             return ""
 
-    production_commit = resolve_or_issue(production_ref, "Production ref")
     effective_baseline_tag = baseline_tag
-    if baseline_tag in {"", "latest"} and production_commit:
+    if baseline_tag in {"", "latest"}:
         try:
-            effective_baseline_tag = latest_production_tag(repo, production_ref)
+            effective_baseline_tag = latest_version_tag(repo)
         except subprocess.CalledProcessError as exc:
             issues.append(f"Latest production tag is not available: {command_error_text(exc)}")
             effective_baseline_tag = ""
     tag_commit = resolve_or_issue(effective_baseline_tag, "Baseline tag") if effective_baseline_tag else ""
+    effective_production_ref = production_ref
+    if production_ref in {"", "latest"} and tag_commit:
+        try:
+            effective_production_ref = latest_production_ref(repo, tag_commit, remote)
+        except subprocess.CalledProcessError as exc:
+            issues.append(f"Latest production ref is not available: {command_error_text(exc)}")
+            effective_production_ref = ""
+    production_commit = resolve_or_issue(effective_production_ref, "Production ref") if effective_production_ref else ""
     current_commit = resolve_or_issue(current_ref, "Current ref")
 
     if expected_commit and production_commit and not production_commit.startswith(expected_commit):
         issues.append(
-            f"Production ref {production_ref} is {production_commit[:12]}, expected {expected_commit}"
+            f"Production ref {effective_production_ref} is {production_commit[:12]}, expected {expected_commit}"
         )
     if expected_commit and tag_commit and not tag_commit.startswith(expected_commit):
         issues.append(f"Baseline tag {effective_baseline_tag} is {tag_commit[:12]}, expected {expected_commit}")
     if tag_commit and production_commit and not is_ancestor(repo, tag_commit, production_commit):
         issues.append(
             f"Baseline tag {effective_baseline_tag} ({tag_commit[:12]}) is not contained in "
-            f"production ref {production_ref} ({production_commit[:12]})"
+            f"production ref {effective_production_ref} ({production_commit[:12]})"
         )
     if production_commit and current_commit and not is_ancestor(repo, production_commit, current_commit):
         issues.append(
-            f"Current ref {current_ref} does not contain production ref {production_ref} "
+            f"Current ref {current_ref} does not contain production ref {effective_production_ref} "
             f"({production_commit[:12]})"
         )
 
     return BaselineResult(
         ok=not issues,
-        production_ref=production_ref,
+        production_ref=effective_production_ref,
         production_commit=production_commit,
         baseline_tag=effective_baseline_tag,
         tag_commit=tag_commit,
