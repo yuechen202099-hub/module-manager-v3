@@ -63,6 +63,13 @@ export type AuthConfig = {
   account_config_enabled?: boolean
 }
 
+export type ProjectModule = {
+  id: string
+  name: string
+  priority: number
+  endpoint: string
+}
+
 export type Project = {
   id: string
   name: string
@@ -75,6 +82,7 @@ export type Project = {
   completedGroups: number
   exceptionGroups: number
   updatedAt: string
+  modules: ProjectModule[]
   tasks?: {
     total: number
     uploaded: number

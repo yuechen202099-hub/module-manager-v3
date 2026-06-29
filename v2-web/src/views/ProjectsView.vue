@@ -5,11 +5,17 @@ import { Plus, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
 import { useWorkspaceStore } from '@/stores/workspace'
-import type { Project } from '@/api/types'
+import type { Project, ProjectModule } from '@/api/types'
 
 const workspace = useWorkspaceStore()
 const route = useRoute()
 const router = useRouter()
+const fallbackModules: ProjectModule[] = [
+  { id: 'progress', name: '项目进度', priority: 10, endpoint: '' },
+  { id: 'delivery', name: '项目交付能力', priority: 20, endpoint: '' },
+  { id: 'field', name: '现场采集', priority: 30, endpoint: '' },
+  { id: 'review', name: '审阅功能', priority: 40, endpoint: '' },
+]
 
 onMounted(() => {
   void loadProjectsFromRoute()
@@ -33,6 +39,18 @@ function selectRouteProject() {
 function openRoute(path: string, project: Project) {
   workspace.selectProject(project.id)
   void router.push({ path, query: { project_id: project.id } })
+}
+
+function projectModuleRoute(moduleId: string) {
+  if (moduleId === 'field') return '/construction'
+  if (moduleId === 'review') return '/task-hall'
+  if (moduleId === 'tasks') return '/claim-tasks'
+  return '/project-board'
+}
+
+function projectActionModules(project: Project) {
+  const modules = project.modules.length ? project.modules : fallbackModules
+  return modules.filter((module) => ['progress', 'delivery', 'field', 'review', 'tasks'].includes(module.id))
 }
 
 function projectRowClass({ row }: { row: Project }) {
@@ -151,13 +169,17 @@ function progressStatus(value = 0, riskTotal = 0) {
               {{ formatUpdatedAt(row.updatedAt) }}
             </template>
           </ElTableColumn>
-          <ElTableColumn label="操作" width="310" fixed="right">
+          <ElTableColumn label="操作" width="360" fixed="right">
             <template #default="{ row }">
               <div class="row-actions">
-                <ElButton size="small" @click="openRoute('/project-board', row)">看板</ElButton>
-                <ElButton size="small" @click="openRoute('/claim-tasks', row)">任务</ElButton>
-                <ElButton size="small" @click="openRoute('/construction', row)">现场</ElButton>
-                <ElButton size="small" @click="openRoute('/task-hall', row)">审阅</ElButton>
+                <ElButton
+                  v-for="module in projectActionModules(row)"
+                  :key="module.id"
+                  size="small"
+                  @click="openRoute(projectModuleRoute(module.id), row)"
+                >
+                  {{ module.name }}
+                </ElButton>
               </div>
             </template>
           </ElTableColumn>

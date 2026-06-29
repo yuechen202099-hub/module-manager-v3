@@ -4,6 +4,7 @@ import type { Project } from './types'
 type ProjectModuleSections = Awaited<ReturnType<typeof fetchProjectModuleSections>>
 
 const projectListContract: () => Promise<Project[]> = fetchProjectsWithModules
+const projectModulesContract: Project['modules'] = []
 
 function assertProjectModuleShape(sections: ProjectModuleSections) {
   sections.progress.stage
@@ -15,4 +16,5 @@ function assertProjectModuleShape(sections: ProjectModuleSections) {
 }
 
 void projectListContract
+void projectModulesContract
 void assertProjectModuleShape

@@ -151,6 +151,7 @@ type BackendPlatformProject = {
     unconstructed_groups?: number
     delivery_blockers?: number
   }
+  modules?: BackendProjectModule[]
 }
 
 type BackendProjectProgress = {
@@ -193,6 +194,13 @@ type BackendProjectRisks = {
   field_exceptions?: number
   unconstructed_groups?: number
   delivery_blockers?: number
+}
+
+type BackendProjectModule = {
+  id?: string
+  name?: string
+  priority?: number
+  endpoint?: string
 }
 
 type ProjectProgressSection = Pick<Project, 'stage' | 'systemProgress' | 'managementProgress' | 'managementLocked'>
@@ -762,6 +770,18 @@ function mapProjectRisks(raw: BackendProjectRisks = {}): NonNullable<Project['ri
   }
 }
 
+function mapProjectModules(raw: BackendProjectModule[] = []): Project['modules'] {
+  return raw
+    .map((module) => ({
+      id: String(module.id || '').trim(),
+      name: String(module.name || '').trim(),
+      priority: Number(module.priority || 0),
+      endpoint: String(module.endpoint || '').trim(),
+    }))
+    .filter((module) => module.id && module.name)
+    .sort((left, right) => left.priority - right.priority)
+}
+
 function mapProject(raw: BackendPlatformProject): Project {
   const progress = mapProjectProgress(raw)
   return {
@@ -773,6 +793,7 @@ function mapProject(raw: BackendPlatformProject): Project {
     completedGroups: Number(raw.completed_groups || 0),
     exceptionGroups: Number(raw.exception_groups || 0),
     updatedAt: raw.updated_at || '',
+    modules: mapProjectModules(raw.modules),
     tasks: raw.tasks ? mapProjectTasks(raw.tasks) : undefined,
     delivery: raw.delivery ? mapProjectDelivery(raw.delivery) : undefined,
     field: raw.field ? mapProjectField(raw.field) : undefined,
