@@ -44,6 +44,28 @@ def test_platform_catalog_rejects_unknown_project_and_section():
         get_project_section("replacement-project", "unknown-section")
 
 
+def test_project_scoped_business_requests_accept_registered_project():
+    client = TestClient(app)
+    login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    headers = {"Authorization": f"bearer {login.json()['data']['access_token']}"}
+
+    response = client.get("/local-test/system/status?project_id=replacement-project", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["project_id"] == "replacement-project"
+
+
+def test_project_scoped_business_requests_reject_unknown_project():
+    client = TestClient(app)
+    login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    headers = {"Authorization": f"bearer {login.json()['data']['access_token']}"}
+
+    response = client.get("/local-test/system/status?project_id=unknown-project", headers=headers)
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Project not found"
+
+
 def test_platform_progress_module_calculates_stage_and_progress():
     progress = build_progress_summary(
         groups=10,

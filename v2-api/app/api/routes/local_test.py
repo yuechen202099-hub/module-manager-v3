@@ -39,6 +39,7 @@ from app.models import (
 )
 from app.services.ops_status import build_system_status
 from app.services.account_store import get_user
+from app.services.platform.context import current_request_project_id, resolve_request_project_id
 from app.services.project_board_cache import project_board_summary_cache
 from app.services.photo_storage import (
     normalize_suffix,
@@ -130,6 +131,7 @@ def response_group_target_summary(group: dict[str, Any] | None) -> dict[str, Any
 
 
 async def use_team_context(request: Request):
+    resolve_request_project_id(request)
     team_id = request.headers.get("X-Team-Id") or request.query_params.get("team_id") or ""
     payload = getattr(request.state, "auth", None)
     if payload:
@@ -283,7 +285,9 @@ def store_scan_import_job(job_id: str, update: dict) -> dict:
 def system_status(request: Request):
     if not request_is_admin(request):
         raise HTTPException(status_code=403, detail="Only administrators can view system status")
-    return ok(request, build_system_status())
+    payload = build_system_status()
+    payload["project_id"] = current_request_project_id(request)
+    return ok(request, payload)
 
 
 def response_payload(payload: dict) -> dict:
