@@ -35,6 +35,7 @@ class ProjectDefinition:
     description: str = ""
     created_at: str = ""
     updated_at: str = ""
+    work_item_schema: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -106,6 +107,39 @@ _PINYIN_SLUGS = {
 }
 
 
+_VALID_FIELD_SOURCES = {"import", "field_collection", "review", "system"}
+_VALID_CAPTURE_METHODS = {"manual", "scan", "photo", "select", "datetime", "location", "system", "none"}
+_VALID_DATA_TYPES = {"text", "number", "datetime", "image", "enum", "duration", "location", "boolean"}
+
+_PLATFORM_REQUIRED_FIELDS: tuple[dict[str, Any], ...] = (
+    {"key": "work_order_id", "label": "工单编号", "data_type": "text", "source": "system", "capture_method": "system", "required": True, "kpi_enabled": False},
+    {"key": "installer", "label": "安装人员", "data_type": "text", "source": "field_collection", "capture_method": "manual", "required": True, "kpi_enabled": True},
+    {"key": "collector", "label": "采集人员", "data_type": "text", "source": "field_collection", "capture_method": "manual", "required": False, "kpi_enabled": True},
+    {"key": "dispatcher", "label": "派工人员", "data_type": "text", "source": "system", "capture_method": "system", "required": False, "kpi_enabled": True},
+    {"key": "reviewer", "label": "审阅人员", "data_type": "text", "source": "review", "capture_method": "manual", "required": False, "kpi_enabled": True},
+    {"key": "dispatched_at", "label": "派工时间", "data_type": "datetime", "source": "system", "capture_method": "system", "required": False, "kpi_enabled": True},
+    {"key": "started_at", "label": "安装时间", "data_type": "datetime", "source": "field_collection", "capture_method": "datetime", "required": False, "kpi_enabled": True},
+    {"key": "completed_at", "label": "完成时间", "data_type": "datetime", "source": "field_collection", "capture_method": "datetime", "required": True, "kpi_enabled": True},
+    {"key": "uploaded_at", "label": "上传时间", "data_type": "datetime", "source": "system", "capture_method": "system", "required": False, "kpi_enabled": True},
+    {"key": "reviewed_at", "label": "审阅时间", "data_type": "datetime", "source": "review", "capture_method": "datetime", "required": False, "kpi_enabled": True},
+    {"key": "online_duration_minutes", "label": "在线时长（分钟）", "data_type": "duration", "source": "system", "capture_method": "system", "required": False, "kpi_enabled": True},
+    {"key": "location", "label": "现场位置", "data_type": "location", "source": "field_collection", "capture_method": "location", "required": False, "kpi_enabled": False},
+    {"key": "photo_count", "label": "照片数量", "data_type": "number", "source": "system", "capture_method": "system", "required": True, "kpi_enabled": True},
+    {"key": "scan_count", "label": "扫码次数", "data_type": "number", "source": "system", "capture_method": "system", "required": False, "kpi_enabled": True},
+    {"key": "manual_input_count", "label": "手工录入次数", "data_type": "number", "source": "system", "capture_method": "system", "required": False, "kpi_enabled": True},
+    {"key": "exception_status", "label": "异常状态", "data_type": "enum", "source": "review", "capture_method": "select", "required": False, "kpi_enabled": True, "options": ["正常", "异常", "已闭环"]},
+)
+
+_DEFAULT_DASHBOARD_METRICS: tuple[dict[str, str], ...] = (
+    {"key": "total_work_orders", "label": "工单总数"},
+    {"key": "collected_work_orders", "label": "已采集工单"},
+    {"key": "completed_work_orders", "label": "已完成工单"},
+    {"key": "exception_work_orders", "label": "异常工单"},
+    {"key": "average_online_duration", "label": "平均在线时长"},
+    {"key": "average_completion_duration", "label": "平均完工时长"},
+)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -137,6 +171,7 @@ def _project_definition_to_store(project: ProjectDefinition) -> dict[str, Any]:
         "description": project.description,
         "created_at": project.created_at,
         "updated_at": project.updated_at,
+        "work_item_schema": _normalize_work_item_schema(project.work_item_schema),
     }
 
 
@@ -171,6 +206,7 @@ def _project_definition_from_store(raw_project: Any) -> ProjectDefinition | None
         description=str(raw_project.get("description") or "").strip(),
         created_at=str(raw_project.get("created_at") or "").strip(),
         updated_at=str(raw_project.get("updated_at") or "").strip(),
+        work_item_schema=_normalize_work_item_schema(raw_project.get("work_item_schema")),
     )
 
 
@@ -225,6 +261,117 @@ def _slugify_project_name(name: str) -> str:
     return "draft-project"
 
 
+def _slugify_field_key(value: str, fallback: str) -> str:
+    slug = re.sub(r"[^a-z0-9_]+", "_", value.strip().lower()).strip("_")
+    slug = re.sub(r"_+", "_", slug)
+    return slug or fallback
+
+
+def _normalize_field_definition(
+    raw_field: Any,
+    *,
+    fallback_key: str,
+    fallback_label: str,
+    default_source: str,
+    default_capture_method: str,
+    default_required: bool,
+    default_kpi_enabled: bool = False,
+) -> dict[str, Any]:
+    raw = raw_field if isinstance(raw_field, dict) else {}
+    label = str(raw.get("label") or fallback_label).strip() or fallback_label
+    key = _slugify_field_key(str(raw.get("key") or label), fallback_key)
+    data_type = str(raw.get("data_type") or "text").strip()
+    source = str(raw.get("source") or default_source).strip()
+    capture_method = str(raw.get("capture_method") or default_capture_method).strip()
+    if data_type not in _VALID_DATA_TYPES:
+        raise ProjectValidationError(f"Unsupported field data type: {data_type}")
+    if source not in _VALID_FIELD_SOURCES:
+        raise ProjectValidationError(f"Unsupported field source: {source}")
+    if capture_method not in _VALID_CAPTURE_METHODS:
+        raise ProjectValidationError(f"Unsupported capture method: {capture_method}")
+    field = {
+        "key": key,
+        "label": label,
+        "data_type": data_type,
+        "source": source,
+        "capture_method": capture_method,
+        "required": bool(raw.get("required", default_required)),
+        "kpi_enabled": bool(raw.get("kpi_enabled", default_kpi_enabled)),
+    }
+    parent_key = str(raw.get("parent_key") or "").strip()
+    if parent_key:
+        field["parent_key"] = _slugify_field_key(parent_key, parent_key)
+    options = raw.get("options")
+    if isinstance(options, list):
+        clean_options = [str(option).strip() for option in options if str(option).strip()]
+        if clean_options:
+            field["options"] = clean_options
+    return field
+
+
+def _platform_required_fields() -> list[dict[str, Any]]:
+    return [
+        _normalize_field_definition(
+            field,
+            fallback_key=str(field["key"]),
+            fallback_label=str(field["label"]),
+            default_source=str(field["source"]),
+            default_capture_method=str(field["capture_method"]),
+            default_required=bool(field["required"]),
+            default_kpi_enabled=bool(field["kpi_enabled"]),
+        )
+        for field in _PLATFORM_REQUIRED_FIELDS
+    ]
+
+
+def _default_work_item_schema() -> dict[str, Any]:
+    return _normalize_work_item_schema(None)
+
+
+def _normalize_work_item_schema(raw_schema: Any) -> dict[str, Any]:
+    raw = raw_schema if isinstance(raw_schema, dict) else {}
+    primary_field = _normalize_field_definition(
+        raw.get("primary_field"),
+        fallback_key="work_item",
+        fallback_label="工单对象",
+        default_source="import",
+        default_capture_method="manual",
+        default_required=True,
+    )
+    aggregate_field = _normalize_field_definition(
+        raw.get("aggregate_field"),
+        fallback_key="work_order_group",
+        fallback_label="聚合对象",
+        default_source="import",
+        default_capture_method="manual",
+        default_required=True,
+    )
+    reserved_keys = {primary_field["key"], aggregate_field["key"]}
+    reserved_keys.update(field["key"] for field in _PLATFORM_REQUIRED_FIELDS)
+    custom_fields: list[dict[str, Any]] = []
+    for raw_field in raw.get("custom_fields", []) if isinstance(raw.get("custom_fields"), list) else []:
+        field = _normalize_field_definition(
+            raw_field,
+            fallback_key=f"custom_field_{len(custom_fields) + 1}",
+            fallback_label=f"子字段 {len(custom_fields) + 1}",
+            default_source="field_collection",
+            default_capture_method="manual",
+            default_required=False,
+        )
+        if field["key"] in reserved_keys:
+            raise ProjectValidationError(f"Field key is reserved or duplicated: {field['key']}")
+        reserved_keys.add(field["key"])
+        custom_fields.append(field)
+    return {
+        "schema_version": 1,
+        "primary_field": primary_field,
+        "aggregate_field": aggregate_field,
+        "platform_required_fields": _platform_required_fields(),
+        "custom_fields": custom_fields,
+        "dashboard_metrics": [dict(metric) for metric in _DEFAULT_DASHBOARD_METRICS],
+    }
+
+
 def _unique_project_id(base_id: str) -> str:
     existing_ids = {project.id for project in _PROJECTS} | set(_DRAFT_PROJECTS)
     if base_id not in existing_ids:
@@ -254,6 +401,7 @@ def _apply_project_definition(overview: dict[str, Any], definition: ProjectDefin
     overview["name"] = definition.name
     overview["status"] = definition.status
     overview["modules"] = [module.as_dict(definition.id) for module in modules]
+    overview["work_item_schema"] = _normalize_work_item_schema(definition.work_item_schema)
     if "progress" not in enabled_module_ids:
         for key in _PROJECT_PROGRESS_KEYS:
             overview.pop(key, None)
@@ -395,7 +543,13 @@ def _build_draft_project_overview(definition: ProjectDefinition) -> dict[str, An
     return _apply_project_definition(overview, definition)
 
 
-def create_project_draft(*, name: str, description: str = "", module_ids: list[str]) -> dict[str, Any]:
+def create_project_draft(
+    *,
+    name: str,
+    description: str = "",
+    module_ids: list[str],
+    work_item_schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     with _DRAFT_PROJECTS_LOCK:
         _load_project_drafts_unlocked()
         normalized_name = re.sub(r"\s+", " ", name.strip())
@@ -409,6 +563,7 @@ def create_project_draft(*, name: str, description: str = "", module_ids: list[s
             raise ProjectValidationError(f"Unknown project module: {unknown_modules[0]}")
         now = _now_iso()
         project_id = _unique_project_id(_slugify_project_name(normalized_name))
+        normalized_work_item_schema = _normalize_work_item_schema(work_item_schema)
         _DRAFT_PROJECTS[project_id] = ProjectDefinition(
             id=project_id,
             name=normalized_name,
@@ -418,6 +573,7 @@ def create_project_draft(*, name: str, description: str = "", module_ids: list[s
             description=description.strip(),
             created_at=now,
             updated_at=now,
+            work_item_schema=normalized_work_item_schema,
         )
         _save_project_drafts_unlocked()
     return get_project_overview(project_id)

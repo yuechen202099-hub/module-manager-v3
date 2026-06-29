@@ -11,6 +11,8 @@ import type {
   PhotoBarcodeReviewGroup,
   Project,
   ProjectCreatePayload,
+  ProjectFieldDefinition,
+  ProjectWorkItemSchema,
   ProjectSummary,
   ReplacementRecord,
   ReviewPhoto,
@@ -110,6 +112,27 @@ type BackendTaskStatusSummary = {
   groups?: number
 }
 
+type BackendProjectFieldDefinition = {
+  key?: string
+  label?: string
+  data_type?: ProjectFieldDefinition['dataType']
+  source?: ProjectFieldDefinition['source']
+  capture_method?: ProjectFieldDefinition['captureMethod']
+  required?: boolean
+  parent_key?: string
+  kpi_enabled?: boolean
+  options?: string[]
+}
+
+type BackendProjectWorkItemSchema = {
+  schema_version?: number
+  primary_field?: BackendProjectFieldDefinition
+  aggregate_field?: BackendProjectFieldDefinition
+  platform_required_fields?: BackendProjectFieldDefinition[]
+  custom_fields?: BackendProjectFieldDefinition[]
+  dashboard_metrics?: string[]
+}
+
 type BackendPlatformProject = {
   id: string
   name: string
@@ -153,6 +176,7 @@ type BackendPlatformProject = {
     delivery_blockers?: number
   }
   modules?: BackendProjectModule[]
+  work_item_schema?: BackendProjectWorkItemSchema
 }
 
 type BackendProjectProgress = {
@@ -818,6 +842,61 @@ function mapProjectModules(raw: BackendProjectModule[] = []): Project['modules']
     .sort((left, right) => left.priority - right.priority)
 }
 
+function mapWorkItemField(raw: BackendProjectFieldDefinition | undefined): ProjectFieldDefinition | undefined {
+  if (!raw?.key && !raw?.label) return undefined
+  return {
+    key: String(raw.key || '').trim(),
+    label: String(raw.label || raw.key || '').trim(),
+    dataType: raw.data_type || 'text',
+    source: raw.source || 'import',
+    captureMethod: raw.capture_method || 'manual',
+    required: Boolean(raw.required),
+    parentKey: raw.parent_key || undefined,
+    kpiEnabled: Boolean(raw.kpi_enabled),
+    options: Array.isArray(raw.options) ? raw.options.map(String) : [],
+  }
+}
+
+function mapWorkItemSchema(raw: BackendProjectWorkItemSchema | undefined): ProjectWorkItemSchema | undefined {
+  if (!raw) return undefined
+  return {
+    schemaVersion: Number(raw.schema_version || 1),
+    primaryField: mapWorkItemField(raw.primary_field),
+    aggregateField: mapWorkItemField(raw.aggregate_field),
+    platformRequiredFields: (raw.platform_required_fields || [])
+      .map(mapWorkItemField)
+      .filter((field): field is ProjectFieldDefinition => Boolean(field)),
+    customFields: (raw.custom_fields || [])
+      .map(mapWorkItemField)
+      .filter((field): field is ProjectFieldDefinition => Boolean(field)),
+    dashboardMetrics: Array.isArray(raw.dashboard_metrics) ? raw.dashboard_metrics.map(String) : [],
+  }
+}
+
+function mapWorkItemFieldForCreate(field: ProjectFieldDefinition | undefined): BackendProjectFieldDefinition | undefined {
+  if (!field) return undefined
+  return {
+    key: field.key,
+    label: field.label,
+    data_type: field.dataType,
+    source: field.source,
+    capture_method: field.captureMethod,
+    required: field.required,
+    parent_key: field.parentKey,
+    kpi_enabled: field.kpiEnabled,
+    options: field.options,
+  }
+}
+
+function mapWorkItemSchemaForCreate(schema: ProjectWorkItemSchema | undefined): BackendProjectWorkItemSchema | undefined {
+  if (!schema) return undefined
+  return {
+    primary_field: mapWorkItemFieldForCreate(schema.primaryField),
+    aggregate_field: mapWorkItemFieldForCreate(schema.aggregateField),
+    custom_fields: schema.customFields.map(mapWorkItemFieldForCreate).filter(Boolean) as BackendProjectFieldDefinition[],
+  }
+}
+
 function mapProject(raw: BackendPlatformProject): Project {
   const progress = mapProjectProgress(raw)
   const status = raw.status === 'draft' ? 'draft' : raw.status === 'archived' ? 'archived' : 'active'
@@ -831,6 +910,7 @@ function mapProject(raw: BackendPlatformProject): Project {
     exceptionGroups: Number(raw.exception_groups || 0),
     updatedAt: raw.updated_at || '',
     modules: mapProjectModules(raw.modules),
+    workItemSchema: mapWorkItemSchema(raw.work_item_schema),
     tasks: raw.tasks ? mapProjectTasks(raw.tasks) : undefined,
     delivery: raw.delivery ? mapProjectDelivery(raw.delivery) : undefined,
     field: raw.field ? mapProjectField(raw.field) : undefined,
@@ -1300,6 +1380,7 @@ export async function createProject(payload: ProjectCreatePayload): Promise<Proj
       name: payload.name,
       description: payload.description || '',
       module_ids: payload.moduleIds,
+      work_item_schema: mapWorkItemSchemaForCreate(payload.workItemSchema),
     }),
   })
   const project = mapProject(data)

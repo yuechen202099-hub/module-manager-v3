@@ -5,7 +5,26 @@ import { Plus, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
 import { useWorkspaceStore } from '@/stores/workspace'
-import type { Project, ProjectModule } from '@/api/types'
+import type {
+  Project,
+  ProjectCaptureMethod,
+  ProjectFieldDataType,
+  ProjectFieldDefinition,
+  ProjectFieldSource,
+  ProjectModule,
+  ProjectWorkItemSchema,
+} from '@/api/types'
+
+type CreateFieldForm = {
+  key: string
+  label: string
+  dataType: ProjectFieldDataType
+  source: ProjectFieldSource
+  captureMethod: ProjectCaptureMethod
+  required: boolean
+  parentKey: string
+  kpiEnabled: boolean
+}
 
 const workspace = useWorkspaceStore()
 const route = useRoute()
@@ -17,12 +36,49 @@ const fallbackModules: ProjectModule[] = [
   { id: 'review', name: '审阅功能', priority: 40, endpoint: '', routePath: '/task-hall' },
 ]
 const defaultModuleIds = ['progress', 'delivery', 'field', 'review']
+const sourceOptions: Array<{ value: ProjectFieldSource; label: string }> = [
+  { value: 'import', label: '初始导入' },
+  { value: 'field_collection', label: '现场采集' },
+  { value: 'review', label: '审阅补录' },
+]
+const captureMethodOptions: Array<{ value: ProjectCaptureMethod; label: string }> = [
+  { value: 'manual', label: '录入' },
+  { value: 'scan', label: '扫码' },
+  { value: 'photo', label: '拍照' },
+  { value: 'select', label: '选择' },
+  { value: 'datetime', label: '时间' },
+  { value: 'location', label: '定位' },
+]
+const dataTypeOptions: Array<{ value: ProjectFieldDataType; label: string }> = [
+  { value: 'text', label: '文本' },
+  { value: 'number', label: '数字' },
+  { value: 'datetime', label: '时间' },
+  { value: 'image', label: '图片' },
+  { value: 'enum', label: '选项' },
+  { value: 'duration', label: '时长' },
+  { value: 'location', label: '位置' },
+]
+const platformRequiredFields = [
+  '工单编号',
+  '安装人员',
+  '安装时间',
+  '完成时间',
+  '在线时间',
+  '在线时长',
+  '照片数量',
+  '扫码次数',
+  '异常状态',
+  '审阅人员',
+]
 const createDialogVisible = ref(false)
 const creatingProject = ref(false)
 const createForm = reactive({
   name: '',
   description: '',
   moduleIds: [...defaultModuleIds],
+  primaryField: defaultPrimaryField(),
+  aggregateField: defaultAggregateField(),
+  customFields: [defaultCustomField('module_asset_no', '模块', 'scan'), defaultCustomField('collector_no', '采集器', 'scan')],
 })
 
 const moduleOptions = computed(() => {
@@ -55,10 +111,99 @@ function openCreateDialog() {
   createDialogVisible.value = true
 }
 
+function defaultPrimaryField(): CreateFieldForm {
+  return {
+    key: 'meter_no',
+    label: '电能表',
+    dataType: 'text',
+    source: 'import',
+    captureMethod: 'manual',
+    required: true,
+    parentKey: '',
+    kpiEnabled: false,
+  }
+}
+
+function defaultAggregateField(): CreateFieldForm {
+  return {
+    key: 'area_no',
+    label: '台区',
+    dataType: 'text',
+    source: 'import',
+    captureMethod: 'manual',
+    required: true,
+    parentKey: '',
+    kpiEnabled: false,
+  }
+}
+
+function defaultCustomField(
+  key = '',
+  label = '',
+  captureMethod: ProjectCaptureMethod = 'manual',
+): CreateFieldForm {
+  return {
+    key,
+    label,
+    dataType: captureMethod === 'photo' ? 'image' : 'text',
+    source: 'field_collection',
+    captureMethod,
+    required: false,
+    parentKey: 'meter_no',
+    kpiEnabled: false,
+  }
+}
+
 function resetCreateForm() {
   createForm.name = ''
   createForm.description = ''
   createForm.moduleIds = [...defaultModuleIds]
+  createForm.primaryField = defaultPrimaryField()
+  createForm.aggregateField = defaultAggregateField()
+  createForm.customFields = [
+    defaultCustomField('module_asset_no', '模块', 'scan'),
+    defaultCustomField('collector_no', '采集器', 'scan'),
+  ]
+}
+
+function fieldParentOptions() {
+  return [
+    { value: createForm.primaryField.key || 'primary', label: createForm.primaryField.label || '主字段' },
+    { value: createForm.aggregateField.key || 'aggregate', label: createForm.aggregateField.label || '聚合字段' },
+  ]
+}
+
+function addCustomField() {
+  createForm.customFields.push(defaultCustomField())
+}
+
+function removeCustomField(index: number) {
+  createForm.customFields.splice(index, 1)
+}
+
+function toFieldDefinition(field: CreateFieldForm, fallbackKey: string): ProjectFieldDefinition {
+  return {
+    key: field.key.trim() || fallbackKey,
+    label: field.label.trim(),
+    dataType: field.dataType,
+    source: field.source,
+    captureMethod: field.captureMethod,
+    required: field.required,
+    parentKey: field.parentKey || undefined,
+    kpiEnabled: field.kpiEnabled,
+    options: [],
+  }
+}
+
+function buildWorkItemSchemaPayload(): ProjectWorkItemSchema {
+  return {
+    primaryField: toFieldDefinition(createForm.primaryField, 'primary_object'),
+    aggregateField: toFieldDefinition(createForm.aggregateField, 'aggregate_object'),
+    platformRequiredFields: [],
+    customFields: createForm.customFields
+      .filter((field) => field.label.trim())
+      .map((field, index) => toFieldDefinition(field, `custom_field_${index + 1}`)),
+  }
 }
 
 async function submitCreateProject() {
@@ -71,12 +216,21 @@ async function submitCreateProject() {
     ElMessage.warning('请至少选择一个模块')
     return
   }
+  if (!createForm.primaryField.label.trim() || !createForm.aggregateField.label.trim()) {
+    ElMessage.warning('请填写主字段和聚合字段')
+    return
+  }
+  if (createForm.customFields.some((field) => !field.label.trim())) {
+    ElMessage.warning('请补全子字段名称，或删除空字段')
+    return
+  }
   creatingProject.value = true
   try {
     const project = await workspace.createProjectDraft({
       name,
       description: createForm.description.trim(),
       moduleIds: createForm.moduleIds,
+      workItemSchema: buildWorkItemSchemaPayload(),
     })
     createDialogVisible.value = false
     resetCreateForm()
@@ -245,7 +399,7 @@ function progressStatus(value = 0, riskTotal = 0) {
       </div>
     </section>
 
-    <ElDialog v-model="createDialogVisible" title="新建项目草稿" width="520px" @closed="resetCreateForm">
+    <ElDialog v-model="createDialogVisible" title="新建项目草稿" width="860px" @closed="resetCreateForm">
       <ElForm label-position="top">
         <ElFormItem label="项目名称" required>
           <ElInput v-model="createForm.name" maxlength="40" show-word-limit placeholder="例如：线路巡检项目" />
@@ -267,6 +421,86 @@ function progressStatus(value = 0, riskTotal = 0) {
             </ElCheckbox>
           </ElCheckboxGroup>
         </ElFormItem>
+
+        <div class="schema-section">
+          <div class="schema-heading">
+            <strong>工单关键字段</strong>
+            <span>定义每个工单围绕什么对象管理，以及如何按现场维度汇总。</span>
+          </div>
+          <div class="field-grid two-columns">
+            <div class="field-block">
+              <span class="field-block-title">主字段</span>
+              <ElInput v-model="createForm.primaryField.label" placeholder="电能表 / 终端 / 台区" />
+              <ElInput v-model="createForm.primaryField.key" placeholder="字段编码，例如 meter_no" />
+            </div>
+            <div class="field-block">
+              <span class="field-block-title">聚合字段</span>
+              <ElInput v-model="createForm.aggregateField.label" placeholder="台区 / 供电所 / 线路" />
+              <ElInput v-model="createForm.aggregateField.key" placeholder="字段编码，例如 area_no" />
+            </div>
+          </div>
+        </div>
+
+        <div class="schema-section">
+          <div class="schema-heading">
+            <strong>业务子字段</strong>
+            <ElButton size="small" :icon="Plus" @click="addCustomField">添加字段</ElButton>
+          </div>
+          <div class="custom-field-list">
+            <div v-for="(field, index) in createForm.customFields" :key="index" class="custom-field-row">
+              <ElInput v-model="field.label" placeholder="字段名称，例如 模块 / 通讯模块 / 总表" />
+              <ElInput v-model="field.key" placeholder="字段编码" />
+              <ElSelect v-model="field.source" placeholder="来源">
+                <ElOption
+                  v-for="option in sourceOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </ElSelect>
+              <ElSelect v-model="field.captureMethod" placeholder="采集方式">
+                <ElOption
+                  v-for="option in captureMethodOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </ElSelect>
+              <ElSelect v-model="field.dataType" placeholder="格式">
+                <ElOption
+                  v-for="option in dataTypeOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </ElSelect>
+              <ElSelect v-model="field.parentKey" placeholder="归属">
+                <ElOption
+                  v-for="option in fieldParentOptions()"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </ElSelect>
+              <ElSwitch v-model="field.required" active-text="必填" inactive-text="可选" />
+              <ElButton size="small" :disabled="createForm.customFields.length <= 1" @click="removeCustomField(index)">
+                删除
+              </ElButton>
+            </div>
+          </div>
+        </div>
+
+        <div class="schema-section">
+          <div class="schema-heading">
+            <strong>平台必备字段</strong>
+            <span>用于 KPI、效率、审阅和追溯，创建后由系统保留。</span>
+          </div>
+          <div class="required-field-tags">
+            <ElTag v-for="field in platformRequiredFields" :key="field" type="info">
+              {{ field }}
+            </ElTag>
+          </div>
+        </div>
       </ElForm>
       <template #footer>
         <ElButton @click="createDialogVisible = false">取消</ElButton>
@@ -315,6 +549,70 @@ function progressStatus(value = 0, riskTotal = 0) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px 12px;
+}
+
+.schema-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px 0;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.schema-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.schema-heading strong,
+.field-block-title {
+  color: var(--el-text-color-primary);
+  font-size: 14px;
+}
+
+.schema-heading span {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.field-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.two-columns {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.field-block {
+  display: grid;
+  gap: 8px;
+}
+
+.custom-field-list {
+  display: grid;
+  gap: 10px;
+}
+
+.custom-field-row {
+  display: grid;
+  grid-template-columns: minmax(112px, 1.2fr) minmax(110px, 1fr) repeat(4, minmax(96px, 0.9fr)) minmax(88px, auto) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.required-field-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 860px) {
+  .two-columns,
+  .custom-field-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 :deep(.active-project-row td) {

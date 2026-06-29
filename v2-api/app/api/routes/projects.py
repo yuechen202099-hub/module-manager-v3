@@ -52,6 +52,7 @@ def create_project(payload: ProjectCreate, request: Request):
             name=payload.name,
             description=payload.description or "",
             module_ids=payload.module_ids,
+            work_item_schema=payload.work_item_schema.model_dump() if payload.work_item_schema else None,
         )
     except ProjectValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -71,10 +71,38 @@ export type ProjectModule = {
   routePath: string
 }
 
+export type ProjectFieldSource = 'import' | 'field_collection' | 'review' | 'system'
+
+export type ProjectCaptureMethod = 'manual' | 'scan' | 'photo' | 'select' | 'datetime' | 'location' | 'system' | 'none'
+
+export type ProjectFieldDataType = 'text' | 'number' | 'datetime' | 'image' | 'enum' | 'duration' | 'location' | 'boolean'
+
+export type ProjectFieldDefinition = {
+  key: string
+  label: string
+  dataType: ProjectFieldDataType
+  source: ProjectFieldSource
+  captureMethod: ProjectCaptureMethod
+  required: boolean
+  parentKey?: string
+  kpiEnabled: boolean
+  options: string[]
+}
+
+export type ProjectWorkItemSchema = {
+  schemaVersion?: number
+  primaryField?: ProjectFieldDefinition
+  aggregateField?: ProjectFieldDefinition
+  platformRequiredFields: ProjectFieldDefinition[]
+  customFields: ProjectFieldDefinition[]
+  dashboardMetrics?: string[]
+}
+
 export type ProjectCreatePayload = {
   name: string
   description?: string
   moduleIds: string[]
+  workItemSchema?: ProjectWorkItemSchema
 }
 
 export type Project = {
@@ -90,6 +118,7 @@ export type Project = {
   exceptionGroups: number
   updatedAt: string
   modules: ProjectModule[]
+  workItemSchema?: ProjectWorkItemSchema
   tasks?: {
     total: number
     uploaded: number

@@ -471,6 +471,99 @@ def test_project_draft_registry_persists_created_projects(tmp_path):
     assert payload["projects"][0]["module_ids"] == ["progress", "review"]
 
 
+def test_create_project_draft_keeps_work_item_schema_with_required_platform_fields():
+    client = TestClient(app)
+    response = client.post(
+        "/projects",
+        json={
+            "name": "Meter Replacement Field Model",
+            "module_ids": ["progress", "field", "review"],
+            "work_item_schema": {
+                "primary_field": {
+                    "key": "meter_no",
+                    "label": "Electric meter",
+                    "data_type": "text",
+                    "source": "import",
+                    "capture_method": "scan",
+                    "required": True,
+                },
+                "aggregate_field": {
+                    "key": "terminal",
+                    "label": "Terminal",
+                    "data_type": "text",
+                    "source": "import",
+                    "capture_method": "manual",
+                    "required": True,
+                },
+                "custom_fields": [
+                    {
+                        "key": "module_asset_no",
+                        "label": "Module asset number",
+                        "data_type": "text",
+                        "source": "field_collection",
+                        "capture_method": "scan",
+                        "required": True,
+                        "parent_key": "meter_no",
+                    },
+                    {
+                        "key": "collector_no",
+                        "label": "Collector number",
+                        "data_type": "text",
+                        "source": "field_collection",
+                        "capture_method": "scan",
+                        "required": False,
+                        "parent_key": "meter_no",
+                    },
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    schema = response.json()["data"]["work_item_schema"]
+    assert schema["primary_field"]["key"] == "meter_no"
+    assert schema["aggregate_field"]["key"] == "terminal"
+    assert [field["key"] for field in schema["custom_fields"]] == ["module_asset_no", "collector_no"]
+    required_keys = {field["key"] for field in schema["platform_required_fields"]}
+    assert {"installer", "completed_at", "online_duration_minutes", "photo_count"}.issubset(required_keys)
+    required_by_key = {field["key"]: field for field in schema["platform_required_fields"]}
+    assert required_by_key["installer"]["label"] == "安装人员"
+    assert required_by_key["completed_at"]["label"] == "完成时间"
+    assert required_by_key["online_duration_minutes"]["label"] == "在线时长（分钟）"
+    assert required_by_key["photo_count"]["label"] == "照片数量"
+    kpi_keys = {field["key"] for field in schema["platform_required_fields"] if field["kpi_enabled"]}
+    assert {"installer", "completed_at", "online_duration_minutes"}.issubset(kpi_keys)
+
+
+def test_project_draft_registry_persists_work_item_schema(tmp_path):
+    store_path = tmp_path / "platform-project-drafts.json"
+    configure_project_draft_store_path(store_path)
+    client = TestClient(app)
+
+    response = client.post(
+        "/projects",
+        json={
+            "name": "Terminal Swap Field Model",
+            "module_ids": ["progress", "field"],
+            "work_item_schema": {
+                "primary_field": {"key": "terminal_no", "label": "Terminal", "source": "import"},
+                "aggregate_field": {"key": "area", "label": "Area", "source": "import"},
+                "custom_fields": [
+                    {"key": "carrier_module", "label": "Carrier module", "source": "field_collection"}
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(store_path.read_text(encoding="utf-8"))
+    stored_schema = payload["projects"][0]["work_item_schema"]
+    assert stored_schema["primary_field"]["key"] == "terminal_no"
+    assert stored_schema["aggregate_field"]["key"] == "area"
+    assert stored_schema["custom_fields"][0]["key"] == "carrier_module"
+    assert any(field["key"] == "installer" for field in stored_schema["platform_required_fields"])
+
+
 def test_project_draft_registry_recovers_projects_after_memory_reset(tmp_path):
     store_path = tmp_path / "platform-project-drafts.json"
     configure_project_draft_store_path(store_path)
