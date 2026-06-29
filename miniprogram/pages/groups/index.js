@@ -1,6 +1,6 @@
 const { GROUP_FILTERS, PHOTO_SLOTS, groupStatusLabel } = require('../../utils/constants')
 const { requireSession } = require('../../utils/session')
-const { fetchGroups, matchesGroup, findGroupByScan } = require('../../services/groups')
+const { fetchGroups, matchesGroup, filterRemoteGroupsByLocalDrafts, findGroupByScan } = require('../../services/groups')
 const drafts = require('../../services/drafts')
 const uploadQueue = require('../../services/uploadQueue')
 
@@ -78,7 +78,7 @@ Page({
           statusLabel: '待上传'
         })))
     } else {
-      visibleGroups = this.data.groups
+      visibleGroups = filterRemoteGroupsByLocalDrafts(this.data.groups, this.data.localDrafts, this.data.activeFilter)
         .filter((group) => matchesGroup(group, keyword))
         .map((group) => this.decorateGroup(group))
     }
