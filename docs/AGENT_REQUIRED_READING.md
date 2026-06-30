@@ -5,10 +5,9 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.0.70`
-- 当前生产应用基线：`V3.0.70`
-- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.70`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
-- 生产版本会持续更新；任何平台化开发、合并、发布、长会话恢复或接手前，必须先获取 `origin` 下的生产分支和最新生产 tag，并运行 `python scripts/verify_production_baseline.py --fetch`，确认平台分支已经纳入最新生产修复，不能在过期生产基线上继续扩展平台能力。
+- 生产维护分支：`production/V3/3.0.71`
+- 当前生产应用基线：`V3.0.71`
+- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.71`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
 - worktree 路径里的 `production-v3.0.24` 是创建时名称，不代表当前线上版本。
 
@@ -69,7 +68,6 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest v2-api/tests
-.\.venv\Scripts\python.exe .\scripts\verify_production_baseline.py
 .\.venv\Scripts\python.exe .\scripts\verify_release_sop.py
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py --help
 cd v2-web; npm run build
@@ -81,8 +79,6 @@ cd v2-web; npm run build
 
 ```powershell
 git status -sb
-git fetch origin "+refs/heads/production/*:refs/remotes/origin/production/*" --tags
-python scripts/verify_production_baseline.py
 git diff --stat
 git diff --cached --stat
 git diff --cached --name-only

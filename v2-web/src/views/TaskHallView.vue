@@ -357,21 +357,30 @@ function groupBarcodeProgressTag(group: MaterialGroup) {
   }
 }
 
+function isManualBarcodeConfirmed() {
+  return Boolean(activeGroup.value?.groupBarcodeManualConfirmed)
+}
+
+function isPhotoBarcodePassed(photo: ReviewPhoto | null | undefined) {
+  const status = String(photo?.barcodeCheckStatus || '')
+  return status === 'matched' || (isManualBarcodeConfirmed() && ['mismatched', 'unreadable'].includes(status))
+}
+
 function categoryLabel(key: string | undefined) {
   return categories.find((item) => item.key === key)?.label || '未分类'
 }
 
 function barcodeStatusType(photo: ReviewPhoto | null | undefined) {
+  if (isPhotoBarcodePassed(photo)) return 'success' as const
   const status = String(photo?.barcodeCheckStatus || '')
-  if (status === 'matched') return 'success' as const
   if (status === 'mismatched') return 'danger' as const
   if (status === 'unreadable') return 'warning' as const
   return 'info' as const
 }
 
 function barcodeStatusLabel(photo: ReviewPhoto | null | undefined) {
+  if (isPhotoBarcodePassed(photo)) return '扫码通过'
   const status = String(photo?.barcodeCheckStatus || '')
-  if (status === 'matched') return '扫码通过'
   if (status === 'mismatched') return '条码异常'
   if (status === 'unreadable') return '无法识别'
   if (status === 'not_required') return '无需扫码'
@@ -1892,7 +1901,7 @@ onUnmounted(() => {
             <span v-else class="photo-thumb-empty" aria-hidden="true"></span>
             <span class="photo-chip-label">#{{ index + 1 }} {{ categoryLabel(photo.category) }}</span>
             <ElTag
-              v-if="photo.barcodeCheckStatus === 'matched'"
+              v-if="isPhotoBarcodePassed(photo)"
               class="photo-scan-passed"
               size="small"
               type="success"

@@ -1946,6 +1946,7 @@ export async function fetchPhotoBarcodeReviewGroups(
   status = 'unreadable',
   page = 1,
   pageSize = 20,
+  query = '',
 ): Promise<{ total: number; items: PhotoBarcodeReviewGroup[] }> {
   const safePage = Math.max(1, Math.floor(Number(page) || 1))
   const safePageSize = Math.max(1, Math.min(100, Math.floor(Number(pageSize) || 20)))
@@ -1954,6 +1955,7 @@ export async function fetchPhotoBarcodeReviewGroups(
     limit: String(safePageSize),
     offset: String((safePage - 1) * safePageSize),
   })
+  if (query.trim()) params.set('query', query.trim())
   const data = await api<{ total: number; items: BackendPhotoBarcodeReviewGroup[] }>(
     `/local-test/photo-barcode/review-groups?${params.toString()}`,
   )
@@ -1963,8 +1965,9 @@ export async function fetchPhotoBarcodeReviewGroups(
   }
 }
 
-export async function exportPhotoBarcodeReviewGroups(status = 'unreadable'): Promise<void> {
+export async function exportPhotoBarcodeReviewGroups(status = 'unreadable', query = ''): Promise<void> {
   const params = new URLSearchParams({ status })
+  if (query.trim()) params.set('query', query.trim())
   const response = await fetchWithAuth(`/local-test/photo-barcode/review-groups/export?${params.toString()}`, {
     method: 'GET',
     headers: formHeaders(),

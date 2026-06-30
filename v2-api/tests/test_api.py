@@ -143,7 +143,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.70"
+    assert data["version"] == "3.0.71"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -500,6 +500,33 @@ def test_photo_barcode_review_groups_are_paginated_and_include_archived_groups()
     assert archived_item["archived"] is True
 
 
+def test_photo_barcode_review_groups_support_passed_all_and_query_filters() -> None:
+    headers = demo_admin_headers()
+    seeded = seed_photo_barcode_review_groups(count=3)
+    seeded[0]["group_barcode_manual_confirmed"] = True
+    seeded[0]["group_barcode_manual_confirmed_fields"] = ["meter", "module", "collector"]
+    seeded[0]["terminal"] = "TERMINAL-PASSED-001"
+    seeded[1]["terminal"] = "TERMINAL-UNREADABLE-002"
+
+    passed_response = client.get(
+        "/local-test/photo-barcode/review-groups?status=matched&query=TERMINAL-PASSED-001",
+        headers=headers,
+    )
+    all_response = client.get(
+        "/local-test/photo-barcode/review-groups?status=all&query=TERMINAL-",
+        headers=headers,
+    )
+
+    assert passed_response.status_code == 200
+    passed_payload = passed_response.json()["data"]
+    assert passed_payload["total"] == 1
+    assert passed_payload["items"][0]["group_id"] == seeded[0]["id"]
+    assert passed_payload["items"][0]["status"] == "matched"
+    assert all_response.status_code == 200
+    all_items = all_response.json()["data"]["items"]
+    assert {item["group_id"] for item in all_items} >= {seeded[0]["id"], seeded[1]["id"]}
+
+
 def test_photo_barcode_review_groups_export_returns_admin_workbook() -> None:
     headers = demo_admin_headers()
     seed_photo_barcode_review_groups(count=1)
@@ -522,6 +549,36 @@ def test_photo_barcode_review_groups_export_returns_admin_workbook() -> None:
     assert "资料组状态" in headers
     assert "是否已归档" in headers
     assert "缺失项" in headers
+
+
+def test_photo_barcode_review_groups_export_supports_passed_query_filter() -> None:
+    headers = demo_admin_headers()
+    seeded = seed_photo_barcode_review_groups(count=3)
+    seeded[0]["group_barcode_manual_confirmed"] = True
+    seeded[0]["group_barcode_manual_confirmed_fields"] = ["meter", "module", "collector"]
+    seeded[0]["terminal"] = "TERMINAL-EXPORT-PASSED-001"
+    seeded[1]["terminal"] = "TERMINAL-EXPORT-UNREADABLE-002"
+    local_simulation.save_all_team_states()
+
+    export_response = client.get(
+        "/local-test/photo-barcode/review-groups/export?status=matched&query=TERMINAL-EXPORT-PASSED-001",
+        headers=headers,
+    )
+
+    assert export_response.status_code == 200
+
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(export_response.content), read_only=True)
+    sheet = workbook.active
+    rows = list(sheet.iter_rows(values_only=True))
+    headers_row = list(rows[0])
+    status_index = headers_row.index("状态")
+    terminal_index = headers_row.index("终端")
+    data_rows = rows[1:]
+    assert len(data_rows) == 1
+    assert data_rows[0][status_index] == "通过"
+    assert data_rows[0][terminal_index] == "TERMINAL-EXPORT-PASSED-001"
 
 
 def test_account_login_history_keeps_30_rows_and_marks_ip_common_user(monkeypatch, tmp_path) -> None:
@@ -762,7 +819,7 @@ def test_photo_barcode_rescan_route_updates_photo_with_ocr(monkeypatch) -> None:
 
 
 def test_group_barcode_manual_confirm_route_marks_summary_and_audits() -> None:
-    team_id = "manual-confirm-route-test"
+    team_id = f"manual-confirm-route-test-{uuid4()}"
     headers = {"X-Team-Id": team_id}
     client.post("/local-test/bootstrap", headers=headers)
     token = local_simulation.set_current_team(team_id)
@@ -784,8 +841,14 @@ def test_group_barcode_manual_confirm_route_marks_summary_and_audits() -> None:
                 ],
             }
         )
+        local_simulation.refresh_summary()
     finally:
         local_simulation.reset_current_team(token)
+
+    cached_summary_response = client.get("/local-test/summary", headers=headers)
+    assert cached_summary_response.status_code == 200
+    cached_summary = cached_summary_response.json()["data"]["summary"]
+    assert cached_summary["group_barcode_accuracy_unreadable"] >= 1
 
     claim_response = client.post(f"/local-test/tasks/{task['id']}/claim", json={"reviewer": "api-test"}, headers=headers)
     assert claim_response.status_code == 200
@@ -801,6 +864,12 @@ def test_group_barcode_manual_confirm_route_marks_summary_and_audits() -> None:
     assert payload["group"]["group_barcode_manual_confirmed"] is True
     assert payload["group"]["group_barcode_passed_count"] == 3
     assert payload["group"]["group_barcode_check_status"] == "matched"
+
+    summary_response = client.get("/local-test/summary", headers=headers)
+    assert summary_response.status_code == 200
+    summary = summary_response.json()["data"]["summary"]
+    assert summary["group_barcode_accuracy_passed"] >= 1
+    assert summary["group_barcode_accuracy_unreadable"] == cached_summary["group_barcode_accuracy_unreadable"] - 1
 
     audit_response = client.get("/local-test/audit-log?limit=1", headers=headers)
     assert audit_response.status_code == 200

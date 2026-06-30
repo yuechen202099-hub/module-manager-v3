@@ -626,6 +626,41 @@ def test_group_barcode_review_items_skip_incomplete_photo_sets() -> None:
     assert items == []
 
 
+def test_manual_confirmed_group_moves_from_exception_to_passed_review_items() -> None:
+    group = {
+        "id": "manual-confirmed-group",
+        "meter_no": "110000288056",
+        "module_asset_no": "MOD-001",
+        "collector": "COLLECTOR-001",
+        "group_barcode_manual_confirmed": True,
+        "group_barcode_manual_confirmed_fields": ["meter", "module", "collector"],
+        "photos": [
+            {"id": "photo-1", "barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
+            {"id": "photo-2", "barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
+            {"id": "photo-3", "barcode_check_status": "mismatched", "barcode_check_normalized_values": ["NOISE999"]},
+            {"id": "photo-4", "barcode_check_status": "not_required", "barcode_check_normalized_values": []},
+        ],
+    }
+
+    exception_items = photo_barcode_check.list_group_barcode_review_items(
+        [group],
+        statuses={"unreadable", "mismatched"},
+    )
+    passed_items = photo_barcode_check.list_group_barcode_review_items(
+        [group],
+        statuses={"matched"},
+    )
+    accuracy = summarize_group_barcode_accuracy([group])
+
+    assert exception_items == []
+    assert len(passed_items) == 1
+    assert passed_items[0]["status"] == "matched"
+    assert passed_items[0]["missing_fields"] == []
+    assert accuracy["group_barcode_accuracy_passed"] == 1
+    assert accuracy["group_barcode_accuracy_failed"] == 0
+    assert accuracy["group_barcode_accuracy_unreadable"] == 0
+
+
 def tiny_jpeg_bytes() -> bytes:
     buffer = BytesIO()
     Image.new("RGB", (8, 8), "white").save(buffer, format="JPEG")
