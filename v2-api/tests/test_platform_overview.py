@@ -1,6 +1,8 @@
 import json
+from io import BytesIO
 
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 import pytest
 
 from app.main import app
@@ -645,6 +647,82 @@ def test_project_draft_registry_recovers_projects_after_memory_reset(tmp_path):
     assert detail_response.status_code == 200
     assert detail_response.json()["data"]["id"] == project_id
     assert [module["id"] for module in modules_response.json()["data"]["items"]] == ["field", "review"]
+
+
+@pytest.mark.parametrize(
+    ("template_type", "expected_headers"),
+    [
+        ("initial_work_orders", ["Terminal", "Station area", "Address"]),
+        ("field_collection", ["Communication module", "Installed at"]),
+        ("external_completed", ["Terminal", "Station area", "Address", "Communication module", "Installed at"]),
+    ],
+)
+def test_project_templates_download_schema_driven_workbooks(template_type, expected_headers):
+    client = TestClient(app)
+    create_response = client.post(
+        "/projects",
+        json={
+            "name": "Terminal Field Template Demo",
+            "module_ids": ["progress", "field", "review"],
+            "work_item_schema": {
+                "primary_field": {"key": "terminal_no", "label": "Terminal", "source": "import", "required": True},
+                "aggregate_field": {"key": "station_area", "label": "Station area", "source": "import", "required": True},
+                "custom_fields": [
+                    {"key": "address", "label": "Address", "source": "import", "required": False},
+                    {
+                        "key": "communication_module",
+                        "label": "Communication module",
+                        "source": "field_collection",
+                        "capture_method": "scan",
+                        "required": True,
+                    },
+                    {
+                        "key": "installed_at",
+                        "label": "Installed at",
+                        "source": "field_collection",
+                        "capture_method": "datetime",
+                        "data_type": "datetime",
+                    },
+                ],
+            },
+        },
+    )
+    project_id = create_response.json()["data"]["id"]
+
+    response = client.get(f"/projects/{project_id}/templates/{template_type}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    workbook = load_workbook(BytesIO(response.content))
+    assert workbook.sheetnames == ["template", "fields"]
+    template_sheet = workbook["template"]
+    headers = [cell.value for cell in template_sheet[1] if cell.value]
+    for expected_header in expected_headers:
+        assert expected_header in headers
+    assert template_sheet.max_row >= 3
+    fields_sheet = workbook["fields"]
+    field_rows = {
+        row[0]: row
+        for row in fields_sheet.iter_rows(min_row=2, values_only=True)
+        if row[0]
+    }
+    assert "terminal_no" in field_rows
+    assert "station_area" in field_rows
+    if template_type == "external_completed":
+        assert "uploaded_at" in field_rows
+        assert field_rows["uploaded_at"][6] == "平台上传时补齐"
+        assert field_rows["completed_at"][6] == "缺失时按上传时间补齐"
+        assert field_rows["installer"][6] == "缺失时按上传人补齐"
+
+
+def test_unknown_project_template_type_returns_404():
+    client = TestClient(app)
+
+    response = client.get("/projects/replacement-project/templates/unknown")
+
+    assert response.status_code == 404
 
 
 @pytest.mark.parametrize(

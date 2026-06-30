@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response
 
 from app.core.responses import ok
 from app.schemas.project import ProjectCreate, ProjectWorkItemSchemaUpdate
@@ -13,6 +14,7 @@ from app.services.platform.catalog import (
     list_project_overviews,
     update_project_work_item_schema,
 )
+from app.services.platform.templates import build_project_template_workbook, project_template_filename
 
 router = APIRouter(prefix="/projects")
 
@@ -119,6 +121,24 @@ def list_project_module_definitions(project_id: str, request: Request):
 @router.get("/{project_id}/modules/{module_id}")
 def get_project_module(project_id: str, module_id: str, request: Request):
     return ok(request, _project_section_or_404(project_id, module_id))
+
+
+@router.get("/{project_id}/templates/{template_type}")
+def download_project_template(project_id: str, template_type: str):
+    try:
+        content = build_project_template_workbook(project_id, template_type)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="Project not found")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Project template not found")
+    except ProjectConfigurationError:
+        raise HTTPException(status_code=500, detail="Project configuration invalid")
+    filename = project_template_filename(project_id, template_type)
+    return Response(
+        content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{project_id}")

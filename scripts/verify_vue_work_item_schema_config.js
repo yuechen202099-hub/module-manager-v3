@@ -84,6 +84,16 @@ const checks = [
       constructionViewSource.includes("field_values"),
     message: "Construction collection form must render, cache, scan, validate, and upload configured field values.",
   },
+  {
+    ok:
+      servicesSource.includes("export async function downloadProjectTemplate") &&
+      servicesSource.includes("`/projects/${projectId}/templates/${templateType}`") &&
+      projectsViewSource.includes("downloadProjectTemplate") &&
+      projectsViewSource.includes("downloadTemplate(row, 'initial_work_orders')") &&
+      projectsViewSource.includes("downloadTemplate(row, 'field_collection')") &&
+      projectsViewSource.includes("downloadTemplate(row, 'external_completed')"),
+    message: "Projects view must offer schema-driven initial, field collection, and external completed template downloads.",
+  },
 ];
 
 const failures = checks.filter((check) => !check.ok);

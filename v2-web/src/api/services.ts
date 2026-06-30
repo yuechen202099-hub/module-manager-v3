@@ -12,6 +12,7 @@ import type {
   Project,
   ProjectCreatePayload,
   ProjectFieldDefinition,
+  ProjectTemplateType,
   ProjectWorkItemSchema,
   ProjectSummary,
   ReplacementRecord,
@@ -1415,6 +1416,23 @@ export async function updateProjectWorkItemSchema(
     risks: sections.risks,
     tasks: sections.tasks,
   }
+}
+
+export async function downloadProjectTemplate(
+  projectId: string,
+  templateType: ProjectTemplateType,
+  projectName = projectId,
+): Promise<void> {
+  const response = await fetchWithAuth(`/projects/${projectId}/templates/${templateType}`, {
+    method: 'GET',
+    headers: authHeaders(),
+  })
+  if (!response.ok) {
+    throw new Error(response.statusText || '项目模板下载失败')
+  }
+  const blob = await response.blob()
+  const fallbackName = `${projectName || projectId}-${templateType}.xlsx`
+  triggerBrowserDownload(blob, filenameFromDisposition(response.headers.get('Content-Disposition') || '', fallbackName))
 }
 
 export async function fetchProjects(): Promise<Project[]> {

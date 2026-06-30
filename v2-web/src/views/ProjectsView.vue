@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
+import { downloadProjectTemplate } from '@/api/services'
 import { useWorkspaceStore } from '@/stores/workspace'
 import type {
   Project,
@@ -12,6 +13,7 @@ import type {
   ProjectFieldDefinition,
   ProjectFieldSource,
   ProjectModule,
+  ProjectTemplateType,
   ProjectWorkItemSchema,
 } from '@/api/types'
 
@@ -324,6 +326,15 @@ async function submitSchemaUpdate() {
   }
 }
 
+async function downloadTemplate(project: Project, templateType: ProjectTemplateType) {
+  try {
+    await downloadProjectTemplate(project.id, templateType, project.name)
+    ElMessage.success('模板已开始下载')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '模板下载失败')
+  }
+}
+
 function openRoute(path: string, project: Project) {
   if (project.status === 'draft') {
     ElMessage.info('草稿项目模块待接入，先保留在项目列表中管理')
@@ -463,11 +474,20 @@ function progressStatus(value = 0, riskTotal = 0) {
               {{ formatUpdatedAt(row.updatedAt) }}
             </template>
           </ElTableColumn>
-          <ElTableColumn label="操作" width="360" fixed="right">
+          <ElTableColumn label="操作" width="560" fixed="right">
             <template #default="{ row }">
               <div class="row-actions">
                 <ElButton size="small" type="primary" plain @click="openSchemaDialog(row)">
                   字段配置
+                </ElButton>
+                <ElButton size="small" plain @click="downloadTemplate(row, 'initial_work_orders')">
+                  初始工单模板
+                </ElButton>
+                <ElButton size="small" plain @click="downloadTemplate(row, 'field_collection')">
+                  现场采集模板
+                </ElButton>
+                <ElButton size="small" plain @click="downloadTemplate(row, 'external_completed')">
+                  系统外已完成模板
                 </ElButton>
                 <ElButton
                   v-for="module in projectActionModules(row)"
