@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build the first version of a project template center so each configured project can download Excel templates for initial work orders, field collection, and externally completed work.
+Build the first version of a project template center so each configured project can download Excel templates for onboarding work that started outside the platform.
 
 ## Scope
 
@@ -11,8 +11,9 @@ The first version focuses on template generation and safe simulation data. Impor
 ## Template Types
 
 - `initial_work_orders`: fields that can be imported before construction starts, including the primary field, aggregate field, and custom fields whose source is `import`.
-- `field_collection`: fields expected from site collection, including custom fields whose source is `field_collection`.
-- `external_completed`: fields that an outside system can reasonably provide for already completed work. It includes the primary field, aggregate field, import fields, field collection fields, and optional evidence fields.
+- `external_completed`: fields that an outside system can reasonably provide for already completed work. It includes the primary field, aggregate field, import fields, field collection fields that outside records may already have, and optional evidence fields.
+
+There is no separate `field_collection` download template. Site collection is handled by the platform's construction workflow; templates are for bringing a mid-run or externally completed project into the platform without requiring fields only the platform can know.
 
 ## External Completed Rules
 

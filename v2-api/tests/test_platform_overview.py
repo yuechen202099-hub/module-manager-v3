@@ -653,7 +653,6 @@ def test_project_draft_registry_recovers_projects_after_memory_reset(tmp_path):
     ("template_type", "expected_headers"),
     [
         ("initial_work_orders", ["Terminal", "Station area", "Address"]),
-        ("field_collection", ["Communication module", "Installed at"]),
         ("external_completed", ["Terminal", "Station area", "Address", "Communication module", "Installed at"]),
     ],
 )
@@ -721,6 +720,14 @@ def test_unknown_project_template_type_returns_404():
     client = TestClient(app)
 
     response = client.get("/projects/replacement-project/templates/unknown")
+
+    assert response.status_code == 404
+
+
+def test_field_collection_project_template_returns_404():
+    client = TestClient(app)
+
+    response = client.get("/projects/replacement-project/templates/field_collection")
 
     assert response.status_code == 404
 

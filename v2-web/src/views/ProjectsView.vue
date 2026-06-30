@@ -34,6 +34,14 @@ type WorkItemSchemaForm = {
   customFields: CreateFieldForm[]
 }
 
+type FieldPreset = {
+  key: string
+  label: string
+  dataType: ProjectFieldDataType
+  source: ProjectFieldSource
+  captureMethod: ProjectCaptureMethod
+}
+
 const workspace = useWorkspaceStore()
 const route = useRoute()
 const router = useRouter()
@@ -44,6 +52,21 @@ const fallbackModules: ProjectModule[] = [
   { id: 'review', name: '审阅功能', priority: 40, endpoint: '', routePath: '/task-hall' },
 ]
 const defaultModuleIds = ['progress', 'delivery', 'field', 'review']
+const commonFieldPresets: FieldPreset[] = [
+  { key: 'meter_no', label: '电能表', dataType: 'text', source: 'import', captureMethod: 'manual' },
+  { key: 'terminal_no', label: '终端', dataType: 'text', source: 'import', captureMethod: 'manual' },
+  { key: 'area_no', label: '台区', dataType: 'text', source: 'import', captureMethod: 'manual' },
+  { key: 'station_area', label: '台区', dataType: 'text', source: 'import', captureMethod: 'manual' },
+  { key: 'master_meter_no', label: '总表', dataType: 'text', source: 'import', captureMethod: 'manual' },
+  { key: 'user_no', label: '用户', dataType: 'text', source: 'import', captureMethod: 'manual' },
+  { key: 'address', label: '地址', dataType: 'text', source: 'import', captureMethod: 'manual' },
+  { key: 'line_no', label: '线路', dataType: 'text', source: 'import', captureMethod: 'manual' },
+  { key: 'power_supply_unit', label: '供电所', dataType: 'text', source: 'import', captureMethod: 'manual' },
+]
+const templateDownloadOptions: Array<{ type: ProjectTemplateType; label: string }> = [
+  { type: 'initial_work_orders', label: '初始接入模板' },
+  { type: 'external_completed', label: '系统外已完成模板' },
+]
 const sourceOptions: Array<{ value: ProjectFieldSource; label: string }> = [
   { value: 'import', label: '初始导入' },
   { value: 'field_collection', label: '现场采集' },
@@ -151,6 +174,33 @@ function defaultAggregateField(): CreateFieldForm {
     parentKey: '',
     kpiEnabled: false,
   }
+}
+
+function applyFieldPreset(field: CreateFieldForm, presetKey: string) {
+  const preset = commonFieldPresets.find((item) => item.key === presetKey)
+  if (!preset) return
+  field.key = preset.key
+  field.label = preset.label
+  field.dataType = preset.dataType
+  field.source = preset.source
+  field.captureMethod = preset.captureMethod
+  field.required = true
+}
+
+function applyCreatePrimaryFieldPreset(value: string | number | boolean) {
+  applyFieldPreset(createForm.primaryField, String(value))
+}
+
+function applyCreateAggregateFieldPreset(value: string | number | boolean) {
+  applyFieldPreset(createForm.aggregateField, String(value))
+}
+
+function applySchemaPrimaryFieldPreset(value: string | number | boolean) {
+  applyFieldPreset(schemaForm.primaryField, String(value))
+}
+
+function applySchemaAggregateFieldPreset(value: string | number | boolean) {
+  applyFieldPreset(schemaForm.aggregateField, String(value))
 }
 
 function defaultCustomField(
@@ -335,6 +385,15 @@ async function downloadTemplate(project: Project, templateType: ProjectTemplateT
   }
 }
 
+function handleTemplateCommand(project: Project, command: string | number | object) {
+  const templateType = String(command) as ProjectTemplateType
+  void downloadTemplate(project, templateType)
+}
+
+function handleModuleCommand(project: Project, command: string | number | object) {
+  openRoute(String(command), project)
+}
+
 function openRoute(path: string, project: Project) {
   if (project.status === 'draft') {
     ElMessage.info('草稿项目模块待接入，先保留在项目列表中管理')
@@ -474,29 +533,45 @@ function progressStatus(value = 0, riskTotal = 0) {
               {{ formatUpdatedAt(row.updatedAt) }}
             </template>
           </ElTableColumn>
-          <ElTableColumn label="操作" width="560" fixed="right">
+          <ElTableColumn label="操作" width="300" fixed="right">
             <template #default="{ row }">
               <div class="row-actions">
                 <ElButton size="small" type="primary" plain @click="openSchemaDialog(row)">
                   字段配置
                 </ElButton>
-                <ElButton size="small" plain @click="downloadTemplate(row, 'initial_work_orders')">
-                  初始工单模板
-                </ElButton>
-                <ElButton size="small" plain @click="downloadTemplate(row, 'field_collection')">
-                  现场采集模板
-                </ElButton>
-                <ElButton size="small" plain @click="downloadTemplate(row, 'external_completed')">
-                  系统外已完成模板
-                </ElButton>
-                <ElButton
-                  v-for="module in projectActionModules(row)"
-                  :key="module.id"
-                  size="small"
-                  @click="openRoute(module.routePath, row)"
-                >
-                  {{ module.name }}
-                </ElButton>
+                <ElDropdown trigger="click" @command="handleTemplateCommand(row, $event)">
+                  <ElButton size="small" plain>模板下载</ElButton>
+                  <template #dropdown>
+                    <ElDropdownMenu>
+                      <ElDropdownItem
+                        v-for="option in templateDownloadOptions"
+                        :key="option.type"
+                        :command="option.type"
+                      >
+                        {{ option.label }}
+                      </ElDropdownItem>
+                    </ElDropdownMenu>
+                  </template>
+                </ElDropdown>
+                <ElDropdown trigger="click" @command="handleModuleCommand(row, $event)">
+                  <ElButton
+                    size="small"
+                    :disabled="!projectActionModules(row).length"
+                  >
+                    进入模块
+                  </ElButton>
+                  <template #dropdown>
+                    <ElDropdownMenu>
+                      <ElDropdownItem
+                        v-for="module in projectActionModules(row)"
+                        :key="module.id"
+                        :command="module.routePath"
+                      >
+                        {{ module.name }}
+                      </ElDropdownItem>
+                    </ElDropdownMenu>
+                  </template>
+                </ElDropdown>
               </div>
             </template>
           </ElTableColumn>
@@ -535,12 +610,38 @@ function progressStatus(value = 0, riskTotal = 0) {
           <div class="field-grid two-columns">
             <div class="field-block">
               <span class="field-block-title">主字段</span>
-              <ElInput v-model="createForm.primaryField.label" placeholder="电能表 / 终端 / 台区" />
+              <ElSelect
+                :model-value="createForm.primaryField.key"
+                filterable
+                placeholder="选择常见主字段"
+                @change="applyCreatePrimaryFieldPreset"
+              >
+                <ElOption
+                  v-for="preset in commonFieldPresets"
+                  :key="preset.key"
+                  :label="preset.label"
+                  :value="preset.key"
+                />
+              </ElSelect>
+              <ElInput v-model="createForm.primaryField.label" placeholder="显示名称，例如电能表" />
               <ElInput v-model="createForm.primaryField.key" placeholder="字段编码，例如 meter_no" />
             </div>
             <div class="field-block">
               <span class="field-block-title">聚合字段</span>
-              <ElInput v-model="createForm.aggregateField.label" placeholder="台区 / 供电所 / 线路" />
+              <ElSelect
+                :model-value="createForm.aggregateField.key"
+                filterable
+                placeholder="选择常见聚合字段"
+                @change="applyCreateAggregateFieldPreset"
+              >
+                <ElOption
+                  v-for="preset in commonFieldPresets"
+                  :key="preset.key"
+                  :label="preset.label"
+                  :value="preset.key"
+                />
+              </ElSelect>
+              <ElInput v-model="createForm.aggregateField.label" placeholder="显示名称，例如台区" />
               <ElInput v-model="createForm.aggregateField.key" placeholder="字段编码，例如 area_no" />
             </div>
           </div>
@@ -627,11 +728,39 @@ function progressStatus(value = 0, riskTotal = 0) {
           <div class="field-grid two-columns">
             <div class="field-block">
               <span class="field-block-title">主字段</span>
+              <ElSelect
+                :model-value="schemaForm.primaryField.key"
+                filterable
+                placeholder="选择常见主字段"
+                :disabled="schemaProject?.status !== 'draft'"
+                @change="applySchemaPrimaryFieldPreset"
+              >
+                <ElOption
+                  v-for="preset in commonFieldPresets"
+                  :key="preset.key"
+                  :label="preset.label"
+                  :value="preset.key"
+                />
+              </ElSelect>
               <ElInput v-model="schemaForm.primaryField.label" :disabled="schemaProject?.status !== 'draft'" />
               <ElInput v-model="schemaForm.primaryField.key" :disabled="schemaProject?.status !== 'draft'" />
             </div>
             <div class="field-block">
               <span class="field-block-title">聚合字段</span>
+              <ElSelect
+                :model-value="schemaForm.aggregateField.key"
+                filterable
+                placeholder="选择常见聚合字段"
+                :disabled="schemaProject?.status !== 'draft'"
+                @change="applySchemaAggregateFieldPreset"
+              >
+                <ElOption
+                  v-for="preset in commonFieldPresets"
+                  :key="preset.key"
+                  :label="preset.label"
+                  :value="preset.key"
+                />
+              </ElSelect>
               <ElInput v-model="schemaForm.aggregateField.label" :disabled="schemaProject?.status !== 'draft'" />
               <ElInput v-model="schemaForm.aggregateField.key" :disabled="schemaProject?.status !== 'draft'" />
             </div>

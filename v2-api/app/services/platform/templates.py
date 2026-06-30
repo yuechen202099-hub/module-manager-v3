@@ -9,9 +9,9 @@ from openpyxl.utils import get_column_letter
 
 from app.services.platform.catalog import get_project_overview
 
-TemplateType = Literal["initial_work_orders", "field_collection", "external_completed"]
+TemplateType = Literal["initial_work_orders", "external_completed"]
 
-SUPPORTED_TEMPLATE_TYPES = {"initial_work_orders", "field_collection", "external_completed"}
+SUPPORTED_TEMPLATE_TYPES = {"initial_work_orders", "external_completed"}
 
 PLATFORM_FILL_RULES = {
     "uploaded_at": "平台上传时补齐",
@@ -80,8 +80,6 @@ def _fields_for_template(schema: dict[str, Any], template_type: str) -> list[dic
 
     if template_type == "initial_work_orders":
         return _dedupe_fields([primary, aggregate, *import_fields])
-    if template_type == "field_collection":
-        return _dedupe_fields([*field_collection_fields, platform_by_key.get("installer"), platform_by_key.get("completed_at")])
     return _dedupe_fields(
         [
             primary,
@@ -98,8 +96,6 @@ def _fields_for_template(schema: dict[str, Any], template_type: str) -> list[dic
 def _field_rows_for_template(schema: dict[str, Any], template_fields: list[dict[str, Any]], template_type: str) -> list[dict[str, Any]]:
     primary = _clean_field(schema.get("primary_field"))
     aggregate = _clean_field(schema.get("aggregate_field"))
-    if template_type == "field_collection":
-        return _dedupe_fields([primary, aggregate, *template_fields])
     if template_type != "external_completed":
         return template_fields
     platform_fields = [_clean_field(field) for field in schema.get("platform_required_fields", []) if isinstance(field, dict)]

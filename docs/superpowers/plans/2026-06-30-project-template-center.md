@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add downloadable Excel templates driven by each project's configured work item schema, using synthetic test data for platform simulation.
+**Goal:** Add downloadable Excel templates driven by each project's configured work item schema, using synthetic test data for platform simulation. Templates focus on onboarding initial work orders and externally completed work; site collection stays in the construction workflow.
 
 **Architecture:** Keep template rules in a focused platform service. Expose project-scoped download endpoints from the existing project router. Add a small frontend action group on the project page that calls the download endpoints.
 
@@ -17,7 +17,7 @@
 - Modify: `v2-api/app/api/routes/projects.py`
 - Test: `v2-api/tests/test_platform_overview.py`
 
-- [ ] Write failing tests for `initial_work_orders`, `field_collection`, and `external_completed` template downloads.
+- [ ] Write failing tests for `initial_work_orders` and `external_completed` template downloads, plus a guard that `field_collection` is not exposed as a download template.
 - [ ] Implement a template service that builds workbooks from `work_item_schema`.
 - [ ] Add `GET /projects/{project_id}/templates/{template_type}`.
 - [ ] Verify tests pass without real business spreadsheets.
@@ -29,9 +29,9 @@
 - Modify: `v2-web/src/views/ProjectsView.vue`
 - Modify: `scripts/verify_vue_work_item_schema_config.js`
 
-- [ ] Write a verifier expectation for template download API calls and project page buttons.
+- [ ] Write a verifier expectation for template download API calls and consolidated project page actions.
 - [ ] Add a frontend `downloadProjectTemplate(projectId, templateType, projectName)` service.
-- [ ] Add three download buttons to draft/project rows.
+- [ ] Add a compact template download menu to draft/project rows.
 - [ ] Verify the script and frontend build pass.
 
 ### Task 3: Synthetic Simulation Coverage

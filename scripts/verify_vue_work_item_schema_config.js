@@ -89,10 +89,29 @@ const checks = [
       servicesSource.includes("export async function downloadProjectTemplate") &&
       servicesSource.includes("`/projects/${projectId}/templates/${templateType}`") &&
       projectsViewSource.includes("downloadProjectTemplate") &&
-      projectsViewSource.includes("downloadTemplate(row, 'initial_work_orders')") &&
-      projectsViewSource.includes("downloadTemplate(row, 'field_collection')") &&
-      projectsViewSource.includes("downloadTemplate(row, 'external_completed')"),
-    message: "Projects view must offer schema-driven initial, field collection, and external completed template downloads.",
+      projectsViewSource.includes("templateDownloadOptions") &&
+      projectsViewSource.includes("initial_work_orders") &&
+      projectsViewSource.includes("external_completed") &&
+      !projectsViewSource.includes("downloadTemplate(row, 'field_collection')") &&
+      !typesSource.includes("'field_collection' | 'external_completed'"),
+    message: "Projects view must expose only onboarding template downloads and hide field collection templates.",
+  },
+  {
+    ok:
+      projectsViewSource.includes("commonFieldPresets") &&
+      projectsViewSource.includes("applyFieldPreset(createForm.primaryField") &&
+      projectsViewSource.includes("applyFieldPreset(createForm.aggregateField") &&
+      projectsViewSource.includes("applyFieldPreset(schemaForm.primaryField") &&
+      projectsViewSource.includes("applyFieldPreset(schemaForm.aggregateField"),
+    message: "Project primary and aggregate fields must be chosen from common field presets before manual refinement.",
+  },
+  {
+    ok:
+      projectsViewSource.includes("handleTemplateCommand") &&
+      projectsViewSource.includes("handleModuleCommand") &&
+      projectsViewSource.includes("<ElDropdown") &&
+      projectsViewSource.includes("<ElDropdownItem"),
+    message: "Projects view must consolidate row operations into dropdown actions.",
   },
 ];
 

@@ -98,7 +98,7 @@ export type ProjectWorkItemSchema = {
   dashboardMetrics?: string[]
 }
 
-export type ProjectTemplateType = 'initial_work_orders' | 'field_collection' | 'external_completed'
+export type ProjectTemplateType = 'initial_work_orders' | 'external_completed'
 
 export type ProjectCreatePayload = {
   name: string
