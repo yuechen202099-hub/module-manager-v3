@@ -309,6 +309,7 @@ export type ConstructionUploadPayload = {
   clientCompletedAt?: string
   collector: string
   moduleAssetNo: string
+  fieldValues?: Record<string, string>
   photos: ConstructionUploadPhoto[]
 }
 

@@ -205,6 +205,18 @@ def validate_construction_upload_group_before_file_save(group_id: str) -> None:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def parse_construction_field_values(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("field_values must be a JSON object") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("field_values must be a JSON object")
+    return {str(key).strip(): str(value).strip() for key, value in payload.items() if str(key).strip() and value is not None}
+
+
 def request_auth_payload(request: Request) -> dict:
     payload = getattr(request.state, "auth", None) or {}
     if not payload:
@@ -2022,6 +2034,7 @@ async def construction_group_upload_batch(
     client_completed_at: str = Form(default=""),
     collector: str = Form(default=""),
     module_asset_no: str = Form(default=""),
+    field_values: str = Form(default=""),
     photo_slots: list[str] = Form(default=[]),
     client_photo_ids: list[str] = Form(default=[]),
     files: list[UploadFile] = File(default=[]),
@@ -2073,12 +2086,14 @@ async def construction_group_upload_batch(
     if not records:
         raise HTTPException(status_code=400, detail="Uploaded images are empty")
     try:
+        field_values_payload = parse_construction_field_values(field_values)
         result = state_repository().upload_construction_group_batch(
             group_id,
             actor=actor,
             client_batch_id=client_batch_id,
             collector=collector,
             module_asset_no=module_asset_no,
+            field_values=field_values_payload,
             photos=records,
             creator=display_name_for_actor(request, actor),
             client_completed_at=client_completed_at,

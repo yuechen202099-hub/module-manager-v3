@@ -1864,6 +1864,7 @@ export async function uploadConstructionBatch(
   if (payload.clientCompletedAt) form.append('client_completed_at', payload.clientCompletedAt)
   form.append('collector', payload.collector)
   form.append('module_asset_no', payload.moduleAssetNo)
+  if (payload.fieldValues) form.append('field_values', JSON.stringify(payload.fieldValues))
   for (const photo of payload.photos) {
     form.append('photo_slots', photo.slot)
     form.append('client_photo_ids', photo.clientPhotoId)

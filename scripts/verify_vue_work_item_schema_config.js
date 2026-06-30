@@ -6,6 +6,7 @@ const typesSource = fs.readFileSync(path.join(root, "v2-web", "src", "api", "typ
 const servicesSource = fs.readFileSync(path.join(root, "v2-web", "src", "api", "services.ts"), "utf8");
 const workspaceSource = fs.readFileSync(path.join(root, "v2-web", "src", "stores", "workspace.ts"), "utf8");
 const projectsViewSource = fs.readFileSync(path.join(root, "v2-web", "src", "views", "ProjectsView.vue"), "utf8");
+const constructionViewSource = fs.readFileSync(path.join(root, "v2-web", "src", "views", "ConstructionView.vue"), "utf8");
 
 const checks = [
   {
@@ -71,6 +72,17 @@ const checks = [
       workspaceSource.includes("services.updateProjectWorkItemSchema(projectId, workItemSchema)") &&
       workspaceSource.includes("this.projects.splice"),
     message: "Workspace store must update the local project list after schema changes.",
+  },
+  {
+    ok:
+      typesSource.includes("fieldValues?: Record<string, string>") &&
+      servicesSource.includes("field_values") &&
+      constructionViewSource.includes("constructionFields") &&
+      constructionViewSource.includes("dynamicFields") &&
+      constructionViewSource.includes("startDynamicScanner") &&
+      constructionViewSource.includes("requiredConstructionFieldLabels") &&
+      constructionViewSource.includes("field_values"),
+    message: "Construction collection form must render, cache, scan, validate, and upload configured field values.",
   },
 ];
 

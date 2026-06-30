@@ -17,6 +17,7 @@ from app.api.routes.local_test import (
     current_request_team,
     display_name_for_actor,
     is_all_zero_construction_code,
+    parse_construction_field_values,
     response_payload,
     state_repository,
     use_team_context,
@@ -284,6 +285,7 @@ async def upload_group_batch(
     client_completed_at: str = Form(default=""),
     collector: str = Form(default=""),
     module_asset_no: str = Form(default=""),
+    field_values: str = Form(default=""),
     exception_note: str = Form(default=""),
     photo_slots: list[str] = Form(default=[]),
     client_photo_ids: list[str] = Form(default=[]),
@@ -337,12 +339,14 @@ async def upload_group_batch(
     if not records:
         raise HTTPException(status_code=400, detail="Uploaded images are empty")
     try:
+        field_values_payload = parse_construction_field_values(field_values)
         result = state_repository().upload_construction_group_batch(
             group_id,
             actor=actor,
             client_batch_id=client_batch_id,
             collector=collector,
             module_asset_no=module_asset_no,
+            field_values=field_values_payload,
             photos=records,
             creator=display_name_for_actor(request, actor),
             client_completed_at=client_completed_at,
