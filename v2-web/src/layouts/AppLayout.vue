@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DataBoard, FolderChecked, List, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
+import { DataBoard, Expand, Fold, FolderChecked, List, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -45,6 +45,8 @@ const isAdmin = computed(() => auth.user?.role === 'admin' || auth.user?.roles?.
 const releaseNotesVisible = ref(false)
 const releaseNotesPage = ref(1)
 const releaseNotesPageSize = 4
+const sidebarStorageKey = 'module_manager_sidebar_collapsed'
+const sidebarCollapsed = ref(localStorage.getItem(sidebarStorageKey) === '1')
 const pagedReleaseNotes = computed(() => {
   const start = (releaseNotesPage.value - 1) * releaseNotesPageSize
   return releaseNotes.slice(start, start + releaseNotesPageSize)
@@ -99,6 +101,11 @@ function logout() {
 function openReleaseNotes() {
   releaseNotesPage.value = 1
   releaseNotesVisible.value = true
+}
+
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  localStorage.setItem(sidebarStorageKey, sidebarCollapsed.value ? '1' : '0')
 }
 
 function currentTeamId() {
@@ -278,9 +285,12 @@ async function startShellScanImport(message: { file?: File; filename?: string })
 </script>
 
 <template>
-  <div class="app-shell" :class="{ embedded: isEmbedded, 'construction-route': isConstructionRoute }">
-    <header v-if="!isEmbedded" class="topbar">
-      <div class="topbar-brand">
+  <div
+    class="app-shell side-shell"
+    :class="{ embedded: isEmbedded, 'construction-route': isConstructionRoute, collapsed: sidebarCollapsed }"
+  >
+    <aside v-if="!isEmbedded" class="side-rail" aria-label="平台导航">
+      <div class="side-brand">
         <span class="brand-mark">V{{ APP_VERSION }}</span>
         <div class="brand-copy">
           <strong>模块更换项目管理器</strong>
@@ -288,13 +298,24 @@ async function startShellScanImport(message: { file?: File; filename?: string })
         </div>
       </div>
 
-      <nav class="top-nav" aria-label="主导航">
+      <button
+        class="side-toggle"
+        type="button"
+        :aria-expanded="!sidebarCollapsed"
+        :aria-label="sidebarCollapsed ? '展开导航' : '收起导航'"
+        @click="toggleSidebar"
+      >
+        <ElIcon><component :is="sidebarCollapsed ? Expand : Fold" /></ElIcon>
+      </button>
+
+      <nav class="side-nav" aria-label="主导航">
         <button
           v-for="item in navigation"
           :key="item.key"
-          class="top-nav__item"
+          class="side-nav__item"
           :class="{ active: route.path === item.routePath }"
           type="button"
+          :title="sidebarCollapsed ? item.title : undefined"
           @click="router.push(item.routePath)"
         >
           <ElIcon><component :is="item.icon" /></ElIcon>
@@ -302,19 +323,36 @@ async function startShellScanImport(message: { file?: File; filename?: string })
         </button>
       </nav>
 
-      <div class="header-actions">
-        <span class="page-chip">{{ pageTitle }}</span>
-        <ElButton v-if="isAdmin" :icon="Tickets" plain @click="openReleaseNotes">更新内容</ElButton>
-        <span class="user-chip">{{ roleLabel }} / {{ auth.displayName }}</span>
-        <ElTooltip content="退出登录" placement="bottom">
+      <div class="side-actions">
+        <ElTooltip v-if="isAdmin && sidebarCollapsed" content="更新内容" placement="right">
+          <ElButton :icon="Tickets" circle @click="openReleaseNotes" />
+        </ElTooltip>
+        <ElButton v-else-if="isAdmin" :icon="Tickets" plain @click="openReleaseNotes">更新内容</ElButton>
+
+        <div class="side-user" :title="`${roleLabel} / ${auth.displayName}`">
+          <span>{{ roleLabel }}</span>
+          <strong>{{ auth.displayName }}</strong>
+        </div>
+
+        <ElTooltip content="退出登录" placement="right">
           <ElButton :icon="SwitchButton" circle @click="logout" />
         </ElTooltip>
       </div>
-    </header>
+    </aside>
 
-    <main class="main-panel">
-      <RouterView />
-    </main>
+    <div class="shell-content">
+      <header v-if="!isEmbedded" class="shell-header">
+        <div>
+          <span class="shell-page-kicker">当前页面</span>
+          <h1 class="shell-page-title">{{ pageTitle }}</h1>
+        </div>
+        <span class="shell-project-chip">{{ workspace.activeProject?.name || '未选择项目' }}</span>
+      </header>
+
+      <main class="main-panel">
+        <RouterView />
+      </main>
+    </div>
 
     <aside v-if="shellJobVisible" class="shell-job-status" :class="`tone-${shellJobTone}`" aria-live="polite">
       <strong>{{ shellJobTitle }}</strong>
@@ -352,6 +390,293 @@ async function startShellScanImport(message: { file?: File; filename?: string })
 </template>
 
 <style scoped>
+.side-shell {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  min-height: 100dvh;
+}
+
+.side-shell.collapsed {
+  grid-template-columns: 80px minmax(0, 1fr);
+}
+
+.side-shell.embedded {
+  display: block;
+}
+
+.side-rail {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  align-self: start;
+  height: 100dvh;
+  gap: 14px;
+  padding: 16px 12px;
+  border-right: 1px solid var(--v2-border-soft, #e2e8f0);
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 12px 0 32px rgba(16, 24, 40, 0.05);
+  backdrop-filter: blur(22px) saturate(170%);
+  -webkit-backdrop-filter: blur(22px) saturate(170%);
+}
+
+.side-brand {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.side-shell.collapsed .side-brand {
+  grid-template-columns: 1fr;
+  justify-items: center;
+}
+
+.side-shell.collapsed .brand-copy,
+.side-shell.collapsed .side-nav__item span,
+.side-shell.collapsed .side-user strong {
+  display: none;
+}
+
+.side-shell.collapsed .brand-mark {
+  min-width: 48px;
+  width: 48px;
+  padding: 0;
+  font-size: 10px;
+}
+
+.side-toggle {
+  display: inline-grid;
+  place-items: center;
+  justify-self: end;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--v2-border-soft, #e2e8f0);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--v2-text-muted, #64748b);
+  cursor: pointer;
+}
+
+.side-shell.collapsed .side-toggle {
+  justify-self: center;
+}
+
+.side-nav {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.side-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.side-nav__item {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--v2-text-muted, #64748b);
+  font-size: 14px;
+  font-weight: 760;
+  letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.side-nav__item:hover {
+  color: var(--v2-text-strong, #0f172a);
+  background: rgba(10, 114, 216, 0.06);
+}
+
+.side-nav__item.active {
+  color: var(--v2-primary, #0a72d8);
+  background: var(--v2-primary-muted, #e8f3ff);
+  box-shadow: inset 3px 0 0 var(--v2-primary, #0a72d8);
+}
+
+.side-shell.collapsed .side-nav__item {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  padding: 0;
+}
+
+.side-actions {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--v2-border-soft, #e2e8f0);
+}
+
+.side-user {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--v2-border-soft, #e2e8f0);
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.82);
+}
+
+.side-user span,
+.side-user strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-user span {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+}
+
+.side-user strong {
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 13px;
+}
+
+.side-shell.collapsed .side-user {
+  justify-items: center;
+  padding: 8px 4px;
+}
+
+.shell-content {
+  min-width: 0;
+}
+
+.shell-header {
+  position: sticky;
+  top: 0;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 64px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--v2-border-soft, #e2e8f0);
+  background: rgba(255, 255, 255, 0.76);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+}
+
+.shell-page-kicker {
+  display: block;
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.shell-page-title {
+  margin: 0;
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 20px;
+  font-weight: 820;
+  line-height: 1.25;
+}
+
+.shell-project-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  max-width: min(360px, 42vw);
+  padding: 0 12px;
+  overflow: hidden;
+  border: 1px solid var(--v2-primary-border, rgba(10, 114, 216, 0.22));
+  border-radius: 999px;
+  background: var(--v2-primary-muted, #e8f3ff);
+  color: var(--v2-primary, #0a72d8);
+  font-size: 13px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-shell:not(.embedded) .main-panel {
+  width: 100%;
+  max-width: var(--v2-content-max, 1440px);
+}
+
+.side-shell.construction-route:not(.embedded) .main-panel {
+  max-width: 100%;
+}
+
+@media (max-width: 900px) {
+  .side-shell:not(.embedded) {
+    grid-template-columns: 1fr;
+  }
+
+  .side-shell:not(.embedded) .side-rail {
+    position: sticky;
+    top: 0;
+    grid-template-rows: auto auto;
+    grid-template-columns: minmax(0, 1fr) auto;
+    height: auto;
+    gap: 10px;
+    padding: 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--v2-border-soft, #e2e8f0);
+  }
+
+  .side-brand {
+    grid-column: 1;
+  }
+
+  .side-toggle {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .side-nav {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: flex;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .side-nav__item {
+    grid-template-columns: 20px auto;
+    flex: 0 0 auto;
+    min-height: 38px;
+  }
+
+  .side-actions {
+    display: none;
+  }
+
+  .shell-header {
+    position: static;
+    min-height: 56px;
+  }
+
+  .shell-project-chip {
+    max-width: 46vw;
+  }
+}
+
+@media (max-width: 640px) {
+  .shell-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .shell-project-chip {
+    max-width: 100%;
+  }
+}
+
 .shell-job-status {
   position: fixed;
   right: 18px;
