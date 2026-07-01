@@ -50,12 +50,21 @@ def is_true(node: ast.AST | None) -> bool:
     return isinstance(node, ast.Constant) and node.value is True
 
 
-def is_direct_wildcard_origin(node: ast.AST | None) -> bool:
-    return (
-        isinstance(node, ast.List)
-        and len(node.elts) == 1
-        and isinstance(node.elts[0], ast.Constant)
-        and node.elts[0].value == "*"
+def is_string_constant(node: ast.AST | None, value: str) -> bool:
+    return isinstance(node, ast.Constant) and node.value == value
+
+
+def contains_wildcard_origin(node: ast.AST | None) -> bool:
+    if is_string_constant(node, "*"):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return any(contains_wildcard_origin(element) for element in node.elts)
+    return False
+
+
+def is_config_backed_allowed_origins(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Attribute) and node.attr == "allowed_origins" and dotted_name(node.value).endswith(
+        "settings"
     )
 
 
@@ -85,13 +94,26 @@ def cors_middleware_calls(module: ast.AST) -> list[ast.Call]:
     ]
 
 
-def has_config_field(module: ast.AST, field_name: str) -> bool:
-    return any(
-        isinstance(node, ast.AnnAssign)
-        and isinstance(node.target, ast.Name)
-        and node.target.id == field_name
-        for node in ast.walk(module)
-    )
+def field_alias(node: ast.AST | None) -> str:
+    if not isinstance(node, ast.Call) or node_name(node.func) != "Field":
+        return ""
+    alias = get_keyword(node, "alias")
+    return alias.value if isinstance(alias, ast.Constant) and isinstance(alias.value, str) else ""
+
+
+def has_settings_field_with_alias(module: ast.AST, field_name: str, alias: str) -> bool:
+    for node in ast.walk(module):
+        if not isinstance(node, ast.ClassDef) or node.name != "Settings":
+            continue
+        for statement in node.body:
+            if (
+                isinstance(statement, ast.AnnAssign)
+                and isinstance(statement.target, ast.Name)
+                and statement.target.id == field_name
+                and field_alias(statement.value) == alias
+            ):
+                return True
+    return False
 
 
 def has_login_rate_limiter(module: ast.AST) -> bool:
@@ -113,10 +135,12 @@ def main() -> int:
     auth_py = parse_python("v2-api/app/api/routes/auth.py")
 
     cors_calls = cors_middleware_calls(main_py)
-    if any(is_direct_wildcard_origin(get_keyword(call, "allow_origins")) for call in cors_calls):
+    if any(contains_wildcard_origin(get_keyword(call, "allow_origins")) for call in cors_calls):
         fail("production CORS must not use wildcard origins")
-    if any(is_true(get_keyword(call, "allow_credentials")) for call in cors_calls) and not references_name(
-        main_py, "security_allowed_origins"
+    if any(
+        is_true(get_keyword(call, "allow_credentials"))
+        and not is_config_backed_allowed_origins(get_keyword(call, "allow_origins"))
+        for call in cors_calls
     ):
         fail("credentialed CORS must be tied to configured allowed origins")
 
@@ -129,7 +153,7 @@ def main() -> int:
         fail("request size limit middleware must be installed")
     if not has_login_rate_limiter(auth_py):
         fail("login route must use rate limiting")
-    if not has_config_field(config_py, "MAX_UPLOAD_MB"):
+    if not has_settings_field_with_alias(config_py, "max_upload_mb", "MAX_UPLOAD_MB"):
         fail("upload size limit setting must exist")
 
     print("[OK] security hardening static checks passed")
