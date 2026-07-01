@@ -49,6 +49,8 @@ Demo accounts are acceptable for local client walkthroughs only. When `APP_ENV=p
 
 When `APP_ENV=production`, FastAPI API documentation endpoints are disabled: `/docs`, `/redoc`, and `/openapi.json` must return 404. Keep them available only in local/demo mode.
 
+生产安全配置建议同步写入服务器 `.env`：`SECURITY_ALLOWED_ORIGINS` 控制允许携带凭据访问的前端域名，`SECURITY_TRUSTED_HOSTS` 控制可信 Host，`SECURITY_FRAME_ANCESTORS` 控制页面可被哪些站点嵌入，`SECURITY_LOGIN_RATE_LIMIT_PER_MINUTE` 和 `SECURITY_UPLOAD_RATE_LIMIT_PER_MINUTE` 控制登录和上传限流，`MAX_UPLOAD_MB` 与 `MAX_UPLOAD_FILES_PER_REQUEST` 控制单次上传大小和文件数量，`PHOTO_PROXY_ALLOWED_HOSTS` 用于限制照片代理可访问的外部主机。
+
 ## Production Preflight
 
 Before exposing real project data, run the production readiness check against the server `.env`:
