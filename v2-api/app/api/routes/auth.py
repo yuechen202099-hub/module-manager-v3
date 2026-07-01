@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from app.core.config import settings
+from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core.responses import error_response, ok
 from app.core.security import create_access_token, decode_access_token
 from app.schemas.auth import LoginRequest
@@ -19,6 +20,7 @@ from app.services.account_store import (
 )
 
 router = APIRouter(prefix="/auth")
+login_limiter = SlidingWindowRateLimiter(limit=settings.security_login_rate_limit_per_minute)
 
 DEMO_USERS = {
     "admin": {
@@ -121,6 +123,11 @@ def request_client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+def login_rate_key(request: Request, username: str) -> str:
+    client_ip = request_client_ip(request) or "unknown"
+    return f"{client_ip}:{username.strip().lower()}"
+
+
 def request_device(request: Request) -> str:
     return request.headers.get("user-agent", "").strip()[:256]
 
@@ -177,6 +184,11 @@ def login(payload: LoginRequest, request: Request):
         or demo_login_user(payload.username, payload.password)
     )
     if user is None:
+        rate = login_limiter.check(login_rate_key(request, payload.username))
+        if not rate.allowed:
+            response = error_response(request, "rate_limited", "Too many login attempts.", status_code=429)
+            response.headers["Retry-After"] = str(rate.retry_after_seconds)
+            return response
         return error_response(request, "invalid_credentials", "Username or password is incorrect.", status_code=401)
     team_id = normalize_team_id(user.get("team_id") or payload.team_id or getattr(settings, "admin_team_id", "default-team"))
     user = {**user, "team_id": team_id, "home": user.get("home") or "/app"}

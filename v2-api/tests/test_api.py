@@ -323,6 +323,43 @@ def test_login_page_and_demo_auth_are_available() -> None:
     assert bad.status_code == 401
 
 
+def test_login_rate_limit_blocks_repeated_bad_passwords() -> None:
+    for _ in range(8):
+        response = client.post(
+            "/auth/login",
+            headers={"x-forwarded-for": "203.0.113.10"},
+            json={"username": "admin", "password": "wrong"},
+        )
+        assert response.status_code == 401
+
+    successful_login = client.post(
+        "/auth/login",
+        headers={"x-forwarded-for": "203.0.113.10"},
+        json={"username": "admin", "password": "admin123"},
+    )
+    assert successful_login.status_code == 200
+
+    response = client.post(
+        "/auth/login",
+        headers={"x-forwarded-for": "203.0.113.10"},
+        json={"username": "admin", "password": "wrong"},
+    )
+
+    assert response.status_code == 429
+    assert int(response.headers["Retry-After"]) > 0
+
+
+def test_login_rate_limit_does_not_count_successful_logins() -> None:
+    for _ in range(12):
+        response = client.post(
+            "/auth/login",
+            headers={"x-forwarded-for": "203.0.113.11"},
+            json={"username": "admin", "password": "admin123"},
+        )
+
+        assert response.status_code == 200
+
+
 def test_demo_auth_is_disabled_by_default_in_production(monkeypatch) -> None:
     production_settings = SimpleNamespace(
         app_env="production",
