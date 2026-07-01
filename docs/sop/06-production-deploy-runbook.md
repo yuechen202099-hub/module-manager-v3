@@ -64,6 +64,14 @@ APP=/opt/module-manager-v2
 "$APP/venv/bin/python" "$APP/current/scripts/production_health_check.py" --base-url http://127.0.0.1 --expected-version <version> --env "$APP/.env"
 ```
 
+Run the production security audit against the real server `.env`:
+
+```bash
+SECURITY_ENV_PATH=/opt/module-manager-v2/.env /opt/module-manager-v2/venv/bin/python scripts/audit_production_security.py
+```
+
+`PHOTO_PROXY_ALLOWED_HOSTS` must list the real external photo source domains. If it is empty, the production image proxy will reject external photo fallback requests under the explicit allowlist policy.
+
 Also verify the public entry:
 
 ```powershell

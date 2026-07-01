@@ -48,6 +48,7 @@ REQUIRED_FILES = {
     "scripts/verify_postgres_cutover_gate.py",
     "scripts/verify-production-readiness.py",
     "scripts/verify-client-release.py",
+    "scripts/audit_production_security.py",
     "scripts/verify_security_hardening.py",
     "scripts/verify_frontend_auth_expiry.js",
     "scripts/verify_claim_tasks_completion_status.js",
