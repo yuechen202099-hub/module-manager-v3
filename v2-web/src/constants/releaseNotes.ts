@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.72'
+export const APP_VERSION = '3.0.73'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.73',
+    date: '2026-07-01',
+    type: 'BUG 修复',
+    title: '今日完成量可见性修复',
+    items: [
+      '项目驾驶舱安装人员完成量占比不再只返回历史总量前 8 名，今天新上传的施工员会立即进入统计范围。',
+      '日、周、月完成量筛选会按完整安装人员列表加载 daily-workload，避免新施工员有上传但页面显示未更新。',
+      '安装人员每日工作量支持账号和姓名别名匹配，例如账号 x006 与姓名蒲丕龙会合并为同一施工员。',
+      '本次只调整统计展示口径，不改变施工上传校验、00000000 占位工单拦截和缓存上传保护。',
+    ],
+  },
   {
     version: 'V3.0.72',
     date: '2026-07-01',

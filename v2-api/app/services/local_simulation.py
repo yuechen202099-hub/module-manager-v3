@@ -2660,7 +2660,7 @@ def summarize_installers_by_group(groups: list[dict[str, Any]]) -> list[dict[str
     total = sum(counts.values())
     return [
         {"installer": installer, "group_count": count, "share": round(count / total, 4) if total else 0.0}
-        for installer, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+        for installer, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     ]
 
 
@@ -3456,11 +3456,12 @@ def installer_daily_workload(installer: str) -> dict[str, Any]:
     rows: dict[str, dict[str, Any]] = {}
     if not target:
         return {"installer": target, "items": []}
+    aliases = installer_actor_aliases(target)
     for group in get_state()["groups"]:
         matched_photos = [
             photo
             for photo in group.get("photos", [])
-            if str(photo.get("creator") or "").strip() == target and photo.get("is_active", True) is not False
+            if str(photo.get("creator") or "").strip() in aliases and photo.get("is_active", True) is not False
         ]
         if not matched_photos:
             continue

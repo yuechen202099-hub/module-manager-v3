@@ -268,6 +268,7 @@ const installerScopeOptions = [
   { value: 'week', label: '周' },
   { value: 'month', label: '月' },
 ]
+const installerWorkloadFetchConcurrency = 3
 const installerScopeSelectLabel = computed(() => {
   if (installerWorkloadScope.value === 'day') return '日期'
   if (installerWorkloadScope.value === 'week') return '自然周'
@@ -869,6 +870,14 @@ function cacheInstallerWorkload(workload: InstallerWorkload) {
   installerWorkloadCache[workload.installer] = workload.items
 }
 
+async function loadInstallerWorkloadsInBatches(installers: string[]) {
+  for (let index = 0; index < installers.length; index += installerWorkloadFetchConcurrency) {
+    const batch = installers.slice(index, index + installerWorkloadFetchConcurrency)
+    const workloads = await Promise.all(batch.map((installer) => fetchInstallerWorkload(installer)))
+    workloads.forEach(cacheInstallerWorkload)
+  }
+}
+
 async function loadInstallerScopeWorkload() {
   if (installerWorkloadScope.value === 'all') {
     syncInstallerScopeDate()
@@ -883,8 +892,7 @@ async function loadInstallerScopeWorkload() {
   }
   installerWorkloadLoading.value = true
   try {
-    const workloads = await Promise.all(missing.map((installer) => fetchInstallerWorkload(installer)))
-    workloads.forEach(cacheInstallerWorkload)
+    await loadInstallerWorkloadsInBatches(missing)
     syncInstallerScopeDate()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '安装人员工作量筛选加载失败')

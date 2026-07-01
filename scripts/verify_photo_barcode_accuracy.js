@@ -30,7 +30,7 @@ const board = read('v2-web/src/views/ProjectBoardView.vue')
 const releaseNotes = read('v2-web/src/constants/releaseNotes.ts')
 const apiMain = read('v2-api/app/main.py')
 const opsStatus = read('v2-api/app/services/ops_status.py')
-const expectedVersion = '3.0.68'
+const expectedVersion = '3.0.73'
 
 for (const field of [
   'photoAccuracyChecked',
@@ -57,7 +57,7 @@ assertContains(services, 'page = 1', 'photo barcode review list API must accept 
 assertContains(services, 'pageSize = 20', 'photo barcode review list API must default to a small page size')
 assertContains(services, 'offset: String((safePage - 1) * safePageSize)', 'photo barcode review list API must send an offset')
 assertContains(board, '条码准确率', 'ProjectBoardView must show the top barcode accuracy label in Chinese')
-assertContains(board, '条码无法识别清单', 'ProjectBoardView must show the unreadable barcode review dialog in Chinese')
+assertContains(board, '条码复核清单', 'ProjectBoardView must show the barcode review dialog in Chinese')
 assertContains(board, 'fetchGroupPhotoObjectUrl', 'ProjectBoardView must load review dialog photos with authenticated fetch')
 assertContains(board, 'clearPhotoBarcodeObjectUrls', 'ProjectBoardView must release barcode review object URLs')
 assertContains(board, '<el-pagination', 'ProjectBoardView must paginate barcode review details')
@@ -66,7 +66,7 @@ assertContains(board, 'openPhotoBarcodePhotos', 'ProjectBoardView must open phot
 assertContains(board, 'photoBarcodePageSize', 'ProjectBoardView must keep a small barcode review page size')
 assertOrdered(
   board,
-  'title="条码无法识别清单"',
+  'title="条码复核清单"',
   'v-model:current-page="photoBarcodePage"',
   'barcode review pagination must stay inside the barcode review dialog',
 )

@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.72'
+const EXPECTED_VERSION = '3.0.73'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -17,6 +17,10 @@ assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file mus
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
 assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
+assert.match(releaseNotes, /今日完成量可见性修复/, 'release notes must describe the V3.0.73 daily completion visibility fix in Chinese')
+assert.match(releaseNotes, /不再只返回历史总量前 8 名/, 'release notes must state installer distribution is not capped to top 8')
+assert.match(releaseNotes, /账号和姓名别名匹配/, 'release notes must describe installer account/name alias matching')
+assert.match(releaseNotes, /00000000 占位工单拦截/, 'release notes must keep the construction placeholder guard statement')
 assert.match(releaseNotes, /施工缓存一键上传修复/, 'release notes must describe the V3.0.72 construction one-click upload fix in Chinese')
 assert.match(releaseNotes, /存在本地缓存即可点击/, 'release notes must state cached upload buttons remain clickable')
 assert.match(releaseNotes, /保存稳定的 Blob 数据/, 'release notes must describe cached photo Blob persistence')

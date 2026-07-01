@@ -2544,7 +2544,7 @@ class PostgresStateRepository(StateRepository):
         for row in installer_pairs:
             installer = _installer_display_name(row.creator, installer_name_cache) or "未填写"
             installer_group_ids.setdefault(installer, set()).add(str(row.group_id))
-        installer_items = sorted(installer_group_ids.items(), key=lambda item: (-len(item[1]), item[0]))[:8]
+        installer_items = sorted(installer_group_ids.items(), key=lambda item: (-len(item[1]), item[0]))
         installer_total = sum(len(group_ids) for _, group_ids in installer_items)
         installer_distribution = [
             {
@@ -2923,6 +2923,7 @@ class PostgresStateRepository(StateRepository):
         target = str(installer or "").strip()
         if not target:
             return {"installer": target, "items": []}
+        aliases = local_simulation.installer_actor_aliases(target)
         with self._session() as session:
             team_id = local_simulation.current_team_id()
             rows = session.execute(
@@ -2931,7 +2932,7 @@ class PostgresStateRepository(StateRepository):
                 .where(
                     Photo.team_id == team_id,
                     Photo.is_active.is_(True),
-                    Photo.creator == target,
+                    Photo.creator.in_(tuple(aliases)),
                 )
                 .order_by(Photo.created_at, Photo.sort_order, Photo.legacy_id)
             ).all()
