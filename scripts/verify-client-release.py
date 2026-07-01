@@ -49,6 +49,7 @@ REQUIRED_FILES = {
     "scripts/verify-production-readiness.py",
     "scripts/verify-client-release.py",
     "scripts/verify_security_hardening.py",
+    "scripts/verify_frontend_auth_expiry.js",
     "scripts/verify_claim_tasks_completion_status.js",
     "scripts/verify_construction_one_click_upload.js",
     "scripts/verify_construction_draft_photo_cache.js",

@@ -520,6 +520,10 @@ function handleUnauthorizedResponse(response: Response) {
     clearLocalAuthSession()
     redirectToLogin()
   }
+  if (response.status === 429) {
+    const retryAfter = response.headers.get('Retry-After')
+    console.warn('请求过于频繁，请稍后再试', retryAfter ? { retryAfter } : undefined)
+  }
 }
 
 async function fetchWithAuth(path: string, init: RequestInit = {}) {
