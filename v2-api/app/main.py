@@ -13,7 +13,7 @@ from app.core.config import settings
 from app.core.request_id import RequestIdMiddleware
 from app.core.responses import error_response, ok
 from app.core.security import decode_access_token
-from app.core.security_middleware import SecurityHeadersMiddleware
+from app.core.security_middleware import RequestSizeLimitMiddleware, SecurityHeadersMiddleware
 from app.services.local_simulation import save_all_team_states
 from app.services.ezcodes_scheduler import sync_manager
 from app.services.project_board_cache import (
@@ -54,6 +54,7 @@ def create_app() -> FastAPI:
     if production_mode:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
         app.add_middleware(SecurityHeadersMiddleware, frame_ancestors=settings.security_frame_ancestors)
+    app.add_middleware(RequestSizeLimitMiddleware, max_upload_mb=settings.max_upload_mb)
     app.add_middleware(RequestIdMiddleware)
 
     protected_prefixes = (

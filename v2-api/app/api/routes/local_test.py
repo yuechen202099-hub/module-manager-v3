@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import json
 import mimetypes
 import hashlib
@@ -6,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime
 from io import BytesIO
+from pathlib import Path
 from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
@@ -151,6 +153,66 @@ async def use_team_context(request: Request):
 
 router = APIRouter(prefix="/local-test", dependencies=[Depends(use_team_context)])
 BOARD_EVENT_INTERVAL_SECONDS = 15 * 60
+ALLOWED_UPLOAD_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+DANGEROUS_UPLOAD_SUFFIXES = {".html", ".svg", ".js", ".exe", ".bat", ".cmd", ".ps1"}
+
+
+def _upload_content_type(file: UploadFile) -> str:
+    return str(file.content_type or "").split(";", 1)[0].strip().lower()
+
+
+def _validate_upload_files_before_save(files: list[UploadFile]) -> None:
+    if len(files) > settings.max_upload_files_per_request:
+        raise HTTPException(status_code=400, detail="Too many files in one upload request")
+    for file in files:
+        filename = file.filename or "photo.jpg"
+        suffix = Path(filename).suffix.lower()
+        if suffix in DANGEROUS_UPLOAD_SUFFIXES:
+            raise HTTPException(status_code=400, detail=f"Dangerous upload file extension is not allowed: {filename}")
+        try:
+            normalize_suffix(filename)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        content_type = _upload_content_type(file)
+        if content_type not in ALLOWED_UPLOAD_MIME_TYPES:
+            raise HTTPException(status_code=400, detail=f"Unsupported image MIME type: {file.content_type or ''}")
+
+
+def _is_blocked_proxy_ip(hostname: str) -> bool:
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if getattr(address, "ipv4_mapped", None):
+        mapped = address.ipv4_mapped
+        return (
+            mapped.is_private
+            or mapped.is_loopback
+            or mapped.is_link_local
+            or mapped.is_reserved
+            or mapped.is_unspecified
+            or mapped.is_multicast
+        )
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_unspecified
+        or address.is_multicast
+    )
+
+
+def _validate_photo_proxy_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="Invalid image URL")
+    hostname = parsed.hostname.lower().rstrip(".")
+    if hostname == "localhost" or _is_blocked_proxy_ip(hostname):
+        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
+    allowed_hosts = {host.lower().rstrip(".") for host in settings.photo_proxy_hosts}
+    if allowed_hosts and hostname not in allowed_hosts:
+        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
 
 
 def display_name_for_actor(request: Request, actor: str) -> str:
@@ -1514,9 +1576,7 @@ def group_photo_content(group_id: str, photo_id: str, kind: str = Query(default=
 
 @router.get("/photo-proxy")
 def photo_proxy(url: str):
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=400, detail="Invalid image URL")
+    _validate_photo_proxy_url(url)
     try:
         content, media_type = _read_remote_image(url, max_bytes=20_000_000)
     except HTTPException:
@@ -2034,13 +2094,10 @@ async def construction_group_upload_batch(
     validate_construction_upload_group_before_file_save(group_id)
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
+    _validate_upload_files_before_save(files)
     records: list[dict] = []
     for index, file in enumerate(files):
         filename = file.filename or f"photo-{index + 1}.jpg"
-        try:
-            normalize_suffix(filename)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
         content = await file.read()
         if not content:
             continue
@@ -2179,14 +2236,11 @@ async def upload_group_photo_images(
 ):
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
+    _validate_upload_files_before_save(files)
     saved_urls: list[str] = []
     photo_metadata: dict[str, dict] = {}
     for file in files:
         filename = file.filename or "manual-photo.jpg"
-        try:
-            normalize_suffix(filename)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
         content = await file.read()
         if not content:
             continue

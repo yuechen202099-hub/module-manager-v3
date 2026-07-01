@@ -82,6 +82,10 @@ def production_test_settings(**overrides) -> SimpleNamespace:
         "trusted_hosts": ["testserver", "www.sgcc.online", "sgcc.online", "127.0.0.1", "localhost"],
         "trusted_proxy_hosts": {"127.0.0.1", "::1", "localhost"},
         "security_frame_ancestors": "'self'",
+        "state_backend": "postgres",
+        "max_upload_mb": 20,
+        "max_upload_files_per_request": 8,
+        "photo_proxy_hosts": set(),
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -2189,6 +2193,85 @@ def test_manual_group_photo_upload_route() -> None:
     assert uploaded_photo["storage_type"] == "local_upload"
     assert uploaded_photo["storage_key"].startswith("manual/")
     assert uploaded_photo["sha256"]
+
+
+def test_upload_rejects_html_file_before_save() -> None:
+    client.post("/local-test/bootstrap")
+    created = client.post(
+        "/local-test/groups",
+        json={
+            "actor": "api-test",
+            "terminal": "T-HTML-UPLOAD",
+            "meter_no": "M-HTML-UPLOAD",
+            "address": "html upload rejection address",
+        },
+    )
+    group = created.json()["data"]["group"]
+    upload_dir = Path("v2-api/app/static/uploads/manual")
+
+    def saved_upload_files() -> set[str]:
+        if not upload_dir.exists():
+            return set()
+        return {str(path.relative_to(upload_dir)) for path in upload_dir.rglob("*") if path.is_file()}
+
+    before_files = saved_upload_files()
+    uploaded = client.post(
+        f"/local-test/groups/{group['id']}/photos/upload-images",
+        data={"actor": "api-test"},
+        files=[("files", ("masked-html.jpg", b"<!doctype html><script>alert(1)</script>", "text/html"))],
+    )
+
+    assert uploaded.status_code == 400
+    assert "Unsupported image MIME type" in uploaded.json()["detail"]
+    assert saved_upload_files() == before_files
+
+
+def test_upload_rejects_too_many_files(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "max_upload_files_per_request", 1)
+    client.post("/local-test/bootstrap")
+    created = client.post(
+        "/local-test/groups",
+        json={
+            "actor": "api-test",
+            "terminal": "T-COUNT-UPLOAD",
+            "meter_no": "M-COUNT-UPLOAD",
+            "address": "upload count rejection address",
+        },
+    )
+    group = created.json()["data"]["group"]
+
+    uploaded = client.post(
+        f"/local-test/groups/{group['id']}/photos/upload-images",
+        data={"actor": "api-test"},
+        files=[
+            ("files", ("first.jpg", b"fake-image-a", "image/jpeg")),
+            ("files", ("second.jpg", b"fake-image-b", "image/jpeg")),
+        ],
+    )
+
+    assert uploaded.status_code == 400
+    assert "Too many files" in uploaded.json()["detail"]
+
+
+def test_photo_proxy_rejects_localhost(monkeypatch) -> None:
+    from app.api.routes import local_test
+
+    monkeypatch.setattr(local_test, "_read_remote_image", lambda *args, **kwargs: (b"image", "image/jpeg"))
+
+    response = client.get("/local-test/photo-proxy", params={"url": "http://localhost/private.jpg"})
+
+    assert response.status_code == 400
+    assert "not allowed" in response.json()["detail"]
+
+
+def test_request_size_limit_returns_413(monkeypatch) -> None:
+    limited_settings = production_test_settings(app_env="local", max_upload_mb=0)
+    monkeypatch.setattr(main_module, "settings", limited_settings)
+    limited_client = TestClient(main_module.create_app())
+
+    response = limited_client.post("/local-test/bootstrap", content=b"x")
+
+    assert response.status_code == 413
 
 
 def test_catalog_routes_are_filterable() -> None:
