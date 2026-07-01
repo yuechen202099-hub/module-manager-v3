@@ -2226,6 +2226,40 @@ def test_upload_rejects_html_file_before_save() -> None:
     assert saved_upload_files() == before_files
 
 
+def test_upload_rejects_spoofed_html_before_save() -> None:
+    client.post("/local-test/bootstrap")
+    created = client.post(
+        "/local-test/groups",
+        json={
+            "actor": "api-test",
+            "terminal": "T-SPOOF-UPLOAD",
+            "meter_no": "M-SPOOF-UPLOAD",
+            "address": "spoofed html upload rejection address",
+        },
+    )
+    group = created.json()["data"]["group"]
+    upload_dir = Path("v2-api/app/static/uploads/manual")
+
+    def saved_upload_files() -> set[str]:
+        if not upload_dir.exists():
+            return set()
+        return {str(path.relative_to(upload_dir)) for path in upload_dir.rglob("*") if path.is_file()}
+
+    before_files = saved_upload_files()
+    uploaded = client.post(
+        f"/local-test/groups/{group['id']}/photos/upload-images",
+        data={"actor": "api-test"},
+        files=[
+            ("files", ("valid-first.jpg", b"fake-image-a", "image/jpeg")),
+            ("files", ("masked-html.jpg", b"   <html><script>alert(1)</script>", "image/jpeg")),
+        ],
+    )
+
+    assert uploaded.status_code == 400
+    assert "active content" in uploaded.json()["detail"]
+    assert saved_upload_files() == before_files
+
+
 def test_upload_rejects_too_many_files(monkeypatch) -> None:
     monkeypatch.setattr(settings, "max_upload_files_per_request", 1)
     client.post("/local-test/bootstrap")
@@ -2259,6 +2293,40 @@ def test_photo_proxy_rejects_localhost(monkeypatch) -> None:
     monkeypatch.setattr(local_test, "_read_remote_image", lambda *args, **kwargs: (b"image", "image/jpeg"))
 
     response = client.get("/local-test/photo-proxy", params={"url": "http://localhost/private.jpg"})
+
+    assert response.status_code == 400
+    assert "not allowed" in response.json()["detail"]
+
+
+def test_photo_proxy_requires_allowlist_in_production(monkeypatch) -> None:
+    from app.api.routes import local_test
+
+    production_settings = production_test_settings(app_env="production", photo_proxy_hosts=set())
+    monkeypatch.setattr(local_test, "settings", production_settings)
+    monkeypatch.setattr(
+        local_test,
+        "_read_remote_image",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("proxy fetch should be blocked")),
+    )
+
+    response = client.get("/local-test/photo-proxy", params={"url": "https://example.test/photo.jpg"})
+
+    assert response.status_code == 400
+    assert "not allowed" in response.json()["detail"]
+
+
+def test_photo_proxy_rejects_private_dns(monkeypatch) -> None:
+    from app.api.routes import local_test
+
+    monkeypatch.setattr(local_test, "_read_remote_image", lambda *args, **kwargs: (b"image", "image/jpeg"))
+    monkeypatch.setattr(
+        local_test,
+        "_resolve_photo_proxy_host_addresses",
+        lambda hostname: ["10.0.0.5"],
+        raising=False,
+    )
+
+    response = client.get("/local-test/photo-proxy", params={"url": "https://cdn.example.test/photo.jpg"})
 
     assert response.status_code == 400
     assert "not allowed" in response.json()["detail"]

@@ -3,14 +3,17 @@ import ipaddress
 import json
 import mimetypes
 import hashlib
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Callable
+from urllib.error import HTTPError
+from urllib.parse import urljoin, urlparse
+from urllib.request import HTTPRedirectHandler, build_opener
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 from uuid import uuid4
@@ -155,6 +158,8 @@ router = APIRouter(prefix="/local-test", dependencies=[Depends(use_team_context)
 BOARD_EVENT_INTERVAL_SECONDS = 15 * 60
 ALLOWED_UPLOAD_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 DANGEROUS_UPLOAD_SUFFIXES = {".html", ".svg", ".js", ".exe", ".bat", ".cmd", ".ps1"}
+DANGEROUS_UPLOAD_PREFIXES = (b"<!doctype", b"<html", b"<script", b"<svg", b"<?xml")
+DANGEROUS_UPLOAD_MARKERS = (b"<script", b"javascript:", b"onerror=", b"onload=")
 
 
 def _upload_content_type(file: UploadFile) -> str:
@@ -178,7 +183,32 @@ def _validate_upload_files_before_save(files: list[UploadFile]) -> None:
             raise HTTPException(status_code=400, detail=f"Unsupported image MIME type: {file.content_type or ''}")
 
 
-def _is_blocked_proxy_ip(hostname: str) -> bool:
+def _validate_upload_content_before_save(content: bytes, file: UploadFile) -> None:
+    filename = file.filename or "photo.jpg"
+    content_type = _upload_content_type(file)
+    normalized = content.lstrip(b"\x00\t\r\n\f ").lower()
+    sniff_window = normalized[:1024]
+    if sniff_window.startswith(DANGEROUS_UPLOAD_PREFIXES) or any(marker in sniff_window for marker in DANGEROUS_UPLOAD_MARKERS):
+        raise HTTPException(status_code=400, detail=f"Uploaded image contains active content: {filename}")
+    try:
+        validate_image_content(content, content_type, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _read_validated_upload_files_before_save(files: list[UploadFile]) -> list[tuple[int, UploadFile, bytes]]:
+    _validate_upload_files_before_save(files)
+    validated: list[tuple[int, UploadFile, bytes]] = []
+    for index, file in enumerate(files):
+        content = await file.read()
+        if not content:
+            continue
+        _validate_upload_content_before_save(content, file)
+        validated.append((index, file, content))
+    return validated
+
+
+def _is_blocked_proxy_address(hostname: str) -> bool:
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
@@ -203,16 +233,52 @@ def _is_blocked_proxy_ip(hostname: str) -> bool:
     )
 
 
+def _is_ip_literal(hostname: str) -> bool:
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_photo_proxy_host_addresses(hostname: str) -> list[str]:
+    try:
+        results = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed") from exc
+    addresses: set[str] = set()
+    for result in results:
+        sockaddr = result[4]
+        if sockaddr:
+            addresses.add(str(sockaddr[0]))
+    if not addresses:
+        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
+    return sorted(addresses)
+
+
 def _validate_photo_proxy_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
         raise HTTPException(status_code=400, detail="Invalid image URL")
     hostname = parsed.hostname.lower().rstrip(".")
-    if hostname == "localhost" or _is_blocked_proxy_ip(hostname):
+    if hostname == "localhost" or _is_blocked_proxy_address(hostname):
         raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
     allowed_hosts = {host.lower().rstrip(".") for host in settings.photo_proxy_hosts}
     if allowed_hosts and hostname not in allowed_hosts:
         raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
+    if not allowed_hosts and settings.app_env.lower() in {"prod", "production"}:
+        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
+    resolved_addresses = [hostname] if not _is_blocked_proxy_address(hostname) and _is_ip_literal(hostname) else _resolve_photo_proxy_host_addresses(hostname)
+    if any(_is_blocked_proxy_address(address) for address in resolved_addresses):
+        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler)
 
 
 def display_name_for_actor(request: Request, actor: str) -> str:
@@ -1252,7 +1318,15 @@ def delivery_cache_photo(group_id: str, photo_id: str):
     return FileResponse(path, media_type=media_type, headers={"Cache-Control": "private, max-age=86400"})
 
 
-def _read_remote_image(url: str, *, max_bytes: int = 30 * 1024 * 1024) -> tuple[bytes, str]:
+def _read_remote_image(
+    url: str,
+    *,
+    max_bytes: int = 30 * 1024 * 1024,
+    url_validator: Callable[[str], None] | None = None,
+    follow_redirects: bool = True,
+) -> tuple[bytes, str]:
+    if url_validator is not None:
+        url_validator(url)
     try:
         upstream_request = UrlRequest(
             url,
@@ -1261,10 +1335,21 @@ def _read_remote_image(url: str, *, max_bytes: int = 30 * 1024 * 1024) -> tuple[
                 "Accept": "image/*,*/*;q=0.8",
             },
         )
-        with urlopen(upstream_request, timeout=30) as upstream:
+        opener = urlopen if follow_redirects else _NO_REDIRECT_OPENER.open
+        with opener(upstream_request, timeout=30) as upstream:
+            final_url = upstream.geturl()
+            if url_validator is not None:
+                url_validator(final_url)
             content_type = upstream.headers.get("Content-Type") or "application/octet-stream"
             expected_length = upstream.headers.get("Content-Length", "")
             content = upstream.read(max_bytes + 1)
+    except HTTPError as exc:
+        if not follow_redirects and 300 <= exc.code < 400:
+            location = exc.headers.get("Location") or ""
+            if location and url_validator is not None:
+                url_validator(urljoin(url, location))
+            raise HTTPException(status_code=400, detail="Photo proxy redirects are not allowed") from exc
+        raise HTTPException(status_code=502, detail=f"Image download failed: {exc}") from exc
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"Image download failed: {exc}") from exc
     if len(content) > max_bytes:
@@ -1578,7 +1663,12 @@ def group_photo_content(group_id: str, photo_id: str, kind: str = Query(default=
 def photo_proxy(url: str):
     _validate_photo_proxy_url(url)
     try:
-        content, media_type = _read_remote_image(url, max_bytes=20_000_000)
+        content, media_type = _read_remote_image(
+            url,
+            max_bytes=20_000_000,
+            url_validator=_validate_photo_proxy_url,
+            follow_redirects=False,
+        )
     except HTTPException:
         raise
     return Response(content=content, media_type=media_type)
@@ -2094,13 +2184,10 @@ async def construction_group_upload_batch(
     validate_construction_upload_group_before_file_save(group_id)
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
-    _validate_upload_files_before_save(files)
+    validated_files = await _read_validated_upload_files_before_save(files)
     records: list[dict] = []
-    for index, file in enumerate(files):
+    for index, file, content in validated_files:
         filename = file.filename or f"photo-{index + 1}.jpg"
-        content = await file.read()
-        if not content:
-            continue
         client_photo_id = client_photo_ids[index] if index < len(client_photo_ids) else f"photo-{index + 1}"
         slot = photo_slots[index] if index < len(photo_slots) else "other"
         try:
@@ -2236,14 +2323,11 @@ async def upload_group_photo_images(
 ):
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
-    _validate_upload_files_before_save(files)
+    validated_files = await _read_validated_upload_files_before_save(files)
     saved_urls: list[str] = []
     photo_metadata: dict[str, dict] = {}
-    for file in files:
+    for _index, file, content in validated_files:
         filename = file.filename or "manual-photo.jpg"
-        content = await file.read()
-        if not content:
-            continue
         try:
             stored = save_image_bytes(
                 scope="manual",
