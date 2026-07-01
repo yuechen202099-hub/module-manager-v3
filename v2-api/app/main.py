@@ -53,7 +53,7 @@ def create_app() -> FastAPI:
     )
     if production_mode:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
-    app.add_middleware(SecurityHeadersMiddleware, frame_ancestors=settings.security_frame_ancestors)
+        app.add_middleware(SecurityHeadersMiddleware, frame_ancestors=settings.security_frame_ancestors)
     app.add_middleware(RequestIdMiddleware)
 
     protected_prefixes = (
@@ -70,7 +70,11 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def require_production_auth(request: Request, call_next):
-        if production_mode and request.url.path.startswith(protected_prefixes):
+        if (
+            production_mode
+            and request.method.upper() != "OPTIONS"
+            and request.url.path.startswith(protected_prefixes)
+        ):
             authorization = request.headers.get("authorization", "")
             if not authorization.lower().startswith("bearer "):
                 return error_response(request, "authentication_required", "Authentication required.", status_code=401)

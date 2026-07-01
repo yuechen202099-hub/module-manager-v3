@@ -664,27 +664,56 @@ def test_api_docs_are_disabled_in_production(monkeypatch) -> None:
     assert production_client.get("/openapi.json").status_code == 404
 
 
-def test_security_headers_present() -> None:
-    response = client.get("/login")
+def test_local_api_docs_do_not_receive_production_csp() -> None:
+    response = client.get("/docs")
+
+    assert response.status_code == 200
+    assert "content-security-policy" not in response.headers
+
+
+def test_production_security_headers_present(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "settings", production_test_settings())
+    production_client = TestClient(main_module.create_app())
+
+    response = production_client.get("/login")
 
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert "default-src 'self'" in response.headers["content-security-policy"]
 
 
-def test_production_cors_rejects_untrusted_origin(monkeypatch) -> None:
+def test_production_cors_allows_project_preflight_before_auth(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "settings", production_test_settings())
     production_client = TestClient(main_module.create_app())
 
     response = production_client.options(
-        "/auth/login",
+        "/projects",
         headers={
-            "Origin": "https://evil.example",
-            "Access-Control-Request-Method": "POST",
+            "Origin": "https://www.sgcc.online",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Authorization",
         },
     )
 
-    assert response.headers.get("access-control-allow-origin") != "https://evil.example"
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://www.sgcc.online"
+    assert response.headers["access-control-allow-credentials"] == "true"
+
+
+def test_production_cors_rejects_untrusted_origins(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "settings", production_test_settings())
+    production_client = TestClient(main_module.create_app())
+
+    for path, method in (("/auth/login", "POST"), ("/projects", "GET")):
+        response = production_client.options(
+            path,
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": method,
+            },
+        )
+
+        assert response.headers.get("access-control-allow-origin") != "https://evil.example"
 
 
 def test_project_routes_return_contract_shape() -> None:
