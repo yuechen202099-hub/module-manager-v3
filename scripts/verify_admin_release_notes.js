@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.73'
+const EXPECTED_VERSION = '3.0.74'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -17,7 +17,12 @@ assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file mus
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
 assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
-assert.match(releaseNotes, /今日完成量可见性修复/, 'release notes must describe the V3.0.73 daily completion visibility fix in Chinese')
+assert.match(releaseNotes, /网站安全防护加固/, 'release notes must describe the V3.0.74 security hardening update in Chinese')
+assert.match(releaseNotes, /严格 CORS、可信 Host、请求大小限制和安全响应头/, 'release notes must describe security headers, strict CORS, trusted Host, and request size limits')
+assert.match(releaseNotes, /多次错误密码会返回 429/, 'release notes must describe login rate limiting and 429 behavior')
+assert.match(releaseNotes, /生产安全审计脚本/, 'release notes must describe the production security audit script')
+assert.match(releaseNotes, /version:\s*'V3\.0\.73'/, 'release notes must keep V3.0.73')
+assert.match(releaseNotes, /今日完成量可见性修复/, 'release notes must keep the V3.0.73 daily completion visibility fix in Chinese')
 assert.match(releaseNotes, /不再只返回历史总量前 8 名/, 'release notes must state installer distribution is not capped to top 8')
 assert.match(releaseNotes, /账号和姓名别名匹配/, 'release notes must describe installer account/name alias matching')
 assert.match(releaseNotes, /00000000 占位工单拦截/, 'release notes must keep the construction placeholder guard statement')

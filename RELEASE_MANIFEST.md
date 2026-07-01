@@ -2,8 +2,8 @@
 
 ## Package
 
-- Name: module-manager-v2-server-3.0.73
-- Version: 3.0.73
+- Name: module-manager-v2-server-3.0.74
+- Version: 3.0.74
 - Generated at: 2026-07-01 11:20 +08:00
 
 ## Included

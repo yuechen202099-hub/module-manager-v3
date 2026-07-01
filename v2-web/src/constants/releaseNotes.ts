@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.73'
+export const APP_VERSION = '3.0.74'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,19 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.74',
+    date: '2026-07-01',
+    type: '小更新',
+    title: '网站安全防护加固',
+    items: [
+      '生产环境启用严格 CORS、可信 Host、请求大小限制和安全响应头，降低跨站调用、伪造 Host 和浏览器侧攻击风险。',
+      '登录接口增加失败限流保护，多次错误密码会返回 429，并保留当天有效登录过期后自动跳转登录页的行为。',
+      '施工和资料组图片上传增加文件数量、类型、危险内容和超大请求拦截，00000000 占位工单与无工单校验仍在保存照片前执行。',
+      '照片代理改为生产显式白名单策略，拒绝本机、内网、私网 DNS 和跳转代理，避免服务器被当作内网探测入口。',
+      '发布包新增生产安全审计脚本，上线后会检查真实服务器 .env 的弱口令、生产开关、域名白名单和照片代理白名单。',
+    ],
+  },
   {
     version: 'V3.0.73',
     date: '2026-07-01',

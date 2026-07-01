@@ -25,7 +25,7 @@ const releaseNotes = read('v2-web/src/constants/releaseNotes.ts')
 const opsStatus = read('v2-api/app/services/ops_status.py')
 const apiMain = read('v2-api/app/main.py')
 const packageJson = read('v2-web/package.json')
-const expectedVersion = '3.0.73'
+const expectedVersion = '3.0.74'
 
 assertNotContains(projectBoard, 'fetchSystemStatus', 'project board must not fetch unrelated system status')
 assertNotContains(projectBoard, 'systemRows', 'project board must not compute system status rows')
@@ -42,8 +42,10 @@ assertContains(globalSearch, '<img', 'data center photo dialog must render nativ
 assertNotContains(globalSearch, '<el-image', 'data center photo dialog must not depend on Element Plus image rendering')
 
 assertContains(releaseNotes, `APP_VERSION = '${expectedVersion}'`, `APP_VERSION must be ${expectedVersion}`)
+assertContains(releaseNotes, "version: 'V3.0.74'", 'release notes must include V3.0.74')
+assertContains(releaseNotes, '网站安全防护加固', 'release notes must describe the V3.0.74 security hardening update in Chinese')
 assertContains(releaseNotes, "version: 'V3.0.73'", 'release notes must include V3.0.73')
-assertContains(releaseNotes, '今日完成量可见性修复', 'release notes must describe the V3.0.73 daily completion visibility fix in Chinese')
+assertContains(releaseNotes, '今日完成量可见性修复', 'release notes must keep the V3.0.73 daily completion visibility fix in Chinese')
 assertContains(releaseNotes, "version: 'V3.0.72'", 'release notes must include V3.0.72')
 assertContains(releaseNotes, '施工缓存一键上传修复', 'release notes must describe the V3.0.72 construction upload fix in Chinese')
 assertContains(releaseNotes, '保存稳定的 Blob 数据', 'release notes must describe the cached photo fix in Chinese')

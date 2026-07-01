@@ -30,7 +30,7 @@ const localSimulation = read('v2-api/app/services/local_simulation.py')
 const apiMain = read('v2-api/app/main.py')
 const opsStatus = read('v2-api/app/services/ops_status.py')
 const packageJson = read('v2-web/package.json')
-const expectedVersion = '3.0.73'
+const expectedVersion = '3.0.74'
 
 for (const label of ['终端总数', '已完成施工', '未完成施工', '待归档', '已归档']) {
   assertContains(board, label, `ProjectBoardView must expose the ${label} terminal card`)

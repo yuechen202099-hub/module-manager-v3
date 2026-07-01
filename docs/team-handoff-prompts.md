@@ -2,7 +2,7 @@
 
 ## 给小程序工程师团队 Codex
 
-你正在协作 `module-manager-v3` 生产维护仓库。请先从 GitHub 拉取最新生产分支 `production/V3/3.0.73`，基于它创建功能分支 `mp/<短功能名>`，不要直接提交到生产分支。
+你正在协作 `module-manager-v3` 生产维护仓库。请先从 GitHub 拉取最新生产分支 `production/V3/3.0.74`，基于它创建功能分支 `mp/<短功能名>`，不要直接提交到生产分支。
 
 工作边界：
 
@@ -14,7 +14,7 @@
 
 交付方式：
 
-1. 从 `production/V3/3.0.73` 切 `mp/<短功能名>`。
+1. 从 `production/V3/3.0.74` 切 `mp/<短功能名>`。
 2. 小步提交，写清中文变更说明。
 3. 完成后提交 PR 到当前生产分支，或提供 patch。
 4. PR/patch 必须包含：基线 commit、修改文件清单、功能说明、测试命令和结果、风险与回滚说明。
@@ -22,7 +22,7 @@
 
 ## 给项目管理平台工程师团队 Codex
 
-你正在基于 `module-manager-v3` 最新生产版开发项目管理平台能力。请先从 GitHub 拉取最新生产分支 `production/V3/3.0.73`，基于它创建功能分支 `pm-platform/<短功能名>`，不要直接提交到生产分支。
+你正在基于 `module-manager-v3` 最新生产版开发项目管理平台能力。请先从 GitHub 拉取最新生产分支 `production/V3/3.0.74`，基于它创建功能分支 `pm-platform/<短功能名>`，不要直接提交到生产分支。
 
 工作边界：
 
@@ -34,7 +34,7 @@
 
 交付方式：
 
-1. 从 `production/V3/3.0.73` 切 `pm-platform/<短功能名>`。
+1. 从 `production/V3/3.0.74` 切 `pm-platform/<短功能名>`。
 2. 开发期间定期合并或 rebase 最新 `production/V3/<version>`。
 3. 完成后提交 PR 到当前生产分支，或提供 patch。
 4. PR/patch 必须包含：基线 commit、修改文件清单、功能说明、测试命令和结果、风险与回滚说明。

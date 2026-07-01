@@ -30,7 +30,7 @@ const board = read('v2-web/src/views/ProjectBoardView.vue')
 const releaseNotes = read('v2-web/src/constants/releaseNotes.ts')
 const apiMain = read('v2-api/app/main.py')
 const opsStatus = read('v2-api/app/services/ops_status.py')
-const expectedVersion = '3.0.73'
+const expectedVersion = '3.0.74'
 
 for (const field of [
   'photoAccuracyChecked',
