@@ -6,12 +6,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.request_id import RequestIdMiddleware
 from app.core.responses import error_response, ok
 from app.core.security import decode_access_token
+from app.core.security_middleware import SecurityHeadersMiddleware
 from app.services.local_simulation import save_all_team_states
 from app.services.ezcodes_scheduler import sync_manager
 from app.services.project_board_cache import (
@@ -43,11 +45,15 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=settings.allowed_origins,
+        allow_origin_regex=None if production_mode else ".*",
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Team-Id", "X-Request-Id"],
     )
+    if production_mode:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+    app.add_middleware(SecurityHeadersMiddleware, frame_ancestors=settings.security_frame_ancestors)
     app.add_middleware(RequestIdMiddleware)
 
     protected_prefixes = (

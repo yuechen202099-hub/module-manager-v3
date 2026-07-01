@@ -74,6 +74,17 @@ def assert_vue_shell_response(response) -> None:
     assert "LegacyStaticPageView" not in response.text
 
 
+def production_test_settings(**overrides) -> SimpleNamespace:
+    values = {
+        "app_env": "production",
+        "allowed_origins": ["https://www.sgcc.online", "https://sgcc.online"],
+        "trusted_hosts": ["testserver", "www.sgcc.online", "sgcc.online", "127.0.0.1", "localhost"],
+        "security_frame_ancestors": "'self'",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def demo_admin_headers() -> dict[str, str]:
     admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
     assert admin_login.status_code == 200
@@ -334,8 +345,7 @@ def test_demo_auth_is_disabled_by_default_in_production(monkeypatch) -> None:
 
 
 def test_production_account_config_and_api_token_gate(monkeypatch, tmp_path) -> None:
-    production_settings = SimpleNamespace(
-        app_env="production",
+    production_settings = production_test_settings(
         demo_auth_enabled=False,
         admin_username="root-admin",
         admin_password="RootPass12345",
@@ -582,8 +592,7 @@ def test_photo_barcode_review_groups_export_supports_passed_query_filter() -> No
 
 
 def test_account_login_history_keeps_30_rows_and_marks_ip_common_user(monkeypatch, tmp_path) -> None:
-    production_settings = SimpleNamespace(
-        app_env="production",
+    production_settings = production_test_settings(
         demo_auth_enabled=False,
         admin_username="root-admin",
         admin_password="RootPass12345",
@@ -647,12 +656,35 @@ def test_account_login_history_keeps_30_rows_and_marks_ip_common_user(monkeypatc
 
 
 def test_api_docs_are_disabled_in_production(monkeypatch) -> None:
-    monkeypatch.setattr(main_module, "settings", SimpleNamespace(app_env="production"))
+    monkeypatch.setattr(main_module, "settings", production_test_settings())
     production_client = TestClient(main_module.create_app())
 
     assert production_client.get("/docs").status_code == 404
     assert production_client.get("/redoc").status_code == 404
     assert production_client.get("/openapi.json").status_code == 404
+
+
+def test_security_headers_present() -> None:
+    response = client.get("/login")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+    assert "default-src 'self'" in response.headers["content-security-policy"]
+
+
+def test_production_cors_rejects_untrusted_origin(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "settings", production_test_settings())
+    production_client = TestClient(main_module.create_app())
+
+    response = production_client.options(
+        "/auth/login",
+        headers={
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.headers.get("access-control-allow-origin") != "https://evil.example"
 
 
 def test_project_routes_return_contract_shape() -> None:
@@ -1614,8 +1646,7 @@ def test_group_target_route_is_searchable() -> None:
 def test_admin_global_group_search_is_admin_only(monkeypatch, tmp_path) -> None:
     from app.api.routes import local_test
 
-    production_settings = SimpleNamespace(
-        app_env="production",
+    production_settings = production_test_settings(
         demo_auth_enabled=False,
         admin_username="root-admin",
         admin_password="RootPass12345",
@@ -1730,8 +1761,7 @@ def test_admin_global_group_search_is_admin_only(monkeypatch, tmp_path) -> None:
 def test_admin_group_backoffice_edit_and_resets_are_audited(monkeypatch, tmp_path) -> None:
     from app.api.routes import local_test
 
-    production_settings = SimpleNamespace(
-        app_env="production",
+    production_settings = production_test_settings(
         demo_auth_enabled=False,
         admin_username="root-admin",
         admin_password="RootPass12345",
