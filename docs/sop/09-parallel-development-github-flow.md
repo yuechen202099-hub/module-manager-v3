@@ -3,7 +3,7 @@
 ## Current Rule
 
 - Official production branch format: `production/V3/<version>`.
-- Current production baseline: `production/V3/3.0.71`.
+- Current production baseline: `production/V3/3.0.72`.
 - Old branch `production/v3.0.35` is historical compatibility only.
 
 ## Roles

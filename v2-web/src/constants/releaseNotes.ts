@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.71'
+export const APP_VERSION = '3.0.72'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,18 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.72',
+    date: '2026-07-01',
+    type: 'BUG 修复',
+    title: '施工缓存一键上传修复',
+    items: [
+      '施工采集页“上传缓存”和“一键上传”只要当前终端存在本地缓存即可点击，不再因为缓存预判未完整而直接灰掉。',
+      '一键上传会逐条执行原有上传校验，00000000 占位工单、缺少模块号、缺少必填照片仍会被拦截并保留本地缓存。',
+      '本地缓存照片改为保存稳定的 Blob 数据和文件元信息，兼容部分移动浏览器或微信环境中 File 写入 IndexedDB 后照片为空的问题。',
+      '缓存完整性判断会确认照片确实有可上传内容，空照片占位不再被误判为完整缓存。',
+    ],
+  },
   {
     version: 'V3.0.71',
     date: '2026-06-30',

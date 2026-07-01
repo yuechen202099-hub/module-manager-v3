@@ -100,6 +100,8 @@ Copy-ReleaseItem "scripts\verify_postgres_cutover_gate.py" "scripts\verify_postg
 Copy-ReleaseItem "scripts\verify-production-readiness.py" "scripts\verify-production-readiness.py"
 Copy-ReleaseItem "scripts\verify-client-release.py" "scripts\verify-client-release.py"
 Copy-ReleaseItem "scripts\verify_claim_tasks_completion_status.js" "scripts\verify_claim_tasks_completion_status.js"
+Copy-ReleaseItem "scripts\verify_construction_one_click_upload.js" "scripts\verify_construction_one_click_upload.js"
+Copy-ReleaseItem "scripts\verify_construction_draft_photo_cache.js" "scripts\verify_construction_draft_photo_cache.js"
 Copy-ReleaseItem "scripts\verify_release_sop.py" "scripts\verify_release_sop.py"
 Copy-ReleaseItem "scripts\verify_release_retention_policy.py" "scripts\verify_release_retention_policy.py"
 Copy-ReleaseItem "scripts\verify_project_board_photo_dialog.js" "scripts\verify_project_board_photo_dialog.js"

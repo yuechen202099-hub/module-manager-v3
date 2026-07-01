@@ -58,6 +58,9 @@ type DraftPhoto = {
   blob?: Blob
   filename?: string
   name?: string
+  mime_type?: string
+  size?: number
+  last_modified?: number
   client_photo_id?: string
 }
 
@@ -1357,11 +1360,24 @@ async function getAllSnapshots(): Promise<TerminalSnapshot[]> {
   return withStore<TerminalSnapshot[]>(SNAPSHOT_STORE, 'readonly', (store) => store.getAll())
 }
 
+function draftPhotoBlob(photo: DraftPhoto): Blob | null {
+  const source = photo.blob || photo.file
+  if (!(source instanceof Blob) || source.size <= 0) return null
+  return source
+}
+
+function draftPhotoHasPayload(photo: DraftPhoto) {
+  return Boolean(draftPhotoBlob(photo))
+}
+
 function fileFromDraftPhoto(photo: DraftPhoto, index: number): File | null {
-  const source = photo.file || photo.blob
+  const source = draftPhotoBlob(photo)
   if (!source) return null
   if (source instanceof File) return source
-  return new File([source], photo.filename || photo.name || `photo-${index + 1}.jpg`, { type: source.type || 'image/jpeg' })
+  return new File([source], photo.filename || photo.name || `photo-${index + 1}.jpg`, {
+    type: photo.mime_type || source.type || 'image/jpeg',
+    lastModified: photo.last_modified || Date.now(),
+  })
 }
 
 function exceptionNeedsPhotoSlots(source: PhotoRequirementSource = {}) {
@@ -1373,7 +1389,13 @@ function exceptionNeedsPhotoSlots(source: PhotoRequirementSource = {}) {
 
 function missingSlotsForDraft(draft: CacheDraft) {
   if (draft.work_order_id && !exceptionNeedsPhotoSlots(draft)) return []
-  const covered = new Set([...(draft.covered_slots || []), ...((draft.photos || []).map((photo) => photo.slot).filter(Boolean) as string[])])
+  const covered = new Set([
+    ...(draft.covered_slots || []),
+    ...((draft.photos || [])
+      .filter(draftPhotoHasPayload)
+      .map((photo) => photo.slot)
+      .filter(Boolean) as string[]),
+  ])
   return slots.filter((slot) => slot.required && !covered.has(slot.key)).map((slot) => slot.label)
 }
 
@@ -1438,9 +1460,12 @@ function buildCurrentDraft(): CacheDraft {
       if (!file) return null
       return {
         slot,
-        file,
+        blob: file.slice(0, file.size, file.type || 'image/jpeg'),
         filename: file.name,
         name: file.name,
+        mime_type: file.type || 'image/jpeg',
+        size: file.size,
+        last_modified: file.lastModified,
         client_photo_id: `${slot}-${file.name}-${file.size}-${file.lastModified}`,
       }
     })
@@ -1641,24 +1666,41 @@ async function uploadCurrentDraft() {
 }
 
 async function uploadAllCached() {
-  if (!readyCachedDrafts.value.length) {
-    ElMessage.warning('当前终端没有可上传的完整缓存')
+  if (!cachedTaskDrafts.value.length) {
+    ElMessage.warning('当前终端没有本地缓存')
     return
   }
   uploading.value = true
   let success = 0
   let failed = 0
-  for (const draft of [...readyCachedDrafts.value]) {
-    try {
-      await uploadDraft(draft)
-      success += 1
-    } catch {
-      failed += 1
+  const failureReasons = new Map<string, number>()
+  try {
+    for (const draft of [...cachedTaskDrafts.value]) {
+      try {
+        await uploadDraft(draft)
+        success += 1
+      } catch (error) {
+        failed += 1
+        const reason = error instanceof Error ? error.message : '上传失败'
+        failureReasons.set(reason, (failureReasons.get(reason) || 0) + 1)
+      }
     }
+  } finally {
+    uploading.value = false
   }
-  uploading.value = false
-  ElMessage.success(`缓存上传完成：成功 ${success}，失败 ${failed}`)
-  await reloadAfterUpload()
+  const reasonSummary = [...failureReasons.entries()]
+    .slice(0, 3)
+    .map(([reason, count]) => `${reason}${count > 1 ? ` ×${count}` : ''}`)
+    .join('；')
+  if (success && failed) {
+    ElMessage.warning(`缓存上传完成：成功 ${success}，失败 ${failed}${reasonSummary ? `。${reasonSummary}` : ''}`)
+  } else if (success) {
+    ElMessage.success(`缓存上传完成：成功 ${success}`)
+  } else {
+    ElMessage.error(`缓存未上传：${reasonSummary || '请检查网络和必填资料'}`)
+  }
+  if (success) await reloadAfterUpload()
+  else await loadDrafts()
 }
 
 async function submitSelectedConstructionTask() {
@@ -2047,10 +2089,10 @@ onBeforeUnmount(() => {
           type="primary"
           :icon="UploadFilled"
           :loading="uploading"
-          :disabled="!readyCachedDrafts.length"
+          :disabled="uploading || !cachedTaskDrafts.length"
           @click="uploadAllCached"
         >
-          上传缓存 {{ readyCachedDrafts.length || '' }}
+          上传缓存 {{ cachedTaskDrafts.length || '' }}
         </el-button>
       </div>
     </header>
@@ -2260,7 +2302,7 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="selectedTask && groupFilter === 'cached' && cachedTaskDrafts.length" class="cache-inline-actions">
               <span>{{ cachedTaskDrafts.length }} 个本地缓存</span>
-              <el-button size="small" type="primary" :loading="uploading" :disabled="!readyCachedDrafts.length" @click="uploadAllCached">
+              <el-button size="small" type="primary" :loading="uploading" :disabled="uploading || !cachedTaskDrafts.length" @click="uploadAllCached">
                 一键上传
               </el-button>
             </div>

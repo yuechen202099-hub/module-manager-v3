@@ -17,6 +17,7 @@ REQUIRED_FILES = [
     "docs/sop/07-rollback-and-incident-review.md",
     "docs/sop/08-business-acceptance-templates.md",
     "ops/releases/README.md",
+    "ops/releases/V3.0.72.md",
     "ops/releases/V3.0.71.md",
     "ops/releases/V3.0.70.md",
     "ops/releases/V3.0.69.md",
@@ -96,6 +97,7 @@ def main() -> int:
         "docs/sop/06-production-deploy-runbook.md",
         "docs/sop/07-rollback-and-incident-review.md",
         "docs/sop/08-business-acceptance-templates.md",
+        "ops/releases/V3.0.72.md",
         "ops/releases/V3.0.71.md",
         "ops/releases/V3.0.70.md",
         "ops/releases/V3.0.69.md",
@@ -147,14 +149,14 @@ def main() -> int:
         fail("SOP files must not keep stale V3.0.38 deployment examples: " + ", ".join(stale_sop_hits))
 
     agents = read("AGENTS.md")
-    if "V3.0.71" not in agents:
-        fail("AGENTS.md must state current production baseline V3.0.71")
+    if "V3.0.72" not in agents:
+        fail("AGENTS.md must state current production baseline V3.0.72")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
 
     manifest = read("RELEASE_MANIFEST.md")
-    if "3.0.71" not in manifest:
-        fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.71")
+    if "3.0.72" not in manifest:
+        fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.72")
 
     retention_runbook = read("docs/sop/06-production-deploy-runbook.md")
     for text in ["Production Release Retention", "cleanup_old_releases.sh", "keep 5", "--dry-run"]:

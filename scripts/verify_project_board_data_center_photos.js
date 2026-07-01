@@ -25,7 +25,7 @@ const releaseNotes = read('v2-web/src/constants/releaseNotes.ts')
 const opsStatus = read('v2-api/app/services/ops_status.py')
 const apiMain = read('v2-api/app/main.py')
 const packageJson = read('v2-web/package.json')
-const expectedVersion = '3.0.71'
+const expectedVersion = '3.0.72'
 
 assertNotContains(projectBoard, 'fetchSystemStatus', 'project board must not fetch unrelated system status')
 assertNotContains(projectBoard, 'systemRows', 'project board must not compute system status rows')
@@ -42,8 +42,10 @@ assertContains(globalSearch, '<img', 'data center photo dialog must render nativ
 assertNotContains(globalSearch, '<el-image', 'data center photo dialog must not depend on Element Plus image rendering')
 
 assertContains(releaseNotes, `APP_VERSION = '${expectedVersion}'`, `APP_VERSION must be ${expectedVersion}`)
-assertContains(releaseNotes, "version: 'V3.0.71'", 'release notes must include V3.0.71')
-assertContains(releaseNotes, '人工确认条码状态修复', 'release notes must describe the V3.0.71 barcode manual confirmation fix in Chinese')
+assertContains(releaseNotes, "version: 'V3.0.72'", 'release notes must include V3.0.72')
+assertContains(releaseNotes, '施工缓存一键上传修复', 'release notes must describe the V3.0.72 construction upload fix in Chinese')
+assertContains(releaseNotes, '保存稳定的 Blob 数据', 'release notes must describe the cached photo fix in Chinese')
+assertContains(releaseNotes, '人工确认条码状态修复', 'release notes must keep the V3.0.71 barcode manual confirmation fix in Chinese')
 assertContains(releaseNotes, '数据中台照片加载修复', 'release notes must describe the data center photo fix in Chinese')
 assertContains(releaseNotes, '删除项目驾驶舱系统状态', 'release notes must describe removing system status in Chinese')
 assertContains(opsStatus, `return "${expectedVersion}"`, `system status version must be ${expectedVersion}`)
