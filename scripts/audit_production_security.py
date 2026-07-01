@@ -101,7 +101,7 @@ def audit(env: dict[str, str], env_path: Path) -> list[str]:
         failures.append("DEMO_AUTH_ENABLED must not be true in production")
 
     origins = split_csv(env.get("SECURITY_ALLOWED_ORIGINS", ""))
-    if "*" in origins:
+    if any("*" in origin for origin in origins):
         failures.append("SECURITY_ALLOWED_ORIGINS must not contain * in production")
     if not (PRODUCTION_DOMAINS & set(origins)):
         failures.append(
@@ -110,7 +110,7 @@ def audit(env: dict[str, str], env_path: Path) -> list[str]:
 
     trusted_hosts = split_csv(env.get("SECURITY_TRUSTED_HOSTS", ""))
     normalized_hosts = {host.removeprefix("https://").removeprefix("http://") for host in trusted_hosts}
-    if "*" in trusted_hosts or "*" in normalized_hosts:
+    if any("*" in host for host in trusted_hosts) or any("*" in host for host in normalized_hosts):
         failures.append("SECURITY_TRUSTED_HOSTS must not contain * in production")
     if not (PRODUCTION_HOSTS & normalized_hosts):
         failures.append("SECURITY_TRUSTED_HOSTS must include www.sgcc.online or sgcc.online")
