@@ -99,6 +99,7 @@ Copy-ReleaseItem "scripts\verify_vue_migration_gate.py" "scripts\verify_vue_migr
 Copy-ReleaseItem "scripts\verify_postgres_cutover_gate.py" "scripts\verify_postgres_cutover_gate.py"
 Copy-ReleaseItem "scripts\verify-production-readiness.py" "scripts\verify-production-readiness.py"
 Copy-ReleaseItem "scripts\verify-client-release.py" "scripts\verify-client-release.py"
+Copy-ReleaseItem "scripts\verify_security_hardening.py" "scripts\verify_security_hardening.py"
 Copy-ReleaseItem "scripts\verify_claim_tasks_completion_status.js" "scripts\verify_claim_tasks_completion_status.js"
 Copy-ReleaseItem "scripts\verify_construction_one_click_upload.js" "scripts\verify_construction_one_click_upload.js"
 Copy-ReleaseItem "scripts\verify_construction_draft_photo_cache.js" "scripts\verify_construction_draft_photo_cache.js"
