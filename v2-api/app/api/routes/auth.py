@@ -114,13 +114,16 @@ def environment_admin_login(username: str, password: str) -> dict | None:
 
 
 def request_client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
-        return forwarded.split(",", 1)[0].strip()
-    real_ip = request.headers.get("x-real-ip", "")
-    if real_ip:
-        return real_ip.strip()
-    return request.client.host if request.client else ""
+    client_host = request.client.host if request.client else ""
+    trusted_proxy_hosts = getattr(settings, "trusted_proxy_hosts", {"127.0.0.1", "::1", "localhost"})
+    if client_host in trusted_proxy_hosts:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip()
+        real_ip = request.headers.get("x-real-ip", "")
+        if real_ip:
+            return real_ip.strip()
+    return client_host
 
 
 def login_rate_key(request: Request, username: str) -> str:

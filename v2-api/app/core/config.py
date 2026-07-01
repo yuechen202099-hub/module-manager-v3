@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     security_frame_ancestors: str = Field(default="'self'", alias="SECURITY_FRAME_ANCESTORS")
     security_login_rate_limit_per_minute: int = Field(default=8, alias="SECURITY_LOGIN_RATE_LIMIT_PER_MINUTE")
     security_upload_rate_limit_per_minute: int = Field(default=60, alias="SECURITY_UPLOAD_RATE_LIMIT_PER_MINUTE")
+    security_trusted_proxy_hosts: str = Field(default="127.0.0.1,::1,localhost", alias="SECURITY_TRUSTED_PROXY_HOSTS")
     max_upload_mb: int = Field(default=20, alias="MAX_UPLOAD_MB")
     max_upload_files_per_request: int = Field(default=8, alias="MAX_UPLOAD_FILES_PER_REQUEST")
     photo_proxy_allowed_hosts: str = Field(default="", alias="PHOTO_PROXY_ALLOWED_HOSTS")
@@ -81,6 +82,10 @@ class Settings(BaseSettings):
     @property
     def trusted_hosts(self) -> list[str]:
         return self.split_csv(self.security_trusted_hosts)
+
+    @property
+    def trusted_proxy_hosts(self) -> set[str]:
+        return set(self.split_csv(self.security_trusted_proxy_hosts))
 
     @property
     def photo_proxy_hosts(self) -> set[str]:

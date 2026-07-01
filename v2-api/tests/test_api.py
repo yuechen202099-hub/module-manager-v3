@@ -13,6 +13,7 @@ import app.main as main_module
 from app.main import create_app
 from app.api.routes import auth
 from app.core.config import settings
+from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
 from app.services.ezcodes_scheduler import sync_manager
 from app.services import account_store, local_simulation
@@ -79,6 +80,7 @@ def production_test_settings(**overrides) -> SimpleNamespace:
         "app_env": "production",
         "allowed_origins": ["https://www.sgcc.online", "https://sgcc.online"],
         "trusted_hosts": ["testserver", "www.sgcc.online", "sgcc.online", "127.0.0.1", "localhost"],
+        "trusted_proxy_hosts": {"127.0.0.1", "::1", "localhost"},
         "security_frame_ancestors": "'self'",
     }
     values.update(overrides)
@@ -323,7 +325,37 @@ def test_login_page_and_demo_auth_are_available() -> None:
     assert bad.status_code == 401
 
 
+def test_sliding_window_rate_limiter_sweeps_expired_keys() -> None:
+    limiter = SlidingWindowRateLimiter(limit=1, window_seconds=1)
+
+    assert limiter.check("stale-key").allowed is True
+    time.sleep(1.1)
+    assert limiter.check("active-key").allowed is True
+
+    assert "stale-key" not in limiter._events
+    assert "active-key" in limiter._events
+
+
+def test_request_client_ip_ignores_forwarded_for_from_untrusted_clients() -> None:
+    request = SimpleNamespace(
+        headers={"x-forwarded-for": "203.0.113.10"},
+        client=SimpleNamespace(host="198.51.100.99"),
+    )
+
+    assert auth.request_client_ip(request) == "198.51.100.99"
+
+
+def test_request_client_ip_accepts_forwarded_for_from_trusted_proxy() -> None:
+    request = SimpleNamespace(
+        headers={"x-forwarded-for": "203.0.113.10, 198.51.100.20"},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+    assert auth.request_client_ip(request) == "203.0.113.10"
+
+
 def test_login_rate_limit_blocks_repeated_bad_passwords() -> None:
+    auth.login_limiter.clear()
     for _ in range(8):
         response = client.post(
             "/auth/login",
@@ -350,6 +382,7 @@ def test_login_rate_limit_blocks_repeated_bad_passwords() -> None:
 
 
 def test_login_rate_limit_does_not_count_successful_logins() -> None:
+    auth.login_limiter.clear()
     for _ in range(12):
         response = client.post(
             "/auth/login",
@@ -390,6 +423,7 @@ def test_production_account_config_and_api_token_gate(monkeypatch, tmp_path) -> 
         auth_users_path=str(tmp_path / "users.json"),
         jwt_secret="jwt-secret-for-production-test-12345",
         jwt_expire_minutes=60,
+        trusted_proxy_hosts={"testclient"},
     )
     monkeypatch.setattr(auth, "settings", production_settings)
     monkeypatch.setattr(account_store, "settings", production_settings)
@@ -637,6 +671,7 @@ def test_account_login_history_keeps_30_rows_and_marks_ip_common_user(monkeypatc
         auth_users_path=str(tmp_path / "users.json"),
         jwt_secret="jwt-secret-for-production-test-12345",
         jwt_expire_minutes=60,
+        trusted_proxy_hosts={"testclient"},
     )
     monkeypatch.setattr(auth, "settings", production_settings)
     monkeypatch.setattr(account_store, "settings", production_settings)
