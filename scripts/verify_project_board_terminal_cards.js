@@ -30,7 +30,7 @@ const localSimulation = read('v2-api/app/services/local_simulation.py')
 const apiMain = read('v2-api/app/main.py')
 const opsStatus = read('v2-api/app/services/ops_status.py')
 const packageJson = read('v2-web/package.json')
-const expectedVersion = '3.0.77'
+const expectedVersion = '3.0.78'
 
 for (const label of ['终端总数', '已完成施工', '未完成施工', '待归档', '已归档']) {
   assertContains(board, label, `ProjectBoardView must expose the ${label} terminal card`)
@@ -53,7 +53,8 @@ for (const removed of [
 
 assertContains(board, 'fetchTasks', 'ProjectBoardView must load terminal detail rows from the task API')
 assertContains(board, 'terminalStatusDialogVisible', 'ProjectBoardView must have a terminal detail dialog')
-assertContains(board, 'terminalStatusPageSize = ref(20)', 'terminal detail dialog must default to 20 rows per page')
+assertContains(board, 'const DIALOG_PAGE_SIZE = 20', 'project board dialogs must share a 20-row page size')
+assertContains(board, 'terminalStatusPageSize = ref(DIALOG_PAGE_SIZE)', 'terminal detail dialog must use the shared page size')
 assertContains(board, 'openTerminalStatusDialog', 'terminal cards must open a detail dialog')
 assertContains(board, '<el-pagination', 'terminal detail dialog must be paginated')
 assertContains(board, ':page-size="terminalStatusPageSize"', 'terminal detail dialog pagination must use the 20-row page-size state')

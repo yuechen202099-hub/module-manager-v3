@@ -25,7 +25,7 @@ const releaseNotes = read('v2-web/src/constants/releaseNotes.ts')
 const opsStatus = read('v2-api/app/services/ops_status.py')
 const apiMain = read('v2-api/app/main.py')
 const packageJson = read('v2-web/package.json')
-const expectedVersion = '3.0.77'
+const expectedVersion = '3.0.78'
 
 assertNotContains(projectBoard, 'fetchSystemStatus', 'project board must not fetch unrelated system status')
 assertNotContains(projectBoard, 'systemRows', 'project board must not compute system status rows')
@@ -42,6 +42,10 @@ assertContains(globalSearch, '<img', 'data center photo dialog must render nativ
 assertNotContains(globalSearch, '<el-image', 'data center photo dialog must not depend on Element Plus image rendering')
 
 assertContains(releaseNotes, `APP_VERSION = '${expectedVersion}'`, `APP_VERSION must be ${expectedVersion}`)
+assertContains(releaseNotes, "version: 'V3.0.78'", 'release notes must include V3.0.78')
+assertContains(releaseNotes, '弹窗信息整合', 'release notes must describe the V3.0.78 dialog information integration in Chinese')
+assertContains(releaseNotes, '20 条分页结构', 'release notes must describe the V3.0.78 dialog pagination update in Chinese')
+assertContains(releaseNotes, '数据中台资料组照片弹窗新增终端', 'release notes must describe the V3.0.78 data center photo context update in Chinese')
 assertContains(releaseNotes, "version: 'V3.0.77'", 'release notes must include V3.0.77')
 assertContains(releaseNotes, '发布包验证脚本补齐', 'release notes must describe the V3.0.77 release package verifier update in Chinese')
 assertContains(releaseNotes, 'verify_admin_release_notes.js 必备项', 'release notes must describe the V3.0.77 release package verifier guard in Chinese')

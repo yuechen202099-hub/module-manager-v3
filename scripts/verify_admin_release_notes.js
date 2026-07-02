@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.77'
+const EXPECTED_VERSION = '3.0.78'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -17,6 +17,11 @@ assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file mus
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
 assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
+assert.match(releaseNotes, /弹窗信息整合/, 'release notes must describe the V3.0.78 dialog information integration update in Chinese')
+assert.match(releaseNotes, /20 条分页结构/, 'release notes must describe the V3.0.78 dialog pagination structure in Chinese')
+assert.match(releaseNotes, /数据中台资料组照片弹窗新增终端/, 'release notes must describe the V3.0.78 data center photo context update in Chinese')
+assert.match(releaseNotes, /verify_dialog_information_integration\.js/, 'release notes must describe the V3.0.78 dialog integration verifier')
+assert.match(releaseNotes, /version:\s*'V3\.0\.77'/, 'release notes must keep V3.0.77')
 assert.match(releaseNotes, /发布包验证脚本补齐/, 'release notes must describe the V3.0.77 release package verifier update in Chinese')
 assert.match(releaseNotes, /服务器发布包补齐管理员更新内容验证脚本/, 'release notes must describe packaging the admin release notes verifier')
 assert.match(releaseNotes, /verify_admin_release_notes\.js 必备项/, 'release notes must describe requiring verify_admin_release_notes.js in release packages')

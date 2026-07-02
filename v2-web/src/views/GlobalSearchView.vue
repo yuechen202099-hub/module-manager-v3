@@ -168,6 +168,27 @@ function barcodeProgressType(row: MaterialGroup) {
   return 'danger'
 }
 
+const groupPhotoContextItems = computed(() => [
+  { label: '终端', value: photoGroup.value?.terminal || '-' },
+  { label: '资料组', value: photoGroup.value?.id || '-' },
+  { label: '表号', value: photoGroup.value?.meterNo || '-' },
+  { label: '模块', value: photoGroup.value?.constructionModuleAssetNo || photoGroup.value?.moduleAssetNo || '-' },
+  { label: '采集器', value: photoGroup.value?.constructionCollector || photoGroup.value?.collector || '-' },
+  {
+    label: '安装人员',
+    value:
+      photoGroup.value?.creatorName ||
+      photoGroup.value?.installerName ||
+      photoGroup.value?.installer ||
+      photoGroup.value?.creator ||
+      '-',
+  },
+  { label: '审阅人员', value: photoGroup.value?.reviewerName || photoGroup.value?.reviewer || '-' },
+  { label: '照片', value: String(photoGroup.value?.photoCount || photoGroup.value?.photos?.length || 0) },
+  { label: '状态', value: statusLabel(photoGroup.value?.status || '') },
+  { label: '地址', value: photoGroup.value?.address || '-' },
+])
+
 function photoCategoryLabel(row: MaterialGroup) {
   const classified = Number(row.photoCategoryClassifiedCount || 0)
   const totalCount = Number(row.photoCategoryTotalCount || row.photoCount || 0)
@@ -707,6 +728,12 @@ async function decodeScannerFile(event: Event) {
       append-to-body
       @closed="handlePhotoDialogClosed"
     >
+      <div v-if="photoGroup" class="group-photo-context">
+        <article v-for="item in groupPhotoContextItems" :key="item.label">
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+        </article>
+      </div>
       <div v-loading="photoDialogLoading" class="group-photo-grid">
         <article v-for="photo in photoGroup?.photos || []" :key="photo.id" class="group-photo-card">
           <button
@@ -900,6 +927,38 @@ async function decodeScannerFile(event: Event) {
   text-align: center;
 }
 
+.group-photo-context {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.group-photo-context article {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--v2-border-soft, #dde5ee);
+  border-radius: 8px;
+  background: var(--v2-surface-soft, #f8fafc);
+}
+
+.group-photo-context span {
+  color: var(--v2-text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.group-photo-context strong {
+  overflow: hidden;
+  color: var(--v2-text-strong);
+  font-size: 13px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .group-photo-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1054,7 +1113,8 @@ async function decodeScannerFile(event: Event) {
   }
 
   .search-bar,
-  .edit-form {
+  .edit-form,
+  .group-photo-context {
     grid-template-columns: 1fr;
   }
 

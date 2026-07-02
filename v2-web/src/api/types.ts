@@ -155,9 +155,12 @@ export type MaterialGroup = {
   exceptionReasons?: string[]
   hasArchiveBlocker?: boolean
   installer?: string
+  installerName?: string
   collector?: string
   moduleAssetNo?: string
   creator?: string
+  creatorName?: string
+  reviewerName?: string
   constructionCollector?: string
   constructionModuleAssetNo?: string
   constructionStatus?: string

@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.77'
+export const APP_VERSION = '3.0.78'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,19 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.78',
+    date: '2026-07-02',
+    type: '小更新',
+    title: '弹窗信息整合',
+    items: [
+      '项目驾驶舱主要资料弹窗统一为统计卡、工具区、表格和 20 条分页结构，减少长列表一次性渲染。',
+      '工作量、异常与缺照、换表、未匹配、KPI 地址明细和异常明细弹窗补齐标准分页，并在刷新后回到第一页。',
+      '异常、换表和未匹配清单按终端、资料组、模块、采集器、人员、状态、时间和地址的顺序整理字段。',
+      '数据中台资料组照片弹窗新增终端、资料组、表号、模块、采集器、安装人员、审阅人员、照片数、状态和地址上下文。',
+      '发布包新增 verify_dialog_information_integration.js 弹窗信息整合验证脚本，后续漏分页或照片上下文缺失会阻断发布验证。',
+    ],
+  },
   {
     version: 'V3.0.77',
     date: '2026-07-02',

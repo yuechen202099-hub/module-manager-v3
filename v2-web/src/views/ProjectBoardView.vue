@@ -45,6 +45,8 @@ import type {
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
+const DIALOG_PAGE_SIZE = 20
+
 const emptySummary: ProjectSummary = {
   totalCatalogRows: 0,
   groups: 0,
@@ -109,13 +111,16 @@ const workloadDialogVisible = ref(false)
 const workloadLoading = ref(false)
 const workloadInstaller = ref('')
 const workloadRows = ref<InstallerWorkloadRow[]>([])
+const workloadPage = ref(1)
 const workloadExceptionDialogVisible = ref(false)
 const workloadExceptionDate = ref('')
 const workloadExceptionGroups = ref<InstallerExceptionGroup[]>([])
+const workloadExceptionPage = ref(1)
 const workloadTimeDialogVisible = ref(false)
 const workloadTimeRow = ref<InstallerWorkloadRow | null>(null)
 const workloadSegmentDialogVisible = ref(false)
 const workloadSegment = ref<InstallerWorkSegment | null>(null)
+const workloadSegmentPage = ref(1)
 const installerWorkloadScope = ref<'all' | 'day' | 'week' | 'month'>('all')
 const installerScopeDate = ref('')
 const installerWorkloadLoading = ref(false)
@@ -127,15 +132,18 @@ const unmatchedDeletingId = ref('')
 const unmatchedRematchingId = ref('')
 const unmatchedQuery = ref('')
 const unmatchedRows = ref<UnmatchedRecord[]>([])
+const unmatchedPage = ref(1)
 const replacementDialogVisible = ref(false)
 const replacementLoading = ref(false)
 const replacementQuery = ref('')
 const replacementRows = ref<ReplacementRecord[]>([])
+const replacementPage = ref(1)
 const exceptionDialogVisible = ref(false)
 const exceptionLoading = ref(false)
 const exceptionAssigningGroupId = ref('')
 const exceptionQuery = ref('')
 const exceptionRows = ref<MaterialGroup[]>([])
+const exceptionPage = ref(1)
 const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
 const exceptionAssignDraft = reactive<Record<string, string>>({})
 const photoBarcodeDialogVisible = ref(false)
@@ -146,7 +154,7 @@ const photoBarcodeQuery = ref('')
 const photoBarcodeRows = ref<PhotoBarcodeReviewGroup[]>([])
 const photoBarcodeTotal = ref(0)
 const photoBarcodePage = ref(1)
-const photoBarcodePageSize = ref(20)
+const photoBarcodePageSize = ref(DIALOG_PAGE_SIZE)
 const photoBarcodeObjectUrls = reactive<Record<string, string>>({})
 const photoBarcodePhotoErrors = reactive<Record<string, string>>({})
 const photoBarcodePhotoDialogVisible = ref(false)
@@ -158,12 +166,17 @@ const activePhotoBarcodeImageTitle = ref('')
 const terminalStatusDialogVisible = ref(false)
 const terminalStatusFilter = ref<'all' | 'completed' | 'incomplete' | 'pending_archive' | 'archived'>('all')
 const terminalStatusPage = ref(1)
-const terminalStatusPageSize = ref(20)
+const terminalStatusPageSize = ref(DIALOG_PAGE_SIZE)
 
 const BOARD_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 let boardEventAbortController: AbortController | null = null
 let boardFallbackTimer = 0
 let photoBarcodeLoadSerial = 0
+
+function paginateDialogRows<T>(rows: T[], page: number) {
+  const start = (Math.max(1, page) - 1) * DIALOG_PAGE_SIZE
+  return rows.slice(start, start + DIALOG_PAGE_SIZE)
+}
 
 const isAdmin = computed(() => Boolean(auth.user?.roles?.includes('admin') || auth.user?.role === 'admin'))
 const scannedRate = computed(() => (summary.value.groups ? summary.value.scannedGroups / summary.value.groups : 0))
@@ -416,6 +429,17 @@ const exceptionDialogStats = computed(() => {
     pending: Math.max(0, exceptionRows.value.length - assigned),
   }
 })
+const workloadSegmentAddresses = computed(() => workloadSegment.value?.addresses || [])
+const pagedWorkloadRows = computed(() => paginateDialogRows(workloadRows.value, workloadPage.value))
+const pagedExceptionRows = computed(() => paginateDialogRows(filteredExceptionRows.value, exceptionPage.value))
+const pagedReplacementRows = computed(() => paginateDialogRows(replacementRows.value, replacementPage.value))
+const pagedUnmatchedRows = computed(() => paginateDialogRows(unmatchedRows.value, unmatchedPage.value))
+const pagedWorkloadSegmentAddresses = computed(() =>
+  paginateDialogRows(workloadSegmentAddresses.value, workloadSegmentPage.value),
+)
+const pagedWorkloadExceptionGroups = computed(() =>
+  paginateDialogRows(workloadExceptionGroups.value, workloadExceptionPage.value),
+)
 
 function percent(value: number) {
   if (!Number.isFinite(value)) return '0%'
@@ -912,8 +936,10 @@ async function handleInstallerScopeChange() {
 async function openInstallerWorkload(installer: string) {
   workloadInstaller.value = installer
   workloadRows.value = []
+  workloadPage.value = 1
   workloadExceptionGroups.value = []
   workloadExceptionDate.value = ''
+  workloadExceptionPage.value = 1
   workloadExceptionDialogVisible.value = false
   workloadDialogVisible.value = true
   workloadLoading.value = true
@@ -933,6 +959,7 @@ function openWorkloadExceptionGroups(row: InstallerWorkloadRow) {
   if (!row.exceptionCount) return
   workloadExceptionDate.value = row.date
   workloadExceptionGroups.value = row.exceptionGroups || []
+  workloadExceptionPage.value = 1
   workloadExceptionDialogVisible.value = true
 }
 
@@ -944,6 +971,7 @@ function openWorkloadTimeChart(row: InstallerWorkloadRow) {
 
 function openWorkloadSegmentDetail(segment: InstallerWorkSegment) {
   workloadSegment.value = segment
+  workloadSegmentPage.value = 1
   workloadSegmentDialogVisible.value = true
 }
 
@@ -1067,6 +1095,7 @@ function exceptionOrderFor(row: MaterialGroup) {
 
 async function loadExceptionRows() {
   exceptionLoading.value = true
+  exceptionPage.value = 1
   try {
     const [groups, orders] = await Promise.all([fetchExceptionGroups(''), fetchConstructionExceptionOrders('', '')])
     exceptionRows.value = groups
@@ -1161,6 +1190,7 @@ async function unassignExceptionGroup(row: MaterialGroup) {
 
 async function loadUnmatchedRows() {
   unmatchedLoading.value = true
+  unmatchedPage.value = 1
   try {
     unmatchedRows.value = await fetchUnmatchedRecords(unmatchedQuery.value)
   } catch (error) {
@@ -1240,6 +1270,7 @@ async function openUnmatchedDialog() {
 
 async function loadReplacementRows() {
   replacementLoading.value = true
+  replacementPage.value = 1
   try {
     replacementRows.value = await fetchReplacementRecords(replacementQuery.value)
   } catch (error) {
@@ -1659,7 +1690,7 @@ onUnmounted(() => {
           <strong>{{ formatWorkDuration(workloadTotals.fusedWorkDurationMinutes) }}</strong>
         </article>
       </div>
-      <el-table v-loading="workloadLoading" :data="workloadRows" height="360" size="small">
+      <el-table v-loading="workloadLoading" :data="pagedWorkloadRows" height="360" size="small">
         <el-table-column prop="date" label="日期" min-width="120" />
         <el-table-column prop="startTime" label="开工" width="82">
           <template #default="{ row }">
@@ -1734,6 +1765,15 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column prop="unreviewedCount" label="未审阅" width="92" />
       </el-table>
+      <div class="dialog-pagination">
+        <el-pagination
+          v-model:current-page="workloadPage"
+          background
+          layout="total, prev, pager, next"
+          :total="workloadRows.length"
+          :page-size="DIALOG_PAGE_SIZE"
+        />
+      </div>
       <template #footer>
         <el-button @click="workloadDialogVisible = false">关闭</el-button>
         <el-button type="primary" :disabled="!workloadRows.length" @click="exportInstallerWorkloadCsv">
@@ -1773,31 +1813,17 @@ onUnmounted(() => {
           <el-button v-if="isAdmin" :disabled="!constructorOptions.length" @click="loadAccounts">刷新施工员</el-button>
         </div>
       </div>
-      <el-table v-loading="exceptionLoading" :data="filteredExceptionRows" height="520" size="small">
+      <el-table v-loading="exceptionLoading" :data="pagedExceptionRows" height="520" size="small">
         <el-table-column type="index" width="52" label="#" />
+        <el-table-column prop="terminal" label="终端" min-width="120" />
         <el-table-column label="表号 / 资料组" min-width="150">
           <template #default="{ row }">
             <strong>{{ row.meterNo || '-' }}</strong>
             <small class="table-subline">{{ row.id }}</small>
           </template>
         </el-table-column>
-        <el-table-column prop="terminal" label="终端" min-width="120" />
-        <el-table-column prop="address" label="地址" min-width="260" show-overflow-tooltip />
-        <el-table-column prop="constructionCollector" label="采集器" min-width="150" show-overflow-tooltip />
         <el-table-column prop="constructionModuleAssetNo" label="模块" min-width="150" show-overflow-tooltip />
-        <el-table-column label="异常原因" min-width="220" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span class="exception-reasons">{{ exceptionReasonText(row) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="派发状态" width="110">
-          <template #default="{ row }">
-            <el-tag v-if="exceptionOrderFor(row)?.assignedTo" type="success" effect="plain">
-              已派发
-            </el-tag>
-            <el-tag v-else type="warning" effect="plain">待派发</el-tag>
-          </template>
-        </el-table-column>
+        <el-table-column prop="constructionCollector" label="采集器" min-width="150" show-overflow-tooltip />
         <el-table-column label="施工员" min-width="260">
           <template #default="{ row }">
             <div v-if="isAdmin" class="exception-assign-cell">
@@ -1828,6 +1854,20 @@ onUnmounted(() => {
             <span v-else>{{ exceptionOrderFor(row)?.assignedTo || '未派发' }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="派发状态" width="110">
+          <template #default="{ row }">
+            <el-tag v-if="exceptionOrderFor(row)?.assignedTo" type="success" effect="plain">
+              已派发
+            </el-tag>
+            <el-tag v-else type="warning" effect="plain">待派发</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="异常原因" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="exception-reasons">{{ exceptionReasonText(row) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="address" label="地址" min-width="260" show-overflow-tooltip />
         <el-table-column v-if="isAdmin" label="操作" width="96">
           <template #default="{ row }">
             <el-button
@@ -1842,6 +1882,15 @@ onUnmounted(() => {
           </template>
         </el-table-column>
       </el-table>
+      <div class="dialog-pagination">
+        <el-pagination
+          v-model:current-page="exceptionPage"
+          background
+          layout="total, prev, pager, next"
+          :total="filteredExceptionRows.length"
+          :page-size="DIALOG_PAGE_SIZE"
+        />
+      </div>
       <template #footer>
         <el-button @click="exceptionDialogVisible = false">关闭</el-button>
         <el-button type="primary" :disabled="!filteredExceptionRows.length" @click="exportExceptionGroupCsv">导出当前清单</el-button>
@@ -1880,22 +1929,15 @@ onUnmounted(() => {
           <el-button :disabled="!replacementRows.length" @click="exportReplacementCsv">导出清单</el-button>
         </div>
       </div>
-      <el-alert
-        class="claim-alert"
-        type="info"
-        :closable="false"
-        title="这里展示通过未匹配资料人工录入旧表号后，已成功匹配到总清单资料组的换表记录。"
-      />
-      <el-table v-loading="replacementLoading" :data="replacementRows" height="520" size="small">
+      <el-table v-loading="replacementLoading" :data="pagedReplacementRows" height="520" size="small">
         <el-table-column type="index" width="54" label="#" />
+        <el-table-column prop="terminal" label="终端" min-width="120" />
         <el-table-column label="旧表号 / 新表号" min-width="180">
           <template #default="{ row }">
             <strong>{{ row.oldMeterNo || '-' }}</strong>
             <small class="table-subline">新：{{ row.newMeterNo || '-' }}</small>
           </template>
         </el-table-column>
-        <el-table-column prop="terminal" label="终端" min-width="120" />
-        <el-table-column prop="address" label="匹配地址" min-width="280" show-overflow-tooltip />
         <el-table-column label="资料组" min-width="150">
           <template #default="{ row }">
             <strong>{{ row.groupId || '-' }}</strong>
@@ -1904,13 +1946,23 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column prop="photoCount" label="照片" width="76" />
         <el-table-column prop="replacementBy" label="操作人" width="110" />
+        <el-table-column prop="status" label="资料状态" width="110" />
         <el-table-column label="操作时间" min-width="180">
           <template #default="{ row }">
             <span>{{ formatDateTime(row.replacementAt) }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="资料状态" width="110" />
+        <el-table-column prop="address" label="匹配地址" min-width="280" show-overflow-tooltip />
       </el-table>
+      <div class="dialog-pagination">
+        <el-pagination
+          v-model:current-page="replacementPage"
+          background
+          layout="total, prev, pager, next"
+          :total="replacementRows.length"
+          :page-size="DIALOG_PAGE_SIZE"
+        />
+      </div>
       <template #footer>
         <el-button @click="replacementDialogVisible = false">关闭</el-button>
         <el-button type="primary" :disabled="!replacementRows.length" @click="exportReplacementCsv">导出当前清单</el-button>
@@ -2128,26 +2180,19 @@ onUnmounted(() => {
           </el-dropdown>
         </div>
       </div>
-      <el-alert
-        class="claim-alert"
-        type="info"
-        :closable="false"
-        title="重复项按表号/扫码内容等特征识别。系统会优先保留已指派、项目外施工、换表记录或照片更多的记录。"
-      />
-      <el-table v-loading="unmatchedLoading" :data="unmatchedRows" height="520" size="small">
+      <el-table v-loading="unmatchedLoading" :data="pagedUnmatchedRows" height="520" size="small">
         <el-table-column type="index" width="54" label="#" />
+        <el-table-column prop="terminal" label="终端" min-width="120" />
         <el-table-column label="表号 / 扫码内容" min-width="150">
           <template #default="{ row }">
             <strong>{{ row.barcode || row.meterNo || '-' }}</strong>
             <small class="table-subline">{{ row.meterMatchKey || row.unmatchedId }}</small>
           </template>
         </el-table-column>
-        <el-table-column prop="terminal" label="终端" min-width="120" />
-        <el-table-column prop="address" label="地址" min-width="280" show-overflow-tooltip />
-        <el-table-column prop="collector" label="采集器" min-width="150" show-overflow-tooltip />
         <el-table-column prop="moduleAssetNo" label="模块" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="collector" label="采集器" min-width="150" show-overflow-tooltip />
         <el-table-column prop="creator" label="安装人员" width="100" />
-        <el-table-column prop="photoCount" label="照片" width="76" />
+        <el-table-column prop="assignedTo" label="指派" width="110" />
         <el-table-column label="状态" width="118">
           <template #default="{ row }">
             <el-tag v-if="row.projectOutside" type="warning" effect="plain">项目外</el-tag>
@@ -2156,8 +2201,9 @@ onUnmounted(() => {
             <el-tag v-else effect="plain">待处理</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="assignedTo" label="指派" width="110" />
+        <el-table-column prop="photoCount" label="照片" width="76" />
         <el-table-column prop="sourceFile" label="来源文件" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="address" label="地址" min-width="280" show-overflow-tooltip />
         <el-table-column label="操作" width="94" fixed="right">
           <template #default="{ row }">
             <el-dropdown trigger="click">
@@ -2188,6 +2234,15 @@ onUnmounted(() => {
           </template>
         </el-table-column>
       </el-table>
+      <div class="dialog-pagination">
+        <el-pagination
+          v-model:current-page="unmatchedPage"
+          background
+          layout="total, prev, pager, next"
+          :total="unmatchedRows.length"
+          :page-size="DIALOG_PAGE_SIZE"
+        />
+      </div>
       <template #footer>
         <el-button @click="unmatchedDialogVisible = false">关闭</el-button>
         <el-button type="primary" :disabled="!unmatchedRows.length" @click="exportUnmatchedCsv">导出当前清单</el-button>
@@ -2242,9 +2297,6 @@ onUnmounted(() => {
             <strong>{{ formatDecimal(workloadTimeRow.fusedWeightedCompletionPerEffectiveHour) }}</strong>
           </article>
         </div>
-        <p class="work-time-note">
-          按 2 小时展示有效工时与完成量。25分钟内按实际间隔计入，25-45分钟压缩为25分钟，超过45分钟断开；2小时内至少15个有效gap且90%满足短gap时，补偿15或25分钟。地址权重会降低同楼集中施工的寻找成本，并提高缺少室号、零散地址、充电桩/车位等现场寻找难度。
-        </p>
         <section class="screen-time-card" :aria-label="`${workloadTimeTitle}，按 2 小时展示有效工时和完成量`">
           <div class="screen-time-head">
             <div>
@@ -2283,7 +2335,7 @@ onUnmounted(() => {
     </el-dialog>
 
     <el-dialog v-model="workloadSegmentDialogVisible" :title="workloadSegmentTitle" width="920px">
-      <el-table :data="workloadSegment?.addresses || []" height="430" size="small">
+      <el-table :data="pagedWorkloadSegmentAddresses" height="430" size="small">
         <el-table-column prop="completedTime" label="时间" width="76" />
         <el-table-column prop="meterNo" label="表号" min-width="130" />
         <el-table-column prop="terminal" label="终端" min-width="120" />
@@ -2300,13 +2352,22 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column prop="photoCount" label="照片" width="70" />
       </el-table>
+      <div class="dialog-pagination">
+        <el-pagination
+          v-model:current-page="workloadSegmentPage"
+          background
+          layout="total, prev, pager, next"
+          :total="workloadSegmentAddresses.length"
+          :page-size="DIALOG_PAGE_SIZE"
+        />
+      </div>
       <template #footer>
         <el-button @click="workloadSegmentDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
     <el-dialog v-model="workloadExceptionDialogVisible" :title="workloadExceptionTitle" width="860px">
-      <el-table :data="workloadExceptionGroups" height="420" size="small">
+      <el-table :data="pagedWorkloadExceptionGroups" height="420" size="small">
         <el-table-column prop="meterNo" label="表号" min-width="130" />
         <el-table-column prop="terminal" label="终端" min-width="130" />
         <el-table-column prop="address" label="地址" min-width="240" show-overflow-tooltip />
@@ -2319,6 +2380,15 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column prop="photoCount" label="照片" width="76" />
       </el-table>
+      <div class="dialog-pagination">
+        <el-pagination
+          v-model:current-page="workloadExceptionPage"
+          background
+          layout="total, prev, pager, next"
+          :total="workloadExceptionGroups.length"
+          :page-size="DIALOG_PAGE_SIZE"
+        />
+      </div>
       <template #footer>
         <el-button @click="workloadExceptionDialogVisible = false">关闭</el-button>
       </template>
@@ -2661,8 +2731,7 @@ onUnmounted(() => {
   box-shadow: var(--v2-shadow-hairline, 0 0 0 1px rgba(17, 24, 39, 0.03));
 }
 
-.work-time-stats span,
-.work-time-note {
+.work-time-stats span {
   color: var(--v2-text-muted, #64748b);
   font-size: 12px;
 }
@@ -2670,11 +2739,6 @@ onUnmounted(() => {
 .work-time-stats strong {
   color: var(--v2-text-strong, #0f172a);
   font-size: 20px;
-}
-
-.work-time-note {
-  margin: 0;
-  line-height: 1.7;
 }
 
 .screen-time-card {
