@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import mimetypes
+import socket
 from copy import deepcopy
+from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable
 from urllib.parse import quote, urlencode, urlparse
 from uuid import uuid4
 
@@ -37,6 +40,79 @@ def normalize_suffix(filename: str) -> str:
     return suffix
 
 
+def _is_ip_literal(hostname: str) -> bool:
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return True
+
+
+def is_blocked_remote_image_address(hostname: str) -> bool:
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    if getattr(address, "ipv4_mapped", None):
+        mapped = address.ipv4_mapped
+        return (
+            mapped.is_private
+            or mapped.is_loopback
+            or mapped.is_link_local
+            or mapped.is_reserved
+            or mapped.is_unspecified
+            or mapped.is_multicast
+        )
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+def resolve_remote_image_host_addresses(hostname: str) -> list[str]:
+    try:
+        results = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError("Photo proxy host is not allowed") from exc
+    addresses: set[str] = set()
+    for result in results:
+        sockaddr = result[4]
+        if sockaddr:
+            addresses.add(str(sockaddr[0]))
+    if not addresses:
+        raise ValueError("Photo proxy host is not allowed")
+    return sorted(addresses)
+
+
+def validate_remote_image_url(
+    url: str,
+    *,
+    allowed_hosts: Iterable[str] | None = None,
+    app_env: str | None = None,
+    resolver: Callable[[str], list[str]] | None = None,
+) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise ValueError("Invalid image URL")
+    hostname = parsed.hostname.lower().rstrip(".")
+    if hostname == "localhost" or is_blocked_remote_image_address(hostname):
+        raise ValueError("Photo proxy host is not allowed")
+    allowed = {host.lower().rstrip(".") for host in (settings.photo_proxy_hosts if allowed_hosts is None else allowed_hosts)}
+    if allowed and hostname not in allowed:
+        raise ValueError("Photo proxy host is not allowed")
+    current_env = (settings.app_env if app_env is None else app_env).lower()
+    if not allowed and current_env in {"prod", "production"}:
+        raise ValueError("Photo proxy host is not allowed")
+    resolve = resolver or resolve_remote_image_host_addresses
+    resolved_addresses = [hostname] if _is_ip_literal(hostname) else resolve(hostname)
+    if any(is_blocked_remote_image_address(address) for address in resolved_addresses):
+        raise ValueError("Photo proxy host is not allowed")
+
+
 def validate_image_content(content: bytes, content_type: str = "", source: str = "image") -> None:
     if not content:
         raise ValueError(f"{source} is empty")
@@ -46,6 +122,14 @@ def validate_image_content(content: bytes, content_type: str = "", source: str =
     content_type = str(content_type or "").split(";", 1)[0].strip().lower()
     if content_type and not content_type.startswith("image/") and content_type != "application/octet-stream":
         raise ValueError(f"{source} is not an image response: {content_type}")
+
+    try:
+        from PIL import Image
+
+        with Image.open(BytesIO(content)) as image:
+            image.verify()
+    except Exception as exc:
+        raise ValueError(f"{source} has unsupported image bytes") from exc
 
     if content.startswith(b"\xff\xd8"):
         if not content.rstrip().endswith(b"\xff\xd9"):
@@ -62,8 +146,6 @@ def validate_image_content(content: bytes, content_type: str = "", source: str =
     if content.startswith((b"GIF87a", b"GIF89a")):
         return
 
-    if content_type.startswith("image/"):
-        return
     raise ValueError(f"{source} has unsupported image bytes")
 
 
@@ -135,8 +217,9 @@ def save_image_bytes(
     if not content:
         raise ValueError("Uploaded image is empty")
     suffix = normalize_suffix(filename)
-    sha256 = hashlib.sha256(content).hexdigest()
     content_type = content_type or mimetypes.types_map.get(suffix, "application/octet-stream")
+    validate_image_content(content, content_type, filename or "Uploaded image")
+    sha256 = hashlib.sha256(content).hexdigest()
     scope = sanitize_part(scope, "uploads")
     key_hint = sanitize_part(key_hint, "") if key_hint else ""
     backend = active_storage_backend()

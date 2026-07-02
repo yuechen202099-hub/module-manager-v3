@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.74'
+const EXPECTED_VERSION = '3.0.77'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -17,6 +17,22 @@ assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file mus
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
 assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
+assert.match(releaseNotes, /发布包验证脚本补齐/, 'release notes must describe the V3.0.77 release package verifier update in Chinese')
+assert.match(releaseNotes, /服务器发布包补齐管理员更新内容验证脚本/, 'release notes must describe packaging the admin release notes verifier')
+assert.match(releaseNotes, /verify_admin_release_notes\.js 必备项/, 'release notes must describe requiring verify_admin_release_notes.js in release packages')
+assert.match(releaseNotes, /SOP 发布门禁新增打包脚本和发布包校验脚本互检/, 'release notes must describe release SOP cross-checking package scripts')
+assert.match(releaseNotes, /version:\s*'V3\.0\.76'/, 'release notes must keep V3.0.76')
+assert.match(releaseNotes, /异常工单与远程图片重定向安全修复/, 'release notes must keep the V3.0.76 exception order and remote image redirect security update in Chinese')
+assert.match(releaseNotes, /仅管理员可操作/, 'release notes must describe admin-only exception order assignment')
+assert.match(releaseNotes, /绑定当前施工登录身份/, 'release notes must describe construction exception submit actor binding')
+assert.match(releaseNotes, /禁止自动跟随 302\/301 跳转/, 'release notes must describe remote image redirect blocking')
+assert.match(releaseNotes, /后台条码静默扫描下载外部图片/, 'release notes must describe barcode scanner remote redirect blocking')
+assert.match(releaseNotes, /version:\s*'V3\.0\.75'/, 'release notes must keep V3.0.75')
+assert.match(releaseNotes, /上传与扫码安全加固/, 'release notes must keep the V3.0.75 upload and barcode security update in Chinese')
+assert.match(releaseNotes, /绑定登录 token 身份/, 'release notes must describe actor binding to signed-in token identity')
+assert.match(releaseNotes, /真实图片内容校验/, 'release notes must describe real image content validation')
+assert.match(releaseNotes, /后台条码扫描统一远程图片地址校验/, 'release notes must describe remote image URL validation for barcode scans')
+assert.match(releaseNotes, /version:\s*'V3\.0\.74'/, 'release notes must keep V3.0.74')
 assert.match(releaseNotes, /网站安全防护加固/, 'release notes must describe the V3.0.74 security hardening update in Chinese')
 assert.match(releaseNotes, /严格 CORS、可信 Host、请求大小限制和安全响应头/, 'release notes must describe security headers, strict CORS, trusted Host, and request size limits')
 assert.match(releaseNotes, /多次错误密码会返回 429/, 'release notes must describe login rate limiting and 429 behavior')

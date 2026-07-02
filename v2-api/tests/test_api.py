@@ -6,6 +6,7 @@ from io import BytesIO
 from uuid import uuid4
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 from fastapi.testclient import TestClient
 
@@ -97,6 +98,22 @@ def demo_admin_headers() -> dict[str, str]:
     return {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
 
 
+def tiny_jpeg_bytes(color: str | tuple[int, int, int] = "white") -> bytes:
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), color).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def tiny_png_bytes(color: str | tuple[int, int, int] = "white") -> bytes:
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def seed_photo_barcode_review_groups(count: int = 3) -> list[dict]:
     client.post("/local-test/bootstrap")
     state = local_simulation.get_state()
@@ -160,7 +177,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.74"
+    assert data["version"] == "3.0.77"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -892,6 +909,61 @@ def test_local_test_task_and_review_flow() -> None:
     assert delete_response.json()["data"]["deleted_photo"]["id"] == photo["id"]
 
 
+def test_reviewer_claim_rejects_body_reviewer_spoofing() -> None:
+    team_id = f"reviewer-spoof-{uuid4()}"
+    team_headers = {"X-Team-Id": team_id}
+    client.post("/local-test/bootstrap", headers=team_headers)
+    token = security.create_access_token(
+        {"sub": "reviewer-a", "username": "reviewer-a", "roles": ["reviewer"], "team_id": team_id}
+    )
+    headers = {**team_headers, "Authorization": f"bearer {token}"}
+    task = next(item for item in client.get("/local-test/tasks", headers=headers).json()["data"]["items"] if item["can_claim"])
+
+    response = client.post(
+        f"/local-test/tasks/{task['id']}/claim",
+        headers=headers,
+        json={"reviewer": "reviewer-b"},
+    )
+
+    assert response.status_code == 403
+    tasks_after = client.get("/local-test/tasks", headers=team_headers).json()["data"]["items"]
+    assert next(item for item in tasks_after if item["id"] == task["id"]).get("claimed_by") in (None, "")
+
+
+def test_construction_claim_rejects_body_actor_spoofing() -> None:
+    team_id = f"constructor-spoof-{uuid4()}"
+    admin_token = security.create_access_token(
+        {"sub": "admin", "username": "admin", "roles": ["admin"], "team_id": team_id}
+    )
+    constructor_token = security.create_access_token(
+        {"sub": "constructor-a", "username": "constructor-a", "roles": ["constructor"], "team_id": team_id}
+    )
+    admin_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {admin_token}"}
+    constructor_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {constructor_token}"}
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    task = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][0]
+    opened = client.patch(
+        f"/local-test/construction/tasks/{task['id']}/open",
+        headers=admin_headers,
+        json={"actor": "admin"},
+    )
+    assigned = client.patch(
+        f"/local-test/construction/tasks/{task['id']}/assign",
+        headers=admin_headers,
+        json={"actor": "admin", "constructor": "constructor-b"},
+    )
+    assert opened.status_code == 200
+    assert assigned.status_code == 200
+
+    response = client.post(
+        f"/local-test/construction/tasks/{task['id']}/claim",
+        headers=constructor_headers,
+        json={"actor": "constructor-b"},
+    )
+
+    assert response.status_code == 403
+
+
 def test_photo_barcode_rescan_route_updates_photo_with_ocr(monkeypatch) -> None:
     headers = {"X-Team-Id": "rescan-route-test"}
     client.post("/local-test/bootstrap", headers=headers)
@@ -1181,8 +1253,8 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
             "client_photo_ids": ["photo-a", "photo-b"],
         },
         files=[
-            ("files", ("before.jpg", b"image-before", "image/jpeg")),
-            ("files", ("after.jpg", b"image-after", "image/jpeg")),
+            ("files", ("before.jpg", tiny_jpeg_bytes("red"), "image/jpeg")),
+            ("files", ("after.jpg", tiny_jpeg_bytes("blue"), "image/jpeg")),
         ],
     )
     uploaded = client.post(
@@ -1198,9 +1270,9 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
             "client_photo_ids": ["photo-a", "photo-b", "photo-c"],
         },
         files=[
-            ("files", ("before.jpg", b"image-before-1", "image/jpeg")),
-            ("files", ("meter.jpg", b"image-meter-1", "image/jpeg")),
-            ("files", ("after.jpg", b"image-after-1", "image/jpeg")),
+            ("files", ("before.jpg", tiny_jpeg_bytes("red"), "image/jpeg")),
+            ("files", ("meter.jpg", tiny_jpeg_bytes("green"), "image/jpeg")),
+            ("files", ("after.jpg", tiny_jpeg_bytes("blue"), "image/jpeg")),
         ],
     )
 
@@ -1250,7 +1322,7 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
             "client_photo_ids": ["photo-collector"],
         },
         files=[
-            ("files", ("collector.jpg", b"image-collector-1", "image/jpeg")),
+            ("files", ("collector.jpg", tiny_jpeg_bytes("yellow"), "image/jpeg")),
         ],
     )
     assert collector_upload.status_code == 200
@@ -1273,10 +1345,10 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
             "client_photo_ids": ["photo-1", "photo-2", "photo-3", "photo-4"],
         },
         files=[
-            ("files", ("before.jpg", b"image-1", "image/jpeg")),
-            ("files", ("after.jpg", b"image-2", "image/jpeg")),
-            ("files", ("meter.jpg", b"image-3", "image/jpeg")),
-            ("files", ("collector.jpg", b"image-4", "image/jpeg")),
+            ("files", ("before.jpg", tiny_jpeg_bytes("red"), "image/jpeg")),
+            ("files", ("after.jpg", tiny_jpeg_bytes("blue"), "image/jpeg")),
+            ("files", ("meter.jpg", tiny_jpeg_bytes("green"), "image/jpeg")),
+            ("files", ("collector.jpg", tiny_jpeg_bytes("yellow"), "image/jpeg")),
         ],
     )
     assert complete_upload.status_code == 200
@@ -1427,10 +1499,10 @@ def test_construction_online_events_feed_fused_installer_workload() -> None:
                 "client_photo_ids": [f"before-{index}", f"after-{index}", f"meter-{index}", f"collector-{index}"],
             },
             files=[
-                ("files", ("before.jpg", f"before-{index}".encode(), "image/jpeg")),
-                ("files", ("after.jpg", f"after-{index}".encode(), "image/jpeg")),
-                ("files", ("meter.jpg", f"meter-{index}".encode(), "image/jpeg")),
-                ("files", ("collector.jpg", f"collector-{index}".encode(), "image/jpeg")),
+                ("files", ("before.jpg", tiny_jpeg_bytes((255, index, 0)), "image/jpeg")),
+                ("files", ("after.jpg", tiny_jpeg_bytes((0, index, 255)), "image/jpeg")),
+                ("files", ("meter.jpg", tiny_jpeg_bytes((0, 255, index)), "image/jpeg")),
+                ("files", ("collector.jpg", tiny_jpeg_bytes((255, 255, index)), "image/jpeg")),
             ],
         )
         assert upload.status_code == 200
@@ -1579,6 +1651,69 @@ def test_exception_group_assignment_is_visible_to_constructor() -> None:
     assert order["id"] in {item["id"] for item in constructor_orders}
     assert str(group["id"]) in {str(item["group_id"]) for item in constructor_orders}
     assert task["id"] in {item["id"] for item in constructor_tasks}
+
+
+def test_construction_exception_order_routes_reject_actor_spoofing() -> None:
+    team_id = f"exception-order-spoof-{uuid4()}"
+    admin_token = security.create_access_token(
+        {"sub": "admin", "username": "admin", "roles": ["admin"], "team_id": team_id}
+    )
+    reviewer_token = security.create_access_token(
+        {"sub": "reviewer-a", "username": "reviewer-a", "roles": ["reviewer"], "team_id": team_id}
+    )
+    constructor_token = security.create_access_token(
+        {"sub": "constructor-a", "username": "constructor-a", "roles": ["constructor"], "team_id": team_id}
+    )
+    admin_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {admin_token}"}
+    reviewer_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {reviewer_token}"}
+    constructor_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {constructor_token}"}
+
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    task = next(item for item in client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"] if item["can_claim"])
+    claim = client.post(
+        f"/local-test/tasks/{task['id']}/claim",
+        headers=reviewer_headers,
+        json={"reviewer": "reviewer-a"},
+    )
+    assert claim.status_code == 200
+    group = client.get(
+        f"/local-test/tasks/{task['id']}/groups?limit=1&summary=true",
+        headers=reviewer_headers,
+    ).json()["data"]["items"][0]
+    returned = client.patch(
+        f"/local-test/groups/{group['id']}/return-exception",
+        headers=reviewer_headers,
+        json={"actor": "reviewer-a", "category": "照片缺失", "note": "现场补缺失照片"},
+    )
+    assert returned.status_code == 200
+    order_id = returned.json()["data"]["order"]["id"]
+
+    spoof_assign = client.patch(
+        f"/local-test/construction/exception-orders/{order_id}/assign",
+        headers=constructor_headers,
+        json={"actor": "admin", "constructor": "constructor-b", "note": "spoof assign"},
+    )
+    assert spoof_assign.status_code == 403
+
+    assigned = client.patch(
+        f"/local-test/construction/exception-orders/{order_id}/assign",
+        headers=admin_headers,
+        json={"actor": "admin", "constructor": "constructor-b", "note": "admin assign"},
+    )
+    assert assigned.status_code == 200
+    spoof_submit = client.patch(
+        f"/local-test/construction/exception-orders/{order_id}/submit",
+        headers=constructor_headers,
+        json={"actor": "constructor-b", "updates": {"collector": "C-1"}, "note": "spoof submit"},
+    )
+    spoof_unassign = client.patch(
+        f"/local-test/construction/exception-orders/{order_id}/unassign",
+        headers=constructor_headers,
+        json={"actor": "admin", "reason": "spoof unassign"},
+    )
+
+    assert spoof_submit.status_code == 403
+    assert spoof_unassign.status_code == 403
 
 
 def test_constructor_can_keep_up_to_five_assigned_terminals() -> None:
@@ -2179,8 +2314,8 @@ def test_manual_group_photo_upload_route() -> None:
         f"/local-test/groups/{group['id']}/photos/upload-images",
         data={"actor": "api-test", "collector": "collector-upload", "module_asset_no": "module-upload"},
         files=[
-            ("files", ("upload-a.jpg", b"fake-image-a", "image/jpeg")),
-            ("files", ("upload-b.png", b"fake-image-b", "image/png")),
+            ("files", ("upload-a.jpg", tiny_jpeg_bytes("red"), "image/jpeg")),
+            ("files", ("upload-b.png", tiny_png_bytes("blue"), "image/png")),
         ],
     )
 
@@ -2250,7 +2385,7 @@ def test_upload_rejects_spoofed_html_before_save() -> None:
         f"/local-test/groups/{group['id']}/photos/upload-images",
         data={"actor": "api-test"},
         files=[
-            ("files", ("valid-first.jpg", b"fake-image-a", "image/jpeg")),
+            ("files", ("valid-first.jpg", tiny_jpeg_bytes(), "image/jpeg")),
             ("files", ("masked-html.jpg", b"   <html><script>alert(1)</script>", "image/jpeg")),
         ],
     )
@@ -2258,6 +2393,29 @@ def test_upload_rejects_spoofed_html_before_save() -> None:
     assert uploaded.status_code == 400
     assert "active content" in uploaded.json()["detail"]
     assert saved_upload_files() == before_files
+
+
+def test_upload_rejects_fake_image_bytes_before_save() -> None:
+    client.post("/local-test/bootstrap")
+    created = client.post(
+        "/local-test/groups",
+        json={
+            "actor": "api-test",
+            "terminal": "T-FAKE-UPLOAD",
+            "meter_no": "M-FAKE-UPLOAD",
+            "address": "fake upload rejection address",
+        },
+    )
+    group = created.json()["data"]["group"]
+
+    uploaded = client.post(
+        f"/local-test/groups/{group['id']}/photos/upload-images",
+        data={"actor": "api-test"},
+        files=[("files", ("fake.jpg", b"not-a-real-image", "image/jpeg"))],
+    )
+
+    assert uploaded.status_code == 400
+    assert "unsupported image bytes" in uploaded.json()["detail"]
 
 
 def test_upload_rejects_too_many_files(monkeypatch) -> None:
@@ -2330,6 +2488,44 @@ def test_photo_proxy_rejects_private_dns(monkeypatch) -> None:
 
     assert response.status_code == 400
     assert "not allowed" in response.json()["detail"]
+
+
+def test_read_remote_image_with_validator_blocks_redirect_before_fetch(monkeypatch) -> None:
+    from app.api.routes import local_test
+    from fastapi import HTTPException
+
+    no_redirect_requests: list[str] = []
+    automatic_redirect_requests: list[str] = []
+
+    def validator(url: str) -> None:
+        if "127.0.0.1" in url:
+            raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
+
+    def automatic_redirect_fetch(_request, timeout: int):
+        automatic_redirect_requests.append(str(getattr(_request, "full_url", _request)))
+        raise AssertionError("validated remote image reads must not auto-follow redirects")
+
+    def no_redirect_fetch(_request, timeout: int):
+        no_redirect_requests.append(str(getattr(_request, "full_url", _request)))
+        raise HTTPError(
+            str(getattr(_request, "full_url", _request)),
+            302,
+            "Found",
+            {"Location": "http://127.0.0.1/private.jpg"},
+            None,
+        )
+
+    monkeypatch.setattr(local_test, "urlopen", automatic_redirect_fetch)
+    monkeypatch.setattr(local_test._NO_REDIRECT_OPENER, "open", no_redirect_fetch)
+
+    try:
+        local_test._read_remote_image("https://cdn.example.test/photo.jpg", url_validator=validator)
+        raise AssertionError("redirected remote image should be rejected")
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "redirect" in str(exc.detail).lower() or "not allowed" in str(exc.detail).lower()
+    assert automatic_redirect_requests == []
+    assert no_redirect_requests == ["https://cdn.example.test/photo.jpg"]
 
 
 def test_request_size_limit_returns_413(monkeypatch) -> None:

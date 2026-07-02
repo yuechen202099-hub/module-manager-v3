@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from io import BytesIO
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 from PIL import Image
@@ -823,3 +824,63 @@ def test_default_barcode_scanner_downloads_oss_image_with_server_signed_url(monk
 
     assert values == ["ABC123"]
     assert requested_urls == ["https://signed.test/module-manager-v2/default-team/photos/aa/photo.jpg"]
+
+
+def test_default_barcode_scanner_rejects_private_remote_photo_url(monkeypatch) -> None:
+    requested_urls: list[str] = []
+
+    def fake_urlopen(url: str, timeout: int):
+        requested_urls.append(url)
+        raise AssertionError("private photo URL should be rejected before download")
+
+    monkeypatch.setattr(photo_barcode_check.urllib.request, "urlopen", fake_urlopen)
+
+    values = default_barcode_scanner({"image_url": "http://127.0.0.1/private.jpg"})
+
+    assert values == []
+    assert requested_urls == []
+
+
+def test_remote_barcode_download_blocks_redirect_before_fetch(monkeypatch) -> None:
+    automatic_redirect_requests: list[str] = []
+    no_redirect_requests: list[str] = []
+    validated_urls: list[str] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return tiny_jpeg_bytes()
+
+    def validate_url(url: str) -> None:
+        validated_urls.append(url)
+        if "127.0.0.1" in url:
+            raise ValueError("Photo proxy host is not allowed")
+
+    def fake_urlopen(url: str, timeout: int):
+        automatic_redirect_requests.append(url)
+        return FakeResponse()
+
+    def fake_no_redirect_open(url: str, timeout: int):
+        no_redirect_requests.append(url)
+        raise HTTPError(url, 302, "Found", {"Location": "http://127.0.0.1/private.jpg"}, None)
+
+    monkeypatch.setattr(photo_barcode_check, "validate_remote_image_url", validate_url)
+    monkeypatch.setattr(photo_barcode_check.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "_REMOTE_IMAGE_NO_REDIRECT_OPENER",
+        SimpleNamespace(open=fake_no_redirect_open),
+        raising=False,
+    )
+
+    content = photo_barcode_check._download_photo_content({"image_url": "https://cdn.example.test/photo.jpg"})
+
+    assert content is None
+    assert automatic_redirect_requests == []
+    assert no_redirect_requests == ["https://cdn.example.test/photo.jpg"]
+    assert validated_urls == ["https://cdn.example.test/photo.jpg", "http://127.0.0.1/private.jpg"]

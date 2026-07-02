@@ -1,9 +1,7 @@
 import asyncio
-import ipaddress
 import json
 import mimetypes
 import hashlib
-import socket
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -46,6 +44,7 @@ from app.services.ops_status import build_system_status
 from app.services.account_store import get_user
 from app.services.project_board_cache import project_board_summary_cache
 from app.services.photo_storage import (
+    is_blocked_remote_image_address,
     normalize_suffix,
     parse_oss_image_url,
     resolve_group_collection_for_response,
@@ -60,6 +59,8 @@ from app.services.photo_storage import (
     sign_oss_server_url,
     static_upload_root,
     validate_image_content,
+    resolve_remote_image_host_addresses,
+    validate_remote_image_url,
 )
 from app.services.state_repository import StateBackendNotReady, _unmatched_duplicate_keys, get_state_repository
 from app.services.local_simulation import (
@@ -209,68 +210,23 @@ async def _read_validated_upload_files_before_save(files: list[UploadFile]) -> l
 
 
 def _is_blocked_proxy_address(hostname: str) -> bool:
-    try:
-        address = ipaddress.ip_address(hostname)
-    except ValueError:
-        return False
-    if getattr(address, "ipv4_mapped", None):
-        mapped = address.ipv4_mapped
-        return (
-            mapped.is_private
-            or mapped.is_loopback
-            or mapped.is_link_local
-            or mapped.is_reserved
-            or mapped.is_unspecified
-            or mapped.is_multicast
-        )
-    return (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_unspecified
-        or address.is_multicast
-    )
-
-
-def _is_ip_literal(hostname: str) -> bool:
-    try:
-        ipaddress.ip_address(hostname)
-    except ValueError:
-        return False
-    return True
+    return is_blocked_remote_image_address(hostname)
 
 
 def _resolve_photo_proxy_host_addresses(hostname: str) -> list[str]:
     try:
-        results = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
-        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed") from exc
-    addresses: set[str] = set()
-    for result in results:
-        sockaddr = result[4]
-        if sockaddr:
-            addresses.add(str(sockaddr[0]))
-    if not addresses:
-        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
-    return sorted(addresses)
+        return resolve_remote_image_host_addresses(hostname)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _validate_photo_proxy_url(url: str) -> None:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
-        raise HTTPException(status_code=400, detail="Invalid image URL")
-    hostname = parsed.hostname.lower().rstrip(".")
-    if hostname == "localhost" or _is_blocked_proxy_address(hostname):
-        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
-    allowed_hosts = {host.lower().rstrip(".") for host in settings.photo_proxy_hosts}
-    if allowed_hosts and hostname not in allowed_hosts:
-        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
-    if not allowed_hosts and settings.app_env.lower() in {"prod", "production"}:
-        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
-    resolved_addresses = [hostname] if not _is_blocked_proxy_address(hostname) and _is_ip_literal(hostname) else _resolve_photo_proxy_host_addresses(hostname)
-    if any(_is_blocked_proxy_address(address) for address in resolved_addresses):
-        raise HTTPException(status_code=400, detail="Photo proxy host is not allowed")
+    try:
+        validate_remote_image_url(url, resolver=_resolve_photo_proxy_host_addresses)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -386,9 +342,9 @@ def request_is_constructor(request: Request) -> bool:
 def bound_construction_actor(request: Request, actor: str) -> str:
     clean_actor = str(actor or "").strip()
     if request_is_admin(request):
-        return clean_actor
+        return clean_actor or request_actor(request, "admin")
     payload = request_auth_payload(request)
-    subject = str(payload.get("sub") or "").strip()
+    subject = str(payload.get("sub") or payload.get("username") or "").strip()
     if not subject:
         raise HTTPException(status_code=401, detail="Authentication required")
     if not clean_actor:
@@ -1335,7 +1291,8 @@ def _read_remote_image(
                 "Accept": "image/*,*/*;q=0.8",
             },
         )
-        opener = urlopen if follow_redirects else _NO_REDIRECT_OPENER.open
+        allow_auto_redirects = follow_redirects and url_validator is None
+        opener = urlopen if allow_auto_redirects else _NO_REDIRECT_OPENER.open
         with opener(upstream_request, timeout=30) as upstream:
             final_url = upstream.geturl()
             if url_validator is not None:
@@ -1344,7 +1301,7 @@ def _read_remote_image(
             expected_length = upstream.headers.get("Content-Length", "")
             content = upstream.read(max_bytes + 1)
     except HTTPError as exc:
-        if not follow_redirects and 300 <= exc.code < 400:
+        if not allow_auto_redirects and 300 <= exc.code < 400:
             location = exc.headers.get("Location") or ""
             if location and url_validator is not None:
                 url_validator(urljoin(url, location))
@@ -1433,7 +1390,7 @@ def _persist_repaired_photo_storage(group_id: str, photo: dict) -> None:
 
 
 def _replace_photo_storage_from_source(group_id: str, photo: dict, source_url: str) -> tuple[bytes, str]:
-    content, media_type = _read_remote_image(source_url)
+    content, media_type = _read_remote_image(source_url, url_validator=_validate_photo_proxy_url)
     filename = str(photo.get("archive_filename") or photo.get("original_filename") or f"{photo.get('id') or 'photo'}.jpg")
     saved = save_image_bytes(
         scope="repaired-photos",
@@ -1655,7 +1612,7 @@ def group_photo_content(group_id: str, photo_id: str, kind: str = Query(default=
     parsed = urlparse(str(resolved_url or ""))
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=404, detail="Photo has no readable image source")
-    content, media_type = _read_remote_image(str(resolved_url))
+    content, media_type = _read_remote_image(str(resolved_url), url_validator=_validate_photo_proxy_url)
     return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, max-age=600"})
 
 
@@ -1943,8 +1900,9 @@ def task_progress(task_id: int, request: Request):
 
 @router.post("/tasks/{task_id}/claim")
 def claim(task_id: int, payload: ClaimRequest, request: Request):
+    reviewer = bound_review_actor(request, payload.reviewer)
     try:
-        task = state_repository().claim_task(task_id, payload.reviewer)
+        task = state_repository().claim_task(task_id, reviewer)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, task)
@@ -1952,8 +1910,9 @@ def claim(task_id: int, payload: ClaimRequest, request: Request):
 
 @router.post("/tasks/{task_id}/release")
 def release(task_id: int, payload: ClaimRequest, request: Request):
+    reviewer = bound_review_actor(request, payload.reviewer)
     try:
-        task = state_repository().release_task(task_id, payload.reviewer, force=request_is_admin(request))
+        task = state_repository().release_task(task_id, reviewer, force=request_is_admin(request))
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, task)
@@ -2034,8 +1993,9 @@ def construction_my_tasks(request: Request, actor: str = "constructor"):
 
 @router.post("/construction/tasks/{task_id}/claim")
 def construction_task_claim(task_id: int, payload: ConstructionActorRequest, request: Request):
+    actor = bound_construction_actor(request, payload.actor)
     try:
-        task = state_repository().claim_construction_task(task_id, payload.actor)
+        task = state_repository().claim_construction_task(task_id, actor)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except ValueError as exc:
@@ -2054,10 +2014,13 @@ def construction_exception_order_list(
 
 @router.patch("/construction/exception-orders/{order_id}/assign")
 def construction_exception_order_assign(order_id: str, payload: ConstructionExceptionAssignRequest, request: Request):
+    if not request_is_admin(request):
+        raise HTTPException(status_code=403, detail="Only administrators can assign construction exception orders")
+    actor = request_actor(request, "admin")
     try:
         result = state_repository().assign_construction_exception_order(
             order_id,
-            actor=payload.actor,
+            actor=actor,
             constructor=payload.constructor,
             note=payload.note,
             due_date=payload.due_date,
@@ -2071,10 +2034,13 @@ def construction_exception_order_assign(order_id: str, payload: ConstructionExce
 
 @router.patch("/construction/exception-orders/{order_id}/unassign")
 def construction_exception_order_unassign(order_id: str, payload: ConstructionExceptionUnassignRequest, request: Request):
+    if not request_is_admin(request):
+        raise HTTPException(status_code=403, detail="Only administrators can unassign construction exception orders")
+    actor = request_actor(request, "admin")
     try:
         result = state_repository().unassign_construction_exception_order(
             order_id,
-            actor=payload.actor,
+            actor=actor,
             reason=payload.reason,
         )
     except KeyError as exc:
@@ -2084,10 +2050,11 @@ def construction_exception_order_unassign(order_id: str, payload: ConstructionEx
 
 @router.patch("/construction/exception-orders/{order_id}/submit")
 def construction_exception_order_submit(order_id: str, payload: ConstructionExceptionSubmitRequest, request: Request):
+    actor = bound_construction_actor(request, payload.actor)
     try:
         result = state_repository().submit_construction_exception_order(
             order_id,
-            actor=payload.actor,
+            actor=actor,
             updates=payload.updates,
             note=payload.note,
         )
@@ -2100,8 +2067,9 @@ def construction_exception_order_submit(order_id: str, payload: ConstructionExce
 
 @router.post("/construction/tasks/{task_id}/release")
 def construction_task_release(task_id: int, payload: ConstructionActorRequest, request: Request):
+    actor = bound_construction_actor(request, payload.actor)
     try:
-        task = state_repository().release_construction_task(task_id, payload.actor, force=request_is_admin(request))
+        task = state_repository().release_construction_task(task_id, actor, force=request_is_admin(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except ValueError as exc:
@@ -2200,6 +2168,8 @@ async def construction_group_upload_batch(
                 group_id=group_id,
                 key_hint=f"{group_id}-{client_batch_id[:16] or 'batch'}-{client_photo_id[:16]}",
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         records.append(
@@ -2338,6 +2308,8 @@ async def upload_group_photo_images(
                 group_id=group_id,
                 key_hint=f"{group_id}-{uuid4().hex[:16]}",
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         url = stored["url"]
@@ -2368,11 +2340,12 @@ async def upload_group_photo_images(
 
 @router.patch("/groups/{group_id}/review")
 def save_review(group_id: str, payload: ReviewRequest, request: Request):
+    reviewer = bound_review_actor(request, payload.reviewer)
     try:
         group = state_repository().review_group(
             group_id,
             payload.status,
-            payload.reviewer,
+            reviewer,
             payload.note,
             payload.exception_note,
         )
@@ -2385,8 +2358,9 @@ def save_review(group_id: str, payload: ReviewRequest, request: Request):
 
 @router.post("/groups/{group_id}/exception")
 def mark_exception(group_id: str, payload: ExceptionNoteRequest, request: Request):
+    reviewer = bound_review_actor(request, payload.reviewer)
     try:
-        group = state_repository().save_exception_note(group_id, reviewer=payload.reviewer, note=payload.note)
+        group = state_repository().save_exception_note(group_id, reviewer=reviewer, note=payload.note)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
@@ -2396,10 +2370,11 @@ def mark_exception(group_id: str, payload: ExceptionNoteRequest, request: Reques
 
 @router.patch("/groups/{group_id}/reset-unconstructed")
 def reset_group_unconstructed(group_id: str, payload: GroupResetRequest, request: Request):
+    actor = bound_review_actor(request, payload.actor, fallback="admin")
     try:
         result = state_repository().reset_group_to_unconstructed(
             group_id,
-            actor=payload.actor,
+            actor=actor,
             reason=payload.reason,
             force=request_is_admin(request),
         )
@@ -2412,10 +2387,11 @@ def reset_group_unconstructed(group_id: str, payload: GroupResetRequest, request
 
 @router.patch("/groups/{group_id}/return-exception")
 def return_group_exception_order(group_id: str, payload: GroupExceptionOrderRequest, request: Request):
+    actor = bound_review_actor(request, payload.actor, fallback="admin")
     try:
         result = state_repository().return_group_to_exception_order(
             group_id,
-            actor=payload.actor,
+            actor=actor,
             category=payload.category,
             note=payload.note,
             force=request_is_admin(request),
@@ -2435,9 +2411,10 @@ def save_photo_category(
     request: Request,
     include_group: bool = Query(default=False),
 ):
+    reviewer = bound_review_actor(request, payload.reviewer)
     try:
         repo = state_repository()
-        photo = repo.classify_photo(group_id, photo_id, payload.category, payload.reviewer)
+        photo = repo.classify_photo(group_id, photo_id, payload.category, reviewer)
         invalidate_project_board_summary_cache()
         if include_group:
             group = repo.get_group(group_id)
@@ -2497,8 +2474,9 @@ def confirm_group_barcode_manually(
 
 @router.delete("/groups/{group_id}/photos/{photo_id}")
 def delete_photo(group_id: str, photo_id: str, payload: PhotoDeleteRequest, request: Request):
+    reviewer = bound_review_actor(request, payload.reviewer)
     try:
-        result = state_repository().delete_photo(group_id, photo_id, payload.reviewer)
+        result = state_repository().delete_photo(group_id, photo_id, reviewer)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Photo or group not found") from exc
     except ValueError as exc:

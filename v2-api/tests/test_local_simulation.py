@@ -263,6 +263,14 @@ def test_work_time_bonus_minutes_do_not_reduce_efficiency() -> None:
     assert summary["completion_per_effective_hour"] == 6
 
 
+def tiny_jpeg_bytes(color: str = "white") -> bytes:
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), color).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
 def fake_catalog_rows(source: str) -> list[dict]:
     return [
         {
@@ -393,7 +401,8 @@ def test_local_upload_photos_are_synced_to_oss(monkeypatch: pytest.MonkeyPatch, 
         state.update(blank_state("oss-local-sync-team"))
         upload_dir = tmp_path / "manual"
         upload_dir.mkdir()
-        (upload_dir / "photo.jpg").write_bytes(b"local-photo-bytes")
+        photo_bytes = tiny_jpeg_bytes()
+        (upload_dir / "photo.jpg").write_bytes(photo_bytes)
         state["groups"] = [
             {
                 "id": "g-oss-001",
@@ -417,7 +426,7 @@ def test_local_upload_photos_are_synced_to_oss(monkeypatch: pytest.MonkeyPatch, 
         ]
 
         def fake_save_image_bytes(**kwargs):
-            assert kwargs["content"] == b"local-photo-bytes"
+            assert kwargs["content"] == photo_bytes
             assert kwargs["scope"] == "imported"
             return {
                 "url": "oss://bucket/imported/photo.jpg",

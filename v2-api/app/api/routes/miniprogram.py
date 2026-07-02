@@ -195,6 +195,8 @@ async def save_upload_file_record(
             group_id=group_id,
             key_hint=f"{group_id}-{client_batch_id[:16] or 'batch'}-{client_photo_id[:16]}",
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
@@ -318,6 +320,8 @@ async def upload_group_batch(
                 group_id=group_id,
                 key_hint=f"{group_id}-{client_batch_id[:16] or 'batch'}-{client_photo_id[:16]}",
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         records.append(

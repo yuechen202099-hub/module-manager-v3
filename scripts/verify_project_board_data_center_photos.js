@@ -25,7 +25,7 @@ const releaseNotes = read('v2-web/src/constants/releaseNotes.ts')
 const opsStatus = read('v2-api/app/services/ops_status.py')
 const apiMain = read('v2-api/app/main.py')
 const packageJson = read('v2-web/package.json')
-const expectedVersion = '3.0.74'
+const expectedVersion = '3.0.77'
 
 assertNotContains(projectBoard, 'fetchSystemStatus', 'project board must not fetch unrelated system status')
 assertNotContains(projectBoard, 'systemRows', 'project board must not compute system status rows')
@@ -42,8 +42,16 @@ assertContains(globalSearch, '<img', 'data center photo dialog must render nativ
 assertNotContains(globalSearch, '<el-image', 'data center photo dialog must not depend on Element Plus image rendering')
 
 assertContains(releaseNotes, `APP_VERSION = '${expectedVersion}'`, `APP_VERSION must be ${expectedVersion}`)
-assertContains(releaseNotes, "version: 'V3.0.74'", 'release notes must include V3.0.74')
-assertContains(releaseNotes, '网站安全防护加固', 'release notes must describe the V3.0.74 security hardening update in Chinese')
+assertContains(releaseNotes, "version: 'V3.0.77'", 'release notes must include V3.0.77')
+assertContains(releaseNotes, '发布包验证脚本补齐', 'release notes must describe the V3.0.77 release package verifier update in Chinese')
+assertContains(releaseNotes, 'verify_admin_release_notes.js 必备项', 'release notes must describe the V3.0.77 release package verifier guard in Chinese')
+assertContains(releaseNotes, "version: 'V3.0.76'", 'release notes must keep V3.0.76')
+assertContains(releaseNotes, '异常工单与远程图片重定向安全修复', 'release notes must keep the V3.0.76 exception order and remote image redirect security update in Chinese')
+assertContains(releaseNotes, '禁止自动跟随 302/301 跳转', 'release notes must keep the V3.0.76 remote image redirect guard in Chinese')
+assertContains(releaseNotes, "version: 'V3.0.75'", 'release notes must keep V3.0.75')
+assertContains(releaseNotes, '上传与扫码安全加固', 'release notes must keep the V3.0.75 upload and barcode security update in Chinese')
+assertContains(releaseNotes, "version: 'V3.0.74'", 'release notes must keep V3.0.74')
+assertContains(releaseNotes, '网站安全防护加固', 'release notes must keep the V3.0.74 security hardening update in Chinese')
 assertContains(releaseNotes, "version: 'V3.0.73'", 'release notes must include V3.0.73')
 assertContains(releaseNotes, '今日完成量可见性修复', 'release notes must keep the V3.0.73 daily completion visibility fix in Chinese')
 assertContains(releaseNotes, "version: 'V3.0.72'", 'release notes must include V3.0.72')

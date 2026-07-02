@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from io import BytesIO
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from app.main import create_app
 from app.core.security import create_access_token
@@ -81,6 +83,12 @@ def bind_constructor(code: str = "wx-code-constructor") -> dict:
 def constructor_headers(username: str) -> dict[str, str]:
     token = create_access_token({"username": username, "roles": ["constructor"], "team_id": "default-team"})
     return {"Authorization": f"bearer {token}"}
+
+
+def tiny_jpeg_bytes(color: str | tuple[int, int, int] = "white") -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), color).save(buffer, format="JPEG")
+    return buffer.getvalue()
 
 
 def setup_assigned_construction_task(monkeypatch: pytest.MonkeyPatch) -> tuple[dict, dict[str, str]]:
@@ -183,9 +191,9 @@ def test_miniprogram_group_filters_and_upload_keep_production_shape(monkeypatch:
             "client_photo_ids": ["wx-photo-a", "wx-photo-b", "wx-photo-c"],
         },
         files=[
-            ("files", ("before.jpg", b"wx-before", "image/jpeg")),
-            ("files", ("meter.jpg", b"wx-meter", "image/jpeg")),
-            ("files", ("after.jpg", b"wx-after", "image/jpeg")),
+            ("files", ("before.jpg", tiny_jpeg_bytes("red"), "image/jpeg")),
+            ("files", ("meter.jpg", tiny_jpeg_bytes("green"), "image/jpeg")),
+            ("files", ("after.jpg", tiny_jpeg_bytes("blue"), "image/jpeg")),
         ],
     )
     assert uploaded.status_code == 200
@@ -204,9 +212,9 @@ def test_miniprogram_single_file_uploads_commit_as_one_batch(monkeypatch: pytest
     group = groups.json()["data"]["items"][0]
 
     slots = [
-        ("before_box", "before.jpg", b"wx-before-one"),
-        ("module_meter", "meter.jpg", b"wx-meter-one"),
-        ("after_box", "after.jpg", b"wx-after-one"),
+        ("before_box", "before.jpg", tiny_jpeg_bytes("red")),
+        ("module_meter", "meter.jpg", tiny_jpeg_bytes("green")),
+        ("after_box", "after.jpg", tiny_jpeg_bytes("blue")),
     ]
     responses = []
     for index, (slot, filename, content) in enumerate(slots):
@@ -234,6 +242,31 @@ def test_miniprogram_single_file_uploads_commit_as_one_batch(monkeypatch: pytest
     assert committed["status"] == "committed"
     assert committed["group"]["photos"][0]["upload_source"] == "construction-mobile"
     assert len(committed["uploaded_urls"]) == 3
+
+
+def test_miniprogram_upload_rejects_fake_image_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    task, headers = setup_assigned_construction_task(monkeypatch)
+    groups = client.get(f"/miniprogram/tasks/{task['id']}/groups?filter=todo", headers=headers)
+    group = groups.json()["data"]["items"][0]
+
+    response = client.post(
+        f"/miniprogram/groups/{group['id']}/upload-file",
+        headers=headers,
+        data={
+            "client_batch_id": "wx-fake-image",
+            "client_completed_at": "2026-06-29T10:10:00",
+            "collector": "collector-one",
+            "module_asset_no": "module-one",
+            "photo_slot": "before_box",
+            "client_photo_id": "fake-before",
+            "expected_count": "3",
+            "commit": "false",
+        },
+        files={"file": ("fake.jpg", b"not-a-real-image", "image/jpeg")},
+    )
+
+    assert response.status_code == 400
+    assert "unsupported image bytes" in response.json()["detail"]
 
 
 def test_miniprogram_activity_records_use_signed_in_constructor(monkeypatch: pytest.MonkeyPatch) -> None:

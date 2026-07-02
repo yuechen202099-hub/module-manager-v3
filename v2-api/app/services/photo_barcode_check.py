@@ -10,10 +10,17 @@ from io import BytesIO
 from pathlib import Path
 from threading import BoundedSemaphore
 from typing import Any, Callable, Iterable
-from urllib.parse import urlparse
+from urllib.error import HTTPError
+from urllib.parse import urljoin, urlparse
 
 from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key
-from app.services.photo_storage import parse_oss_image_url, sign_oss_server_url, static_upload_root, validate_image_content
+from app.services.photo_storage import (
+    parse_oss_image_url,
+    sign_oss_server_url,
+    static_upload_root,
+    validate_image_content,
+    validate_remote_image_url,
+)
 
 BarcodeScanner = Callable[[dict[str, Any]], Iterable[str]]
 OcrReader = Callable[[dict[str, Any], list[str]], Iterable[str]]
@@ -37,6 +44,14 @@ BARCODE_RESCUE_MAX_WORK_LONG_SIDE = 2200
 BARCODE_RESCUE_MAX_CANDIDATES = 40
 BARCODE_SLOW_RESCAN_MAX_CANDIDATES = 12
 OCR_RESCUE_ROTATION_ANGLES = (0, 5, -5)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+_REMOTE_IMAGE_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
 OCR_RESCUE_MAX_CANDIDATES = 3
 OCR_RESCUE_TIMEOUT_SECONDS = 3
 OCR_RESCUE_SEMAPHORE = BoundedSemaphore(1)
@@ -1022,11 +1037,29 @@ def _download_photo_content(photo: dict[str, Any]) -> bytes | None:
     image_url = _download_photo_url(photo)
     if not image_url:
         return None
+    is_trusted_oss = _is_trusted_oss_photo(photo)
+    opener = urllib.request.urlopen if is_trusted_oss else _REMOTE_IMAGE_NO_REDIRECT_OPENER.open
     try:
-        with urllib.request.urlopen(image_url, timeout=8) as response:
+        with opener(image_url, timeout=8) as response:
             return response.read(8 * 1024 * 1024)
+    except HTTPError as exc:
+        if not is_trusted_oss and 300 <= exc.code < 400:
+            location = exc.headers.get("Location") or ""
+            if location:
+                try:
+                    validate_remote_image_url(urljoin(image_url, location))
+                except ValueError:
+                    return None
+            return None
+        return None
     except Exception:
         return None
+
+
+def _is_trusted_oss_photo(photo: dict[str, Any]) -> bool:
+    storage_type = str(photo.get("storage_type") or "").strip()
+    image_url = str(photo.get("image_url") or photo.get("url") or photo.get("source_url") or "").strip()
+    return storage_type == "oss" or image_url.startswith("oss://")
 
 
 def _download_photo_url(photo: dict[str, Any]) -> str:
@@ -1043,5 +1076,9 @@ def _download_photo_url(photo: dict[str, Any]) -> str:
     for key in ("image_url", "source_url", "url", "preview_url", "delivery_cache_url", "thumbnail_url"):
         value = str(photo.get(key) or "").strip()
         if value.lower().startswith(("http://", "https://")):
+            try:
+                validate_remote_image_url(value)
+            except ValueError:
+                continue
             return value
     return ""
