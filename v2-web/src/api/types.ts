@@ -63,14 +63,94 @@ export type AuthConfig = {
   account_config_enabled?: boolean
 }
 
+export type ProjectModule = {
+  id: string
+  name: string
+  priority: number
+  endpoint: string
+  routePath: string
+}
+
+export type ProjectFieldSource = 'import' | 'field_collection' | 'review' | 'system'
+
+export type ProjectCaptureMethod = 'manual' | 'scan' | 'photo' | 'select' | 'datetime' | 'location' | 'system' | 'none'
+
+export type ProjectFieldDataType = 'text' | 'number' | 'datetime' | 'image' | 'enum' | 'duration' | 'location' | 'boolean'
+
+export type ProjectFieldDefinition = {
+  key: string
+  label: string
+  dataType: ProjectFieldDataType
+  source: ProjectFieldSource
+  captureMethod: ProjectCaptureMethod
+  required: boolean
+  parentKey?: string
+  kpiEnabled: boolean
+  options: string[]
+}
+
+export type ProjectWorkItemSchema = {
+  schemaVersion?: number
+  primaryField?: ProjectFieldDefinition
+  aggregateField?: ProjectFieldDefinition
+  platformRequiredFields: ProjectFieldDefinition[]
+  customFields: ProjectFieldDefinition[]
+  dashboardMetrics?: string[]
+}
+
+export type ProjectTemplateType = 'initial_work_orders' | 'external_completed'
+
+export type ProjectCreatePayload = {
+  name: string
+  description?: string
+  moduleIds: string[]
+  workItemSchema?: ProjectWorkItemSchema
+}
+
 export type Project = {
   id: string
   name: string
-  status: 'active' | 'archived'
+  status: 'active' | 'archived' | 'draft'
+  stage?: string
+  systemProgress?: number
+  managementProgress?: number
+  managementLocked?: boolean
   totalGroups: number
   completedGroups: number
   exceptionGroups: number
   updatedAt: string
+  modules: ProjectModule[]
+  workItemSchema?: ProjectWorkItemSchema
+  tasks?: {
+    total: number
+    uploaded: number
+    reviewing: number
+    archived: number
+    uploadRate: number
+    reviewRate: number
+  }
+  delivery?: {
+    status: string
+    totalItems: number
+    completedItems: number
+    latestRecord: string
+  }
+  field?: {
+    photoRowsLinked: number
+    unconstructedGroups: number
+    exceptionCount: number
+  }
+  review?: {
+    reviewedGroups: number
+    reviewRate: number
+    pendingGroups: number
+  }
+  risks?: {
+    total: number
+    fieldExceptions: number
+    unconstructedGroups: number
+    deliveryBlockers: number
+  }
 }
 
 export type TaskStatus =
@@ -231,6 +311,7 @@ export type ConstructionUploadPayload = {
   clientCompletedAt?: string
   collector: string
   moduleAssetNo: string
+  fieldValues?: Record<string, string>
   photos: ConstructionUploadPhoto[]
 }
 

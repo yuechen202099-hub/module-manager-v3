@@ -59,6 +59,8 @@ REQUIRED_FILES = {
     "scripts/verify_release_sop.py",
     "scripts/verify_release_retention_policy.py",
     "scripts/verify_project_board_photo_dialog.js",
+    "scripts/verify_vue_draft_project_entry_guard.js",
+    "scripts/verify_vue_work_item_schema_config.js",
     "scripts/verify_project_board_data_center_photos.js",
     "scripts/production_backup.sh",
     "scripts/cleanup_old_releases.sh",

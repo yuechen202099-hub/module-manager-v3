@@ -42,6 +42,7 @@ from app.models import (
 )
 from app.services.ops_status import build_system_status
 from app.services.account_store import get_user
+from app.services.platform.context import current_request_project_id, resolve_request_project_id
 from app.services.project_board_cache import project_board_summary_cache
 from app.services.photo_storage import (
     is_blocked_remote_image_address,
@@ -136,6 +137,7 @@ def response_group_target_summary(group: dict[str, Any] | None) -> dict[str, Any
 
 
 async def use_team_context(request: Request):
+    resolve_request_project_id(request)
     team_id = request.headers.get("X-Team-Id") or request.query_params.get("team_id") or ""
     payload = getattr(request.state, "auth", None)
     if payload:
@@ -291,6 +293,18 @@ def validate_construction_upload_group_before_file_save(group_id: str) -> None:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def parse_construction_field_values(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("field_values must be a JSON object") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("field_values must be a JSON object")
+    return {str(key).strip(): str(value).strip() for key, value in payload.items() if str(key).strip() and value is not None}
+
+
 def request_auth_payload(request: Request) -> dict:
     payload = getattr(request.state, "auth", None) or {}
     if not payload:
@@ -371,7 +385,9 @@ def store_scan_import_job(job_id: str, update: dict) -> dict:
 def system_status(request: Request):
     if not request_is_admin(request):
         raise HTTPException(status_code=403, detail="Only administrators can view system status")
-    return ok(request, build_system_status())
+    payload = build_system_status()
+    payload["project_id"] = current_request_project_id(request)
+    return ok(request, payload)
 
 
 def response_payload(payload: dict) -> dict:
@@ -2142,6 +2158,7 @@ async def construction_group_upload_batch(
     client_completed_at: str = Form(default=""),
     collector: str = Form(default=""),
     module_asset_no: str = Form(default=""),
+    field_values: str = Form(default=""),
     photo_slots: list[str] = Form(default=[]),
     client_photo_ids: list[str] = Form(default=[]),
     files: list[UploadFile] = File(default=[]),
@@ -2189,12 +2206,14 @@ async def construction_group_upload_batch(
     if not records:
         raise HTTPException(status_code=400, detail="Uploaded images are empty")
     try:
+        field_values_payload = parse_construction_field_values(field_values)
         result = state_repository().upload_construction_group_batch(
             group_id,
             actor=actor,
             client_batch_id=client_batch_id,
             collector=collector,
             module_asset_no=module_asset_no,
+            field_values=field_values_payload,
             photos=records,
             creator=display_name_for_actor(request, actor),
             client_completed_at=client_completed_at,

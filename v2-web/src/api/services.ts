@@ -1,4 +1,4 @@
-import { mockProjects, mockTasks, mockUser } from './mock'
+import { mockUser } from './mock'
 import type {
   AuthConfig,
   ConstructionExceptionOrder,
@@ -10,6 +10,10 @@ import type {
   MaterialGroup,
   PhotoBarcodeReviewGroup,
   Project,
+  ProjectCreatePayload,
+  ProjectFieldDefinition,
+  ProjectTemplateType,
+  ProjectWorkItemSchema,
   ProjectSummary,
   ReplacementRecord,
   ReviewPhoto,
@@ -108,6 +112,138 @@ type BackendTaskStatusSummary = {
   total_catalog_rows?: number
   groups?: number
 }
+
+type BackendProjectFieldDefinition = {
+  key?: string
+  label?: string
+  data_type?: ProjectFieldDefinition['dataType']
+  source?: ProjectFieldDefinition['source']
+  capture_method?: ProjectFieldDefinition['captureMethod']
+  required?: boolean
+  parent_key?: string
+  kpi_enabled?: boolean
+  options?: string[]
+}
+
+type BackendProjectWorkItemSchema = {
+  schema_version?: number
+  primary_field?: BackendProjectFieldDefinition
+  aggregate_field?: BackendProjectFieldDefinition
+  platform_required_fields?: BackendProjectFieldDefinition[]
+  custom_fields?: BackendProjectFieldDefinition[]
+  dashboard_metrics?: string[]
+}
+
+type BackendPlatformProject = {
+  id: string
+  name: string
+  status?: string
+  stage?: string
+  system_progress?: number
+  management_progress?: number
+  management_locked?: boolean
+  total_groups?: number
+  completed_groups?: number
+  exception_groups?: number
+  updated_at?: string
+  tasks?: {
+    total?: number
+    uploaded?: number
+    reviewing?: number
+    archived?: number
+    upload_rate?: number
+    review_rate?: number
+  }
+  delivery?: {
+    status?: string
+    total_items?: number
+    completed_items?: number
+    latest_record?: string
+  }
+  field?: {
+    photo_rows_linked?: number
+    unconstructed_groups?: number
+    exception_count?: number
+  }
+  review?: {
+    reviewed_groups?: number
+    review_rate?: number
+    pending_groups?: number
+  }
+  risks?: {
+    total?: number
+    field_exceptions?: number
+    unconstructed_groups?: number
+    delivery_blockers?: number
+  }
+  modules?: BackendProjectModule[]
+  work_item_schema?: BackendProjectWorkItemSchema
+}
+
+type BackendProjectProgress = {
+  stage?: string
+  system_progress?: number
+  management_progress?: number
+  management_locked?: boolean
+}
+
+type BackendProjectTasks = {
+  total?: number
+  uploaded?: number
+  reviewing?: number
+  archived?: number
+  upload_rate?: number
+  review_rate?: number
+}
+
+type BackendProjectDelivery = {
+  status?: string
+  total_items?: number
+  completed_items?: number
+  latest_record?: string
+}
+
+type BackendProjectField = {
+  photo_rows_linked?: number
+  unconstructed_groups?: number
+  exception_count?: number
+}
+
+type BackendProjectReview = {
+  reviewed_groups?: number
+  review_rate?: number
+  pending_groups?: number
+}
+
+type BackendProjectRisks = {
+  total?: number
+  field_exceptions?: number
+  unconstructed_groups?: number
+  delivery_blockers?: number
+}
+
+type BackendProjectModule = {
+  id?: string
+  name?: string
+  priority?: number
+  endpoint?: string
+  route_path?: string
+}
+
+type ProjectProgressSection = Pick<Project, 'stage' | 'systemProgress' | 'managementProgress' | 'managementLocked'>
+
+export type ProjectModuleSections = {
+  progress: ProjectProgressSection
+  delivery: NonNullable<Project['delivery']>
+  field: NonNullable<Project['field']>
+  review: NonNullable<Project['review']>
+  risks: NonNullable<Project['risks']>
+  tasks: NonNullable<Project['tasks']>
+}
+
+type ProjectModuleId = keyof ProjectModuleSections
+
+type LoadableProjectModule = Project['modules'][number] & { id: ProjectModuleId }
 
 type BackendPhoto = {
   id: string | number
@@ -456,8 +592,6 @@ type BackendInstallerWorkload = {
   }>
 }
 
-const delay = (ms = 120) => new Promise((resolve) => window.setTimeout(resolve, ms))
-
 function readLegacySession(): LegacySession | null {
   try {
     return JSON.parse(localStorage.getItem('module_manager_session') || 'null') as LegacySession | null
@@ -474,6 +608,37 @@ export function currentActor() {
 export function currentTeamId() {
   const session = readLegacySession()
   return session?.team_id || session?.user?.team_id || localStorage.getItem('module_manager_team_id') || 'default-team'
+}
+
+const projectScopedPathPrefixes = [
+  '/catalog',
+  '/exports',
+  '/ezcodes',
+  '/groups',
+  '/jobs',
+  '/local-test',
+  '/scan',
+  '/tasks',
+]
+
+export function currentProjectId() {
+  if (typeof window === 'undefined') return ''
+  const queryProjectId = new URLSearchParams(window.location.search).get('project_id') || ''
+  return queryProjectId || localStorage.getItem('module_manager_active_project_id') || ''
+}
+
+function shouldScopeProjectPath(pathname: string) {
+  return projectScopedPathPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
+}
+
+export function projectScopedPath(path: string, projectId = currentProjectId()) {
+  if (!projectId) return path
+  const fallbackOrigin = typeof window === 'undefined' ? 'http://module-manager.local' : window.location.origin
+  const url = new URL(path, fallbackOrigin)
+  if (!shouldScopeProjectPath(url.pathname) || url.searchParams.has('project_id')) return path
+  url.searchParams.set('project_id', projectId)
+  if (/^https?:\/\//i.test(path)) return url.href
+  return `${url.pathname}${url.search}${url.hash}`
 }
 
 function authHeaders(): HeadersInit {
@@ -527,7 +692,7 @@ function handleUnauthorizedResponse(response: Response) {
 }
 
 async function fetchWithAuth(path: string, init: RequestInit = {}) {
-  const response = await fetch(path, init)
+  const response = await fetch(projectScopedPath(path), init)
   handleUnauthorizedResponse(response)
   return response
 }
@@ -584,6 +749,179 @@ function roleFromSession(session: LegacySession | null, username: string): UserR
   if (username === 'admin') return 'admin'
   if (username.includes('constructor') || username.includes('施工')) return 'constructor'
   return 'reviewer'
+}
+
+function mapProjectProgress(raw: BackendProjectProgress = {}): ProjectProgressSection {
+  return {
+    stage: raw.stage || '',
+    systemProgress: Number(raw.system_progress || 0),
+    managementProgress: Number(raw.management_progress || 0),
+    managementLocked: Boolean(raw.management_locked),
+  }
+}
+
+function mapProjectTasks(raw: BackendProjectTasks = {}): NonNullable<Project['tasks']> {
+  return {
+    total: Number(raw.total || 0),
+    uploaded: Number(raw.uploaded || 0),
+    reviewing: Number(raw.reviewing || 0),
+    archived: Number(raw.archived || 0),
+    uploadRate: Number(raw.upload_rate || 0),
+    reviewRate: Number(raw.review_rate || 0),
+  }
+}
+
+function mapProjectDelivery(raw: BackendProjectDelivery = {}): NonNullable<Project['delivery']> {
+  return {
+    status: raw.status || '',
+    totalItems: Number(raw.total_items || 0),
+    completedItems: Number(raw.completed_items || 0),
+    latestRecord: raw.latest_record || '',
+  }
+}
+
+function mapProjectField(raw: BackendProjectField = {}): NonNullable<Project['field']> {
+  return {
+    photoRowsLinked: Number(raw.photo_rows_linked || 0),
+    unconstructedGroups: Number(raw.unconstructed_groups || 0),
+    exceptionCount: Number(raw.exception_count || 0),
+  }
+}
+
+function mapProjectReview(raw: BackendProjectReview = {}): NonNullable<Project['review']> {
+  return {
+    reviewedGroups: Number(raw.reviewed_groups || 0),
+    reviewRate: Number(raw.review_rate || 0),
+    pendingGroups: Number(raw.pending_groups || 0),
+  }
+}
+
+function mapProjectRisks(raw: BackendProjectRisks = {}): NonNullable<Project['risks']> {
+  return {
+    total: Number(raw.total || 0),
+    fieldExceptions: Number(raw.field_exceptions || 0),
+    unconstructedGroups: Number(raw.unconstructed_groups || 0),
+    deliveryBlockers: Number(raw.delivery_blockers || 0),
+  }
+}
+
+const fallbackProjectModules: Project['modules'] = [
+  { id: 'progress', name: '项目进度', priority: 10, endpoint: '', routePath: '/project-board' },
+  { id: 'delivery', name: '项目交付能力', priority: 20, endpoint: '', routePath: '/project-board' },
+  { id: 'field', name: '现场施工数据采集', priority: 30, endpoint: '', routePath: '/construction' },
+  { id: 'review', name: '审阅功能', priority: 40, endpoint: '', routePath: '/task-hall' },
+  { id: 'risks', name: '风险预警', priority: 50, endpoint: '', routePath: '/project-board' },
+  { id: 'tasks', name: '任务执行', priority: 60, endpoint: '', routePath: '/claim-tasks' },
+]
+
+function isProjectModuleId(moduleId: string): moduleId is ProjectModuleId {
+  return ['progress', 'delivery', 'field', 'review', 'risks', 'tasks'].includes(moduleId)
+}
+
+function moduleRegistryForLoading(registeredModules: Project['modules']): LoadableProjectModule[] {
+  const modules = registeredModules.length ? registeredModules : fallbackProjectModules
+  return modules.filter((module): module is LoadableProjectModule => isProjectModuleId(module.id))
+}
+
+function emptyProjectModuleSections(): ProjectModuleSections {
+  return {
+    progress: mapProjectProgress(),
+    delivery: mapProjectDelivery(),
+    field: mapProjectField(),
+    review: mapProjectReview(),
+    risks: mapProjectRisks(),
+    tasks: mapProjectTasks(),
+  }
+}
+
+function mapProjectModules(raw: BackendProjectModule[] = []): Project['modules'] {
+  return raw
+    .map((module) => ({
+      id: String(module.id || '').trim(),
+      name: String(module.name || '').trim(),
+      priority: Number(module.priority || 0),
+      endpoint: String(module.endpoint || '').trim(),
+      routePath: String(module.route_path || '').trim(),
+    }))
+    .filter((module) => module.id && module.name && module.routePath)
+    .sort((left, right) => left.priority - right.priority)
+}
+
+function mapWorkItemField(raw: BackendProjectFieldDefinition | undefined): ProjectFieldDefinition | undefined {
+  if (!raw?.key && !raw?.label) return undefined
+  return {
+    key: String(raw.key || '').trim(),
+    label: String(raw.label || raw.key || '').trim(),
+    dataType: raw.data_type || 'text',
+    source: raw.source || 'import',
+    captureMethod: raw.capture_method || 'manual',
+    required: Boolean(raw.required),
+    parentKey: raw.parent_key || undefined,
+    kpiEnabled: Boolean(raw.kpi_enabled),
+    options: Array.isArray(raw.options) ? raw.options.map(String) : [],
+  }
+}
+
+function mapWorkItemSchema(raw: BackendProjectWorkItemSchema | undefined): ProjectWorkItemSchema | undefined {
+  if (!raw) return undefined
+  return {
+    schemaVersion: Number(raw.schema_version || 1),
+    primaryField: mapWorkItemField(raw.primary_field),
+    aggregateField: mapWorkItemField(raw.aggregate_field),
+    platformRequiredFields: (raw.platform_required_fields || [])
+      .map(mapWorkItemField)
+      .filter((field): field is ProjectFieldDefinition => Boolean(field)),
+    customFields: (raw.custom_fields || [])
+      .map(mapWorkItemField)
+      .filter((field): field is ProjectFieldDefinition => Boolean(field)),
+    dashboardMetrics: Array.isArray(raw.dashboard_metrics) ? raw.dashboard_metrics.map(String) : [],
+  }
+}
+
+function mapWorkItemFieldForCreate(field: ProjectFieldDefinition | undefined): BackendProjectFieldDefinition | undefined {
+  if (!field) return undefined
+  return {
+    key: field.key,
+    label: field.label,
+    data_type: field.dataType,
+    source: field.source,
+    capture_method: field.captureMethod,
+    required: field.required,
+    parent_key: field.parentKey,
+    kpi_enabled: field.kpiEnabled,
+    options: field.options,
+  }
+}
+
+function mapWorkItemSchemaForCreate(schema: ProjectWorkItemSchema | undefined): BackendProjectWorkItemSchema | undefined {
+  if (!schema) return undefined
+  return {
+    primary_field: mapWorkItemFieldForCreate(schema.primaryField),
+    aggregate_field: mapWorkItemFieldForCreate(schema.aggregateField),
+    custom_fields: schema.customFields.map(mapWorkItemFieldForCreate).filter(Boolean) as BackendProjectFieldDefinition[],
+  }
+}
+
+function mapProject(raw: BackendPlatformProject): Project {
+  const progress = mapProjectProgress(raw)
+  const status = raw.status === 'draft' ? 'draft' : raw.status === 'archived' ? 'archived' : 'active'
+  return {
+    id: raw.id,
+    name: raw.name,
+    status,
+    ...progress,
+    totalGroups: Number(raw.total_groups || 0),
+    completedGroups: Number(raw.completed_groups || 0),
+    exceptionGroups: Number(raw.exception_groups || 0),
+    updatedAt: raw.updated_at || '',
+    modules: mapProjectModules(raw.modules),
+    workItemSchema: mapWorkItemSchema(raw.work_item_schema),
+    tasks: raw.tasks ? mapProjectTasks(raw.tasks) : undefined,
+    delivery: raw.delivery ? mapProjectDelivery(raw.delivery) : undefined,
+    field: raw.field ? mapProjectField(raw.field) : undefined,
+    review: raw.review ? mapProjectReview(raw.review) : undefined,
+    risks: raw.risks ? mapProjectRisks(raw.risks) : undefined,
+  }
 }
 
 function mapTask(raw: BackendTask): ReviewTask {
@@ -986,9 +1324,123 @@ export async function deleteUserAccount(username: string): Promise<UserAccount> 
   return mapUserAccount(data.user)
 }
 
+export async function fetchProjectModuleSections(
+  projectId: string,
+  registeredModules: Project['modules'] = fallbackProjectModules,
+): Promise<ProjectModuleSections> {
+  const id = encodeURIComponent(projectId)
+  const sections = emptyProjectModuleSections()
+  const modules = moduleRegistryForLoading(registeredModules)
+  await Promise.all(
+    modules.map(async (module) => {
+      const modulePath = `/projects/${id}/modules/${encodeURIComponent(module.id)}`
+      switch (module.id) {
+        case 'progress':
+          sections.progress = mapProjectProgress(await api<BackendProjectProgress>(modulePath))
+          break
+        case 'delivery':
+          sections.delivery = mapProjectDelivery(await api<BackendProjectDelivery>(modulePath))
+          break
+        case 'field':
+          sections.field = mapProjectField(await api<BackendProjectField>(modulePath))
+          break
+        case 'review':
+          sections.review = mapProjectReview(await api<BackendProjectReview>(modulePath))
+          break
+        case 'risks':
+          sections.risks = mapProjectRisks(await api<BackendProjectRisks>(modulePath))
+          break
+        case 'tasks':
+          sections.tasks = mapProjectTasks(await api<BackendProjectTasks>(modulePath))
+          break
+      }
+    }),
+  )
+  return sections
+}
+
+export async function fetchProjectsWithModules(): Promise<Project[]> {
+  const data = await api<{ items: BackendPlatformProject[] }>('/projects')
+  const projects = (data.items || []).map(mapProject)
+  return Promise.all(
+    projects.map(async (project) => {
+      const sections = await fetchProjectModuleSections(project.id, project.modules)
+      return {
+        ...project,
+        ...sections.progress,
+        delivery: sections.delivery,
+        field: sections.field,
+        review: sections.review,
+        risks: sections.risks,
+        tasks: sections.tasks,
+      }
+    }),
+  )
+}
+
+export async function createProject(payload: ProjectCreatePayload): Promise<Project> {
+  const data = await api<BackendPlatformProject>('/projects', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: payload.name,
+      description: payload.description || '',
+      module_ids: payload.moduleIds,
+      work_item_schema: mapWorkItemSchemaForCreate(payload.workItemSchema),
+    }),
+  })
+  const project = mapProject(data)
+  const sections = await fetchProjectModuleSections(project.id, project.modules)
+  return {
+    ...project,
+    ...sections.progress,
+    delivery: sections.delivery,
+    field: sections.field,
+    review: sections.review,
+    risks: sections.risks,
+    tasks: sections.tasks,
+  }
+}
+
+export async function updateProjectWorkItemSchema(
+  projectId: string,
+  workItemSchema: ProjectWorkItemSchema,
+): Promise<Project> {
+  const data = await api<BackendPlatformProject>(`/projects/${projectId}/work-item-schema`, {
+    method: 'PATCH',
+    body: JSON.stringify(mapWorkItemSchemaForCreate(workItemSchema)),
+  })
+  const project = mapProject(data)
+  const sections = await fetchProjectModuleSections(project.id, project.modules)
+  return {
+    ...project,
+    ...sections.progress,
+    delivery: sections.delivery,
+    field: sections.field,
+    review: sections.review,
+    risks: sections.risks,
+    tasks: sections.tasks,
+  }
+}
+
+export async function downloadProjectTemplate(
+  projectId: string,
+  templateType: ProjectTemplateType,
+  projectName = projectId,
+): Promise<void> {
+  const response = await fetchWithAuth(`/projects/${projectId}/templates/${templateType}`, {
+    method: 'GET',
+    headers: authHeaders(),
+  })
+  if (!response.ok) {
+    throw new Error(response.statusText || '项目模板下载失败')
+  }
+  const blob = await response.blob()
+  const fallbackName = `${projectName || projectId}-${templateType}.xlsx`
+  triggerBrowserDownload(blob, filenameFromDisposition(response.headers.get('Content-Disposition') || '', fallbackName))
+}
+
 export async function fetchProjects(): Promise<Project[]> {
-  await delay(60)
-  return mockProjects
+  return fetchProjectsWithModules()
 }
 
 export async function fetchTasks(options: { summary?: boolean } = {}): Promise<ReviewTask[]> {
@@ -1004,7 +1456,7 @@ export async function fetchTaskStatus(): Promise<TaskStatusSummary> {
 
 export function boardEventsUrl(scope = 'project-board'): string {
   const query = new URLSearchParams({ scope, team_id: currentTeamId() })
-  return `/local-test/events?${query.toString()}`
+  return projectScopedPath(`/local-test/events?${query.toString()}`)
 }
 
 export function boardEventHeaders(): HeadersInit {
@@ -1434,6 +1886,7 @@ export async function uploadConstructionBatch(
   if (payload.clientCompletedAt) form.append('client_completed_at', payload.clientCompletedAt)
   form.append('collector', payload.collector)
   form.append('module_asset_no', payload.moduleAssetNo)
+  if (payload.fieldValues) form.append('field_values', JSON.stringify(payload.fieldValues))
   for (const photo of payload.photos) {
     form.append('photo_slots', photo.slot)
     form.append('client_photo_ids', photo.clientPhotoId)
@@ -1902,7 +2355,9 @@ export function groupPhotoContentUrl(
     kind,
     team_id: currentTeamId(),
   })
-  return `/local-test/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/content?${params.toString()}`
+  return projectScopedPath(
+    `/local-test/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/content?${params.toString()}`,
+  )
 }
 
 export async function fetchGroupPhotoObjectUrl(

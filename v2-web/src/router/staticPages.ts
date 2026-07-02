@@ -1,4 +1,5 @@
 export type StaticPageKey =
+  | 'projects'
   | 'project-board'
   | 'claim-tasks'
   | 'task-hall'
@@ -19,6 +20,14 @@ export type StaticPageRoute = {
 }
 
 export const staticPages: StaticPageRoute[] = [
+  {
+    key: 'projects',
+    title: '项目管理',
+    subtitle: '',
+    routePath: '/platform-projects',
+    roles: ['admin', 'reviewer'],
+    migrationStatus: 'native_vue',
+  },
   {
     key: 'project-board',
     title: '项目驾驶舱',

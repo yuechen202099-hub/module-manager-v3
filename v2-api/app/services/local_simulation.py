@@ -5030,6 +5030,7 @@ def upload_construction_group_batch(
     client_batch_id: str,
     collector: str,
     module_asset_no: str,
+    field_values: dict[str, str] | None,
     photos: list[dict[str, Any]],
     creator: str = "",
     client_completed_at: str = "",
@@ -5052,6 +5053,7 @@ def upload_construction_group_batch(
     if task.get("construction_claimed_by") != actor:
         raise ValueError("Construction task must be claimed by the current constructor before upload")
     validate_construction_upload_required_slots(group, photos)
+    clean_field_values = {str(key): str(value) for key, value in (field_values or {}).items() if str(key).strip()}
     existing_composite = {
         make_construction_photo_unique_key(photo)
         for photo in group.get("photos", [])
@@ -5113,6 +5115,8 @@ def upload_construction_group_batch(
                 "archived_at": None,
             }
         )
+        if clean_field_values:
+            photo["field_values"] = clean_field_values
         group["photos"].append(photo)
         existing_composite.add(composite)
         if sha256:
@@ -5123,6 +5127,8 @@ def upload_construction_group_batch(
         group["construction_collector"] = collector
     if module_asset_no:
         group["construction_module_asset_no"] = module_asset_no
+    if clean_field_values:
+        group["construction_field_values"] = clean_field_values
     group["constructor"] = actor
     group["construction_updated_at"] = now_iso()
     if group["status"] == "exception":
@@ -5151,6 +5157,7 @@ def upload_construction_group_batch(
             "client_batch_id": client_batch_id,
             "added": added,
             "skipped_duplicates": skipped_duplicates,
+            "field_value_keys": sorted(clean_field_values),
         },
     )
     record_construction_activity_event(

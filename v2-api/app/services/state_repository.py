@@ -1717,6 +1717,7 @@ class StateRepository(ABC):
         client_batch_id: str,
         collector: str,
         module_asset_no: str,
+        field_values: dict[str, str] | None = None,
         photos: list[dict[str, Any]],
         creator: str = "",
         client_completed_at: str = "",
@@ -2251,6 +2252,7 @@ class JsonStateRepository(StateRepository):
         client_batch_id: str,
         collector: str,
         module_asset_no: str,
+        field_values: dict[str, str] | None = None,
         photos: list[dict[str, Any]],
         creator: str = "",
         client_completed_at: str = "",
@@ -2261,6 +2263,7 @@ class JsonStateRepository(StateRepository):
             client_batch_id=client_batch_id,
             collector=collector,
             module_asset_no=module_asset_no,
+            field_values=field_values,
             photos=photos,
             creator=creator,
             client_completed_at=client_completed_at,
@@ -5217,6 +5220,7 @@ class PostgresStateRepository(StateRepository):
         client_batch_id: str,
         collector: str,
         module_asset_no: str,
+        field_values: dict[str, str] | None = None,
         photos: list[dict[str, Any]],
         creator: str = "",
         client_completed_at: str = "",
@@ -5239,6 +5243,10 @@ class PostgresStateRepository(StateRepository):
             if client_completed_at:
                 for photo in photos:
                     photo.setdefault("client_completed_at", client_completed_at)
+            clean_field_values = {str(key): str(value) for key, value in (field_values or {}).items() if str(key).strip()}
+            if clean_field_values:
+                for photo in photos:
+                    photo.setdefault("field_values", clean_field_values)
             result = self._add_photo_records_to_group(
                 session,
                 group,
@@ -5253,6 +5261,8 @@ class PostgresStateRepository(StateRepository):
             raw = dict(group.raw_data or {})
             raw["construction_collector"] = collector
             raw["construction_module_asset_no"] = module_asset_no
+            if clean_field_values:
+                raw["construction_field_values"] = clean_field_values
             group.raw_data = raw
             self._add_construction_activity_audit(
                 session,
@@ -5264,6 +5274,7 @@ class PostgresStateRepository(StateRepository):
                     "client_batch_id": client_batch_id,
                     "occurred_at": client_completed_at or datetime.now(UTC).isoformat(),
                     "added": result.get("added", 0),
+                    "field_value_keys": sorted(clean_field_values),
                     "confirmed_non_idle": bool(_datetime_from_value(client_completed_at) and result.get("added", 0) > 0),
                 },
             )
@@ -5860,6 +5871,7 @@ class DualWriteStateRepository(JsonStateRepository):
         client_batch_id: str,
         collector: str,
         module_asset_no: str,
+        field_values: dict[str, str] | None = None,
         photos: list[dict[str, Any]],
         creator: str = "",
         client_completed_at: str = "",
@@ -5870,6 +5882,7 @@ class DualWriteStateRepository(JsonStateRepository):
             client_batch_id=client_batch_id,
             collector=collector,
             module_asset_no=module_asset_no,
+            field_values=field_values,
             photos=photos,
             creator=creator,
             client_completed_at=client_completed_at,
@@ -5881,6 +5894,7 @@ class DualWriteStateRepository(JsonStateRepository):
             client_batch_id=client_batch_id,
             collector=collector,
             module_asset_no=module_asset_no,
+            field_values=field_values,
             photos=photos,
             creator=creator,
             client_completed_at=client_completed_at,

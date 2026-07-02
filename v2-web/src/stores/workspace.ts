@@ -1,10 +1,19 @@
 import { defineStore } from 'pinia'
 
 import * as services from '@/api/services'
-import type { MaterialGroup, Project, ReviewPhoto, ReviewTask, TaskStatus } from '@/api/types'
+import type {
+  MaterialGroup,
+  Project,
+  ProjectCreatePayload,
+  ProjectWorkItemSchema,
+  ReviewPhoto,
+  ReviewTask,
+  TaskStatus,
+} from '@/api/types'
 
 type WorkspaceState = {
   loading: boolean
+  activeProjectId: string
   projects: Project[]
   tasks: ReviewTask[]
   groups: MaterialGroup[]
@@ -12,9 +21,33 @@ type WorkspaceState = {
   activePhotos: ReviewPhoto[]
 }
 
+const activeProjectStorageKey = 'module_manager_active_project_id'
+
+function readActiveProjectId() {
+  if (typeof localStorage === 'undefined') return ''
+  return localStorage.getItem(activeProjectStorageKey) || ''
+}
+
+function writeActiveProjectId(projectId: string) {
+  if (typeof localStorage === 'undefined') return
+  if (projectId) {
+    localStorage.setItem(activeProjectStorageKey, projectId)
+    return
+  }
+  localStorage.removeItem(activeProjectStorageKey)
+}
+
+type RouteProjectIdValue = string | null | Array<string | null> | undefined
+
+function normalizeRouteProjectId(value: RouteProjectIdValue) {
+  const rawValue = Array.isArray(value) ? value[0] : value
+  return String(rawValue || '').trim()
+}
+
 export const useWorkspaceStore = defineStore('workspace', {
   state: (): WorkspaceState => ({
     loading: false,
+    activeProjectId: readActiveProjectId(),
     projects: [],
     tasks: [],
     groups: [],
@@ -22,9 +55,10 @@ export const useWorkspaceStore = defineStore('workspace', {
     activePhotos: [],
   }),
   getters: {
-    activeProject: (state) => state.projects[0] || null,
+    activeProject: (state) =>
+      state.projects.find((project) => project.id === state.activeProjectId) || state.projects[0] || null,
     dashboardStats: (state) => {
-      const project = state.projects[0]
+      const project = state.projects.find((item) => item.id === state.activeProjectId) || state.projects[0]
       return {
         totalGroups: project?.totalGroups || 0,
         completedGroups: project?.completedGroups || 0,
@@ -34,8 +68,45 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
   },
   actions: {
+    ensureActiveProject() {
+      const fallbackProjectId = this.projects[0]?.id || ''
+      const nextProjectId = this.projects.some((project) => project.id === this.activeProjectId)
+        ? this.activeProjectId
+        : fallbackProjectId
+      if (nextProjectId !== this.activeProjectId) {
+        this.activeProjectId = nextProjectId
+        writeActiveProjectId(nextProjectId)
+      }
+    },
+    selectProject(projectId: string) {
+      if (!projectId) return
+      if (this.projects.length && !this.projects.some((project) => project.id === projectId)) return
+      this.activeProjectId = projectId
+      writeActiveProjectId(projectId)
+    },
+    selectRouteProject(projectId: RouteProjectIdValue) {
+      const normalizedProjectId = normalizeRouteProjectId(projectId)
+      if (normalizedProjectId) this.selectProject(normalizedProjectId)
+    },
     async loadProjects() {
       this.projects = await services.fetchProjects()
+      this.ensureActiveProject()
+    },
+    async createProjectDraft(payload: ProjectCreatePayload) {
+      const project = await services.createProject(payload)
+      await this.loadProjects()
+      this.selectProject(project.id)
+      return project
+    },
+    async updateProjectWorkItemSchema(projectId: string, workItemSchema: ProjectWorkItemSchema) {
+      const project = await services.updateProjectWorkItemSchema(projectId, workItemSchema)
+      const index = this.projects.findIndex((item) => item.id === projectId)
+      if (index >= 0) {
+        this.projects.splice(index, 1, project)
+      } else {
+        this.projects.push(project)
+      }
+      return project
     },
     async bootstrap() {
       this.loading = true
@@ -48,6 +119,7 @@ export const useWorkspaceStore = defineStore('workspace', {
         this.projects = projects
         this.tasks = tasks
         this.groups = groups
+        this.ensureActiveProject()
       } finally {
         this.loading = false
       }

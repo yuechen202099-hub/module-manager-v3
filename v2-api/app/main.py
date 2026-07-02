@@ -154,6 +154,10 @@ def create_app() -> FastAPI:
     def app_page():
         return vue_index_response()
 
+    @app.get("/platform-projects")
+    def platform_projects_page():
+        return vue_index_response()
+
     @app.get("/vue")
     @app.get("/vue/{full_path:path}")
     def vue_app(full_path: str = ""):

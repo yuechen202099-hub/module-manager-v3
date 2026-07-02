@@ -41,6 +41,132 @@ def build_api_workbook(rows: list[list[str]]) -> bytes:
     return output.getvalue()
 
 
+def test_project_overview_counts_local_platform_work_orders_after_execution() -> None:
+    project = client.post(
+        "/projects",
+        json={
+            "name": f"Terminal Dashboard Counts {uuid4()}",
+            "module_ids": ["progress", "delivery", "field", "review", "risks", "tasks"],
+            "work_item_schema": {
+                "primary_field": {"key": "terminal_no", "label": "Terminal", "source": "import", "required": True},
+                "aggregate_field": {"key": "area_no", "label": "Area", "source": "import", "required": True},
+                "custom_fields": [
+                    {
+                        "key": "communication_module_no",
+                        "label": "Communication Module",
+                        "data_type": "text",
+                        "source": "field_collection",
+                        "capture_method": "scan",
+                        "required": True,
+                    },
+                ],
+            },
+        },
+    )
+    assert project.status_code == 200
+    project_id = project.json()["data"]["id"]
+    workbook = build_api_workbook(
+        [
+            ["Terminal", "Area"],
+            ["TT-DASH-001", "Area-01"],
+            ["TT-DASH-002", "Area-02"],
+            ["TT-DASH-003", "Area-03"],
+            ["TT-DASH-004", "Area-04"],
+        ]
+    )
+    batch = client.post(
+        f"/projects/{project_id}/templates/initial_work_orders/import-batches",
+        data={"actor": "admin"},
+        files={
+            "file": (
+                "initial-work-orders-dashboard.xlsx",
+                workbook,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert batch.status_code == 200, batch.text
+    task = client.post(
+        f"/projects/{project_id}/import-batches/{batch.json()['data']['job_id']}/work-order-tasks",
+        json={"actor": "admin", "mode": "safe_record_only"},
+    )
+    assert task.status_code == 200, task.text
+    executed = client.post(
+        f"/projects/{project_id}/work-order-tasks/{task.json()['data']['job_id']}/execute",
+        json={"actor": "admin", "mode": "local_platform_store"},
+    )
+    assert executed.status_code == 200, executed.text
+    work_orders = client.get(f"/projects/{project_id}/construction/work-orders").json()["data"]["items"]
+    by_terminal = {item["primary_value"]: item["id"] for item in work_orders}
+
+    pending = client.post(
+        f"/projects/{project_id}/construction/work-orders/{by_terminal['TT-DASH-002']}/collection-draft",
+        json={
+            "actor": "installer-pending",
+            "status": "submitted",
+            "field_values": {"communication_module_no": "COMM-SCAN-002"},
+            "covered_photo_slots": [],
+            "client_batch_id": "dashboard-pending",
+        },
+    )
+    assert pending.status_code == 200, pending.text
+    approved = client.post(
+        f"/projects/{project_id}/construction/work-orders/{by_terminal['TT-DASH-003']}/collection-draft",
+        json={
+            "actor": "installer-approved",
+            "status": "submitted",
+            "field_values": {"communication_module_no": "COMM-SCAN-003"},
+            "covered_photo_slots": [],
+            "client_batch_id": "dashboard-approved",
+        },
+    )
+    assert approved.status_code == 200, approved.text
+    approved_review = client.post(
+        f"/projects/{project_id}/review/work-orders/{by_terminal['TT-DASH-003']}/actions",
+        json={"actor": "reviewer", "action": "approved", "note": "dashboard approved"},
+    )
+    assert approved_review.status_code == 200, approved_review.text
+    returned = client.post(
+        f"/projects/{project_id}/construction/work-orders/{by_terminal['TT-DASH-004']}/collection-draft",
+        json={
+            "actor": "installer-returned",
+            "status": "submitted",
+            "field_values": {"communication_module_no": "COMM-SCAN-004"},
+            "covered_photo_slots": [],
+            "client_batch_id": "dashboard-returned",
+        },
+    )
+    assert returned.status_code == 200, returned.text
+    returned_review = client.post(
+        f"/projects/{project_id}/review/work-orders/{by_terminal['TT-DASH-004']}/actions",
+        json={"actor": "reviewer", "action": "returned", "note": "needs rework", "reason": "needs rework"},
+    )
+    assert returned_review.status_code == 200, returned_review.text
+
+    overview = client.get(f"/projects/{project_id}")
+    assert overview.status_code == 200
+    data = overview.json()["data"]
+    assert data["total_groups"] == 4
+    assert data["completed_groups"] == 1
+    assert data["exception_groups"] == 1
+    assert data["tasks"]["total"] == 4
+    assert data["tasks"]["uploaded"] == 3
+    assert data["tasks"]["reviewing"] == 1
+    assert data["tasks"]["archived"] == 1
+    assert data["field"]["unconstructed_groups"] == 1
+    assert data["field"]["exception_count"] == 1
+    assert data["review"]["pending_groups"] == 1
+    assert data["review"]["reviewed_groups"] == 1
+    assert data["risks"]["unconstructed_groups"] == 1
+    assert data["risks"]["field_exceptions"] == 1
+
+    tasks = client.get(f"/projects/{project_id}/tasks")
+    assert tasks.status_code == 200
+    assert tasks.json()["data"]["total"] == 4
+    assert tasks.json()["data"]["uploaded"] == 3
+    assert tasks.json()["data"]["archived"] == 1
+
+
 def load_static_page_verifier():
     verifier_path = Path(__file__).resolve().parents[2] / "scripts" / "verify-static-pages.py"
     spec = importlib.util.spec_from_file_location("verify_static_pages", verifier_path)
@@ -1341,6 +1467,7 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
             "client_completed_at": "2026-06-08T09:30:00",
             "collector": "collector-api-2",
             "module_asset_no": "module-api-2",
+            "field_values": '{"module_asset_no":"module-api-2","installer":"constructor","online_time":"2026-06-08T09:45:00"}',
             "photo_slots": ["before_box", "after_box", "module_meter", "collector_barcode"],
             "client_photo_ids": ["photo-1", "photo-2", "photo-3", "photo-4"],
         },
@@ -1355,6 +1482,8 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     complete_payload = complete_upload.json()["data"]
     assert complete_payload["added"] == 4
     assert complete_payload["group"]["status"] == "pending"
+    assert complete_payload["group"]["construction_field_values"]["installer"] == "constructor"
+    assert complete_payload["group"]["photos"][0]["field_values"]["online_time"] == "2026-06-08T09:45:00"
     workload = client.get(f"/local-test/installers/{constructor_name}/daily-workload", headers=admin_headers)
     assert workload.status_code == 200
     client_day = next(item for item in workload.json()["data"]["items"] if item["date"] == "2026-06-08")
@@ -1801,7 +1930,15 @@ def test_construction_tasks_include_meter_search_text_for_task_picker() -> None:
 
 
 def test_direct_workspace_routes_redirect_to_app_shell() -> None:
-    for path in ["/project-board", "/claim-tasks", "/task-hall", "/construction", "/account-management", "/sync-config"]:
+    for path in [
+        "/platform-projects",
+        "/project-board",
+        "/claim-tasks",
+        "/task-hall",
+        "/construction",
+        "/account-management",
+        "/sync-config",
+    ]:
         assert_vue_shell_response(client.get(path, follow_redirects=False))
     response = client.get("/construction-cache", follow_redirects=False)
     assert response.status_code == 307

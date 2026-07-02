@@ -11,11 +11,12 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import {
   currentActor,
   currentTeamId,
+  fetchProjectsWithModules,
   fetchConstructionExceptionOrders,
   fetchConstructionTaskGroups,
   fetchConstructionTasks,
@@ -32,6 +33,8 @@ import type {
   ConstructionExceptionOrder,
   ConstructionPhotoSlot,
   MaterialGroup,
+  Project,
+  ProjectFieldDefinition,
   ReviewPhoto,
   ReviewTask,
   UnmatchedRecord,
@@ -49,7 +52,7 @@ import {
 
 type GroupFilter = 'unbuilt' | 'cached' | 'exception' | 'all'
 type PhotoSource = 'camera' | 'album'
-type ScannerTarget = 'quickMeter' | 'collector' | 'module'
+type ScannerTarget = 'quickMeter' | 'collector' | 'module' | 'dynamic'
 type TaskPickerMode = 'terminal' | 'exception' | 'unmatched'
 
 type DraftPhoto = {
@@ -80,6 +83,7 @@ type CacheDraft = {
   exception_category?: string
   exception_note?: string
   covered_slots?: string[]
+  field_values?: Record<string, string>
   photos?: DraftPhoto[]
   status?: string
   created_at?: string
@@ -137,6 +141,7 @@ const HEARTBEAT_INTERVAL_MS = 60_000
 const collator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' })
 
 const auth = useAuthStore()
+const route = useRoute()
 const router = useRouter()
 const actor = computed(() => auth.user?.username || auth.user?.id || currentActor())
 const teamId = computed(() => auth.user?.teamId || currentTeamId())
@@ -155,6 +160,7 @@ const fieldExceptionOrders = ref<ConstructionExceptionOrder[]>([])
 const unmatchedRecords = ref<UnmatchedRecord[]>([])
 const drafts = ref<CacheDraft[]>([])
 const accountUsers = ref<UserAccount[]>([])
+const platformProjects = ref<Project[]>([])
 const taskPickerMode = ref<TaskPickerMode>('terminal')
 const selectedTaskId = ref('')
 const selectedItemKey = ref('')
@@ -170,6 +176,7 @@ const scannerOpen = ref(false)
 const unbuiltDialogOpen = ref(false)
 const unbuiltDialogLoading = ref(false)
 const scannerTarget = ref<ScannerTarget>('quickMeter')
+const scannerFieldKey = ref('')
 const scannerStatus = ref('优先使用 QuaggaJS 识别一维条形码。')
 const scannerHint = ref('将条形码横向放入框内，保持稳定')
 const activeGroup = ref<MaterialGroup | null>(null)
@@ -195,6 +202,7 @@ let suspendDraftAutoPersist = false
 const form = reactive({
   collector: '',
   moduleAssetNo: '',
+  dynamicFields: {} as Record<string, string>,
   note: '',
 })
 const unbuiltDialogTask = ref<ReviewTask | null>(null)
@@ -219,6 +227,19 @@ const userByUsername = computed(() => {
   }
   return map
 })
+
+const activeProjectId = computed(() => String(route.query.project_id || 'replacement-project').trim() || 'replacement-project')
+const activeProject = computed(() => platformProjects.value.find((project) => project.id === activeProjectId.value) || null)
+const constructionFields = computed(() => {
+  const fields = activeProject.value?.workItemSchema?.customFields || []
+  return fields.filter((field) => field.source === 'field_collection' && field.dataType !== 'image')
+})
+const hasConfiguredConstructionFields = computed(() => constructionFields.value.length > 0)
+const requiredConstructionFieldLabels = computed(() =>
+  constructionFields.value
+    .filter((field) => field.required && !fieldValue(field).trim())
+    .map((field) => field.label),
+)
 
 const visibleTasks = computed(() => {
   const source = isAdmin.value
@@ -463,7 +484,8 @@ const activeExistingPhotos = computed(() => activeGroup.value?.photos?.filter((p
 const canUploadCurrent = computed(() => {
   if (!activeGroup.value) return false
   if (constructionGroupOpenBlockReason(activeGroup.value)) return false
-  if (!form.moduleAssetNo.trim()) return false
+  if (!hasConfiguredConstructionFields.value && !form.moduleAssetNo.trim()) return false
+  if (requiredConstructionFieldLabels.value.length) return false
   if (missingRequiredSlots.value.length) return false
   return Boolean(Object.values(selectedFiles.value).some(Boolean) || activeOrder.value)
 })
@@ -473,10 +495,55 @@ const canShowCurrentUpload = computed(
 const activeCachedDraft = computed(() => (activeGroup.value ? cachedDraftByGroupId.value.get(String(activeGroup.value.id)) || null : null))
 
 const scannerTitle = computed(() => {
+  if (scannerTarget.value === 'dynamic') return `扫描${activeScannerField()?.label || '字段'}`
   if (scannerTarget.value === 'collector') return '扫描采集器'
   if (scannerTarget.value === 'module') return '扫描模块号'
   return '扫描表号'
 })
+
+function activeScannerField() {
+  return constructionFields.value.find((field) => field.key === scannerFieldKey.value) || null
+}
+
+function fieldValue(field: ProjectFieldDefinition) {
+  if (field.key === 'collector' || field.key === 'collector_no') return form.collector
+  if (field.key === 'module_asset_no' || field.key === 'module' || field.key === 'asset_no') return form.moduleAssetNo
+  return form.dynamicFields[field.key] || ''
+}
+
+function setFieldValue(field: ProjectFieldDefinition, value: string) {
+  const clean = String(value || '').trim()
+  if (field.key === 'collector' || field.key === 'collector_no') form.collector = clean
+  else if (field.key === 'module_asset_no' || field.key === 'module' || field.key === 'asset_no') form.moduleAssetNo = clean
+  else form.dynamicFields[field.key] = clean
+}
+
+function fieldPlaceholder(field: ProjectFieldDefinition) {
+  if (field.captureMethod === 'scan') return '扫码或手填'
+  if (field.captureMethod === 'datetime') return '填写时间'
+  if (field.captureMethod === 'location') return '填写或定位'
+  return field.required ? '必填' : '可选'
+}
+
+function fieldInputType(field: ProjectFieldDefinition) {
+  if (field.dataType === 'number' || field.dataType === 'duration') return 'number'
+  return 'text'
+}
+
+function shouldShowScanButton(field: ProjectFieldDefinition) {
+  return field.captureMethod === 'scan'
+}
+
+function startDynamicScanner(field: ProjectFieldDefinition) {
+  scannerFieldKey.value = field.key
+  void startScanner('dynamic')
+}
+
+function collectFieldValues() {
+  const values: Record<string, string> = {}
+  for (const field of constructionFields.value) values[field.key] = fieldValue(field).trim()
+  return values
+}
 
 function normalizeSearch(value: string) {
   return String(value || '')
@@ -857,11 +924,13 @@ function clearPreviews() {
 function resetCollectorForm() {
   form.collector = ''
   form.moduleAssetNo = ''
+  form.dynamicFields = {}
   form.note = ''
   activeGroup.value = null
   activeOrder.value = null
   selectedFiles.value = {}
   selectedItemKey.value = ''
+  scannerFieldKey.value = ''
   clearPreviews()
 }
 
@@ -1016,6 +1085,7 @@ function resetScannerRuntime() {
 function closeScanner() {
   resetScannerRuntime()
   scannerOpen.value = false
+  scannerFieldKey.value = ''
 }
 
 async function startScanner(target: ScannerTarget) {
@@ -1026,7 +1096,9 @@ async function startScanner(target: ScannerTarget) {
   scanLocked = false
   scannerStatus.value = '正在启动相机，请允许浏览器使用摄像头。'
   scannerHint.value =
-    target === 'collector'
+    target === 'dynamic'
+      ? `扫描${activeScannerField()?.label || '字段'}条码后填入当前字段`
+      : target === 'collector'
       ? '采集器扫码成功后只填入编号，照片仍需单独拍摄'
       : target === 'module'
         ? '将模块条码横向放入框内'
@@ -1232,8 +1304,11 @@ function prepareScannerFallback(reason = '') {
 }
 
 async function manualScannerInput(message = '请输入编号') {
+  const dynamicField = activeScannerField()
   const current =
-    scannerTarget.value === 'collector'
+    scannerTarget.value === 'dynamic' && dynamicField
+      ? fieldValue(dynamicField)
+      : scannerTarget.value === 'collector'
       ? form.collector
       : scannerTarget.value === 'module'
         ? form.moduleAssetNo
@@ -1254,6 +1329,10 @@ async function applyScanValue(value: string) {
     quickMeter.value = clean
     openByMeter(clean)
     return
+  }
+  if (scannerTarget.value === 'dynamic') {
+    const field = activeScannerField()
+    if (field) setFieldValue(field, clean)
   }
   if (scannerTarget.value === 'collector') form.collector = clean
   if (scannerTarget.value === 'module') form.moduleAssetNo = clean
@@ -1331,6 +1410,7 @@ function draftHasContent(draft: CacheDraft) {
     (draft.photos || []).length ||
       String(draft.collector || '').trim() ||
       String(draft.module_asset_no || '').trim() ||
+      Object.values(draft.field_values || {}).some((value) => String(value || '').trim()) ||
       String(draft.work_order_id || '').trim(),
   )
 }
@@ -1399,10 +1479,17 @@ function missingSlotsForDraft(draft: CacheDraft) {
   return slots.filter((slot) => slot.required && !covered.has(slot.key)).map((slot) => slot.label)
 }
 
+function missingConfiguredFieldsForDraft(draft: CacheDraft) {
+  if (!hasConfiguredConstructionFields.value) return draft.module_asset_no?.trim() ? [] : ['模块资产编号']
+  return constructionFields.value
+    .filter((field) => field.required && !String(draft.field_values?.[field.key] || '').trim())
+    .map((field) => field.label)
+}
+
 function draftReady(draft: CacheDraft) {
   return Boolean(
     (draft.groupId || draft.group_id) &&
-      draft.module_asset_no &&
+      missingConfiguredFieldsForDraft(draft).length === 0 &&
       !constructionDraftUploadBlockReason(draft) &&
       missingSlotsForDraft(draft).length === 0,
   )
@@ -1432,6 +1519,12 @@ async function loadDraftIntoForm(group: MaterialGroup) {
       payloadText(orderPayload, 'module_asset_no', 'moduleAssetNo', 'asset_no'),
       group.photos?.[0]?.moduleAssetNo,
     )
+    form.dynamicFields = { ...(draft?.field_values || {}) }
+    for (const field of constructionFields.value) {
+      const existing = fieldValue(field)
+      if (existing) continue
+      setFieldValue(field, firstText(payloadText(orderPayload, field.key), payloadText(orderPayload, field.key.replace(/_/g, ''))))
+    }
     form.note = firstText(draft?.exception_note, group.exceptionNote, activeOrder.value?.note)
     if (draft?.photos?.length) {
       const files: Record<string, File | null> = {}
@@ -1485,6 +1578,7 @@ function buildCurrentDraft(): CacheDraft {
     exception_category: activeOrder.value?.category || '',
     exception_note: form.note.trim(),
     covered_slots: coveredSlotsForGroup(activeGroup.value),
+    field_values: collectFieldValues(),
     photos,
     status: 'queued',
     created_at: previousDraft?.created_at || now,
@@ -1597,7 +1691,8 @@ async function uploadDraft(draft: CacheDraft) {
   if (!online()) throw new Error('当前离线，已保留本地缓存')
   const blockedReason = constructionDraftUploadBlockReason(draft)
   if (blockedReason) throw new Error(blockedReason)
-  if (!draft.module_asset_no?.trim()) throw new Error('模块资产编号为必填项')
+  const missingFields = missingConfiguredFieldsForDraft(draft)
+  if (missingFields.length) throw new Error(`缺少必填字段：${missingFields.join('、')}`)
   const missing = missingSlotsForDraft(draft)
   if (missing.length) throw new Error(`缺少必填照片：${missing.join('、')}`)
   const groupId = String(draft.groupId || draft.group_id || '')
@@ -1623,6 +1718,7 @@ async function uploadDraft(draft: CacheDraft) {
       clientCompletedAt: draftCompletedAt(draft),
       collector: draft.collector || '',
       moduleAssetNo: draft.module_asset_no || '',
+      fieldValues: draft.field_values || {},
       photos,
     })
     uploadedGroupId = result.group?.id || uploadedGroupId
@@ -1807,6 +1903,14 @@ async function loadFieldTaskCards() {
     unmatchedRecords.value = unmatched
   } catch {
     // Field task cards are auxiliary. Keep terminal collection available on weak networks.
+  }
+}
+
+async function loadPlatformProjects() {
+  try {
+    platformProjects.value = await fetchProjectsWithModules()
+  } catch {
+    platformProjects.value = []
   }
 }
 
@@ -2032,7 +2136,7 @@ async function returnToTaskPicker() {
 }
 
 watch(
-  () => [form.collector, form.moduleAssetNo, form.note],
+  () => [form.collector, form.moduleAssetNo, form.note, JSON.stringify(form.dynamicFields)],
   () => {
     if (suspendDraftAutoPersist || !activeGroup.value) return
     scheduleCurrentDraftPersist()
@@ -2045,6 +2149,7 @@ watch(selectedTaskId, () => {
 
 onMounted(() => {
   window.addEventListener('message', handleExternalRefresh)
+  void loadPlatformProjects()
   void loadTasks()
   void sendConstructionHeartbeat()
   heartbeatTimer = window.setInterval(() => {
@@ -2389,32 +2494,50 @@ onBeforeUnmount(() => {
             </div>
 
             <div class="field-grid">
-              <label>
-                <span>采集器</span>
-                <div class="field-with-action">
-                  <el-input
-                    v-model="form.collector"
-                    placeholder="扫码或手填采集器号"
-                    clearable
-                    @input="scheduleCurrentDraftPersist"
-                    @change="saveCurrentDraft({ silent: true })"
-                  />
-                  <el-button :icon="Connection" @click="startScanner('collector')">扫码</el-button>
-                </div>
-              </label>
-              <label>
-                <span>模块资产编号 <b>*</b></span>
-                <div class="field-with-action">
-                  <el-input
-                    v-model="form.moduleAssetNo"
-                    placeholder="必填，可扫码或手填"
-                    clearable
-                    @input="scheduleCurrentDraftPersist"
-                    @change="saveCurrentDraft({ silent: true })"
-                  />
-                  <el-button :icon="Connection" @click="startScanner('module')">扫码</el-button>
-                </div>
-              </label>
+              <template v-if="hasConfiguredConstructionFields">
+                <label v-for="field in constructionFields" :key="field.key">
+                  <span>{{ field.label }} <b v-if="field.required">*</b></span>
+                  <div class="field-with-action">
+                    <el-input
+                      :model-value="fieldValue(field)"
+                      :type="fieldInputType(field)"
+                      :placeholder="fieldPlaceholder(field)"
+                      clearable
+                      @update:model-value="(value: string | number) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist() }"
+                      @change="saveCurrentDraft({ silent: true })"
+                    />
+                    <el-button v-if="shouldShowScanButton(field)" :icon="Connection" @click="startDynamicScanner(field)">扫码</el-button>
+                  </div>
+                </label>
+              </template>
+              <template v-else>
+                <label>
+                  <span>采集器</span>
+                  <div class="field-with-action">
+                    <el-input
+                      v-model="form.collector"
+                      placeholder="扫码或手填采集器号"
+                      clearable
+                      @input="scheduleCurrentDraftPersist"
+                      @change="saveCurrentDraft({ silent: true })"
+                    />
+                    <el-button :icon="Connection" @click="startScanner('collector')">扫码</el-button>
+                  </div>
+                </label>
+                <label>
+                  <span>模块资产编号 <b>*</b></span>
+                  <div class="field-with-action">
+                    <el-input
+                      v-model="form.moduleAssetNo"
+                      placeholder="必填，可扫码或手填"
+                      clearable
+                      @input="scheduleCurrentDraftPersist"
+                      @change="saveCurrentDraft({ silent: true })"
+                    />
+                    <el-button :icon="Connection" @click="startScanner('module')">扫码</el-button>
+                  </div>
+                </label>
+              </template>
             </div>
 
             <el-input
@@ -2493,9 +2616,13 @@ onBeforeUnmount(() => {
               </article>
             </section>
 
-            <div v-if="missingRequiredSlots.length || !form.moduleAssetNo.trim()" class="sheet-warning">
-              <span v-if="!form.moduleAssetNo.trim()">模块资产编号必填。</span>
-              <span v-if="missingRequiredSlots.length">缺少：{{ missingRequiredSlots.join('、') }}</span>
+            <div
+              v-if="missingRequiredSlots.length || (!hasConfiguredConstructionFields && !form.moduleAssetNo.trim()) || requiredConstructionFieldLabels.length"
+              class="sheet-warning"
+            >
+              <span v-if="!hasConfiguredConstructionFields && !form.moduleAssetNo.trim()">模块资产编号必填。</span>
+              <span v-if="requiredConstructionFieldLabels.length">缺少字段：{{ requiredConstructionFieldLabels.join('、') }}</span>
+              <span v-if="missingRequiredSlots.length">缺少照片：{{ missingRequiredSlots.join('、') }}</span>
             </div>
 
             <footer class="sheet-actions">
@@ -2600,32 +2727,50 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="field-grid">
-          <label>
-            <span>采集器</span>
-            <div class="field-with-action">
-              <el-input
-                v-model="form.collector"
-                placeholder="扫码或手填采集器号"
-                clearable
-                @input="scheduleCurrentDraftPersist"
-                @change="saveCurrentDraft({ silent: true })"
-              />
-              <el-button :icon="Connection" @click="startScanner('collector')">扫码</el-button>
-            </div>
-          </label>
-          <label>
-            <span>模块资产编号 <b>*</b></span>
-            <div class="field-with-action">
-              <el-input
-                v-model="form.moduleAssetNo"
-                placeholder="必填，可扫码或手填"
-                clearable
-                @input="scheduleCurrentDraftPersist"
-                @change="saveCurrentDraft({ silent: true })"
-              />
-              <el-button :icon="Connection" @click="startScanner('module')">扫码</el-button>
-            </div>
-          </label>
+          <template v-if="hasConfiguredConstructionFields">
+            <label v-for="field in constructionFields" :key="field.key">
+              <span>{{ field.label }} <b v-if="field.required">*</b></span>
+              <div class="field-with-action">
+                <el-input
+                  :model-value="fieldValue(field)"
+                  :type="fieldInputType(field)"
+                  :placeholder="fieldPlaceholder(field)"
+                  clearable
+                  @update:model-value="(value: string | number) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist() }"
+                  @change="saveCurrentDraft({ silent: true })"
+                />
+                <el-button v-if="shouldShowScanButton(field)" :icon="Connection" @click="startDynamicScanner(field)">扫码</el-button>
+              </div>
+            </label>
+          </template>
+          <template v-else>
+            <label>
+              <span>采集器</span>
+              <div class="field-with-action">
+                <el-input
+                  v-model="form.collector"
+                  placeholder="扫码或手填采集器号"
+                  clearable
+                  @input="scheduleCurrentDraftPersist"
+                  @change="saveCurrentDraft({ silent: true })"
+                />
+                <el-button :icon="Connection" @click="startScanner('collector')">扫码</el-button>
+              </div>
+            </label>
+            <label>
+              <span>模块资产编号 <b>*</b></span>
+              <div class="field-with-action">
+                <el-input
+                  v-model="form.moduleAssetNo"
+                  placeholder="必填，可扫码或手填"
+                  clearable
+                  @input="scheduleCurrentDraftPersist"
+                  @change="saveCurrentDraft({ silent: true })"
+                />
+                <el-button :icon="Connection" @click="startScanner('module')">扫码</el-button>
+              </div>
+            </label>
+          </template>
         </div>
 
         <el-input
@@ -2704,9 +2849,13 @@ onBeforeUnmount(() => {
           </article>
         </section>
 
-        <div v-if="missingRequiredSlots.length || !form.moduleAssetNo.trim()" class="sheet-warning">
-          <span v-if="!form.moduleAssetNo.trim()">模块资产编号必填。</span>
-          <span v-if="missingRequiredSlots.length">缺少：{{ missingRequiredSlots.join('、') }}</span>
+        <div
+          v-if="missingRequiredSlots.length || (!hasConfiguredConstructionFields && !form.moduleAssetNo.trim()) || requiredConstructionFieldLabels.length"
+          class="sheet-warning"
+        >
+          <span v-if="!hasConfiguredConstructionFields && !form.moduleAssetNo.trim()">模块资产编号必填。</span>
+          <span v-if="requiredConstructionFieldLabels.length">缺少字段：{{ requiredConstructionFieldLabels.join('、') }}</span>
+          <span v-if="missingRequiredSlots.length">缺少照片：{{ missingRequiredSlots.join('、') }}</span>
         </div>
 
         <footer class="sheet-actions">
