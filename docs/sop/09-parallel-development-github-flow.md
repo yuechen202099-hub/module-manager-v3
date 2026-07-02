@@ -19,6 +19,8 @@
 - Major workflow change: `+0.1` after user confirmation.
 - Documentation/SOP-only changes do not bump the application version.
 - Candidate branches must not reserve production versions. Use branch names, PR titles, or notes to describe candidate scope.
+- Miniprogram work uses an independent progress version such as `MP-V1.0.xx` for miniprogram-team planning, while still recording the production baseline it is based on, for example `based on production V3.0.78`.
+- The miniprogram progress version must not replace or pre-reserve production `V3.0.xx` releases; production version numbers are assigned only by the production maintainer when code enters the production line.
 - Project management platform work may use an independent progress version such as `PM-V1.0.xx` for platform-team planning, while still recording the production baseline it is based on, for example `based on production V3.0.78`.
 - The platform team should explicitly evaluate whether the independent `PM-V1.0.xx` scheme is needed in their next PR or patch. This platform progress version must not replace or pre-reserve production `V3.0.xx` releases.
 
