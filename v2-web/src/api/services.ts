@@ -8,11 +8,34 @@ import type {
   ImportJob,
   InstallerWorkload,
   MaterialGroup,
+  PlatformDeliveryArchiveReadiness,
+  PlatformConstructionCollectionPayload,
+  PlatformConstructionPhoto,
+  PlatformConstructionPhotoUploadPayload,
+  PlatformDeliveryArchiveManifest,
   PhotoBarcodeReviewGroup,
+  PlatformConstructionWorkOrder,
+  PlatformConstructionWorkOrders,
+  PlatformReviewActionPayload,
+  PlatformReviewWorkOrder,
+  PlatformReviewWorkOrders,
+  PlatformHandoffReadiness,
+  PlatformMigrationReadiness,
+  PlatformConfigPreflight,
+  PlatformPersistenceStatus,
   Project,
   ProjectCreatePayload,
+  ProjectConfigPersistenceContract,
+  ProjectDashboardMetric,
   ProjectFieldDefinition,
+  ProjectReadiness,
+  ProjectReadinessCheckStatus,
+  ProjectReadinessSummaryList,
+  ProjectTemplateFieldPreview,
+  ProjectTemplateValidationReport,
   ProjectTemplateType,
+  ProjectWorkflow,
+  ProjectWorkflowStatus,
   ProjectWorkItemSchema,
   ProjectSummary,
   ReplacementRecord,
@@ -122,7 +145,22 @@ type BackendProjectFieldDefinition = {
   required?: boolean
   parent_key?: string
   kpi_enabled?: boolean
+  show_in_construction_panel?: boolean
   options?: string[]
+  required_when?: BackendProjectFieldRequiredWhen
+  relation_role?: ProjectFieldDefinition['relationRole']
+}
+
+type BackendProjectFieldRequiredWhen = {
+  field_key?: string
+  equals?: string | string[]
+}
+
+type BackendProjectDashboardMetric = {
+  key?: string
+  label?: string
+  source?: string
+  scope?: string
 }
 
 type BackendProjectWorkItemSchema = {
@@ -131,7 +169,266 @@ type BackendProjectWorkItemSchema = {
   aggregate_field?: BackendProjectFieldDefinition
   platform_required_fields?: BackendProjectFieldDefinition[]
   custom_fields?: BackendProjectFieldDefinition[]
-  dashboard_metrics?: string[]
+  dashboard_metrics?: BackendProjectDashboardMetric[]
+}
+
+type BackendProjectWorkflowNode = {
+  id?: string
+  type?: string
+  label?: string
+  enabled?: boolean
+  required?: boolean
+  order?: number
+  module_id?: string
+  moduleId?: string
+  config?: Record<string, unknown>
+}
+
+type BackendProjectWorkflowEdge = {
+  id?: string
+  source?: string
+  target?: string
+  label?: string
+}
+
+type BackendProjectWorkflow = {
+  version?: number
+  nodes?: BackendProjectWorkflowNode[]
+  edges?: BackendProjectWorkflowEdge[]
+  updated_at?: string
+  updatedAt?: string
+  updated_by?: string
+  updatedBy?: string
+}
+
+type BackendProjectWorkflowStatus = {
+  total_nodes?: number
+  enabled_node_ids?: string[]
+  enabled_node_labels?: string[]
+  enabled_module_ids?: string[]
+  current_node_id?: string
+  current_node_label?: string
+  pending_node_ids?: string[]
+  pending_node_labels?: string[]
+  module_sync_enabled?: boolean
+}
+
+type BackendProjectTemplatePreviewField = {
+  key?: string
+  label?: string
+  source?: string
+  capture_method?: string
+  data_type?: string
+  required?: boolean
+  parent_key?: string
+  relation_role?: string
+  required_when?: { field_key?: string; equals?: string | string[] }
+  show_in_construction_panel?: boolean
+  template_hierarchy_role?: string
+  template_parent_label?: string
+  template_condition_hint?: string
+  platform_fill_rule?: string
+}
+
+type BackendProjectTemplatePreviewItem = {
+  template_type?: ProjectTemplateType
+  headers?: string[]
+  field_rows?: BackendProjectTemplatePreviewField[]
+}
+
+type BackendProjectTemplateFieldPreview = {
+  project_id?: string
+  templates?: BackendProjectTemplatePreviewItem[]
+  site_required_fields?: string[]
+}
+
+type BackendProjectReadinessCheck = {
+  id?: string
+  group?: string
+  label?: string
+  status?: string
+  severity?: string
+  evidence?: Record<string, unknown>
+  action?: string
+}
+
+type BackendProjectReadiness = {
+  readiness_version?: number
+  project_id?: string
+  ready?: boolean
+  summary?: {
+    total?: number
+    passed?: number
+    failed?: number
+    blockers?: number
+  }
+  checks?: BackendProjectReadinessCheck[]
+  next_actions?: string[]
+  safety?: string[]
+}
+
+type BackendProjectReadinessSummaryItem = {
+  project_id?: string
+  project_name?: string
+  project_status?: string
+  ready?: boolean
+  summary?: BackendProjectReadiness['summary']
+  next_actions?: string[]
+}
+
+type BackendProjectReadinessActionCount = {
+  action?: string
+  count?: number
+}
+
+type BackendProjectReadinessSummaryList = {
+  readiness_version?: number
+  total?: number
+  ready?: number
+  not_ready?: number
+  action_counts?: BackendProjectReadinessActionCount[]
+  items?: BackendProjectReadinessSummaryItem[]
+  safety?: string[]
+}
+
+type BackendPlatformPersistenceStore = {
+  id?: string
+  label?: string
+  backend?: string
+  path?: string
+  exists?: boolean
+  parent?: string
+  parent_exists?: boolean
+  contains?: string[]
+}
+
+type BackendPlatformPersistenceStatus = {
+  status_version?: number
+  state_backend?: string
+  database?: {
+    configured?: boolean
+    url_redacted?: string
+    used_for_platform_project_config?: boolean
+    migration_required_for_postgres_platform_config?: boolean
+  }
+  stores?: BackendPlatformPersistenceStore[]
+  guarantees?: string[]
+  safety?: string[]
+}
+
+type BackendPlatformConfigPreflightIssue = {
+  scope?: string
+  code?: string
+  severity?: string
+  message?: string
+  action?: string
+}
+
+type BackendPlatformConfigPreflightProject = {
+  project_id?: string
+  name?: string
+  source_status?: string
+  status?: string
+  issue_count?: number
+  issues?: BackendPlatformConfigPreflightIssue[]
+}
+
+type BackendPlatformConfigPreflight = {
+  preflight_version?: number
+  ready_for_config_load?: boolean
+  store?: {
+    id?: string
+    backend?: string
+    path?: string
+    exists?: boolean
+    readable?: boolean
+  }
+  summary?: {
+    total_projects?: number
+    ready_projects?: number
+    blocked_projects?: number
+    store_issues?: number
+  }
+  issues?: BackendPlatformConfigPreflightIssue[]
+  projects?: BackendPlatformConfigPreflightProject[]
+  safety?: string[]
+}
+
+type BackendPlatformMigrationGateItem = {
+  id?: string
+  label?: string
+  description?: string
+  required?: boolean
+  status?: string
+  evidence?: string
+}
+
+type BackendPlatformMigrationReadiness = {
+  readiness_version?: number
+  scope?: string
+  ready_for_migration?: boolean
+  requires_user_approval?: boolean
+  creates_migration?: boolean
+  target_backend?: string
+  target_tables?: string[]
+  database_configured?: boolean
+  current_state_backend?: string
+  gate_items?: BackendPlatformMigrationGateItem[]
+  migration_plan?: string[]
+  rollback_plan?: string[]
+  safety?: string[]
+}
+
+type BackendPlatformHandoffReadiness = {
+  handoff_version?: number
+  feature_branch?: string
+  production_baseline?: {
+    branch?: string
+    version?: string
+  }
+  ready_for_review_package?: boolean
+  ready_for_production_migration?: boolean
+  ready_for_production_release?: boolean
+  config_preflight?: BackendPlatformConfigPreflight
+  project_readiness_summary?: BackendProjectReadinessSummaryList
+  persistence?: BackendPlatformPersistenceStatus
+  migration?: BackendPlatformMigrationReadiness
+  production_safety?: string[]
+  next_actions?: string[]
+}
+
+type BackendProjectConfigRoundtrip = {
+  can_restore?: boolean
+  preserved_keys?: string[]
+  missing_preserved_keys?: string[]
+}
+
+type BackendProjectConfigPersistenceRecord = {
+  team_id?: string
+  project_key?: string
+  name?: string
+  status?: string
+  adapter?: string
+  module_ids?: string[]
+  description?: string
+  field_schema?: BackendProjectWorkItemSchema
+  workflow_definition?: BackendProjectWorkflow
+  created_at?: string
+  updated_at?: string
+  created_by?: string
+  updated_by?: string
+}
+
+type BackendProjectConfigPersistenceContract = {
+  contract_version?: number
+  project_id?: string
+  source_backend?: string
+  target_backend?: string
+  target_tables?: string[]
+  config_record?: BackendProjectConfigPersistenceRecord
+  roundtrip?: BackendProjectConfigRoundtrip
+  migration_gate?: string[]
+  safety?: string[]
 }
 
 type BackendPlatformProject = {
@@ -151,6 +448,17 @@ type BackendPlatformProject = {
     uploaded?: number
     reviewing?: number
     archived?: number
+    initial_work_orders?: number
+    external_completed?: number
+    pending_review?: number
+    returned_rework?: number
+    approved_archive?: number
+    not_ready?: number
+    kpi_ready?: number
+    photo_total?: number
+    old_device_recovered?: number
+    average_online_duration_minutes?: number
+    installer_count?: number
     upload_rate?: number
     review_rate?: number
   }
@@ -178,6 +486,135 @@ type BackendPlatformProject = {
   }
   modules?: BackendProjectModule[]
   work_item_schema?: BackendProjectWorkItemSchema
+  workflow?: BackendProjectWorkflow
+  workflow_status?: BackendProjectWorkflowStatus
+}
+
+type BackendProjectListResponse = {
+  total?: number
+  items?: BackendPlatformProject[]
+  config_preflight?: BackendPlatformConfigPreflight
+  next_actions?: string[]
+  safety?: string[]
+}
+
+type BackendPlatformConstructionWorkOrder = {
+  id?: string
+  project_id?: string
+  source_task_id?: string
+  source_batch_id?: string
+  primary_value?: string
+  aggregate_value?: string
+  status?: string
+  created_at?: string
+  created_by?: string
+  field_values?: Record<string, unknown>
+  required_fields?: BackendProjectFieldDefinition[]
+  photo_slots?: BackendProjectFieldDefinition[]
+  collection_photos?: BackendPlatformConstructionPhoto[]
+  collection_status?: string
+  collection_field_values?: Record<string, unknown>
+  kpi_values?: Record<string, unknown>
+  covered_photo_slots?: unknown[]
+  client_batch_id?: string
+  collected_by?: string
+  collected_at?: string
+  review_status?: string
+  reviewed_by?: string
+  reviewed_at?: string
+  review_note?: string
+  review_reason?: string
+  review_history?: BackendPlatformReviewHistoryEvent[]
+  rework_evidence_gap_groups?: Array<{ label?: string; items?: unknown[] }>
+}
+
+type BackendPlatformConstructionPhoto = {
+  id?: string
+  slot?: string
+  client_photo_id?: string
+  filename?: string
+  content_type?: string
+  size?: number
+  storage?: string
+  storage_key?: string
+  uploaded_by?: string
+  uploaded_at?: string
+}
+
+type BackendPlatformConstructionWorkOrders = {
+  project_id?: string
+  total?: number
+  field_schema?: {
+    primary_field?: BackendProjectFieldDefinition
+    aggregate_field?: BackendProjectFieldDefinition
+    display_fields?: BackendProjectFieldDefinition[]
+    construction_fields?: BackendProjectFieldDefinition[]
+    photo_slots?: BackendProjectFieldDefinition[]
+  }
+  items?: BackendPlatformConstructionWorkOrder[]
+}
+
+type BackendPlatformReviewFieldReview = {
+  key?: string
+  label?: string
+  capture_method?: ProjectFieldDefinition['captureMethod']
+  required?: boolean
+  required_when?: BackendProjectFieldRequiredWhen
+  relation_role?: ProjectFieldDefinition['relationRole']
+  initial_value?: string
+  collected_value?: string
+}
+
+type BackendPlatformReviewPhotoSlotReview = {
+  key?: string
+  label?: string
+  required?: boolean
+  required_when?: BackendProjectFieldRequiredWhen
+  relation_role?: ProjectFieldDefinition['relationRole']
+  covered?: boolean
+  photo_count?: number
+}
+
+type BackendPlatformReviewHierarchyGapItem = {
+  row?: number | null
+  field_key?: string
+  field_label?: string
+  message?: string
+  value?: string
+}
+
+type BackendPlatformReviewHistoryEvent = {
+  id?: string
+  action?: string
+  actor?: string
+  reviewed_at?: string
+  note?: string
+  reason?: string
+}
+
+type BackendPlatformReviewWorkOrder = BackendPlatformConstructionWorkOrder & {
+  review_status?: string
+  reviewed_by?: string
+  reviewed_at?: string
+  review_note?: string
+  review_reason?: string
+  review_history?: BackendPlatformReviewHistoryEvent[]
+  suggested_review_return_reason?: string
+  review_hierarchy_gap_items?: BackendPlatformReviewHierarchyGapItem[]
+  field_reviews?: BackendPlatformReviewFieldReview[]
+  photo_slot_reviews?: BackendPlatformReviewPhotoSlotReview[]
+}
+
+type BackendPlatformReviewWorkOrders = Omit<BackendPlatformConstructionWorkOrders, 'items'> & {
+  status_counts?: Record<string, number>
+  items?: BackendPlatformReviewWorkOrder[]
+}
+
+type BackendPlatformReviewActionPayload = {
+  actor: string
+  action: PlatformReviewActionPayload['action']
+  note: string
+  reason: string
 }
 
 type BackendProjectProgress = {
@@ -192,6 +629,17 @@ type BackendProjectTasks = {
   uploaded?: number
   reviewing?: number
   archived?: number
+  initial_work_orders?: number
+  external_completed?: number
+  pending_review?: number
+  returned_rework?: number
+  approved_archive?: number
+  not_ready?: number
+  kpi_ready?: number
+  photo_total?: number
+  old_device_recovered?: number
+  average_online_duration_minutes?: number
+  installer_count?: number
   upload_rate?: number
   review_rate?: number
 }
@@ -201,6 +649,66 @@ type BackendProjectDelivery = {
   total_items?: number
   completed_items?: number
   latest_record?: string
+}
+
+type BackendPlatformDeliveryArchiveItem = {
+  work_order_id?: string
+  primary_value?: string
+  aggregate_value?: string
+  reason?: string
+  detail?: string
+}
+
+type BackendPlatformDeliveryArchiveReadiness = {
+  project_id?: string
+  total?: number
+  ready_for_archive?: number
+  approved_archive?: number
+  pending_review?: number
+  returned_rework?: number
+  evidence_gap?: number
+  not_ready?: number
+  exception?: number
+  blocked?: number
+  ready?: boolean
+  status?: string
+  next_actions?: string[]
+  blockers?: BackendPlatformDeliveryArchiveItem[]
+  ready_items?: BackendPlatformDeliveryArchiveItem[]
+}
+
+type BackendPlatformDeliveryArchiveEvidenceItem = {
+  key?: string
+  label?: string
+  capture_method?: ProjectFieldDefinition['captureMethod']
+  relation_role?: ProjectFieldDefinition['relationRole']
+  required?: boolean
+  required_when?: BackendProjectFieldRequiredWhen
+}
+
+type BackendPlatformDeliveryArchiveManifestSection = {
+  id?: string
+  title?: string
+  count?: number
+  items?: BackendPlatformDeliveryArchiveItem[]
+}
+
+type BackendPlatformDeliveryArchiveManifest = {
+  project_id?: string
+  manifest_id?: string
+  generated_at?: string
+  status?: string
+  ready?: boolean
+  can_export?: boolean
+  total?: number
+  ready_count?: number
+  blocked_count?: number
+  next_actions?: string[]
+  required_evidence?: {
+    fields?: BackendPlatformDeliveryArchiveEvidenceItem[]
+    photos?: BackendPlatformDeliveryArchiveEvidenceItem[]
+  }
+  sections?: BackendPlatformDeliveryArchiveManifestSection[]
 }
 
 type BackendProjectField = {
@@ -257,6 +765,8 @@ type BackendPhoto = {
   storage_key?: string
   category?: string
   category_label?: string
+  construction_slot?: string
+  construction_slot_label?: string
   archive_status?: string
   archive_filename?: string
   barcode?: string
@@ -299,6 +809,8 @@ type BackendGroup = {
   construction_collector?: string
   construction_module_asset_no?: string
   construction_status?: string
+  construction_field_values?: Record<string, unknown>
+  field_values?: Record<string, unknown>
   exception_order_id?: string
   group_barcode_check_status?: string
   group_barcode_matched_fields?: unknown[]
@@ -685,10 +1197,6 @@ function handleUnauthorizedResponse(response: Response) {
     clearLocalAuthSession()
     redirectToLogin()
   }
-  if (response.status === 429) {
-    const retryAfter = response.headers.get('Retry-After')
-    console.warn('请求过于频繁，请稍后再试', retryAfter ? { retryAfter } : undefined)
-  }
 }
 
 async function fetchWithAuth(path: string, init: RequestInit = {}) {
@@ -766,6 +1274,17 @@ function mapProjectTasks(raw: BackendProjectTasks = {}): NonNullable<Project['ta
     uploaded: Number(raw.uploaded || 0),
     reviewing: Number(raw.reviewing || 0),
     archived: Number(raw.archived || 0),
+    initialWorkOrders: Number(raw.initial_work_orders || 0),
+    externalCompleted: Number(raw.external_completed || 0),
+    pendingReview: Number(raw.pending_review || 0),
+    returnedRework: Number(raw.returned_rework || 0),
+    approvedArchive: Number(raw.approved_archive || 0),
+    notReady: Number(raw.not_ready || 0),
+    kpiReady: Number(raw.kpi_ready || 0),
+    photoTotal: Number(raw.photo_total || 0),
+    oldDeviceRecovered: Number(raw.old_device_recovered || 0),
+    averageOnlineDurationMinutes: Number(raw.average_online_duration_minutes || 0),
+    installerCount: Number(raw.installer_count || 0),
     uploadRate: Number(raw.upload_rate || 0),
     reviewRate: Number(raw.review_rate || 0),
   }
@@ -777,6 +1296,76 @@ function mapProjectDelivery(raw: BackendProjectDelivery = {}): NonNullable<Proje
     totalItems: Number(raw.total_items || 0),
     completedItems: Number(raw.completed_items || 0),
     latestRecord: raw.latest_record || '',
+  }
+}
+
+function mapPlatformDeliveryArchiveItem(raw: BackendPlatformDeliveryArchiveItem = {}) {
+  return {
+    workOrderId: raw.work_order_id || '',
+    primaryValue: raw.primary_value || '',
+    aggregateValue: raw.aggregate_value || '',
+    reason: raw.reason || '',
+    detail: raw.detail || '',
+  }
+}
+
+function mapPlatformDeliveryArchiveReadiness(
+  raw: BackendPlatformDeliveryArchiveReadiness = {},
+): PlatformDeliveryArchiveReadiness {
+  return {
+    projectId: raw.project_id || '',
+    total: Number(raw.total || 0),
+    readyForArchive: Number(raw.ready_for_archive || 0),
+    approvedArchive: Number(raw.approved_archive || 0),
+    pendingReview: Number(raw.pending_review || 0),
+    returnedRework: Number(raw.returned_rework || 0),
+    evidenceGap: Number(raw.evidence_gap || 0),
+    notReady: Number(raw.not_ready || 0),
+    exception: Number(raw.exception || 0),
+    blocked: Number(raw.blocked || 0),
+    ready: Boolean(raw.ready),
+    status: raw.status || '',
+    nextActions: raw.next_actions || [],
+    blockers: (raw.blockers || []).map(mapPlatformDeliveryArchiveItem),
+    readyItems: (raw.ready_items || []).map(mapPlatformDeliveryArchiveItem),
+  }
+}
+
+function mapPlatformDeliveryArchiveEvidenceItem(raw: BackendPlatformDeliveryArchiveEvidenceItem = {}) {
+  return {
+    key: raw.key || '',
+    label: raw.label || raw.key || '',
+    captureMethod: raw.capture_method || 'manual',
+    relationRole: raw.relation_role,
+    required: Boolean(raw.required),
+    requiredWhen: mapRequiredWhen(raw.required_when),
+  }
+}
+
+function mapPlatformDeliveryArchiveManifest(
+  raw: BackendPlatformDeliveryArchiveManifest = {},
+): PlatformDeliveryArchiveManifest {
+  return {
+    projectId: raw.project_id || '',
+    manifestId: raw.manifest_id || '',
+    generatedAt: raw.generated_at || '',
+    status: raw.status || '',
+    ready: Boolean(raw.ready),
+    canExport: Boolean(raw.can_export),
+    total: Number(raw.total || 0),
+    readyCount: Number(raw.ready_count || 0),
+    blockedCount: Number(raw.blocked_count || 0),
+    nextActions: raw.next_actions || [],
+    requiredEvidence: {
+      fields: (raw.required_evidence?.fields || []).map(mapPlatformDeliveryArchiveEvidenceItem),
+      photos: (raw.required_evidence?.photos || []).map(mapPlatformDeliveryArchiveEvidenceItem),
+    },
+    sections: (raw.sections || []).map((section) => ({
+      id: section.id || '',
+      title: section.title || '',
+      count: Number(section.count || 0),
+      items: (section.items || []).map(mapPlatformDeliveryArchiveItem),
+    })),
   }
 }
 
@@ -858,7 +1447,52 @@ function mapWorkItemField(raw: BackendProjectFieldDefinition | undefined): Proje
     required: Boolean(raw.required),
     parentKey: raw.parent_key || undefined,
     kpiEnabled: Boolean(raw.kpi_enabled),
+    showInConstructionPanel: raw.show_in_construction_panel,
     options: Array.isArray(raw.options) ? raw.options.map(String) : [],
+    requiredWhen: mapRequiredWhen(raw.required_when),
+    relationRole: mapRelationRole(raw.relation_role),
+  }
+}
+
+function mapRelationRole(raw: BackendProjectFieldDefinition['relation_role']): ProjectFieldDefinition['relationRole'] | undefined {
+  const role = String(raw || '').trim()
+  const validRoles: Array<NonNullable<ProjectFieldDefinition['relationRole']>> = [
+    'aggregate',
+    'task_object',
+    'task_detail',
+    'replacement_device',
+    'old_device',
+    'accessory_replace_confirm',
+    'accessory_new_device',
+    'evidence_photo',
+    'supporting_field',
+  ]
+  return validRoles.includes(role as NonNullable<ProjectFieldDefinition['relationRole']>)
+    ? (role as NonNullable<ProjectFieldDefinition['relationRole']>)
+    : undefined
+}
+
+function mapRequiredWhen(raw: BackendProjectFieldRequiredWhen | undefined): ProjectFieldDefinition['requiredWhen'] | undefined {
+  const fieldKey = String(raw?.field_key || '').trim()
+  if (!fieldKey) return undefined
+  if (Array.isArray(raw?.equals)) {
+    const equals = raw.equals.map(String).map((item) => item.trim()).filter(Boolean)
+    return equals.length ? { fieldKey, equals } : undefined
+  }
+  const equals = String(raw?.equals || '').trim()
+  return equals ? { fieldKey, equals } : undefined
+}
+
+function mapDashboardMetric(raw: BackendProjectDashboardMetric | string | undefined): ProjectDashboardMetric | null {
+  const metric = typeof raw === 'string' ? { key: raw, label: raw } : raw
+  const key = String(metric?.key || '').trim()
+  const label = String(metric?.label || key).trim()
+  if (!key || !label) return null
+  return {
+    key,
+    label,
+    source: String(metric?.source || '').trim() || undefined,
+    scope: String(metric?.scope || '').trim() || undefined,
   }
 }
 
@@ -874,7 +1508,150 @@ function mapWorkItemSchema(raw: BackendProjectWorkItemSchema | undefined): Proje
     customFields: (raw.custom_fields || [])
       .map(mapWorkItemField)
       .filter((field): field is ProjectFieldDefinition => Boolean(field)),
-    dashboardMetrics: Array.isArray(raw.dashboard_metrics) ? raw.dashboard_metrics.map(String) : [],
+    dashboardMetrics: (raw.dashboard_metrics || [])
+      .map(mapDashboardMetric)
+      .filter((metric): metric is ProjectDashboardMetric => Boolean(metric)),
+  }
+}
+
+function mapProjectFieldList(raw: BackendProjectFieldDefinition[] | undefined): ProjectFieldDefinition[] {
+  return (raw || []).map(mapWorkItemField).filter((field): field is ProjectFieldDefinition => Boolean(field))
+}
+
+function mapPlatformConstructionPhoto(raw: BackendPlatformConstructionPhoto): PlatformConstructionPhoto {
+  return {
+    id: String(raw.id || ''),
+    slot: String(raw.slot || ''),
+    clientPhotoId: String(raw.client_photo_id || ''),
+    filename: String(raw.filename || ''),
+    contentType: String(raw.content_type || ''),
+    size: Number(raw.size || 0),
+    storage: String(raw.storage || ''),
+    storageKey: String(raw.storage_key || ''),
+    uploadedBy: String(raw.uploaded_by || ''),
+    uploadedAt: String(raw.uploaded_at || ''),
+  }
+}
+
+function mapPlatformConstructionWorkOrder(raw: BackendPlatformConstructionWorkOrder): PlatformConstructionWorkOrder {
+  return {
+    id: String(raw.id || ''),
+    projectId: String(raw.project_id || ''),
+    sourceTaskId: String(raw.source_task_id || ''),
+    sourceBatchId: String(raw.source_batch_id || ''),
+    primaryValue: String(raw.primary_value || ''),
+    aggregateValue: String(raw.aggregate_value || ''),
+    status: String(raw.status || ''),
+    createdAt: String(raw.created_at || ''),
+    createdBy: String(raw.created_by || ''),
+    fieldValues: mapStringRecord(raw.field_values),
+    requiredFields: mapProjectFieldList(raw.required_fields),
+    photoSlots: mapProjectFieldList(raw.photo_slots),
+    collectionPhotos: (raw.collection_photos || []).map(mapPlatformConstructionPhoto),
+    collectionStatus: String(raw.collection_status || ''),
+    collectionFieldValues: mapStringRecord(raw.collection_field_values),
+    kpiValues: mapStringRecord(raw.kpi_values),
+    coveredPhotoSlots: mapStringArray(raw.covered_photo_slots),
+    clientBatchId: String(raw.client_batch_id || ''),
+    collectedBy: String(raw.collected_by || ''),
+    collectedAt: String(raw.collected_at || ''),
+    reviewStatus: String(raw.review_status || ''),
+    reviewedBy: String(raw.reviewed_by || ''),
+    reviewedAt: String(raw.reviewed_at || ''),
+    reviewNote: String(raw.review_note || ''),
+    reviewReason: String(raw.review_reason || ''),
+    reviewHistory: (raw.review_history || []).map((event) => ({
+      id: String(event.id || ''),
+      action: String(event.action || ''),
+      actor: String(event.actor || ''),
+      reviewedAt: String(event.reviewed_at || ''),
+      note: String(event.note || ''),
+      reason: String(event.reason || ''),
+    })),
+    reworkEvidenceGapGroups: (raw.rework_evidence_gap_groups || [])
+      .map((group) => ({
+        label: String(group.label || ''),
+        items: mapStringArray(group.items),
+      }))
+      .filter((group) => group.label && group.items.length),
+  }
+}
+
+function mapPlatformConstructionWorkOrders(raw: BackendPlatformConstructionWorkOrders): PlatformConstructionWorkOrders {
+  const schema = raw.field_schema || {}
+  return {
+    projectId: String(raw.project_id || ''),
+    total: Number(raw.total || 0),
+    fieldSchema: {
+      primaryField: mapWorkItemField(schema.primary_field),
+      aggregateField: mapWorkItemField(schema.aggregate_field),
+      displayFields: mapProjectFieldList(schema.display_fields),
+      constructionFields: mapProjectFieldList(schema.construction_fields),
+      photoSlots: mapProjectFieldList(schema.photo_slots),
+    },
+    items: (raw.items || []).map(mapPlatformConstructionWorkOrder),
+  }
+}
+
+function mapPlatformReviewWorkOrder(raw: BackendPlatformReviewWorkOrder): PlatformReviewWorkOrder {
+  return {
+    ...mapPlatformConstructionWorkOrder(raw),
+    reviewStatus: String(raw.review_status || ''),
+    reviewedBy: String(raw.reviewed_by || ''),
+    reviewedAt: String(raw.reviewed_at || ''),
+    reviewNote: String(raw.review_note || ''),
+    reviewReason: String(raw.review_reason || ''),
+    suggestedReviewReturnReason: String(raw.suggested_review_return_reason || ''),
+    reviewHierarchyGapItems: (raw.review_hierarchy_gap_items || []).map((item) => ({
+      row: item.row === null || item.row === undefined ? null : Number(item.row),
+      fieldKey: String(item.field_key || ''),
+      fieldLabel: String(item.field_label || item.field_key || ''),
+      message: String(item.message || ''),
+      value: String(item.value || ''),
+    })),
+    fieldReviews: (raw.field_reviews || []).map((field) => ({
+      key: String(field.key || ''),
+      label: String(field.label || field.key || ''),
+      captureMethod: field.capture_method || 'manual',
+      required: Boolean(field.required),
+      requiredWhen: mapRequiredWhen(field.required_when),
+      relationRole: mapRelationRole(field.relation_role),
+      initialValue: String(field.initial_value || ''),
+      collectedValue: String(field.collected_value || ''),
+    })),
+    photoSlotReviews: (raw.photo_slot_reviews || []).map((slot) => ({
+      key: String(slot.key || ''),
+      label: String(slot.label || slot.key || ''),
+      required: Boolean(slot.required),
+      requiredWhen: mapRequiredWhen(slot.required_when),
+      relationRole: mapRelationRole(slot.relation_role),
+      covered: Boolean(slot.covered),
+      photoCount: Number(slot.photo_count || 0),
+    })),
+  }
+}
+
+function mapPlatformReviewWorkOrders(raw: BackendPlatformReviewWorkOrders): PlatformReviewWorkOrders {
+  const schema = raw.field_schema || {}
+  const statusCounts = raw.status_counts || {}
+  return {
+    projectId: String(raw.project_id || ''),
+    total: Number(raw.total || 0),
+    statusCounts: {
+      pending_review: Number(statusCounts.pending_review || 0),
+      approved: Number(statusCounts.approved || 0),
+      returned: Number(statusCounts.returned || 0),
+      exception: Number(statusCounts.exception || 0),
+      not_ready: Number(statusCounts.not_ready || 0),
+    },
+    fieldSchema: {
+      primaryField: mapWorkItemField(schema.primary_field),
+      aggregateField: mapWorkItemField(schema.aggregate_field),
+      displayFields: mapProjectFieldList(schema.display_fields),
+      constructionFields: mapProjectFieldList(schema.construction_fields),
+      photoSlots: mapProjectFieldList(schema.photo_slots),
+    },
+    items: (raw.items || []).map(mapPlatformReviewWorkOrder),
   }
 }
 
@@ -889,7 +1666,32 @@ function mapWorkItemFieldForCreate(field: ProjectFieldDefinition | undefined): B
     required: field.required,
     parent_key: field.parentKey,
     kpi_enabled: field.kpiEnabled,
+    show_in_construction_panel: field.showInConstructionPanel,
     options: field.options,
+    required_when: mapRequiredWhenForCreate(field.requiredWhen),
+    relation_role: field.relationRole,
+  }
+}
+
+function mapRequiredWhenForCreate(requiredWhen: ProjectFieldDefinition['requiredWhen'] | undefined): BackendProjectFieldRequiredWhen | undefined {
+  const fieldKey = String(requiredWhen?.fieldKey || '').trim()
+  if (!fieldKey) return undefined
+  const equals = Array.isArray(requiredWhen?.equals)
+    ? requiredWhen.equals.map(String).map((item) => item.trim()).filter(Boolean)
+    : String(requiredWhen?.equals || '').trim()
+  if (Array.isArray(equals)) return equals.length ? { field_key: fieldKey, equals } : undefined
+  return equals ? { field_key: fieldKey, equals } : undefined
+}
+
+function mapDashboardMetricForCreate(metric: ProjectDashboardMetric): BackendProjectDashboardMetric | null {
+  const key = String(metric.key || '').trim()
+  const label = String(metric.label || key).trim()
+  if (!key || !label) return null
+  return {
+    key,
+    label,
+    source: String(metric.source || '').trim() || undefined,
+    scope: String(metric.scope || '').trim() || undefined,
   }
 }
 
@@ -899,6 +1701,326 @@ function mapWorkItemSchemaForCreate(schema: ProjectWorkItemSchema | undefined): 
     primary_field: mapWorkItemFieldForCreate(schema.primaryField),
     aggregate_field: mapWorkItemFieldForCreate(schema.aggregateField),
     custom_fields: schema.customFields.map(mapWorkItemFieldForCreate).filter(Boolean) as BackendProjectFieldDefinition[],
+    dashboard_metrics: (schema.dashboardMetrics || [])
+      .map(mapDashboardMetricForCreate)
+      .filter(Boolean) as BackendProjectDashboardMetric[],
+  }
+}
+
+function mapProjectWorkflow(raw: BackendProjectWorkflow | undefined): ProjectWorkflow | undefined {
+  if (!raw) return undefined
+  return {
+    version: Number(raw.version || 1),
+    nodes: (raw.nodes || []).map((node) => ({
+      id: String(node.id || ''),
+      type: String(node.type || 'custom'),
+      label: String(node.label || node.id || ''),
+      enabled: Boolean(node.enabled),
+      required: Boolean(node.required),
+      order: Number(node.order || 0),
+      moduleId: String(node.module_id || node.moduleId || ''),
+      config: node.config && typeof node.config === 'object' ? node.config : {},
+    })).filter((node) => node.id && node.label),
+    edges: (raw.edges || []).map((edge) => ({
+      id: String(edge.id || `${edge.source || ''}__${edge.target || ''}`),
+      source: String(edge.source || ''),
+      target: String(edge.target || ''),
+      label: String(edge.label || '下一步'),
+    })).filter((edge) => edge.source && edge.target),
+    updatedAt: String(raw.updated_at || raw.updatedAt || ''),
+    updatedBy: String(raw.updated_by || raw.updatedBy || ''),
+  }
+}
+
+function mapProjectWorkflowForSave(workflow: ProjectWorkflow): BackendProjectWorkflow {
+  return {
+    version: workflow.version || 1,
+    nodes: workflow.nodes.map((node) => ({
+      id: node.id,
+      type: node.type,
+      label: node.label,
+      enabled: node.enabled,
+      required: node.required,
+      order: node.order,
+      module_id: node.moduleId,
+      config: node.config || {},
+    })),
+    edges: workflow.edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      label: edge.label,
+    })),
+  }
+}
+
+function mapProjectWorkflowStatus(raw: BackendProjectWorkflowStatus | undefined): ProjectWorkflowStatus | undefined {
+  if (!raw) return undefined
+  return {
+    totalNodes: Number(raw.total_nodes || 0),
+    enabledNodeIds: raw.enabled_node_ids || [],
+    enabledNodeLabels: raw.enabled_node_labels || [],
+    enabledModuleIds: raw.enabled_module_ids || [],
+    currentNodeId: String(raw.current_node_id || ''),
+    currentNodeLabel: String(raw.current_node_label || ''),
+    pendingNodeIds: raw.pending_node_ids || [],
+    pendingNodeLabels: raw.pending_node_labels || [],
+    moduleSyncEnabled: Boolean(raw.module_sync_enabled),
+  }
+}
+
+function mapProjectTemplateFieldPreview(raw: BackendProjectTemplateFieldPreview): ProjectTemplateFieldPreview {
+  return {
+    projectId: String(raw.project_id || ''),
+    templates: (raw.templates || []).map((template) => ({
+      templateType: (template.template_type || 'initial_work_orders') as ProjectTemplateType,
+      headers: (template.headers || []).map(String).filter(Boolean),
+      fieldRows: (template.field_rows || []).map((field) => ({
+        key: String(field.key || ''),
+        label: String(field.label || field.key || ''),
+        source: String(field.source || ''),
+        captureMethod: String(field.capture_method || ''),
+        dataType: String(field.data_type || ''),
+        required: Boolean(field.required),
+        parentKey: String(field.parent_key || ''),
+        relationRole: String(field.relation_role || ''),
+        requiredWhen: mapTemplatePreviewRequiredWhen(field.required_when),
+        showInConstructionPanel: Boolean(field.show_in_construction_panel),
+        templateHierarchyRole: String(field.template_hierarchy_role || ''),
+        templateParentLabel: String(field.template_parent_label || ''),
+        templateConditionHint: String(field.template_condition_hint || ''),
+        platformFillRule: String(field.platform_fill_rule || ''),
+      })).filter((field) => field.key && field.label),
+    })),
+    siteRequiredFields: (raw.site_required_fields || []).map(String).filter(Boolean),
+  }
+}
+
+function mapTemplatePreviewRequiredWhen(
+  raw: BackendProjectTemplatePreviewField['required_when'],
+): { fieldKey: string; equals: string | string[] } | null {
+  if (!raw?.field_key) return null
+  const fieldKey = String(raw.field_key || '').trim()
+  if (!fieldKey) return null
+  const equals = Array.isArray(raw.equals)
+    ? raw.equals.map(String).filter(Boolean)
+    : String(raw.equals || '')
+  return { fieldKey, equals }
+}
+
+function mapProjectReadiness(raw: BackendProjectReadiness): ProjectReadiness {
+  const summary = raw.summary || {}
+  return {
+    readinessVersion: Number(raw.readiness_version || 1),
+    projectId: String(raw.project_id || ''),
+    ready: Boolean(raw.ready),
+    summary: {
+      total: Number(summary.total || 0),
+      passed: Number(summary.passed || 0),
+      failed: Number(summary.failed || 0),
+      blockers: Number(summary.blockers || 0),
+    },
+    checks: (raw.checks || []).map((check) => {
+      const status: ProjectReadinessCheckStatus = check.status === 'passed' ? 'passed' : 'failed'
+      return {
+        id: String(check.id || ''),
+        group: String(check.group || ''),
+        label: String(check.label || check.id || ''),
+        status,
+        severity: String(check.severity || ''),
+        evidence: check.evidence && typeof check.evidence === 'object' ? check.evidence : {},
+        action: String(check.action || ''),
+      }
+    }).filter((check) => check.id && check.label),
+    nextActions: (raw.next_actions || []).map(String).filter(Boolean),
+    safety: (raw.safety || []).map(String).filter(Boolean),
+  }
+}
+
+function mapProjectReadinessSummaryList(raw: BackendProjectReadinessSummaryList): ProjectReadinessSummaryList {
+  return {
+    readinessVersion: Number(raw.readiness_version || 1),
+    total: Number(raw.total || 0),
+    ready: Number(raw.ready || 0),
+    notReady: Number(raw.not_ready || 0),
+    actionCounts: (raw.action_counts || []).map((item) => ({
+      action: String(item.action || ''),
+      count: Number(item.count || 0),
+    })).filter((item) => item.action && item.count > 0),
+    items: (raw.items || []).map((item) => {
+      const summary = item.summary || {}
+      return {
+        projectId: String(item.project_id || ''),
+        projectName: String(item.project_name || item.project_id || ''),
+        projectStatus: String(item.project_status || ''),
+        ready: Boolean(item.ready),
+        summary: {
+          total: Number(summary.total || 0),
+          passed: Number(summary.passed || 0),
+          failed: Number(summary.failed || 0),
+          blockers: Number(summary.blockers || 0),
+        },
+        nextActions: (item.next_actions || []).map(String).filter(Boolean),
+      }
+    }).filter((item) => item.projectId),
+    safety: (raw.safety || []).map(String).filter(Boolean),
+  }
+}
+
+function mapPlatformPersistenceStatus(raw: BackendPlatformPersistenceStatus): PlatformPersistenceStatus {
+  const database = raw.database || {}
+  return {
+    statusVersion: Number(raw.status_version || 1),
+    stateBackend: String(raw.state_backend || ''),
+    database: {
+      configured: Boolean(database.configured),
+      urlRedacted: String(database.url_redacted || ''),
+      usedForPlatformProjectConfig: Boolean(database.used_for_platform_project_config),
+      migrationRequiredForPostgresPlatformConfig: Boolean(database.migration_required_for_postgres_platform_config),
+    },
+    stores: (raw.stores || []).map((store) => ({
+      id: String(store.id || ''),
+      label: String(store.label || store.id || ''),
+      backend: String(store.backend || ''),
+      path: String(store.path || ''),
+      exists: Boolean(store.exists),
+      parent: String(store.parent || ''),
+      parentExists: Boolean(store.parent_exists),
+      contains: (store.contains || []).map(String).filter(Boolean),
+    })).filter((store) => store.id),
+    guarantees: (raw.guarantees || []).map(String).filter(Boolean),
+    safety: (raw.safety || []).map(String).filter(Boolean),
+  }
+}
+
+function mapPlatformConfigPreflightIssue(raw: BackendPlatformConfigPreflightIssue) {
+  return {
+    scope: String(raw.scope || ''),
+    code: String(raw.code || ''),
+    severity: String(raw.severity || ''),
+    message: String(raw.message || ''),
+    action: String(raw.action || ''),
+  }
+}
+
+function mapPlatformConfigPreflight(raw: BackendPlatformConfigPreflight): PlatformConfigPreflight {
+  const store = raw.store || {}
+  const summary = raw.summary || {}
+  return {
+    preflightVersion: Number(raw.preflight_version || 1),
+    readyForConfigLoad: Boolean(raw.ready_for_config_load),
+    store: {
+      id: String(store.id || ''),
+      backend: String(store.backend || ''),
+      path: String(store.path || ''),
+      exists: Boolean(store.exists),
+      readable: store.readable !== false,
+    },
+    summary: {
+      totalProjects: Number(summary.total_projects || 0),
+      readyProjects: Number(summary.ready_projects || 0),
+      blockedProjects: Number(summary.blocked_projects || 0),
+      storeIssues: Number(summary.store_issues || 0),
+    },
+    issues: (raw.issues || []).map(mapPlatformConfigPreflightIssue).filter((issue) => issue.message),
+    projects: (raw.projects || []).map((project) => ({
+      projectId: String(project.project_id || ''),
+      name: String(project.name || project.project_id || ''),
+      sourceStatus: String(project.source_status || ''),
+      status: String(project.status || ''),
+      issueCount: Number(project.issue_count || 0),
+      issues: (project.issues || []).map(mapPlatformConfigPreflightIssue).filter((issue) => issue.message),
+    })).filter((project) => project.projectId || project.name),
+    safety: (raw.safety || []).map(String).filter(Boolean),
+  }
+}
+
+function mapPlatformMigrationReadiness(raw: BackendPlatformMigrationReadiness): PlatformMigrationReadiness {
+  return {
+    readinessVersion: Number(raw.readiness_version || 1),
+    scope: String(raw.scope || ''),
+    readyForMigration: Boolean(raw.ready_for_migration),
+    requiresUserApproval: Boolean(raw.requires_user_approval),
+    createsMigration: Boolean(raw.creates_migration),
+    targetBackend: String(raw.target_backend || ''),
+    targetTables: (raw.target_tables || []).map(String).filter(Boolean),
+    databaseConfigured: Boolean(raw.database_configured),
+    currentStateBackend: String(raw.current_state_backend || ''),
+    gateItems: (raw.gate_items || []).map((item) => ({
+      id: String(item.id || ''),
+      label: String(item.label || item.id || ''),
+      description: String(item.description || ''),
+      required: Boolean(item.required),
+      status: String(item.status || ''),
+      evidence: String(item.evidence || ''),
+    })).filter((item) => item.id),
+    migrationPlan: (raw.migration_plan || []).map(String).filter(Boolean),
+    rollbackPlan: (raw.rollback_plan || []).map(String).filter(Boolean),
+    safety: (raw.safety || []).map(String).filter(Boolean),
+  }
+}
+
+function mapPlatformHandoffReadiness(raw: BackendPlatformHandoffReadiness): PlatformHandoffReadiness {
+  const baseline = raw.production_baseline || {}
+  return {
+    handoffVersion: Number(raw.handoff_version || 1),
+    featureBranch: String(raw.feature_branch || ''),
+    productionBaseline: {
+      branch: String(baseline.branch || ''),
+      version: String(baseline.version || ''),
+    },
+    readyForReviewPackage: Boolean(raw.ready_for_review_package),
+    readyForProductionMigration: Boolean(raw.ready_for_production_migration),
+    readyForProductionRelease: Boolean(raw.ready_for_production_release),
+    configPreflight: mapPlatformConfigPreflight(raw.config_preflight || { ready_for_config_load: true }),
+    projectReadinessSummary: mapProjectReadinessSummaryList(raw.project_readiness_summary || {}),
+    persistence: mapPlatformPersistenceStatus(raw.persistence || {}),
+    migration: mapPlatformMigrationReadiness(raw.migration || {}),
+    productionSafety: (raw.production_safety || []).map(String).filter(Boolean),
+    nextActions: (raw.next_actions || []).map(String).filter(Boolean),
+  }
+}
+
+function mapProjectConfigPersistenceContract(raw: BackendProjectConfigPersistenceContract): ProjectConfigPersistenceContract {
+  const record = raw.config_record || {}
+  const roundtrip = raw.roundtrip || {}
+  return {
+    contractVersion: Number(raw.contract_version || 1),
+    projectId: String(raw.project_id || ''),
+    sourceBackend: String(raw.source_backend || ''),
+    targetBackend: String(raw.target_backend || ''),
+    targetTables: (raw.target_tables || []).map(String).filter(Boolean),
+    configRecord: {
+      teamId: String(record.team_id || ''),
+      projectKey: String(record.project_key || ''),
+      name: String(record.name || ''),
+      status: String(record.status || ''),
+      adapter: String(record.adapter || ''),
+      moduleIds: (record.module_ids || []).map(String).filter(Boolean),
+      description: String(record.description || ''),
+      fieldSchema: mapWorkItemSchema(record.field_schema) || {
+        platformRequiredFields: [],
+        customFields: [],
+      },
+      workflowDefinition: mapProjectWorkflow(record.workflow_definition) || {
+        version: 1,
+        nodes: [],
+        edges: [],
+        updatedAt: '',
+        updatedBy: '',
+      },
+      createdAt: String(record.created_at || ''),
+      updatedAt: String(record.updated_at || ''),
+      createdBy: String(record.created_by || ''),
+      updatedBy: String(record.updated_by || ''),
+    },
+    roundtrip: {
+      canRestore: Boolean(roundtrip.can_restore),
+      preservedKeys: (roundtrip.preserved_keys || []).map(String).filter(Boolean),
+      missingPreservedKeys: (roundtrip.missing_preserved_keys || []).map(String).filter(Boolean),
+    },
+    migrationGate: (raw.migration_gate || []).map(String).filter(Boolean),
+    safety: (raw.safety || []).map(String).filter(Boolean),
   }
 }
 
@@ -916,12 +2038,20 @@ function mapProject(raw: BackendPlatformProject): Project {
     updatedAt: raw.updated_at || '',
     modules: mapProjectModules(raw.modules),
     workItemSchema: mapWorkItemSchema(raw.work_item_schema),
+    workflow: mapProjectWorkflow(raw.workflow),
+    workflowStatus: mapProjectWorkflowStatus(raw.workflow_status),
     tasks: raw.tasks ? mapProjectTasks(raw.tasks) : undefined,
     delivery: raw.delivery ? mapProjectDelivery(raw.delivery) : undefined,
     field: raw.field ? mapProjectField(raw.field) : undefined,
     review: raw.review ? mapProjectReview(raw.review) : undefined,
     risks: raw.risks ? mapProjectRisks(raw.risks) : undefined,
   }
+}
+
+let lastProjectListConfigPreflight: PlatformConfigPreflight | null = null
+
+export function getLastProjectListConfigPreflight(): PlatformConfigPreflight | null {
+  return lastProjectListConfigPreflight
 }
 
 function mapTask(raw: BackendTask): ReviewTask {
@@ -997,6 +2127,15 @@ function mapStringArray(value: unknown): string[] {
   return text ? [text] : []
 }
 
+function mapStringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => [String(key || '').trim(), String(item ?? '').trim()])
+      .filter(([key]) => key),
+  )
+}
+
 function mapPhoto(raw: BackendPhoto): ReviewPhoto {
   const originalUrl = raw.image_url || raw.source_url || raw.url || ''
   const imageUrl = raw.delivery_cache_url || raw.preview_url || raw.thumbnail_url || originalUrl
@@ -1015,6 +2154,8 @@ function mapPhoto(raw: BackendPhoto): ReviewPhoto {
     status: category === 'unclassified' ? 'unclassified' : 'valid',
     category,
     categoryLabel: raw.category_label || '',
+    constructionSlot: raw.construction_slot || '',
+    constructionSlotLabel: raw.construction_slot_label || '',
     archiveStatus: raw.archive_status || '',
     archiveFilename: raw.archive_filename || '',
     barcode: raw.barcode || '',
@@ -1057,6 +2198,7 @@ function mapGroup(raw: BackendGroup): MaterialGroup {
     constructionCollector: raw.construction_collector || '',
     constructionModuleAssetNo: raw.construction_module_asset_no || '',
     constructionStatus: raw.construction_status || '',
+    fieldValues: mapStringRecord(raw.construction_field_values || raw.field_values),
     exceptionOrderId: raw.exception_order_id || '',
     groupBarcodeCheckStatus: raw.group_barcode_check_status || '',
     groupBarcodeMatchedFields: mapStringArray(raw.group_barcode_matched_fields),
@@ -1360,22 +2502,99 @@ export async function fetchProjectModuleSections(
 }
 
 export async function fetchProjectsWithModules(): Promise<Project[]> {
-  const data = await api<{ items: BackendPlatformProject[] }>('/projects')
+  const data = await api<BackendProjectListResponse>('/projects')
+  lastProjectListConfigPreflight = data.config_preflight
+    ? mapPlatformConfigPreflight(data.config_preflight)
+    : null
   const projects = (data.items || []).map(mapProject)
-  return Promise.all(
-    projects.map(async (project) => {
-      const sections = await fetchProjectModuleSections(project.id, project.modules)
-      return {
-        ...project,
-        ...sections.progress,
-        delivery: sections.delivery,
-        field: sections.field,
-        review: sections.review,
-        risks: sections.risks,
-        tasks: sections.tasks,
-      }
-    }),
+  return projects
+}
+
+export async function fetchProjectConstructionWorkOrders(projectId: string): Promise<PlatformConstructionWorkOrders> {
+  const data = await api<BackendPlatformConstructionWorkOrders>(
+    `/projects/${encodeURIComponent(projectId)}/construction/work-orders`,
   )
+  return mapPlatformConstructionWorkOrders(data)
+}
+
+export async function fetchProjectReviewWorkOrders(projectId: string): Promise<PlatformReviewWorkOrders> {
+  const data = await api<BackendPlatformReviewWorkOrders>(
+    `/projects/${encodeURIComponent(projectId)}/review/work-orders`,
+  )
+  return mapPlatformReviewWorkOrders(data)
+}
+
+export async function fetchProjectDeliveryArchiveReadiness(projectId: string): Promise<PlatformDeliveryArchiveReadiness> {
+  const data = await api<BackendPlatformDeliveryArchiveReadiness>(
+    `/projects/${encodeURIComponent(projectId)}/delivery/archive-readiness`,
+  )
+  return mapPlatformDeliveryArchiveReadiness(data)
+}
+
+export async function fetchProjectDeliveryArchiveManifest(projectId: string): Promise<PlatformDeliveryArchiveManifest> {
+  const data = await api<BackendPlatformDeliveryArchiveManifest>(
+    `/projects/${encodeURIComponent(projectId)}/delivery/archive-manifest`,
+  )
+  return mapPlatformDeliveryArchiveManifest(data)
+}
+
+export async function reviewProjectReviewWorkOrder(
+  projectId: string,
+  workOrderId: string,
+  payload: PlatformReviewActionPayload,
+): Promise<PlatformReviewWorkOrder> {
+  const body: BackendPlatformReviewActionPayload = {
+    actor: payload.actor,
+    action: payload.action,
+    note: payload.note,
+    reason: payload.reason,
+  }
+  const data = await api<BackendPlatformReviewWorkOrder>(
+    `/projects/${encodeURIComponent(projectId)}/review/work-orders/${encodeURIComponent(workOrderId)}/actions`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+  return mapPlatformReviewWorkOrder(data)
+}
+
+export async function saveProjectConstructionWorkOrderCollection(
+  projectId: string,
+  workOrderId: string,
+  payload: PlatformConstructionCollectionPayload,
+): Promise<PlatformConstructionWorkOrder> {
+  const data = await api<BackendPlatformConstructionWorkOrder>(
+    `/projects/${encodeURIComponent(projectId)}/construction/work-orders/${encodeURIComponent(workOrderId)}/collection-draft`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        actor: payload.actor,
+        client_batch_id: payload.clientBatchId,
+        status: payload.status,
+        field_values: payload.fieldValues,
+        covered_photo_slots: payload.coveredPhotoSlots,
+      }),
+    },
+  )
+  return mapPlatformConstructionWorkOrder(data)
+}
+
+export async function uploadProjectConstructionWorkOrderPhoto(
+  projectId: string,
+  workOrderId: string,
+  payload: PlatformConstructionPhotoUploadPayload,
+): Promise<PlatformConstructionWorkOrder> {
+  const form = new FormData()
+  form.set('actor', payload.actor)
+  form.set('slot', payload.slot)
+  form.set('client_photo_id', payload.clientPhotoId)
+  form.set('file', payload.file)
+  const data = await formApi<BackendPlatformConstructionWorkOrder>(
+    `/projects/${encodeURIComponent(projectId)}/construction/work-orders/${encodeURIComponent(workOrderId)}/photos`,
+    form,
+  )
+  return mapPlatformConstructionWorkOrder(data)
 }
 
 export async function createProject(payload: ProjectCreatePayload): Promise<Project> {
@@ -1422,6 +2641,100 @@ export async function updateProjectWorkItemSchema(
   }
 }
 
+export async function fetchProjectWorkflow(projectId: string): Promise<ProjectWorkflow> {
+  const data = await api<BackendProjectWorkflow>(`/projects/${encodeURIComponent(projectId)}/workflow`)
+  return mapProjectWorkflow(data) || {
+    version: 1,
+    nodes: [],
+    edges: [],
+    updatedAt: '',
+    updatedBy: '',
+  }
+}
+
+export async function fetchProjectReadiness(projectId: string): Promise<ProjectReadiness> {
+  const data = await api<BackendProjectReadiness>(`/projects/${encodeURIComponent(projectId)}/readiness`)
+  return mapProjectReadiness(data)
+}
+
+export async function fetchProjectReadinessSummary(): Promise<ProjectReadinessSummaryList> {
+  const data = await api<BackendProjectReadinessSummaryList>('/projects/readiness/summary')
+  return mapProjectReadinessSummaryList(data)
+}
+
+export async function fetchPlatformHandoffReadiness(): Promise<PlatformHandoffReadiness> {
+  const data = await api<BackendPlatformHandoffReadiness>('/projects/handoff/readiness')
+  return mapPlatformHandoffReadiness(data)
+}
+
+export async function fetchPlatformPersistenceStatus(): Promise<PlatformPersistenceStatus> {
+  const data = await api<BackendPlatformPersistenceStatus>('/projects/persistence/status')
+  return mapPlatformPersistenceStatus(data)
+}
+
+export async function fetchProjectConfigPreflight(): Promise<PlatformConfigPreflight> {
+  const data = await api<BackendPlatformConfigPreflight>('/projects/persistence/config-preflight')
+  return mapPlatformConfigPreflight(data)
+}
+
+export async function fetchPlatformMigrationReadiness(): Promise<PlatformMigrationReadiness> {
+  const data = await api<BackendPlatformMigrationReadiness>('/projects/persistence/migration-readiness')
+  return mapPlatformMigrationReadiness(data)
+}
+
+export async function fetchProjectConfigPersistenceContract(projectId: string): Promise<ProjectConfigPersistenceContract> {
+  const data = await api<BackendProjectConfigPersistenceContract>(`/projects/${encodeURIComponent(projectId)}/persistence/contract`)
+  return mapProjectConfigPersistenceContract(data)
+}
+
+export async function saveProjectWorkflow(
+  projectId: string,
+  workflow: ProjectWorkflow,
+  actor = currentActor(),
+): Promise<ProjectWorkflow> {
+  const data = await api<BackendProjectWorkflow>(`/projects/${encodeURIComponent(projectId)}/workflow`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      ...mapProjectWorkflowForSave(workflow),
+      actor,
+    }),
+  })
+  return mapProjectWorkflow(data) || workflow
+}
+
+export async function resetProjectWorkflow(
+  projectId: string,
+  actor = currentActor(),
+): Promise<ProjectWorkflow> {
+  const data = await api<BackendProjectWorkflow>(`/projects/${encodeURIComponent(projectId)}/workflow/reset`, {
+    method: 'POST',
+    body: JSON.stringify({ actor }),
+  })
+  return mapProjectWorkflow(data) || {
+    version: 1,
+    nodes: [],
+    edges: [],
+    updatedAt: '',
+    updatedBy: actor,
+  }
+}
+
+export async function previewProjectTemplateFields(
+  projectId: string,
+  workItemSchema: ProjectWorkItemSchema,
+): Promise<ProjectTemplateFieldPreview> {
+  const data = await api<BackendProjectTemplateFieldPreview>(
+    `/projects/${encodeURIComponent(projectId)}/templates/preview`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        work_item_schema: mapWorkItemSchemaForCreate(workItemSchema),
+      }),
+    },
+  )
+  return mapProjectTemplateFieldPreview(data)
+}
+
 export async function downloadProjectTemplate(
   projectId: string,
   templateType: ProjectTemplateType,
@@ -1437,6 +2750,100 @@ export async function downloadProjectTemplate(
   const blob = await response.blob()
   const fallbackName = `${projectName || projectId}-${templateType}.xlsx`
   triggerBrowserDownload(blob, filenameFromDisposition(response.headers.get('Content-Disposition') || '', fallbackName))
+}
+
+export async function validateProjectTemplate(
+  projectId: string,
+  templateType: ProjectTemplateType,
+  file: File,
+): Promise<ProjectTemplateValidationReport> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const response = await fetchWithAuth(`/projects/${projectId}/templates/${templateType}/validate`, {
+    method: 'POST',
+    headers: formHeaders(),
+    body: formData,
+  })
+  const payload = (await response.json()) as ApiEnvelope<ProjectTemplateValidationReport>
+  if (!response.ok || payload.error) {
+    throw new Error(payload.detail || payload.error?.message || response.statusText)
+  }
+  return payload.data as ProjectTemplateValidationReport
+}
+
+export async function createProjectTemplateImportDraft(
+  projectId: string,
+  templateType: ProjectTemplateType,
+  file: File,
+): Promise<ImportJob> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const job = await formApi<BackendImportJob>(
+    `/projects/${projectId}/templates/${templateType}/import-drafts`,
+    formData,
+  )
+  return mapImportJob(job)
+}
+
+export async function confirmProjectTemplateImportBatch(
+  projectId: string,
+  templateType: ProjectTemplateType,
+  file: File,
+  actor = currentActor(),
+): Promise<ImportJob> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('actor', actor)
+  const job = await formApi<BackendImportJob>(
+    `/projects/${projectId}/templates/${templateType}/import-batches`,
+    formData,
+  )
+  return mapImportJob(job)
+}
+
+export async function createImportBatchWorkOrderTask(
+  projectId: string,
+  batchId: string,
+  actor = currentActor(),
+): Promise<ImportJob> {
+  const job = await api<BackendImportJob>(
+    `/projects/${projectId}/import-batches/${batchId}/work-order-tasks`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ actor, mode: 'safe_record_only' }),
+    },
+  )
+  return mapImportJob(job)
+}
+
+export async function executeImportWorkOrderTask(
+  projectId: string,
+  taskId: string,
+  actor = currentActor(),
+): Promise<ImportJob> {
+  const job = await api<BackendImportJob>(
+    `/projects/${projectId}/work-order-tasks/${taskId}/execute`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ actor, mode: 'local_platform_store' }),
+    },
+  )
+  return mapImportJob(job)
+}
+
+export async function rollbackImportWorkOrderTask(
+  projectId: string,
+  taskId: string,
+  actor = currentActor(),
+): Promise<ImportJob> {
+  const job = await api<BackendImportJob>(
+    `/projects/${projectId}/work-order-tasks/${taskId}/rollback`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ actor }),
+    },
+  )
+  return mapImportJob(job)
 }
 
 export async function fetchProjects(): Promise<Project[]> {

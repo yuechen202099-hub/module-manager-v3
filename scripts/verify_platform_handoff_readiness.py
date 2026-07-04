@@ -19,10 +19,10 @@ def require(condition: bool, message: str) -> None:
 def main() -> None:
     readiness = build_platform_handoff_readiness()
     require(readiness.get("handoff_version") == 1, "handoff version must be 1")
-    require(readiness.get("feature_branch") == "pm-platform/project-drafts", "feature branch drifted")
+    require(readiness.get("feature_branch") == "pm-platform/production-3.0.77-sync", "feature branch drifted")
     baseline = readiness.get("production_baseline", {})
-    require(baseline.get("branch") == "production/V3/3.0.71", "production branch drifted")
-    require(baseline.get("version") == "V3.0.71", "production version drifted")
+    require(baseline.get("branch") == "production/V3/3.0.77", "production branch drifted")
+    require(baseline.get("version") == "V3.0.77", "production version drifted")
     require(readiness.get("ready_for_review_package") is True, "review package should be ready")
     require(readiness.get("ready_for_production_migration") is False, "migration must stay blocked")
     require(readiness.get("ready_for_production_release") is False, "release must stay blocked")

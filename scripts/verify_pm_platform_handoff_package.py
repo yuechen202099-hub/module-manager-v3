@@ -155,8 +155,8 @@ REQUIRED_PR_BODY_STRINGS = [
 REQUIRED_TEAM_STRINGS = [
     "Context-Stable Team Contract",
     "Codex Integrator remains the single project manager",
-    "Current production baseline: `production/V3/3.0.71`",
-    "Current feature branch: `pm-platform/project-drafts`",
+    "Current production baseline: `production/V3/3.0.77`",
+    "Current feature branch: `pm-platform/production-3.0.77-sync`",
     "PR/patch handoff",
     "frontend project readiness panel",
     "Context compression rule",

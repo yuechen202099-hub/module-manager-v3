@@ -537,6 +537,43 @@ def test_create_project_draft_keeps_work_item_schema_with_required_platform_fiel
     assert {"installer", "completed_at", "online_duration_minutes"}.issubset(kpi_keys)
 
 
+def test_project_work_item_schema_rejects_extra_aggregate_field():
+    client = TestClient(app)
+
+    response = client.post(
+        "/projects",
+        json={
+            "name": "Bad Aggregate Model",
+            "module_ids": ["progress", "field"],
+            "work_item_schema": {
+                "primary_field": {
+                    "key": "terminal_no",
+                    "label": "Terminal",
+                    "source": "import",
+                    "relation_role": "task_object",
+                },
+                "aggregate_field": {
+                    "key": "area_no",
+                    "label": "Area",
+                    "source": "import",
+                    "relation_role": "aggregate",
+                },
+                "custom_fields": [
+                    {
+                        "key": "manufacturer",
+                        "label": "Manufacturer",
+                        "source": "import",
+                        "relation_role": "aggregate",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Only one aggregate field" in response.json()["detail"]
+
+
 def test_project_draft_registry_persists_work_item_schema(tmp_path):
     store_path = tmp_path / "platform-project-drafts.json"
     configure_project_draft_store_path(store_path)
@@ -629,6 +666,62 @@ def test_project_draft_work_item_schema_can_be_updated_and_persisted(tmp_path):
     assert persisted_schema["custom_fields"][1]["capture_method"] == "photo"
 
 
+def test_project_work_item_schema_rejects_terminal_replacement_without_accessory_confirmation():
+    client = TestClient(app)
+    create_response = client.post(
+        "/projects",
+        json={
+            "name": "Bad Terminal Hierarchy",
+            "module_ids": ["progress", "field", "review"],
+            "work_item_schema": {
+                "primary_field": {"key": "terminal_no", "label": "Terminal", "source": "import"},
+                "aggregate_field": {"key": "area_no", "label": "Area", "source": "import"},
+            },
+        },
+    )
+    project_id = create_response.json()["data"]["id"]
+
+    response = client.patch(
+        f"/projects/{project_id}/work-item-schema",
+        json={
+            "primary_field": {
+                "key": "terminal_no",
+                "label": "Terminal",
+                "source": "import",
+                "relation_role": "task_object",
+            },
+            "aggregate_field": {
+                "key": "area_no",
+                "label": "Area",
+                "source": "import",
+                "relation_role": "aggregate",
+            },
+            "custom_fields": [
+                {
+                    "key": "new_terminal_no",
+                    "label": "New terminal",
+                    "source": "field_collection",
+                    "capture_method": "scan",
+                    "required": True,
+                    "parent_key": "terminal_no",
+                    "relation_role": "replacement_device",
+                },
+                {
+                    "key": "communication_module_no",
+                    "label": "New communication module",
+                    "source": "field_collection",
+                    "capture_method": "scan",
+                    "parent_key": "terminal_no",
+                    "relation_role": "accessory_new_device",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "accessory confirmation" in response.json()["detail"]
+
+
 def test_project_draft_registry_recovers_projects_after_memory_reset(tmp_path):
     store_path = tmp_path / "platform-project-drafts.json"
     configure_project_draft_store_path(store_path)
@@ -695,7 +788,7 @@ def test_project_templates_download_schema_driven_workbooks(template_type, expec
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     workbook = load_workbook(BytesIO(response.content))
-    assert workbook.sheetnames == ["template", "fields"]
+    assert workbook.sheetnames == ["template", "fields", "instructions"]
     template_sheet = workbook["template"]
     headers = [cell.value for cell in template_sheet[1] if cell.value]
     for expected_header in expected_headers:
@@ -711,11 +804,19 @@ def test_project_templates_download_schema_driven_workbooks(template_type, expec
     assert "station_area" in field_rows
     if template_type == "external_completed":
         assert "uploaded_at" in field_rows
-        assert field_rows["uploaded_at"][6] == "平台上传时补齐"
-        assert field_rows["completed_at"][6] == "缺失时按上传时间补齐"
-        assert field_rows["installer"][6] == "缺失时按上传人补齐"
-
-
+        assert field_rows["uploaded_at"][9] == "平台上传时补齐"
+        assert field_rows["completed_at"][9] == "缺失时按上传时间补齐"
+        assert field_rows["installer"][9] == "缺失时按上传人补齐"
+        instructions_values = [
+            str(cell.value)
+            for row in workbook["instructions"].iter_rows()
+            for cell in row
+            if cell.value is not None
+        ]
+        instructions_text = "\n".join(instructions_values)
+        assert "模板填写说明" in instructions_text
+        assert "字段层级" in instructions_text
+        assert "上传时平台生成" in instructions_text
 def test_unknown_project_template_type_returns_404():
     client = TestClient(app)
 

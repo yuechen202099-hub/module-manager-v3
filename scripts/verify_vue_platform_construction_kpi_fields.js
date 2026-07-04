@@ -35,6 +35,19 @@ const checks = [
       view.includes('platformWorkOrderKpiLine'),
     message: 'ConstructionView must show required platform KPI collection fields and status.',
   },
+  {
+    ok:
+      services.includes('display_fields') &&
+      services.includes('displayFields: mapProjectFieldList(schema.display_fields)') &&
+      services.includes('show_in_construction_panel') &&
+      types.includes('showInConstructionPanel?: boolean') &&
+      types.includes('displayFields: ProjectFieldDefinition[]') &&
+      view.includes('platformConstructionDisplayFields') &&
+      view.includes('platformDisplayFieldValue') &&
+      view.includes('platform-core-context') &&
+      view.includes('display-field-chip'),
+    message: 'ConstructionView must keep task core display fields separate from editable construction collection fields.',
+  },
 ]
 
 const failures = checks.filter((check) => !check.ok)

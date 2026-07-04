@@ -11,6 +11,7 @@ from app.services.platform.catalog import (
     get_project_overview,
     get_project_section,
     get_project_workflow,
+    list_builtin_project_overviews,
     list_project_modules,
     list_project_overviews,
     reset_project_workflow,
@@ -19,10 +20,13 @@ from app.services.platform.catalog import (
 )
 from app.services.platform.persistence import build_platform_persistence_status
 from app.services.platform.config_persistence_contract import build_project_config_persistence_contract
+from app.services.platform.config_preflight import build_project_config_preflight
 from app.services.platform.handoff_readiness import build_platform_handoff_readiness
 from app.services.platform.migration_readiness import build_platform_migration_readiness
 from app.services.platform.readiness import build_project_readiness, build_project_readiness_summary
 from app.services.platform.templates import (
+    build_platform_delivery_archive_manifest,
+    build_platform_delivery_archive_readiness,
     build_project_template_workbook,
     build_project_template_preview,
     create_import_work_order_task,
@@ -69,9 +73,36 @@ def _project_section_or_404(project_id: str, section: str):
 def list_projects(request: Request):
     try:
         items = list_project_overviews()
-    except ProjectConfigurationError:
-        raise HTTPException(status_code=500, detail="Project configuration invalid")
-    return ok(request, {"total": len(items), "items": items})
+    except (ProjectConfigurationError, ProjectValidationError):
+        config_preflight = build_project_config_preflight()
+        if config_preflight.get("ready_for_config_load"):
+            raise HTTPException(status_code=500, detail="Project configuration invalid")
+        items = list_builtin_project_overviews()
+        return ok(
+            request,
+            {
+                "total": len(items),
+                "items": items,
+                "config_preflight": config_preflight,
+                "next_actions": ["fix_config_preflight_blockers"],
+                "safety": [
+                    "config_preflight_blocks_project_list",
+                    "read_only_no_write",
+                    "no_database_connection",
+                    "no_production_data_edit",
+                ],
+            },
+        )
+    return ok(
+        request,
+        {
+            "total": len(items),
+            "items": items,
+            "config_preflight": build_project_config_preflight(),
+            "next_actions": [],
+            "safety": ["project_list_loaded"],
+        },
+    )
 
 
 @router.get("/readiness/summary")
@@ -186,6 +217,28 @@ def get_project_progress(project_id: str, request: Request):
 @router.get("/{project_id}/delivery")
 def get_project_delivery(project_id: str, request: Request):
     return ok(request, _project_section_or_404(project_id, "delivery"))
+
+
+@router.get("/{project_id}/delivery/archive-readiness")
+def get_platform_delivery_archive_readiness(project_id: str, request: Request):
+    try:
+        readiness = build_platform_delivery_archive_readiness(project_id)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="Project not found")
+    except ProjectConfigurationError:
+        raise HTTPException(status_code=500, detail="Project configuration invalid")
+    return ok(request, readiness)
+
+
+@router.get("/{project_id}/delivery/archive-manifest")
+def get_platform_delivery_archive_manifest(project_id: str, request: Request):
+    try:
+        manifest = build_platform_delivery_archive_manifest(project_id)
+    except ProjectNotFound:
+        raise HTTPException(status_code=404, detail="Project not found")
+    except ProjectConfigurationError:
+        raise HTTPException(status_code=500, detail="Project configuration invalid")
+    return ok(request, manifest)
 
 
 @router.get("/{project_id}/field")
@@ -486,6 +539,11 @@ def get_platform_persistence_status(request: Request):
 @router.get("/persistence/migration-readiness")
 def get_platform_migration_readiness(request: Request):
     return ok(request, build_platform_migration_readiness())
+
+
+@router.get("/persistence/config-preflight")
+def get_project_config_preflight(request: Request):
+    return ok(request, build_project_config_preflight())
 
 
 @router.get("/{project_id}")

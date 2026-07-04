@@ -1,6 +1,11 @@
 from pydantic import BaseModel, Field
 
 
+class ProjectFieldRequiredWhen(BaseModel):
+    field_key: str = ""
+    equals: str | list[str] = ""
+
+
 class ProjectFieldCreate(BaseModel):
     key: str | None = None
     label: str
@@ -10,13 +15,24 @@ class ProjectFieldCreate(BaseModel):
     required: bool = False
     parent_key: str | None = None
     kpi_enabled: bool = False
+    show_in_construction_panel: bool | None = None
     options: list[str] = Field(default_factory=list)
+    required_when: ProjectFieldRequiredWhen | None = None
+    relation_role: str | None = None
+
+
+class ProjectDashboardMetricCreate(BaseModel):
+    key: str | None = None
+    label: str
+    source: str | None = None
+    scope: str | None = None
 
 
 class ProjectWorkItemSchemaCreate(BaseModel):
     primary_field: ProjectFieldCreate | None = None
     aggregate_field: ProjectFieldCreate | None = None
     custom_fields: list[ProjectFieldCreate] = Field(default_factory=list)
+    dashboard_metrics: list[ProjectDashboardMetricCreate] = Field(default_factory=list)
 
 
 class ProjectWorkItemSchemaUpdate(ProjectWorkItemSchemaCreate):

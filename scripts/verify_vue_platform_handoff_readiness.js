@@ -53,7 +53,7 @@ for (const token of [
   '交付就绪',
   '可评审包',
   '生产迁移未放行',
-  'production/V3/3.0.71',
+  'production/V3/3.0.77',
 ]) {
   if (!projectsSource.includes(token)) fail(`ProjectsView.vue missing handoff readiness token: ${token}`)
 }
@@ -73,6 +73,15 @@ if (operationsStart >= 0 && operationsEnd > operationsStart) {
   if (operationColumnSource.includes('交付就绪') || operationColumnSource.includes('handoff-readiness-band')) {
     fail('handoff readiness must stay as a summary band, not another row operation')
   }
+}
+
+for (const token of [
+  '.handoff-readiness-band strong',
+  'overflow-wrap: anywhere',
+  '@media (max-width: 720px)',
+  'grid-template-columns: 1fr',
+]) {
+  if (!projectsSource.includes(token)) fail(`handoff readiness mobile layout token missing: ${token}`)
 }
 
 console.log('[OK] Vue platform handoff readiness is wired.')

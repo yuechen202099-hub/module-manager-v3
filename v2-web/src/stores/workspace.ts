@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import * as services from '@/api/services'
 import type {
   MaterialGroup,
+  PlatformConfigPreflight,
   Project,
   ProjectCreatePayload,
   ProjectWorkItemSchema,
@@ -15,6 +16,7 @@ type WorkspaceState = {
   loading: boolean
   activeProjectId: string
   projects: Project[]
+  projectListConfigPreflight: PlatformConfigPreflight | null
   tasks: ReviewTask[]
   groups: MaterialGroup[]
   activeGroup: MaterialGroup | null
@@ -49,6 +51,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     loading: false,
     activeProjectId: readActiveProjectId(),
     projects: [],
+    projectListConfigPreflight: null,
     tasks: [],
     groups: [],
     activeGroup: null,
@@ -90,6 +93,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     },
     async loadProjects() {
       this.projects = await services.fetchProjects()
+      this.projectListConfigPreflight = services.getLastProjectListConfigPreflight()
       this.ensureActiveProject()
     },
     async createProjectDraft(payload: ProjectCreatePayload) {
@@ -117,6 +121,7 @@ export const useWorkspaceStore = defineStore('workspace', {
           services.fetchTaskGroups(),
         ])
         this.projects = projects
+        this.projectListConfigPreflight = services.getLastProjectListConfigPreflight()
         this.tasks = tasks
         this.groups = groups
         this.ensureActiveProject()

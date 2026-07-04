@@ -167,6 +167,10 @@ def create_app() -> FastAPI:
     def task_hall_page():
         return vue_index_response()
 
+    @app.get("/review/{group_id}")
+    def review_detail_page(group_id: str):
+        return vue_index_response()
+
     @app.get("/claim-tasks")
     def claim_tasks_page():
         return vue_index_response()

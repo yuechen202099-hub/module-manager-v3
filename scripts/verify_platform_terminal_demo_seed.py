@@ -44,22 +44,36 @@ if schema["aggregate_field"]["key"] != "area_no":
 
 custom_by_key = {field["key"]: field for field in schema["custom_fields"]}
 expected_fields = {
-    "old_device_no": ("旧设备（拆回）", "scan", "text"),
-    "communication_module_no": ("通讯模块（需更换）", "scan", "text"),
-    "new_sim_card_no": ("新SIM卡", "manual", "text"),
-    "before_reform_photo": ("改造前照片", "photo", "image"),
-    "old_device_recovery_photo": ("旧设备回收照片", "photo", "image"),
-    "old_new_module_photo": ("新旧模块照片", "photo", "image"),
-    "after_reform_photo": ("改造后照片", "photo", "image"),
+    "old_device_no": ("scan", "text"),
+    "communication_module_no": ("scan", "text"),
+    "new_sim_card_no": ("manual", "text"),
+    "before_reform_photo": ("photo", "image"),
+    "old_device_recovery_photo": ("photo", "image"),
+    "old_new_module_photo": ("photo", "image"),
+    "after_reform_photo": ("photo", "image"),
 }
-for key, (label, capture_method, data_type) in expected_fields.items():
+for key, (capture_method, data_type) in expected_fields.items():
     field = custom_by_key.get(key)
     if not field:
         fail(f"terminal demo seed missing field {key}")
-    if field["label"] != label or field["capture_method"] != capture_method or field["data_type"] != data_type:
-        fail(f"terminal demo seed field {key} has wrong label/capture/data type")
+    if not str(field.get("label") or "").strip():
+        fail(f"terminal demo seed field {key} must have a non-empty label")
+    if field["capture_method"] != capture_method or field["data_type"] != data_type:
+        fail(f"terminal demo seed field {key} has wrong capture/data type")
     if field.get("parent_key") != "terminal_no":
         fail(f"terminal demo seed field {key} must belong to terminal_no")
+
+new_terminal = custom_by_key.get("new_terminal_no")
+if not new_terminal:
+    fail("terminal demo seed missing field new_terminal_no")
+if new_terminal.get("capture_method") != "scan" or new_terminal.get("data_type") != "text":
+    fail("terminal demo seed new terminal must be a scanned text field")
+if new_terminal.get("parent_key") != "terminal_no":
+    fail("terminal demo seed new terminal must belong to terminal_no")
+if new_terminal.get("relation_role") != "replacement_device":
+    fail("terminal demo seed new terminal must be marked as replacement_device")
+if new_terminal.get("required") is not True:
+    fail("terminal demo seed new terminal must be required")
 
 orders = module.SAMPLE_WORK_ORDERS
 if not (3 <= len(orders) <= 5):

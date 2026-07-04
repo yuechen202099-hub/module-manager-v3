@@ -64,6 +64,124 @@ class ProjectModuleDefinition:
         }
 
 
+_REPLACEMENT_CONFIRM_OPTIONS = ("更换", "不更换", "待确认")
+
+_MODULE_REPLACEMENT_WORK_ITEM_SCHEMA: dict[str, Any] = {
+    "primary_field": {
+        "key": "meter_no",
+        "label": "电能表",
+        "data_type": "text",
+        "source": "import",
+        "capture_method": "manual",
+        "required": True,
+        "show_in_construction_panel": True,
+        "relation_role": "task_object",
+    },
+    "aggregate_field": {
+        "key": "area_no",
+        "label": "台区",
+        "data_type": "text",
+        "source": "import",
+        "capture_method": "manual",
+        "required": True,
+        "show_in_construction_panel": True,
+        "relation_role": "aggregate",
+    },
+    "custom_fields": [
+        {
+            "key": "old_module_no",
+            "label": "旧模块号（拆回扫码）",
+            "data_type": "text",
+            "source": "field_collection",
+            "capture_method": "scan",
+            "required": True,
+            "parent_key": "meter_no",
+            "show_in_construction_panel": True,
+            "relation_role": "old_device",
+        },
+        {
+            "key": "module_asset_no",
+            "label": "模块（需更换）",
+            "data_type": "text",
+            "source": "field_collection",
+            "capture_method": "scan",
+            "required": True,
+            "parent_key": "meter_no",
+            "show_in_construction_panel": True,
+            "relation_role": "accessory_new_device",
+        },
+        {
+            "key": "collector_replace_confirm",
+            "label": "采集器（确认是否更换）",
+            "data_type": "enum",
+            "source": "field_collection",
+            "capture_method": "select",
+            "required": True,
+            "parent_key": "meter_no",
+            "show_in_construction_panel": True,
+            "options": list(_REPLACEMENT_CONFIRM_OPTIONS),
+            "relation_role": "accessory_replace_confirm",
+        },
+        {
+            "key": "old_collector_no",
+            "label": "旧采集器号（更换时扫码）",
+            "data_type": "text",
+            "source": "field_collection",
+            "capture_method": "scan",
+            "required": False,
+            "parent_key": "meter_no",
+            "show_in_construction_panel": True,
+            "relation_role": "old_device",
+            "required_when": {"field_key": "collector_replace_confirm", "equals": "更换"},
+        },
+        {
+            "key": "collector_no",
+            "label": "新采集器号（更换时扫码）",
+            "data_type": "text",
+            "source": "field_collection",
+            "capture_method": "scan",
+            "required": False,
+            "parent_key": "meter_no",
+            "show_in_construction_panel": True,
+            "relation_role": "accessory_new_device",
+            "required_when": {"field_key": "collector_replace_confirm", "equals": "更换"},
+        },
+        {
+            "key": "before_replacement_photo",
+            "label": "更换前照片",
+            "data_type": "image",
+            "source": "field_collection",
+            "capture_method": "photo",
+            "required": True,
+            "parent_key": "meter_no",
+            "show_in_construction_panel": True,
+            "relation_role": "evidence_photo",
+        },
+        {
+            "key": "old_new_module_photo",
+            "label": "新旧模块照片",
+            "data_type": "image",
+            "source": "field_collection",
+            "capture_method": "photo",
+            "required": True,
+            "parent_key": "meter_no",
+            "show_in_construction_panel": True,
+            "relation_role": "evidence_photo",
+        },
+        {
+            "key": "after_replacement_photo",
+            "label": "更换后照片",
+            "data_type": "image",
+            "source": "field_collection",
+            "capture_method": "photo",
+            "required": True,
+            "parent_key": "meter_no",
+            "show_in_construction_panel": True,
+            "relation_role": "evidence_photo",
+        },
+    ],
+}
+
 _PROJECTS = (
     ProjectDefinition(
         id="replacement-project",
@@ -71,6 +189,7 @@ _PROJECTS = (
         status="active",
         adapter="replacement",
         module_ids=("progress", "delivery", "field", "review", "risks", "tasks"),
+        work_item_schema=_MODULE_REPLACEMENT_WORK_ITEM_SCHEMA,
     ),
 )
 
@@ -110,6 +229,17 @@ _PINYIN_SLUGS = {
 
 _VALID_FIELD_SOURCES = {"import", "field_collection", "review", "system"}
 _VALID_CAPTURE_METHODS = {"manual", "scan", "photo", "select", "datetime", "location", "system", "none"}
+_VALID_FIELD_RELATION_ROLES = {
+    "aggregate",
+    "task_object",
+    "task_detail",
+    "replacement_device",
+    "old_device",
+    "accessory_replace_confirm",
+    "accessory_new_device",
+    "evidence_photo",
+    "supporting_field",
+}
 _VALID_DATA_TYPES = {"text", "number", "datetime", "image", "enum", "duration", "location", "boolean"}
 
 _PLATFORM_REQUIRED_FIELDS: tuple[dict[str, Any], ...] = (
@@ -521,6 +651,7 @@ def _normalize_field_definition(
         "capture_method": capture_method,
         "required": bool(raw.get("required", default_required)),
         "kpi_enabled": bool(raw.get("kpi_enabled", default_kpi_enabled)),
+        "show_in_construction_panel": bool(raw.get("show_in_construction_panel", source == "field_collection")),
     }
     parent_key = str(raw.get("parent_key") or "").strip()
     if parent_key:
@@ -530,7 +661,142 @@ def _normalize_field_definition(
         clean_options = [str(option).strip() for option in options if str(option).strip()]
         if clean_options:
             field["options"] = clean_options
+    required_when = _normalize_required_when(raw.get("required_when"))
+    if required_when:
+        field["required_when"] = required_when
+    relation_role = str(raw.get("relation_role") or "").strip()
+    if relation_role:
+        if relation_role not in _VALID_FIELD_RELATION_ROLES:
+            raise ProjectValidationError(f"Unsupported field relation role: {relation_role}")
+        field["relation_role"] = relation_role
     return field
+
+
+def _normalize_required_when(raw_required_when: Any) -> dict[str, Any] | None:
+    raw = raw_required_when if isinstance(raw_required_when, dict) else {}
+    field_key = str(raw.get("field_key") or "").strip()
+    if not field_key:
+        return None
+    raw_equals = raw.get("equals")
+    if isinstance(raw_equals, list):
+        equals = [str(item).strip() for item in raw_equals if str(item).strip()]
+        return {"field_key": _slugify_field_key(field_key, field_key), "equals": equals} if equals else None
+    equals = str(raw_equals or "").strip()
+    return {"field_key": _slugify_field_key(field_key, field_key), "equals": equals} if equals else None
+
+
+def _field_relation_role(field: dict[str, Any] | None) -> str:
+    return str((field or {}).get("relation_role") or "").strip()
+
+
+def _field_required_when_key(field: dict[str, Any] | None) -> str:
+    required_when = (field or {}).get("required_when")
+    if not isinstance(required_when, dict):
+        return ""
+    return str(required_when.get("field_key") or "").strip()
+
+
+def _validate_single_aggregate_field(
+    primary_field: dict[str, Any],
+    aggregate_field: dict[str, Any],
+    custom_fields: list[dict[str, Any]],
+) -> None:
+    if _field_relation_role(aggregate_field) and _field_relation_role(aggregate_field) != "aggregate":
+        raise ProjectValidationError("aggregate_field relation_role must be aggregate")
+    if _field_relation_role(primary_field) == "aggregate":
+        raise ProjectValidationError("Only one aggregate field is allowed; use aggregate_field for grouping")
+    extra_aggregate_keys = [
+        str(field.get("key") or "")
+        for field in custom_fields
+        if _field_relation_role(field) == "aggregate"
+    ]
+    if extra_aggregate_keys:
+        raise ProjectValidationError(
+            "Only one aggregate field is allowed; move these fields to task details: "
+            + ", ".join(extra_aggregate_keys)
+        )
+
+
+def _validate_device_replacement_hierarchy(
+    primary_field: dict[str, Any],
+    custom_fields: list[dict[str, Any]],
+) -> None:
+    primary_key = str(primary_field.get("key") or "").strip()
+    device_roles = {
+        "replacement_device",
+        "old_device",
+        "accessory_replace_confirm",
+        "accessory_new_device",
+        "evidence_photo",
+    }
+    device_fields = [
+        field
+        for field in custom_fields
+        if _field_relation_role(field) in device_roles
+    ]
+    if not device_fields:
+        return
+
+    missing_parent_keys = [
+        str(field.get("key") or "")
+        for field in device_fields
+        if str(field.get("parent_key") or "").strip() != primary_key
+    ]
+    if missing_parent_keys:
+        raise ProjectValidationError(
+            "Device replacement hierarchy invalid; device fields must use primary field as parent: "
+            + ", ".join(missing_parent_keys)
+        )
+
+    confirmation_fields = [
+        field
+        for field in custom_fields
+        if _field_relation_role(field) == "accessory_replace_confirm"
+    ]
+    confirmation_keys = {
+        str(field.get("key") or "").strip()
+        for field in confirmation_fields
+        if str(field.get("key") or "").strip()
+    }
+    has_main_replacement = any(_field_relation_role(field) == "replacement_device" for field in custom_fields)
+    if has_main_replacement and not confirmation_keys:
+        raise ProjectValidationError("Main device replacement requires accessory confirmation fields")
+
+    invalid_conditional_keys = [
+        str(field.get("key") or "")
+        for field in custom_fields
+        if _field_required_when_key(field) and _field_required_when_key(field) not in confirmation_keys
+    ]
+    if invalid_conditional_keys:
+        raise ProjectValidationError(
+            "Device replacement hierarchy invalid; conditional fields must depend on accessory confirmation: "
+            + ", ".join(invalid_conditional_keys)
+        )
+
+    confirmation_without_child_keys = [
+        str(field.get("key") or "")
+        for field in confirmation_fields
+        if str(field.get("key") or "").strip()
+        and not any(_field_required_when_key(child) == str(field.get("key") or "").strip() for child in custom_fields)
+    ]
+    if confirmation_without_child_keys:
+        raise ProjectValidationError(
+            "Device replacement hierarchy invalid; accessory confirmation must control replacement fields: "
+            + ", ".join(confirmation_without_child_keys)
+        )
+
+    if not has_main_replacement:
+        return
+    unconditional_accessory_keys = [
+        str(field.get("key") or "")
+        for field in custom_fields
+        if _field_relation_role(field) == "accessory_new_device" and not _field_required_when_key(field)
+    ]
+    if unconditional_accessory_keys:
+        raise ProjectValidationError(
+            "Main device replacement accessory fields must depend on accessory confirmation: "
+            + ", ".join(unconditional_accessory_keys)
+        )
 
 
 def _platform_required_fields() -> list[dict[str, Any]]:
@@ -546,6 +812,28 @@ def _platform_required_fields() -> list[dict[str, Any]]:
         )
         for field in _PLATFORM_REQUIRED_FIELDS
     ]
+
+
+def _normalize_dashboard_metrics(raw_metrics: Any) -> list[dict[str, str]]:
+    source_metrics = raw_metrics if isinstance(raw_metrics, list) else list(_DEFAULT_DASHBOARD_METRICS)
+    metrics: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    for index, raw_metric in enumerate(source_metrics, start=1):
+        raw = raw_metric if isinstance(raw_metric, dict) else {}
+        label = str(raw.get("label") or raw.get("key") or f"Dashboard metric {index}").strip()
+        key = _slugify_field_key(str(raw.get("key") or label), f"dashboard_metric_{index}")
+        if not key or key in seen_keys:
+            continue
+        metric = {"key": key, "label": label or key}
+        source = str(raw.get("source") or "").strip()
+        scope = str(raw.get("scope") or "").strip()
+        if source:
+            metric["source"] = source
+        if scope:
+            metric["scope"] = scope
+        seen_keys.add(key)
+        metrics.append(metric)
+    return metrics or [dict(metric) for metric in _DEFAULT_DASHBOARD_METRICS]
 
 
 def _default_work_item_schema() -> dict[str, Any]:
@@ -586,13 +874,15 @@ def _normalize_work_item_schema(raw_schema: Any) -> dict[str, Any]:
             raise ProjectValidationError(f"Field key is reserved or duplicated: {field['key']}")
         reserved_keys.add(field["key"])
         custom_fields.append(field)
+    _validate_single_aggregate_field(primary_field, aggregate_field, custom_fields)
+    _validate_device_replacement_hierarchy(primary_field, custom_fields)
     return {
         "schema_version": 1,
         "primary_field": primary_field,
         "aggregate_field": aggregate_field,
         "platform_required_fields": _platform_required_fields(),
         "custom_fields": custom_fields,
-        "dashboard_metrics": [dict(metric) for metric in _DEFAULT_DASHBOARD_METRICS],
+        "dashboard_metrics": _normalize_dashboard_metrics(raw.get("dashboard_metrics")),
     }
 
 
@@ -701,6 +991,10 @@ def list_project_overviews() -> list[dict[str, Any]]:
     return [get_project_overview(project_id) for project_id in project_ids]
 
 
+def list_builtin_project_overviews() -> list[dict[str, Any]]:
+    return [_build_static_project_overview(project) for project in _PROJECTS]
+
+
 def get_project_definition(project_id: str) -> ProjectDefinition:
     if project_id in _PROJECT_BY_ID:
         return _PROJECT_BY_ID[project_id]
@@ -806,6 +1100,24 @@ def _empty_sections() -> dict[str, dict[str, Any]]:
             "review_rate": 0,
         },
     }
+
+
+def _build_static_project_overview(definition: ProjectDefinition) -> dict[str, Any]:
+    sections = _empty_sections()
+    overview: dict[str, Any] = {
+        "id": definition.id,
+        "name": definition.name,
+        "description": definition.description,
+        "status": definition.status,
+        "total_groups": 0,
+        "completed_groups": 0,
+        "exception_groups": 0,
+        "updated_at": definition.updated_at or definition.created_at,
+    }
+    overview.update(sections["progress"])
+    for section_id in ("delivery", "field", "review", "risks", "tasks"):
+        overview[section_id] = sections[section_id]
+    return _apply_project_definition(overview, definition)
 
 
 def _build_draft_project_overview(definition: ProjectDefinition) -> dict[str, Any]:

@@ -2,6 +2,7 @@
 import { Finished, MoreFilled, Refresh, Select } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
 import {
   assignConstructionExceptionOrder,
@@ -16,6 +17,7 @@ import {
   fetchConstructionExceptionOrders,
   fetchGroupPhotoObjectUrl,
   fetchGroup,
+  fetchProjectReviewWorkOrders,
   fetchUnmatchedRecords,
   fetchTaskGroups,
   fetchTasks,
@@ -25,14 +27,26 @@ import {
   resetGroupToUnconstructed,
   rescanPhotoBarcode,
   returnGroupToException,
+  reviewProjectReviewWorkOrder,
   saveReview,
   unassignConstructionExceptionOrder,
   unassignUnmatchedRecord,
   updateGroupMetadata,
   uploadGroupImages,
 } from '@/api/services'
-import type { ConstructionExceptionOrder, MaterialGroup, ReviewPhoto, ReviewTask, UnmatchedRecord } from '@/api/types'
+import type {
+  ConstructionExceptionOrder,
+  MaterialGroup,
+  PlatformReviewActionPayload,
+  PlatformReviewFieldReview,
+  PlatformReviewPhotoSlotReview,
+  PlatformReviewWorkOrder,
+  ReviewPhoto,
+  ReviewTask,
+  UnmatchedRecord,
+} from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
+import { useWorkspaceStore } from '@/stores/workspace'
 
 const categories = [
   { key: 'before_box', label: '表箱整体改造前', hotkey: '1' },
@@ -53,7 +67,36 @@ const exceptionCategories = [
 ]
 
 type GroupFilter = 'reviewable' | 'exception' | 'unconstructed' | 'archived' | 'all'
-type ReviewTaskMode = 'terminal' | 'exception' | 'unmatched'
+type ReviewTaskMode = 'terminal' | 'platform' | 'exception' | 'unmatched'
+type PlatformReviewStatusFilter = 'all' | 'pending_review' | 'approved' | 'returned' | 'exception' | 'not_ready'
+type PlatformReviewHierarchySection = {
+  id:
+    | 'task-core'
+    | 'main-device-replacement'
+    | 'device-replacement'
+    | 'accessory-confirmation'
+    | 'conditional-accessory-fields'
+    | 'supporting-fields'
+  title: string
+  helper: string
+  fields: PlatformReviewFieldReview[]
+}
+type PlatformReviewPhotoHierarchySection = {
+  id: 'photo-evidence' | 'other-photos'
+  title: string
+  helper: string
+  slots: PlatformReviewPhotoSlotReview[]
+}
+type PlatformReviewEvidenceIntentItem = {
+  key?: string
+  relationRole?: PlatformReviewFieldReview['relationRole'] | PlatformReviewPhotoSlotReview['relationRole']
+  requiredWhen?: PlatformReviewFieldReview['requiredWhen']
+}
+type PlatformReviewKpiEvidenceRow = {
+  key: string
+  label: string
+  value: string
+}
 type LoadGroupsOptions = {
   autoOpen?: boolean
 }
@@ -63,12 +106,15 @@ type GroupDetail = {
 }
 
 const auth = useAuthStore()
+const route = useRoute()
+const workspace = useWorkspaceStore()
 const actor = computed(() => auth.user?.username || auth.user?.id || currentActor())
 
 const loadingTasks = ref(false)
 const loadingGroups = ref(false)
 const loadingGroup = ref(false)
 const loadingFieldTasks = ref(false)
+const loadingPlatformReview = ref(false)
 const busy = ref(false)
 const rescanningBarcode = ref(false)
 const confirmingBarcode = ref(false)
@@ -76,8 +122,18 @@ const tasks = ref<ReviewTask[]>([])
 const groups = ref<MaterialGroup[]>([])
 const unmatchedRecords = ref<UnmatchedRecord[]>([])
 const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
+const platformReviewWorkOrders = ref<PlatformReviewWorkOrder[]>([])
+const platformReviewStatusCounts = ref<Record<Exclude<PlatformReviewStatusFilter, 'all'>, number>>({
+  pending_review: 0,
+  approved: 0,
+  returned: 0,
+  exception: 0,
+  not_ready: 0,
+})
 const activeTaskMode = ref<ReviewTaskMode>('terminal')
+const platformReviewStatusFilter = ref<PlatformReviewStatusFilter>('all')
 const selectedTaskId = ref('')
+const selectedPlatformReviewWorkOrderId = ref('')
 const selectedGroupId = ref('')
 const selectedPhotoId = ref('')
 const selectedCategory = ref(categories[0].key)
@@ -147,6 +203,200 @@ const isAdmin = computed(() => {
   return roles.includes('admin')
 })
 const selectedTask = computed(() => myTasks.value.find((task) => task.id === selectedTaskId.value) || null)
+const activePlatformProjectId = computed(() => {
+  const routeProjectId = Array.isArray(route.query.project_id) ? route.query.project_id[0] : route.query.project_id
+  return String(routeProjectId || workspace.activeProject?.id || workspace.activeProjectId || '').trim()
+})
+const selectedPlatformReviewWorkOrder = computed(
+  () => platformReviewWorkOrders.value.find((item) => item.id === selectedPlatformReviewWorkOrderId.value) || null,
+)
+const platformReviewReturnReasonSuggestion = computed(
+  () => selectedPlatformReviewWorkOrder.value?.suggestedReviewReturnReason || '',
+)
+const activePlatformReviewFieldReviews = computed(() => {
+  const workOrder = selectedPlatformReviewWorkOrder.value
+  if (!workOrder) return []
+  const values = platformReviewWorkOrderFieldValues(workOrder)
+  return workOrder.fieldReviews.filter((field) => isPlatformReviewConditionActiveForValues(field, values))
+})
+const activePlatformReviewPhotoSlotReviews = computed(() => {
+  const workOrder = selectedPlatformReviewWorkOrder.value
+  if (!workOrder) return []
+  const values = platformReviewWorkOrderFieldValues(workOrder)
+  return workOrder.photoSlotReviews.filter((slot) => isPlatformReviewConditionActiveForValues(slot, values))
+})
+const platformReviewFieldSections = computed<PlatformReviewHierarchySection[]>(() => {
+  const fields = activePlatformReviewFieldReviews.value
+  const sections = platformReviewFieldSectionsBase()
+  const sectionById = new Map(sections.map((section) => [section.id, section]))
+  for (const field of fields) {
+    sectionById.get(platformReviewFieldSectionId(field))?.fields.push(field)
+  }
+  return sections.filter((section) => section.fields.length)
+})
+const platformReviewPhotoSections = computed<PlatformReviewPhotoHierarchySection[]>(() => {
+  const slots = activePlatformReviewPhotoSlotReviews.value
+  const sections: PlatformReviewPhotoHierarchySection[] = [
+    {
+      id: 'photo-evidence',
+      title: '照片证据',
+      helper: '用于核查改造前、旧设备、新设备和改造后的现场状态。',
+      slots: slots.filter((slot) => slot.relationRole === 'evidence_photo'),
+    },
+    {
+      id: 'other-photos',
+      title: '其他照片',
+      helper: '项目自定义的补充照片槽位。',
+      slots: slots.filter((slot) => slot.relationRole !== 'evidence_photo'),
+    },
+  ]
+  return sections.filter((section) => section.slots.length)
+})
+const platformReviewKpiEvidenceRows = computed<PlatformReviewKpiEvidenceRow[]>(() => {
+  const workOrder = selectedPlatformReviewWorkOrder.value
+  if (!workOrder) return []
+  const labels: Record<string, string> = {
+    installer: '安装人员',
+    started_at: '安装时间',
+    completed_at: '完成时间',
+    uploaded_at: '上传时间',
+    online_duration_minutes: '在线时长（分钟）',
+    photo_count: '照片数量',
+    old_device_recovered: '旧设备回收',
+  }
+  return Object.entries(workOrder.kpiValues || {})
+    .map(([key, value]) => ({ key, label: labels[key] || key, value: String(value || '').trim() }))
+    .filter((row) => row.value)
+})
+const filteredPlatformReviewWorkOrders = computed(() => {
+  if (platformReviewStatusFilter.value === 'all') return platformReviewWorkOrders.value
+  return platformReviewWorkOrders.value.filter((item) => item.reviewStatus === platformReviewStatusFilter.value)
+})
+const platformReviewStats = computed(() => {
+  const total = platformReviewWorkOrders.value.length
+  const withPhotos = platformReviewWorkOrders.value.filter((item) => item.collectionPhotos.length > 0).length
+  const ready = platformReviewStatusCounts.value.pending_review
+  return { total, withPhotos, ready }
+})
+const platformReviewStatusOptions = computed(() => [
+  { label: '全部', value: 'all' as const, count: platformReviewStats.value.total },
+  { label: '待审', value: 'pending_review' as const, count: platformReviewStatusCounts.value.pending_review },
+  { label: '通过', value: 'approved' as const, count: platformReviewStatusCounts.value.approved },
+  { label: '退回', value: 'returned' as const, count: platformReviewStatusCounts.value.returned },
+  { label: '异常', value: 'exception' as const, count: platformReviewStatusCounts.value.exception },
+  { label: '未就绪', value: 'not_ready' as const, count: platformReviewStatusCounts.value.not_ready },
+])
+
+function platformReviewFieldSectionsBase(): PlatformReviewHierarchySection[] {
+  return [
+    { id: 'task-core', title: '任务核心', helper: '核查本工单对象及核心详情，例如终端号、安装地址、所属台区或地区。', fields: [] },
+    { id: 'main-device-replacement', title: '主设备更换', helper: '核查本次必须更换的主设备安装结果，例如新终端。', fields: [] },
+    { id: 'device-replacement', title: '设备/附属设备采集', helper: '核查旧设备拆回、附属新设备和其他设备编码。', fields: [] },
+    { id: 'accessory-confirmation', title: '附属设备确认', helper: '核查通讯模块、SIM 卡、采集器等附属设备是否同步更换。', fields: [] },
+    { id: 'conditional-accessory-fields', title: '条件补采', helper: '仅核查已触发的附属设备旧件、新件或前置字段。', fields: [] },
+    { id: 'supporting-fields', title: '补充字段', helper: '补充审阅、效率统计和施工追溯所需资料。', fields: [] },
+  ]
+}
+
+function isConditionalPlatformReviewField(field: PlatformReviewFieldReview) {
+  return Boolean(field.requiredWhen?.fieldKey)
+}
+
+function platformReviewWorkOrderFieldValues(workOrder: PlatformReviewWorkOrder) {
+  const values: Record<string, string> = {
+    ...workOrder.fieldValues,
+    ...workOrder.collectionFieldValues,
+    ...workOrder.kpiValues,
+  }
+  for (const field of workOrder.fieldReviews) {
+    const initialValue = String(field.initialValue || '').trim()
+    const collectedValue = String(field.collectedValue || '').trim()
+    if (initialValue && !values[field.key]) values[field.key] = initialValue
+    if (collectedValue) values[field.key] = collectedValue
+  }
+  return values
+}
+
+function platformReviewConditionMatches(
+  item: Pick<PlatformReviewFieldReview, 'requiredWhen'> | Pick<PlatformReviewPhotoSlotReview, 'requiredWhen'>,
+  values: Record<string, string>,
+) {
+  const requiredWhen = item.requiredWhen
+  const fieldKey = requiredWhen?.fieldKey
+  const expected = requiredWhen?.equals
+  const current = fieldKey ? String(values[fieldKey] || '').trim() : ''
+  if (!expected || !current) return false
+  return Array.isArray(expected) ? expected.map(String).includes(current) : current === String(expected)
+}
+
+function isPlatformReviewConditionActiveForValues(
+  item: Pick<PlatformReviewFieldReview, 'requiredWhen'> | Pick<PlatformReviewPhotoSlotReview, 'requiredWhen'>,
+  values: Record<string, string>,
+) {
+  if (!item.requiredWhen?.fieldKey) return true
+  return platformReviewConditionMatches(item, values)
+}
+
+function platformReviewFieldSectionId(field: PlatformReviewFieldReview): PlatformReviewHierarchySection['id'] {
+  if (field.relationRole === 'task_object' || field.relationRole === 'task_detail') return 'task-core'
+  if (isConditionalPlatformReviewField(field)) return 'conditional-accessory-fields'
+  if (field.relationRole === 'replacement_device') return 'main-device-replacement'
+  if (field.relationRole === 'accessory_replace_confirm') return 'accessory-confirmation'
+  if (field.relationRole === 'old_device' || field.relationRole === 'accessory_new_device') return 'device-replacement'
+  return 'supporting-fields'
+}
+
+function platformReviewRelationRoleLabel(
+  role: PlatformReviewFieldReview['relationRole'] | PlatformReviewPhotoSlotReview['relationRole'] | undefined,
+) {
+  const labels: Record<string, string> = {
+    aggregate: '聚合字段',
+    task_object: '任务对象',
+    task_detail: '核心详情',
+    replacement_device: '主设备 · 更换后',
+    old_device: '旧设备 · 拆回',
+    accessory_replace_confirm: '附属设备 · 是否更换',
+    accessory_new_device: '附属设备 · 新设备',
+    evidence_photo: '照片证据',
+    supporting_field: '补充字段',
+  }
+  return role ? labels[role] || '补充字段' : '补充字段'
+}
+
+function isPlatformReviewKpiEvidenceKey(key: string | undefined) {
+  return Boolean(
+    key &&
+      ['installer', 'started_at', 'completed_at', 'uploaded_at', 'online_duration_minutes', 'photo_count', 'old_device_recovered'].includes(key),
+  )
+}
+
+function platformReviewEvidenceIntentLabel(item: PlatformReviewEvidenceIntentItem) {
+  if (item.requiredWhen?.fieldKey) return '条件补采'
+  if (item.relationRole === 'replacement_device') return '主设备本体'
+  if (item.relationRole === 'accessory_replace_confirm') return '附属设备确认'
+  if (item.relationRole === 'old_device' || item.relationRole === 'accessory_new_device') return '任务对象下的附属设备'
+  if (item.relationRole === 'evidence_photo') return '照片证据'
+  if (isPlatformReviewKpiEvidenceKey(item.key)) return 'KPI资料'
+  if (item.relationRole === 'task_object' || item.relationRole === 'task_detail') return '任务核心'
+  return '补充资料'
+}
+
+function platformReviewEvidenceIntentType(item: PlatformReviewEvidenceIntentItem): '' | 'success' | 'warning' | 'danger' | 'info' {
+  if (item.requiredWhen?.fieldKey) return 'warning'
+  if (item.relationRole === 'replacement_device') return 'danger'
+  if (item.relationRole === 'accessory_replace_confirm') return 'warning'
+  if (item.relationRole === 'old_device' || item.relationRole === 'accessory_new_device') return 'success'
+  if (item.relationRole === 'evidence_photo' || isPlatformReviewKpiEvidenceKey(item.key)) return 'info'
+  return ''
+}
+
+function platformReviewConditionLabel(field: PlatformReviewFieldReview | PlatformReviewPhotoSlotReview) {
+  const requiredWhen = field.requiredWhen
+  const fieldKey = requiredWhen?.fieldKey
+  if (!fieldKey) return ''
+  const equals = Array.isArray(requiredWhen.equals) ? requiredWhen.equals.join('/') : requiredWhen.equals
+  return `${fieldKey} = ${equals || '指定值'} 时需要核查`
+}
 const selectedPhoto = computed(() => photos.value.find((photo) => photo.id === selectedPhotoId.value) || null)
 const selectedPhotoIndex = computed(() => photos.value.findIndex((photo) => photo.id === selectedPhotoId.value))
 const selectedPhotoPosition = computed(() => {
@@ -202,16 +452,19 @@ const activeFieldTaskCards = computed(() => {
   return []
 })
 const selectedFieldModeTitle = computed(() => {
+  if (activeTaskMode.value === 'platform') return '平台接入审阅'
   if (activeTaskMode.value === 'unmatched') return '未匹配任务'
   if (activeTaskMode.value === 'exception') return '异常任务'
   return ''
 })
 const selectedFieldModeHint = computed(() => {
+  if (activeTaskMode.value === 'platform') return '系统外接入工单的字段与照片槽位'
   if (activeTaskMode.value === 'unmatched') return '修改表号、换表、项目外施工与施工指派'
   if (activeTaskMode.value === 'exception') return '异常组指派给施工员后回流审阅'
   return ''
 })
 const selectedFieldModeEmpty = computed(() => {
+  if (activeTaskMode.value === 'platform') return '暂无平台接入审阅工单'
   if (activeTaskMode.value === 'unmatched') return '暂无未匹配任务'
   if (activeTaskMode.value === 'exception') return '暂无异常任务'
   return ''
@@ -679,6 +932,7 @@ async function loadTasks() {
   loadingTasks.value = true
   errorMessage.value = ''
   try {
+    await loadPlatformReviewWorkOrders()
     tasks.value = await fetchTasks()
     if (activeTaskMode.value === 'terminal') {
       scheduleFieldTasksWarmup()
@@ -707,6 +961,118 @@ async function loadTasks() {
     errorMessage.value = error instanceof Error ? error.message : '任务加载失败'
   } finally {
     loadingTasks.value = false
+  }
+}
+
+async function loadPlatformReviewWorkOrders() {
+  if (!workspace.projects.length) {
+    await workspace.loadProjects()
+  }
+  workspace.selectRouteProject(route.query.project_id)
+  const projectId = activePlatformProjectId.value
+  if (!projectId) {
+    platformReviewWorkOrders.value = []
+    platformReviewStatusCounts.value = {
+      pending_review: 0,
+      approved: 0,
+      returned: 0,
+      exception: 0,
+      not_ready: 0,
+    }
+    selectedPlatformReviewWorkOrderId.value = ''
+    return
+  }
+  loadingPlatformReview.value = true
+  try {
+    const result = await fetchProjectReviewWorkOrders(projectId)
+    platformReviewWorkOrders.value = result.items
+    platformReviewStatusCounts.value = result.statusCounts
+    if (!filteredPlatformReviewWorkOrders.value.some((item) => item.id === selectedPlatformReviewWorkOrderId.value)) {
+      selectedPlatformReviewWorkOrderId.value = filteredPlatformReviewWorkOrders.value[0]?.id || ''
+    }
+  } catch {
+    platformReviewWorkOrders.value = []
+    platformReviewStatusCounts.value = {
+      pending_review: 0,
+      approved: 0,
+      returned: 0,
+      exception: 0,
+      not_ready: 0,
+    }
+    selectedPlatformReviewWorkOrderId.value = ''
+  } finally {
+    loadingPlatformReview.value = false
+  }
+}
+
+function selectPlatformReviewWorkOrder(workOrder: PlatformReviewWorkOrder) {
+  activeTaskMode.value = 'platform'
+  selectedPlatformReviewWorkOrderId.value = workOrder.id
+  selectedTaskId.value = ''
+  selectedGroupId.value = ''
+  activeGroup.value = null
+  photos.value = []
+  resetImageState()
+}
+
+function selectPlatformReviewStatusFilter(status: PlatformReviewStatusFilter) {
+  platformReviewStatusFilter.value = status
+  if (!filteredPlatformReviewWorkOrders.value.some((item) => item.id === selectedPlatformReviewWorkOrderId.value)) {
+    selectedPlatformReviewWorkOrderId.value = filteredPlatformReviewWorkOrders.value[0]?.id || ''
+  }
+}
+
+function platformReviewActionLabel(action: string) {
+  if (action === 'approved') return '通过'
+  if (action === 'returned') return '退回'
+  if (action === 'exception') return '异常'
+  return action || '-'
+}
+
+async function submitPlatformReviewAction(action: PlatformReviewActionPayload['action']) {
+  const workOrder = selectedPlatformReviewWorkOrder.value
+  const projectId = activePlatformProjectId.value
+  if (!workOrder || !projectId) return
+  const actionText = action === 'approved' ? '通过' : action === 'returned' ? '退回' : '标异常'
+  let note = ''
+  try {
+    if (action === 'approved') {
+      await ElMessageBox.confirm('确认该平台接入工单资料完整，可以进入通过状态。', '平台接入审阅', {
+        confirmButtonText: '通过',
+        cancelButtonText: '取消',
+        type: 'success',
+      })
+      note = '审阅通过'
+    } else {
+      const result = await ElMessageBox.prompt(
+        action === 'returned' && platformReviewReturnReasonSuggestion.value ? '建议退回原因已带入，可按实际情况调整' : action === 'returned' ? '请输入退回施工的原因' : '请输入异常原因',
+        `平台接入审阅 - ${actionText}`,
+        {
+          confirmButtonText: actionText,
+          cancelButtonText: '取消',
+          inputValue: platformReviewReturnReasonSuggestion.value,
+          inputPattern: /\S+/,
+          inputErrorMessage: '原因不能为空',
+        },
+      )
+      note = String(result.value || '').trim()
+    }
+    busy.value = true
+    await reviewProjectReviewWorkOrder(projectId, workOrder.id, {
+      actor: actor.value,
+      action,
+      note,
+      reason: action === 'approved' ? '' : note,
+    })
+    selectedPlatformReviewWorkOrderId.value = workOrder.id
+    await loadPlatformReviewWorkOrders()
+    ElMessage.success(`已${actionText}`)
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error(error instanceof Error ? error.message : `${actionText}失败`)
+    }
+  } finally {
+    busy.value = false
   }
 }
 
@@ -1698,6 +2064,43 @@ onUnmounted(() => {
         </button>
         <ElEmpty v-if="!loadingTasks && !myTasks.length" description="暂无已领取任务" />
       </div>
+      <div class="platform-review-entry">
+        <div class="platform-review-entry-head">
+          <div>
+            <strong>平台接入审阅</strong>
+            <span>{{ platformReviewStats.ready }}/{{ platformReviewStats.total }} 待审</span>
+          </div>
+          <ElButton size="small" :loading="loadingPlatformReview" @click="loadPlatformReviewWorkOrders">刷新</ElButton>
+        </div>
+        <div class="platform-review-filter" role="group" aria-label="平台接入审阅状态筛选">
+          <button
+            v-for="status in platformReviewStatusOptions"
+            :key="status.value"
+            type="button"
+            :class="{ active: platformReviewStatusFilter === status.value }"
+            @click="selectPlatformReviewStatusFilter(status.value)"
+          >
+            <span>{{ status.label }}</span>
+            <strong>{{ status.count }}</strong>
+          </button>
+        </div>
+        <button
+          v-for="workOrder in filteredPlatformReviewWorkOrders"
+          :key="workOrder.id"
+          class="review-list-card task-card-simple platform-review-card"
+          :class="{ active: activeTaskMode === 'platform' && workOrder.id === selectedPlatformReviewWorkOrderId }"
+          type="button"
+          @click="selectPlatformReviewWorkOrder(workOrder)"
+        >
+          <strong>{{ workOrder.primaryValue || workOrder.id }}</strong>
+          <span>{{ workOrder.aggregateValue || '未填写聚合字段' }} / {{ workOrder.collectionStatus || '未采集' }}</span>
+          <div class="task-mini-metrics">
+            <b>字段 {{ workOrder.fieldReviews.filter((field) => field.collectedValue).length }}/{{ workOrder.fieldReviews.length }}</b>
+            <b>照片 {{ workOrder.collectionPhotos.length }}/{{ workOrder.photoSlotReviews.length }}</b>
+          </div>
+        </button>
+        <ElEmpty v-if="!loadingPlatformReview && !filteredPlatformReviewWorkOrders.length" description="暂无平台接入审阅工单" />
+      </div>
     </aside>
 
     <aside class="panel review-group-panel">
@@ -1708,7 +2111,49 @@ onUnmounted(() => {
         </div>
         <ElTag effect="plain">{{ activeTaskMode === 'terminal' ? visibleGroupCountLabel : activeFieldTaskCards.length }}</ElTag>
       </div>
-      <section v-if="activeTaskMode !== 'terminal'" class="field-task-section field-task-mode-panel">
+      <section v-if="activeTaskMode === 'platform'" class="field-task-section field-task-mode-panel platform-review-panel">
+        <div class="field-task-head">
+          <div>
+            <strong>平台接入审阅</strong>
+            <span>平台工单字段与照片槽位</span>
+          </div>
+          <ElTag effect="plain">{{ filteredPlatformReviewWorkOrders.length }}</ElTag>
+        </div>
+        <div class="platform-review-filter platform-review-filter-wide" role="group" aria-label="平台接入审阅状态筛选">
+          <button
+            v-for="status in platformReviewStatusOptions"
+            :key="status.value"
+            type="button"
+            :class="{ active: platformReviewStatusFilter === status.value }"
+            @click="selectPlatformReviewStatusFilter(status.value)"
+          >
+            <span>{{ status.label }}</span>
+            <strong>{{ status.count }}</strong>
+          </button>
+        </div>
+        <ElSkeleton v-if="loadingPlatformReview" :rows="6" animated />
+        <div v-else class="field-task-list field-task-list-full">
+          <article
+            v-for="workOrder in filteredPlatformReviewWorkOrders"
+            :key="workOrder.id"
+            class="field-task-card kind-platform"
+            :class="{ active: workOrder.id === selectedPlatformReviewWorkOrderId }"
+            @click="selectPlatformReviewWorkOrder(workOrder)"
+          >
+            <div class="field-task-title">
+              <strong>{{ workOrder.primaryValue || workOrder.id }}</strong>
+              <ElTag size="small" effect="light">{{ workOrder.reviewStatus || 'not_ready' }}</ElTag>
+            </div>
+            <p>{{ workOrder.aggregateValue || '未填写聚合字段' }} / {{ workOrder.collectedBy || '未记录采集人' }}</p>
+            <small>
+              平台工单字段 {{ workOrder.fieldReviews.filter((field) => field.collectedValue).length }}/{{ workOrder.fieldReviews.length }}
+              · 照片槽位 {{ workOrder.collectionPhotos.length }}/{{ workOrder.photoSlotReviews.length }}
+            </small>
+          </article>
+          <ElEmpty v-if="!filteredPlatformReviewWorkOrders.length" description="暂无平台接入审阅工单" />
+        </div>
+      </section>
+      <section v-else-if="activeTaskMode !== 'terminal'" class="field-task-section field-task-mode-panel">
         <div class="field-task-head">
           <div>
             <strong>{{ selectedFieldModeTitle }}</strong>
@@ -1826,6 +2271,161 @@ onUnmounted(() => {
       </div>
 
       <ElSkeleton v-if="loadingGroup" :rows="10" animated />
+      <template v-else-if="selectedPlatformReviewWorkOrder">
+        <section class="platform-review-detail">
+          <div class="platform-review-title">
+            <div>
+              <span>平台接入审阅</span>
+              <strong>{{ selectedPlatformReviewWorkOrder.primaryValue || selectedPlatformReviewWorkOrder.id }}</strong>
+              <small>{{ selectedPlatformReviewWorkOrder.aggregateValue || '未填写聚合字段' }}</small>
+            </div>
+            <ElTag effect="light">{{ selectedPlatformReviewWorkOrder.reviewStatus || 'not_ready' }}</ElTag>
+          </div>
+
+          <div class="review-meta-grid editable-meta-grid">
+            <div>
+              <span>采集状态</span>
+              <strong>{{ selectedPlatformReviewWorkOrder.collectionStatus || '-' }}</strong>
+            </div>
+            <div>
+              <span>采集人员</span>
+              <strong>{{ selectedPlatformReviewWorkOrder.collectedBy || '-' }}</strong>
+            </div>
+            <div>
+              <span>采集时间</span>
+              <strong>{{ selectedPlatformReviewWorkOrder.collectedAt || '-' }}</strong>
+            </div>
+            <div>
+              <span>本地照片</span>
+              <strong>{{ selectedPlatformReviewWorkOrder.collectionPhotos.length }}</strong>
+            </div>
+          </div>
+
+          <div class="platform-review-actions">
+            <ElButton
+              type="success"
+              :loading="busy"
+              :disabled="selectedPlatformReviewWorkOrder.reviewStatus === 'approved'"
+              @click="submitPlatformReviewAction('approved')"
+            >
+              通过
+            </ElButton>
+            <ElButton :loading="busy" @click="submitPlatformReviewAction('returned')">退回</ElButton>
+            <ElButton type="warning" plain :loading="busy" @click="submitPlatformReviewAction('exception')">标异常</ElButton>
+          </div>
+
+          <div v-if="platformReviewReturnReasonSuggestion" class="platform-review-return-suggestion">
+            <span>建议退回原因：{{ platformReviewReturnReasonSuggestion }}</span>
+          </div>
+
+          <section class="platform-review-block">
+            <h4>审阅记录</h4>
+            <div class="platform-review-history">
+              <div
+                v-for="event in selectedPlatformReviewWorkOrder.reviewHistory"
+                :key="event.id || `${event.action}-${event.reviewedAt}`"
+                class="platform-review-history-row"
+              >
+                <div>
+                  <strong>{{ platformReviewActionLabel(event.action) }}</strong>
+                  <span>{{ event.actor || '-' }} / {{ event.reviewedAt || '-' }}</span>
+                </div>
+                <small>{{ event.reason || event.note || '无备注' }}</small>
+              </div>
+              <ElEmpty v-if="!selectedPlatformReviewWorkOrder.reviewHistory.length" description="暂无审阅记录" />
+            </div>
+          </section>
+
+          <section
+            v-for="section in platformReviewFieldSections"
+            :key="section.id"
+            class="platform-review-block platform-review-section"
+            :class="`platform-review-section-${section.id}`"
+          >
+            <h4>{{ section.title }}</h4>
+            <p class="platform-review-section-helper">{{ section.helper }}</p>
+            <div class="platform-review-fields">
+              <div v-for="field in section.fields" :key="field.key" class="platform-review-field">
+                <span>{{ field.label }}<b v-if="field.required">*</b></span>
+                <small class="platform-review-role-tag">{{ platformReviewRelationRoleLabel(field.relationRole) }}</small>
+                <ElTag
+                  class="platform-review-intent-tag"
+                  size="small"
+                  :type="platformReviewEvidenceIntentType(field)"
+                  effect="light"
+                  title="审阅证据意图"
+                >
+                  {{ platformReviewEvidenceIntentLabel(field) }}
+                </ElTag>
+                <small>{{ field.captureMethod }}</small>
+                <small v-if="field.requiredWhen?.fieldKey" class="platform-review-condition-hint">{{ platformReviewConditionLabel(field) }}</small>
+                <strong>{{ field.collectedValue || '-' }}</strong>
+                <em>原始：{{ field.initialValue || '-' }}</em>
+              </div>
+            </div>
+          </section>
+
+          <section
+            v-for="photoSection in platformReviewPhotoSections"
+            :key="photoSection.id"
+            class="platform-review-block platform-review-section"
+            :class="`platform-review-section-${photoSection.id}`"
+          >
+            <h4>{{ photoSection.title }}</h4>
+            <p class="platform-review-section-helper">{{ photoSection.helper }}</p>
+            <div class="platform-review-fields">
+              <div v-for="slot in photoSection.slots" :key="slot.key" class="platform-review-field">
+                <span>{{ slot.label }}<b v-if="slot.required">*</b></span>
+                <small class="platform-review-role-tag">{{ platformReviewRelationRoleLabel(slot.relationRole) }}</small>
+                <ElTag
+                  class="platform-review-intent-tag"
+                  size="small"
+                  :type="platformReviewEvidenceIntentType(slot)"
+                  effect="light"
+                  title="审阅证据意图"
+                >
+                  {{ platformReviewEvidenceIntentLabel(slot) }}
+                </ElTag>
+                <small>{{ slot.covered ? '已上传' : '未上传' }}</small>
+                <small v-if="slot.requiredWhen?.fieldKey" class="platform-review-condition-hint">{{ platformReviewConditionLabel(slot) }}</small>
+                <strong>{{ slot.photoCount }} 张</strong>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="platformReviewKpiEvidenceRows.length" class="platform-review-block platform-review-section platform-review-section-kpi-evidence">
+            <h4>KPI资料</h4>
+            <p class="platform-review-section-helper">核查安装人员、安装时间、在线时长和旧设备回收等效率计算资料。</p>
+            <div class="platform-review-fields">
+              <div v-for="row in platformReviewKpiEvidenceRows" :key="row.key" class="platform-review-field">
+                <span>{{ row.label }}</span>
+                <ElTag
+                  class="platform-review-intent-tag"
+                  size="small"
+                  :type="platformReviewEvidenceIntentType(row)"
+                  effect="light"
+                  title="审阅证据意图"
+                >
+                  {{ platformReviewEvidenceIntentLabel(row) }}
+                </ElTag>
+                <strong>{{ row.value }}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section class="platform-review-block">
+            <h4>本地照片元数据</h4>
+            <div class="platform-review-photo-list">
+              <div v-for="photo in selectedPlatformReviewWorkOrder.collectionPhotos" :key="photo.id" class="platform-review-photo-row">
+                <strong>{{ photo.filename || photo.id }}</strong>
+                <span>{{ photo.slot }} / {{ photo.contentType || '-' }} / {{ photo.size }} B</span>
+                <small>{{ photo.storage }}</small>
+              </div>
+              <ElEmpty v-if="!selectedPlatformReviewWorkOrder.collectionPhotos.length" description="暂无本地照片" />
+            </div>
+          </section>
+        </section>
+      </template>
       <template v-else-if="activeGroup">
         <div
           v-if="selectedPhoto"
@@ -2135,6 +2735,277 @@ onUnmounted(() => {
 
 .field-task-card.kind-exception {
   border-left: 3px solid #b42318;
+}
+
+.field-task-card.kind-platform,
+.platform-review-card {
+  border-left: 3px solid #0f766e;
+}
+
+.platform-review-entry {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--v2-border-soft);
+}
+
+.platform-review-entry-head,
+.platform-review-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.platform-review-entry-head strong,
+.platform-review-title strong {
+  display: block;
+  color: var(--v2-text-strong);
+}
+
+.platform-review-entry-head span,
+.platform-review-title span,
+.platform-review-title small {
+  color: var(--v2-text-muted);
+  font-size: 12px;
+}
+
+.platform-review-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.platform-review-title {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--v2-border-soft);
+}
+
+.platform-review-title strong {
+  margin-top: 2px;
+  font-size: 26px;
+  line-height: 1.1;
+}
+
+.platform-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+  border-radius: var(--v2-radius-sm);
+  background: rgba(240, 253, 250, 0.72);
+}
+
+.platform-review-return-suggestion {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(217, 119, 6, 0.24);
+  border-radius: var(--v2-radius-sm);
+  background: rgba(255, 251, 235, 0.86);
+  color: #92400e;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.platform-review-return-suggestion span {
+  overflow-wrap: anywhere;
+}
+
+.platform-review-filter {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 6px;
+}
+
+.platform-review-filter button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 8px;
+  border: 1px solid var(--v2-border-soft);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-bg-subtle);
+  color: var(--v2-text);
+  font-size: 12px;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.platform-review-filter button.active {
+  border-color: rgba(15, 118, 110, 0.38);
+  background: rgba(240, 253, 250, 0.86);
+  color: var(--v2-primary);
+}
+
+.platform-review-filter span,
+.platform-review-filter strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-review-filter strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.platform-review-filter-wide {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.platform-review-block {
+  display: grid;
+  gap: 8px;
+}
+
+.platform-review-block h4 {
+  margin: 0;
+  color: var(--v2-text-strong);
+  font-size: 14px;
+}
+
+.platform-review-history {
+  display: grid;
+  gap: 8px;
+}
+
+.platform-review-history-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--v2-border-soft);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-bg-subtle);
+}
+
+.platform-review-history-row div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.platform-review-history-row strong {
+  color: var(--v2-text-strong);
+}
+
+.platform-review-history-row span,
+.platform-review-history-row small {
+  min-width: 0;
+  color: var(--v2-text-muted);
+  font-size: 12px;
+}
+
+.platform-review-history-row small {
+  overflow-wrap: anywhere;
+}
+
+.platform-review-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.platform-review-field,
+.platform-review-photo-row {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--v2-border-soft);
+  border-radius: var(--v2-radius-sm);
+  background: #fff;
+}
+
+.platform-review-field span,
+.platform-review-photo-row strong {
+  color: var(--v2-text-strong);
+  font-weight: 700;
+}
+
+.platform-review-field b {
+  color: #b42318;
+}
+
+.platform-review-field small,
+.platform-review-field em,
+.platform-review-photo-row span,
+.platform-review-photo-row small {
+  overflow: hidden;
+  color: var(--v2-text-muted);
+  font-size: 12px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-review-section {
+  padding: 10px;
+  border: 1px solid var(--v2-border-soft);
+  border-left-width: 3px;
+  border-radius: var(--v2-radius-sm);
+  background: #fff;
+}
+
+.platform-review-section-helper {
+  margin: -2px 0 2px;
+  color: var(--v2-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.platform-review-section-task-core,
+.platform-review-section-photo-evidence {
+  border-left-color: #2563eb;
+}
+
+.platform-review-section-main-device-replacement {
+  border-left-color: #059669;
+}
+
+.platform-review-section-device-replacement,
+.platform-review-section-other-photos {
+  border-left-color: #7c3aed;
+}
+
+.platform-review-section-accessory-confirmation {
+  border-left-color: #d97706;
+}
+
+.platform-review-section-conditional-accessory-fields {
+  border-left-color: #dc2626;
+}
+
+.platform-review-role-tag,
+.platform-review-intent-tag,
+.platform-review-condition-hint {
+  width: max-content;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 999px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.platform-review-role-tag {
+  background: #eef4ff;
+  color: #1d4ed8;
+}
+
+.platform-review-condition-hint {
+  background: #fff7ed;
+  color: #9a3412;
+  overflow-wrap: anywhere;
+}
+
+.platform-review-photo-list {
+  display: grid;
+  gap: 8px;
 }
 
 .field-task-title {
@@ -3402,4 +4273,3 @@ onUnmounted(() => {
   }
 }
 </style>
-

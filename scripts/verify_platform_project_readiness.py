@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
 from app.services.platform.catalog import configure_project_draft_store_path, reset_project_drafts  # noqa: E402
+from app.services.platform.readiness import _device_hierarchy_check  # noqa: E402
 
 
 def require(condition: bool, message: str) -> None:
@@ -28,14 +29,17 @@ def _create_complete_project(client: TestClient) -> str:
             "module_ids": ["progress", "field", "review", "tasks", "delivery"],
             "work_item_schema": {
                 "primary_field": {"key": "terminal", "label": "Terminal", "source": "import", "capture_method": "scan", "required": True},
-                "aggregate_field": {"key": "station_area", "label": "Station area", "source": "import", "capture_method": "manual", "required": True},
+                "aggregate_field": {"key": "station_area", "label": "Station area", "source": "import", "capture_method": "manual", "required": True, "relation_role": "aggregate"},
                 "custom_fields": [
-                    {"key": "old_terminal", "label": "Old terminal", "source": "field_collection", "capture_method": "scan", "required": True, "parent_key": "terminal"},
-                    {"key": "communication_module", "label": "Communication module", "source": "field_collection", "capture_method": "scan", "required": True, "parent_key": "terminal"},
-                    {"key": "new_sim_card", "label": "New SIM card", "source": "field_collection", "capture_method": "manual", "required": True, "parent_key": "terminal"},
-                    {"key": "before_photo", "label": "Before photo", "data_type": "image", "source": "field_collection", "capture_method": "photo", "required": True, "parent_key": "terminal"},
-                    {"key": "module_photo", "label": "Module photo", "data_type": "image", "source": "field_collection", "capture_method": "photo", "required": True, "parent_key": "terminal"},
-                    {"key": "after_photo", "label": "After photo", "data_type": "image", "source": "field_collection", "capture_method": "photo", "required": True, "parent_key": "terminal"},
+                    {"key": "old_terminal", "label": "Old terminal", "source": "field_collection", "capture_method": "scan", "required": True, "parent_key": "terminal", "relation_role": "old_device"},
+                    {"key": "new_terminal", "label": "New terminal", "source": "field_collection", "capture_method": "scan", "required": True, "parent_key": "terminal", "relation_role": "replacement_device"},
+                    {"key": "communication_module_replace_confirm", "label": "Communication module replace confirm", "data_type": "enum", "source": "field_collection", "capture_method": "select", "required": True, "parent_key": "terminal", "relation_role": "accessory_replace_confirm", "options": ["更换", "不更换"]},
+                    {"key": "communication_module", "label": "Communication module", "source": "field_collection", "capture_method": "scan", "required": False, "parent_key": "terminal", "relation_role": "accessory_new_device", "required_when": {"field_key": "communication_module_replace_confirm", "equals": "更换"}},
+                    {"key": "sim_card_replace_confirm", "label": "SIM card replace confirm", "data_type": "enum", "source": "field_collection", "capture_method": "select", "required": True, "parent_key": "terminal", "relation_role": "accessory_replace_confirm", "options": ["更换", "不更换"]},
+                    {"key": "new_sim_card", "label": "New SIM card", "source": "field_collection", "capture_method": "manual", "required": False, "parent_key": "terminal", "relation_role": "accessory_new_device", "required_when": {"field_key": "sim_card_replace_confirm", "equals": "更换"}},
+                    {"key": "before_photo", "label": "Before photo", "data_type": "image", "source": "field_collection", "capture_method": "photo", "required": True, "parent_key": "terminal", "relation_role": "evidence_photo"},
+                    {"key": "module_photo", "label": "Module photo", "data_type": "image", "source": "field_collection", "capture_method": "photo", "required": True, "parent_key": "terminal", "relation_role": "evidence_photo", "required_when": {"field_key": "communication_module_replace_confirm", "equals": "更换"}},
+                    {"key": "after_photo", "label": "After photo", "data_type": "image", "source": "field_collection", "capture_method": "photo", "required": True, "parent_key": "terminal", "relation_role": "evidence_photo"},
                 ],
             },
         },
@@ -75,6 +79,12 @@ def main() -> None:
             require(ready_payload.get("ready") is True, "complete project should be ready")
             require(ready_payload.get("summary", {}).get("failed") == 0, "complete project has failed checks")
             require("ready_for_construction_collection" in ready_payload.get("next_actions", []), "ready next action missing")
+            passed_ids = {
+                check.get("id")
+                for check in ready_payload.get("checks", [])
+                if check.get("status") == "passed"
+            }
+            require("device_hierarchy" in passed_ids, "complete project device hierarchy check missing")
 
             incomplete_response = client.post(
                 "/projects",
@@ -117,6 +127,27 @@ def main() -> None:
             require(action_counts.get("complete_field_schema", 0) >= 1, "field schema action count missing")
             require(action_counts.get("enable_review_workflow", 0) >= 1, "review workflow action count missing")
             require("ready_for_template_import" not in action_counts, "ready next actions must not be counted as todos")
+
+            device_check = _device_hierarchy_check(
+                {
+                    "primary_field": {"key": "terminal", "label": "Terminal", "relation_role": "task_object"},
+                    "custom_fields": [
+                        {"key": "old_terminal", "label": "Old terminal", "parent_key": "terminal", "relation_role": "old_device"},
+                        {"key": "new_terminal", "label": "New terminal", "parent_key": "terminal", "relation_role": "replacement_device"},
+                        {"key": "communication_module_replace_confirm", "label": "Communication module replace confirm", "parent_key": "terminal"},
+                        {"key": "communication_module", "label": "Communication module", "parent_key": "terminal", "relation_role": "accessory_new_device"},
+                    ],
+                }
+            )
+            require(device_check.get("status") == "failed", "flat terminal project device hierarchy should fail")
+            require(
+                "communication_module_replace_confirm" in device_check.get("evidence", {}).get("missing_confirmation_keys", []),
+                "flat terminal project missing confirmation evidence",
+            )
+            require(
+                "communication_module" in device_check.get("evidence", {}).get("unconditional_child_keys", []),
+                "flat terminal project missing conditional child evidence",
+            )
         finally:
             reset_project_drafts(remove_store=True)
             configure_project_draft_store_path(None)

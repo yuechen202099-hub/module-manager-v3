@@ -1947,6 +1947,9 @@ def test_direct_workspace_routes_redirect_to_app_shell() -> None:
     assert response.status_code == 307
     assert response.headers["location"] == "/task-hall"
 
+def test_review_detail_deep_link_serves_vue_shell() -> None:
+    assert_vue_shell_response(client.get("/review/g-001?project_id=draft-project"))
+
 def test_project_board_page_is_available() -> None:
     assert_vue_shell_response(client.get("/project-board"))
     assert_vue_shell_response(client.get("/project-board?embedded=1"))

@@ -16,6 +16,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   currentActor,
   currentTeamId,
+  fetchProjectConstructionWorkOrders,
   fetchProjectsWithModules,
   fetchConstructionExceptionOrders,
   fetchConstructionTaskGroups,
@@ -26,13 +27,17 @@ import {
   recordConstructionHeartbeat,
   recordConstructionNonIdleEvent,
   releaseConstructionTask,
+  saveProjectConstructionWorkOrderCollection,
   submitConstructionExceptionOrder,
+  uploadProjectConstructionWorkOrderPhoto,
   uploadConstructionBatch,
 } from '@/api/services'
 import type {
   ConstructionExceptionOrder,
   ConstructionPhotoSlot,
   MaterialGroup,
+  PlatformConstructionFieldSchema,
+  PlatformConstructionWorkOrder,
   Project,
   ProjectFieldDefinition,
   ReviewPhoto,
@@ -61,9 +66,6 @@ type DraftPhoto = {
   blob?: Blob
   filename?: string
   name?: string
-  mime_type?: string
-  size?: number
-  last_modified?: number
   client_photo_id?: string
 }
 
@@ -113,13 +115,46 @@ type TerminalSnapshot = {
 
 type WorkItem = {
   key: string
-  kind: 'group' | 'cached' | 'exception'
+  kind: 'group' | 'cached' | 'exception' | 'platform'
   group: MaterialGroup
   order?: ConstructionExceptionOrder
   draft?: CacheDraft
+  platformWorkOrder?: PlatformConstructionWorkOrder
 }
 
-const slots: ConstructionPhotoSlot[] = [
+type SiteChecklistItem = {
+  key: string
+  label: string
+  group: 'field' | 'photo' | 'kpi'
+  method: string
+  intentLabel: string
+  intentType: '' | 'success' | 'warning' | 'danger' | 'info'
+  required: boolean
+  done: boolean
+  value: string
+}
+
+type ConstructionFieldSection = {
+  id:
+    | 'task-core'
+    | 'main-device-replacement'
+    | 'device-replacement'
+    | 'accessory-confirmation'
+    | 'conditional-accessory-fields'
+    | 'supporting-fields'
+  title: string
+  helper: string
+  fields: ProjectFieldDefinition[]
+}
+
+type ConstructionPhotoSection = {
+  id: string
+  title: string
+  helper: string
+  slots: ConstructionPhotoSlot[]
+}
+
+const defaultPhotoSlots: ConstructionPhotoSlot[] = [
   { key: 'before_box', label: '改造前照片', required: true },
   { key: 'collector_barcode', label: '采集器照片', required: false },
   { key: 'module_meter', label: '模块与电表照片', required: true },
@@ -152,6 +187,7 @@ const loadingGroups = ref(false)
 const uploading = ref(false)
 const cacheBusy = ref(false)
 const submittingTask = ref(false)
+const loadingPlatformWorkOrders = ref(false)
 const offlineMode = ref(false)
 const tasks = ref<ReviewTask[]>([])
 const groups = ref<MaterialGroup[]>([])
@@ -161,6 +197,11 @@ const unmatchedRecords = ref<UnmatchedRecord[]>([])
 const drafts = ref<CacheDraft[]>([])
 const accountUsers = ref<UserAccount[]>([])
 const platformProjects = ref<Project[]>([])
+const platformConstructionWorkOrders = ref<PlatformConstructionWorkOrder[]>([])
+const platformConstructionSchema = ref<PlatformConstructionFieldSchema | null>(null)
+const platformConstructionTotal = ref(0)
+const platformReworkOnly = ref(false)
+const activePlatformWorkOrder = ref<PlatformConstructionWorkOrder | null>(null)
 const taskPickerMode = ref<TaskPickerMode>('terminal')
 const selectedTaskId = ref('')
 const selectedItemKey = ref('')
@@ -205,6 +246,38 @@ const form = reactive({
   dynamicFields: {} as Record<string, string>,
   note: '',
 })
+const platformKpiInputFields: ProjectFieldDefinition[] = [
+  {
+    key: 'started_at',
+    label: '安装时间',
+    dataType: 'datetime',
+    source: 'field_collection',
+    captureMethod: 'datetime',
+    required: false,
+    kpiEnabled: true,
+    options: [],
+  },
+  {
+    key: 'completed_at',
+    label: '完成时间',
+    dataType: 'datetime',
+    source: 'field_collection',
+    captureMethod: 'datetime',
+    required: true,
+    kpiEnabled: true,
+    options: [],
+  },
+  {
+    key: 'online_duration_minutes',
+    label: '在线时长（分钟）',
+    dataType: 'duration',
+    source: 'system',
+    captureMethod: 'manual',
+    required: false,
+    kpiEnabled: true,
+    options: [],
+  },
+]
 const unbuiltDialogTask = ref<ReviewTask | null>(null)
 const unbuiltDialogGroups = ref<MaterialGroup[]>([])
 const unbuiltDialogQuery = ref('')
@@ -232,14 +305,232 @@ const activeProjectId = computed(() => String(route.query.project_id || 'replace
 const activeProject = computed(() => platformProjects.value.find((project) => project.id === activeProjectId.value) || null)
 const constructionFields = computed(() => {
   const fields = activeProject.value?.workItemSchema?.customFields || []
-  return fields.filter((field) => field.source === 'field_collection' && field.dataType !== 'image')
+  return fields.filter((field) => field.showInConstructionPanel !== false && field.source === 'field_collection' && field.dataType !== 'image')
 })
+const schemaPhotoSlots = computed<ConstructionPhotoSlot[]>(() => {
+  const fields = activeProject.value?.workItemSchema?.customFields || []
+  return fields
+    .filter((field) => field.showInConstructionPanel !== false && field.source === 'field_collection' && field.dataType === 'image')
+    .map((field) => ({
+      key: field.key,
+      label: field.label,
+      required: field.required,
+      requiredWhen: field.requiredWhen,
+      relationRole: field.relationRole,
+    }))
+})
+const photoSlots = computed(() => (schemaPhotoSlots.value.length ? schemaPhotoSlots.value : defaultPhotoSlots))
 const hasConfiguredConstructionFields = computed(() => constructionFields.value.length > 0)
-const requiredConstructionFieldLabels = computed(() =>
-  constructionFields.value
-    .filter((field) => field.required && !fieldValue(field).trim())
-    .map((field) => field.label),
+const activeConstructionFields = computed(() => constructionFields.value.filter((field) => isFieldConditionActive(field)))
+const activePhotoSlots = computed(() => photoSlots.value.filter((slot) => isPhotoSlotConditionActive(slot)))
+const activePhotoSlotKeys = computed(() => new Set(activePhotoSlots.value.map((slot) => slot.key)))
+const constructionFieldSections = computed<ConstructionFieldSection[]>(() => {
+  const sections = constructionFieldSectionsBase()
+  const sectionById = new Map(sections.map((section) => [section.id, section]))
+  for (const field of constructionFields.value) {
+    sectionById.get(constructionFieldSectionId(field))?.fields.push(field)
+  }
+  return sections.filter((section) => section.fields.length)
+})
+const activeConstructionFieldSections = computed<ConstructionFieldSection[]>(() => {
+  const sections = constructionFieldSectionsBase()
+  const sectionById = new Map(sections.map((section) => [section.id, section]))
+  for (const field of activeConstructionFields.value) {
+    sectionById.get(constructionFieldSectionId(field))?.fields.push(field)
+  }
+  return sections.filter((section) => section.fields.length)
+})
+const constructionPhotoSections = computed<ConstructionPhotoSection[]>(() => {
+  if (!photoSlots.value.length) return []
+  const evidenceSlots = photoSlots.value.filter((slot) => slot.relationRole === 'evidence_photo')
+  const otherSlots = photoSlots.value.filter((slot) => slot.relationRole !== 'evidence_photo')
+  return [
+    {
+      id: 'evidence-photo',
+      title: '照片证据',
+      helper: '按项目模板补齐改造前、旧设备、新旧模块和改造后等影像资料。',
+      slots: evidenceSlots.length ? evidenceSlots : photoSlots.value,
+    },
+    {
+      id: 'other-photo',
+      title: '补充照片',
+      helper: '项目额外要求的照片资料。',
+      slots: evidenceSlots.length ? otherSlots : [],
+    },
+  ].filter((section) => section.slots.length)
+})
+const activeConstructionPhotoSections = computed<ConstructionPhotoSection[]>(() => {
+  if (!activePhotoSlots.value.length) return []
+  const evidenceSlots = activePhotoSlots.value.filter((slot) => slot.relationRole === 'evidence_photo')
+  const otherSlots = activePhotoSlots.value.filter((slot) => slot.relationRole !== 'evidence_photo')
+  return [
+    {
+      id: 'evidence-photo',
+      title: '照片证据',
+      helper: '按项目模板补齐改造前、旧设备、新旧模块和改造后等影像资料。',
+      slots: evidenceSlots.length ? evidenceSlots : activePhotoSlots.value,
+    },
+    {
+      id: 'other-photo',
+      title: '补充照片',
+      helper: '项目额外要求的照片资料。',
+      slots: evidenceSlots.length ? otherSlots : [],
+    },
+  ].filter((section) => section.slots.length)
+})
+const platformConstructionReworkOrders = computed(() =>
+  platformConstructionWorkOrders.value.filter((order) => platformWorkOrderNeedsRework(order)),
 )
+const platformConstructionDisplayOrders = computed(() => {
+  const source = platformReworkOnly.value ? platformConstructionReworkOrders.value : platformConstructionWorkOrders.value
+  return [...source].sort((left, right) => {
+    const leftRework = platformWorkOrderNeedsRework(left) ? 1 : 0
+    const rightRework = platformWorkOrderNeedsRework(right) ? 1 : 0
+    if (leftRework !== rightRework) return rightRework - leftRework
+    return String(left.primaryValue || left.id).localeCompare(String(right.primaryValue || right.id), 'zh-Hans-CN', { numeric: true })
+  })
+})
+const platformConstructionPreview = computed(() => platformConstructionDisplayOrders.value.slice(0, 5))
+const platformConstructionDisplayFields = computed(() => platformConstructionSchema.value?.displayFields || [])
+const platformConstructionFields = computed(() => platformConstructionSchema.value?.constructionFields || [])
+const platformConstructionFieldSections = computed<ConstructionFieldSection[]>(() => {
+  const sections = constructionFieldSectionsBase()
+  const sectionById = new Map(sections.map((section) => [section.id, section]))
+  for (const field of platformConstructionFields.value) {
+    sectionById.get(constructionFieldSectionId(field))?.fields.push(field)
+  }
+  return sections.filter((section) => section.fields.length)
+})
+const platformConstructionPhotoSlots = computed(() => platformConstructionSchema.value?.photoSlots || [])
+const platformPrimaryLabel = computed(() => platformConstructionSchema.value?.primaryField?.label || activeProject.value?.workItemSchema?.primaryField?.label || '主字段')
+const platformAggregateLabel = computed(
+  () => platformConstructionSchema.value?.aggregateField?.label || activeProject.value?.workItemSchema?.aggregateField?.label || '聚合字段',
+)
+const hasPlatformConstructionEntry = computed(
+  () =>
+    loadingPlatformWorkOrders.value ||
+    platformConstructionTotal.value > 0 ||
+    platformConstructionDisplayFields.value.length > 0 ||
+    platformConstructionFields.value.length > 0 ||
+    platformConstructionPhotoSlots.value.length > 0,
+)
+const activePlatformKpiItems = computed(() => {
+  const order = activePlatformWorkOrder.value
+  if (!order) return []
+  return [
+    { key: 'installer', label: '安装人员', value: order.kpiValues.installer || actor.value || '-' },
+    { key: 'photo_count', label: '照片数量', value: order.kpiValues.photo_count || String(order.coveredPhotoSlots.length || order.collectionPhotos.length || 0) },
+    { key: 'old_device_recovered', label: '旧设备回收', value: order.kpiValues.old_device_recovered === '1' ? '已记录' : '待记录' },
+  ]
+})
+const fieldChecklistItems = computed<SiteChecklistItem[]>(() =>
+  activeConstructionFields.value.map((field) => {
+    const value = fieldValue(field).trim()
+    const required = isFieldRequired(field)
+    return {
+      key: `field-${field.key}`,
+      label: field.label || field.key,
+      group: 'field',
+      method: `${captureMethodLabel(field.captureMethod)}${conditionalRequiredHint(field)}`,
+      intentLabel: field.requiredWhen?.fieldKey ? '条件补采' : constructionCollectionIntentLabel(field),
+      intentType: constructionCollectionIntentType(field),
+      required,
+      done: Boolean(value),
+      value: value || (required ? '待补齐' : '可选'),
+    }
+  }),
+)
+const photoChecklistItems = computed<SiteChecklistItem[]>(() =>
+  activePhotoSlots.value.map((slot) => {
+    const existing = hasSlotPhoto(activeGroup.value, slot.key)
+    const pending = Boolean(selectedFiles.value[slot.key])
+    const required = isPhotoSlotRequired(slot)
+    return {
+      key: `photo-${slot.key}`,
+      label: slot.label || slot.key,
+      group: 'photo',
+      method: `拍照${conditionalRequiredHint(slot)}`,
+      intentLabel: slot.requiredWhen?.fieldKey ? '条件补采' : constructionCollectionIntentLabel(slot),
+      intentType: constructionCollectionIntentType(slot),
+      required,
+      done: existing || pending,
+      value: existing ? '系统已有' : pending ? '本地待传' : required ? '待补齐' : '可选',
+    }
+  }),
+)
+const kpiChecklistItems = computed<SiteChecklistItem[]>(() => {
+  if (!activePlatformWorkOrder.value) return []
+  const inputItems = platformKpiInputFields.map((field) => {
+    const value = fieldValue(field).trim() || activePlatformWorkOrder.value?.kpiValues[field.key] || ''
+    return {
+      key: `kpi-input-${field.key}`,
+      label: field.label || field.key,
+      group: 'kpi' as const,
+      method: captureMethodLabel(field.captureMethod),
+      intentLabel: 'KPI资料',
+      intentType: 'info' as const,
+      required: field.required,
+      done: Boolean(value),
+      value: value || (field.required ? '待补齐' : '可选'),
+    }
+  })
+  const statusItems = activePlatformKpiItems.value.map((item) => {
+    const value = String(item.value || '')
+    const done =
+      item.key === 'photo_count'
+        ? Number(value || 0) > 0
+        : Boolean(value && value !== '-' && !value.includes('待') && !value.includes('未记录'))
+    return {
+      key: `kpi-status-${item.key}`,
+      label: item.label,
+      group: 'kpi' as const,
+      method: '系统生成',
+      intentLabel: 'KPI资料',
+      intentType: 'info' as const,
+      required: true,
+      done,
+      value: value || '待补齐',
+    }
+  })
+  return [...inputItems, ...statusItems]
+})
+const siteChecklistItems = computed<SiteChecklistItem[]>(() => [
+  ...fieldChecklistItems.value,
+  ...photoChecklistItems.value,
+  ...kpiChecklistItems.value,
+])
+const siteChecklistSummary = computed(() => {
+  const total = siteChecklistItems.value.length
+  const done = siteChecklistItems.value.filter((item) => item.done).length
+  const missing = siteChecklistItems.value.filter((item) => item.required && !item.done).length
+  return { total, done, missing }
+})
+const requiredConstructionFieldLabels = computed(() =>
+  activeConstructionFields.value.filter((field) => isFieldRequired(field) && !fieldValue(field).trim()).map((field) => field.label),
+)
+const missingRequiredKpiFieldLabels = computed(() => {
+  if (!activePlatformWorkOrder.value) return []
+  return platformKpiInputFields
+    .filter((field) => {
+      if (!field.required) return false
+      const currentValue = fieldValue(field).trim()
+      const savedValue = String(activePlatformWorkOrder.value?.kpiValues[field.key] || '').trim()
+      return !currentValue && !savedValue
+    })
+    .map((field) => field.label || field.key)
+})
+const constructionSubmitGapGroups = computed(() => {
+  const groups: { label: string; items: string[] }[] = []
+  const fieldMissing = [
+    ...(!hasConfiguredConstructionFields.value && !form.moduleAssetNo.trim() ? ['模块资产编号'] : []),
+    ...requiredConstructionFieldLabels.value,
+  ]
+  if (fieldMissing.length) groups.push({ label: '缺少字段', items: fieldMissing })
+  if (missingRequiredSlots.value.length) groups.push({ label: '缺少照片', items: missingRequiredSlots.value })
+  if (missingRequiredKpiFieldLabels.value.length) groups.push({ label: '缺少KPI', items: missingRequiredKpiFieldLabels.value })
+  return groups
+})
+const constructionSubmitBlocked = computed(() => constructionSubmitGapGroups.value.length > 0)
 
 const visibleTasks = computed(() => {
   const source = isAdmin.value
@@ -309,7 +600,7 @@ const taskEmptyDescription = computed(() => {
 })
 
 const selectedTask = computed(() => visibleTasks.value.find((task) => task.id === selectedTaskId.value) || null)
-const inTaskPicker = computed(() => isAdmin.value || !selectedTask.value || taskPickerOpen.value)
+const inTaskPicker = computed(() => !activePlatformWorkOrder.value && (isAdmin.value || !selectedTask.value || taskPickerOpen.value))
 const canSubmitSelectedTask = computed(() => {
   const task = selectedTask.value
   if (!task || isAdmin.value) return false
@@ -446,7 +737,7 @@ const visibleWorkItems = computed(() => {
       return matchesGroupQuery(item.group, keyword)
     })
     .sort((left, right) => {
-      const rank: Record<WorkItem['kind'], number> = { group: 0, cached: 1, exception: 2 }
+      const rank: Record<WorkItem['kind'], number> = { group: 0, cached: 1, exception: 2, platform: 3 }
       if (rank[left.kind] !== rank[right.kind]) return rank[left.kind] - rank[right.kind]
       return collator.compare(left.group.address || left.group.meterNo || left.key, right.group.address || right.group.meterNo || right.key)
     })
@@ -476,7 +767,7 @@ const missingRequiredSlots = computed(() => {
   ) {
     return []
   }
-  return slots.filter((slot) => slot.required && !hasSlotPhoto(activeGroup.value, slot.key)).map((slot) => slot.label)
+  return activePhotoSlots.value.filter((slot) => isPhotoSlotRequired(slot) && !hasSlotPhoto(activeGroup.value, slot.key)).map((slot) => slot.label)
 })
 
 const activeExistingPhotos = computed(() => activeGroup.value?.photos?.filter((photo) => photoUrl(photo)) || [])
@@ -502,13 +793,290 @@ const scannerTitle = computed(() => {
 })
 
 function activeScannerField() {
-  return constructionFields.value.find((field) => field.key === scannerFieldKey.value) || null
+  return activeConstructionFields.value.find((field) => field.key === scannerFieldKey.value) || null
 }
 
 function fieldValue(field: ProjectFieldDefinition) {
-  if (field.key === 'collector' || field.key === 'collector_no') return form.collector
-  if (field.key === 'module_asset_no' || field.key === 'module' || field.key === 'asset_no') return form.moduleAssetNo
-  return form.dynamicFields[field.key] || ''
+  return fieldValueByKey(field.key)
+}
+
+function fieldValueByKey(fieldKey: string) {
+  if (fieldKey === 'collector' || fieldKey === 'collector_no') return form.collector
+  if (fieldKey === 'module_asset_no' || fieldKey === 'module' || fieldKey === 'asset_no') return form.moduleAssetNo
+  return form.dynamicFields[fieldKey] || ''
+}
+
+function constructionFieldSectionsBase(): ConstructionFieldSection[] {
+  return [
+    { id: 'task-core', title: '任务核心字段', helper: '确认任务对象、地址、厂家等核心信息。', fields: [] },
+    { id: 'main-device-replacement', title: '主设备更换', helper: '记录本次必须更换的主设备安装结果。', fields: [] },
+    { id: 'device-replacement', title: '设备/附属设备采集', helper: '记录旧设备拆回、附属新设备和其他设备编码。', fields: [] },
+    { id: 'accessory-confirmation', title: '附属设备确认', helper: '先确认通讯模块、SIM 卡、采集器等附属设备是否同步更换。', fields: [] },
+    { id: 'conditional-accessory-fields', title: '条件补采', helper: '仅在对应附属设备选择更换后出现，用于补齐旧件、新件或照片前置字段。', fields: [] },
+    { id: 'supporting-fields', title: '补充采集字段', helper: '项目自定义的辅助录入、定位或审阅前置资料。', fields: [] },
+  ]
+}
+
+function isConditionalAccessoryField(field: ProjectFieldDefinition) {
+  return Boolean(field.requiredWhen?.fieldKey)
+}
+
+function constructionFieldSectionId(field: ProjectFieldDefinition): ConstructionFieldSection['id'] {
+  if (field.relationRole === 'task_detail' || field.relationRole === 'task_object') return 'task-core'
+  if (isConditionalAccessoryField(field)) return 'conditional-accessory-fields'
+  if (field.relationRole === 'replacement_device') return 'main-device-replacement'
+  if (field.relationRole === 'accessory_replace_confirm') return 'accessory-confirmation'
+  if (field.relationRole === 'old_device' || field.relationRole === 'accessory_new_device') return 'device-replacement'
+  return 'supporting-fields'
+}
+
+function fieldRelationRoleLabel(role: ProjectFieldDefinition['relationRole'] | ConstructionPhotoSlot['relationRole']) {
+  const labels: Record<NonNullable<ProjectFieldDefinition['relationRole']>, string> = {
+    aggregate: '聚合口径',
+    task_object: '任务对象',
+    task_detail: '任务详情',
+    replacement_device: '主设备 · 更换后',
+    old_device: '旧设备 · 拆回',
+    accessory_replace_confirm: '附属设备 · 是否更换',
+    accessory_new_device: '附属设备 · 新设备',
+    evidence_photo: '照片证据',
+    supporting_field: '辅助字段',
+  }
+  return role ? labels[role] || '辅助字段' : '辅助字段'
+}
+
+function constructionCollectionIntentLabel(
+  item: Pick<ProjectFieldDefinition, 'relationRole' | 'requiredWhen'> | Pick<ConstructionPhotoSlot, 'relationRole' | 'requiredWhen'>,
+) {
+  if (item.requiredWhen?.fieldKey) return '条件补采'
+  if (item.relationRole === 'replacement_device') return '主设备本体'
+  if (item.relationRole === 'accessory_replace_confirm') return '附属设备确认'
+  if (item.relationRole === 'old_device' || item.relationRole === 'accessory_new_device') return '任务对象下的附属设备'
+  if (item.relationRole === 'evidence_photo') return '照片证据'
+  if (item.relationRole === 'task_object' || item.relationRole === 'task_detail') return '任务核心'
+  return '补充资料'
+}
+
+function constructionCollectionIntentType(
+  item: Pick<ProjectFieldDefinition, 'relationRole' | 'requiredWhen'> | Pick<ConstructionPhotoSlot, 'relationRole' | 'requiredWhen'>,
+): SiteChecklistItem['intentType'] {
+  if (item.requiredWhen?.fieldKey) return 'warning'
+  if (item.relationRole === 'replacement_device') return 'danger'
+  if (item.relationRole === 'accessory_replace_confirm') return 'warning'
+  if (item.relationRole === 'old_device' || item.relationRole === 'accessory_new_device') return 'success'
+  if (item.relationRole === 'evidence_photo') return 'info'
+  return ''
+}
+
+function constructionConditionLabel(field: Pick<ProjectFieldDefinition, 'requiredWhen'> | Pick<ConstructionPhotoSlot, 'requiredWhen'>) {
+  const requiredWhen = field.requiredWhen
+  const fieldKey = requiredWhen?.fieldKey
+  if (!fieldKey) return ''
+  const equals = Array.isArray(requiredWhen.equals) ? requiredWhen.equals.join('/') : requiredWhen.equals
+  return `${fieldKey} = ${equals || '指定值'} 时显示并必采`
+}
+
+function captureMethodLabel(method: ProjectFieldDefinition['captureMethod']) {
+  const labels: Record<ProjectFieldDefinition['captureMethod'], string> = {
+    manual: '手工录入',
+    scan: '扫码',
+    photo: '拍照',
+    select: '下拉选择',
+    datetime: '时间',
+    location: '定位',
+    system: '系统生成',
+    none: '无需采集',
+  }
+  return labels[method] || '手工录入'
+}
+
+function platformFieldRequirement(field: ProjectFieldDefinition) {
+  return `${field.label} · ${captureMethodLabel(field.captureMethod)}${field.required ? ' · 必填' : ''}`
+}
+
+function platformWorkOrderFieldValue(order: PlatformConstructionWorkOrder, field: ProjectFieldDefinition) {
+  return order.collectionFieldValues[field.key] || order.fieldValues[field.key] || '-'
+}
+
+function platformWorkOrderConditionValues(order: PlatformConstructionWorkOrder) {
+  const values: Record<string, string> = {
+    ...order.fieldValues,
+    ...order.collectionFieldValues,
+    ...order.kpiValues,
+  }
+  const primaryKey = platformConstructionSchema.value?.primaryField?.key
+  const aggregateKey = platformConstructionSchema.value?.aggregateField?.key
+  if (primaryKey && !values[primaryKey]) values[primaryKey] = order.primaryValue || ''
+  if (aggregateKey && !values[aggregateKey]) values[aggregateKey] = order.aggregateValue || ''
+  return values
+}
+
+function platformConstructionFieldsForOrder(order: PlatformConstructionWorkOrder) {
+  return platformConstructionFields.value.filter((field) => isFieldConditionActiveForValues(field, platformWorkOrderConditionValues(order)))
+}
+
+function platformConstructionPhotoSlotsForOrder(order: PlatformConstructionWorkOrder) {
+  return platformConstructionPhotoSlots.value.filter((slot) => isPhotoSlotConditionActiveForValues(slot, platformWorkOrderConditionValues(order)))
+}
+
+function platformWorkOrderPhotoSlotStatus(order: PlatformConstructionWorkOrder, slot: ConstructionPhotoSlot) {
+  const covered = order.coveredPhotoSlots.includes(slot.key) || order.collectionPhotos.some((photo) => photo.slot === slot.key)
+  if (covered) return '已覆盖'
+  return isPhotoSlotRequiredForValues(slot, platformWorkOrderConditionValues(order)) ? '待拍照' : '可选'
+}
+
+function platformDisplayFieldValue(order: PlatformConstructionWorkOrder, field: ProjectFieldDefinition) {
+  if (field.key === platformConstructionSchema.value?.primaryField?.key) return order.primaryValue || '-'
+  if (field.key === platformConstructionSchema.value?.aggregateField?.key) return order.aggregateValue || '-'
+  return order.fieldValues[field.key] || order.collectionFieldValues[field.key] || '-'
+}
+
+function checklistGroupLabel(group: SiteChecklistItem['group']) {
+  const labels: Record<SiteChecklistItem['group'], string> = {
+    field: '字段',
+    photo: '照片',
+    kpi: 'KPI',
+  }
+  return labels[group]
+}
+
+function checklistStatusLabel(item: SiteChecklistItem) {
+  return item.done ? '已完成' : '待补齐'
+}
+
+function checklistStatusType(item: SiteChecklistItem) {
+  return item.done ? 'success' : item.required ? 'danger' : 'info'
+}
+
+function platformWorkOrderKpiLine(order: PlatformConstructionWorkOrder) {
+  const installer = order.kpiValues.installer || order.collectedBy || '未记录安装人员'
+  const completedAt = order.kpiValues.completed_at || '未记录完成时间'
+  const online = order.kpiValues.online_duration_minutes ? `${order.kpiValues.online_duration_minutes} 分钟在线` : '未记录在线时长'
+  const oldDevice = order.kpiValues.old_device_recovered === '1' ? '旧设备已记录' : '旧设备待记录'
+  return `${installer} / ${completedAt} / ${online} / ${oldDevice}`
+}
+
+function platformWorkOrderNeedsRework(order: PlatformConstructionWorkOrder | null | undefined) {
+  return order?.reviewStatus === 'returned'
+}
+
+function platformWasReworkResubmitted(order: PlatformConstructionWorkOrder | null | undefined) {
+  return Boolean(order?.reviewHistory?.some((event) => event.action === 'rework_submitted'))
+}
+
+const platformReworkEvidenceGapGroups = computed(() => activePlatformWorkOrder.value?.reworkEvidenceGapGroups || [])
+
+function platformWorkOrderReworkReason(order: PlatformConstructionWorkOrder | null | undefined) {
+  return order?.reviewReason || order?.reviewNote || order?.reviewHistory?.find((event) => event.action === 'returned')?.reason || ''
+}
+
+function platformReworkGapSummary(order: PlatformConstructionWorkOrder | null | undefined) {
+  if (!order || !platformWorkOrderNeedsRework(order)) return ''
+  const firstGroup = (order.reworkEvidenceGapGroups || []).find((group) => group.items.length)
+  if (!firstGroup) return platformWorkOrderReworkReason(order) || '请按审阅意见重新采集'
+  const visibleItems = firstGroup.items.slice(0, 4)
+  const suffix = firstGroup.items.length > visibleItems.length ? '等' : ''
+  return `${firstGroup.label}：${visibleItems.join('、')}${suffix}`
+}
+
+function platformWorkOrderToGroup(order: PlatformConstructionWorkOrder): MaterialGroup {
+  return {
+    id: order.id,
+    taskId: order.sourceTaskId || 'platform',
+    address: order.aggregateValue,
+    meterNo: order.primaryValue,
+    meterMatchKey: order.primaryValue,
+    terminal: order.primaryValue,
+    status: 'pending',
+    photoCount: order.coveredPhotoSlots.length,
+    constructionStatus: order.collectionStatus || 'created',
+    fieldValues: {
+      ...order.fieldValues,
+      ...order.collectionFieldValues,
+    },
+    photos: order.collectionPhotos.map((photo) => ({
+      id: photo.id,
+      url: '',
+      name: photo.filename,
+      status: 'unclassified',
+      category: photo.slot,
+      constructionSlot: photo.slot,
+      constructionSlotLabel: photo.slot,
+      creator: photo.uploadedBy,
+    })),
+  }
+}
+
+function loadPlatformWorkOrderIntoForm(order: PlatformConstructionWorkOrder) {
+  clearPreviews()
+  selectedFiles.value = {}
+  form.collector = ''
+  form.moduleAssetNo = ''
+  form.dynamicFields = {
+    ...order.fieldValues,
+    ...order.collectionFieldValues,
+    ...order.kpiValues,
+  }
+  form.note = ''
+}
+
+async function openPlatformWorkOrder(order: PlatformConstructionWorkOrder) {
+  await flushCurrentDraftPersist()
+  activePlatformWorkOrder.value = order
+  activeOrder.value = null
+  activeGroup.value = platformWorkOrderToGroup(order)
+  selectedTaskId.value = ''
+  selectedItemKey.value = `platform-${order.id}`
+  taskPickerOpen.value = false
+  collectOpen.value = shouldUseCollectorDrawer()
+  loadPlatformWorkOrderIntoForm(order)
+}
+
+function replacePlatformWorkOrder(updated: PlatformConstructionWorkOrder) {
+  platformConstructionWorkOrders.value = platformConstructionWorkOrders.value.map((order) => (order.id === updated.id ? updated : order))
+  activePlatformWorkOrder.value = updated
+  activeGroup.value = platformWorkOrderToGroup(updated)
+}
+
+async function savePlatformCollectionDraft(status: 'cached' | 'submitted' = 'cached') {
+  if (!activePlatformWorkOrder.value) return
+  cacheBusy.value = true
+  try {
+    let latestWorkOrder = activePlatformWorkOrder.value
+    const pendingFiles = Object.entries(selectedFiles.value).filter(
+      (entry): entry is [string, File] => Boolean(entry[1]) && activePhotoSlotKeys.value.has(entry[0]),
+    )
+    for (const [slot, file] of pendingFiles) {
+      latestWorkOrder = await uploadProjectConstructionWorkOrderPhoto(activeProjectId.value, latestWorkOrder.id, {
+        actor: actor.value,
+        slot,
+        clientPhotoId: `${slot}-${file.name}-${file.size}-${file.lastModified}`,
+        file,
+      })
+    }
+    const coveredPhotoSlots = Array.from(
+      new Set([
+        ...latestWorkOrder.coveredPhotoSlots,
+        ...pendingFiles.map(([slot]) => slot),
+      ]),
+    )
+    const updated = await saveProjectConstructionWorkOrderCollection(activeProjectId.value, latestWorkOrder.id, {
+      actor: actor.value,
+      clientBatchId: `platform-${latestWorkOrder.id}`,
+      status,
+      fieldValues: collectFieldValues(),
+      coveredPhotoSlots,
+    })
+    clearPreviews()
+    selectedFiles.value = {}
+    replacePlatformWorkOrder(updated)
+    const submittedMessage = platformWasReworkResubmitted(updated) ? '返工已重新提交审阅' : '平台采集元数据已提交'
+    ElMessage.success(status === 'submitted' ? submittedMessage : '平台采集草稿已保存')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '平台采集草稿保存失败')
+  } finally {
+    cacheBusy.value = false
+  }
 }
 
 function setFieldValue(field: ProjectFieldDefinition, value: string) {
@@ -516,13 +1084,15 @@ function setFieldValue(field: ProjectFieldDefinition, value: string) {
   if (field.key === 'collector' || field.key === 'collector_no') form.collector = clean
   else if (field.key === 'module_asset_no' || field.key === 'module' || field.key === 'asset_no') form.moduleAssetNo = clean
   else form.dynamicFields[field.key] = clean
+  clearInactiveConditionalValues(field.key)
 }
 
 function fieldPlaceholder(field: ProjectFieldDefinition) {
+  if (shouldUseFieldSelect(field)) return '请选择'
   if (field.captureMethod === 'scan') return '扫码或手填'
   if (field.captureMethod === 'datetime') return '填写时间'
   if (field.captureMethod === 'location') return '填写或定位'
-  return field.required ? '必填' : '可选'
+  return isFieldRequired(field) ? '必填' : '可选'
 }
 
 function fieldInputType(field: ProjectFieldDefinition) {
@@ -534,6 +1104,76 @@ function shouldShowScanButton(field: ProjectFieldDefinition) {
   return field.captureMethod === 'scan'
 }
 
+function shouldUseFieldSelect(field: ProjectFieldDefinition) {
+  return field.captureMethod === 'select' || field.dataType === 'enum' || field.dataType === 'boolean'
+}
+
+function fieldSelectOptions(field: ProjectFieldDefinition) {
+  if (field.options?.length) return field.options
+  if (field.dataType === 'boolean') return ['是', '否']
+  return ['更换', '不更换', '待确认']
+}
+
+function fieldConditionValue(
+  field: Pick<ProjectFieldDefinition, 'requiredWhen'> | Pick<ConstructionPhotoSlot, 'requiredWhen'>,
+  values?: Record<string, string>,
+) {
+  const fieldKey = field.requiredWhen?.fieldKey
+  if (!fieldKey) return ''
+  if (values) return String(values[fieldKey] || '').trim()
+  return fieldValueByKey(fieldKey).trim()
+}
+
+function requiredWhenMatches(
+  field: Pick<ProjectFieldDefinition, 'requiredWhen'> | Pick<ConstructionPhotoSlot, 'requiredWhen'>,
+  values?: Record<string, string>,
+) {
+  const expected = field.requiredWhen?.equals
+  const current = fieldConditionValue(field, values)
+  if (!expected || !current) return false
+  return Array.isArray(expected) ? expected.includes(current) : current === expected
+}
+
+function isFieldConditionActive(field: ProjectFieldDefinition) {
+  return isFieldConditionActiveForValues(field)
+}
+
+function isFieldConditionActiveForValues(field: ProjectFieldDefinition, values?: Record<string, string>) {
+  if (!field.requiredWhen?.fieldKey) return true
+  return requiredWhenMatches(field, values)
+}
+
+function isPhotoSlotConditionActive(slot: ConstructionPhotoSlot) {
+  return isPhotoSlotConditionActiveForValues(slot)
+}
+
+function isPhotoSlotConditionActiveForValues(slot: ConstructionPhotoSlot, values?: Record<string, string>) {
+  if (!slot.requiredWhen?.fieldKey) return true
+  return requiredWhenMatches(slot, values)
+}
+
+function isFieldRequired(field: ProjectFieldDefinition) {
+  return isFieldRequiredForValues(field)
+}
+
+function isFieldRequiredForValues(field: ProjectFieldDefinition, values?: Record<string, string>) {
+  return Boolean(isFieldConditionActiveForValues(field, values) && (field.required || requiredWhenMatches(field, values)))
+}
+
+function isPhotoSlotRequired(slot: ConstructionPhotoSlot) {
+  return isPhotoSlotRequiredForValues(slot)
+}
+
+function isPhotoSlotRequiredForValues(slot: ConstructionPhotoSlot, values?: Record<string, string>) {
+  return Boolean(isPhotoSlotConditionActiveForValues(slot, values) && (slot.required || requiredWhenMatches(slot, values)))
+}
+
+function conditionalRequiredHint(field: Pick<ProjectFieldDefinition, 'requiredWhen'> | Pick<ConstructionPhotoSlot, 'requiredWhen'>) {
+  if (!field.requiredWhen?.fieldKey) return ''
+  const equals = Array.isArray(field.requiredWhen.equals) ? field.requiredWhen.equals.join('/') : field.requiredWhen.equals
+  return equals ? ` · ${equals}时必填` : ''
+}
+
 function startDynamicScanner(field: ProjectFieldDefinition) {
   scannerFieldKey.value = field.key
   void startScanner('dynamic')
@@ -541,8 +1181,26 @@ function startDynamicScanner(field: ProjectFieldDefinition) {
 
 function collectFieldValues() {
   const values: Record<string, string> = {}
-  for (const field of constructionFields.value) values[field.key] = fieldValue(field).trim()
+  for (const field of activeConstructionFields.value) values[field.key] = fieldValue(field).trim()
+  if (activePlatformWorkOrder.value) {
+    for (const field of platformKpiInputFields) values[field.key] = fieldValue(field).trim()
+  }
   return values
+}
+
+function clearInactiveConditionalValues(changedFieldKey = '') {
+  for (const field of constructionFields.value) {
+    if (changedFieldKey && field.requiredWhen?.fieldKey !== changedFieldKey) continue
+    if (isFieldConditionActive(field)) continue
+    if (field.key === 'collector' || field.key === 'collector_no') form.collector = ''
+    else if (field.key === 'module_asset_no' || field.key === 'module' || field.key === 'asset_no') form.moduleAssetNo = ''
+    else delete form.dynamicFields[field.key]
+  }
+  for (const slot of photoSlots.value) {
+    if (changedFieldKey && slot.requiredWhen?.fieldKey !== changedFieldKey) continue
+    if (isPhotoSlotConditionActive(slot)) continue
+    clearSelectedSlotPhoto(slot.key)
+  }
 }
 
 function normalizeSearch(value: string) {
@@ -899,9 +1557,10 @@ function existingPhotoForSlot(group: MaterialGroup | null, slotKey: string) {
   if (!group?.photos?.length) return null
   const aliases = slotAliases[slotKey] || [slotKey]
   return (
+    group.photos.find((photo) => photo.constructionSlot === slotKey) ||
     group.photos.find((photo) => photo.category === slotKey) ||
     group.photos.find((photo) => {
-      const text = `${photo.category || ''} ${photo.categoryLabel || ''} ${photo.archiveFilename || ''} ${photo.name || ''}`
+      const text = `${photo.constructionSlot || ''} ${photo.constructionSlotLabel || ''} ${photo.category || ''} ${photo.categoryLabel || ''} ${photo.archiveFilename || ''} ${photo.name || ''}`
       return aliases.some((alias) => text.includes(alias))
     }) ||
     null
@@ -913,12 +1572,21 @@ function hasSlotPhoto(group: MaterialGroup | null, slotKey: string) {
 }
 
 function coveredSlotsForGroup(group: MaterialGroup | null) {
-  return slots.filter((slot) => existingPhotoForSlot(group, slot.key)).map((slot) => slot.key)
+  return activePhotoSlots.value.filter((slot) => existingPhotoForSlot(group, slot.key)).map((slot) => slot.key)
 }
 
 function clearPreviews() {
   for (const url of Object.values(previewUrls.value)) URL.revokeObjectURL(url)
   previewUrls.value = {}
+}
+
+function clearSelectedSlotPhoto(slotKey: string) {
+  const oldUrl = previewUrls.value[slotKey]
+  if (oldUrl) URL.revokeObjectURL(oldUrl)
+  selectedFiles.value[slotKey] = null
+  delete previewUrls.value[slotKey]
+  selectedFiles.value = { ...selectedFiles.value }
+  previewUrls.value = { ...previewUrls.value }
 }
 
 function resetCollectorForm() {
@@ -928,6 +1596,7 @@ function resetCollectorForm() {
   form.note = ''
   activeGroup.value = null
   activeOrder.value = null
+  activePlatformWorkOrder.value = null
   selectedFiles.value = {}
   selectedItemKey.value = ''
   scannerFieldKey.value = ''
@@ -1440,24 +2109,11 @@ async function getAllSnapshots(): Promise<TerminalSnapshot[]> {
   return withStore<TerminalSnapshot[]>(SNAPSHOT_STORE, 'readonly', (store) => store.getAll())
 }
 
-function draftPhotoBlob(photo: DraftPhoto): Blob | null {
-  const source = photo.blob || photo.file
-  if (!(source instanceof Blob) || source.size <= 0) return null
-  return source
-}
-
-function draftPhotoHasPayload(photo: DraftPhoto) {
-  return Boolean(draftPhotoBlob(photo))
-}
-
 function fileFromDraftPhoto(photo: DraftPhoto, index: number): File | null {
-  const source = draftPhotoBlob(photo)
+  const source = photo.file || photo.blob
   if (!source) return null
   if (source instanceof File) return source
-  return new File([source], photo.filename || photo.name || `photo-${index + 1}.jpg`, {
-    type: photo.mime_type || source.type || 'image/jpeg',
-    lastModified: photo.last_modified || Date.now(),
-  })
+  return new File([source], photo.filename || photo.name || `photo-${index + 1}.jpg`, { type: source.type || 'image/jpeg' })
 }
 
 function exceptionNeedsPhotoSlots(source: PhotoRequirementSource = {}) {
@@ -1469,20 +2125,16 @@ function exceptionNeedsPhotoSlots(source: PhotoRequirementSource = {}) {
 
 function missingSlotsForDraft(draft: CacheDraft) {
   if (draft.work_order_id && !exceptionNeedsPhotoSlots(draft)) return []
-  const covered = new Set([
-    ...(draft.covered_slots || []),
-    ...((draft.photos || [])
-      .filter(draftPhotoHasPayload)
-      .map((photo) => photo.slot)
-      .filter(Boolean) as string[]),
-  ])
-  return slots.filter((slot) => slot.required && !covered.has(slot.key)).map((slot) => slot.label)
+  const covered = new Set([...(draft.covered_slots || []), ...((draft.photos || []).map((photo) => photo.slot).filter(Boolean) as string[])])
+  return photoSlots.value
+    .filter((slot) => isPhotoSlotConditionActiveForValues(slot, draft.field_values || {}) && isPhotoSlotRequiredForValues(slot, draft.field_values || {}) && !covered.has(slot.key))
+    .map((slot) => slot.label)
 }
 
 function missingConfiguredFieldsForDraft(draft: CacheDraft) {
   if (!hasConfiguredConstructionFields.value) return draft.module_asset_no?.trim() ? [] : ['模块资产编号']
   return constructionFields.value
-    .filter((field) => field.required && !String(draft.field_values?.[field.key] || '').trim())
+    .filter((field) => isFieldConditionActiveForValues(field, draft.field_values || {}) && isFieldRequiredForValues(field, draft.field_values || {}) && !String(draft.field_values?.[field.key] || '').trim())
     .map((field) => field.label)
 }
 
@@ -1549,16 +2201,14 @@ function buildCurrentDraft(): CacheDraft {
   const now = new Date().toISOString()
   const previousDraft = draftByGroupId.value.get(String(activeGroup.value.id))
   const photos = Object.entries(selectedFiles.value)
+    .filter(([slot]) => activePhotoSlotKeys.value.has(slot))
     .map(([slot, file]) => {
       if (!file) return null
       return {
         slot,
-        blob: file.slice(0, file.size, file.type || 'image/jpeg'),
+        file,
         filename: file.name,
         name: file.name,
-        mime_type: file.type || 'image/jpeg',
-        size: file.size,
-        last_modified: file.lastModified,
         client_photo_id: `${slot}-${file.name}-${file.size}-${file.lastModified}`,
       }
     })
@@ -1762,41 +2412,24 @@ async function uploadCurrentDraft() {
 }
 
 async function uploadAllCached() {
-  if (!cachedTaskDrafts.value.length) {
-    ElMessage.warning('当前终端没有本地缓存')
+  if (!readyCachedDrafts.value.length) {
+    ElMessage.warning('当前终端没有可上传的完整缓存')
     return
   }
   uploading.value = true
   let success = 0
   let failed = 0
-  const failureReasons = new Map<string, number>()
-  try {
-    for (const draft of [...cachedTaskDrafts.value]) {
-      try {
-        await uploadDraft(draft)
-        success += 1
-      } catch (error) {
-        failed += 1
-        const reason = error instanceof Error ? error.message : '上传失败'
-        failureReasons.set(reason, (failureReasons.get(reason) || 0) + 1)
-      }
+  for (const draft of [...readyCachedDrafts.value]) {
+    try {
+      await uploadDraft(draft)
+      success += 1
+    } catch {
+      failed += 1
     }
-  } finally {
-    uploading.value = false
   }
-  const reasonSummary = [...failureReasons.entries()]
-    .slice(0, 3)
-    .map(([reason, count]) => `${reason}${count > 1 ? ` ×${count}` : ''}`)
-    .join('；')
-  if (success && failed) {
-    ElMessage.warning(`缓存上传完成：成功 ${success}，失败 ${failed}${reasonSummary ? `。${reasonSummary}` : ''}`)
-  } else if (success) {
-    ElMessage.success(`缓存上传完成：成功 ${success}`)
-  } else {
-    ElMessage.error(`缓存未上传：${reasonSummary || '请检查网络和必填资料'}`)
-  }
-  if (success) await reloadAfterUpload()
-  else await loadDrafts()
+  uploading.value = false
+  ElMessage.success(`缓存上传完成：成功 ${success}，失败 ${failed}`)
+  await reloadAfterUpload()
 }
 
 async function submitSelectedConstructionTask() {
@@ -1912,6 +2545,25 @@ async function loadPlatformProjects() {
   } catch {
     platformProjects.value = []
   }
+  await loadPlatformConstructionWorkOrders()
+}
+
+async function loadPlatformConstructionWorkOrders() {
+  const projectId = activeProjectId.value
+  if (!projectId) return
+  loadingPlatformWorkOrders.value = true
+  try {
+    const data = await fetchProjectConstructionWorkOrders(projectId)
+    platformConstructionWorkOrders.value = data.items
+    platformConstructionSchema.value = data.fieldSchema
+    platformConstructionTotal.value = data.total
+  } catch {
+    platformConstructionWorkOrders.value = []
+    platformConstructionSchema.value = null
+    platformConstructionTotal.value = 0
+  } finally {
+    loadingPlatformWorkOrders.value = false
+  }
 }
 
 function findTaskForFieldCard(taskId?: string | number, terminal?: string) {
@@ -2026,6 +2678,7 @@ async function loadTasks() {
     }
     loadingTasks.value = false
   }
+  void loadPlatformConstructionWorkOrders()
   if (!isAdmin.value && taskPickerMode.value === 'terminal' && selectedTaskId.value) await loadGroups()
 }
 
@@ -2072,6 +2725,7 @@ async function openWorkItem(item: WorkItem) {
   }
   selectedItemKey.value = item.key
   activeOrder.value = item.order || null
+  activePlatformWorkOrder.value = null
   activeGroup.value = item.group
   collectOpen.value = shouldUseCollectorDrawer()
   await loadDraftIntoForm(item.group)
@@ -2132,6 +2786,7 @@ function clearGroupSearch() {
 
 async function returnToTaskPicker() {
   await flushCurrentDraftPersist()
+  if (activePlatformWorkOrder.value) resetCollectorForm()
   taskPickerOpen.value = true
 }
 
@@ -2145,6 +2800,10 @@ watch(
 
 watch(selectedTaskId, () => {
   void sendConstructionHeartbeat()
+})
+
+watch(activeProjectId, () => {
+  void loadPlatformConstructionWorkOrders()
 })
 
 onMounted(() => {
@@ -2188,16 +2847,16 @@ onBeforeUnmount(() => {
       </div>
       <div class="top-actions">
         <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
-        <el-button :icon="Refresh" :loading="loadingTasks || loadingGroups" @click="loadTasks">刷新</el-button>
+        <el-button :icon="Refresh" :loading="loadingTasks || loadingGroups || loadingPlatformWorkOrders" @click="loadTasks">刷新</el-button>
         <el-button
           v-if="!isAdmin && groupFilter === 'cached' && cachedTaskDrafts.length"
           type="primary"
           :icon="UploadFilled"
           :loading="uploading"
-          :disabled="uploading || !cachedTaskDrafts.length"
+          :disabled="!readyCachedDrafts.length"
           @click="uploadAllCached"
         >
-          上传缓存 {{ cachedTaskDrafts.length || '' }}
+          上传缓存 {{ readyCachedDrafts.length || '' }}
         </el-button>
       </div>
     </header>
@@ -2219,7 +2878,7 @@ onBeforeUnmount(() => {
           <div class="head-actions">
             <el-tag v-if="offlineMode" type="warning" effect="light">离线包</el-tag>
             <el-tag effect="light">{{ taskPickerCount }}</el-tag>
-            <el-button size="small" :icon="Refresh" :loading="loadingTasks" @click="loadTasks">刷新</el-button>
+            <el-button size="small" :icon="Refresh" :loading="loadingTasks || loadingPlatformWorkOrders" @click="loadTasks">刷新</el-button>
             <el-button size="small" class="construction-panel-logout" @click="logoutConstruction">退出</el-button>
           </div>
         </div>
@@ -2235,6 +2894,65 @@ onBeforeUnmount(() => {
             />
             <el-button type="primary" :icon="Search" @click="submitTaskSearch">搜索</el-button>
           </div>
+
+          <article v-if="taskPickerMode === 'terminal' && hasPlatformConstructionEntry" class="field-task-card kind-platform platform-work-order-entry">
+            <div class="field-task-title">
+              <strong>平台接入工单</strong>
+              <el-tag type="success" effect="light">{{ loadingPlatformWorkOrders ? '读取中' : `${platformConstructionTotal} 条` }}</el-tag>
+            </div>
+            <p>{{ activeProject?.name || activeProjectId }} · {{ platformPrimaryLabel }} / {{ platformAggregateLabel }}</p>
+            <div v-if="platformConstructionReworkOrders.length" class="platform-rework-filter">
+              <el-checkbox v-model="platformReworkOnly">只看退回返工</el-checkbox>
+              <el-tag type="warning" effect="light">{{ platformConstructionReworkOrders.length }} 条返工</el-tag>
+            </div>
+            <div v-if="platformConstructionDisplayFields.length || platformConstructionFields.length || platformConstructionPhotoSlots.length" class="platform-schema-chips">
+              <span v-for="field in platformConstructionDisplayFields" :key="field.key" class="display-field-chip">
+                {{ field.label }} · 展示
+              </span>
+              <div v-if="platformConstructionFieldSections.length" class="platform-schema-sections">
+                <section
+                  v-for="section in platformConstructionFieldSections"
+                  :key="section.id"
+                  class="platform-schema-section"
+                  :class="`construction-section-${section.id}`"
+                >
+                  <strong>{{ section.title }}</strong>
+                  <small>{{ section.helper }}</small>
+                  <span v-for="field in section.fields" :key="field.key">
+                    {{ platformFieldRequirement(field) }}
+                    <em>{{ fieldRelationRoleLabel(field.relationRole) }}</em>
+                  </span>
+                </section>
+              </div>
+              <span v-for="slot in platformConstructionPhotoSlots" :key="slot.key">
+                {{ platformFieldRequirement(slot) }}
+              </span>
+            </div>
+            <div v-if="platformConstructionPreview.length" class="platform-work-order-samples">
+              <div v-for="order in platformConstructionPreview" :key="order.id">
+                <strong>{{ order.primaryValue || order.id }}</strong>
+                <span>{{ platformAggregateLabel }} {{ order.aggregateValue || '-' }}</span>
+                <el-tag v-if="platformWorkOrderNeedsRework(order)" size="small" type="warning" effect="light">退回返工</el-tag>
+                <small v-if="platformWorkOrderNeedsRework(order)" class="platform-rework-note">
+                  {{ platformReworkGapSummary(order) }}
+                </small>
+                <small v-for="field in platformConstructionDisplayFields" :key="`${order.id}-display-${field.key}`">
+                  {{ field.label }} {{ platformDisplayFieldValue(order, field) }}
+                </small>
+                <small v-for="field in platformConstructionFieldsForOrder(order)" :key="`${order.id}-${field.key}`">
+                  {{ field.label }} {{ platformWorkOrderFieldValue(order, field) }}
+                </small>
+                <small v-for="slot in platformConstructionPhotoSlotsForOrder(order)" :key="`${order.id}-slot-${slot.key}`">
+                  {{ slot.label }} {{ platformWorkOrderPhotoSlotStatus(order, slot) }}
+                </small>
+                <small class="platform-kpi-line">{{ platformWorkOrderKpiLine(order) }}</small>
+                <el-button size="small" type="primary" plain @click.stop="openPlatformWorkOrder(order)">打开采集</el-button>
+              </div>
+            </div>
+            <el-empty v-if="platformReworkOnly && !platformConstructionPreview.length" description="暂无退回返工" />
+            <small>系统外项目接入平台后的施工清单，后续会接入扫码、拍照和提交。</small>
+          </article>
+
           <article
             v-if="taskPickerMode === 'terminal' && !isAdmin && visibleExceptionTaskCards.length"
             class="field-task-card kind-exception field-task-entry"
@@ -2361,14 +3079,14 @@ onBeforeUnmount(() => {
       <main v-show="!inTaskPicker" class="panel group-panel">
         <div class="panel-head group-head">
           <div>
-            <h3>{{ selectedTask ? `终端 ${selectedTask.terminal || selectedTask.id}` : '施工区' }}</h3>
+            <h3>{{ activePlatformWorkOrder ? '平台接入工单' : selectedTask ? `终端 ${selectedTask.terminal || selectedTask.id}` : '施工区' }}</h3>
           </div>
           <div class="head-actions">
             <el-button size="small" @click="returnToTaskPicker">返回任务区</el-button>
-            <el-tag effect="light">{{ groupSummary.total }}</el-tag>
-            <el-button size="small" :icon="Refresh" :loading="loadingGroups" @click="loadGroups">刷新</el-button>
+            <el-tag effect="light">{{ activePlatformWorkOrder ? 1 : groupSummary.total }}</el-tag>
+            <el-button v-if="!activePlatformWorkOrder" size="small" :icon="Refresh" :loading="loadingGroups" @click="loadGroups">刷新</el-button>
             <el-button
-              v-if="canSubmitSelectedTask"
+              v-if="canSubmitSelectedTask && !activePlatformWorkOrder"
               size="small"
               type="primary"
               :loading="submittingTask"
@@ -2407,13 +3125,36 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="selectedTask && groupFilter === 'cached' && cachedTaskDrafts.length" class="cache-inline-actions">
               <span>{{ cachedTaskDrafts.length }} 个本地缓存</span>
-              <el-button size="small" type="primary" :loading="uploading" :disabled="uploading || !cachedTaskDrafts.length" @click="uploadAllCached">
+              <el-button size="small" type="primary" :loading="uploading" :disabled="!readyCachedDrafts.length" @click="uploadAllCached">
                 一键上传
               </el-button>
             </div>
           </div>
 
           <div v-loading="loadingGroups" class="group-list">
+            <article
+              v-if="activePlatformWorkOrder && activeGroup"
+              class="group-card active"
+            >
+              <div class="group-main">
+                <div class="group-name-row">
+                  <strong>{{ activePlatformWorkOrder.primaryValue || activePlatformWorkOrder.id }}</strong>
+                  <el-tag :type="platformWorkOrderNeedsRework(activePlatformWorkOrder) ? 'warning' : 'success'" effect="light">
+                    {{ platformWorkOrderNeedsRework(activePlatformWorkOrder) ? '退回返工' : (activePlatformWorkOrder.collectionStatus || '待采集') }}
+                  </el-tag>
+                </div>
+                <span>{{ platformAggregateLabel }} {{ activePlatformWorkOrder.aggregateValue || '-' }}</span>
+                <small>平台工单 {{ activePlatformWorkOrder.id }}</small>
+                <div v-if="platformConstructionDisplayFields.length" class="platform-core-context">
+                  <span v-for="field in platformConstructionDisplayFields" :key="field.key">
+                    {{ field.label }} {{ platformDisplayFieldValue(activePlatformWorkOrder, field) }}
+                  </span>
+                </div>
+                <small v-if="platformWorkOrderNeedsRework(activePlatformWorkOrder)" class="platform-rework-note">
+                  {{ platformReworkGapSummary(activePlatformWorkOrder) }}
+                </small>
+              </div>
+            </article>
             <article
               v-for="item in visibleWorkItems"
               :key="item.key"
@@ -2441,10 +3182,10 @@ onBeforeUnmount(() => {
               </div>
             </article>
             <el-empty
-              v-if="!loadingGroups && selectedTask && !visibleWorkItems.length"
+              v-if="!loadingGroups && selectedTask && !activePlatformWorkOrder && !visibleWorkItems.length"
               description="当前筛选下没有资料组，可切换分类或搜索表号"
             />
-            <el-empty v-if="!loadingGroups && !selectedTask" description="请先选择一个终端任务" />
+            <el-empty v-if="!loadingGroups && !selectedTask && !activePlatformWorkOrder" description="请先选择一个终端任务" />
           </div>
         </div>
       </main>
@@ -2467,15 +3208,32 @@ onBeforeUnmount(() => {
           <div v-else class="collector-sheet collector-sheet-inline">
             <header class="sheet-head">
               <div>
-                <p class="eyebrow">{{ activeOrder ? '异常工单处理' : '施工采集单' }}</p>
+                <p class="eyebrow">{{ activePlatformWorkOrder ? '平台接入采集' : activeOrder ? '异常工单处理' : '施工采集单' }}</p>
                 <h3>{{ activeGroup.meterNo || activeGroup.id }}</h3>
                 <span>{{ activeGroup.terminal || selectedTask?.terminal || '-' }} / {{ activeGroup.address || '未填写地址' }}</span>
               </div>
+              <el-tag
+                v-if="activePlatformWorkOrder"
+                :type="platformWorkOrderNeedsRework(activePlatformWorkOrder) ? 'warning' : 'success'"
+                effect="light"
+              >
+                {{ platformWorkOrderNeedsRework(activePlatformWorkOrder) ? '退回返工' : (activePlatformWorkOrder.collectionStatus || '待采集') }}
+              </el-tag>
               <el-tag v-if="activeOrder" type="danger" effect="light">{{ activeOrder.category || '异常' }}</el-tag>
             </header>
 
             <div v-if="activeOrder?.note" class="exception-note">
               {{ activeOrder.note }}
+            </div>
+            <div v-if="platformWorkOrderNeedsRework(activePlatformWorkOrder)" class="platform-rework-note platform-rework-note-panel">
+              {{ platformReworkGapSummary(activePlatformWorkOrder) }}
+            </div>
+            <div v-if="platformReworkEvidenceGapGroups.length" class="platform-rework-gap-panel">
+              <strong>退回补采清单</strong>
+              <span v-for="group in platformReworkEvidenceGapGroups" :key="group.label">
+                <em>{{ group.label }}</em>
+                {{ group.items.join('、') }}
+              </span>
             </div>
 
             <div class="readonly-grid">
@@ -2493,24 +3251,100 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div class="field-grid">
-              <template v-if="hasConfiguredConstructionFields">
-                <label v-for="field in constructionFields" :key="field.key">
-                  <span>{{ field.label }} <b v-if="field.required">*</b></span>
-                  <div class="field-with-action">
-                    <el-input
-                      :model-value="fieldValue(field)"
-                      :type="fieldInputType(field)"
-                      :placeholder="fieldPlaceholder(field)"
-                      clearable
-                      @update:model-value="(value: string | number) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist() }"
-                      @change="saveCurrentDraft({ silent: true })"
-                    />
-                    <el-button v-if="shouldShowScanButton(field)" :icon="Connection" @click="startDynamicScanner(field)">扫码</el-button>
+            <section v-if="siteChecklistItems.length" class="site-checklist-panel">
+              <div class="site-checklist-head">
+                <div>
+                  <strong>施工必采清单</strong>
+                  <span>字段配置同步，按当前项目字段提醒现场补齐。</span>
+                </div>
+                <el-tag :type="siteChecklistSummary.missing ? 'warning' : 'success'" effect="light">
+                  {{ siteChecklistSummary.done }}/{{ siteChecklistSummary.total }} 已完成
+                </el-tag>
+              </div>
+              <div class="site-checklist-grid">
+                <article
+                  v-for="item in siteChecklistItems"
+                  :key="item.key"
+                  :class="{ done: item.done, required: item.required }"
+                >
+                  <div>
+                    <el-tag size="small" effect="plain">{{ checklistGroupLabel(item.group) }}</el-tag>
+                    <el-tag size="small" :type="checklistStatusType(item)" effect="light">
+                      {{ checklistStatusLabel(item) }}
+                    </el-tag>
+                    <el-tag class="construction-intent-tag" size="small" :type="item.intentType" effect="light" title="施工采集意图">
+                      {{ item.intentLabel }}
+                    </el-tag>
                   </div>
-                </label>
-              </template>
-              <template v-else>
+                  <strong>{{ item.label }}</strong>
+                  <small>{{ item.method }}<template v-if="item.required"> · 必填</template></small>
+                  <span>{{ item.value }}</span>
+                </article>
+              </div>
+              <small v-if="siteChecklistSummary.missing">
+                还有 {{ siteChecklistSummary.missing }} 项必填资料待补齐，补齐后才能提交。
+              </small>
+            </section>
+
+            <div v-if="hasConfiguredConstructionFields" class="construction-section-list">
+              <section
+              v-for="section in activeConstructionFieldSections"
+                :key="section.id"
+                class="construction-section"
+                :class="`construction-section-${section.id}`"
+              >
+                <div class="construction-section-head">
+                  <div>
+                    <strong>{{ section.title }}</strong>
+                    <span>{{ section.helper }}</span>
+                  </div>
+                  <el-tag size="small" effect="plain">{{ section.fields.length }} 项</el-tag>
+                </div>
+                <div class="field-grid">
+                  <label v-for="field in section.fields" :key="field.key">
+                    <span>
+                      {{ field.label }} <b v-if="isFieldRequired(field)">*</b>
+                      <el-tag class="construction-role-tag" size="small" effect="plain">
+                        {{ fieldRelationRoleLabel(field.relationRole) }}
+                      </el-tag>
+                      <el-tag class="construction-intent-tag" size="small" :type="constructionCollectionIntentType(field)" effect="light" title="施工采集意图">
+                        {{ constructionCollectionIntentLabel(field) }}
+                      </el-tag>
+                    </span>
+                    <small v-if="field.requiredWhen?.fieldKey" class="construction-condition-hint">
+                      {{ constructionConditionLabel(field) }}
+                    </small>
+                    <div class="field-with-action">
+                      <el-select
+                        v-if="shouldUseFieldSelect(field)"
+                        :model-value="fieldValue(field)"
+                        :placeholder="fieldPlaceholder(field)"
+                        clearable
+                        @change="(value: string) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist(); saveCurrentDraft({ silent: true }) }"
+                      >
+                        <el-option
+                          v-for="option in fieldSelectOptions(field)"
+                          :key="option"
+                          :label="option"
+                          :value="option"
+                        />
+                      </el-select>
+                      <el-input
+                        v-else
+                        :model-value="fieldValue(field)"
+                        :type="fieldInputType(field)"
+                        :placeholder="fieldPlaceholder(field)"
+                        clearable
+                        @update:model-value="(value: string | number) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist() }"
+                        @change="saveCurrentDraft({ silent: true })"
+                      />
+                      <el-button v-if="shouldShowScanButton(field)" :icon="Connection" @click="startDynamicScanner(field)">扫码</el-button>
+                    </div>
+                  </label>
+                </div>
+              </section>
+            </div>
+            <div v-else class="field-grid">
                 <label>
                   <span>采集器</span>
                   <div class="field-with-action">
@@ -2537,8 +3371,32 @@ onBeforeUnmount(() => {
                     <el-button :icon="Connection" @click="startScanner('module')">扫码</el-button>
                   </div>
                 </label>
-              </template>
             </div>
+
+            <section v-if="activePlatformWorkOrder" class="platform-kpi-panel">
+              <div class="platform-kpi-panel-head">
+                <strong>KPI 必备资料</strong>
+                <span>安装人员自动取当前账号，时间和在线时长用于效率计算</span>
+              </div>
+              <div class="platform-kpi-inputs">
+                <label v-for="field in platformKpiInputFields" :key="field.key">
+                  <span>{{ field.label }} <b v-if="field.required">*</b></span>
+                  <el-input
+                    :model-value="fieldValue(field)"
+                    :type="fieldInputType(field)"
+                    :placeholder="fieldPlaceholder(field)"
+                    clearable
+                    @update:model-value="(value: string | number) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist() }"
+                    @change="saveCurrentDraft({ silent: true })"
+                  />
+                </label>
+              </div>
+              <div class="platform-kpi-status">
+                <span v-for="item in activePlatformKpiItems" :key="item.key">
+                  {{ item.label }} {{ item.value }}
+                </span>
+              </div>
+            </section>
 
             <el-input
               v-if="activeOrder"
@@ -2567,69 +3425,99 @@ onBeforeUnmount(() => {
               </div>
             </section>
 
-            <section class="slot-grid">
-              <article v-for="(slot, index) in slots" :key="slot.key" class="photo-slot">
-                <div class="slot-title">
-                  <strong>{{ index + 1 }}. {{ slot.label }} <b v-if="slot.required">*</b></strong>
-                  <el-tag v-if="existingPhotoForSlot(activeGroup, slot.key) && !selectedFiles[slot.key]" size="small" type="success" effect="light">
-                    系统已有
-                  </el-tag>
-                  <el-tag v-if="selectedFiles[slot.key]" size="small" type="warning" effect="light">本地待传</el-tag>
+            <section
+              v-for="photoSection in activeConstructionPhotoSections"
+              :key="photoSection.id"
+              class="construction-photo-section"
+            >
+              <div class="construction-section-head">
+                <div>
+                  <strong>{{ photoSection.title }}</strong>
+                  <span>{{ photoSection.helper }}</span>
                 </div>
-
-                <div class="slot-preview" :class="{ empty: !previewUrls[slot.key] && !photoUrl(existingPhotoForSlot(activeGroup, slot.key)) }">
-                  <img
-                    v-if="previewUrls[slot.key] || photoUrl(existingPhotoForSlot(activeGroup, slot.key))"
-                    :src="previewUrls[slot.key] || photoUrl(existingPhotoForSlot(activeGroup, slot.key))"
-                    alt=""
-                    loading="lazy"
-                    decoding="async"
-                  />
-                  <div v-else>
-                    <el-icon><Picture /></el-icon>
-                    <span>{{ slot.required ? '必填照片' : '可选照片' }}</span>
+                <el-tag size="small" effect="plain">{{ photoSection.slots.length }} 张</el-tag>
+              </div>
+              <div class="slot-grid">
+                <article v-for="(slot, index) in photoSection.slots" :key="slot.key" class="photo-slot">
+                  <div class="slot-title">
+                    <strong>{{ index + 1 }}. {{ slot.label }} <b v-if="isPhotoSlotRequired(slot)">*</b></strong>
+                    <el-tag class="construction-role-tag" size="small" effect="plain">
+                      {{ fieldRelationRoleLabel(slot.relationRole) }}
+                    </el-tag>
+                    <el-tag class="construction-intent-tag" size="small" :type="constructionCollectionIntentType(slot)" effect="light" title="施工采集意图">
+                      {{ constructionCollectionIntentLabel(slot) }}
+                    </el-tag>
+                    <el-tag v-if="existingPhotoForSlot(activeGroup, slot.key) && !selectedFiles[slot.key]" size="small" type="success" effect="light">
+                      系统已有
+                    </el-tag>
+                    <el-tag v-if="selectedFiles[slot.key]" size="small" type="warning" effect="light">本地待传</el-tag>
                   </div>
-                </div>
-                <div v-if="existingPhotoForSlot(activeGroup, slot.key) && !selectedFiles[slot.key]" class="slot-note">
-                  已存在对应照片，无需重复上传；如需替换可重新拍照或从相册选择。
-                </div>
 
-                <div class="slot-actions">
-                  <el-button :icon="Camera" :loading="slotBusy[slot.key]" @click="triggerPhotoInput(slot.key, 'camera')">拍照</el-button>
-                  <el-button :icon="FolderOpened" @click="triggerPhotoInput(slot.key, 'album')">相册</el-button>
-                </div>
-                <input
-                  :ref="(el) => setFileInput(slot.key, 'camera', el, 'inline')"
-                  class="file-input"
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  @change="pickFile(slot.key, $event)"
-                />
-                <input
-                  :ref="(el) => setFileInput(slot.key, 'album', el, 'inline')"
-                  class="file-input"
-                  type="file"
-                  accept="image/*"
-                  @change="pickFile(slot.key, $event)"
-                />
-              </article>
+                  <div class="slot-preview" :class="{ empty: !previewUrls[slot.key] && !photoUrl(existingPhotoForSlot(activeGroup, slot.key)) }">
+                    <img
+                      v-if="previewUrls[slot.key] || photoUrl(existingPhotoForSlot(activeGroup, slot.key))"
+                      :src="previewUrls[slot.key] || photoUrl(existingPhotoForSlot(activeGroup, slot.key))"
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                    />
+                    <div v-else>
+                      <el-icon><Picture /></el-icon>
+                      <span>{{ isPhotoSlotRequired(slot) ? '必填照片' : '可选照片' }}</span>
+                    </div>
+                  </div>
+                  <div v-if="existingPhotoForSlot(activeGroup, slot.key) && !selectedFiles[slot.key]" class="slot-note">
+                    已存在对应照片，无需重复上传；如需替换可重新拍照或从相册选择。
+                  </div>
+
+                  <div class="slot-actions">
+                    <el-button :icon="Camera" :loading="slotBusy[slot.key]" @click="triggerPhotoInput(slot.key, 'camera')">拍照</el-button>
+                    <el-button :icon="FolderOpened" @click="triggerPhotoInput(slot.key, 'album')">相册</el-button>
+                  </div>
+                  <input
+                    :ref="(el) => setFileInput(slot.key, 'camera', el, 'inline')"
+                    class="file-input"
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    @change="pickFile(slot.key, $event)"
+                  />
+                  <input
+                    :ref="(el) => setFileInput(slot.key, 'album', el, 'inline')"
+                    class="file-input"
+                    type="file"
+                    accept="image/*"
+                    @change="pickFile(slot.key, $event)"
+                  />
+                </article>
+              </div>
             </section>
 
             <div
-              v-if="missingRequiredSlots.length || (!hasConfiguredConstructionFields && !form.moduleAssetNo.trim()) || requiredConstructionFieldLabels.length"
-              class="sheet-warning"
+              v-if="constructionSubmitGapGroups.length"
+              class="sheet-warning construction-submit-gap"
             >
-              <span v-if="!hasConfiguredConstructionFields && !form.moduleAssetNo.trim()">模块资产编号必填。</span>
-              <span v-if="requiredConstructionFieldLabels.length">缺少字段：{{ requiredConstructionFieldLabels.join('、') }}</span>
-              <span v-if="missingRequiredSlots.length">缺少照片：{{ missingRequiredSlots.join('、') }}</span>
+              <strong>施工提交缺口</strong>
+              <span v-for="group in constructionSubmitGapGroups" :key="group.label">{{ group.label }}：{{ group.items.join('、') }}</span>
             </div>
 
             <footer class="sheet-actions">
               <span class="draft-status">{{ Object.values(selectedFiles).filter(Boolean).length }} 张本地待上传</span>
-              <el-button v-if="activeCachedDraft" size="large" type="danger" plain @click="removeCachedDraft(activeCachedDraft)">删除缓存</el-button>
-              <el-button size="large" :loading="cacheBusy" @click="saveCurrentDraft()">保存缓存</el-button>
-              <el-button v-if="canShowCurrentUpload" size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
+              <el-button v-if="activePlatformWorkOrder" size="large" type="primary" :loading="cacheBusy" @click="savePlatformCollectionDraft('cached')">
+                保存平台草稿
+              </el-button>
+              <el-button
+                v-if="activePlatformWorkOrder"
+                size="large"
+                :loading="cacheBusy"
+                :disabled="constructionSubmitBlocked"
+                @click="savePlatformCollectionDraft('submitted')"
+              >
+                提交元数据
+              </el-button>
+              <el-button v-if="activeCachedDraft && !activePlatformWorkOrder" size="large" type="danger" plain @click="removeCachedDraft(activeCachedDraft)">删除缓存</el-button>
+              <el-button v-if="!activePlatformWorkOrder" size="large" :loading="cacheBusy" @click="saveCurrentDraft()">保存缓存</el-button>
+              <el-button v-if="canShowCurrentUpload && !activePlatformWorkOrder" size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
                 上传当前组
               </el-button>
             </footer>
@@ -2726,24 +3614,100 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="field-grid">
-          <template v-if="hasConfiguredConstructionFields">
-            <label v-for="field in constructionFields" :key="field.key">
-              <span>{{ field.label }} <b v-if="field.required">*</b></span>
-              <div class="field-with-action">
-                <el-input
-                  :model-value="fieldValue(field)"
-                  :type="fieldInputType(field)"
-                  :placeholder="fieldPlaceholder(field)"
-                  clearable
-                  @update:model-value="(value: string | number) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist() }"
-                  @change="saveCurrentDraft({ silent: true })"
-                />
-                <el-button v-if="shouldShowScanButton(field)" :icon="Connection" @click="startDynamicScanner(field)">扫码</el-button>
+        <section v-if="siteChecklistItems.length" class="site-checklist-panel">
+          <div class="site-checklist-head">
+            <div>
+              <strong>施工必采清单</strong>
+              <span>字段配置同步，按当前项目字段提醒现场补齐。</span>
+            </div>
+            <el-tag :type="siteChecklistSummary.missing ? 'warning' : 'success'" effect="light">
+              {{ siteChecklistSummary.done }}/{{ siteChecklistSummary.total }} 已完成
+            </el-tag>
+          </div>
+          <div class="site-checklist-grid">
+            <article
+              v-for="item in siteChecklistItems"
+              :key="item.key"
+              :class="{ done: item.done, required: item.required }"
+            >
+              <div>
+                <el-tag size="small" effect="plain">{{ checklistGroupLabel(item.group) }}</el-tag>
+                <el-tag size="small" :type="checklistStatusType(item)" effect="light">
+                  {{ checklistStatusLabel(item) }}
+                </el-tag>
+                <el-tag class="construction-intent-tag" size="small" :type="item.intentType" effect="light" title="施工采集意图">
+                  {{ item.intentLabel }}
+                </el-tag>
               </div>
-            </label>
-          </template>
-          <template v-else>
+              <strong>{{ item.label }}</strong>
+              <small>{{ item.method }}<template v-if="item.required"> · 必填</template></small>
+              <span>{{ item.value }}</span>
+            </article>
+          </div>
+          <small v-if="siteChecklistSummary.missing">
+            还有 {{ siteChecklistSummary.missing }} 项必填资料待补齐，补齐后才能提交。
+          </small>
+        </section>
+
+        <div v-if="hasConfiguredConstructionFields" class="construction-section-list">
+          <section
+            v-for="section in activeConstructionFieldSections"
+            :key="section.id"
+            class="construction-section"
+            :class="`construction-section-${section.id}`"
+          >
+            <div class="construction-section-head">
+              <div>
+                <strong>{{ section.title }}</strong>
+                <span>{{ section.helper }}</span>
+              </div>
+              <el-tag size="small" effect="plain">{{ section.fields.length }} 项</el-tag>
+            </div>
+            <div class="field-grid">
+              <label v-for="field in section.fields" :key="field.key">
+                <span>
+                  {{ field.label }} <b v-if="isFieldRequired(field)">*</b>
+                  <el-tag class="construction-role-tag" size="small" effect="plain">
+                    {{ fieldRelationRoleLabel(field.relationRole) }}
+                  </el-tag>
+                  <el-tag class="construction-intent-tag" size="small" :type="constructionCollectionIntentType(field)" effect="light" title="施工采集意图">
+                    {{ constructionCollectionIntentLabel(field) }}
+                  </el-tag>
+                </span>
+                <small v-if="field.requiredWhen?.fieldKey" class="construction-condition-hint">
+                  {{ constructionConditionLabel(field) }}
+                </small>
+                <div class="field-with-action">
+                  <el-select
+                    v-if="shouldUseFieldSelect(field)"
+                    :model-value="fieldValue(field)"
+                    :placeholder="fieldPlaceholder(field)"
+                    clearable
+                    @change="(value: string) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist(); saveCurrentDraft({ silent: true }) }"
+                  >
+                    <el-option
+                      v-for="option in fieldSelectOptions(field)"
+                      :key="option"
+                      :label="option"
+                      :value="option"
+                    />
+                  </el-select>
+                  <el-input
+                    v-else
+                    :model-value="fieldValue(field)"
+                    :type="fieldInputType(field)"
+                    :placeholder="fieldPlaceholder(field)"
+                    clearable
+                    @update:model-value="(value: string | number) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist() }"
+                    @change="saveCurrentDraft({ silent: true })"
+                  />
+                  <el-button v-if="shouldShowScanButton(field)" :icon="Connection" @click="startDynamicScanner(field)">扫码</el-button>
+                </div>
+              </label>
+            </div>
+          </section>
+        </div>
+        <div v-else class="field-grid">
             <label>
               <span>采集器</span>
               <div class="field-with-action">
@@ -2770,8 +3734,32 @@ onBeforeUnmount(() => {
                 <el-button :icon="Connection" @click="startScanner('module')">扫码</el-button>
               </div>
             </label>
-          </template>
         </div>
+
+        <section v-if="activePlatformWorkOrder" class="platform-kpi-panel">
+          <div class="platform-kpi-panel-head">
+            <strong>KPI 必备资料</strong>
+            <span>安装人员自动取当前账号，时间和在线时长用于效率计算</span>
+          </div>
+          <div class="platform-kpi-inputs">
+            <label v-for="field in platformKpiInputFields" :key="field.key">
+              <span>{{ field.label }} <b v-if="field.required">*</b></span>
+              <el-input
+                :model-value="fieldValue(field)"
+                :type="fieldInputType(field)"
+                :placeholder="fieldPlaceholder(field)"
+                clearable
+                @update:model-value="(value: string | number) => { setFieldValue(field, String(value)); scheduleCurrentDraftPersist() }"
+                @change="saveCurrentDraft({ silent: true })"
+              />
+            </label>
+          </div>
+          <div class="platform-kpi-status">
+            <span v-for="item in activePlatformKpiItems" :key="item.key">
+              {{ item.label }} {{ item.value }}
+            </span>
+          </div>
+        </section>
 
         <el-input
           v-if="activeOrder"
@@ -2800,69 +3788,99 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section class="slot-grid">
-          <article v-for="(slot, index) in slots" :key="slot.key" class="photo-slot">
-            <div class="slot-title">
-              <strong>{{ index + 1 }}. {{ slot.label }} <b v-if="slot.required">*</b></strong>
-              <el-tag v-if="existingPhotoForSlot(activeGroup, slot.key) && !selectedFiles[slot.key]" size="small" type="success" effect="light">
-                系统已有
-              </el-tag>
-              <el-tag v-if="selectedFiles[slot.key]" size="small" type="warning" effect="light">本地待传</el-tag>
+        <section
+          v-for="photoSection in activeConstructionPhotoSections"
+          :key="photoSection.id"
+          class="construction-photo-section"
+        >
+          <div class="construction-section-head">
+            <div>
+              <strong>{{ photoSection.title }}</strong>
+              <span>{{ photoSection.helper }}</span>
             </div>
-
-            <div class="slot-preview" :class="{ empty: !previewUrls[slot.key] && !photoUrl(existingPhotoForSlot(activeGroup, slot.key)) }">
-              <img
-                v-if="previewUrls[slot.key] || photoUrl(existingPhotoForSlot(activeGroup, slot.key))"
-                :src="previewUrls[slot.key] || photoUrl(existingPhotoForSlot(activeGroup, slot.key))"
-                alt=""
-                loading="lazy"
-                decoding="async"
-              />
-              <div v-else>
-                <el-icon><Picture /></el-icon>
-                <span>{{ slot.required ? '必填照片' : '可选照片' }}</span>
+            <el-tag size="small" effect="plain">{{ photoSection.slots.length }} 张</el-tag>
+          </div>
+          <div class="slot-grid">
+            <article v-for="(slot, index) in photoSection.slots" :key="slot.key" class="photo-slot">
+              <div class="slot-title">
+                <strong>{{ index + 1 }}. {{ slot.label }} <b v-if="isPhotoSlotRequired(slot)">*</b></strong>
+                <el-tag class="construction-role-tag" size="small" effect="plain">
+                  {{ fieldRelationRoleLabel(slot.relationRole) }}
+                </el-tag>
+                <el-tag class="construction-intent-tag" size="small" :type="constructionCollectionIntentType(slot)" effect="light" title="施工采集意图">
+                  {{ constructionCollectionIntentLabel(slot) }}
+                </el-tag>
+                <el-tag v-if="existingPhotoForSlot(activeGroup, slot.key) && !selectedFiles[slot.key]" size="small" type="success" effect="light">
+                  系统已有
+                </el-tag>
+                <el-tag v-if="selectedFiles[slot.key]" size="small" type="warning" effect="light">本地待传</el-tag>
               </div>
-            </div>
-            <div v-if="existingPhotoForSlot(activeGroup, slot.key) && !selectedFiles[slot.key]" class="slot-note">
-              已存在对应照片，无需重复上传；如需替换可重新拍照或从相册选择。
-            </div>
 
-            <div class="slot-actions">
-              <el-button :icon="Camera" :loading="slotBusy[slot.key]" @click="triggerPhotoInput(slot.key, 'camera')">拍照</el-button>
-              <el-button :icon="FolderOpened" @click="triggerPhotoInput(slot.key, 'album')">相册</el-button>
-            </div>
-            <input
-              :ref="(el) => setFileInput(slot.key, 'camera', el, 'drawer')"
-              class="file-input"
-              type="file"
-              accept="image/*"
-              capture="environment"
-              @change="pickFile(slot.key, $event)"
-            />
-            <input
-              :ref="(el) => setFileInput(slot.key, 'album', el, 'drawer')"
-              class="file-input"
-              type="file"
-              accept="image/*"
-              @change="pickFile(slot.key, $event)"
-            />
-          </article>
+              <div class="slot-preview" :class="{ empty: !previewUrls[slot.key] && !photoUrl(existingPhotoForSlot(activeGroup, slot.key)) }">
+                <img
+                  v-if="previewUrls[slot.key] || photoUrl(existingPhotoForSlot(activeGroup, slot.key))"
+                  :src="previewUrls[slot.key] || photoUrl(existingPhotoForSlot(activeGroup, slot.key))"
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
+                />
+                <div v-else>
+                  <el-icon><Picture /></el-icon>
+                  <span>{{ isPhotoSlotRequired(slot) ? '必填照片' : '可选照片' }}</span>
+                </div>
+              </div>
+              <div v-if="existingPhotoForSlot(activeGroup, slot.key) && !selectedFiles[slot.key]" class="slot-note">
+                已存在对应照片，无需重复上传；如需替换可重新拍照或从相册选择。
+              </div>
+
+              <div class="slot-actions">
+                <el-button :icon="Camera" :loading="slotBusy[slot.key]" @click="triggerPhotoInput(slot.key, 'camera')">拍照</el-button>
+                <el-button :icon="FolderOpened" @click="triggerPhotoInput(slot.key, 'album')">相册</el-button>
+              </div>
+              <input
+                :ref="(el) => setFileInput(slot.key, 'camera', el, 'drawer')"
+                class="file-input"
+                type="file"
+                accept="image/*"
+                capture="environment"
+                @change="pickFile(slot.key, $event)"
+              />
+              <input
+                :ref="(el) => setFileInput(slot.key, 'album', el, 'drawer')"
+                class="file-input"
+                type="file"
+                accept="image/*"
+                @change="pickFile(slot.key, $event)"
+              />
+            </article>
+          </div>
         </section>
 
         <div
-          v-if="missingRequiredSlots.length || (!hasConfiguredConstructionFields && !form.moduleAssetNo.trim()) || requiredConstructionFieldLabels.length"
-          class="sheet-warning"
+          v-if="constructionSubmitGapGroups.length"
+          class="sheet-warning construction-submit-gap"
         >
-          <span v-if="!hasConfiguredConstructionFields && !form.moduleAssetNo.trim()">模块资产编号必填。</span>
-          <span v-if="requiredConstructionFieldLabels.length">缺少字段：{{ requiredConstructionFieldLabels.join('、') }}</span>
-          <span v-if="missingRequiredSlots.length">缺少照片：{{ missingRequiredSlots.join('、') }}</span>
+          <strong>施工提交缺口</strong>
+          <span v-for="group in constructionSubmitGapGroups" :key="group.label">{{ group.label }}：{{ group.items.join('、') }}</span>
         </div>
 
         <footer class="sheet-actions">
           <span class="draft-status">{{ Object.values(selectedFiles).filter(Boolean).length }} 张本地待上传</span>
-          <el-button v-if="activeCachedDraft" size="large" type="danger" plain @click="removeCachedDraft(activeCachedDraft)">删除缓存</el-button>
-          <el-button size="large" :loading="cacheBusy" @click="saveCurrentDraft()">保存缓存</el-button>
-          <el-button v-if="canShowCurrentUpload" size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
+          <el-button v-if="activePlatformWorkOrder" size="large" type="primary" :loading="cacheBusy" @click="savePlatformCollectionDraft('cached')">
+            保存平台草稿
+          </el-button>
+          <el-button
+            v-if="activePlatformWorkOrder"
+            size="large"
+            :loading="cacheBusy"
+            :disabled="constructionSubmitBlocked"
+            @click="savePlatformCollectionDraft('submitted')"
+          >
+            提交元数据
+          </el-button>
+          <el-button v-if="activeCachedDraft && !activePlatformWorkOrder" size="large" type="danger" plain @click="removeCachedDraft(activeCachedDraft)">删除缓存</el-button>
+          <el-button v-if="!activePlatformWorkOrder" size="large" :loading="cacheBusy" @click="saveCurrentDraft()">保存缓存</el-button>
+          <el-button v-if="canShowCurrentUpload && !activePlatformWorkOrder" size="large" type="primary" :loading="uploading" :disabled="!canUploadCurrent" @click="uploadCurrentDraft">
             上传当前组
           </el-button>
         </footer>
@@ -3678,6 +4696,16 @@ onBeforeUnmount(() => {
   line-height: 1.5;
 }
 
+.construction-submit-gap {
+  display: grid;
+  gap: 4px;
+}
+
+.construction-submit-gap strong,
+.construction-submit-gap span {
+  overflow-wrap: anywhere;
+}
+
 .readonly-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3717,6 +4745,96 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+.construction-section-list,
+.construction-section,
+.construction-photo-section {
+  display: grid;
+  gap: 10px;
+}
+
+.construction-section,
+.construction-photo-section {
+  border: 1px solid #d9e4ee;
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px;
+}
+
+.construction-section-device-replacement {
+  border-color: #bddfd0;
+  background: #f7fcf9;
+}
+
+.construction-section-main-device-replacement {
+  border-color: #f4b4aa;
+  background: #fff8f6;
+}
+
+.construction-section-accessory-confirmation {
+  border-color: #f3d28f;
+  background: #fffaf0;
+}
+
+.construction-section-conditional-accessory-fields {
+  border-color: #f3d28f;
+  background: #fffdf7;
+}
+
+.construction-section-task-core {
+  border-color: #d8c9f7;
+  background: #fbf9ff;
+}
+
+.construction-section-supporting-fields {
+  background: #fbfdff;
+}
+
+.construction-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.construction-section-head > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.construction-section-head strong {
+  color: #111827;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.construction-section-head span {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.construction-role-tag {
+  display: inline-flex;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.construction-intent-tag {
+  display: inline-flex;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.construction-condition-hint {
+  display: block;
+  margin: -2px 0 8px;
+  color: #9a6700;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
 }
 
 .field-with-action {
@@ -4170,6 +5288,10 @@ onBeforeUnmount(() => {
   border-left-color: var(--v2-warning, #a15c00);
 }
 
+.field-task-card.kind-platform {
+  border-left-color: var(--v2-success, #067647);
+}
+
 .field-task-entry {
   margin-bottom: 4px;
 }
@@ -4180,6 +5302,306 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   line-height: 1;
+}
+
+.platform-work-order-entry {
+  display: grid;
+  gap: 10px;
+}
+
+.platform-schema-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.platform-schema-sections {
+  display: grid;
+  flex: 1 1 100%;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.platform-schema-section {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid rgba(16, 24, 40, 0.08);
+  border-radius: 10px;
+  padding: 8px;
+}
+
+.platform-schema-section strong {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.platform-schema-section small {
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.platform-rework-filter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(234, 88, 12, 0.18);
+  border-radius: 10px;
+  background: rgba(255, 247, 237, 0.72);
+}
+
+.platform-schema-chips span {
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid rgba(16, 24, 40, 0.06);
+  border-radius: 999px;
+  background: rgba(240, 253, 244, 0.76);
+  color: var(--v2-text, #344054);
+  font-size: 12px;
+  line-height: 1.3;
+  padding: 5px 9px;
+  overflow-wrap: anywhere;
+}
+
+.platform-schema-section span {
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.platform-schema-section span em {
+  display: block;
+  margin-top: 2px;
+  color: #667085;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.platform-work-order-samples {
+  display: grid;
+  gap: 6px;
+}
+
+.platform-work-order-samples > div {
+  display: grid;
+  gap: 3px;
+  border: 1px solid rgba(16, 24, 40, 0.045);
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.86);
+  padding: 9px;
+}
+
+.platform-work-order-samples strong,
+.platform-work-order-samples span,
+.platform-work-order-samples small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.platform-core-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.platform-core-context span,
+.display-field-chip {
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+.platform-kpi-line {
+  color: var(--v2-text-muted, #64748b);
+  font-weight: 700;
+}
+
+.site-checklist-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(10, 114, 216, 0.16);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.site-checklist-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.site-checklist-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.site-checklist-head strong {
+  color: var(--v2-text-strong, #0f172a);
+}
+
+.site-checklist-head span,
+.site-checklist-panel > small {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.site-checklist-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.site-checklist-grid article {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(100, 116, 139, 0.14);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.site-checklist-grid article.done {
+  border-color: rgba(6, 118, 71, 0.2);
+  background: rgba(240, 253, 244, 0.9);
+}
+
+.site-checklist-grid article.required:not(.done) {
+  border-color: rgba(180, 35, 24, 0.2);
+  background: rgba(255, 247, 247, 0.92);
+}
+
+.site-checklist-grid article > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.site-checklist-grid strong,
+.site-checklist-grid span,
+.site-checklist-grid small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.site-checklist-grid strong {
+  color: var(--v2-text-strong, #101828);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.site-checklist-grid small,
+.site-checklist-grid span {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.platform-kpi-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(10, 114, 216, 0.16);
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.platform-kpi-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.platform-kpi-panel-head strong {
+  color: var(--v2-text-strong, #0f172a);
+}
+
+.platform-kpi-panel-head span,
+.platform-kpi-status span {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.platform-kpi-inputs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.platform-kpi-inputs label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.platform-kpi-inputs label > span {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.platform-kpi-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.platform-kpi-status span {
+  padding: 5px 8px;
+  border: 1px solid rgba(100, 116, 139, 0.14);
+  border-radius: 999px;
+  background: #ffffff;
+}
+
+.platform-rework-note {
+  color: #9a3412;
+  font-weight: 760;
+}
+
+.platform-rework-note-panel {
+  padding: 10px 12px;
+  border: 1px solid rgba(234, 88, 12, 0.22);
+  border-radius: 10px;
+  background: rgba(255, 247, 237, 0.9);
+}
+
+.platform-rework-gap-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(234, 88, 12, 0.2);
+  border-radius: 10px;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.platform-rework-gap-panel strong {
+  color: #7c2d12;
+  font-size: 14px;
+}
+
+.platform-rework-gap-panel span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.platform-rework-gap-panel em {
+  margin-right: 6px;
+  color: #c2410c;
+  font-style: normal;
+  font-weight: 740;
 }
 
 .task-title,
@@ -5037,6 +6459,23 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 720px) {
+  .site-checklist-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .site-checklist-head {
+    flex-direction: column;
+  }
+
+  .platform-kpi-inputs {
+    grid-template-columns: 1fr;
+  }
+
+  .platform-kpi-panel-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .unbuilt-dialog-summary {
     grid-template-columns: 1fr;
   }

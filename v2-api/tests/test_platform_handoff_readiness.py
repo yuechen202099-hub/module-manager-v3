@@ -13,14 +13,24 @@ def test_platform_handoff_readiness_summarizes_review_package_and_safety() -> No
     assert response.status_code == 200
     payload = response.json()["data"]
     assert payload["handoff_version"] == 1
-    assert payload["feature_branch"] == "pm-platform/project-drafts"
+    assert payload["feature_branch"] == "pm-platform/production-3.0.77-sync"
     assert payload["production_baseline"] == {
-        "branch": "production/V3/3.0.71",
-        "version": "V3.0.71",
+        "branch": "production/V3/3.0.77",
+        "version": "V3.0.77",
     }
     assert payload["ready_for_review_package"] is True
     assert payload["ready_for_production_migration"] is False
     assert payload["ready_for_production_release"] is False
+
+    config_preflight = payload["config_preflight"]
+    assert config_preflight["preflight_version"] == 1
+    assert "ready_for_config_load" in config_preflight
+    assert set(config_preflight["safety"]) >= {
+        "read_only_no_write",
+        "no_project_draft_load",
+        "no_database_connection",
+        "no_production_data_edit",
+    }
 
     readiness = payload["project_readiness_summary"]
     assert readiness["readiness_version"] == 1

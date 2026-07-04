@@ -12,7 +12,7 @@ from app.services.platform.config_persistence_contract import PERSISTENCE_CONTRA
 from app.services.platform.templates import SUPPORTED_TEMPLATE_TYPES
 
 
-FIELD_SCHEMA_KEYS = ["primary_field", "aggregate_field", "construction_fields", "photo_slots"]
+FIELD_SCHEMA_KEYS = ["primary_field", "aggregate_field", "display_fields", "construction_fields", "photo_slots"]
 
 CONSTRUCTION_COLLECTION_PAYLOAD_KEYS = [
     "actor",

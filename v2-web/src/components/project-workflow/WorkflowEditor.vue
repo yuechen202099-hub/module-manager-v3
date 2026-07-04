@@ -35,6 +35,16 @@ const draft = ref<ProjectWorkflow>(emptyWorkflow())
 const selectedNodeId = ref('')
 const draggingNodeId = ref('')
 
+type WorkflowNodePosition = {
+  x: number
+  y: number
+}
+
+type WorkflowConnector = {
+  id: string
+  d: string
+}
+
 const enabledNodes = computed(() => draft.value.nodes.filter((node) => node.enabled).sort(compareNodes))
 const disabledNodes = computed(() => draft.value.nodes.filter((node) => !node.enabled).sort(compareNodes))
 const selectedNode = computed(() => draft.value.nodes.find((node) => node.id === selectedNodeId.value) || enabledNodes.value[0] || disabledNodes.value[0])
@@ -75,6 +85,57 @@ const previewEdges = computed(() => {
     label: '下一步',
   }))
 })
+const workflowNodePositions = computed<Record<string, WorkflowNodePosition>>(() => {
+  const nodes = enabledNodes.value
+  const columns = Math.min(Math.max(nodes.length, 1), 4)
+  const xStep = columns > 1 ? 760 / (columns - 1) : 0
+  return Object.fromEntries(
+    nodes.map((node, index) => {
+      const row = Math.floor(index / columns)
+      const column = index % columns
+      return [
+        node.id,
+        {
+          x: Math.round(columns === 1 ? 500 : 120 + xStep * column),
+          y: 80 + row * 110,
+        },
+      ]
+    }),
+  )
+})
+const workflowConnectors = computed<WorkflowConnector[]>(() => {
+  const nodes = enabledNodes.value
+  return nodes.slice(1).map((node, index) => {
+    const source = workflowNodePositions.value[nodes[index].id]
+    const target = workflowNodePositions.value[node.id]
+    const midX = Math.round((source.x + target.x) / 2)
+    return {
+      id: `${nodes[index].id}__${node.id}`,
+      d: `M ${source.x} ${source.y} C ${midX} ${source.y}, ${midX} ${target.y}, ${target.x} ${target.y}`,
+    }
+  })
+})
+const selectedNodeOrderIndex = computed(() =>
+  selectedNode.value ? enabledNodes.value.findIndex((node) => node.id === selectedNode.value?.id) : -1,
+)
+const selectedNodeOrderLabel = computed(() => {
+  const index = selectedNodeOrderIndex.value
+  if (index < 0) return '未在当前流程中'
+  return `第 ${index + 1} / ${enabledNodes.value.length} 步`
+})
+const selectedNodeNeighborSummary = computed(() => {
+  const index = selectedNodeOrderIndex.value
+  if (index < 0) return '启用节点后可调整流程顺序'
+  const previousNode = enabledNodes.value[index - 1]
+  const nextNode = enabledNodes.value[index + 1]
+  const previousLabel = previousNode ? previousNode.label || fallbackNodeLabels[previousNode.id] || previousNode.id : '无'
+  const nextLabel = nextNode ? nextNode.label || fallbackNodeLabels[nextNode.id] || nextNode.id : '无'
+  return `上一步：${previousLabel}；下一步：${nextLabel}`
+})
+const canMoveSelectedNodeUp = computed(() => editable.value && selectedNodeOrderIndex.value > 0)
+const canMoveSelectedNodeDown = computed(
+  () => editable.value && selectedNodeOrderIndex.value >= 0 && selectedNodeOrderIndex.value < enabledNodes.value.length - 1,
+)
 
 watch(
   () => props.workflow,
@@ -126,6 +187,14 @@ function fallbackModuleName(moduleId: string) {
   return fallbackNames[moduleId] || moduleId
 }
 
+function workflowNodeStyle(node: ProjectWorkflowNode, index: number) {
+  const position = workflowNodePositions.value[node.id] || { x: 500, y: 80 + index * 110 }
+  return {
+    left: `${position.x / 10}%`,
+    top: `${position.y / 3.6}%`,
+  }
+}
+
 function moduleNodeCount(moduleId: string) {
   return draft.value.nodes.filter((node) => node.moduleId === moduleId).length
 }
@@ -167,6 +236,12 @@ function moveNode(nodeId: string, direction: -1 | 1) {
   nodes.splice(targetIndex, 0, node)
   normalizeOrders(nodes)
   rebuildEdges(nodes)
+}
+
+function moveSelectedNode(direction: -1 | 1) {
+  const node = selectedNode.value
+  if (!node?.enabled) return
+  moveNode(node.id, direction)
 }
 
 function toggleNode(node: ProjectWorkflowNode, enabled: boolean) {
@@ -240,6 +315,33 @@ function saveWorkflow() {
 
     <div class="workflow-layout">
       <section class="workflow-canvas">
+        <div class="workflow-visual-map" aria-label="项目流程关系图">
+          <svg class="workflow-connector-layer" viewBox="0 0 1000 360" preserveAspectRatio="none" aria-hidden="true">
+            <path
+              v-for="connector in workflowConnectors"
+              :key="connector.id"
+              :d="connector.d"
+            />
+          </svg>
+          <button
+            v-for="(node, index) in enabledNodes"
+            :key="`map-${node.id}`"
+            type="button"
+            class="workflow-map-node"
+            :class="{ selected: selectedNode?.id === node.id, required: node.required }"
+            :style="workflowNodeStyle(node, index)"
+            :draggable="editable"
+            @dragstart="onDragStart(node.id)"
+            @dragover.prevent
+            @drop="onDrop(node.id)"
+            @click="selectNode(node.id)"
+          >
+            <small>{{ index + 1 }} · {{ fallbackModuleName(node.moduleId) }}</small>
+            <strong>{{ node.label || fallbackNodeLabels[node.id] || node.id }}</strong>
+            <em>{{ node.required ? '必备节点' : '可选节点' }}</em>
+          </button>
+        </div>
+
         <div class="workflow-lane">
           <div
             v-for="(node, index) in enabledNodes"
@@ -328,6 +430,19 @@ function saveWorkflow() {
               inactive-text="停用"
               @change="toggleNode(selectedNode, Boolean($event))"
             />
+            <div class="node-order-control-panel">
+              <span>顺序调整</span>
+              <strong>当前位置：{{ selectedNodeOrderLabel }}</strong>
+              <small>{{ selectedNodeNeighborSummary }}</small>
+              <div class="node-order-buttons">
+                <ElButton :icon="ArrowUp" :disabled="!canMoveSelectedNodeUp" @click="moveSelectedNode(-1)">
+                  上移
+                </ElButton>
+                <ElButton :icon="ArrowDown" :disabled="!canMoveSelectedNodeDown" @click="moveSelectedNode(1)">
+                  下移
+                </ElButton>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -413,6 +528,78 @@ function saveWorkflow() {
 .workflow-canvas,
 .workflow-side-panel {
   min-width: 0;
+}
+
+.workflow-canvas {
+  overflow-x: auto;
+}
+
+.workflow-visual-map {
+  position: relative;
+  min-width: 760px;
+  min-height: 360px;
+  margin-bottom: 12px;
+  overflow: hidden;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.workflow-connector-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.workflow-connector-layer path {
+  fill: none;
+  stroke: var(--el-color-primary-light-5);
+  stroke-width: 3;
+}
+
+.workflow-map-node {
+  position: absolute;
+  z-index: 1;
+  display: grid;
+  gap: 4px;
+  width: 184px;
+  min-height: 78px;
+  padding: 10px;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-lighter);
+  cursor: pointer;
+  text-align: left;
+}
+
+.workflow-map-node.required {
+  border-color: var(--el-color-success-light-5);
+  background: var(--el-color-success-light-9);
+}
+
+.workflow-map-node.selected {
+  border-color: var(--el-color-primary);
+  box-shadow: 0 0 0 2px var(--el-color-primary-light-8);
+}
+
+.workflow-map-node strong {
+  overflow-wrap: anywhere;
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.workflow-map-node small,
+.workflow-map-node em {
+  overflow-wrap: anywhere;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.35;
 }
 
 .workflow-lane {
@@ -547,6 +734,31 @@ function saveWorkflow() {
 .node-fields label {
   display: grid;
   gap: 6px;
+}
+
+.node-order-control-panel {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.node-order-control-panel strong {
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.node-order-control-panel small {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.node-order-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .disabled-node {

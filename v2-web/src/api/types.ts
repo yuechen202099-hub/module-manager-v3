@@ -77,6 +77,22 @@ export type ProjectCaptureMethod = 'manual' | 'scan' | 'photo' | 'select' | 'dat
 
 export type ProjectFieldDataType = 'text' | 'number' | 'datetime' | 'image' | 'enum' | 'duration' | 'location' | 'boolean'
 
+export type ProjectFieldRequiredWhen = {
+  fieldKey: string
+  equals: string | string[]
+}
+
+export type ProjectFieldRelationRole =
+  | 'aggregate'
+  | 'task_object'
+  | 'task_detail'
+  | 'replacement_device'
+  | 'old_device'
+  | 'accessory_replace_confirm'
+  | 'accessory_new_device'
+  | 'evidence_photo'
+  | 'supporting_field'
+
 export type ProjectFieldDefinition = {
   key: string
   label: string
@@ -86,7 +102,17 @@ export type ProjectFieldDefinition = {
   required: boolean
   parentKey?: string
   kpiEnabled: boolean
+  showInConstructionPanel?: boolean
   options: string[]
+  requiredWhen?: ProjectFieldRequiredWhen
+  relationRole?: ProjectFieldRelationRole
+}
+
+export type ProjectDashboardMetric = {
+  key: string
+  label: string
+  source?: string
+  scope?: string
 }
 
 export type ProjectWorkItemSchema = {
@@ -95,10 +121,295 @@ export type ProjectWorkItemSchema = {
   aggregateField?: ProjectFieldDefinition
   platformRequiredFields: ProjectFieldDefinition[]
   customFields: ProjectFieldDefinition[]
-  dashboardMetrics?: string[]
+  dashboardMetrics?: ProjectDashboardMetric[]
+}
+
+export type ProjectWorkflowNode = {
+  id: string
+  type: string
+  label: string
+  enabled: boolean
+  required: boolean
+  order: number
+  moduleId: string
+  config: Record<string, unknown>
+}
+
+export type ProjectWorkflowEdge = {
+  id: string
+  source: string
+  target: string
+  label: string
+}
+
+export type ProjectWorkflow = {
+  version: number
+  nodes: ProjectWorkflowNode[]
+  edges: ProjectWorkflowEdge[]
+  updatedAt: string
+  updatedBy: string
+}
+
+export type ProjectWorkflowStatus = {
+  totalNodes: number
+  enabledNodeIds: string[]
+  enabledNodeLabels: string[]
+  enabledModuleIds: string[]
+  currentNodeId: string
+  currentNodeLabel: string
+  pendingNodeIds: string[]
+  pendingNodeLabels: string[]
+  moduleSyncEnabled: boolean
+}
+
+export type ProjectReadinessCheckStatus = 'passed' | 'failed'
+
+export type ProjectReadinessCheck = {
+  id: string
+  group: string
+  label: string
+  status: ProjectReadinessCheckStatus
+  severity: string
+  evidence: Record<string, unknown>
+  action: string
+}
+
+export type ProjectReadinessSummary = {
+  total: number
+  passed: number
+  failed: number
+  blockers: number
+}
+
+export type ProjectReadiness = {
+  readinessVersion: number
+  projectId: string
+  ready: boolean
+  summary: ProjectReadinessSummary
+  checks: ProjectReadinessCheck[]
+  nextActions: string[]
+  safety: string[]
+}
+
+export type ProjectReadinessSummaryItem = {
+  projectId: string
+  projectName: string
+  projectStatus: string
+  ready: boolean
+  summary: ProjectReadinessSummary
+  nextActions: string[]
+}
+
+export type ProjectReadinessActionCount = {
+  action: string
+  count: number
+}
+
+export type ProjectReadinessSummaryList = {
+  readinessVersion: number
+  total: number
+  ready: number
+  notReady: number
+  actionCounts: ProjectReadinessActionCount[]
+  items: ProjectReadinessSummaryItem[]
+  safety: string[]
+}
+
+export type PlatformPersistenceStore = {
+  id: string
+  label: string
+  backend: string
+  path: string
+  exists: boolean
+  parent: string
+  parentExists: boolean
+  contains: string[]
+}
+
+export type PlatformPersistenceStatus = {
+  statusVersion: number
+  stateBackend: string
+  database: {
+    configured: boolean
+    urlRedacted: string
+    usedForPlatformProjectConfig: boolean
+    migrationRequiredForPostgresPlatformConfig: boolean
+  }
+  stores: PlatformPersistenceStore[]
+  guarantees: string[]
+  safety: string[]
+}
+
+export type PlatformConfigPreflightIssue = {
+  scope: string
+  code: string
+  severity: string
+  message: string
+  action: string
+}
+
+export type PlatformConfigPreflightProject = {
+  projectId: string
+  name: string
+  sourceStatus: string
+  status: string
+  issueCount: number
+  issues: PlatformConfigPreflightIssue[]
+}
+
+export type PlatformConfigPreflight = {
+  preflightVersion: number
+  readyForConfigLoad: boolean
+  store: {
+    id: string
+    backend: string
+    path: string
+    exists: boolean
+    readable: boolean
+  }
+  summary: {
+    totalProjects: number
+    readyProjects: number
+    blockedProjects: number
+    storeIssues: number
+  }
+  issues: PlatformConfigPreflightIssue[]
+  projects: PlatformConfigPreflightProject[]
+  safety: string[]
+}
+
+export type PlatformMigrationGateItem = {
+  id: string
+  label: string
+  description: string
+  required: boolean
+  status: string
+  evidence: string
+}
+
+export type PlatformMigrationReadiness = {
+  readinessVersion: number
+  scope: string
+  readyForMigration: boolean
+  requiresUserApproval: boolean
+  createsMigration: boolean
+  targetBackend: string
+  targetTables: string[]
+  databaseConfigured: boolean
+  currentStateBackend: string
+  gateItems: PlatformMigrationGateItem[]
+  migrationPlan: string[]
+  rollbackPlan: string[]
+  safety: string[]
+}
+
+export type PlatformProductionBaseline = {
+  branch: string
+  version: string
+}
+
+export type PlatformHandoffReadiness = {
+  handoffVersion: number
+  featureBranch: string
+  productionBaseline: PlatformProductionBaseline
+  readyForReviewPackage: boolean
+  readyForProductionMigration: boolean
+  readyForProductionRelease: boolean
+  configPreflight: PlatformConfigPreflight
+  projectReadinessSummary: ProjectReadinessSummaryList
+  persistence: PlatformPersistenceStatus
+  migration: PlatformMigrationReadiness
+  productionSafety: string[]
+  nextActions: string[]
+}
+
+export type ProjectConfigRoundtrip = {
+  canRestore: boolean
+  preservedKeys: string[]
+  missingPreservedKeys: string[]
+}
+
+export type ProjectConfigPersistenceRecord = {
+  teamId: string
+  projectKey: string
+  name: string
+  status: string
+  adapter: string
+  moduleIds: string[]
+  description: string
+  fieldSchema: ProjectWorkItemSchema
+  workflowDefinition: ProjectWorkflow
+  createdAt: string
+  updatedAt: string
+  createdBy: string
+  updatedBy: string
+}
+
+export type ProjectConfigPersistenceContract = {
+  contractVersion: number
+  projectId: string
+  sourceBackend: string
+  targetBackend: string
+  targetTables: string[]
+  configRecord: ProjectConfigPersistenceRecord
+  roundtrip: ProjectConfigRoundtrip
+  migrationGate: string[]
+  safety: string[]
 }
 
 export type ProjectTemplateType = 'initial_work_orders' | 'external_completed'
+
+export type ProjectTemplateValidationItem = {
+  severity: 'error' | 'warning'
+  code: string
+  row: number | null
+  field_key: string
+  field_label: string
+  message: string
+  value: string
+}
+
+export type ProjectTemplateValidationReport = {
+  project_id: string
+  template_type: ProjectTemplateType
+  status: 'passed' | 'warning' | 'failed'
+  summary: {
+    total_rows: number
+    error_count: number
+    warning_count: number
+  }
+  expected_headers: string[]
+  items: ProjectTemplateValidationItem[]
+}
+
+export type ProjectTemplatePreviewField = {
+  key: string
+  label: string
+  source: ProjectFieldSource | string
+  captureMethod: ProjectCaptureMethod | string
+  dataType: ProjectFieldDataType | string
+  required: boolean
+  parentKey: string
+  relationRole: string
+  requiredWhen: { fieldKey: string; equals: string | string[] } | null
+  showInConstructionPanel: boolean
+  templateHierarchyRole: string
+  templateParentLabel: string
+  templateConditionHint: string
+  platformFillRule: string
+}
+
+export type ProjectTemplatePreviewItem = {
+  templateType: ProjectTemplateType
+  headers: string[]
+  fieldRows: ProjectTemplatePreviewField[]
+}
+
+export type ProjectTemplateFieldPreview = {
+  projectId: string
+  templates: ProjectTemplatePreviewItem[]
+  siteRequiredFields: string[]
+}
 
 export type ProjectCreatePayload = {
   name: string
@@ -121,11 +432,24 @@ export type Project = {
   updatedAt: string
   modules: ProjectModule[]
   workItemSchema?: ProjectWorkItemSchema
+  workflow?: ProjectWorkflow
+  workflowStatus?: ProjectWorkflowStatus
   tasks?: {
     total: number
     uploaded: number
     reviewing: number
     archived: number
+    initialWorkOrders: number
+    externalCompleted: number
+    pendingReview: number
+    returnedRework: number
+    approvedArchive: number
+    notReady: number
+    kpiReady: number
+    photoTotal: number
+    oldDeviceRecovered: number
+    averageOnlineDurationMinutes: number
+    installerCount: number
     uploadRate: number
     reviewRate: number
   }
@@ -151,6 +475,231 @@ export type Project = {
     unconstructedGroups: number
     deliveryBlockers: number
   }
+}
+
+export type PlatformDeliveryArchiveBlocker = {
+  workOrderId: string
+  primaryValue: string
+  aggregateValue: string
+  reason: string
+  detail: string
+}
+
+export type PlatformDeliveryArchiveReadyItem = {
+  workOrderId: string
+  primaryValue: string
+  aggregateValue: string
+  reason: string
+}
+
+export type PlatformDeliveryArchiveReadiness = {
+  projectId: string
+  total: number
+  readyForArchive: number
+  approvedArchive: number
+  pendingReview: number
+  returnedRework: number
+  evidenceGap: number
+  notReady: number
+  exception: number
+  blocked: number
+  ready: boolean
+  status: string
+  nextActions: string[]
+  blockers: PlatformDeliveryArchiveBlocker[]
+  readyItems: PlatformDeliveryArchiveReadyItem[]
+}
+
+export type PlatformDeliveryArchiveManifestItem = {
+  workOrderId: string
+  primaryValue: string
+  aggregateValue: string
+  reason: string
+  detail: string
+}
+
+export type PlatformDeliveryArchiveManifestSection = {
+  id: string
+  title: string
+  count: number
+  items: PlatformDeliveryArchiveManifestItem[]
+}
+
+export type PlatformDeliveryArchiveManifestEvidenceItem = {
+  key: string
+  label: string
+  captureMethod: ProjectFieldDefinition['captureMethod']
+  relationRole: ProjectFieldDefinition['relationRole']
+  required: boolean
+  requiredWhen?: ProjectFieldRequiredWhen
+}
+
+export type PlatformDeliveryArchiveManifest = {
+  projectId: string
+  manifestId: string
+  generatedAt: string
+  status: string
+  ready: boolean
+  canExport: boolean
+  total: number
+  readyCount: number
+  blockedCount: number
+  nextActions: string[]
+  requiredEvidence: {
+    fields: PlatformDeliveryArchiveManifestEvidenceItem[]
+    photos: PlatformDeliveryArchiveManifestEvidenceItem[]
+  }
+  sections: PlatformDeliveryArchiveManifestSection[]
+}
+
+export type PlatformConstructionFieldSchema = {
+  primaryField?: ProjectFieldDefinition
+  aggregateField?: ProjectFieldDefinition
+  displayFields: ProjectFieldDefinition[]
+  constructionFields: ProjectFieldDefinition[]
+  photoSlots: ProjectFieldDefinition[]
+}
+
+export type PlatformReworkEvidenceGapGroup = {
+  label: string
+  items: string[]
+}
+
+export type PlatformConstructionWorkOrder = {
+  id: string
+  projectId: string
+  sourceTaskId: string
+  sourceBatchId: string
+  primaryValue: string
+  aggregateValue: string
+  status: string
+  createdAt: string
+  createdBy: string
+  fieldValues: Record<string, string>
+  requiredFields: ProjectFieldDefinition[]
+  photoSlots: ProjectFieldDefinition[]
+  collectionPhotos: PlatformConstructionPhoto[]
+  collectionStatus: string
+  collectionFieldValues: Record<string, string>
+  kpiValues: Record<string, string>
+  coveredPhotoSlots: string[]
+  clientBatchId: string
+  collectedBy: string
+  collectedAt: string
+  reviewStatus: string
+  reviewedBy: string
+  reviewedAt: string
+  reviewNote: string
+  reviewReason: string
+  reviewHistory: PlatformReviewHistoryEvent[]
+  reworkEvidenceGapGroups: PlatformReworkEvidenceGapGroup[]
+}
+
+export type PlatformConstructionPhoto = {
+  id: string
+  slot: string
+  clientPhotoId: string
+  filename: string
+  contentType: string
+  size: number
+  storage: string
+  storageKey: string
+  uploadedBy: string
+  uploadedAt: string
+}
+
+export type PlatformConstructionWorkOrders = {
+  projectId: string
+  total: number
+  fieldSchema: PlatformConstructionFieldSchema
+  items: PlatformConstructionWorkOrder[]
+}
+
+export type PlatformReviewHistoryEvent = {
+  id: string
+  action: 'approved' | 'returned' | 'exception' | string
+  actor: string
+  reviewedAt: string
+  note: string
+  reason: string
+}
+
+export type PlatformReviewFieldReview = {
+  key: string
+  label: string
+  captureMethod: ProjectFieldDefinition['captureMethod']
+  required: boolean
+  requiredWhen?: ProjectFieldRequiredWhen
+  relationRole?: ProjectFieldDefinition['relationRole']
+  initialValue: string
+  collectedValue: string
+}
+
+export type PlatformReviewPhotoSlotReview = {
+  key: string
+  label: string
+  required: boolean
+  requiredWhen?: ProjectFieldRequiredWhen
+  relationRole?: ProjectFieldDefinition['relationRole']
+  covered: boolean
+  photoCount: number
+}
+
+export type PlatformReviewHierarchyGapItem = {
+  row: number | null
+  fieldKey: string
+  fieldLabel: string
+  message: string
+  value: string
+}
+
+export type PlatformReviewWorkOrder = PlatformConstructionWorkOrder & {
+  reviewStatus: string
+  reviewedBy: string
+  reviewedAt: string
+  reviewNote: string
+  reviewReason: string
+  reviewHistory: PlatformReviewHistoryEvent[]
+  suggestedReviewReturnReason: string
+  reviewHierarchyGapItems: PlatformReviewHierarchyGapItem[]
+  fieldReviews: PlatformReviewFieldReview[]
+  photoSlotReviews: PlatformReviewPhotoSlotReview[]
+}
+
+export type PlatformReviewWorkOrders = {
+  projectId: string
+  total: number
+  statusCounts: {
+    pending_review: number
+    approved: number
+    returned: number
+    exception: number
+    not_ready: number
+  }
+  fieldSchema: PlatformConstructionFieldSchema
+  items: PlatformReviewWorkOrder[]
+}
+
+export type PlatformReviewActionPayload = {
+  actor: string
+  action: 'approved' | 'returned' | 'exception'
+  note: string
+  reason: string
+}
+
+export type PlatformConstructionCollectionPayload = {
+  actor: string
+  clientBatchId: string
+  status: 'cached' | 'submitted'
+  fieldValues: Record<string, string>
+  coveredPhotoSlots: string[]
+}
+
+export type PlatformConstructionPhotoUploadPayload = {
+  actor: string
+  slot: string
+  clientPhotoId: string
+  file: File
 }
 
 export type TaskStatus =
@@ -241,6 +790,7 @@ export type MaterialGroup = {
   constructionCollector?: string
   constructionModuleAssetNo?: string
   constructionStatus?: string
+  fieldValues?: Record<string, string>
   exceptionOrderId?: string
   groupBarcodeCheckStatus?: string
   groupBarcodeMatchedFields?: string[]
@@ -274,6 +824,8 @@ export type ReviewPhoto = {
   status: 'unclassified' | 'valid' | 'invalid' | 'exception'
   category?: string
   categoryLabel?: string
+  constructionSlot?: string
+  constructionSlotLabel?: string
   archiveStatus?: string
   archiveFilename?: string
   barcode?: string
@@ -297,6 +849,8 @@ export type ConstructionPhotoSlot = {
   key: string
   label: string
   required: boolean
+  requiredWhen?: ProjectFieldRequiredWhen
+  relationRole?: ProjectFieldRelationRole
 }
 
 export type ConstructionUploadPhoto = {

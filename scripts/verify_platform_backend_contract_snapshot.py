@@ -30,7 +30,11 @@ def main() -> None:
     require({"manual", "scan", "photo", "datetime", "system"}.issubset(field_schema.get("capture_methods", [])), "capture methods incomplete")
 
     construction = snapshot.get("construction", {})
-    require(construction.get("field_schema_keys") == ["primary_field", "aggregate_field", "construction_fields", "photo_slots"], "construction field schema keys drifted")
+    require(
+        construction.get("field_schema_keys")
+        == ["primary_field", "aggregate_field", "display_fields", "construction_fields", "photo_slots"],
+        "construction field schema keys drifted",
+    )
     require(
         {"installer", "completed_at", "uploaded_at", "photo_count", "old_device_recovered"}.issubset(construction.get("required_kpi_keys", [])),
         "required KPI keys incomplete",

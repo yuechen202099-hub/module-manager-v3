@@ -99,11 +99,19 @@ const checks = [
   {
     ok:
       projectsViewSource.includes("commonFieldPresets") &&
+      projectsViewSource.includes("aggregateFieldPresetOptions") &&
+      projectsViewSource.includes("terminalAggregateFieldPresetOptions") &&
+      projectsViewSource.includes("setExclusiveAggregateField") &&
+      projectsViewSource.includes("requiredFieldCollectionLabels") &&
+      projectsViewSource.includes("createRequiredFieldCollectionLabels") &&
+      projectsViewSource.includes("schemaRequiredFieldCollectionLabels") &&
+      projectsViewSource.includes("siteRequiredFields: [...createRequiredFieldCollectionLabels.value, ...createRequiredPhotoLabels.value]") &&
       projectsViewSource.includes("applyFieldPreset(createForm.primaryField") &&
-      projectsViewSource.includes("applyFieldPreset(createForm.aggregateField") &&
       projectsViewSource.includes("applyFieldPreset(schemaForm.primaryField") &&
-      projectsViewSource.includes("applyFieldPreset(schemaForm.aggregateField"),
-    message: "Project primary and aggregate fields must be chosen from common field presets before manual refinement.",
+      projectsViewSource.includes("setExclusiveAggregateField(createForm") &&
+      projectsViewSource.includes("setExclusiveAggregateField(schemaForm") &&
+      projectsViewSource.includes("showInConstructionPanel"),
+    message: "Project primary fields must use common presets, aggregate fields must be exclusive, and fields must expose construction display control.",
   },
   {
     ok:
@@ -121,6 +129,19 @@ if (failures.length) {
     console.error(failure.message);
   }
   process.exit(1);
+}
+
+const defaultModuleBlocks = [
+  /const createForm = reactive<CreateProjectForm>\([\s\S]*?defaultCustomField\('module_asset_no', '模块（需更换）', 'scan'\)[\s\S]*?required: true[\s\S]*?relationRole: 'accessory_new_device'/,
+  /const schemaForm = reactive<WorkItemSchemaForm>\([\s\S]*?defaultCustomField\('module_asset_no', '模块（需更换）', 'scan'\)[\s\S]*?required: true[\s\S]*?relationRole: 'accessory_new_device'/,
+  /function resetCreateForm\(\)[\s\S]*?defaultCustomField\('module_asset_no', '模块（需更换）', 'scan'\)[\s\S]*?required: true[\s\S]*?relationRole: 'accessory_new_device'/,
+];
+
+for (const pattern of defaultModuleBlocks) {
+  if (!pattern.test(projectsViewSource)) {
+    console.error("Default module replacement field must be required in create/schema draft forms.");
+    process.exit(1);
+  }
 }
 
 console.log("[OK] Vue project creation configures work item schema fields.");

@@ -1,6 +1,6 @@
 # PM Platform Team Development Operating Model
 
-Last updated: 2026-07-02
+Last updated: 2026-07-03
 
 This document records the standing team model for the operations engineering platform work. It is a context recovery file: every future Codex session or delegated agent should be able to read it and continue without relying on chat history.
 
@@ -29,10 +29,32 @@ The near-term product direction is:
 - Review, return, exception handling, and delivery archive.
 - Configurable project templates, field schemas, import templates, and project workflows.
 
+## Field Hierarchy Product Contract
+
+This contract is the current product rule for configurable project fields:
+
+- A project has exactly one active aggregate field at a time, such as station area, region, or manufacturer.
+- Non-aggregate import fields belong to the task core layer and may choose whether they appear on the construction panel.
+- Module replacement is modeled as an accessory-device replacement under one task object, for example an electric meter task object with old module, new module, collector replacement confirmation, and evidence photos under it.
+- Terminal replacement is modeled as a main-device replacement under one terminal task object: old terminal/device recovered, new terminal installed, and then accessory replacement confirmations for communication module and SIM card.
+- Every device replacement, accessory confirmation, accessory old/new value, and evidence photo must keep an explicit parent link to the task object so the visual field graph never falls back to a flat field list.
+- Accessory fields use confirmation fields such as `communication_module_replace_confirm` or `sim_card_replace_confirm`; old/new accessory numbers and related photos become required through `required_when` only when the confirmation equals replacement.
+- The graphical field designer should show aggregate -> task core -> device/accessory/evidence layers, with solid parent-child lines and conditional requirement lines where `required_when` applies.
+
+## Dashboard Metrics Product Contract
+
+Dashboard metrics are part of the project field schema, not a hardcoded one-project dashboard. Each project may keep its own `dashboard_metrics` list with `key`, `label`, optional `source`, and optional `scope`.
+
+- The default metrics remain progress, collection, completion, exception, online duration, and completion duration.
+- Custom metrics must round-trip through backend schema normalization and frontend save payloads.
+- Project board should expose the configured metric口径 so operators can understand which fields are feeding project progress, delivery capability, field collection, review quality, and KPI calculations.
+- Field graph configuration should provide operator-facing metric preset cards for project progress, delivery capability, field collection, review quality, and KPI efficiency, so metric口径 can be edited without writing raw JSON.
+- Device hierarchy remains the source of meaning for replacement metrics: module replacement measures accessory replacement under one task object, while terminal replacement measures main-device replacement plus accessory replacement confirmation.
+
 ## Production Baseline Rules
 
 - Default upstream repository: `https://github.com/yuechen202099-hub/module-manager-v3`.
-- Platform development starts from the latest production branch, currently `production/V3/3.0.71`.
+- Platform development starts from the latest production branch, currently `production/V3/3.0.77`.
 - Feature branches use `pm-platform/<short-feature>`.
 - Do not commit directly to any `production/*` branch.
 - Do not change official production version numbers.
@@ -398,8 +420,8 @@ Frontend work is split by user workflow rather than by technical file alone.
 Continue in this order unless the user reprioritizes:
 
 1. Keep the PR/patch handoff ready and refresh its evidence when new packages are added.
-2. Platform Handoff Readiness Summary is now the current review entry: `GET /projects/handoff/readiness` and `/platform-projects` show `交付就绪`, `可评审包`, `production/V3/3.0.71`, and `生产迁移未放行`.
-3. Before new implementation work, refresh the production baseline branch and confirm the platform branch still follows `production/V3/3.0.71` or the newest user-approved production branch.
+2. Platform Handoff Readiness Summary is now the current review entry: `GET /projects/handoff/readiness` and `/platform-projects` show `交付就绪`, `可评审包`, `production/V3/3.0.77`, and `生产迁移未放行`.
+3. Before new implementation work, refresh the production baseline branch and confirm the platform branch still follows `production/V3/3.0.77` or the newest user-approved production branch.
 4. If the user chooses PR, use the prepared PR body and target the current production branch without version bump, tag, or deployment.
 5. If the user chooses patch, export a reviewable patch against the same production baseline and include the handoff report.
 6. If the user explicitly approves persistence migration, create the first Alembic/PostgreSQL migration as a separate high-risk package with backup, dry-run, verification, and rollback rehearsal.
@@ -409,9 +431,9 @@ Continue in this order unless the user reprioritizes:
 
 This section is the short version for context recovery. If a future thread is compacted, read this before continuing development.
 
-- Current production baseline: `production/V3/3.0.71`.
-- Current feature branch: `pm-platform/project-drafts`.
-- GitHub Issue #1 follow-up: production has advanced to `production/V3/3.0.77`, and the next platform PR/patch must include `平台版本号评估`.
+- Current production baseline: `production/V3/3.0.77`.
+- Current feature branch: `pm-platform/production-3.0.77-sync`.
+- GitHub Issue #1 follow-up: production has advanced to `production/V3/3.0.77`; handoff readiness and team memory now use the 3.0.77 baseline, and the next platform PR/patch must include `平台版本号评估`.
 - Platform versioning recommendation: use `PM-V1.0.xx` only as a platform development progress version, always paired with the production baseline, and never as a replacement for production `V3.0.xx`.
 - Current platform direction: configurable operations engineering management, not a single replacement-module project.
 - Current delivery style: small work packages, each with owner role, file boundary, verification, migration note, rollback note, and browser smoke when UI changes.
@@ -419,11 +441,62 @@ This section is the short version for context recovery. If a future thread is co
 - Current data safety rule: no production `.env`, real data, uploads, OSS, PostgreSQL, version tag, release, or server publish changes.
 - Current code discovery rule: use `codebase-memory-mcp` first; current graph is ready but shallow, so direct file reads and focused tests are allowed when symbol-level graph search is insufficient.
 - Context compression rule: after any compaction or thread handoff, read this snapshot first, then the active plan; do not rely only on chat history.
-- Current active package: keep PR/patch handoff notes current after Platform Handoff Readiness Summary, or wait for explicit approval before any Alembic/PostgreSQL migration.
-- Last completed package: Platform LAN Tablet Access; `scripts/start-platform-local.ps1` now keeps `127.0.0.1` as the default local-only mode, supports explicit `-HostAddress 0.0.0.0` for trusted LAN tablet review, prints a `LAN URL`, and is guarded by `scripts/verify_platform_local_start_script.py`.
+- Current active package: continue configurable field schema, readiness, construction, review, and workflow refinements in small verified packages, then refresh PR/patch handoff notes before final delivery.
+- Last completed package: Project List Config Preflight Details; `/platform-projects` now shows top-level `项目列表预检阻断` details with store issues, blocked project names, first fix message, project id, and issue count when local drafts block normal list loading.
+- Latest project list config preflight details plan: `docs/superpowers/plans/2026-07-04-project-list-config-preflight-details.md`.
+- Latest project list config preflight details report: `docs/reports/pm-platform-project-list-config-preflight-details-2026-07-04.md`.
+- Previous completed package: Device Hierarchy Contract Notes; backend `device_hierarchy` readiness now exposes the operator contract for module replacement, terminal replacement, and `required_when` conditional accessory collection, and the field graph shows `后端层级口径`.
+- Latest device hierarchy contract notes plan: `docs/superpowers/plans/2026-07-03-device-hierarchy-contract-notes.md`.
+- Latest device hierarchy contract notes report: `docs/reports/pm-platform-device-hierarchy-contract-notes-2026-07-03.md`.
+- Earlier completed package: Project List Config Preflight Fallback; `GET /projects` now degrades to built-in project rows plus read-only `config_preflight` when local draft config is blocked, and `/platform-projects` shows `项目列表预检`.
+- Latest project list config preflight fallback plan: `docs/superpowers/plans/2026-07-03-project-list-config-preflight-fallback.md`.
+- Latest project list config preflight fallback report: `docs/reports/pm-platform-project-list-config-preflight-fallback-2026-07-03.md`.
+- Previous completed package: Handoff Config Preflight Summary; `GET /projects/handoff/readiness` now includes read-only `config_preflight`, reports `fix_config_preflight_blockers` without loading broken drafts, and `/platform-projects` shows top-level `配置预检`.
+- Latest handoff config preflight summary plan: `docs/superpowers/plans/2026-07-03-handoff-config-preflight-summary.md`.
+- Latest handoff config preflight summary report: `docs/reports/pm-platform-handoff-config-preflight-summary-2026-07-03.md`.
+- Previous completed package: Rework Resubmission Audit Trail; returned platform work orders now append `rework_submitted` history when construction resubmits, and the UI labels the event as `返工重新提交`.
+- Latest rework resubmission audit plan: `docs/superpowers/plans/2026-07-03-rework-resubmission-audit-trail.md`.
+- Latest rework resubmission audit report: `docs/reports/pm-platform-rework-resubmission-audit-2026-07-03.md`.
+- Previous completed package: Construction Rework Gap Panel; returned platform work orders now expose structured `rework_evidence_gap_groups`, and the construction page shows a `退回补采清单` that preserves module/terminal device replacement hierarchy.
+- Latest construction rework gap panel plan: `docs/superpowers/plans/2026-07-03-construction-rework-gap-panel.md`.
+- Latest construction rework gap panel report: `docs/reports/pm-platform-construction-rework-gap-panel-2026-07-03.md`.
+- Earlier completed package: Review Return Reason Suggestions; imported hierarchy gaps now become a suggested return reason, and blank returned review actions fall back to that reason.
+- Latest review return reason suggestions plan: `docs/superpowers/plans/2026-07-03-review-return-reason-suggestions.md`.
+- Latest review return reason suggestions report: `docs/reports/pm-platform-review-return-reason-suggestions-2026-07-03.md`.
+- Earlier completed package: Review Hierarchy Gap Follow-up; external-completed takeover work orders now carry imported `missing_conditional_field` warnings into review as `导入层级缺口`, keeping terminal accessory confirmation gaps visible before approval.
+- Latest review hierarchy gap follow-up plan: `docs/superpowers/plans/2026-07-03-review-hierarchy-gap-followup.md`.
+- Latest review hierarchy gap follow-up report: `docs/reports/pm-platform-review-hierarchy-gap-followup-2026-07-03.md`.
+- Earlier completed package: Import Draft Hierarchy Gap Summary; import draft dry-run results now carry `hierarchy_gap_count` and `hierarchy_gap_items`, and the import preview card keeps `层级缺口` visible after validation.
+- Latest import draft hierarchy gap summary plan: `docs/superpowers/plans/2026-07-03-import-draft-hierarchy-gap-summary.md`.
+- Latest import draft hierarchy gap summary report: `docs/reports/pm-platform-import-draft-hierarchy-gap-summary-2026-07-03.md`.
+- Earlier completed package: Template Validation Hierarchy Panel; external-completed import validation now shows a dedicated `层级证据缺口` panel for conditional accessory evidence warnings before the generic issue table.
+- Latest template validation hierarchy panel plan: `docs/superpowers/plans/2026-07-03-template-validation-hierarchy-panel.md`.
+- Latest template validation hierarchy panel report: `docs/reports/pm-platform-template-validation-hierarchy-panel-2026-07-03.md`.
+- Earlier completed package: External Completed Hierarchy Validation; system-external completed template validation now warns when a replacement confirmation triggers missing conditional child fields or photo evidence, without blocking project connection.
+- Latest external completed hierarchy validation plan: `docs/superpowers/plans/2026-07-03-external-completed-hierarchy-validation.md`.
+- Latest external completed hierarchy validation report: `docs/reports/pm-platform-external-completed-hierarchy-validation-2026-07-03.md`.
+- Earlier completed package: Field Template Hierarchy Hints; template preview and downloaded workbook guidance now preserve field hierarchy metadata, including task core, accessory confirmation, conditional collection, parent field, and platform-fill hints.
+- Latest field template hierarchy hints plan: `docs/superpowers/plans/2026-07-03-field-template-hierarchy-hints.md`.
+- Latest field template hierarchy hints report: `docs/reports/pm-platform-field-template-hierarchy-hints-2026-07-03.md`.
+- Earlier completed package: Field Graph Backend Readiness Echo; saved project field configuration now passes backend `device_hierarchy` readiness into the graphical field designer, renders `后端上线检查回显`, and highlights field graph nodes named by backend hierarchy evidence.
+- Latest field graph backend readiness echo plan: `docs/superpowers/plans/2026-07-03-field-graph-backend-readiness-echo.md`.
+- Latest field graph backend readiness echo report: `docs/reports/pm-platform-field-graph-backend-readiness-echo-2026-07-03.md`.
+- Earlier completed package: Field Graph Hierarchy Save Gate; `/platform-projects` field graph now shows `层级完整性`, `换模块完整性`, and `换终端完整性`, and create/save flows block incomplete device-replacement hierarchy before sending the API request.
+- Latest field graph hierarchy save gate plan: `docs/superpowers/plans/2026-07-03-field-graph-hierarchy-save-gate.md`.
+- Latest field graph hierarchy save gate report: `docs/reports/pm-platform-field-graph-hierarchy-save-gate-2026-07-03.md`.
+- Earlier completed package: Delivery Archive Hierarchy Evidence Summary; project board delivery package preview now groups required evidence by main device, task-object accessory device, accessory confirmation, conditional follow-up, photo evidence, and KPI data, while the backend manifest preserves platform KPI archive evidence.
+- Latest delivery archive hierarchy evidence summary plan: `docs/superpowers/plans/2026-07-03-delivery-archive-hierarchy-evidence-summary.md`.
+- Latest delivery archive hierarchy evidence summary report: `docs/reports/pm-platform-delivery-archive-hierarchy-evidence-summary-2026-07-03.md`.
+- Previous completed package: Review Hierarchy Intent Labels; platform review evidence rows now show intent labels matching construction collection semantics.
+- Earlier completed package: Review Required Evidence Gate; platform review now shows grouped missing required field/photo evidence and backend approval rejects incomplete evidence, while return and exception actions remain available.
+- Previous completed package: Construction Submit Gap Preview; the construction page now groups missing required fields, photos, and KPI inputs into a visible submission gap and disables platform final submit until the gap is cleared, while draft save remains available.
+- Earlier completed package: Construction Required Collection Gate; submitted construction collections now reject missing active required fields/photos, including conditional accessory values/photos when an accessory replacement confirmation is triggered, while cached drafts remain allowed.
+- Previous completed package: Device Replacement Hierarchy Drops; the field graph now treats module replacement as task-object -> accessory-device replacement and terminal replacement as task-object -> main-device replacement -> accessory confirmation, with smart-drop behavior preserving those relationships.
+- Earlier completed package: Workflow Selected Node Order Controls; the workflow editor right-side node panel now shows current position, previous node, next node, and selected-node up/down controls for tablet-friendly process editing.
+- Earlier completed package: Platform LAN Tablet Access; `scripts/start-platform-local.ps1` now keeps `127.0.0.1` as the default local-only mode, supports explicit `-HostAddress 0.0.0.0` for trusted LAN tablet review, prints a `LAN URL`, and is guarded by `scripts/verify_platform_local_start_script.py`.
 - Current GitHub action item: before final PR/patch, merge or rebase the platform branch onto `production/V3/3.0.77`, then refresh handoff reports, tests, baseline SHA, and the concrete `PM-V1.0.xx` progress label.
 - Baseline sync readiness result: do not merge directly in the current dirty worktree. Production `3.0.77` changes 145 paths, current platform WIP has 192 dirty paths, and 43 paths overlap, including `projects.py`, frontend API files, `ProjectsView.vue`, and generated Vue assets.
-- Previous completed package: Platform Handoff Readiness Summary; `GET /projects/handoff/readiness` aggregates readiness, persistence, migration gates, production safety, and next actions, while `/platform-projects` shows `交付就绪`, `可评审包`, `production/V3/3.0.71`, and `生产迁移未放行` before `上线检查`.
+- Previous completed package: Platform Handoff Readiness Summary; `GET /projects/handoff/readiness` aggregates readiness, persistence, migration gates, production safety, and next actions, while `/platform-projects` shows `交付就绪`, `可评审包`, `production/V3/3.0.77`, and `生产迁移未放行` before `上线检查`.
 - Previous completed package: Platform Migration Readiness Gate; `/projects/persistence/migration-readiness` and the `持久化准备` panel now show backup, dry-run, verification, rollback, approval, and cutover-flag gates as blocked before any migration can proceed.
 - Previous completed package: Project Persistence Readiness Frontend; `/platform-projects` field configuration now shows `持久化准备`, current storage, PostgreSQL migration approval state, target tables, round-trip preservation, and safety gates by consuming existing read-only persistence endpoints.
 - Earlier completed package: Project readiness action filter; `/platform-projects` lets operators click a `接入待办` action count, shows `筛选中`, filters the table through `filteredProjects`, and restores the full list through `清除筛选`.
@@ -486,6 +559,47 @@ The current platform build should proceed in this order unless the user repriori
 | 27 | Platform LAN Tablet Access | Ops And Release Agent + QA And Verification Agent | Done: local start script defaults to `127.0.0.1`, supports explicit `-HostAddress 0.0.0.0`, prints LAN URL, and verifies both local and LAN HTTP access |
 | 28 | GitHub Issue #1 Platform Versioning Follow-up | Codex Integrator + Ops And Release Agent | In progress: PR/patch docs now include `平台版本号评估`; next required step is to follow `production/V3/3.0.77` before final handoff |
 | 29 | Production 3.0.77 Sync Readiness | Codex Integrator + Ops And Release Agent + QA And Verification Agent | Done for readiness: drift, dirty overlap, merge-tree conflicts, and safe sync sequence are recorded; actual merge waits for WIP snapshot/isolation |
+| 30 | Field Graph Smart Drop | Frontend Field Graph Agent + QA And Verification Agent | Done: field graph smart-drop targets apply task-core, main-device, accessory-confirmation, conditional accessory, and evidence-photo semantics while keeping module and terminal replacement hierarchy explicit |
+| 31 | Field Graph Tap Drop | Frontend Field Graph Agent + QA And Verification Agent | Done: selected custom fields can apply smart-drop hierarchy rules by click/tap or keyboard, making field configuration usable on tablets when native drag/drop is unreliable |
+| 32 | Workflow Selected Node Order Controls | Frontend Workflow Canvas Agent + QA And Verification Agent | Done: selected workflow nodes can be moved up/down from the right node configuration panel with current/previous/next context for tablet operators |
+| 33 | Device Replacement Hierarchy Drops | Frontend Field Graph Agent + QA And Verification Agent | Done: device-node smart drops preserve module replacement and terminal replacement hierarchy instead of flattening replacement fields |
+| 34 | Device Hierarchy Readiness Gate | Backend Field Schema Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: `/projects/{project_id}/readiness` includes `device_hierarchy`, blocks flat device replacement fields, and the field configuration UI labels the required fix in business language |
+| 35 | Construction Required Collection Gate | Backend Construction And Review Agent + QA And Verification Agent | Done: submitted construction collections reject missing active required fields/photos, including conditional accessory collection triggered by replacement confirmation, while cached drafts remain allowed |
+| 36 | Construction Submit Gap Preview | Operator Workbench UI Agent + QA And Verification Agent | Done: construction collection forms show grouped submit gaps for required fields/photos/KPI inputs and disable platform final submit until cleared |
+| 37 | Review Required Evidence Gate | Backend Construction And Review Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: platform review shows grouped evidence gaps and backend approval rejects missing required field/photo evidence |
+| 38 | Main Old Device Hierarchy | Frontend Field Graph Agent + QA And Verification Agent | Done: field graph treats unconditional old devices as main-device-before fields when the schema also has a main replacement device, while conditional old devices remain accessory follow-up collection |
+| 39 | Delivery Archive Readiness Summary | Backend Construction And Review Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: read-only delivery archive readiness classifies approved archive, pending review, returned rework, evidence gaps, exceptions, and not-ready work orders before any archive write |
+| 40 | Delivery Archive Manifest Preview | Backend Construction And Review Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: read-only delivery package manifest previews ready items, blockers, required field/photo evidence, and export eligibility without creating an archive |
+| 41 | Delivery Archive Evidence Details | Operator Workbench UI Agent + QA And Verification Agent | Done: project board delivery package preview shows required field/photo evidence details and conditional trigger labels without adding archive writes |
+| 42 | Delivery Archive Blocker Details | Operator Workbench UI Agent + QA And Verification Agent | Done: delivery package preview lists blocker work-order details with reason, work object, aggregate value, and handling detail without archive writes |
+| 43 | Device Replacement Hierarchy Mode | Frontend Field Graph Agent + Backend Field Schema Agent + QA And Verification Agent | Done: field graph and readiness evidence explicitly classify module replacement as accessory-under-task-object and terminal replacement as main-device-with-accessory-confirmation |
+| 44 | Construction Hierarchy Intent Labels | Operator Workbench UI Agent + QA And Verification Agent | Done: construction collection checklist, fields, and photo slots show collection intent labels for main device, accessory, confirmation, conditional follow-up, photo evidence, and KPI data |
+| 45 | Review Hierarchy Intent Labels | Backend Construction And Review Agent + QA And Verification Agent | Done: review workbench field, photo, and KPI evidence rows show intent labels matching construction collection semantics |
+| 46 | Delivery Archive Hierarchy Evidence Summary | Backend Construction And Review Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: delivery archive preview groups required evidence by main device, task-object accessory device, accessory confirmation, conditional follow-up, photo evidence, and KPI data |
+| 47 | Field Graph Hierarchy Save Gate | Frontend Field Graph Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: field configuration shows hierarchy completeness cards and blocks save/create for incomplete module or terminal replacement hierarchy |
+| 48 | Field Graph Backend Readiness Echo | Frontend Field Graph Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: field configuration passes backend `device_hierarchy` readiness into the field graph, shows backend issue details, and highlights affected nodes |
+| 49 | Field Template Hierarchy Hints | Backend Template Agent + Frontend Field Graph Agent + QA And Verification Agent | Done: template preview and downloaded workbook guidance preserve task core, accessory confirmation, conditional collection, parent field, and platform-fill hints |
+| 50 | External Completed Hierarchy Validation | Backend Template Agent + QA And Verification Agent | Done: external completed template validation warns when replacement confirmation triggers missing conditional child fields or photo evidence without blocking project connection |
+| 51 | Template Validation Hierarchy Panel | Operator Workbench UI Agent + QA And Verification Agent | Done: template validation dialog shows `层级证据缺口` for missing conditional accessory evidence warnings |
+| 52 | Import Draft Hierarchy Gap Summary | Backend Import And Template Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: import draft preview keeps `层级缺口` count and items visible after dry-run generation |
+| 53 | Review Hierarchy Gap Follow-up | Backend Import And Template Agent + Backend Construction And Review Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: external-completed import execution preserves hierarchy gaps and review workbench shows them as `导入层级缺口` blockers |
+| 54 | Review Return Reason Suggestions | Backend Construction And Review Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: imported hierarchy gaps become suggested return reasons in both review entry points and backend blank-return fallback |
+| 55 | Construction Rework Gap Panel | Backend Construction And Review Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: returned platform work orders expose structured rework evidence gaps and construction forms show `退回补采清单` for missing hierarchy fields/photos |
+| 56 | Rework Resubmission Audit Trail | Backend Construction And Review Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: returned platform work orders append `rework_submitted` history on resubmit and review history labels it as `返工重新提交` |
+| 57 | Replacement Hierarchy Template Apply | Frontend Field Graph Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: field graph exposes module and terminal replacement hierarchy templates and applies them to new-project and draft-schema field forms |
+| 58 | Template Impact Preview | Frontend Field Graph Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: draft field graph previews initial import, system-external completed, and upload-time platform generated template data with hierarchy hints |
+| 59 | Template Workbook Instructions | Backend Import And Template Agent + QA And Verification Agent | Done: downloaded templates include an `instructions` sheet explaining field hierarchy, parent fields, conditional collection, upload-time generated fields, and module/terminal replacement hierarchy modes |
+| 60 | Template Download Guidance | Frontend Field Graph Agent + QA And Verification Agent | Done: field graph template preview now explains the downloaded workbook sheets and shows the inferred module/terminal replacement hierarchy before download |
+| 61 | Project Type Preset Guidance | Operator Workbench UI Agent + QA And Verification Agent | Done: create-project preset selector now explains the selected preset's main field, aggregate field, one-active-aggregate rule, and module/terminal replacement hierarchy |
+| 62 | Single Aggregate Device Hierarchy Guard | Backend Field Schema Agent + QA And Verification Agent | Done: backend project schema normalization rejects extra aggregate fields and terminal main-device replacement schemas that lack accessory confirmation hierarchy |
+| 63 | Field Graph Aggregate Guard | Frontend Field Graph Agent + QA And Verification Agent | Done: graphical field designer shows the one-active-aggregate rule, hides aggregate relation roles from custom fields, and validates aggregate misuse before create/save |
+| 64 | Single Aggregate Readiness | Backend Field Schema Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: project readiness now exposes `single_aggregate_field`, maps `fix_aggregate_field`, and keeps aggregate misuse visible in onboarding status |
+| 65 | Terminal Accessory Confirmation Gate | Frontend Field Graph Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: field graph selected-field hints and project save validation now make terminal accessory replacement confirmation explicit before backend submission |
+| 66 | Project Config Preflight | Backend Field Schema Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: read-only config preflight reports legacy draft field/workflow blockers before project load, save, migration, or repair |
+| 67 | Handoff Config Preflight Summary | Backend Field Schema Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: handoff readiness includes read-only config preflight, blocks review package on legacy draft blockers, and `/platform-projects` shows top-level `配置预检` |
+| 68 | Project List Config Preflight Fallback | Backend Field Schema Agent + Operator Workbench UI Agent + QA And Verification Agent | Done: project list returns built-in rows plus read-only config preflight when local draft config blocks normal list loading |
+| 69 | Device Hierarchy Contract Notes | Backend Field Schema Agent + Frontend Field Graph Agent + QA And Verification Agent | Done: backend readiness and the field graph show the operator contract for module replacement as task-object accessory replacement and terminal replacement as main-device replacement plus accessory confirmation |
+| 70 | Project List Config Preflight Details | Operator Workbench UI Agent + QA And Verification Agent | Done: `/platform-projects` shows top-level project-list preflight blocker details with store issues, blocked project names, issue text, project id, and issue count |
 
 ## Integration Checkpoints
 
@@ -576,14 +690,89 @@ Completed execution packages:
 - Add project readiness action filter: `/platform-projects` now lets operators click a `接入待办` action, see `筛选中`, review only projects needing that action, and use `清除筛选` to return to the full project list.
 - Add Project Persistence Readiness Frontend: the field configuration dialog consumes `GET /projects/persistence/status` and `GET /projects/{project_id}/persistence/contract` to show `持久化准备`, current storage, future PostgreSQL target tables, round-trip status, and safety gates without executing a migration.
 - Add Platform Migration Readiness Gate: `GET /projects/persistence/migration-readiness` and the `持久化准备` panel show backup, dry-run, verification, rollback, approval, and cutover-flag blockers; `ready_for_migration` remains false until a separate approved migration package exists.
-- Add Platform Handoff Readiness Summary: `GET /projects/handoff/readiness` and `/platform-projects` show a review-focused `交付就绪` band with `可评审包`, `production/V3/3.0.71`, `生产迁移未放行`, and `准备 PR 或 patch 交付`; this is a review surface, not a production release or migration approval.
+- Add Platform Handoff Readiness Summary: `GET /projects/handoff/readiness` and `/platform-projects` show a review-focused `交付就绪` band with `可评审包`, `production/V3/3.0.77`, `生产迁移未放行`, and `准备 PR 或 patch 交付`; this is a review surface, not a production release or migration approval.
 - Add Platform LAN Tablet Access: `scripts/start-platform-local.ps1` supports explicit LAN listening for same-Wi-Fi tablet review through `-HostAddress 0.0.0.0`, while defaulting to `127.0.0.1` and keeping production data, OSS, PostgreSQL, tags, and deployment untouched.
+
+- Add Device Hierarchy Contract: terminal replacement templates now include old terminal/device recovery and required scanned new terminal installation under `terminal_no`, while communication module and SIM card remain conditional accessory replacements; module replacement stays modeled as accessory-device replacement under the task object.
+- Refine Device Hierarchy Semantics: module replacement now treats `module_asset_no` as `accessory_new_device` under the meter task object, while terminal replacement keeps `new_terminal_no` as the main `replacement_device` under the terminal task object.
+- Add Line Loss Project Preset: project creation now includes a station-area line-loss investigation preset with one active power-supply-unit aggregate, station area as task object, master meter and user task details, and field-collection evidence for issue type and meter photos.
+- Add Create Project Field Graph: the new-project draft dialog now reuses the graphical field relationship designer, so operators can see aggregate, task core, device/accessory/evidence, and template binding relationships before creating a project.
+- Add Device Replacement Visual Hierarchy: the field graph now distinguishes main replacement devices, accessory replacement confirmations, accessory new devices, old-device recovery, and conditional accessory links; default module replacement drafts also mark the replacement module as required.
+- Add Construction Device Hierarchy Sections: construction now groups fields into task core, main device replacement, device/accessory collection, accessory confirmation, conditional accessory collection, and supporting fields; the platform construction entry previews the same grouped sections even with no active task.
+- Add Review Device Hierarchy Sections: platform review details now group externally completed work orders into device/accessory collection, accessory confirmation, conditional accessory review, and photo evidence sections; `required_when` is preserved from backend payloads through frontend mapping.
+- Add Terminal Review Main Device Sample: local terminal replacement seeding can now create an idempotent external-completed review sample, and local platform startup includes it so `/task-hall?project_id=draft-project` shows a real `主设备更换` section for `new_terminal_no`.
+- Add Project Board Device Hierarchy Map: `/project-board` now shows aggregate, task core, main-device replacement, accessory confirmation, conditional accessory follow-up, and photo evidence columns, so module replacement and terminal replacement do not collapse into a flat device list.
+- Add Construction Conditional Preview: platform construction work-order cards now filter conditional accessory fields and photo slots per work order, so a terminal sample with `通讯模块是否更换=不更换` hides old/new communication module fields and the old-new module photo while keeping SIM replacement fields visible.
+- Add Review Conditional Visibility: platform review panels now filter conditional accessory fields and photo slots per selected work order before hierarchy grouping, so terminal replacement confirms accessory changes before showing old/new accessory rows while module replacement remains an accessory-device change under the task object.
+- Add Review Required Evidence Gate: platform review now shows grouped missing required field/photo evidence and backend approval rejects incomplete required evidence, while return and exception actions remain available.
+- Add Construction Required Collection Gate: submitted construction collections now enforce active required construction fields and photo slots, including `required_when` accessory fields/photos triggered by replacement confirmation; cached drafts remain allowed.
+- Add Construction Submit Gap Preview: construction collection forms now show a grouped `施工提交缺口` for missing required fields, photos, and KPI inputs, and platform final submit is disabled until the gap is cleared while draft save remains available.
+- Add Field Graph Relationship Lines: the graphical field designer now labels parent-child and conditional lines, shows a legend for parallel core fields, task-object ownership, and condition triggers, and summarizes main-device, accessory-confirmation, and conditional collection counts.
+- Add Field Graph Smart Drop: the graphical field designer now includes smart drop targets for task core, main-device replacement, accessory replacement confirmation, and conditional accessory collection; photos stay as evidence when dropped into conditional collection.
+- Add Field Graph Tap Drop: smart drop targets now also work by selecting a custom field and clicking/tapping a target, with keyboard support and visible guidance for tablet operators.
+- Add Main Old Device Hierarchy: field graph display now distinguishes terminal main-device-before fields from accessory old-device follow-up fields, so old terminal/device recovery does not collapse into accessory-device semantics.
+- Add Delivery Archive Readiness Summary: project board now shows a read-only archive readiness panel that classifies approved archive, pending review, returned rework, evidence gap, not-ready, and exception work orders before any archive write path.
+- Add Delivery Archive Manifest Preview: project board now previews the read-only delivery package manifest, including ready items, blocker sections, required field/photo evidence, and strict full-package export eligibility.
+- Add Delivery Archive Evidence Details: delivery package preview now lists required field and photo evidence with always-required and conditional-trigger labels, so operators can see the exact evidence contract behind the package.
+- Add Delivery Archive Blocker Details: delivery package preview now lists blocker work-order details with reason, work object, aggregate value, and handling detail, so operators can clear concrete blockers before archive export.
+- Add Device Replacement Hierarchy Mode: field graph and readiness evidence now explicitly distinguish module replacement as task-object accessory replacement and terminal replacement as main-device replacement followed by accessory confirmation.
+- Add Construction Hierarchy Intent Labels: construction collection now translates field roles into on-screen collection intent labels, so operators can tell whether an item is main-device, accessory, accessory-confirmation, conditional follow-up, photo evidence, or KPI data.
+- Add Review Hierarchy Intent Labels: review workbench now translates the same field roles into review evidence intent labels, keeping field review, photo review, and KPI evidence aligned with construction collection.
+- Add Template Validation Hierarchy Panel: external-completed template validation now surfaces `missing_conditional_field` warnings as a dedicated `层级证据缺口` panel before the generic issue table, so mid-project takeover imports can see missing conditional accessory evidence by row and field.
+- Add Import Draft Hierarchy Gap Summary: import draft dry-run results now preserve `missing_conditional_field` warnings as `hierarchy_gap_count` and `hierarchy_gap_items`, and the import preview card continues to show `层级缺口` after validation.
+- Add Review Hierarchy Gap Follow-up: external-completed import execution now preserves imported conditional accessory evidence gaps on created platform work orders, and review shows them as `导入层级缺口` before approval.
+- Add Review Return Reason Suggestions: imported hierarchy gaps now generate `建议退回原因`, can be applied in `ReviewView`, prefill the `TaskHallView` return prompt, and protect blank returned review actions with a backend fallback reason.
+- Add Construction Rework Gap Panel: returned platform work orders now carry structured `rework_evidence_gap_groups`; `/construction` shows a `退回补采清单` so terminal main-device replacement and accessory replacement gaps remain actionable in field rework.
+- Add Rework Resubmission Audit Trail: returned platform work orders now append a `rework_submitted` event when construction resubmits, construction shows `返工已重新提交审阅`, and review history labels it as `返工重新提交`.
+- Add Review Deep Link SPA Fallback: direct `/review/:groupId` browser links now return the Vue app shell, while device replacement hierarchy guards continue to distinguish module replacement under the task object from terminal replacement with accessory confirmation.
+- Add Dashboard Metrics Schema Contract: project field schema now preserves structured dashboard metric definitions and the project board displays the configured metric口径 for progress, delivery, field collection, review, and KPI views.
+- Add Dashboard Metrics Field Graph Editor: the visual field graph now exposes selectable metric口径 cards for progress, delivery, field collection, review quality, and KPI efficiency, and saves them through the existing project schema form.
+- Add Single Aggregate Device Hierarchy Guard: backend schema normalization now enforces the one-active-aggregate contract and blocks terminal main-device replacement schemas unless accessory confirmation controls the accessory replacement fields.
+- Add Field Graph Aggregate Guard: field graph configuration now shows a `聚合口径` readiness card and blocks extra custom aggregate fields before project create or schema save.
+- Add Single Aggregate Readiness: `/projects/{project_id}/readiness` now includes `single_aggregate_field`, and the operator UI labels aggregate misuse as `聚合口径唯一`.
+- Add Terminal Accessory Confirmation Gate: field graph details now explain main-device-before, main-device-after, task-object accessory, accessory confirmation, and conditional collection semantics; terminal replacement save validation blocks flattened accessory new-device fields before backend submission.
+- Add Project Config Preflight: `GET /projects/persistence/config-preflight` reads the raw local draft store without loading or saving projects, reports legacy field/workflow blockers, and `/platform-projects` shows the read-only `配置预检` panel inside field configuration.
 
 Current execution package:
 
 - Keep the branch ready for PR/patch handoff or the next user-approved persistence slice.
 - Use `v2-api/app/services/platform/contracts.py`, `GET /projects/persistence/status`, `v2-api/app/services/platform/postgres_design.py`, `GET /projects/{project_id}/persistence/contract`, and `GET /projects/{project_id}/readiness` as checkpoints before changing persistence, field schema, workflow, import template, construction collection, or review status behavior.
 - Keep the package data-safe: no migration execution, no PostgreSQL write path, no production data edit, no official version bump, no tag, no deployment.
+- Latest completed package: Replacement Hierarchy Template Apply; the field graph now offers clickable module-replacement and terminal-replacement hierarchy templates, and both new-project and draft-schema editors can apply them into the current field form.
+- Latest replacement hierarchy template apply report:
+  - `docs/reports/pm-platform-replacement-hierarchy-template-apply-2026-07-03.md`
+- Latest completed package: Template Impact Preview; draft field graphs now generate local initial-import and system-external-completed template preview rows, preserve parent and condition hints, and list upload-time platform generated fields separately.
+- Latest template impact preview report:
+  - `docs/reports/pm-platform-template-impact-preview-2026-07-03.md`
+- Latest completed package: Template Workbook Instructions; downloaded project templates now include an `instructions` worksheet explaining hierarchy, conditional collection, platform-fill rules, and the difference between module replacement under a task object and terminal replacement with accessory confirmation.
+- Latest template workbook instructions report:
+  - `docs/reports/pm-platform-template-workbook-instructions-2026-07-03.md`
+- Latest completed package: Template Download Guidance; field graph template preview now shows `Excel说明页`, `template / fields / instructions`, and a download-before hierarchy hint for module/terminal replacement modes.
+- Latest template download guidance report:
+  - `docs/reports/pm-platform-template-download-guidance-2026-07-03.md`
+- Latest completed package: Project Type Preset Guidance; create-project preset selection now shows the selected preset's main field, aggregate field, hierarchy mode, and the one-active-aggregate rule for terminal projects.
+- Latest project type preset guidance report:
+  - `docs/reports/pm-platform-project-type-preset-guidance-2026-07-03.md`
+- Latest completed package: Single Aggregate Device Hierarchy Guard; backend project schema normalization now rejects extra aggregate fields and terminal replacement schemas missing accessory confirmation hierarchy.
+- Latest single aggregate device hierarchy guard artifacts:
+  - `docs/superpowers/plans/2026-07-03-single-aggregate-device-hierarchy-guard.md`
+  - `docs/reports/pm-platform-single-aggregate-device-hierarchy-guard-2026-07-03.md`
+- Latest completed package: Field Graph Aggregate Guard; the graphical field designer now surfaces the one-active-aggregate rule and save-time aggregate validation before backend submission.
+- Latest field graph aggregate guard artifacts:
+  - `docs/superpowers/plans/2026-07-03-field-graph-aggregate-guard.md`
+  - `docs/reports/pm-platform-field-graph-aggregate-guard-2026-07-03.md`
+- Latest completed package: Single Aggregate Readiness; backend readiness now includes `single_aggregate_field`, and frontend readiness panels map `fix_aggregate_field` for operators.
+- Latest single aggregate readiness artifacts:
+  - `docs/superpowers/plans/2026-07-03-single-aggregate-readiness.md`
+  - `docs/reports/pm-platform-single-aggregate-readiness-2026-07-03.md`
+- Latest completed package: Terminal Accessory Confirmation Gate; field graph selected-field hints now describe main-device and accessory hierarchy, and the project save gate blocks terminal accessory fields that skip replacement confirmation.
+- Latest terminal accessory confirmation gate artifacts:
+  - `docs/superpowers/plans/2026-07-03-terminal-accessory-confirmation-gate.md`
+  - `docs/reports/pm-platform-terminal-accessory-confirmation-gate-2026-07-03.md`
+- Latest completed package: Project Config Preflight; raw legacy draft stores can now be checked read-only for field schema, workflow, module selection, and store format blockers before normal project load/save/migration.
+- Latest project config preflight artifacts:
+  - `docs/superpowers/plans/2026-07-03-project-config-preflight.md`
+  - `docs/reports/pm-platform-project-config-preflight-2026-07-03.md`
 - Latest frontend readiness panel artifacts:
   - `docs/superpowers/plans/2026-07-02-project-readiness-panel-frontend.md`
   - `docs/reports/pm-platform-readiness-panel-frontend-2026-07-02.md`
@@ -608,10 +797,138 @@ Current execution package:
 - Latest production sync readiness artifacts:
   - `docs/superpowers/plans/2026-07-02-platform-production-3.0.77-sync-readiness.md`
   - `docs/reports/pm-platform-production-3.0.77-sync-readiness-2026-07-02.md`
+- Latest device hierarchy refinement artifacts:
+  - `docs/reports/pm-platform-device-hierarchy-refinement-2026-07-03.md`
+- Latest line-loss preset artifacts:
+  - `docs/superpowers/plans/2026-07-03-line-loss-project-preset.md`
+  - `docs/reports/pm-platform-line-loss-project-preset-2026-07-03.md`
+- Latest create project field graph artifacts:
+  - `docs/superpowers/plans/2026-07-03-create-project-field-graph.md`
+  - `docs/reports/pm-platform-create-project-field-graph-2026-07-03.md`
+- Latest device replacement visual hierarchy artifacts:
+  - `docs/superpowers/plans/2026-07-03-device-replacement-visual-hierarchy.md`
+  - `docs/reports/pm-platform-device-replacement-visual-hierarchy-2026-07-03.md`
+- Latest construction device hierarchy artifacts:
+  - `docs/superpowers/plans/2026-07-03-construction-device-hierarchy-sections.md`
+  - `docs/reports/pm-platform-construction-device-hierarchy-sections-2026-07-03.md`
+- Latest review device hierarchy artifacts:
+  - `docs/superpowers/plans/2026-07-03-review-device-hierarchy-sections.md`
+  - `docs/reports/pm-platform-review-device-hierarchy-sections-2026-07-03.md`
+- Latest terminal review main-device sample artifacts:
+  - `docs/superpowers/plans/2026-07-03-terminal-review-main-device-sample.md`
+  - `docs/reports/pm-platform-terminal-review-main-device-sample-2026-07-03.md`
+- Latest project board device hierarchy map artifacts:
+  - `docs/superpowers/plans/2026-07-03-project-board-device-hierarchy-map.md`
+  - `docs/reports/pm-platform-project-board-device-hierarchy-map-2026-07-03.md`
+- Latest construction conditional preview artifacts:
+  - `docs/superpowers/plans/2026-07-03-construction-conditional-preview.md`
+  - `docs/reports/pm-platform-construction-conditional-preview-2026-07-03.md`
+- Latest review conditional visibility artifacts:
+  - `docs/superpowers/plans/2026-07-03-review-conditional-visibility.md`
+  - `docs/reports/pm-platform-review-conditional-visibility-2026-07-03.md`
+- Latest field graph relationship line artifacts:
+  - `docs/superpowers/plans/2026-07-03-field-graph-relationship-lines.md`
+  - `docs/reports/pm-platform-field-graph-relationship-lines-2026-07-03.md`
+- Latest field graph smart drop artifacts:
+  - `docs/superpowers/plans/2026-07-03-field-graph-smart-drop.md`
+  - `docs/reports/pm-platform-field-graph-smart-drop-2026-07-03.md`
+- Latest field graph tap drop artifacts:
+  - `docs/superpowers/plans/2026-07-03-field-graph-tap-drop.md`
+  - `docs/reports/pm-platform-field-graph-tap-drop-2026-07-03.md`
+- Latest workflow selected node order controls artifacts:
+  - `docs/superpowers/plans/2026-07-03-workflow-selected-node-order-controls.md`
+  - `docs/reports/pm-platform-workflow-selected-node-order-controls-2026-07-03.md`
+- Latest device replacement hierarchy drop artifacts:
+  - `docs/superpowers/plans/2026-07-03-device-replacement-hierarchy-drops.md`
+  - `docs/reports/pm-platform-device-replacement-hierarchy-drops-2026-07-03.md`
+- Latest device hierarchy readiness gate artifacts:
+  - `docs/superpowers/plans/2026-07-03-device-hierarchy-readiness-gate.md`
+  - `docs/reports/pm-platform-device-hierarchy-readiness-gate-2026-07-03.md`
+- Latest main old device hierarchy artifacts:
+  - `docs/superpowers/plans/2026-07-03-main-old-device-hierarchy.md`
+  - `docs/reports/pm-platform-main-old-device-hierarchy-2026-07-03.md`
+- Latest construction required collection gate artifacts:
+  - `docs/superpowers/plans/2026-07-03-construction-required-collection-gate.md`
+  - `docs/reports/pm-platform-construction-required-collection-gate-2026-07-03.md`
+- Latest construction submit gap preview artifacts:
+  - `docs/superpowers/plans/2026-07-03-construction-submit-gap-preview.md`
+  - `docs/reports/pm-platform-construction-submit-gap-preview-2026-07-03.md`
+- Latest review required evidence gate artifacts:
+  - `docs/superpowers/plans/2026-07-03-review-required-evidence-gate.md`
+  - `docs/reports/pm-platform-review-required-evidence-gate-2026-07-03.md`
+- Latest delivery archive readiness artifacts:
+  - `docs/superpowers/plans/2026-07-03-delivery-archive-readiness.md`
+  - `docs/reports/pm-platform-delivery-archive-readiness-2026-07-03.md`
+- Latest delivery archive manifest preview artifacts:
+  - `docs/superpowers/plans/2026-07-03-delivery-archive-manifest-preview.md`
+  - `docs/reports/pm-platform-delivery-archive-manifest-preview-2026-07-03.md`
+- Latest delivery archive evidence detail artifacts:
+  - `docs/superpowers/plans/2026-07-03-delivery-archive-evidence-details.md`
+  - `docs/reports/pm-platform-delivery-archive-evidence-details-2026-07-03.md`
+- Latest delivery archive blocker detail artifacts:
+  - `docs/superpowers/plans/2026-07-03-delivery-archive-blocker-details.md`
+  - `docs/reports/pm-platform-delivery-archive-blocker-details-2026-07-03.md`
+- Latest device replacement hierarchy mode artifacts:
+  - `docs/superpowers/plans/2026-07-03-device-replacement-hierarchy-mode.md`
+  - `docs/reports/pm-platform-device-replacement-hierarchy-mode-2026-07-03.md`
+- Latest construction hierarchy intent label artifacts:
+  - `docs/superpowers/plans/2026-07-03-construction-hierarchy-intent-labels.md`
+  - `docs/reports/pm-platform-construction-hierarchy-intent-labels-2026-07-03.md`
+- Latest review hierarchy intent label artifacts:
+  - `docs/superpowers/plans/2026-07-03-review-hierarchy-intent-labels.md`
+  - `docs/reports/pm-platform-review-hierarchy-intent-labels-2026-07-03.md`
+- Latest template validation hierarchy panel artifacts:
+  - `docs/superpowers/plans/2026-07-03-template-validation-hierarchy-panel.md`
+  - `docs/reports/pm-platform-template-validation-hierarchy-panel-2026-07-03.md`
+- Latest import draft hierarchy gap summary artifacts:
+  - `docs/superpowers/plans/2026-07-03-import-draft-hierarchy-gap-summary.md`
+  - `docs/reports/pm-platform-import-draft-hierarchy-gap-summary-2026-07-03.md`
+- Latest review hierarchy gap follow-up artifacts:
+  - `docs/superpowers/plans/2026-07-03-review-hierarchy-gap-followup.md`
+  - `docs/reports/pm-platform-review-hierarchy-gap-followup-2026-07-03.md`
+- Latest review return reason suggestion artifacts:
+  - `docs/superpowers/plans/2026-07-03-review-return-reason-suggestions.md`
+  - `docs/reports/pm-platform-review-return-reason-suggestions-2026-07-03.md`
+- Latest construction rework gap panel artifacts:
+  - `docs/superpowers/plans/2026-07-03-construction-rework-gap-panel.md`
+  - `docs/reports/pm-platform-construction-rework-gap-panel-2026-07-03.md`
+- Latest rework resubmission audit artifacts:
+  - `docs/superpowers/plans/2026-07-03-rework-resubmission-audit-trail.md`
+  - `docs/reports/pm-platform-rework-resubmission-audit-2026-07-03.md`
+- Latest review deep link SPA fallback artifacts:
+  - `docs/superpowers/plans/2026-07-03-review-deep-link-spa-fallback.md`
+  - `docs/reports/pm-platform-review-deep-link-spa-fallback-2026-07-03.md`
+- Latest dashboard metrics schema contract artifacts:
+  - `docs/superpowers/plans/2026-07-03-dashboard-metrics-schema-contract.md`
+  - `docs/reports/pm-platform-dashboard-metrics-schema-contract-2026-07-03.md`
+- Latest dashboard metrics field graph editor artifacts:
+  - `docs/superpowers/plans/2026-07-03-dashboard-metrics-field-graph-editor.md`
+  - `docs/reports/pm-platform-dashboard-metrics-field-graph-editor-2026-07-03.md`
+- Latest replacement hierarchy template apply artifacts:
+  - `docs/reports/pm-platform-replacement-hierarchy-template-apply-2026-07-03.md`
+- Latest template impact preview artifacts:
+  - `docs/reports/pm-platform-template-impact-preview-2026-07-03.md`
+- Latest template workbook instructions artifacts:
+  - `docs/reports/pm-platform-template-workbook-instructions-2026-07-03.md`
+- Latest template download guidance artifacts:
+  - `docs/superpowers/plans/2026-07-03-template-download-guidance.md`
+  - `docs/reports/pm-platform-template-download-guidance-2026-07-03.md`
+- Latest project type preset guidance artifacts:
+  - `docs/superpowers/plans/2026-07-03-project-type-preset-guidance.md`
+  - `docs/reports/pm-platform-project-type-preset-guidance-2026-07-03.md`
+- Latest device replacement confirmation precision artifacts:
+  - `docs/superpowers/plans/2026-07-03-device-replacement-confirmation-precision.md`
+  - `docs/reports/pm-platform-device-replacement-confirmation-precision-2026-07-03.md`
+- Latest handoff config preflight summary artifacts:
+  - `docs/superpowers/plans/2026-07-03-handoff-config-preflight-summary.md`
+  - `docs/reports/pm-platform-handoff-config-preflight-summary-2026-07-03.md`
+- Latest project list config preflight fallback artifacts:
+  - `docs/superpowers/plans/2026-07-03-project-list-config-preflight-fallback.md`
+  - `docs/reports/pm-platform-project-list-config-preflight-fallback-2026-07-03.md`
 
 Next packages after this one:
 
-1. If the user chooses PR: push `pm-platform/project-drafts` and open a PR to `production/V3/3.0.71` using the prepared PR body.
+1. If the user chooses PR: push `pm-platform/production-3.0.77-sync` and open a PR to `production/V3/3.0.77` using the refreshed PR body.
 2. If the user chooses patch: export the branch as a patch package with the same baseline and safety notes.
 3. After explicit user approval, create the Alembic migration for the first PostgreSQL persistence slice.
 4. After the migration package exists, add persistence-backed read/write contract tests before enabling PostgreSQL reads in production.

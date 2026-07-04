@@ -56,6 +56,10 @@ const requiredViewTokens = [
   'readinessSummaryText',
   'readinessCheckLabel',
   'readinessActionText',
+  'device_hierarchy',
+  '设备更换层级',
+  'complete_device_hierarchy',
+  '请补齐主设备、附属设备确认和条件采集层级',
 ]
 
 const requiredBehaviorTokens = [

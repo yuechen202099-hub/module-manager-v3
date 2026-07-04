@@ -39,6 +39,28 @@ PLATFORM_FILL_RULES = {
     "online_duration_minutes": "外部无法提供时可留空",
 }
 
+_DELIVERY_ARCHIVE_PLATFORM_KPI_KEYS = (
+    "installer",
+    "started_at",
+    "completed_at",
+    "uploaded_at",
+    "online_duration_minutes",
+    "photo_count",
+    "old_device_recovered",
+)
+
+_DELIVERY_ARCHIVE_COMPUTED_KPI_FIELDS: dict[str, dict[str, Any]] = {
+    "old_device_recovered": {
+        "key": "old_device_recovered",
+        "label": "旧设备回收",
+        "source": "system",
+        "capture_method": "system",
+        "data_type": "boolean",
+        "required": True,
+        "relation_role": "old_device",
+    },
+}
+
 
 def build_project_template_workbook(project_id: str, template_type: str) -> bytes:
     if template_type not in SUPPORTED_TEMPLATE_TYPES:
@@ -52,6 +74,7 @@ def build_project_template_workbook(project_id: str, template_type: str) -> byte
     template_sheet = workbook.active
     template_sheet.title = "template"
     fields_sheet = workbook.create_sheet("fields")
+    instructions_sheet = workbook.create_sheet("instructions")
 
     headers = [field["label"] for field in fields]
     keys = [field["key"] for field in fields]
@@ -59,7 +82,7 @@ def build_project_template_workbook(project_id: str, template_type: str) -> byte
     template_sheet.append([_example_value(field, index) for index, field in enumerate(fields, start=1)])
     template_sheet.append([f"字段编码: {key}" for key in keys])
 
-    fields_sheet.append(["字段编码", "字段名称", "来源", "采集方式", "数据格式", "是否必填", "平台补齐规则"])
+    fields_sheet.append(["字段编码", "字段名称", "来源", "采集方式", "数据格式", "是否必填", "层级角色", "父字段", "条件采集", "平台补齐规则"])
     for field in field_rows:
         fields_sheet.append(
             [
@@ -69,9 +92,14 @@ def build_project_template_workbook(project_id: str, template_type: str) -> byte
                 field.get("capture_method", ""),
                 field.get("data_type", ""),
                 "是" if field.get("required") else "否",
+                _template_hierarchy_role(field),
+                _template_parent_label(schema, field),
+                _template_condition_hint(schema, field),
                 _platform_fill_rule(field, template_type),
             ]
         )
+
+    _append_template_instruction_sheet(instructions_sheet, schema, fields, field_rows, template_type)
 
     for sheet in workbook.worksheets:
         _style_sheet(sheet)
@@ -104,6 +132,13 @@ def build_project_template_preview(project_id: str, work_item_schema: dict[str, 
                         "capture_method": field.get("capture_method", ""),
                         "data_type": field.get("data_type", ""),
                         "required": bool(field.get("required")),
+                        "parent_key": field.get("parent_key", ""),
+                        "relation_role": field.get("relation_role", ""),
+                        "required_when": field.get("required_when") or None,
+                        "show_in_construction_panel": bool(field.get("show_in_construction_panel", False)),
+                        "template_hierarchy_role": _template_hierarchy_role(field),
+                        "template_parent_label": _template_parent_label(schema, field),
+                        "template_condition_hint": _template_condition_hint(schema, field),
                         "platform_fill_rule": _platform_fill_rule(field, template_type),
                     }
                     for field in field_rows
@@ -219,6 +254,15 @@ def validate_project_template_workbook(project_id: str, template_type: str, work
                     )
                 )
 
+        _validate_conditional_template_fields(
+            items=items,
+            fields=fields,
+            row_number=row_number,
+            row_values=row_values,
+            header_indexes=header_indexes,
+            template_type=template_type,
+        )
+
         for label, value in row_values.items():
             field = fields_by_label.get(label)
             if not field or value in (None, ""):
@@ -275,6 +319,17 @@ def create_project_template_import_draft(
 
     error_count = int(validation.get("summary", {}).get("error_count", 0))
     warning_count = int(validation.get("summary", {}).get("warning_count", 0))
+    hierarchy_gap_items = [
+        {
+            "row": item.get("row"),
+            "field_key": item.get("field_key", ""),
+            "field_label": item.get("field_label", ""),
+            "message": item.get("message", ""),
+            "value": item.get("value", ""),
+        }
+        for item in validation.get("items", [])
+        if item.get("code") == "missing_conditional_field"
+    ]
     status = "blocked" if error_count else "ready_with_warnings" if warning_count else "ready"
     return {
         "job_id": f"draft-{uuid4().hex}",
@@ -295,6 +350,7 @@ def create_project_template_import_draft(
                 "total_rows": len(data_rows),
                 "ready_rows": 0 if error_count else len(data_rows),
                 "preview_rows": len(preview_rows),
+                "hierarchy_gap_count": len(hierarchy_gap_items),
             },
             "field_mappings": {
                 label: fields_by_label[label]["key"]
@@ -303,6 +359,7 @@ def create_project_template_import_draft(
             },
             "platform_fill_policy": _platform_fill_policies(schema, fields, template_type),
             "preview_rows": preview_rows,
+            "hierarchy_gap_items": hierarchy_gap_items[:20],
         },
         "error": "",
     }
@@ -504,6 +561,7 @@ def execute_import_work_order_task(project_id: str, task_id: str, actor: str = "
                         "client_batch_id": task.get("batch_id", ""),
                         "collected_by": actor,
                         "collected_at": created_at,
+                        "review_hierarchy_gap_items": _platform_hierarchy_gap_items_from_warnings(row),
                     }
                 )
             _PLATFORM_WORK_ORDERS[work_order_id] = work_order
@@ -672,10 +730,239 @@ def summarize_platform_work_orders(project_id: str) -> dict[str, int]:
     }
 
 
+def build_platform_delivery_archive_readiness(project_id: str) -> dict[str, Any]:
+    construction_schema = _platform_construction_schema(project_id)
+    construction_fields = construction_schema["construction_fields"]
+    photo_slots = construction_schema["photo_slots"]
+
+    with _PLATFORM_WORK_ORDERS_LOCK:
+        _load_platform_work_orders_unlocked()
+        work_orders = [
+            deepcopy(work_order)
+            for work_order in _PLATFORM_WORK_ORDERS.values()
+            if work_order.get("project_id") == project_id
+        ]
+
+    work_orders.sort(key=lambda item: (str(item.get("primary_value") or ""), str(item.get("id") or "")))
+    counts = {
+        "total": len(work_orders),
+        "ready_for_archive": 0,
+        "approved_archive": 0,
+        "pending_review": 0,
+        "returned_rework": 0,
+        "evidence_gap": 0,
+        "not_ready": 0,
+        "exception": 0,
+    }
+    blockers: list[dict[str, Any]] = []
+    ready_items: list[dict[str, str]] = []
+
+    for work_order in work_orders:
+        review_status = _platform_review_status(work_order)
+        item = _delivery_archive_work_order_item(work_order)
+        if review_status == "approved":
+            counts["ready_for_archive"] += 1
+            counts["approved_archive"] += 1
+            ready_items.append({**item, "reason": "approved_archive"})
+            continue
+        if review_status == "returned":
+            counts["returned_rework"] += 1
+            blockers.append({**item, "reason": "returned_rework", "detail": str(work_order.get("review_reason") or work_order.get("review_note") or "")})
+            continue
+        if review_status == "exception":
+            counts["exception"] += 1
+            blockers.append({**item, "reason": "exception", "detail": str(work_order.get("review_reason") or work_order.get("review_note") or "")})
+            continue
+        if not _has_platform_collection(work_order):
+            counts["not_ready"] += 1
+            blockers.append({**item, "reason": "not_ready", "detail": "No construction collection has been submitted."})
+            continue
+
+        try:
+            _validate_platform_required_collection(
+                work_order,
+                construction_fields,
+                photo_slots,
+                _stored_platform_collection_field_values(work_order),
+                _stored_platform_covered_photo_slots(work_order),
+            )
+        except ValueError as exc:
+            counts["evidence_gap"] += 1
+            blockers.append({**item, "reason": "evidence_gap", "detail": str(exc)})
+            continue
+
+        if str(work_order.get("collection_status") or "").strip() != "submitted":
+            counts["not_ready"] += 1
+            blockers.append({**item, "reason": "not_ready", "detail": "Collection is still cached and has not been submitted."})
+            continue
+
+        counts["pending_review"] += 1
+        blockers.append({**item, "reason": "pending_review", "detail": "Submitted collection is waiting for review."})
+
+    blocked = (
+        counts["pending_review"]
+        + counts["returned_rework"]
+        + counts["evidence_gap"]
+        + counts["not_ready"]
+        + counts["exception"]
+    )
+    ready = counts["total"] > 0 and blocked == 0 and counts["ready_for_archive"] == counts["total"]
+    return {
+        "project_id": project_id,
+        **counts,
+        "blocked": blocked,
+        "ready": ready,
+        "status": "ready" if ready else "blocked" if blocked else "empty",
+        "next_actions": _delivery_archive_next_actions(counts),
+        "blockers": blockers,
+        "ready_items": ready_items,
+    }
+
+
+def build_platform_delivery_archive_manifest(project_id: str) -> dict[str, Any]:
+    readiness = build_platform_delivery_archive_readiness(project_id)
+    construction_schema = _platform_construction_schema(project_id)
+    required_evidence = _delivery_archive_required_evidence(
+        construction_schema["construction_fields"],
+        construction_schema["photo_slots"],
+        construction_schema["platform_required_fields"],
+    )
+    return {
+        "project_id": project_id,
+        "manifest_id": f"{project_id}:delivery-archive-preview",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "status": readiness["status"],
+        "ready": readiness["ready"],
+        "can_export": bool(readiness["ready"]),
+        "total": readiness["total"],
+        "ready_count": readiness["ready_for_archive"],
+        "blocked_count": readiness["blocked"],
+        "next_actions": readiness["next_actions"],
+        "required_evidence": required_evidence,
+        "sections": _delivery_archive_manifest_sections(readiness),
+    }
+
+
+def _delivery_archive_work_order_item(work_order: dict[str, Any]) -> dict[str, str]:
+    return {
+        "work_order_id": str(work_order.get("id") or ""),
+        "primary_value": str(work_order.get("primary_value") or ""),
+        "aggregate_value": str(work_order.get("aggregate_value") or ""),
+    }
+
+
+def _delivery_archive_next_actions(counts: dict[str, int]) -> list[str]:
+    actions: list[str] = []
+    if counts.get("ready_for_archive", 0) > 0:
+        actions.append("archive_approved_work_orders")
+    if counts.get("pending_review", 0) > 0:
+        actions.append("review_pending_work_orders")
+    if counts.get("returned_rework", 0) > 0:
+        actions.append("resolve_returned_rework")
+    if counts.get("evidence_gap", 0) > 0:
+        actions.append("complete_evidence")
+    if counts.get("not_ready", 0) > 0:
+        actions.append("collect_not_ready_work_orders")
+    if counts.get("exception", 0) > 0:
+        actions.append("handle_exceptions")
+    return actions
+
+
+def _delivery_archive_manifest_sections(readiness: dict[str, Any]) -> list[dict[str, Any]]:
+    ready_items = [
+        item
+        for item in readiness.get("ready_items", [])
+        if isinstance(item, dict)
+    ]
+    blockers = [
+        item
+        for item in readiness.get("blockers", [])
+        if isinstance(item, dict)
+    ]
+    blocker_by_reason: dict[str, list[dict[str, Any]]] = {}
+    for blocker in blockers:
+        reason = str(blocker.get("reason") or "").strip() or "blocked"
+        blocker_by_reason.setdefault(reason, []).append(blocker)
+
+    section_specs = [
+        ("approved_archive", "已通过，可纳入交付包", ready_items),
+        ("pending_review", "待审阅", blocker_by_reason.get("pending_review", [])),
+        ("evidence_gap", "证据缺口", blocker_by_reason.get("evidence_gap", [])),
+        ("returned_rework", "返工", blocker_by_reason.get("returned_rework", [])),
+        ("not_ready", "未施工", blocker_by_reason.get("not_ready", [])),
+        ("exception", "异常", blocker_by_reason.get("exception", [])),
+    ]
+    return [
+        {
+            "id": section_id,
+            "title": title,
+            "count": len(items),
+            "items": deepcopy(items),
+        }
+        for section_id, title, items in section_specs
+    ]
+
+
+def _delivery_archive_required_evidence(
+    construction_fields: list[dict[str, Any]],
+    photo_slots: list[dict[str, Any]],
+    platform_required_fields: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        "fields": [
+            _delivery_archive_evidence_item(field)
+            for field in _dedupe_fields(
+                [
+                    *[field for field in construction_fields if _field_is_archive_required_evidence(field)],
+                    *_delivery_archive_platform_kpi_fields(platform_required_fields),
+                ]
+            )
+        ],
+        "photos": [
+            _delivery_archive_evidence_item(slot)
+            for slot in photo_slots
+            if _field_is_archive_required_evidence(slot)
+        ],
+    }
+
+
+def _field_is_archive_required_evidence(field: dict[str, Any]) -> bool:
+    return bool(field.get("required") or field.get("required_when"))
+
+
+def _delivery_archive_platform_kpi_fields(platform_required_fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    platform_by_key = {
+        str(field.get("key") or ""): field
+        for field in platform_required_fields
+        if isinstance(field, dict) and str(field.get("key") or "")
+    }
+    evidence_fields: list[dict[str, Any]] = []
+    for key in _DELIVERY_ARCHIVE_PLATFORM_KPI_KEYS:
+        field = deepcopy(platform_by_key.get(key) or _DELIVERY_ARCHIVE_COMPUTED_KPI_FIELDS.get(key) or {})
+        if not field:
+            continue
+        field["required"] = True
+        field["relation_role"] = str(field.get("relation_role") or "task_detail")
+        evidence_fields.append(field)
+    return evidence_fields
+
+
+def _delivery_archive_evidence_item(field: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "key": str(field.get("key") or ""),
+        "label": str(field.get("label") or field.get("key") or ""),
+        "capture_method": str(field.get("capture_method") or ""),
+        "relation_role": str(field.get("relation_role") or ""),
+        "required": bool(field.get("required")),
+        "required_when": deepcopy(field.get("required_when") or None),
+    }
+
+
 def list_platform_construction_work_orders(project_id: str) -> dict[str, Any]:
     construction_schema = _platform_construction_schema(project_id)
     primary = construction_schema["primary_field"]
     aggregate = construction_schema["aggregate_field"]
+    display_fields = construction_schema["display_fields"]
     construction_fields = construction_schema["construction_fields"]
     photo_slots = construction_schema["photo_slots"]
 
@@ -694,6 +981,7 @@ def list_platform_construction_work_orders(project_id: str) -> dict[str, Any]:
         "field_schema": {
             "primary_field": primary,
             "aggregate_field": aggregate,
+            "display_fields": display_fields,
             "construction_fields": construction_fields,
             "photo_slots": photo_slots,
         },
@@ -741,6 +1029,7 @@ def list_platform_review_work_orders(project_id: str) -> dict[str, Any]:
         "field_schema": {
             "primary_field": construction_schema["primary_field"],
             "aggregate_field": construction_schema["aggregate_field"],
+            "display_fields": construction_schema["display_fields"],
             "construction_fields": construction_fields,
             "photo_slots": photo_slots,
         },
@@ -763,10 +1052,22 @@ def review_platform_work_order(project_id: str, work_order_id: str, payload: dic
             raise KeyError(work_order_id)
         if not _has_platform_collection(work_order):
             raise ValueError("Platform work order has no collection to review")
+        if action == "approved":
+            _validate_platform_required_collection(
+                work_order,
+                construction_fields,
+                photo_slots,
+                _stored_platform_collection_field_values(work_order),
+                _stored_platform_covered_photo_slots(work_order),
+            )
         reviewed_at = datetime.now().isoformat(timespec="seconds")
         actor = str(payload.get("actor") or "").strip()
         note = str(payload.get("note") or "").strip()
         reason = str(payload.get("reason") or "").strip()
+        if action == "returned" and not reason:
+            reason = _platform_review_return_reason_suggestion(work_order)
+            if not note:
+                note = reason
         review_history = work_order.get("review_history") if isinstance(work_order.get("review_history"), list) else []
         review_history = [event for event in review_history if isinstance(event, dict)]
         review_history.append(
@@ -819,6 +1120,14 @@ def save_platform_construction_work_order_collection(project_id: str, work_order
         work_order = _PLATFORM_WORK_ORDERS.get(work_order_id)
         if not work_order or work_order.get("project_id") != project_id:
             raise KeyError(work_order_id)
+        if status == "submitted":
+            _validate_platform_required_collection(
+                work_order,
+                construction_fields,
+                photo_slots,
+                collection_field_values,
+                covered_photo_slots,
+            )
         collected_at = datetime.now().isoformat(timespec="seconds")
         work_order["collection_status"] = status
         work_order["collection_field_values"] = collection_field_values
@@ -834,6 +1143,19 @@ def save_platform_construction_work_order_collection(project_id: str, work_order
             collected_at=collected_at,
         )
         if status == "submitted" and str(work_order.get("review_status") or "").strip() == "returned":
+            review_history = work_order.get("review_history") if isinstance(work_order.get("review_history"), list) else []
+            review_history = [event for event in review_history if isinstance(event, dict)]
+            review_history.append(
+                {
+                    "id": f"review-action-{uuid4().hex[:12]}",
+                    "action": "rework_submitted",
+                    "actor": work_order["collected_by"],
+                    "reviewed_at": collected_at,
+                    "note": "\u8fd4\u5de5\u8865\u91c7\u540e\u91cd\u65b0\u63d0\u4ea4\u5ba1\u9605",
+                    "reason": "returned_rework_resubmitted",
+                }
+            )
+            work_order["review_history"] = review_history
             work_order["review_status"] = "pending_review"
             work_order["reviewed_by"] = ""
             work_order["reviewed_at"] = ""
@@ -844,6 +1166,82 @@ def save_platform_construction_work_order_collection(project_id: str, work_order
         updated = deepcopy(work_order)
 
     return _construction_work_order_payload(updated, construction_fields, photo_slots)
+
+
+def _validate_platform_required_collection(
+    work_order: dict[str, Any],
+    construction_fields: list[dict[str, Any]],
+    photo_slots: list[dict[str, Any]],
+    collection_field_values: dict[str, str],
+    covered_photo_slots: list[str],
+) -> None:
+    initial_values = {
+        str(key): "" if value is None else str(value).strip()
+        for key, value in (work_order.get("values") if isinstance(work_order.get("values"), dict) else {}).items()
+    }
+    merged_values = {**initial_values, **collection_field_values}
+    missing_fields = [
+        _field_label(field)
+        for field in construction_fields
+        if _is_platform_collection_item_required(field, merged_values)
+        and not str(merged_values.get(str(field.get("key") or ""), "")).strip()
+    ]
+    covered_slots = set(covered_photo_slots)
+    missing_photos = [
+        _field_label(slot)
+        for slot in photo_slots
+        if _is_platform_collection_item_required(slot, merged_values)
+        and str(slot.get("key") or "") not in covered_slots
+    ]
+    if not missing_fields and not missing_photos:
+        return
+    details: list[str] = []
+    if missing_fields:
+        details.append(f"缺少必填字段：{'、'.join(missing_fields)}")
+    if missing_photos:
+        details.append(f"缺少必填照片：{'、'.join(missing_photos)}")
+    raise ValueError("；".join(details))
+
+
+def _field_label(field: dict[str, Any]) -> str:
+    return str(field.get("label") or field.get("key") or "").strip() or "未命名字段"
+
+
+def _stored_platform_collection_field_values(work_order: dict[str, Any]) -> dict[str, str]:
+    values = work_order.get("collection_field_values") if isinstance(work_order.get("collection_field_values"), dict) else {}
+    return {str(key): "" if value is None else str(value).strip() for key, value in values.items()}
+
+
+def _stored_platform_covered_photo_slots(work_order: dict[str, Any]) -> list[str]:
+    slots: list[str] = []
+    stored_slots = work_order.get("covered_photo_slots") if isinstance(work_order.get("covered_photo_slots"), list) else []
+    for raw_slot in stored_slots:
+        slot = str(raw_slot or "").strip()
+        if slot and slot not in slots:
+            slots.append(slot)
+    photos = work_order.get("collection_photos") if isinstance(work_order.get("collection_photos"), list) else []
+    for slot in _covered_slots_from_photos([photo for photo in photos if isinstance(photo, dict)]):
+        if slot not in slots:
+            slots.append(slot)
+    return slots
+
+
+def _is_platform_collection_item_required(field: dict[str, Any], values: dict[str, str]) -> bool:
+    required_when = field.get("required_when")
+    if isinstance(required_when, dict) and str(required_when.get("field_key") or "").strip():
+        return _platform_required_when_matches(required_when, values)
+    return bool(field.get("required"))
+
+
+def _platform_required_when_matches(required_when: dict[str, Any], values: dict[str, str]) -> bool:
+    field_key = str(required_when.get("field_key") or "").strip()
+    current = str(values.get(field_key) or "").strip()
+    if not field_key or not current:
+        return False
+    expected = required_when.get("equals")
+    if isinstance(expected, list):
+        return current in {str(item).strip() for item in expected if str(item).strip()}
+    return current == str(expected or "").strip()
 
 
 def upload_platform_construction_work_order_photo(
@@ -948,21 +1346,41 @@ def _platform_construction_schema(project_id: str) -> dict[str, Any]:
     primary = _clean_field(schema.get("primary_field"))
     aggregate = _clean_field(schema.get("aggregate_field"))
     custom_fields = [_clean_field(field) for field in schema.get("custom_fields", []) if isinstance(field, dict)]
+    platform_required_fields = [_clean_field(field) for field in schema.get("platform_required_fields", []) if isinstance(field, dict)]
+    display_fields = _dedupe_fields(
+        [
+            {**primary, "show_in_construction_panel": True},
+            {**aggregate, "show_in_construction_panel": True},
+            *[
+                field
+                for field in custom_fields
+                if field.get("show_in_construction_panel")
+                and field.get("source") != "field_collection"
+                and field.get("data_type") != "image"
+            ],
+        ]
+    )
     construction_fields = [
         field
         for field in custom_fields
-        if field.get("source") == "field_collection" and field.get("data_type") != "image"
+        if field.get("show_in_construction_panel")
+        and field.get("source") == "field_collection"
+        and field.get("data_type") != "image"
     ]
     photo_slots = [
         field
         for field in custom_fields
-        if field.get("source") == "field_collection" and field.get("data_type") == "image"
+        if field.get("show_in_construction_panel")
+        and field.get("source") == "field_collection"
+        and field.get("data_type") == "image"
     ]
     return {
         "primary_field": primary,
         "aggregate_field": aggregate,
+        "display_fields": display_fields,
         "construction_fields": construction_fields,
         "photo_slots": photo_slots,
+        "platform_required_fields": platform_required_fields,
     }
 
 
@@ -1010,6 +1428,7 @@ def _construction_work_order_payload(
         "review_note": str(work_order.get("review_note") or ""),
         "review_reason": str(work_order.get("review_reason") or ""),
         "review_history": _platform_review_history_payload(work_order),
+        "rework_evidence_gap_groups": _platform_rework_evidence_gap_groups(work_order, construction_fields, photo_slots),
         "kpi_values": kpi_values,
     }
 
@@ -1123,12 +1542,16 @@ def _platform_review_work_order_payload(
         "review_note": str(work_order.get("review_note") or ""),
         "review_reason": str(work_order.get("review_reason") or ""),
         "review_history": _platform_review_history_payload(work_order),
+        "suggested_review_return_reason": _platform_review_return_reason_suggestion(work_order),
+        "review_hierarchy_gap_items": _platform_review_hierarchy_gap_items(work_order),
         "field_reviews": [
             {
                 "key": field["key"],
                 "label": field.get("label") or field["key"],
                 "capture_method": field.get("capture_method") or "manual",
                 "required": bool(field.get("required")),
+                "required_when": field.get("required_when") or None,
+                "relation_role": str(field.get("relation_role") or ""),
                 "initial_value": initial_values.get(field["key"], ""),
                 "collected_value": collected_values.get(field["key"], ""),
             }
@@ -1139,6 +1562,8 @@ def _platform_review_work_order_payload(
                 "key": slot["key"],
                 "label": slot.get("label") or slot["key"],
                 "required": bool(slot.get("required")),
+                "required_when": slot.get("required_when") or None,
+                "relation_role": str(slot.get("relation_role") or ""),
                 "covered": slot["key"] in covered_photo_slots,
                 "photo_count": sum(
                     1
@@ -1167,6 +1592,73 @@ def _platform_review_history_payload(work_order: dict[str, Any]) -> list[dict[st
     ]
 
 
+def _platform_hierarchy_gap_items_from_warnings(row: dict[str, Any]) -> list[dict[str, Any]]:
+    warnings = row.get("warnings") if isinstance(row.get("warnings"), list) else []
+    return _platform_normalized_hierarchy_gap_items(warnings, require_conditional_code=True)
+
+
+def _platform_review_hierarchy_gap_items(work_order: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_items = work_order.get("review_hierarchy_gap_items")
+    if not isinstance(raw_items, list):
+        return []
+    return _platform_normalized_hierarchy_gap_items(raw_items)
+
+
+def _platform_review_return_reason_suggestion(work_order: dict[str, Any]) -> str:
+    hierarchy_gap_items = _platform_review_hierarchy_gap_items(work_order)
+    if not hierarchy_gap_items:
+        return ""
+    labels: list[str] = []
+    for item in hierarchy_gap_items:
+        label = str(item.get("field_label") or item.get("field_key") or "").strip()
+        if label and label not in labels:
+            labels.append(label)
+    if not labels:
+        return ""
+    visible_labels = labels[:6]
+    suffix = "等" if len(labels) > len(visible_labels) else ""
+    return f"导入层级缺口：缺少{'、'.join(visible_labels)}{suffix}，请补齐对应现场证据后重新提交。"
+
+
+def _platform_normalized_hierarchy_gap_items(
+    raw_items: list[Any],
+    *,
+    require_conditional_code: bool = False,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        if require_conditional_code and raw_item.get("code") != "missing_conditional_field":
+            continue
+        row = _safe_optional_int(raw_item.get("row"))
+        field_key = str(raw_item.get("field_key") or "").strip()
+        field_label = str(raw_item.get("field_label") or field_key).strip()
+        message = str(raw_item.get("message") or "").strip()
+        value = str(raw_item.get("value") or "").strip()
+        if not field_key and not field_label and not message:
+            continue
+        items.append(
+            {
+                "row": row,
+                "field_key": field_key,
+                "field_label": field_label,
+                "message": message,
+                "value": value,
+            }
+        )
+    return items
+
+
+def _safe_optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
 def _has_platform_collection(work_order: dict[str, Any]) -> bool:
     return bool(
         work_order.get("collection_status")
@@ -1185,6 +1677,66 @@ def _platform_review_status(work_order: dict[str, Any]) -> str:
     if work_order.get("collection_photos") or work_order.get("collection_field_values"):
         return "pending_review"
     return "not_ready"
+
+
+def _dedupe_non_empty_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for value in values:
+        clean = str(value or "").strip()
+        if clean and clean not in deduped:
+            deduped.append(clean)
+    return deduped
+
+
+def _platform_rework_evidence_gap_groups(
+    work_order: dict[str, Any],
+    construction_fields: list[dict[str, Any]],
+    photo_slots: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if _platform_review_status(work_order) != "returned":
+        return []
+
+    groups: list[dict[str, Any]] = []
+    imported_gap_labels = _dedupe_non_empty_strings(
+        [
+            str(item.get("field_label") or item.get("field_key") or "").strip()
+            for item in _platform_review_hierarchy_gap_items(work_order)
+            if isinstance(item, dict)
+        ]
+    )
+    if imported_gap_labels:
+        groups.append({"label": "\u5bfc\u5165\u5c42\u7ea7\u7f3a\u53e3", "items": imported_gap_labels})
+
+    initial_values = {
+        str(key): "" if value is None else str(value).strip()
+        for key, value in (work_order.get("values") if isinstance(work_order.get("values"), dict) else {}).items()
+    }
+    collected_values = _stored_platform_collection_field_values(work_order)
+    merged_values = {**initial_values, **collected_values}
+    missing_field_labels = _dedupe_non_empty_strings(
+        [
+            _field_label(field)
+            for field in construction_fields
+            if _is_platform_collection_item_required(field, merged_values)
+            and not str(merged_values.get(str(field.get("key") or ""), "")).strip()
+        ]
+    )
+    if missing_field_labels:
+        groups.append({"label": "\u7f3a\u5c11\u5b57\u6bb5", "items": missing_field_labels})
+
+    covered_slots = set(_stored_platform_covered_photo_slots(work_order))
+    missing_photo_labels = _dedupe_non_empty_strings(
+        [
+            _field_label(slot)
+            for slot in photo_slots
+            if _is_platform_collection_item_required(slot, merged_values)
+            and str(slot.get("key") or "") not in covered_slots
+        ]
+    )
+    if missing_photo_labels:
+        groups.append({"label": "\u7f3a\u5c11\u7167\u7247", "items": missing_photo_labels})
+
+    return groups
 
 
 def _covered_slots_from_photos(photos: list[dict[str, Any]]) -> list[str]:
@@ -1395,14 +1947,46 @@ def _clean_field(raw: Any) -> dict[str, Any]:
     field = raw if isinstance(raw, dict) else {}
     key = str(field.get("key") or "").strip()
     label = str(field.get("label") or key).strip() or key
-    return {
+    clean = {
         "key": key,
         "label": label,
         "source": str(field.get("source") or "").strip(),
-        "capture_method": str(field.get("capture_method") or "").strip(),
-        "data_type": str(field.get("data_type") or "").strip(),
+        "capture_method": str(field.get("capture_method") or field.get("captureMethod") or "").strip(),
+        "data_type": str(field.get("data_type") or field.get("dataType") or "").strip(),
         "required": bool(field.get("required", False)),
+        "parent_key": str(field.get("parent_key") or field.get("parentKey") or "").strip(),
+        "show_in_construction_panel": bool(
+            field.get(
+                "show_in_construction_panel",
+                field.get("showInConstructionPanel", str(field.get("source") or "").strip() == "field_collection"),
+            )
+        ),
     }
+    options = field.get("options")
+    if isinstance(options, list):
+        clean_options = [str(option).strip() for option in options if str(option).strip()]
+        if clean_options:
+            clean["options"] = clean_options
+    required_when = _clean_required_when(field.get("required_when") or field.get("requiredWhen"))
+    if required_when:
+        clean["required_when"] = required_when
+    relation_role = str(field.get("relation_role") or field.get("relationRole") or "").strip()
+    if relation_role:
+        clean["relation_role"] = relation_role
+    return clean
+
+
+def _clean_required_when(raw_required_when: Any) -> dict[str, Any] | None:
+    raw = raw_required_when if isinstance(raw_required_when, dict) else {}
+    field_key = str(raw.get("field_key") or raw.get("fieldKey") or "").strip()
+    if not field_key:
+        return None
+    raw_equals = raw.get("equals")
+    if isinstance(raw_equals, list):
+        equals = [str(item).strip() for item in raw_equals if str(item).strip()]
+        return {"field_key": field_key, "equals": equals} if equals else None
+    equals = str(raw_equals or "").strip()
+    return {"field_key": field_key, "equals": equals} if equals else None
 
 
 def _dedupe_fields(fields: list[dict[str, Any] | None]) -> list[dict[str, Any]]:
@@ -1423,6 +2007,68 @@ def _platform_fill_rule(field: dict[str, Any], template_type: str) -> str:
     if template_type != "external_completed":
         return ""
     return PLATFORM_FILL_RULES.get(str(field.get("key") or ""), "")
+
+
+def _template_field_labels(schema: dict[str, Any]) -> dict[str, str]:
+    fields = [
+        _clean_field(schema.get("primary_field")),
+        _clean_field(schema.get("aggregate_field")),
+        *[_clean_field(field) for field in schema.get("custom_fields", []) if isinstance(field, dict)],
+        *[_clean_field(field) for field in schema.get("platform_required_fields", []) if isinstance(field, dict)],
+    ]
+    return {
+        field["key"]: field["label"]
+        for field in fields
+        if field.get("key") and field.get("label")
+    }
+
+
+def _template_hierarchy_role(field: dict[str, Any]) -> str:
+    if field.get("required_when"):
+        return "条件采集"
+    role = str(field.get("relation_role") or "").strip()
+    role_labels = {
+        "aggregate": "聚合字段",
+        "task_object": "任务对象",
+        "task_detail": "任务核心",
+        "replacement_device": "主设备更换",
+        "old_device": "旧设备",
+        "accessory_replace_confirm": "附属设备确认",
+        "accessory_new_device": "附属设备更换",
+        "evidence_photo": "照片证据",
+        "supporting_field": "辅助字段",
+    }
+    if role in role_labels:
+        return role_labels[role]
+    source = str(field.get("source") or "").strip()
+    source_labels = {
+        "import": "导入字段",
+        "field_collection": "现场采集",
+        "review": "审阅补录",
+        "system": "平台生成",
+    }
+    return source_labels.get(source, "业务字段")
+
+
+def _template_parent_label(schema: dict[str, Any], field: dict[str, Any]) -> str:
+    parent_key = str(field.get("parent_key") or "").strip()
+    if not parent_key:
+        return ""
+    return _template_field_labels(schema).get(parent_key, parent_key)
+
+
+def _template_condition_hint(schema: dict[str, Any], field: dict[str, Any]) -> str:
+    required_when = field.get("required_when") if isinstance(field.get("required_when"), dict) else {}
+    field_key = str(required_when.get("field_key") or "").strip()
+    if not field_key:
+        return ""
+    equals = required_when.get("equals")
+    if isinstance(equals, list):
+        value = "/".join(str(item).strip() for item in equals if str(item).strip())
+    else:
+        value = str(equals or "").strip()
+    parent_label = _template_field_labels(schema).get(field_key, field_key)
+    return f"{parent_label}={value} 时采集" if value else f"{parent_label} 触发时采集"
 
 
 def _example_value(field: dict[str, Any], index: int) -> str:
@@ -1479,6 +2125,101 @@ def _platform_fill_policies(schema: dict[str, Any], fields: list[dict[str, Any]]
     return policies
 
 
+def _append_template_instruction_sheet(
+    sheet,
+    schema: dict[str, Any],
+    fields: list[dict[str, Any]],
+    field_rows: list[dict[str, Any]],
+    template_type: str,
+) -> None:
+    template_name = "初始接入模板" if template_type == "initial_work_orders" else "系统外已完成模板"
+    sheet.append(["模板填写说明", template_name, "", "", ""])
+    sheet.append(["说明类型", "字段编码", "字段名称", "层级/规则", "填写说明"])
+    sheet.append(
+        [
+            "模板用途",
+            template_type,
+            template_name,
+            "字段层级",
+            "请按 template 工作表填写数据；本页用于解释字段归属、父字段、条件采集和平台生成规则。",
+        ]
+    )
+    sheet.append(
+        [
+            "填报范围",
+            "",
+            "",
+            "字段范围",
+            "初始接入只填写清单可提供字段；系统外已完成可填写已施工能提供的数据，平台字段按上传时补齐。",
+        ]
+    )
+    replacement_instruction = _template_replacement_hierarchy_instruction(field_rows)
+    if replacement_instruction:
+        mode, note = replacement_instruction
+        sheet.append(["更换层级", "", "", mode, note])
+
+    template_keys = {str(field.get("key") or "") for field in fields}
+    for field in field_rows:
+        rule = _platform_fill_rule(field, template_type)
+        parent_label = _template_parent_label(schema, field)
+        condition_hint = _template_condition_hint(schema, field)
+        hierarchy_role = _template_hierarchy_role(field)
+        if rule:
+            sheet.append(
+                [
+                    "上传时平台生成",
+                    field.get("key", ""),
+                    field.get("label", ""),
+                    "平台补齐",
+                    rule,
+                ]
+            )
+            continue
+        note_parts: list[str] = []
+        if parent_label:
+            note_parts.append(f"父字段：{parent_label}")
+        if condition_hint:
+            note_parts.append(f"条件采集：{condition_hint}")
+        if field.get("key") not in template_keys:
+            note_parts.append("说明字段，不在 template 填写区")
+        if not note_parts:
+            note_parts.append("按字段格式填写")
+        sheet.append(
+            [
+                "字段层级",
+                field.get("key", ""),
+                field.get("label", ""),
+                hierarchy_role,
+                "；".join(note_parts),
+            ]
+        )
+
+
+def _template_replacement_hierarchy_instruction(field_rows: list[dict[str, Any]]) -> tuple[str, str] | None:
+    roles = {str(field.get("relation_role") or "").strip() for field in field_rows}
+    has_replacement_fields = bool(
+        roles
+        & {
+            "replacement_device",
+            "old_device",
+            "accessory_replace_confirm",
+            "accessory_new_device",
+            "evidence_photo",
+        }
+    )
+    if not has_replacement_fields:
+        return None
+    if "replacement_device" in roles:
+        return (
+            "主设备更换后确认附属设备",
+            "先记录旧主设备和新主设备，再确认通讯模块、SIM卡等附属设备是否更换。",
+        )
+    return (
+        "任务对象下更换附属设备",
+        "任务对象保持不变，模块、采集器等附属设备挂在任务对象下，并保留旧件/照片证据。",
+    )
+
+
 def _validation_report(
     project_id: str,
     template_type: str,
@@ -1529,6 +2270,53 @@ def _recommended_headers(
         for field in fields
         if field.get("required") and field.get("key") not in blocked_keys and not _platform_fill_rule(field, template_type)
     ]
+
+
+def _validate_conditional_template_fields(
+    *,
+    items: list[dict[str, Any]],
+    fields: list[dict[str, Any]],
+    row_number: int,
+    row_values: dict[str, Any],
+    header_indexes: dict[str, int],
+    template_type: str,
+) -> None:
+    if template_type != "external_completed":
+        return
+    fields_by_key = {field.get("key"): field for field in fields if field.get("key")}
+    for field in fields:
+        required_when = field.get("required_when")
+        if not isinstance(required_when, dict):
+            continue
+        trigger_field = fields_by_key.get(str(required_when.get("field_key") or ""))
+        if not trigger_field:
+            continue
+        trigger_label = trigger_field.get("label", "")
+        trigger_value = _clean_cell(row_values.get(trigger_label))
+        if not _required_when_matches(trigger_value, required_when):
+            continue
+        field_label = field.get("label", "")
+        missing_value = field_label not in header_indexes or not _clean_cell(row_values.get(field_label))
+        if not missing_value:
+            continue
+        items.append(
+            _report_item(
+                "warning",
+                "missing_conditional_field",
+                row_number,
+                field.get("key", ""),
+                field_label,
+                f"{trigger_label}={trigger_value} 后建议补齐：{field_label}",
+            )
+        )
+
+
+def _required_when_matches(value: Any, required_when: dict[str, Any]) -> bool:
+    normalized_value = _clean_cell(value)
+    equals = required_when.get("equals")
+    if isinstance(equals, list):
+        return normalized_value in {_clean_cell(item) for item in equals}
+    return normalized_value == _clean_cell(equals)
 
 
 def _report_item(

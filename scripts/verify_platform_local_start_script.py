@@ -25,6 +25,7 @@ REQUIRED_SNIPPETS = {
     "V2_API_WORKDIR": "$ApiDir = Join-Path $Root \"v2-api\"",
     "PYTHON_VENV": ".venv",
     "TERMINAL_DEMO_SEED": "seed-platform-terminal-demo.py",
+    "TERMINAL_REVIEW_SAMPLE": "--with-review-sample",
     "DEFAULT_TEAM_SEED": "--team-id default-team",
     "DEMO_TEAM_SEED": "--team-id demo-team",
 }

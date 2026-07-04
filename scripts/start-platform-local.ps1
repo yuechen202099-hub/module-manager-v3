@@ -46,8 +46,8 @@ $env:STORAGE_BACKEND = "local"
 $env:PLATFORM_PROJECT_DRAFTS_PATH = $ProjectDraftsPath
 $env:LOCAL_SIMULATION_STATE_PATH = $LocalStatePath
 
-& $Python $SeedScript --team-id default-team
-& $Python $SeedScript --team-id demo-team
+& $Python $SeedScript --team-id default-team --with-review-sample
+& $Python $SeedScript --team-id demo-team --with-review-sample
 
 $arguments = @(
     "-m",
