@@ -19,7 +19,11 @@ Close the highest-risk production authorization gaps without changing business d
 - JWT revocation after account disable, deletion, or password change.
 - Static upload/photo access control.
 - Upload rate limiting and streamed request-size enforcement.
-- Production deployment or version-number changes.
+- Production deployment.
+
+## Versioning Addendum
+
+On 2026-07-10, the user superseded the original no-version-change constraint and required every bug fix to advance the semantic patch version by `0.0.1`. This RBAC fix therefore advances the release candidate from `V3.0.78` to `V3.0.79`; deployment remains out of scope.
 
 ## Authorization Rules
 

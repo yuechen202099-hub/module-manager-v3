@@ -2,14 +2,14 @@
 
 ## Current Baseline
 
-- Production maintenance branch: `production/V3/3.0.78`
-- Current production app version: `V3.0.78`
+- Production maintenance branch: `production/V3/3.0.79`
+- Current production app version: `V3.0.79`
 - Development environment `3.0.56` must not be mixed into this production line.
 
 ## Branch Rules
 
 - Production fixes happen only on the production maintenance branch unless the user explicitly approves a different branch.
-- Production branch names use `production/V3/<version>`, for example `production/V3/3.0.78`.
+- Production branch names use `production/V3/<version>`, for example `production/V3/3.0.79`.
 - The legacy branch `production/v3.0.35` is kept only for historical compatibility and must not be used as the base for new production work.
 - Fetching from the production server is allowed for environment truth, but source-of-truth code changes must be committed to the production branch.
 - Do not merge development branches into production without a scoped review and explicit user approval.
@@ -28,7 +28,8 @@
 | Change Type | Version Action |
 | --- | --- |
 | Documentation/SOP only | No app version bump |
-| Bug fix or small feature | `+0.01` |
+| Every bug fix | Exactly `+0.0.1` |
+| Small feature | `+0.0.1` unless the user approves a larger change |
 | Major workflow change | `+0.1` after user confirmation |
 | Database migration or architecture change | Ask user before version decision |
 

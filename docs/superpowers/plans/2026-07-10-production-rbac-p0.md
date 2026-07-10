@@ -12,7 +12,7 @@
 
 - Work only on branch `fix/production-rbac-p0` in the linked production worktree.
 - Preserve behavior when `APP_ENV` is not `prod` or `production`.
-- Do not change business data models, frontend behavior, production data, deployment state, or the production version number.
+- Do not change business data models, frontend behavior, production data, or deployment state. Per the user's 2026-07-10 correction, advance the bug-fix candidate from `V3.0.78` to `V3.0.79`.
 - Return `401 Authentication required` when production authentication is missing.
 - Return `403` with an operation-specific message when an authenticated production role is not allowed.
 - Use real login tokens in API tests and prove rejected requests do not reach repository methods.

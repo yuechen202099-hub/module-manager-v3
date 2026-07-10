@@ -5,9 +5,9 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.0.78`
-- 当前生产应用基线：`V3.0.78`
-- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.78`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
+- 生产维护分支：`production/V3/3.0.79`
+- 当前生产应用基线：`V3.0.79`
+- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.79`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
 - worktree 路径里的 `production-v3.0.24` 是创建时名称，不代表当前线上版本。
 
@@ -15,7 +15,7 @@
 
 - 不提交、不覆盖 `.env`、`data/`、`v2-api/data/`、`v2-api/app/static/uploads/`、生产数据库、真实上传图片和发布压缩包。
 - 不直接修改 OSS 生产对象或 PostgreSQL 生产数据；如必须处理，需要用户单独确认备份、dry-run、回滚方案。
-- 代码改动默认 patch 版本 `+0.01`；大流程或主业务规则变更先请用户确认是否 `+0.1`。
+- 每次 BUG 修复必须将语义化 patch 版本推进 `+0.0.1`；小功能使用相同 patch 增量，大流程或主业务规则变更先请用户确认更高版本策略。
 - 文档、SOP、协作规则只改文档版本，不改应用版本。
 - 发布前必须备份生产环境，保留 `.env`、data、uploads、数据库 dump，并记录 release package hash。
 - 每次生产发布健康检查通过后，服务器 `/opt/module-manager-v2/releases` 只保留最近 5 个 release 目录；旧版本留存在 GitHub 分支/tag 和 `ops/releases/` 记录中即可。清理必须先 dry-run，且不得删除 `.env`、data、uploads、backups 或数据库 dump。
@@ -59,11 +59,11 @@
 
 - 生产维护线由当前线程负责，生产分支只保存已上线或即将上线的稳定版本。
 - 小程序团队从最新生产分支切 `mp/<短功能名>` 分支，不直接提交到 `production/V3/<version>`。
-- 小程序团队使用 `MP-V1.0.xx` 独立记录小程序开发进度；PR/patch 必须注明小程序版本和基于的生产版本，例如 `MP-V1.0.01 based on production V3.0.78`。
+- 小程序团队使用 `MP-V1.0.xx` 独立记录小程序开发进度；PR/patch 必须注明小程序版本和基于的生产版本，例如 `MP-V1.0.01 based on production V3.0.79`。
 - 项目管理平台团队从最新生产分支切 `pm-platform/<短功能名>` 分支，不直接提交到 `production/V3/<version>`。
 - 项目管理平台团队使用 `PM-V1.0.xx` 独立记录平台开发进度；PR/patch 必须注明平台版本和基于的生产版本。
 - 外部团队交付代码时优先提交 PR；无法 PR 时提供 patch 包和验证结果，由生产维护线审阅、合并、统一升版本。
-- 版本号由生产维护线统一分配：小更新或 BUG 修复 `+0.01`，大流程变更经用户确认后 `+0.1`。外部团队不得自行占用正式生产版本号。
+- 版本号由生产维护线统一分配：每次 BUG 修复严格 `+0.0.1`，小更新默认使用相同 patch 增量，大流程变更经用户确认后决定更高版本。外部团队不得自行占用正式生产版本号。
 - 多个团队并行时以合并进入生产线的顺序递增版本号；未合并分支只使用候选标识，不写入正式 `APP_VERSION`。
 
 ## 常用验证命令

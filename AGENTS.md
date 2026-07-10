@@ -2,13 +2,13 @@
 
 ## Production SOP Override
 
-- Current production baseline: `V3.0.78`.
-- Production maintenance branch: `production/V3/3.0.78`.
+- Current production baseline: `V3.0.79`.
+- Production maintenance branch: `production/V3/3.0.79`.
 - Production SOP entrypoint: `docs/sop/README.md`.
 - Production release records: `ops/releases/`.
 - P0 incident records: `ops/incidents/`.
 - Documentation/SOP-only changes do not bump the application version.
-- Runtime changes follow the version rule: small feature or bug fix `+0.01`, major workflow change `+0.1` after user confirmation.
+- Every bug fix advances the semantic patch version by exactly `+0.0.1`; small features use the same patch increment unless the user approves a larger change.
 
 ## 生产底线
 
@@ -22,9 +22,9 @@
 
 ## 当前基线
 
-- 当前应用基线：`V3.0.78`。
-- 当前生产分支：`production/V3/3.0.78`。
-- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.78`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
+- 当前应用基线：`V3.0.79`。
+- 当前生产分支：`production/V3/3.0.79`。
+- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.79`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 文档和协作规则使用独立规则版本，不自动修改应用版本。
 - 详细生产 SOP 见 `docs/sop/README.md`。
 
@@ -69,7 +69,7 @@
 - 验证按风险选择：小改跑相关测试或检查；核心流程改动跑对应后端、前端、浏览器或脚本验证；发布前跑构建和生产健康检查。
 - 普通代码改动测试、构建、生产健康检查通过后可自动发布。
 - 数据库迁移、数据修复、`.env`、`uploads`、OSS、PostgreSQL、生产数据相关动作不得自动发布，必须单独确认。
-- 代码改动默认自动升 patch 版本；大改、数据库、架构、主流程变化先询问用户确认版本策略。
+- 每次 BUG 修复必须将语义化 patch 版本推进 `0.0.1`；小功能默认使用相同 patch 增量，大改、数据库、架构、主流程变化先询问用户确认版本策略。
 - 文档或协作规则修改不升应用版本，只更新规则版本或规则记录。
 
 ## 最终报告

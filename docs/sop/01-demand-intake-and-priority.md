@@ -10,7 +10,7 @@ Make every request traceable before it enters the production maintenance line.
 | --- | --- | --- |
 | P0 | Production is blocked or data is wrong: login failure,施工端无法作业,上传阻断,异常工单/00000000类错单,核心数据错配或丢失 | Freeze unrelated work, protect evidence, fix or roll back immediately |
 | P1 | Important production workflow degraded but workaround exists | Same-day fix or scheduled hotfix |
-| P2 | Normal bug or small production feature | Patch release, version `+0.01` |
+| P2 | Normal bug or small production feature | Patch release, version `+0.0.1` |
 | P3 | Documentation, cleanup, internal improvement | No app version bump unless runtime behavior changes |
 
 ## Intake Checklist

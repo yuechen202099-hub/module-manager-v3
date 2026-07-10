@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.78'
+export const APP_VERSION = '3.0.79'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,19 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.79',
+    date: '2026-07-10',
+    type: 'BUG 修复',
+    title: '生产权限越权修复',
+    items: [
+      '清空扫描数据仅允许管理员执行，审查员、施工员和未登录请求会在访问业务仓库前被拒绝。',
+      '审查写操作仅允许审查员或管理员，施工账号不能再通过提交自身账号绕过审查角色限制。',
+      '施工写操作仅允许施工员或管理员，审查账号不能再调用施工领取等写接口。',
+      '生产模式统一使用请求角色守卫返回 401 或 403，本地开发和验收模式保留原有无痛测试行为。',
+      '新增真实登录令牌 API 回归测试，覆盖错误角色拒绝、管理员清空和合法审查员、施工员操作。',
+    ],
+  },
   {
     version: 'V3.0.78',
     date: '2026-07-02',
