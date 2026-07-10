@@ -308,6 +308,18 @@ def request_is_admin(request: Request) -> bool:
     return "admin" in set(payload.get("roles") or [])
 
 
+def require_request_roles(request: Request, allowed_roles: set[str], detail: str) -> dict:
+    payload = request_auth_payload(request)
+    if settings.app_env.lower() not in {"prod", "production"}:
+        return payload
+    if not payload:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    roles = set(payload.get("roles") or [])
+    if roles.isdisjoint(allowed_roles):
+        raise HTTPException(status_code=403, detail=detail)
+    return payload
+
+
 def require_production_admin_payload(request: Request) -> dict:
     if settings.app_env.lower() not in {"prod", "production"}:
         return request_auth_payload(request)
@@ -320,6 +332,11 @@ def request_actor(request: Request, fallback: str = "admin") -> str:
 
 
 def bound_review_actor(request: Request, reviewer: str, fallback: str = "local-reviewer") -> str:
+    require_request_roles(
+        request,
+        {"reviewer", "admin"},
+        detail="Reviewer or administrator role required",
+    )
     clean_reviewer = str(reviewer or "").strip()
     if request_is_admin(request):
         return clean_reviewer or request_actor(request, fallback)
@@ -340,6 +357,11 @@ def request_is_constructor(request: Request) -> bool:
 
 
 def bound_construction_actor(request: Request, actor: str) -> str:
+    require_request_roles(
+        request,
+        {"constructor", "admin"},
+        detail="Constructor or administrator role required",
+    )
     clean_actor = str(actor or "").strip()
     if request_is_admin(request):
         return clean_actor or request_actor(request, "admin")
@@ -1022,6 +1044,7 @@ def bootstrap(request: Request):
 
 @router.post("/scan/clear")
 def clear_scan(request: Request):
+    require_request_roles(request, {"admin"}, detail="Administrator role required")
     return ok(request, state_repository().clear_scan_data())
 
 
