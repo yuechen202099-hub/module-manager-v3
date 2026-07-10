@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main_module
 from app.main import create_app
-from app.api.routes import auth
+from app.api.routes import auth, local_test
 from app.core.config import settings
 from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
@@ -90,6 +90,141 @@ def production_test_settings(**overrides) -> SimpleNamespace:
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def production_rbac_client(monkeypatch, tmp_path) -> tuple[TestClient, dict[str, dict[str, str]]]:
+    production_settings = production_test_settings(
+        demo_auth_enabled=False,
+        admin_username="root-admin",
+        admin_password="RootPass12345",
+        admin_team_id="north-team-01",
+        auth_users_path=str(tmp_path / "rbac-users.json"),
+        jwt_secret="jwt-secret-for-production-rbac-test",
+        jwt_expire_minutes=60,
+        trusted_proxy_hosts={"testclient"},
+    )
+    monkeypatch.setattr(auth, "settings", production_settings)
+    monkeypatch.setattr(account_store, "settings", production_settings)
+    monkeypatch.setattr(security, "settings", production_settings)
+    monkeypatch.setattr(main_module, "settings", production_settings)
+    monkeypatch.setattr(local_test, "settings", production_settings)
+    production_client = TestClient(main_module.create_app())
+
+    admin_login = production_client.post(
+        "/auth/login",
+        json={"username": "root-admin", "password": "RootPass12345"},
+    )
+    assert admin_login.status_code == 200
+    headers = {
+        "admin": {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"},
+    }
+    for username, password, role in (
+        ("reviewer-a", "ReviewPass12345", "reviewer"),
+        ("constructor-a", "ConstructPass12345", "constructor"),
+    ):
+        created = production_client.post(
+            "/auth/users",
+            headers=headers["admin"],
+            json={
+                "username": username,
+                "password": password,
+                "name": username,
+                "roles": [role],
+                "team_id": "north-team-01",
+                "status": "active",
+            },
+        )
+        assert created.status_code == 200
+        login = production_client.post(
+            "/auth/login",
+            json={"username": username, "password": password},
+        )
+        assert login.status_code == 200
+        headers[role] = {"Authorization": f"bearer {login.json()['data']['access_token']}"}
+    return production_client, headers
+
+
+def test_production_scan_clear_requires_admin_role(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class FakeRepository:
+        clear_calls = 0
+
+        def clear_scan_data(self):
+            self.clear_calls += 1
+            return {"summary": {"scan_rows": 0}}
+
+    repository = FakeRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    assert production_client.post("/local-test/scan/clear").status_code == 401
+    assert production_client.post("/local-test/scan/clear", headers=headers["reviewer"]).status_code == 403
+    assert production_client.post("/local-test/scan/clear", headers=headers["constructor"]).status_code == 403
+    assert repository.clear_calls == 0
+
+    allowed = production_client.post("/local-test/scan/clear", headers=headers["admin"])
+    assert allowed.status_code == 200
+    assert repository.clear_calls == 1
+
+
+def test_production_review_mutation_requires_reviewer_or_admin(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class FakeRepository:
+        claim_calls = 0
+
+        def claim_task(self, task_id, reviewer):
+            self.claim_calls += 1
+            return {"id": task_id, "reviewer": reviewer}
+
+    repository = FakeRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    denied = production_client.post(
+        "/local-test/tasks/999999/claim",
+        headers=headers["constructor"],
+        json={"reviewer": "constructor-a"},
+    )
+    assert denied.status_code == 403
+    assert repository.claim_calls == 0
+
+    allowed = production_client.post(
+        "/local-test/tasks/999999/claim",
+        headers=headers["reviewer"],
+        json={"reviewer": "reviewer-a"},
+    )
+    assert allowed.status_code == 200
+    assert repository.claim_calls == 1
+
+
+def test_production_construction_mutation_requires_constructor_or_admin(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class FakeRepository:
+        claim_calls = 0
+
+        def claim_construction_task(self, task_id, actor):
+            self.claim_calls += 1
+            return {"id": task_id, "constructor": actor}
+
+    repository = FakeRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    denied = production_client.post(
+        "/local-test/construction/tasks/999999/claim",
+        headers=headers["reviewer"],
+        json={"actor": "reviewer-a"},
+    )
+    assert denied.status_code == 403
+    assert repository.claim_calls == 0
+
+    allowed = production_client.post(
+        "/local-test/construction/tasks/999999/claim",
+        headers=headers["constructor"],
+        json={"actor": "constructor-a"},
+    )
+    assert allowed.status_code == 200
+    assert repository.claim_calls == 1
 
 
 def demo_admin_headers() -> dict[str, str]:
