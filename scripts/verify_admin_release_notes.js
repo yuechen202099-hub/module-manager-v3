@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.78'
+const EXPECTED_VERSION = '3.0.79'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -17,6 +17,10 @@ assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file mus
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
 assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
+assert.match(releaseNotes, /生产权限越权修复/, 'release notes must describe the V3.0.79 production RBAC fix in Chinese')
+assert.match(releaseNotes, /清空扫描数据仅允许管理员/, 'release notes must describe the admin-only scan clear boundary')
+assert.match(releaseNotes, /审查写操作仅允许审查员或管理员/, 'release notes must describe the review mutation role boundary')
+assert.match(releaseNotes, /施工写操作仅允许施工员或管理员/, 'release notes must describe the construction mutation role boundary')
 assert.match(releaseNotes, /弹窗信息整合/, 'release notes must describe the V3.0.78 dialog information integration update in Chinese')
 assert.match(releaseNotes, /20 条分页结构/, 'release notes must describe the V3.0.78 dialog pagination structure in Chinese')
 assert.match(releaseNotes, /数据中台资料组照片弹窗新增终端/, 'release notes must describe the V3.0.78 data center photo context update in Chinese')

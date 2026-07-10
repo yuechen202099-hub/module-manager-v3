@@ -25,7 +25,7 @@ const releaseNotes = read('v2-web/src/constants/releaseNotes.ts')
 const opsStatus = read('v2-api/app/services/ops_status.py')
 const apiMain = read('v2-api/app/main.py')
 const packageJson = read('v2-web/package.json')
-const expectedVersion = '3.0.78'
+const expectedVersion = '3.0.79'
 
 assertNotContains(projectBoard, 'fetchSystemStatus', 'project board must not fetch unrelated system status')
 assertNotContains(projectBoard, 'systemRows', 'project board must not compute system status rows')
