@@ -180,6 +180,13 @@ def test_production_review_mutation_requires_reviewer_or_admin(monkeypatch, tmp_
     repository = FakeRepository()
     monkeypatch.setattr(local_test, "state_repository", lambda: repository)
 
+    anonymous = production_client.post(
+        "/local-test/tasks/999999/claim",
+        json={"reviewer": "anonymous-reviewer"},
+    )
+    assert anonymous.status_code == 401
+    assert repository.claim_calls == 0
+
     denied = production_client.post(
         "/local-test/tasks/999999/claim",
         headers=headers["constructor"],
@@ -196,6 +203,14 @@ def test_production_review_mutation_requires_reviewer_or_admin(monkeypatch, tmp_
     assert allowed.status_code == 200
     assert repository.claim_calls == 1
 
+    admin_allowed = production_client.post(
+        "/local-test/tasks/999999/claim",
+        headers=headers["admin"],
+        json={"reviewer": "admin-selected-reviewer"},
+    )
+    assert admin_allowed.status_code == 200
+    assert repository.claim_calls == 2
+
 
 def test_production_construction_mutation_requires_constructor_or_admin(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
@@ -209,6 +224,13 @@ def test_production_construction_mutation_requires_constructor_or_admin(monkeypa
 
     repository = FakeRepository()
     monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    anonymous = production_client.post(
+        "/local-test/construction/tasks/999999/claim",
+        json={"actor": "anonymous-constructor"},
+    )
+    assert anonymous.status_code == 401
+    assert repository.claim_calls == 0
 
     denied = production_client.post(
         "/local-test/construction/tasks/999999/claim",
@@ -225,6 +247,14 @@ def test_production_construction_mutation_requires_constructor_or_admin(monkeypa
     )
     assert allowed.status_code == 200
     assert repository.claim_calls == 1
+
+    admin_allowed = production_client.post(
+        "/local-test/construction/tasks/999999/claim",
+        headers=headers["admin"],
+        json={"actor": "admin-selected-constructor"},
+    )
+    assert admin_allowed.status_code == 200
+    assert repository.claim_calls == 2
 
 
 def demo_admin_headers() -> dict[str, str]:
