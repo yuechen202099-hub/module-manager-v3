@@ -257,6 +257,122 @@ def test_production_construction_mutation_requires_constructor_or_admin(monkeypa
     assert repository.claim_calls == 2
 
 
+def test_production_group_metadata_requires_reviewer_or_admin(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class FakeRepository:
+        update_calls = 0
+
+        def update_group_metadata(self, group_id, actor, updates):
+            self.update_calls += 1
+            return {"id": group_id, "actor": actor, **updates}
+
+    repository = FakeRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    denied = production_client.patch(
+        "/local-test/groups/group-1/metadata",
+        headers=headers["constructor"],
+        json={"actor": "constructor-a", "updates": {"meter_no": "METER-001"}},
+    )
+    spoofed = production_client.patch(
+        "/local-test/groups/group-1/metadata",
+        headers=headers["reviewer"],
+        json={"actor": "admin", "updates": {"meter_no": "METER-001"}},
+    )
+
+    assert denied.status_code == 403
+    assert spoofed.status_code == 403
+    assert repository.update_calls == 0
+
+    allowed = production_client.patch(
+        "/local-test/groups/group-1/metadata",
+        headers=headers["admin"],
+        json={"actor": "admin-selected-reviewer", "updates": {"meter_no": "METER-001"}},
+    )
+    assert allowed.status_code == 200
+    assert repository.update_calls == 1
+
+
+def test_production_group_photo_url_import_requires_reviewer_or_admin(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class FakeRepository:
+        add_calls = 0
+
+        def add_photo_urls_to_group(self, group_id, **kwargs):
+            self.add_calls += 1
+            return {"id": group_id, **kwargs}
+
+    repository = FakeRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    payload = {"actor": "constructor-a", "photo_urls": ["https://example.test/photo.jpg"]}
+
+    denied = production_client.post(
+        "/local-test/groups/group-1/photos/import-urls",
+        headers=headers["constructor"],
+        json=payload,
+    )
+    spoofed = production_client.post(
+        "/local-test/groups/group-1/photos/import-urls",
+        headers=headers["reviewer"],
+        json={**payload, "actor": "admin"},
+    )
+
+    assert denied.status_code == 403
+    assert spoofed.status_code == 403
+    assert repository.add_calls == 0
+
+
+def test_production_group_image_upload_checks_role_before_storage(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    storage_calls = []
+
+    def fake_save_image_bytes(**kwargs):
+        storage_calls.append(kwargs)
+        return {
+            "url": "https://example.test/stored.jpg",
+            "sha256": "abc",
+            "storage_type": "local",
+            "storage_key": "stored.jpg",
+            "storage_bucket": "",
+            "storage_source": "test",
+        }
+
+    monkeypatch.setattr(local_test, "save_image_bytes", fake_save_image_bytes)
+
+    denied = production_client.post(
+        "/local-test/groups/group-1/photos/upload-images",
+        headers=headers["constructor"],
+        data={"actor": "admin"},
+        files={"files": ("photo.jpg", tiny_jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert denied.status_code == 403
+    assert storage_calls == []
+
+
+def test_production_placeholder_review_routes_reject_constructor(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    responses = [
+        production_client.post("/tasks/999999/claim", headers=headers["constructor"]),
+        production_client.post("/tasks/999999/release", headers=headers["constructor"]),
+        production_client.patch(
+            "/groups/999999/review",
+            headers=headers["constructor"],
+            json={"status": "approved", "comment": "forbidden"},
+        ),
+        production_client.post(
+            "/groups/999999/exceptions",
+            headers=headers["constructor"],
+            json={"kind": "quality", "description": "forbidden"},
+        ),
+    ]
+
+    assert [response.status_code for response in responses] == [403, 403, 403, 403]
+
+
 def demo_admin_headers() -> dict[str, str]:
     admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
     assert admin_login.status_code == 200

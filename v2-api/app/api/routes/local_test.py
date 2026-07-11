@@ -2267,7 +2267,7 @@ def change_group_terminal(group_id: str, payload: GroupTerminalRequest, request:
 
 @router.patch("/groups/{group_id}/metadata")
 def change_group_metadata(group_id: str, payload: GroupMetadataRequest, request: Request):
-    admin_payload = request_auth_payload(request)
+    actor = bound_review_actor(request, payload.actor, fallback="admin")
     if settings.app_env.lower() in {"prod", "production"}:
         privileged_fields = {
             "terminal",
@@ -2279,8 +2279,7 @@ def change_group_metadata(group_id: str, payload: GroupMetadataRequest, request:
             "construction_module_asset_no",
         }
         if privileged_fields.intersection(payload.updates or {}):
-            admin_payload = require_production_admin_payload(request)
-    actor = str(admin_payload.get("username") or admin_payload.get("sub") or payload.actor or "admin").strip() or "admin"
+            require_production_admin_payload(request)
     try:
         result = state_repository().update_group_metadata(group_id, actor=actor, updates=payload.updates)
     except KeyError as exc:
@@ -2290,10 +2289,11 @@ def change_group_metadata(group_id: str, payload: GroupMetadataRequest, request:
 
 @router.post("/groups/{group_id}/photos/import-urls")
 def import_group_photo_urls(group_id: str, payload: AddGroupPhotosRequest, request: Request):
+    actor = bound_review_actor(request, payload.actor, fallback="admin")
     try:
         result = state_repository().add_photo_urls_to_group(
             group_id,
-            actor=payload.actor,
+            actor=actor,
             photo_urls=payload.photo_urls,
             collector=payload.collector,
             module_asset_no=payload.module_asset_no,
@@ -2314,6 +2314,7 @@ async def upload_group_photo_images(
     creator: str = Form(default="人工补图"),
     files: list[UploadFile] = File(default=[]),
 ):
+    actor = bound_review_actor(request, actor, fallback="admin")
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
     validated_files = await _read_validated_upload_files_before_save(files)

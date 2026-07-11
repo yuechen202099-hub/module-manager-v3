@@ -86,6 +86,15 @@ def require_admin(authorization: str | None = Header(default=None)) -> dict:
     return payload
 
 
+def require_production_reviewer_or_admin(authorization: str | None = Header(default=None)) -> dict:
+    if not auth_required():
+        return {}
+    payload = bearer_payload(authorization)
+    if set(payload.get("roles") or []).isdisjoint({"reviewer", "admin"}):
+        raise HTTPException(status_code=403, detail="Reviewer or administrator role required")
+    return payload
+
+
 def demo_login_user(username: str, password: str) -> dict | None:
     if not demo_auth_is_enabled():
         return None

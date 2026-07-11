@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
+from app.api.routes.auth import require_production_reviewer_or_admin
 from app.core.responses import ok
 from app.services.task_status import TaskState, claim_task, release_task
 
@@ -17,7 +18,11 @@ def publish_tasks(project_id: int, request: Request):
 
 
 @router.post("/tasks/{task_id}/claim")
-def claim(task_id: int, request: Request):
+def claim(
+    task_id: int,
+    request: Request,
+    _reviewer_payload: dict = Depends(require_production_reviewer_or_admin),
+):
     next_state = claim_task(TaskState(status="published"), reviewer_id=1)
     return ok(
         request,
@@ -31,7 +36,11 @@ def claim(task_id: int, request: Request):
 
 
 @router.post("/tasks/{task_id}/release")
-def release(task_id: int, request: Request):
+def release(
+    task_id: int,
+    request: Request,
+    _reviewer_payload: dict = Depends(require_production_reviewer_or_admin),
+):
     next_state = release_task(TaskState(status="claimed", claimed_by_id=1), reviewer_id=1)
     return ok(request, {"task_id": task_id, "status": next_state.status})
 

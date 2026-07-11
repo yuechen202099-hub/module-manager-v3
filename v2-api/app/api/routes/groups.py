@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.core.responses import ok
-from app.api.routes.auth import require_admin
+from app.api.routes.auth import require_admin, require_production_reviewer_or_admin
 from app.schemas.review import ExceptionCreate, GroupReviewUpdate
 from app.services import local_simulation
 from app.services.photo_storage import resolve_group_collection_for_response
@@ -160,12 +160,22 @@ def get_group(group_id: int, request: Request):
 
 
 @router.patch("/{group_id}/review")
-def update_group_review(group_id: int, payload: GroupReviewUpdate, request: Request):
+def update_group_review(
+    group_id: int,
+    payload: GroupReviewUpdate,
+    request: Request,
+    _reviewer_payload: dict = Depends(require_production_reviewer_or_admin),
+):
     return ok(request, {"group_id": group_id, "status": payload.status, "comment": payload.comment})
 
 
 @router.post("/{group_id}/exceptions")
-def create_exception(group_id: int, payload: ExceptionCreate, request: Request):
+def create_exception(
+    group_id: int,
+    payload: ExceptionCreate,
+    request: Request,
+    _reviewer_payload: dict = Depends(require_production_reviewer_or_admin),
+):
     return ok(request, {"group_id": group_id, "kind": payload.kind, "description": payload.description, "status": "open"})
 
 
