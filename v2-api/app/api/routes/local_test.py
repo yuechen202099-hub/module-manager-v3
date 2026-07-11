@@ -2308,7 +2308,7 @@ def import_group_photo_urls(group_id: str, payload: AddGroupPhotosRequest, reque
 async def upload_group_photo_images(
     group_id: str,
     request: Request,
-    actor: str = Form(default="admin"),
+    actor: str = Form(default=""),
     collector: str = Form(default=""),
     module_asset_no: str = Form(default=""),
     creator: str = Form(default="人工补图"),

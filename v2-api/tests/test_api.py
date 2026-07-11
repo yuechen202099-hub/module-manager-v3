@@ -328,6 +328,15 @@ def test_production_group_image_upload_checks_role_before_storage(monkeypatch, t
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
     storage_calls = []
 
+    class FakeRepository:
+        add_calls = []
+
+        def add_photo_urls_to_group(self, group_id, **kwargs):
+            self.add_calls.append({"group_id": group_id, **kwargs})
+            return {"id": group_id, **kwargs}
+
+    repository = FakeRepository()
+
     def fake_save_image_bytes(**kwargs):
         storage_calls.append(kwargs)
         return {
@@ -340,6 +349,7 @@ def test_production_group_image_upload_checks_role_before_storage(monkeypatch, t
         }
 
     monkeypatch.setattr(local_test, "save_image_bytes", fake_save_image_bytes)
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
 
     denied = production_client.post(
         "/local-test/groups/group-1/photos/upload-images",
@@ -350,6 +360,16 @@ def test_production_group_image_upload_checks_role_before_storage(monkeypatch, t
 
     assert denied.status_code == 403
     assert storage_calls == []
+
+    allowed = production_client.post(
+        "/local-test/groups/group-1/photos/upload-images",
+        headers=headers["reviewer"],
+        files={"files": ("photo.jpg", tiny_jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert allowed.status_code == 200
+    assert len(storage_calls) == 1
+    assert repository.add_calls[0]["actor"] == "reviewer-a"
 
 
 def test_production_placeholder_review_routes_reject_constructor(monkeypatch, tmp_path) -> None:
@@ -404,18 +424,29 @@ def test_production_upload_role_guard_runs_before_multipart_parse(monkeypatch, t
     assert form_calls == []
 
 
-def test_rejected_production_local_test_write_does_not_persist_json_state(monkeypatch, tmp_path) -> None:
+def test_production_local_test_persists_only_successful_writes(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
     persist_calls = []
-    main_module.settings.state_backend = "json"
     monkeypatch.setattr(main_module, "save_all_team_states", lambda: persist_calls.append("saved"))
 
-    anonymous = production_client.post("/local-test/scan/clear")
-    wrong_role = production_client.post("/local-test/scan/clear", headers=headers["constructor"])
+    class FakeRepository:
+        def clear_scan_data(self):
+            return {"summary": {"scan_rows": 0}}
 
-    assert anonymous.status_code == 401
-    assert wrong_role.status_code == 403
-    assert persist_calls == []
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+
+    for backend in ("json", "dual"):
+        main_module.settings.state_backend = backend
+        persist_calls.clear()
+
+        anonymous = production_client.post("/local-test/scan/clear")
+        wrong_role = production_client.post("/local-test/scan/clear", headers=headers["constructor"])
+        allowed = production_client.post("/local-test/scan/clear", headers=headers["admin"])
+
+        assert anonymous.status_code == 401
+        assert wrong_role.status_code == 403
+        assert allowed.status_code == 200
+        assert persist_calls == ["saved"]
 
 
 def demo_admin_headers() -> dict[str, str]:
