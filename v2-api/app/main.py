@@ -83,6 +83,18 @@ def create_app() -> FastAPI:
                 request.state.auth = decode_access_token(authorization.split(" ", 1)[1].strip())
             except ValueError:
                 return error_response(request, "invalid_token", "Invalid access token.", status_code=401)
+            request_path = request.url.path.rstrip("/")
+            required_roles: set[str] = set()
+            role_detail = ""
+            if request.method.upper() == "POST":
+                if request_path.startswith("/local-test/groups/") and request_path.endswith("/photos/upload-images"):
+                    required_roles = {"reviewer", "admin"}
+                    role_detail = "Reviewer or administrator role required"
+                elif request_path.startswith("/local-test/construction/groups/") and request_path.endswith("/upload-batch"):
+                    required_roles = {"constructor", "admin"}
+                    role_detail = "Constructor or administrator role required"
+            if required_roles and set(request.state.auth.get("roles") or []).isdisjoint(required_roles):
+                return error_response(request, "forbidden", role_detail, status_code=403)
         return await call_next(request)
 
     @app.middleware("http")
@@ -97,7 +109,7 @@ def create_app() -> FastAPI:
         if (
             request.url.path.startswith("/local-test")
             and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
-            and response.status_code < 500
+            and 200 <= response.status_code < 400
             and settings.state_backend.lower() in {"json", "dual"}
         ):
             save_all_team_states()

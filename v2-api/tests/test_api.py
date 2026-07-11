@@ -373,6 +373,51 @@ def test_production_placeholder_review_routes_reject_constructor(monkeypatch, tm
     assert [response.status_code for response in responses] == [403, 403, 403, 403]
 
 
+def test_production_upload_role_guard_runs_before_multipart_parse(monkeypatch, tmp_path) -> None:
+    from starlette.requests import Request as StarletteRequest
+
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    original_form = StarletteRequest.form
+    form_calls = []
+
+    async def tracked_form(request, *args, **kwargs):
+        form_calls.append(request.url.path)
+        return await original_form(request, *args, **kwargs)
+
+    monkeypatch.setattr(StarletteRequest, "form", tracked_form)
+
+    manual_upload = production_client.post(
+        "/local-test/groups/group-1/photos/upload-images",
+        headers=headers["constructor"],
+        data={"actor": "constructor-a"},
+        files={"files": ("photo.jpg", tiny_jpeg_bytes(), "image/jpeg")},
+    )
+    construction_upload = production_client.post(
+        "/local-test/construction/groups/group-1/upload-batch",
+        headers=headers["reviewer"],
+        data={"actor": "reviewer-a"},
+        files={"files": ("photo.jpg", tiny_jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert manual_upload.status_code == 403
+    assert construction_upload.status_code == 403
+    assert form_calls == []
+
+
+def test_rejected_production_local_test_write_does_not_persist_json_state(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    persist_calls = []
+    main_module.settings.state_backend = "json"
+    monkeypatch.setattr(main_module, "save_all_team_states", lambda: persist_calls.append("saved"))
+
+    anonymous = production_client.post("/local-test/scan/clear")
+    wrong_role = production_client.post("/local-test/scan/clear", headers=headers["constructor"])
+
+    assert anonymous.status_code == 401
+    assert wrong_role.status_code == 403
+    assert persist_calls == []
+
+
 def demo_admin_headers() -> dict[str, str]:
     admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
     assert admin_login.status_code == 200
