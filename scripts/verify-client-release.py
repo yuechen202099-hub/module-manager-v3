@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import sys
 import zipfile
@@ -147,6 +148,16 @@ FORBIDDEN_PREFIXES = {
 }
 
 
+def load_release_truth_parser():
+    path = Path(__file__).with_name("verify_release_sop.py")
+    spec = importlib.util.spec_from_file_location("package_release_truth", path)
+    if spec is None or spec.loader is None:
+        fail("Unable to load shared release truth parser")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def fail(message: str) -> None:
     raise AssertionError(message)
 
@@ -170,24 +181,28 @@ def verify_package(zip_path: Path) -> None:
                 + ", ".join(backslash_names[:20])
             )
         names = {normalize_zip_name(name) for name in raw_names}
+        missing = sorted(REQUIRED_FILES - names)
+        if missing:
+            fail("Missing required release files: " + ", ".join(missing))
         manifest = archive.read("RELEASE_MANIFEST.md").decode("utf-8") if "RELEASE_MANIFEST.md" in names else ""
-        package_version = ""
-        version_match = re.search(r"^- Version:\s*(?P<version>\S+)", manifest, re.MULTILINE)
-        if version_match:
-            package_version = version_match.group("version")
+        version_match = re.search(r"^- Version:\s*(?P<version>V?\d+\.\d+\.\d+)\s*$", manifest, re.MULTILINE)
+        if version_match is None:
+            fail("Release manifest must define Version")
+        package_version = version_match.group("version").lstrip("Vv")
         static_index = (
             archive.read("v2-api/app/static/vue/index.html").decode("utf-8")
             if "v2-api/app/static/vue/index.html" in names
             else ""
         )
         static_js = ""
-        if package_version:
-            for name in sorted(names):
-                if name.startswith("v2-api/app/static/vue/assets/") and name.endswith(".js"):
-                    chunk = archive.read(name).decode("utf-8", errors="ignore")
-                    if package_version in chunk:
-                        static_js = chunk
-                        break
+        for name in sorted(names):
+            if name.startswith("v2-api/app/static/vue/assets/") and name.endswith(".js"):
+                chunk = archive.read(name).decode("utf-8", errors="ignore")
+                if package_version in chunk:
+                    static_js = chunk
+                    break
+        agents = archive.read("AGENTS.md").decode("utf-8")
+        release_record = archive.read("ops/releases/V3.0.80.md").decode("utf-8")
         crlf_shell_scripts = sorted(
             name
             for name in names
@@ -195,10 +210,6 @@ def verify_package(zip_path: Path) -> None:
         )
         if crlf_shell_scripts:
             fail("Shell scripts must use LF line endings: " + ", ".join(crlf_shell_scripts[:20]))
-
-    missing = sorted(REQUIRED_FILES - names)
-    if missing:
-        fail("Missing required release files: " + ", ".join(missing))
 
     forbidden_hits: list[str] = []
     for name in names:
@@ -232,11 +243,27 @@ def verify_package(zip_path: Path) -> None:
     ]:
         if text not in manifest:
             fail(f"Release manifest missing production safety note: {text}")
-    if package_version:
-        if f"Module Manager V{package_version}" not in static_index:
-            fail(f"Vue static index title must be V{package_version}")
-        if package_version not in static_js:
-            fail(f"Vue static assets must include APP_VERSION {package_version}; rebuild v2-web before packaging")
+    if f"Module Manager V{package_version}" not in static_index:
+        fail(f"Vue static index title must be V{package_version}")
+    if package_version not in static_js:
+        fail(f"Vue static assets must include APP_VERSION {package_version}; rebuild v2-web before packaging")
+
+    release_truth = load_release_truth_parser()
+    deployed_version = release_truth.deployed_production_baseline(agents)
+    candidate_version = release_truth.release_candidate(agents)
+    if deployed_version != "V3.0.79":
+        fail("Packaged AGENTS.md deployed production baseline must remain V3.0.79")
+    if candidate_version != "V3.0.80":
+        fail("Packaged AGENTS.md release candidate must be V3.0.80")
+    if candidate_version != f"V{package_version}":
+        fail("Release manifest Version must match packaged AGENTS.md release candidate")
+    record_version = release_truth.RELEASE_RECORD_VERSION_PATTERN.search(release_record)
+    if record_version is None or record_version.group("version") != candidate_version:
+        fail("Packaged release record version must match the release candidate")
+    if release_truth.release_record_claims_deployed_without_live_evidence(release_record):
+        fail("Packaged V3.0.80 release record claims deployed without complete live evidence")
+    if not release_truth.status_is_pending(release_truth.release_record_status(release_record)):
+        fail("Packaged V3.0.80 release record must remain pending before deployment")
 
     print(f"[OK] release zip exists: {zip_path}")
     print(f"[OK] release zip size: {zip_path.stat().st_size} bytes")

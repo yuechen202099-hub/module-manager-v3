@@ -373,6 +373,11 @@ def _formal_identity_advisory_lock_key(project_id: Any, meter_match_key: str) ->
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
 
+def _terminal_task_advisory_lock_key(team_id: str, terminal: str) -> int:
+    digest = hashlib.sha256(f"terminal-task\0{team_id}\0{terminal}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
 def _stage_transactional_audit(
     session: Session,
     *,
@@ -5765,6 +5770,9 @@ class PostgresStateRepository(StateRepository):
         return project_id
 
     def _ensure_task_for_terminal(self, session: Session, team_id: str, terminal: str) -> Task:
+        # Finalization always acquires meter identity before this terminal lock; other callers acquire only this lock.
+        lock_key = _terminal_task_advisory_lock_key(team_id, terminal)
+        session.scalar(select(func.pg_advisory_xact_lock(lock_key)))
         task = session.scalar(select(Task).where(Task.team_id == team_id, Task.terminal == terminal).limit(1))
         if task is not None:
             return task

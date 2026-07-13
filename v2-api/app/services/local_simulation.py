@@ -2324,6 +2324,18 @@ def assign_unmatched_record(
     constructor = constructor.strip()
     if not constructor:
         raise ValueError("Constructor is required")
+    team_id = current_team_id()
+    transaction = active_authoritative_json_write(team_id)
+    state = transaction.working_state if transaction is not None else _team_states.get(team_id)
+    current = None
+    for item in (state or {}).get("scan_unmatched", []):
+        candidate = ensure_unmatched_record(item)
+        if candidate["unmatched_id"] == unmatched_id:
+            current = candidate
+            break
+    if current is None:
+        raise KeyError(unmatched_id)
+    terminal = validate_real_formal_identity_value(current.get("terminal"), "terminal")
     record = update_unmatched_record(
         unmatched_id,
         actor,
@@ -2332,10 +2344,8 @@ def assign_unmatched_record(
         },
         expected_version=expected_version,
     )
-    terminal = str(record.get("terminal") or "").strip()
-    if terminal:
-        task = ensure_task_for_terminal(terminal)
-        assign_construction_task(int(task["id"]), actor=actor, constructor=constructor, note=note, due_date=due_date)
+    task = ensure_task_for_terminal(terminal)
+    assign_construction_task(int(task["id"]), actor=actor, constructor=constructor, note=note, due_date=due_date)
     record.update(
         {
             "assigned_to": constructor,

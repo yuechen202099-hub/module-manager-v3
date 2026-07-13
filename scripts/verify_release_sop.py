@@ -100,18 +100,32 @@ EVIDENCE_FIELD_LABELS = {
     "Release directory": "Release directory",
     "Public health check": "Public health check",
 }
-DEPLOYMENT_CLAIM_PATTERN = re.compile(r"\b(?:deployed|shipped|released)\b|已部署|已发布|已上线", re.IGNORECASE)
+VERSION_TOKEN_PATTERN = re.compile(r"\bV\d+\.\d+\.\d+\b", re.IGNORECASE)
+DEPLOYMENT_CLAIM_PATTERN = re.compile(
+    r"\b(?:deployed|shipped|released)\b"
+    r"|\b(?:is|are|was|were|went|has\s+been|have\s+been)\s+(?:now\s+)?live(?:\s+(?:in|on))?\s+production\b"
+    r"|已部署|已发布|已上线|(?:生产(?:环境)?\s*)?(?:部署|发布|上线)已完成",
+    re.IGNORECASE,
+)
 NEGATED_ENGLISH_CLAIM_PATTERN = re.compile(
-    r"\b(?:not|never)\s+(?:yet\s+)?(?:been\s+)?(?:deployed|shipped|released)\b",
+    r"\b(?:not|never)\s+(?:(?:yet|currently|ever|actually|successfully|fully)\s+)*"
+    r"(?:(?:been|be)\s+)?(?:deployed|shipped|released)\b"
+    r"|\b(?:not|never)\s+(?:now\s+)?live(?:\s+(?:in|on))?\s+production\b",
     re.IGNORECASE,
 )
 NEGATED_CHINESE_CLAIM_PATTERN = re.compile(r"(?:未|尚未)(?:部署|发布|上线)")
 PENDING_STATUS_PATTERN = re.compile(r"\bpending\b|待(?:部署|发布|上线|验证)|未(?:部署|发布|上线)", re.IGNORECASE)
 FUTURE_DEPLOYMENT_PATTERN = re.compile(
-    r"\b(?:will|to be|scheduled to be|planned to be)\s+(?:deployed|shipped|released)\b|(?:将|计划|拟)(?:部署|发布|上线)",
+    r"\b(?:will|would|shall|going\s+to|to\s+be|scheduled\s+to|planned\s+to)\s+"
+    r"(?:be\s+)?(?:deployed|shipped|released)\b"
+    r"|\b(?:before|after|until|once)\b[^,;.!?\n]{0,120}\b(?:deployed|shipped|released)\b"
+    r"|(?:将|计划|拟)(?:于[^,，;；。.!?！？\n]{0,20})?(?:部署|发布|上线)",
     re.IGNORECASE,
 )
-CLAUSE_BOUNDARY_PATTERN = re.compile(r"(?:[,，;；。.!?！？]+|\b(?:but|however)\b|(?:但是|但|却))", re.IGNORECASE)
+CLAUSE_BOUNDARY_PATTERN = re.compile(
+    r"(?:[,，;；。.!?！？\n]+|\b(?:and|but|however|then|while|yet)\b|(?:并且|并于|并|但是|然而|但|却|然后)|于(?=(?:今日|现已|生产)))",
+    re.IGNORECASE,
+)
 RELEASE_RECORD_VERSION_PATTERN = re.compile(r"^#\s*(?P<version>V\d+\.\d+\.\d+)\b", re.MULTILINE)
 PLACEHOLDER_PATTERN = re.compile(r"\b(?:tbd|todo|pending|n/?a|unknown)\b|待补充|待验证|(?:^|\s)-(?:$|\s)", re.IGNORECASE)
 SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
@@ -131,6 +145,16 @@ def read(path: str) -> str:
 
 def normalize_text(value: str) -> str:
     return unicodedata.normalize("NFKC", value).casefold()
+
+
+def normalize_claim_text(value: str) -> str:
+    text = normalize_text(value)
+    text = re.sub(
+        r"\b(is|are|was|were|has|have|had|do|does|did|could|would|should|must)n't\b",
+        r"\1 not",
+        text,
+    )
+    return text.replace("won't", "will not").replace("can't", "cannot")
 
 
 def is_label_character(char: str) -> bool:
@@ -273,15 +297,21 @@ def is_placeholder(value: str) -> bool:
 
 
 def claim_clauses(value: str) -> list[str]:
-    return [clause.strip() for clause in CLAUSE_BOUNDARY_PATTERN.split(value) if clause.strip()]
+    protected = VERSION_TOKEN_PATTERN.sub(lambda match: match.group(0).replace(".", "\ue000"), normalize_claim_text(value))
+    return [
+        clause.replace("\ue000", ".").strip()
+        for clause in CLAUSE_BOUNDARY_PATTERN.split(protected)
+        if clause.strip()
+    ]
 
 
 def clause_has_affirmative_deployment_claim(clause: str) -> bool:
-    if not DEPLOYMENT_CLAIM_PATTERN.search(clause):
+    normalized = normalize_claim_text(clause)
+    if not DEPLOYMENT_CLAIM_PATTERN.search(normalized):
         return False
-    if NEGATED_ENGLISH_CLAIM_PATTERN.search(clause) or NEGATED_CHINESE_CLAIM_PATTERN.search(clause):
+    if NEGATED_ENGLISH_CLAIM_PATTERN.search(normalized) or NEGATED_CHINESE_CLAIM_PATTERN.search(normalized):
         return False
-    if FUTURE_DEPLOYMENT_PATTERN.search(clause):
+    if FUTURE_DEPLOYMENT_PATTERN.search(normalized):
         return False
     return True
 
@@ -291,8 +321,9 @@ def has_deployment_claim(status: str) -> bool:
 
 
 def status_is_pending(status: str) -> bool:
-    return bool(PENDING_STATUS_PATTERN.search(status)) or bool(
-        NEGATED_ENGLISH_CLAIM_PATTERN.search(status) or NEGATED_CHINESE_CLAIM_PATTERN.search(status)
+    normalized = normalize_claim_text(status)
+    return bool(PENDING_STATUS_PATTERN.search(normalized)) or bool(
+        NEGATED_ENGLISH_CLAIM_PATTERN.search(normalized) or NEGATED_CHINESE_CLAIM_PATTERN.search(normalized)
     )
 
 
@@ -300,13 +331,17 @@ def release_record_has_affirmative_version_deployment_prose(record: str) -> bool
     version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
     if version_match is None:
         return False
-    version = normalize_text(version_match.group("version"))
-    for paragraph in re.split(r"\n\s*\n", record):
-        normalized_paragraph = normalize_text(paragraph)
-        if version not in normalized_paragraph:
-            continue
-        prose = " ".join(line.strip() for line in paragraph.splitlines() if line.strip())
-        if has_deployment_claim(prose):
+    version = normalize_claim_text(version_match.group("version"))
+    active_versions: set[str] = set()
+    prose = "\n".join(line for line in record.splitlines() if not line.lstrip().startswith("|"))
+    for clause in claim_clauses(prose):
+        clause_versions = {
+            normalize_claim_text(match.group(0))
+            for match in VERSION_TOKEN_PATTERN.finditer(clause)
+        }
+        if clause_versions:
+            active_versions = clause_versions
+        if version in active_versions and clause_has_affirmative_deployment_claim(clause):
             return True
     return False
 

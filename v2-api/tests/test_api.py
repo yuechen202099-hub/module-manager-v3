@@ -1588,6 +1588,64 @@ def test_dual_http_unmatched_writes_fail_fast_without_deadlock_or_backend_diverg
     assert team_id not in local_simulation._authoritative_write_locks
 
 
+@pytest.mark.parametrize("terminal", ["00000000", "未关联终端", "manual-terminal", "unmatched-terminal"])
+def test_json_http_legacy_assign_rejects_placeholder_terminal_without_state_or_persistence_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    terminal: str,
+) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    main_module.settings.state_backend = "json"
+    local_test.settings.state_backend = "json"
+    state_repository.settings.state_backend = "json"
+    team_id = "north-team-01"
+    state_path = tmp_path / "legacy-assign-state.json"
+    monkeypatch.setenv("LOCAL_SIMULATION_STATE_PATH", str(state_path))
+    local_simulation._team_states[team_id] = local_simulation.blank_state(team_id)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        state = local_simulation.get_state()
+        record = local_simulation.ensure_unmatched_record(
+            {
+                "unmatched_id": "http-legacy-assign-placeholder-terminal",
+                "barcode": "120000912473",
+                "meter_no": "120000912473",
+                "terminal": terminal,
+                "collector": "C001",
+                "module_asset_no": "M001",
+                "photo_urls": [],
+            }
+        )
+        state["scan_unmatched"].append(record)
+        local_simulation.refresh_summary()
+        local_simulation.save_all_team_states()
+        before = deepcopy(state)
+        before_bytes = state_path.read_bytes()
+    finally:
+        local_simulation.reset_current_team(token)
+
+    response = production_client.patch(
+        f"/local-test/unmatched/{record['unmatched_id']}/assign",
+        headers=headers["admin"],
+        json={
+            "actor": "forged-actor",
+            "expected_version": 1,
+            "constructor": "constructor-a",
+            "note": "must not persist",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "real terminal" in response.text
+    assert local_simulation._team_states[team_id]["tasks"] == before["tasks"]
+    assert local_simulation._team_states[team_id]["scan_unmatched"] == before["scan_unmatched"]
+    assert local_simulation._team_states[team_id]["summary"] == before["summary"]
+    assert local_simulation._team_states[team_id]["audit_events"] == before["audit_events"]
+    assert local_simulation._team_states[team_id] == before
+    assert state_path.read_bytes() == before_bytes
+    assert team_id not in local_simulation._authoritative_write_locks
+
+
 def test_fourth_review_production_rejections_do_not_create_team_or_lock_state(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
     main_module.settings.state_backend = "json"

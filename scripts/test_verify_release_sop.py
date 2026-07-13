@@ -326,7 +326,12 @@ def test_preserves_negated_or_pending_candidate_deployment_prose(
     [
         "V3.0.80 was not deployed yesterday; V3.0.80 was deployed today.",
         "V3.0.80 was not deployed yesterday, V3.0.80 was deployed today.",
+        "V3.0.80 was not deployed yesterday and was deployed today.",
+        "V3.0.80 昨日未部署并于今日已部署。",
         "V3.0.80\nhas been deployed to production.",
+        "V3.0.80\n\nhas been deployed to production.",
+        "V3.0.80 is now live in production.",
+        "V3.0.80 生产部署已完成。",
         "V3.0.80 尚未部署的记录已过时；V3.0.80 已部署。",
     ],
 )
@@ -338,3 +343,25 @@ def test_rejects_clause_scoped_and_cross_line_affirmative_deployment_prose(
 
     with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
         verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize(
+    "negated_or_future_prose",
+    [
+        "V3.0.80 hasn't been deployed to production.",
+        "V3.0.80 was not currently deployed.",
+        "V3.0.80 is not live in production.",
+        "V3.0.80 will be deployed tomorrow.",
+        "V3.0.80 将于明日部署。",
+        "V3.0.80 production deployment remains pending.",
+        "V3.0.80\n\n| Deployed source commit | |",
+        "V3.0.80 rollback is allowed only after the release has been deployed.",
+    ],
+)
+def test_semantic_clause_parser_does_not_treat_negative_pending_or_future_as_deployed(
+    negated_or_future_prose: str,
+) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{negated_or_future_prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)

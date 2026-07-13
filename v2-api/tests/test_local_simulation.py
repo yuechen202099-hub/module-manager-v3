@@ -1342,6 +1342,56 @@ def seed_unmatched_review_record(
     return record["unmatched_id"]
 
 
+@pytest.mark.parametrize("terminal", ["00000000", "未关联终端", "manual-terminal", "unmatched-terminal"])
+def test_json_repository_legacy_assign_rejects_placeholder_terminal_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    terminal: str,
+) -> None:
+    team_id = "round3-json-legacy-assign"
+    state_path = tmp_path / "state.json"
+    monkeypatch.setenv("LOCAL_SIMULATION_STATE_PATH", str(state_path))
+    local_simulation._team_states[team_id] = local_simulation.blank_state(team_id)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        state = local_simulation.get_state()
+        record = local_simulation.ensure_unmatched_record(
+            {
+                "unmatched_id": "legacy-assign-placeholder-terminal",
+                "barcode": "120000912473",
+                "meter_no": "120000912473",
+                "terminal": terminal,
+                "collector": "C001",
+                "module_asset_no": "M001",
+                "photo_urls": [],
+            }
+        )
+        state["scan_unmatched"].append(record)
+        local_simulation.refresh_summary()
+        local_simulation.save_all_team_states()
+        before = deepcopy(state)
+        before_bytes = state_path.read_bytes()
+
+        with pytest.raises(ValueError, match="real terminal"):
+            JsonStateRepository().assign_unmatched_record(
+                record["unmatched_id"],
+                actor="admin-a",
+                constructor="constructor-a",
+                expected_version=1,
+                note="must not persist",
+            )
+
+        assert state["tasks"] == before["tasks"]
+        assert state["scan_unmatched"] == before["scan_unmatched"]
+        assert state["summary"] == before["summary"]
+        assert state["audit_events"] == before["audit_events"]
+        assert state == before
+        assert state_path.read_bytes() == before_bytes
+    finally:
+        local_simulation.reset_current_team(token)
+        local_simulation._team_states.pop(team_id, None)
+
+
 def add_unmatched_match_catalog_row(
     *,
     catalog_id: str = "catalog-match-1",
