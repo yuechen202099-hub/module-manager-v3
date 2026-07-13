@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 
@@ -71,38 +72,31 @@ REQUIRED_FILES = [
     "scripts/verify_dialog_information_integration.js",
 ]
 
-AGENTS_MARKER_PATTERN = re.compile(
-    r"^\s*(?:[-*+]\s*)?(?P<label>.+?)\s*[:：!！?？;；.。]+\s*`?\s*(?P<version>V\d+\.\d+\.\d+)\s*`?\s*[:：!！?？;；.。]*\s*$",
-    re.MULTILINE,
-)
-FIELD_LINE_PATTERN = re.compile(
-    r"^\s*(?:[-*+]\s*)?(?P<label>.+?)\s*[:：!！?？;；.。]+\s*(?P<value>.+?)\s*$", re.MULTILINE
-)
 RELEASE_TABLE_ROW_PATTERN = re.compile(
     r"^\|\s*(?P<evidence>[^|]+?)\s*\|\s*(?P<value>[^|]*)\s*\|\s*$", re.MULTILINE
 )
 DEPLOYED_BASELINE_MARKER = "当前已部署生产版本"
 RELEASE_CANDIDATE_MARKER = "当前发布候选版本"
 STATUS_FIELD_LABELS = {
-    "status",
-    "deploymentstate",
-    "deploymentstatus",
-    "releasestatus",
-    "release",
-    "deployment",
-    "状态",
-    "部署状态",
-    "发布状态",
-    "上线状态",
-    "部署",
-    "发布",
-    "上线",
+    "Status": "Status",
+    "Deployment state": "Deployment state",
+    "Deployment status": "Deployment status",
+    "Release status": "Release status",
+    "Release": "Release",
+    "Deployment": "Deployment",
+    "状态": "状态",
+    "部署状态": "部署状态",
+    "发布状态": "发布状态",
+    "上线状态": "上线状态",
+    "部署": "部署",
+    "发布": "发布",
+    "上线": "上线",
 }
 EVIDENCE_FIELD_LABELS = {
-    "sha256": "SHA256",
-    "backupdirectory": "Backup directory",
-    "releasedirectory": "Release directory",
-    "publichealthcheck": "Public health check",
+    "SHA256": "SHA256",
+    "Backup directory": "Backup directory",
+    "Release directory": "Release directory",
+    "Public health check": "Public health check",
 }
 DEPLOYMENT_CLAIM_PATTERN = re.compile(r"\b(?:deployed|shipped|released)\b|已部署|已发布|已上线", re.IGNORECASE)
 NEGATED_ENGLISH_CLAIM_PATTERN = re.compile(r"\bnot\s+(?:deployed|shipped|released)\b", re.IGNORECASE)
@@ -124,19 +118,83 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def normalize_label(label: str) -> str:
-    return re.sub(r"[\s:：!！?？;；,.。．、`'\"“”‘’()\[\]{}<>（）【】〈〉《》「」『』\-—_+*]+", "", label).casefold()
+def normalize_text(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).casefold()
+
+
+def is_label_character(char: str) -> bool:
+    return char.isalnum() or "\u3400" <= char <= "\u9fff"
+
+
+def strip_optional_markdown_bullet(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).lstrip()
+    if normalized[:1] in {"-", "*", "+"}:
+        return normalized[1:].lstrip()
+    return normalized
+
+
+def strip_decorative_prefix(value: str) -> str:
+    while value and not is_label_character(value[0]) and value[0] not in {"/", "-"}:
+        value = value[1:]
+    return value
+
+
+def compact_label(value: str) -> str:
+    return "".join(char.casefold() for char in unicodedata.normalize("NFKC", value) if is_label_character(char))
+
+
+def label_suffix(value: str, label: str) -> str | None:
+    text = strip_decorative_prefix(strip_optional_markdown_bullet(value))
+    expected = compact_label(label)
+    index = 0
+    for char in expected:
+        while index < len(text) and not is_label_character(text[index]):
+            index += 1
+        if index >= len(text) or text[index].casefold() != char:
+            return None
+        index += 1
+    return text[index:]
+
+
+def parse_known_label_value(value: str, labels: dict[str, str]) -> tuple[str, str] | None:
+    for label in sorted(labels, key=lambda item: len(compact_label(item)), reverse=True):
+        suffix = label_suffix(value, label)
+        if suffix is None or not suffix or is_label_character(suffix[0]):
+            continue
+        parsed_value = strip_decorative_prefix(suffix).strip()
+        if parsed_value:
+            return labels[label], parsed_value
+    return None
+
+
+def parse_known_label(value: str, labels: dict[str, str]) -> str | None:
+    for label in sorted(labels, key=lambda item: len(compact_label(item)), reverse=True):
+        suffix = label_suffix(value, label)
+        if suffix is not None and not strip_decorative_prefix(suffix).strip():
+            return labels[label]
+    return None
+
+
+def parse_marker_version(value: str) -> str | None:
+    match = re.match(r"(?P<version>V\d+\.\d+\.\d+)(?P<trailing>.*)$", unicodedata.normalize("NFKC", value))
+    if match is None or strip_decorative_prefix(match.group("trailing")).strip():
+        return None
+    return match.group("version")
 
 
 def parse_agents_marker(agents: str, marker: str, marker_name: str) -> str:
-    matches = [
-        match
-        for match in AGENTS_MARKER_PATTERN.finditer(agents)
-        if normalize_label(match.group("label")) == normalize_label(marker)
-    ]
+    matches = []
+    for line in agents.splitlines():
+        parsed = parse_known_label_value(line, {marker: marker})
+        if parsed is None:
+            continue
+        _, value = parsed
+        version = parse_marker_version(value)
+        if version is not None:
+            matches.append(version)
     if len(matches) != 1:
         fail(f"AGENTS.md must define exactly one {marker_name} marker")
-    return matches[0].group("version")
+    return matches[0]
 
 
 def deployed_production_baseline(agents: str) -> str:
@@ -148,16 +206,18 @@ def release_candidate(agents: str) -> str:
 
 
 def release_record_status(record: str) -> str:
-    claims = [
-        match.group("value").strip()
-        for match in FIELD_LINE_PATTERN.finditer(record)
-        if normalize_label(match.group("label")) in STATUS_FIELD_LABELS
-    ]
-    claims.extend(
-        match.group("value").strip()
-        for match in RELEASE_TABLE_ROW_PATTERN.finditer(record)
-        if normalize_label(match.group("evidence")) in STATUS_FIELD_LABELS
-    )
+    claims = []
+    all_labels = {**STATUS_FIELD_LABELS, **EVIDENCE_FIELD_LABELS}
+    for line in record.splitlines():
+        if line.lstrip().startswith("|"):
+            continue
+        parsed = parse_known_label_value(line, all_labels)
+        if parsed is not None and parsed[0] in STATUS_FIELD_LABELS.values():
+            claims.append(parsed[1])
+    for match in RELEASE_TABLE_ROW_PATTERN.finditer(record):
+        field = parse_known_label(match.group("evidence"), STATUS_FIELD_LABELS)
+        if field is not None:
+            claims.append(match.group("value").strip())
     if not claims:
         fail("release record must include a status-like field")
     if len(claims) != 1:
@@ -168,13 +228,16 @@ def release_record_status(record: str) -> str:
 def release_record_evidence(record: str) -> dict[str, list[str]]:
     evidence = {field: [] for field in EVIDENCE_FIELD_LABELS.values()}
     for match in RELEASE_TABLE_ROW_PATTERN.finditer(record):
-        field = EVIDENCE_FIELD_LABELS.get(normalize_label(match.group("evidence")))
+        field = parse_known_label(match.group("evidence"), EVIDENCE_FIELD_LABELS)
         if field is not None:
             evidence[field].append(match.group("value").strip())
-    for match in FIELD_LINE_PATTERN.finditer(record):
-        field = EVIDENCE_FIELD_LABELS.get(normalize_label(match.group("label")))
-        if field is not None:
-            evidence[field].append(match.group("value").strip())
+    all_labels = {**STATUS_FIELD_LABELS, **EVIDENCE_FIELD_LABELS}
+    for line in record.splitlines():
+        if line.lstrip().startswith("|"):
+            continue
+        parsed = parse_known_label_value(line, all_labels)
+        if parsed is not None and parsed[0] in evidence:
+            evidence[parsed[0]].append(parsed[1])
     return evidence
 
 

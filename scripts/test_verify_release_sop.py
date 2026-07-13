@@ -8,6 +8,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID_SHA256 = "a" * 64
+BULLETS = ("", "- ", "* ", "+ ")
+PUNCTUATION_FORMS = (".", "．", "。", "!", "！", "?", "？", ":", "：", ";", "；", "brackets")
 
 
 def load_verifier():
@@ -55,6 +57,23 @@ def test_rejects_duplicate_normalized_version_markers(marker: str, expected_erro
 def test_rejects_plus_and_punctuation_duplicate_version_markers(marker_line: str) -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8") + f"\n{marker_line}\n"
+
+    with pytest.raises(AssertionError, match="deployed production baseline"):
+        verifier.deployed_production_baseline(agents)
+
+
+def decorated_field(label: str, value: str, bullet: str, punctuation: str) -> str:
+    if punctuation == "brackets":
+        return f"{bullet}\t【{label}】\u3000{value}"
+    return f"{bullet}\t{label}\u3000{punctuation}\u3000{value}"
+
+
+@pytest.mark.parametrize("bullet", BULLETS)
+@pytest.mark.parametrize("punctuation", PUNCTUATION_FORMS)
+def test_rejects_all_punctuation_duplicate_markers(bullet: str, punctuation: str) -> None:
+    verifier = load_verifier()
+    marker = decorated_field("当前已部署生产版本", "`V3.0.79`", bullet, punctuation)
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8") + f"\n{marker}\n"
 
     with pytest.raises(AssertionError, match="deployed production baseline"):
         verifier.deployed_production_baseline(agents)
@@ -132,6 +151,17 @@ def test_parses_plus_and_unbulleted_punctuation_status_claims(status_line: str) 
     record = valid_deployed_record().replace("- Status: deployed", status_line)
 
     assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("bullet", BULLETS)
+@pytest.mark.parametrize("punctuation", PUNCTUATION_FORMS)
+def test_rejects_later_deployed_status_for_all_punctuation_forms(bullet: str, punctuation: str) -> None:
+    verifier = load_verifier()
+    later_status = decorated_field("Status", "shipped", bullet, punctuation)
+    record = valid_deployed_record().replace("- Status: deployed", f"- Status: pending\n{later_status}")
+
+    with pytest.raises(AssertionError, match="multiple status-like claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
 
 
 def test_parses_unbulleted_evidence_lines() -> None:
