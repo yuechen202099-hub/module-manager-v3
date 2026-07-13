@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import re
 from pathlib import Path
 
 
@@ -18,6 +19,7 @@ REQUIRED_FILES = [
     "docs/sop/08-business-acceptance-templates.md",
     "ops/releases/README.md",
     "ops/releases/V3.0.79.md",
+    "ops/releases/V3.0.80.md",
     "ops/releases/V3.0.78.md",
     "ops/releases/V3.0.77.md",
     "ops/releases/V3.0.76.md",
@@ -68,6 +70,23 @@ REQUIRED_FILES = [
     "scripts/verify_dialog_information_integration.js",
 ]
 
+DEPLOYED_BASELINE_PATTERN = re.compile(
+    r"^- 当前已部署生产版本：`(?P<version>V\d+\.\d+\.\d+)`。$", re.MULTILINE
+)
+RELEASE_CANDIDATE_PATTERN = re.compile(
+    r"^- 当前发布候选版本：`(?P<version>V\d+\.\d+\.\d+)`。$", re.MULTILINE
+)
+RELEASE_STATUS_PATTERN = re.compile(r"^- Status:\s*(?P<status>.+?)\s*$", re.MULTILINE)
+RELEASE_TABLE_ROW_PATTERN = re.compile(
+    r"^\|\s*(?P<evidence>[^|]+?)\s*\|\s*(?P<value>[^|]*)\s*\|\s*$", re.MULTILINE
+)
+DEPLOYMENT_EVIDENCE_FIELDS = (
+    "SHA256",
+    "Backup directory",
+    "Release directory",
+    "Public health check",
+)
+
 
 def fail(message: str) -> None:
     raise AssertionError(message)
@@ -75,6 +94,42 @@ def fail(message: str) -> None:
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def parse_agents_marker(agents: str, pattern: re.Pattern[str], marker_name: str) -> str:
+    matches = list(pattern.finditer(agents))
+    if len(matches) != 1:
+        fail(f"AGENTS.md must define exactly one {marker_name} marker")
+    return matches[0].group("version")
+
+
+def deployed_production_baseline(agents: str) -> str:
+    return parse_agents_marker(agents, DEPLOYED_BASELINE_PATTERN, "deployed production baseline")
+
+
+def release_candidate(agents: str) -> str:
+    return parse_agents_marker(agents, RELEASE_CANDIDATE_PATTERN, "release candidate")
+
+
+def release_record_status(record: str) -> str:
+    match = RELEASE_STATUS_PATTERN.search(record)
+    if match is None:
+        fail("release record must include a Status field")
+    return match.group("status").strip()
+
+
+def release_record_evidence(record: str) -> dict[str, str]:
+    return {
+        match.group("evidence").strip(): match.group("value").strip()
+        for match in RELEASE_TABLE_ROW_PATTERN.finditer(record)
+    }
+
+
+def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
+    if "deployed" not in release_record_status(record).casefold():
+        return False
+    evidence = release_record_evidence(record)
+    return any(not evidence.get(field, "").strip() for field in DEPLOYMENT_EVIDENCE_FIELDS)
 
 
 def main() -> int:
@@ -178,10 +233,18 @@ def main() -> int:
         fail("SOP files must not keep stale V3.0.38 deployment examples: " + ", ".join(stale_sop_hits))
 
     agents = read("AGENTS.md")
-    if "V3.0.80" not in agents:
-        fail("AGENTS.md must state current production baseline V3.0.80")
+    if deployed_production_baseline(agents) != "V3.0.79":
+        fail("AGENTS.md deployed production baseline must be V3.0.79 before deployment")
+    if release_candidate(agents) != "V3.0.80":
+        fail("AGENTS.md release candidate must be V3.0.80")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
+
+    v3080_record = read("ops/releases/V3.0.80.md")
+    if release_record_status(v3080_record).casefold() != "pending":
+        fail("V3.0.80 release record status must remain explicitly pending before deployment")
+    if release_record_claims_deployed_without_live_evidence(v3080_record):
+        fail("V3.0.80 release record claims deployed without complete live evidence")
 
     manifest = read("RELEASE_MANIFEST.md")
     if "3.0.80" not in manifest:
