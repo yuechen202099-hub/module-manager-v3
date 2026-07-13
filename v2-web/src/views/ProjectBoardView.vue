@@ -44,6 +44,7 @@ import type {
   UserAccount,
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
+import UnmatchedReviewDialog from '@/components/UnmatchedReviewDialog.vue'
 
 const DIALOG_PAGE_SIZE = 20
 
@@ -133,6 +134,7 @@ const unmatchedRematchingId = ref('')
 const unmatchedQuery = ref('')
 const unmatchedRows = ref<UnmatchedRecord[]>([])
 const unmatchedPage = ref(1)
+const unmatchedReviewId = ref('')
 const replacementDialogVisible = ref(false)
 const replacementLoading = ref(false)
 const replacementQuery = ref('')
@@ -1188,11 +1190,15 @@ async function unassignExceptionGroup(row: MaterialGroup) {
   }
 }
 
-async function loadUnmatchedRows() {
+async function loadUnmatchedRows(options: { preservePage?: boolean } = {}) {
+  const previousPage = unmatchedPage.value
   unmatchedLoading.value = true
-  unmatchedPage.value = 1
+  if (!options.preservePage) unmatchedPage.value = 1
   try {
     unmatchedRows.value = await fetchUnmatchedRecords(unmatchedQuery.value)
+    if (options.preservePage) {
+      unmatchedPage.value = Math.min(previousPage, Math.max(1, Math.ceil(unmatchedRows.value.length / DIALOG_PAGE_SIZE)))
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '未匹配清单加载失败')
   } finally {
@@ -1266,6 +1272,18 @@ async function exportPhotoBarcodeRows() {
 async function openUnmatchedDialog() {
   unmatchedDialogVisible.value = true
   await loadUnmatchedRows()
+}
+
+function openUnmatchedReviewRow(row: UnmatchedRecord) {
+  unmatchedReviewId.value = row.unmatchedId
+}
+
+async function handleUnmatchedReviewUpdated() {
+  await loadUnmatchedRows({ preservePage: true })
+}
+
+async function handleUnmatchedReviewMatched() {
+  await Promise.all([loadUnmatchedRows({ preservePage: true }), loadBoard()])
 }
 
 async function loadReplacementRows() {
@@ -2180,7 +2198,7 @@ onUnmounted(() => {
           </el-dropdown>
         </div>
       </div>
-      <el-table v-loading="unmatchedLoading" :data="pagedUnmatchedRows" height="520" size="small">
+      <el-table v-loading="unmatchedLoading" :data="pagedUnmatchedRows" height="520" size="small" @row-click="openUnmatchedReviewRow">
         <el-table-column type="index" width="54" label="#" />
         <el-table-column prop="terminal" label="终端" min-width="120" />
         <el-table-column label="表号 / 扫码内容" min-width="150">
@@ -2206,7 +2224,10 @@ onUnmounted(() => {
         <el-table-column prop="address" label="地址" min-width="280" show-overflow-tooltip />
         <el-table-column label="操作" width="94" fixed="right">
           <template #default="{ row }">
-            <el-dropdown trigger="click">
+            <div @click.stop>
+              <el-button size="small" plain @click.stop="openUnmatchedReviewRow(row)">审阅</el-button>
+            </div>
+            <el-dropdown trigger="click" @click.stop>
               <el-button
                 size="small"
                 plain
@@ -2218,13 +2239,13 @@ onUnmounted(() => {
                 <el-dropdown-menu>
                   <el-dropdown-item
                     :disabled="unmatchedRematchingId === row.unmatchedId || unmatchedDeletingId === row.unmatchedId"
-                    @click="replaceUnmatchedMeter(row)"
+                    @click.stop="replaceUnmatchedMeter(row)"
                   >
                     换表
                   </el-dropdown-item>
                   <el-dropdown-item
                     :disabled="unmatchedRematchingId === row.unmatchedId || unmatchedDeletingId === row.unmatchedId"
-                    @click="deleteUnmatchedRow(row)"
+                    @click.stop="deleteUnmatchedRow(row)"
                   >
                     删除
                   </el-dropdown-item>
@@ -2248,6 +2269,14 @@ onUnmounted(() => {
         <el-button type="primary" :disabled="!unmatchedRows.length" @click="exportUnmatchedCsv">导出当前清单</el-button>
       </template>
     </el-dialog>
+
+    <UnmatchedReviewDialog
+      :model-value="Boolean(unmatchedReviewId)"
+      :unmatched-id="unmatchedReviewId"
+      @update:model-value="(visible) => { if (!visible) unmatchedReviewId = '' }"
+      @updated="handleUnmatchedReviewUpdated"
+      @matched="handleUnmatchedReviewMatched"
+    />
 
     <el-dialog v-model="workloadTimeDialogVisible" :title="workloadTimeTitle" width="900px">
       <div v-if="workloadTimeRow" class="work-time-detail">

@@ -2,6 +2,8 @@ const fs = require('fs')
 
 const types = fs.readFileSync('v2-web/src/api/types.ts', 'utf8')
 const services = fs.readFileSync('v2-web/src/api/services.ts', 'utf8')
+const board = fs.readFileSync('v2-web/src/views/ProjectBoardView.vue', 'utf8')
+const dialog = fs.readFileSync('v2-web/src/components/UnmatchedReviewDialog.vue', 'utf8')
 
 function assertContains(source, pattern, message) {
   if (!source.includes(pattern)) throw new Error(message)
@@ -66,4 +68,26 @@ assertNotContains(reviewPhotoFetch, 'url:', 'must not proxy caller supplied URLs
 assertNotContains(reviewPhotoFetch, 'sourceUrl', 'must not fetch caller supplied URLs')
 assertContains(reviewPhotoFetch, 'createVerifiedImageObjectUrl(blob)', 'photo content must verify server-owned image blobs')
 
-console.log('project board unmatched review API contract checks passed')
+for (const token of [
+  '@row-click="openUnmatchedReviewRow"',
+  '<UnmatchedReviewDialog',
+  '@click.stop',
+  'DIALOG_PAGE_SIZE',
+]) {
+  assertContains(board, token, `board missing ${token}`)
+}
+
+for (const token of [
+  '重新扫码',
+  '人工确认',
+  '完成审阅并匹配清单',
+  'fetchUnmatchedReviewPhotoObjectUrl',
+  'URL.revokeObjectURL',
+  'candidatePageSize = 20',
+]) {
+  assertContains(dialog, token, `dialog missing ${token}`)
+}
+
+assertNotContains(dialog, '<el-image', 'dialog must use verified object URLs with native img')
+
+console.log('project board unmatched review checks passed')
