@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from app.api.router import api_router
 from app.core.config import settings
@@ -14,7 +15,13 @@ from app.core.request_id import RequestIdMiddleware
 from app.core.responses import error_response, ok
 from app.core.security import decode_access_token
 from app.core.security_middleware import RequestSizeLimitMiddleware, SecurityHeadersMiddleware
-from app.services.local_simulation import save_all_team_states
+from app.services.local_simulation import (
+    abort_authoritative_json_write,
+    activate_authoritative_json_write,
+    begin_authoritative_json_write,
+    finish_authoritative_json_write,
+    save_all_team_states,
+)
 from app.services.ezcodes_scheduler import sync_manager
 from app.services.project_board_cache import (
     start_project_board_summary_cache,
@@ -105,15 +112,42 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def persist_local_test_state(request: Request, call_next):
-        response = await call_next(request)
-        if (
+        is_json_write = (
             request.url.path.startswith("/local-test")
             and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
-            and 200 <= response.status_code < 400
             and settings.state_backend.lower() in {"json", "dual"}
-        ):
-            save_all_team_states()
-        return response
+        )
+        transaction = None
+        token = None
+        if is_json_write:
+            team_id = request.headers.get("X-Team-Id") or request.query_params.get("team_id") or ""
+            authorization = request.headers.get("authorization", "")
+            if authorization.lower().startswith("bearer "):
+                try:
+                    payload = decode_access_token(authorization.split(" ", 1)[1].strip())
+                    team_id = payload.get("team_id") or team_id
+                except ValueError:
+                    pass
+            transaction = await run_in_threadpool(begin_authoritative_json_write, team_id)
+            token = activate_authoritative_json_write(transaction)
+        try:
+            response = await call_next(request)
+            if transaction is not None:
+                completed_transaction = transaction
+                transaction = None
+                if 200 <= response.status_code < 400:
+                    finish_authoritative_json_write(
+                        completed_transaction,
+                        token,
+                        persist=save_all_team_states,
+                    )
+                else:
+                    abort_authoritative_json_write(completed_transaction, token)
+            return response
+        except Exception:
+            if transaction is not None:
+                abort_authoritative_json_write(transaction, token)
+            raise
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):

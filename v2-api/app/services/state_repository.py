@@ -5530,18 +5530,26 @@ class PostgresStateRepository(StateRepository):
         existing_by_sha: dict[str, Photo] = {}
         existing_by_storage: dict[tuple[str, str], Photo] = {}
         existing_by_url_hash: dict[str, Photo] = {}
+
+        def register_duplicate(mapping: dict[Any, Photo], key: Any, photo: Photo) -> None:
+            if not key:
+                return
+            current = mapping.get(key)
+            if current is None or (
+                getattr(current, "is_active", True) is False
+                and getattr(photo, "is_active", True) is not False
+            ):
+                mapping[key] = photo
+
         existing_statement = select(Photo).where(Photo.team_id == group.team_id, Photo.group_id == group.id)
         if source == "unmatched-review-finalize":
             existing_statement = existing_statement.with_for_update()
         for photo in session.scalars(existing_statement).all():
-            if photo.source_fingerprint:
-                existing_by_fingerprint[photo.source_fingerprint] = photo
-            if photo.sha256:
-                existing_by_sha[photo.sha256] = photo
+            register_duplicate(existing_by_fingerprint, photo.source_fingerprint, photo)
+            register_duplicate(existing_by_sha, photo.sha256, photo)
             if photo.storage_type and photo.storage_key:
-                existing_by_storage[(photo.storage_type, photo.storage_key)] = photo
-            if getattr(photo, "source_url_hash", None):
-                existing_by_url_hash[photo.source_url_hash] = photo
+                register_duplicate(existing_by_storage, (photo.storage_type, photo.storage_key), photo)
+            register_duplicate(existing_by_url_hash, getattr(photo, "source_url_hash", None), photo)
         added = 0
         merged_duplicates = 0
         reactivated_duplicates = 0
@@ -5646,11 +5654,11 @@ class PostgresStateRepository(StateRepository):
                 raw_data=raw_payload,
             )
             session.add(photo)
-            existing_by_fingerprint[source_fingerprint] = photo
-            existing_by_sha[sha256] = photo
-            existing_by_url_hash[source_url_hash] = photo
+            register_duplicate(existing_by_fingerprint, source_fingerprint, photo)
+            register_duplicate(existing_by_sha, sha256, photo)
+            register_duplicate(existing_by_url_hash, source_url_hash, photo)
             if storage_type and storage_key:
-                existing_by_storage[(storage_type, storage_key)] = photo
+                register_duplicate(existing_by_storage, (storage_type, storage_key), photo)
             added += 1
         if added or reactivated_duplicates:
             group.photo_count = int(active_count)

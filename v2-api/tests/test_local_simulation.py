@@ -1660,6 +1660,9 @@ def test_unmatched_finalize_interleaving_hides_partial_state_and_preserves_succe
     release_failing_recompute = Event()
     original_recompute = local_simulation._apply_formal_group_barcode_check
     failure: list[Exception] = []
+    successful_started = Event()
+    successful_results: list[dict] = []
+    successful_errors: list[Exception] = []
 
     def interleaved_recompute(group: dict) -> None:
         if group.get("source_unmatched_id") == failing_id:
@@ -1680,27 +1683,43 @@ def test_unmatched_finalize_interleaving_hides_partial_state_and_preserves_succe
         except Exception as exc:
             failure.append(exc)
 
+    def run_successful_finalizer() -> None:
+        successful_started.set()
+        try:
+            successful_results.append(
+                local_simulation.finalize_unmatched_match(
+                    successful_id,
+                    actor="admin-successful",
+                    candidate_key=successful_candidate["candidate_key"],
+                    expected_version=1,
+                )
+            )
+        except Exception as exc:
+            successful_errors.append(exc)
+
     monkeypatch.setattr(local_simulation, "_apply_formal_group_barcode_check", interleaved_recompute)
     thread = Thread(target=run_failing_finalizer)
+    successful_thread = Thread(target=run_successful_finalizer)
     thread.start()
     assert failing_recompute_started.wait(timeout=5)
 
     try:
         live_during_failure = deepcopy(local_simulation.get_state())
-        successful_result = local_simulation.finalize_unmatched_match(
-            successful_id,
-            actor="admin-successful",
-            candidate_key=successful_candidate["candidate_key"],
-            expected_version=1,
-        )
+        successful_thread.start()
+        assert successful_started.wait(timeout=5)
+        assert successful_thread.is_alive()
     finally:
         release_failing_recompute.set()
         thread.join(timeout=5)
+        successful_thread.join(timeout=5)
 
     assert not thread.is_alive()
+    assert not successful_thread.is_alive()
     assert len(failure) == 1
     assert isinstance(failure[0], RuntimeError)
     assert str(failure[0]) == "interleaved failing finalizer"
+    assert successful_errors == []
+    assert len(successful_results) == 1
     assert failing_id in {item["unmatched_id"] for item in live_during_failure["scan_unmatched"]}
     assert all(
         group.get("source_unmatched_id") != failing_id
@@ -1710,7 +1729,7 @@ def test_unmatched_finalize_interleaving_hides_partial_state_and_preserves_succe
     final_state = local_simulation.get_state()
     assert local_simulation.get_unmatched_record(failing_id) is not None
     assert local_simulation.get_unmatched_record(successful_id) is None
-    assert successful_result["group"]["source_unmatched_id"] == successful_id
+    assert successful_results[0]["group"]["source_unmatched_id"] == successful_id
     assert any(group.get("source_unmatched_id") == successful_id for group in final_state["groups"])
     assert all(group.get("source_unmatched_id") != failing_id for group in final_state["groups"])
     finalized_ids = {
@@ -1719,6 +1738,33 @@ def test_unmatched_finalize_interleaving_hides_partial_state_and_preserves_succe
         if event["action"] == "unmatched_review_finalized"
     }
     assert finalized_ids == {successful_id}
+
+
+def test_unmatched_authoritative_json_write_defers_internal_persistence_until_commit(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "authoritative-state.json"
+    monkeypatch.setenv("LOCAL_SIMULATION_STATE_PATH", str(state_path))
+    transaction = local_simulation.begin_authoritative_json_write()
+    token = local_simulation.activate_authoritative_json_write(transaction)
+    committed = False
+    try:
+        local_simulation.get_state()["audit_events"].append(
+            {"id": "deferred-write", "action": "deferred", "actor": "test", "payload": {}}
+        )
+        local_simulation.save_all_team_states()
+        assert state_path.exists() is False
+
+        local_simulation.finish_authoritative_json_write(transaction, token)
+        committed = True
+    finally:
+        if not committed and local_simulation._private_team_state.get() is transaction:
+            local_simulation.abort_authoritative_json_write(transaction, token)
+
+    assert state_path.exists() is True
+    assert "deferred-write" in state_path.read_text(encoding="utf-8")
 
 
 def test_json_state_repository_finalizes_unmatched_match_from_server_candidate(synthetic_state: dict) -> None:

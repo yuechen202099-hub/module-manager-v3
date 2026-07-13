@@ -764,6 +764,102 @@ def test_postgres_unmatched_review_reactivates_soft_deleted_duplicate_photo() ->
     assert session.flush_calls >= 1
 
 
+def test_postgres_unmatched_review_prefers_active_duplicate_over_inactive_equivalent() -> None:
+    source_url = "https://photos.example/shared-identity.jpg?token=current"
+    canonical_hash = repository.hashlib.sha256(
+        source_url.split("?", 1)[0].encode("utf-8")
+    ).hexdigest()
+    active = SimpleNamespace(
+        source_fingerprint="active-fingerprint",
+        sha256="active-sha",
+        storage_type="",
+        storage_key="",
+        source_url_hash=canonical_hash,
+        raw_data={},
+        category="unclassified",
+        source_url=source_url,
+        image_url=source_url,
+        is_active=True,
+        deleted_at=None,
+        deleted_by="",
+        delete_reason="",
+        sort_order=1,
+    )
+    inactive = SimpleNamespace(
+        source_fingerprint="inactive-fingerprint",
+        sha256="inactive-sha",
+        storage_type="",
+        storage_key="",
+        source_url_hash=canonical_hash,
+        raw_data={"delete_reason": "older duplicate"},
+        category="unclassified",
+        source_url=source_url,
+        image_url=source_url,
+        is_active=False,
+        deleted_at=datetime(2026, 7, 12, 9, 0),
+        deleted_by="reviewer-old",
+        delete_reason="older duplicate",
+        sort_order=2,
+    )
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-active-preferred",
+        team_id="default-team",
+        display_meter_no="120000912473",
+        photo_count=1,
+        status=repository.GroupStatus.INCOMPLETE,
+        reviewer=None,
+        review_note="",
+        exception_status="",
+        exception_note="",
+        exception_reasons=[],
+        has_archive_blocker=False,
+        reviewed_at=None,
+        raw_data={"photo_count": 1, "status": "incomplete"},
+    )
+
+    class ActivePreferredSession:
+        def __init__(self):
+            self.flush_calls = 0
+
+        def scalars(self, statement):
+            return FinalizeFakeScalars([active, inactive])
+
+        def scalar(self, statement):
+            return 1
+
+        def add(self, value):
+            raise AssertionError("existing active duplicate must be reused")
+
+        def flush(self):
+            self.flush_calls += 1
+
+    result = repository.PostgresStateRepository()._add_photo_records_to_group(
+        ActivePreferredSession(),
+        group,
+        actor="admin-a",
+        photos=[
+            {
+                "url": source_url,
+                "source_url": source_url,
+                "source_fingerprint": "incoming-fingerprint",
+                "category": "before_box",
+                "qr_values": ["QR-ACTIVE"],
+                "temporary_review_manual_confirmed": True,
+            }
+        ],
+        source="unmatched-review-finalize",
+    )
+
+    assert result == {"added": 0, "skipped_duplicates": 1, "merged_duplicates": 1}
+    assert active.category == "before_box"
+    assert active.raw_data["qr_values"] == ["QR-ACTIVE"]
+    assert inactive.is_active is False
+    assert inactive.deleted_at == datetime(2026, 7, 12, 9, 0)
+    assert inactive.raw_data == {"delete_reason": "older duplicate"}
+    assert group.photo_count == 1
+
+
 def test_postgres_finalize_unmatched_rolls_back_after_all_writes_are_staged() -> None:
     record = _postgres_finalize_record()
     before = deepcopy(vars(record))

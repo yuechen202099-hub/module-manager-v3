@@ -3,6 +3,7 @@ import importlib.util
 import time
 from datetime import datetime
 from io import BytesIO
+from threading import Event, Thread
 from uuid import uuid4
 from pathlib import Path
 from types import SimpleNamespace
@@ -447,6 +448,124 @@ def test_production_local_test_persists_only_successful_writes(monkeypatch, tmp_
         assert wrong_role.status_code == 403
         assert allowed.status_code == 200
         assert persist_calls == ["saved"]
+
+
+def test_json_request_write_waits_for_finalizer_cas_and_preserves_both_writes(monkeypatch) -> None:
+    team_id = "task-4-third-review"
+    team_token = local_simulation.set_current_team(team_id)
+    try:
+        state = local_simulation.get_state()
+        state.clear()
+        state.update(local_simulation.blank_state(team_id))
+        state["summary"] = local_simulation.empty_summary()
+        record = local_simulation.ensure_unmatched_record(
+            {
+                "barcode": "120000912473",
+                "meter_no": "120000912473",
+                "collector": "C001",
+                "module_asset_no": "M001",
+                "photo_urls": [f"https://photos.example/third-review/{index}.jpg" for index in range(4)],
+            }
+        )
+        state["scan_unmatched"].append(record)
+        state["total_catalog"].append(
+            {
+                "id": "catalog-third-review",
+                "terminal": "T-THIRD-REVIEW",
+                "meter_no": "120000912473",
+                "meter_match_key": local_simulation.build_total_catalog_match_key("120000912473"),
+                "address": "third review road",
+            }
+        )
+        candidate = local_simulation.list_unmatched_match_candidates(record["unmatched_id"])["items"][0]
+    finally:
+        local_simulation.reset_current_team(team_token)
+
+    monkeypatch.setattr(main_module.settings, "state_backend", "json")
+    finalizer_after_cas = Event()
+    release_finalizer = Event()
+    request_entered_protocol = Event()
+    request_started = Event()
+    finalizer_errors: list[Exception] = []
+    finalizer_results: list[dict] = []
+    request_responses = []
+    original_save = local_simulation.save_all_team_states
+    original_clear = local_simulation.clear_scan_data
+
+    def pause_after_finalizer_cas() -> None:
+        finalizer_after_cas.set()
+        if not release_finalizer.wait(timeout=5):
+            raise TimeoutError("test did not release finalizer CAS")
+        original_save()
+
+    def tracked_request_begin(target_team_id: str):
+        request_entered_protocol.set()
+        request_started.set()
+        return local_simulation.begin_authoritative_json_write(target_team_id)
+
+    def tracked_clear_scan_data() -> dict:
+        request_started.set()
+        return original_clear()
+
+    def run_finalizer() -> None:
+        token = local_simulation.set_current_team(team_id)
+        try:
+            finalizer_results.append(
+                local_simulation.finalize_unmatched_match(
+                    record["unmatched_id"],
+                    actor="admin-finalizer",
+                    candidate_key=candidate["candidate_key"],
+                    expected_version=1,
+                )
+            )
+        except Exception as exc:
+            finalizer_errors.append(exc)
+        finally:
+            local_simulation.reset_current_team(token)
+
+    test_client = TestClient(create_app())
+
+    def run_request_write() -> None:
+        request_responses.append(
+            test_client.post("/local-test/scan/clear", headers={"X-Team-Id": team_id})
+        )
+
+    monkeypatch.setattr(local_simulation, "save_all_team_states", pause_after_finalizer_cas)
+    monkeypatch.setattr(local_simulation, "clear_scan_data", tracked_clear_scan_data)
+    monkeypatch.setattr(main_module, "begin_authoritative_json_write", tracked_request_begin, raising=False)
+    finalizer_thread = Thread(target=run_finalizer)
+    request_thread = Thread(target=run_request_write)
+    finalizer_thread.start()
+    assert finalizer_after_cas.wait(timeout=5)
+    request_thread.start()
+    assert request_started.wait(timeout=5)
+
+    try:
+        assert finalizer_thread.is_alive()
+    finally:
+        release_finalizer.set()
+        finalizer_thread.join(timeout=5)
+        request_thread.join(timeout=5)
+
+    assert request_entered_protocol.is_set()
+    assert not finalizer_thread.is_alive()
+    assert not request_thread.is_alive()
+    assert finalizer_errors == []
+    assert len(finalizer_results) == 1
+    assert len(request_responses) == 1
+    assert request_responses[0].status_code == 200
+
+    team_token = local_simulation.set_current_team(team_id)
+    try:
+        final_state = local_simulation.get_state()
+        assert any(
+            group.get("source_unmatched_id") == record["unmatched_id"]
+            for group in final_state["groups"]
+        )
+        assert final_state["scan_unmatched"] == []
+        assert final_state["summary"]["scan_rows"] == 0
+    finally:
+        local_simulation.reset_current_team(team_token)
 
 
 def demo_admin_headers() -> dict[str, str]:

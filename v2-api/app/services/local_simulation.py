@@ -115,8 +115,17 @@ class LocalTestPaths:
     scan_file: Path = DEFAULT_SCAN_FILE
 
 
+@dataclass
+class AuthoritativeJsonWrite:
+    team_id: str
+    base_state: dict[str, Any]
+    working_state: dict[str, Any]
+    lock: threading.Lock
+    committing: bool = False
+
+
 _current_team_id: ContextVar[str] = ContextVar("local_simulation_team_id", default=DEFAULT_TEAM_ID)
-_private_team_state: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar(
+_private_team_state: ContextVar[AuthoritativeJsonWrite | None] = ContextVar(
     "local_simulation_private_team_state",
     default=None,
 )
@@ -184,6 +193,8 @@ _state: dict[str, Any] = blank_state(DEFAULT_TEAM_ID)
 _state["summary"] = empty_summary()
 _team_states[DEFAULT_TEAM_ID] = _state
 _persistence_lock = threading.RLock()
+_authoritative_write_locks: dict[str, threading.Lock] = {}
+_authoritative_write_locks_guard = threading.Lock()
 _delivery_cache_executor = ThreadPoolExecutor(max_workers=2)
 _delivery_cache_lock = threading.RLock()
 _delivery_cache_inflight: set[tuple[str, str]] = set()
@@ -197,14 +208,15 @@ def persisted_state_path() -> Path | None:
 
 
 def save_all_team_states() -> None:
+    private_state = _private_team_state.get()
+    if private_state is not None and not private_state.committing:
+        return
     path = persisted_state_path()
     if path is None:
         return
-    private_state = _private_team_state.get()
     states = _team_states
     if private_state is not None:
-        team_id, working_state = private_state
-        states = {**_team_states, team_id: working_state}
+        states = {**_team_states, private_state.team_id: private_state.working_state}
     payload = {
         "version": 1,
         "saved_at": datetime.now(UTC).isoformat(),
@@ -271,8 +283,8 @@ load_all_team_states()
 def state_for_team(team_id: str | None = None) -> dict[str, Any]:
     team = normalize_team_id(team_id or current_team_id())
     private_state = _private_team_state.get()
-    if private_state is not None and private_state[0] == team:
-        state = private_state[1]
+    if private_state is not None and private_state.team_id == team:
+        state = private_state.working_state
         state.setdefault("summary", empty_summary())
         state["summary"]["team_id"] = team
         return state
@@ -299,6 +311,64 @@ def list_team_states() -> list[dict[str, Any]]:
 
 def get_state() -> dict[str, Any]:
     return state_for_team()
+
+
+def _authoritative_write_lock(team_id: str) -> threading.Lock:
+    with _authoritative_write_locks_guard:
+        return _authoritative_write_locks.setdefault(team_id, threading.Lock())
+
+
+def begin_authoritative_json_write(team_id: str | None = None) -> AuthoritativeJsonWrite:
+    team = normalize_team_id(team_id or current_team_id())
+    lock = _authoritative_write_lock(team)
+    lock.acquire()
+    try:
+        with _persistence_lock:
+            base_state = copy.deepcopy(state_for_team(team))
+        return AuthoritativeJsonWrite(
+            team_id=team,
+            base_state=base_state,
+            working_state=copy.deepcopy(base_state),
+            lock=lock,
+        )
+    except Exception:
+        lock.release()
+        raise
+
+
+def activate_authoritative_json_write(transaction: AuthoritativeJsonWrite):
+    return _private_team_state.set(transaction)
+
+
+def finish_authoritative_json_write(
+    transaction: AuthoritativeJsonWrite,
+    token,
+    *,
+    persist: Callable[[], None] | None = None,
+) -> None:
+    try:
+        with _persistence_lock:
+            if _team_states.get(transaction.team_id) != transaction.base_state:
+                raise unmatched_review.ReviewVersionConflict(
+                    "Local state changed during authoritative JSON write"
+                )
+            transaction.committing = True
+            try:
+                (persist or save_all_team_states)()
+            finally:
+                transaction.committing = False
+            _team_states[transaction.team_id] = transaction.working_state
+            if transaction.team_id == DEFAULT_TEAM_ID:
+                global _state
+                _state = transaction.working_state
+    finally:
+        _private_team_state.reset(token)
+        transaction.lock.release()
+
+
+def abort_authoritative_json_write(transaction: AuthoritativeJsonWrite, token) -> None:
+    _private_team_state.reset(token)
+    transaction.lock.release()
 
 
 def clear_scan_data() -> dict[str, Any]:
@@ -1830,13 +1900,17 @@ def finalize_unmatched_match(
     expected_version: int,
 ) -> dict[str, Any]:
     team_id = current_team_id()
-    with _persistence_lock:
-        live_state = state_for_team(team_id)
-        base_state = copy.deepcopy(live_state)
-        if live_state != base_state:
-            raise unmatched_review.ReviewVersionConflict("Local state changed while finalization was starting")
-    working_state = copy.deepcopy(base_state)
-    token = _private_team_state.set((team_id, working_state))
+    active_transaction = _private_team_state.get()
+    if active_transaction is not None and active_transaction.team_id == team_id:
+        return _finalize_unmatched_match_in_state(
+            unmatched_id,
+            actor=actor,
+            candidate_key=candidate_key,
+            expected_version=expected_version,
+        )
+
+    transaction = begin_authoritative_json_write(team_id)
+    token = activate_authoritative_json_write(transaction)
     try:
         result = _finalize_unmatched_match_in_state(
             unmatched_id,
@@ -1844,20 +1918,12 @@ def finalize_unmatched_match(
             candidate_key=candidate_key,
             expected_version=expected_version,
         )
-        with _persistence_lock:
-            current_state = _team_states.get(team_id)
-            if current_state != base_state:
-                raise unmatched_review.ReviewVersionConflict(
-                    "Local state changed during unmatched finalization"
-                )
-            save_all_team_states()
-            _team_states[team_id] = working_state
-            if team_id == DEFAULT_TEAM_ID:
-                global _state
-                _state = working_state
+        finish_authoritative_json_write(transaction, token)
         return result
-    finally:
-        _private_team_state.reset(token)
+    except Exception:
+        if _private_team_state.get() is transaction:
+            abort_authoritative_json_write(transaction, token)
+        raise
 
 
 def save_unmatched_review(
