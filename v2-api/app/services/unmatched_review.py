@@ -47,6 +47,7 @@ def build_review(record: dict[str, Any]) -> dict[str, Any]:
         })
     return {
         "schema_version": REVIEW_SCHEMA_VERSION,
+        "unmatched_id": str(record.get("unmatched_id") or ""),
         "version": max(1, int(existing.get("version") or 1)),
         "state": str(existing.get("state") or "pending"),
         "meter_no": str(existing.get("meter_no") or record.get("meter_no") or record.get("barcode") or ""),
@@ -84,21 +85,46 @@ def apply_review_patch(
             updated[key] = str(metadata.get(key) or "").strip()
     for patch in photo_updates:
         photo = find_review_photo(updated, str(patch.get("id") or ""))
-        if "category" in patch:
-            validate_category(str(patch.get("category") or ""))
-            photo["category"] = str(patch["category"])
+        for key in PHOTO_UPDATE_FIELDS:
+            if key not in patch:
+                continue
+            if key == "category":
+                validate_category(str(patch[key] or ""))
+            photo[key] = str(patch[key])
     updated["state"] = state if state in {"pending", "reviewed"} else "pending"
     updated["reviewer"] = actor
     updated["updated_at"] = datetime.now(UTC).isoformat()
     updated["version"] = expected_version + 1
+    updated["audit_event"] = audit_diff(
+        str(updated.get("unmatched_id") or ""),
+        review,
+        updated,
+        actor=actor,
+        timestamp=updated["updated_at"],
+    )
     return updated
 
 
-def audit_diff(unmatched_id: str, before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+def audit_diff(
+    unmatched_id: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    actor: str = "",
+    action: str = "update_unmatched_review",
+    timestamp: str | None = None,
+) -> dict[str, Any]:
+    before_payload = copy.deepcopy(before)
+    after_payload = copy.deepcopy(after)
+    before_payload.pop("audit_event", None)
+    after_payload.pop("audit_event", None)
     return {
+        "actor": actor,
+        "action": action,
+        "timestamp": timestamp or datetime.now(UTC).isoformat(),
         "unmatched_id": unmatched_id,
         "before_version": before.get("version"),
         "after_version": after.get("version"),
-        "before": before,
-        "after": after,
+        "before": before_payload,
+        "after": after_payload,
     }
