@@ -995,6 +995,10 @@ class UnmatchedReviewConfirmRequest(BaseModel):
     confirmed: bool = True
 
 
+class UnmatchedReviewRescanRequest(BaseModel):
+    category: str = ""
+
+
 class UnmatchedFinalizeMatchRequest(BaseModel):
     candidate_key: str
     expected_version: int
@@ -1903,14 +1907,21 @@ def unmatched_review_photo_content(unmatched_id: str, photo_id: str, request: Re
 
 
 @router.post("/unmatched/{unmatched_id}/photos/{photo_id}/rescan")
-def rescan_unmatched_review_photo(unmatched_id: str, photo_id: str, request: Request, category: str = ""):
+def rescan_unmatched_review_photo(
+    unmatched_id: str,
+    photo_id: str,
+    payload: UnmatchedReviewRescanRequest,
+    request: Request,
+):
     actor = bound_review_actor(request, "")
     try:
+        if payload.category:
+            unmatched_review.validate_category(payload.category)
         review = state_repository().rescan_unmatched_review_photo(
             unmatched_id,
             photo_id,
             actor=actor,
-            category=category,
+            category=payload.category,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched photo not found") from exc

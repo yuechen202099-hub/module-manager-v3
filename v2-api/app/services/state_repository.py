@@ -6,6 +6,7 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -3622,7 +3623,22 @@ class PostgresStateRepository(StateRepository):
             return {"total": int(total), "items": [_unmatched_payload(record) for record in records]}
 
     def get_unmatched_review(self, unmatched_id: str) -> dict[str, Any]:
-        raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            record = session.scalar(
+                select(UnmatchedRecord).where(
+                    UnmatchedRecord.team_id == team_id,
+                    UnmatchedRecord.legacy_id == unmatched_id,
+                    UnmatchedRecord.status == "open",
+                )
+            )
+            if record is None:
+                raise KeyError(unmatched_id)
+            record_payload = _unmatched_payload(record)
+            return {
+                "record": record_payload,
+                "review": unmatched_review.build_review(record_payload),
+            }
 
     def _unmatched_match_candidates_for_session(
         self,
@@ -3927,7 +3943,54 @@ class PostgresStateRepository(StateRepository):
         photo_updates: list[dict[str, Any]] | None = None,
         state: str = "pending",
     ) -> dict[str, Any]:
-        raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
+        unmatched_review.validate_state(state)
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            try:
+                record = session.scalar(
+                    select(UnmatchedRecord)
+                    .where(
+                        UnmatchedRecord.team_id == team_id,
+                        UnmatchedRecord.legacy_id == unmatched_id,
+                        UnmatchedRecord.status == "open",
+                    )
+                    .with_for_update()
+                )
+                if record is None:
+                    raise KeyError(unmatched_id)
+                previous = unmatched_review.build_review(_unmatched_payload(record))
+                updated = unmatched_review.apply_review_patch(
+                    previous,
+                    actor=actor,
+                    expected_version=expected_version,
+                    metadata=metadata or {},
+                    photo_updates=photo_updates or [],
+                    state=state,
+                )
+                audit_event = updated.pop("audit_event")
+                record.payload = {**(record.payload or {}), "temporary_review": updated}
+                session.add(
+                    AuditLog(
+                        team_id=team_id,
+                        legacy_id=f"unmatched-review-saved-{uuid4()}",
+                        actor_username=actor,
+                        action="unmatched_review_saved",
+                        entity_type="unmatched_record",
+                        entity_id=record.id,
+                        before_data=audit_event["before"],
+                        after_data=audit_event["after"],
+                        payload={
+                            "unmatched_id": unmatched_id,
+                            "before_version": audit_event["before_version"],
+                            "after_version": audit_event["after_version"],
+                        },
+                    )
+                )
+                session.commit()
+                return {"record": _unmatched_payload(record), "review": deepcopy(updated)}
+            except Exception:
+                session.rollback()
+                raise
 
     def rescan_unmatched_review_photo(
         self,
@@ -3937,7 +4000,85 @@ class PostgresStateRepository(StateRepository):
         actor: str,
         category: str = "",
     ) -> dict[str, Any]:
-        raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
+        if category:
+            unmatched_review.validate_category(category)
+        team_id = local_simulation.current_team_id()
+        with self._session() as snapshot_session:
+            snapshot_record = snapshot_session.scalar(
+                select(UnmatchedRecord).where(
+                    UnmatchedRecord.team_id == team_id,
+                    UnmatchedRecord.legacy_id == unmatched_id,
+                    UnmatchedRecord.status == "open",
+                )
+            )
+            if snapshot_record is None:
+                raise KeyError(unmatched_id)
+            snapshot_review = unmatched_review.build_review(_unmatched_payload(snapshot_record))
+            snapshot_photo = unmatched_review.find_review_photo(snapshot_review, photo_id)
+            if category:
+                snapshot_photo["category"] = category
+            snapshot_version = int(snapshot_review.get("version") or 0)
+            scan_photo = deepcopy(snapshot_photo)
+            scan_context = deepcopy(unmatched_review.barcode_context(snapshot_review))
+
+        scan_result = photo_barcode_check.check_photo_barcode(
+            {**scan_photo, "image_url": scan_photo["source_url"]},
+            scan_context,
+            use_ocr=True,
+        )
+
+        with self._session() as session:
+            try:
+                record = session.scalar(
+                    select(UnmatchedRecord)
+                    .where(
+                        UnmatchedRecord.team_id == team_id,
+                        UnmatchedRecord.legacy_id == unmatched_id,
+                        UnmatchedRecord.status == "open",
+                    )
+                    .with_for_update()
+                )
+                if record is None:
+                    raise KeyError(unmatched_id)
+                review = unmatched_review.build_review(_unmatched_payload(record))
+                unmatched_review.require_version(review, snapshot_version)
+                photo = unmatched_review.find_review_photo(review, photo_id)
+                before_photo = deepcopy(photo)
+                if category:
+                    photo["category"] = category
+                photo.update(deepcopy(scan_result))
+                now = datetime.now(UTC).isoformat()
+                photo["barcode_rescanned_by"] = actor
+                photo["barcode_rescanned_at"] = now
+                review["version"] = snapshot_version + 1
+                review["updated_at"] = now
+                record.payload = {**(record.payload or {}), "temporary_review": review}
+                session.add(
+                    AuditLog(
+                        team_id=team_id,
+                        legacy_id=f"unmatched-review-rescan-{uuid4()}",
+                        actor_username=actor,
+                        action="unmatched_review_barcode_rescan",
+                        entity_type="unmatched_record",
+                        entity_id=record.id,
+                        before_data={"photo": before_photo, "review_version": snapshot_version},
+                        after_data={"photo": deepcopy(photo), "review_version": review["version"]},
+                        payload={
+                            "unmatched_id": unmatched_id,
+                            "photo_id": photo_id,
+                            "category": photo.get("category") or "",
+                        },
+                    )
+                )
+                session.commit()
+                return {
+                    "record": _unmatched_payload(record),
+                    "review": deepcopy(review),
+                    "photo": deepcopy(photo),
+                }
+            except Exception:
+                session.rollback()
+                raise
 
     def confirm_unmatched_review(
         self,
@@ -3947,7 +4088,52 @@ class PostgresStateRepository(StateRepository):
         expected_version: int,
         confirmed: bool = True,
     ) -> dict[str, Any]:
-        raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            try:
+                record = session.scalar(
+                    select(UnmatchedRecord)
+                    .where(
+                        UnmatchedRecord.team_id == team_id,
+                        UnmatchedRecord.legacy_id == unmatched_id,
+                        UnmatchedRecord.status == "open",
+                    )
+                    .with_for_update()
+                )
+                if record is None:
+                    raise KeyError(unmatched_id)
+                review = unmatched_review.build_review(_unmatched_payload(record))
+                unmatched_review.require_version(review, expected_version)
+                before = deepcopy(review)
+                reviewed_at = datetime.now(UTC).isoformat()
+                review["manual_confirmed"] = bool(confirmed)
+                review["reviewer"] = actor
+                review["reviewed_at"] = reviewed_at
+                review["version"] = expected_version + 1
+                record.payload = {**(record.payload or {}), "temporary_review": review}
+                session.add(
+                    AuditLog(
+                        team_id=team_id,
+                        legacy_id=f"unmatched-review-confirmed-{uuid4()}",
+                        actor_username=actor,
+                        action="unmatched_review_confirmed",
+                        entity_type="unmatched_record",
+                        entity_id=record.id,
+                        before_data=before,
+                        after_data=deepcopy(review),
+                        payload={
+                            "unmatched_id": unmatched_id,
+                            "confirmed": bool(confirmed),
+                            "before_version": expected_version,
+                            "after_version": review["version"],
+                        },
+                    )
+                )
+                session.commit()
+                return {"record": _unmatched_payload(record), "review": deepcopy(review)}
+            except Exception:
+                session.rollback()
+                raise
 
     def list_replacement_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         with self._session() as session:

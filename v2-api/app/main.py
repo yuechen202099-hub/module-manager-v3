@@ -102,6 +102,14 @@ def create_app() -> FastAPI:
             if path.endswith("/terminal"):
                 return {"admin"}, "Administrator role required"
             return {"reviewer", "admin"}, "Reviewer or administrator role required"
+        if path.startswith("/local-test/unmatched/"):
+            if method == "POST" and path.endswith("/finalize-match"):
+                return {"admin"}, "Administrator role required"
+            if (
+                (method == "PATCH" and path.endswith("/review"))
+                or (method == "POST" and path.endswith(("/confirm", "/rescan")))
+            ):
+                return {"reviewer", "admin"}, "Reviewer or administrator role required"
         return set(), ""
 
     def production_auth_rejection(request: Request):

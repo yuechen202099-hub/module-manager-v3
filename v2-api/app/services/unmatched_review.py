@@ -10,6 +10,7 @@ from app.services.matching import build_total_catalog_match_key
 REVIEW_SCHEMA_VERSION = 1
 REVIEW_METADATA_FIELDS = {"meter_no", "collector", "module_asset_no"}
 PHOTO_UPDATE_FIELDS = {"category"}
+REVIEW_STATES = {"pending", "reviewed"}
 INVALID_TERMINALS = {"", "00000000"}
 PHOTO_EVIDENCE_FIELDS = (
     "barcode_check_status",
@@ -169,6 +170,11 @@ def validate_category(category: str) -> None:
         raise ValueError(f"Unsupported photo category: {category}")
 
 
+def validate_state(state: str) -> None:
+    if state not in REVIEW_STATES:
+        raise ValueError(f"Unsupported review state: {state}")
+
+
 def stable_photo_id(unmatched_id: str, index: int, source_url: str) -> str:
     digest = hashlib.sha256(f"{unmatched_id}|{index}|{source_url}".encode("utf-8")).hexdigest()[:16]
     return f"unmatched-photo-{digest}"
@@ -235,6 +241,7 @@ def apply_review_patch(
     photo_updates: list[dict[str, Any]],
     state: str,
 ) -> dict[str, Any]:
+    validate_state(state)
     if int(review.get("version") or 0) != expected_version:
         raise ReviewVersionConflict("Unmatched review was updated by another user")
     updated = copy.deepcopy(review)
@@ -249,7 +256,7 @@ def apply_review_patch(
             if key == "category":
                 validate_category(str(patch[key] or ""))
             photo[key] = str(patch[key])
-    updated["state"] = state if state in {"pending", "reviewed"} else "pending"
+    updated["state"] = state
     updated["reviewer"] = actor
     updated["updated_at"] = datetime.now(UTC).isoformat()
     updated["version"] = expected_version + 1

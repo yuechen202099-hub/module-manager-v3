@@ -413,6 +413,242 @@ class FinalizeFakeSession:
         return None
 
 
+class ReviewFakeSession(FinalizeFakeSession):
+    def __init__(self, record: SimpleNamespace, *, fail_commit: bool = False):
+        super().__init__(record, fail_commit=fail_commit)
+        self.active = False
+
+    def __enter__(self):
+        self.active = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.active = False
+        return False
+
+
+def _review_photo_id(record: SimpleNamespace) -> str:
+    review = repository.unmatched_review.build_review(repository._unmatched_payload(record))
+    return review["photos"][0]["id"]
+
+
+def test_postgres_get_unmatched_review_reads_record_without_lock_or_commit() -> None:
+    record = _postgres_finalize_record()
+    fake_session = ReviewFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+    result = TestPostgresRepository().get_unmatched_review(record.legacy_id)
+
+    compiled = str(fake_session.statements[0].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" not in compiled
+    assert result["record"]["unmatched_id"] == record.legacy_id
+    assert result["review"]["version"] == 1
+    assert result["review"]["photos"][0]["source_url"] == "https://photos.example/1.jpg"
+    assert fake_session.commit_calls == 0
+    assert fake_session.rollback_calls == 0
+
+
+def test_postgres_save_unmatched_review_locks_and_uses_single_audit_and_commit() -> None:
+    record = _postgres_finalize_record()
+    fake_session = ReviewFakeSession(record)
+    photo_id = _review_photo_id(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+    result = TestPostgresRepository().save_unmatched_review(
+        record.legacy_id,
+        actor="reviewer-a",
+        expected_version=1,
+        metadata={"meter_no": "120000912474", "terminal": "00000000"},
+        photo_updates=[{"id": photo_id, "category": "collector_barcode", "source_url": "tampered"}],
+        state="reviewed",
+    )
+
+    compiled = str(fake_session.statements[0].compile(dialect=postgresql.dialect()))
+    audits = [item for item in fake_session.staged if isinstance(item, repository.AuditLog)]
+    assert "FOR UPDATE" in compiled
+    assert fake_session.commit_calls == 1
+    assert fake_session.rollback_calls == 0
+    assert len(audits) == 1
+    assert audits[0].action == "unmatched_review_saved"
+    assert audits[0].actor_username == "reviewer-a"
+    assert result["review"]["version"] == 2
+    assert result["review"]["meter_no"] == "120000912474"
+    assert result["review"]["photos"][0]["category"] == "collector_barcode"
+    assert result["review"]["photos"][0]["source_url"] == "https://photos.example/1.jpg"
+    assert "terminal" not in result["review"]
+
+
+def test_postgres_save_unmatched_review_version_conflict_rolls_back_without_mutation() -> None:
+    record = _postgres_finalize_record(version=2)
+    before = deepcopy(vars(record))
+    fake_session = ReviewFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+    with pytest.raises(repository.unmatched_review.ReviewVersionConflict):
+        TestPostgresRepository().save_unmatched_review(
+            record.legacy_id,
+            actor="reviewer-a",
+            expected_version=1,
+            metadata={"meter_no": "120000912474"},
+        )
+
+    assert fake_session.commit_calls == 0
+    assert fake_session.rollback_calls == 1
+    assert fake_session.staged == []
+    assert vars(record) == before
+
+
+def test_postgres_save_unmatched_review_rolls_back_on_commit_failure() -> None:
+    record = _postgres_finalize_record()
+    before = deepcopy(vars(record))
+    fake_session = ReviewFakeSession(record, fail_commit=True)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+    with pytest.raises(RuntimeError, match="late PostgreSQL commit failure"):
+        TestPostgresRepository().save_unmatched_review(
+            record.legacy_id,
+            actor="reviewer-a",
+            expected_version=1,
+            metadata={"collector": "C002"},
+        )
+
+    assert fake_session.commit_attempts == 1
+    assert fake_session.commit_calls == 0
+    assert fake_session.rollback_calls == 1
+    assert any(isinstance(item, repository.AuditLog) for item in fake_session.rolled_back_staged)
+    assert vars(record) == before
+
+
+def test_postgres_rescan_unmatched_review_scans_outside_session_then_relocks_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _postgres_finalize_record()
+    photo_id = _review_photo_id(record)
+    sessions: list[ReviewFakeSession] = []
+    scan_calls = []
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            session = ReviewFakeSession(record)
+            sessions.append(session)
+            return session
+
+    def fake_scan(photo, context, *, use_ocr=False):
+        assert len(sessions) == 1
+        assert sessions[0].active is False
+        scan_calls.append((deepcopy(photo), deepcopy(context), use_ocr))
+        return {
+            "barcode_check_status": "matched",
+            "barcode_check_method": "barcode_qr_ocr",
+            "barcode_check_matched_value": "120000912473",
+            "qr_values": ["120000912473"],
+        }
+
+    monkeypatch.setattr(repository.photo_barcode_check, "check_photo_barcode", fake_scan)
+
+    result = TestPostgresRepository().rescan_unmatched_review_photo(
+        record.legacy_id,
+        photo_id,
+        actor="reviewer-a",
+        category="collector_barcode",
+    )
+
+    assert len(sessions) == 2
+    snapshot_sql = str(sessions[0].statements[0].compile(dialect=postgresql.dialect()))
+    persistence_sql = str(sessions[1].statements[0].compile(dialect=postgresql.dialect()))
+    audits = [item for item in sessions[1].staged if isinstance(item, repository.AuditLog)]
+    assert "FOR UPDATE" not in snapshot_sql
+    assert "FOR UPDATE" in persistence_sql
+    assert sessions[0].commit_calls == 0
+    assert sessions[1].commit_calls == 1
+    assert sessions[1].rollback_calls == 0
+    assert len(audits) == 1
+    assert audits[0].action == "unmatched_review_barcode_rescan"
+    assert scan_calls[0][0]["category"] == "collector_barcode"
+    assert scan_calls[0][2] is True
+    assert result["review"]["version"] == 2
+    assert result["photo"]["barcode_check_status"] == "matched"
+    assert result["photo"]["barcode_rescanned_by"] == "reviewer-a"
+
+
+def test_postgres_rescan_unmatched_review_rejects_version_drift_before_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _postgres_finalize_record()
+    before_scan = deepcopy(vars(record))
+    photo_id = _review_photo_id(record)
+    sessions: list[ReviewFakeSession] = []
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            session = ReviewFakeSession(record)
+            sessions.append(session)
+            return session
+
+    def drifting_scan(photo, context, *, use_ocr=False):
+        drifted_review = deepcopy(record.payload["temporary_review"])
+        drifted_review["version"] = 2
+        record.payload = {**record.payload, "temporary_review": drifted_review}
+        return {"barcode_check_status": "matched"}
+
+    monkeypatch.setattr(repository.photo_barcode_check, "check_photo_barcode", drifting_scan)
+
+    with pytest.raises(repository.unmatched_review.ReviewVersionConflict):
+        TestPostgresRepository().rescan_unmatched_review_photo(
+            record.legacy_id,
+            photo_id,
+            actor="reviewer-a",
+            category="collector_barcode",
+        )
+
+    assert len(sessions) == 2
+    assert sessions[1].commit_calls == 0
+    assert sessions[1].rollback_calls == 1
+    assert sessions[1].staged == []
+    assert record.payload["temporary_review"]["version"] == 2
+    assert record.payload["temporary_review"] != before_scan["payload"]["temporary_review"]
+
+
+def test_postgres_confirm_unmatched_review_locks_and_uses_single_audit_and_commit() -> None:
+    record = _postgres_finalize_record()
+    fake_session = ReviewFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+    result = TestPostgresRepository().confirm_unmatched_review(
+        record.legacy_id,
+        actor="reviewer-a",
+        expected_version=1,
+        confirmed=True,
+    )
+
+    compiled = str(fake_session.statements[0].compile(dialect=postgresql.dialect()))
+    audits = [item for item in fake_session.staged if isinstance(item, repository.AuditLog)]
+    assert "FOR UPDATE" in compiled
+    assert fake_session.commit_calls == 1
+    assert fake_session.rollback_calls == 0
+    assert len(audits) == 1
+    assert audits[0].action == "unmatched_review_confirmed"
+    assert result["review"]["version"] == 2
+    assert result["review"]["manual_confirmed"] is True
+    assert result["review"]["reviewer"] == "reviewer-a"
+    assert "formal_scan_pass" not in result["review"]
+
+
 def test_postgres_finalize_unmatched_uses_for_update_and_single_commit() -> None:
     record = _postgres_finalize_record()
     fake_session = FinalizeFakeSession(record)

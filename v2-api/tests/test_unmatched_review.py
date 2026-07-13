@@ -39,6 +39,23 @@ def test_apply_review_patch_rejects_stale_version() -> None:
         )
 
 
+def test_apply_review_patch_rejects_unknown_state_without_mutating_source() -> None:
+    review = unmatched_review.build_review(sample_record())
+    source_snapshot = copy.deepcopy(review)
+
+    with pytest.raises(ValueError, match="Unsupported review state"):
+        unmatched_review.apply_review_patch(
+            review,
+            actor="reviewer-a",
+            expected_version=1,
+            metadata={"meter_no": "120000912474"},
+            photo_updates=[],
+            state="invalid",
+        )
+
+    assert review == source_snapshot
+
+
 def test_apply_review_patch_updates_only_allowed_fields() -> None:
     review = unmatched_review.build_review(sample_record())
     photo_id = review["photos"][0]["id"]

@@ -1,6 +1,7 @@
 import html
 import importlib.util
 import time
+from copy import deepcopy
 from datetime import datetime
 from io import BytesIO
 from threading import Event, Thread
@@ -18,7 +19,7 @@ from app.core.config import settings
 from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
 from app.services.ezcodes_scheduler import sync_manager
-from app.services import account_store, local_simulation, photo_storage, unmatched_review
+from app.services import account_store, local_simulation, photo_storage, state_repository, unmatched_review
 from app.services.photo_storage import resolve_photo_for_response
 
 
@@ -203,6 +204,57 @@ class FakeUnmatchedReviewRepository:
         return {"group": {"id": "group-1"}, "attached": False, "actor": actor}
 
 
+class ApiReviewSession:
+    def __init__(self, record: SimpleNamespace, tracker: dict) -> None:
+        self.record = record
+        self.record_snapshot = deepcopy(vars(record))
+        self.tracker = tracker
+        self.statements = []
+        self.staged = []
+
+    def __enter__(self):
+        self.tracker["active_sessions"] += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.tracker["active_sessions"] -= 1
+        return False
+
+    def scalar(self, statement):
+        self.statements.append(statement)
+        return self.record
+
+    def add(self, value):
+        self.staged.append(value)
+        self.tracker["staged"].append(value)
+
+    def commit(self):
+        self.tracker["commits"] += 1
+
+    def rollback(self):
+        self.tracker["rollbacks"] += 1
+        vars(self.record).clear()
+        vars(self.record).update(deepcopy(self.record_snapshot))
+
+
+def postgres_review_record() -> SimpleNamespace:
+    return SimpleNamespace(
+        id="11111111-1111-1111-1111-111111111111",
+        legacy_id="unmatched-1",
+        team_id="north-team-01",
+        record_type="scan",
+        status="open",
+        terminal="",
+        meter_no="120000912473",
+        meter_match_key="0000912473",
+        barcode="120000912473",
+        collector="C001",
+        module_asset_no="M001",
+        address="review road",
+        payload={"photo_urls": ["https://photos.example/review.jpg"]},
+    )
+
+
 def test_production_unmatched_review_role_matrix(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
     repository = FakeUnmatchedReviewRepository()
@@ -243,6 +295,157 @@ def test_production_unmatched_review_role_matrix(monkeypatch, tmp_path) -> None:
         assert production_client.request(method.upper(), path, headers=headers["reviewer"], json=body).status_code == 200
         assert production_client.request(method.upper(), path, headers=headers["admin"], json=body).status_code == 200
     assert production_client.post(finalize_path, headers=headers["admin"], json=finalize_body).status_code == 200
+
+
+def test_production_unmatched_review_rejects_wrong_roles_before_malformed_body_validation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeUnmatchedReviewRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    malformed_headers = {"Content-Type": "application/json"}
+
+    constructor_response = production_client.patch(
+        "/local-test/unmatched/unmatched-1/review",
+        headers={**headers["constructor"], **malformed_headers},
+        content=b"{",
+    )
+    reviewer_finalize_response = production_client.post(
+        "/local-test/unmatched/unmatched-1/finalize-match",
+        headers={**headers["reviewer"], **malformed_headers},
+        content=b"{",
+    )
+
+    assert constructor_response.status_code == 403
+    assert reviewer_finalize_response.status_code == 403
+    assert repository.calls == []
+
+
+def test_unmatched_rescan_accepts_json_category_and_rejects_invalid(monkeypatch) -> None:
+    repository = FakeUnmatchedReviewRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    accepted = client.post(
+        "/local-test/unmatched/unmatched-1/photos/photo-1/rescan",
+        json={"category": "collector_barcode"},
+    )
+
+    assert accepted.status_code == 200
+    rescan_calls = [call for call in repository.calls if call["method"] == "rescan"]
+    assert rescan_calls == [
+        {
+            "method": "rescan",
+            "actor": "local-reviewer",
+            "photo_id": "photo-1",
+            "category": "collector_barcode",
+        }
+    ]
+
+    invalid = client.post(
+        "/local-test/unmatched/unmatched-1/photos/photo-1/rescan",
+        json={"category": "not-a-category"},
+    )
+
+    assert invalid.status_code == 400
+    assert [call for call in repository.calls if call["method"] == "rescan"] == rescan_calls
+
+
+def test_production_unmatched_review_routes_use_postgres_repository_transactions(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    record = postgres_review_record()
+    tracker = {"active_sessions": 0, "commits": 0, "rollbacks": 0, "staged": [], "sessions": []}
+    scan_categories = []
+
+    class TestPostgresRepository(state_repository.PostgresStateRepository):
+        def _session(self):
+            session = ApiReviewSession(record, tracker)
+            tracker["sessions"].append(session)
+            return session
+
+    def fake_scan(photo, context, *, use_ocr=False):
+        assert tracker["active_sessions"] == 0
+        scan_categories.append(photo["category"])
+        return {
+            "barcode_check_status": "matched",
+            "barcode_check_method": "barcode_qr_ocr",
+            "barcode_check_matched_value": context["meter_no"],
+        }
+
+    postgres_repository = TestPostgresRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: postgres_repository)
+    monkeypatch.setattr(state_repository.local_simulation, "current_team_id", lambda: "north-team-01")
+    monkeypatch.setattr(state_repository.photo_barcode_check, "check_photo_barcode", fake_scan)
+
+    detail = production_client.get(
+        "/local-test/unmatched/unmatched-1/review",
+        headers=headers["reviewer"],
+    )
+    assert detail.status_code == 200
+    photo_id = detail.json()["data"]["review"]["photos"][0]["id"]
+
+    saved = production_client.patch(
+        "/local-test/unmatched/unmatched-1/review",
+        headers=headers["reviewer"],
+        json={
+            "expected_version": 1,
+            "metadata": {"collector": "C002"},
+            "photo_updates": [],
+            "state": "reviewed",
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["data"]["review"]["version"] == 2
+
+    before_invalid_state = deepcopy(record.payload)
+    session_count = len(tracker["sessions"])
+    invalid_state = production_client.patch(
+        "/local-test/unmatched/unmatched-1/review",
+        headers=headers["reviewer"],
+        json={"expected_version": 2, "state": "invalid"},
+    )
+    assert invalid_state.status_code == 400
+    assert record.payload == before_invalid_state
+    assert len(tracker["sessions"]) == session_count
+
+    invalid_category = production_client.post(
+        f"/local-test/unmatched/unmatched-1/photos/{photo_id}/rescan",
+        headers=headers["reviewer"],
+        json={"category": "not-a-category"},
+    )
+    assert invalid_category.status_code == 400
+    assert len(tracker["sessions"]) == session_count
+
+    rescanned = production_client.post(
+        f"/local-test/unmatched/unmatched-1/photos/{photo_id}/rescan",
+        headers=headers["reviewer"],
+        json={"category": "collector_barcode"},
+    )
+    assert rescanned.status_code == 200
+    assert rescanned.json()["data"]["review"]["version"] == 3
+    assert rescanned.json()["data"]["photo"]["category"] == "collector_barcode"
+    assert scan_categories == ["collector_barcode"]
+
+    confirmed = production_client.post(
+        "/local-test/unmatched/unmatched-1/confirm",
+        headers=headers["reviewer"],
+        json={"expected_version": 3, "confirmed": True},
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["data"]["review"]["version"] == 4
+    assert confirmed.json()["data"]["review"]["manual_confirmed"] is True
+
+    audits = [item for item in tracker["staged"] if isinstance(item, state_repository.AuditLog)]
+    assert tracker["commits"] == 3
+    assert tracker["rollbacks"] == 0
+    assert [audit.action for audit in audits] == [
+        "unmatched_review_saved",
+        "unmatched_review_barcode_rescan",
+        "unmatched_review_confirmed",
+    ]
 
 
 def test_production_unmatched_review_binds_actor_to_signed_in_reviewer(monkeypatch, tmp_path) -> None:
