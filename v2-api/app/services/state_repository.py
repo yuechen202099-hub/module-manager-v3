@@ -1458,6 +1458,28 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def rescan_unmatched_review_photo(
+        self,
+        unmatched_id: str,
+        photo_id: str,
+        *,
+        actor: str,
+        category: str = "",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def confirm_unmatched_review(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        confirmed: bool = True,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_replacement_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1968,6 +1990,36 @@ class JsonStateRepository(StateRepository):
             metadata=metadata,
             photo_updates=photo_updates,
             state=state,
+        )
+
+    def rescan_unmatched_review_photo(
+        self,
+        unmatched_id: str,
+        photo_id: str,
+        *,
+        actor: str,
+        category: str = "",
+    ) -> dict[str, Any]:
+        return local_simulation.rescan_unmatched_review_photo(
+            unmatched_id,
+            photo_id,
+            actor=actor,
+            category=category,
+        )
+
+    def confirm_unmatched_review(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        confirmed: bool = True,
+    ) -> dict[str, Any]:
+        return local_simulation.confirm_unmatched_review(
+            unmatched_id,
+            actor=actor,
+            expected_version=expected_version,
+            confirmed=confirmed,
         )
 
     def list_replacement_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
@@ -3546,6 +3598,26 @@ class PostgresStateRepository(StateRepository):
         metadata: dict[str, Any] | None = None,
         photo_updates: list[dict[str, Any]] | None = None,
         state: str = "pending",
+    ) -> dict[str, Any]:
+        raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
+
+    def rescan_unmatched_review_photo(
+        self,
+        unmatched_id: str,
+        photo_id: str,
+        *,
+        actor: str,
+        category: str = "",
+    ) -> dict[str, Any]:
+        raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
+
+    def confirm_unmatched_review(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        confirmed: bool = True,
     ) -> dict[str, Any]:
         raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
 

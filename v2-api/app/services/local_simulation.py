@@ -1649,6 +1649,92 @@ def save_unmatched_review(
     raise KeyError(unmatched_id)
 
 
+def rescan_unmatched_review_photo(
+    unmatched_id: str,
+    photo_id: str,
+    *,
+    actor: str,
+    category: str = "",
+) -> dict[str, Any]:
+    current_state = get_state()
+    for index, raw_record in enumerate(current_state.get("scan_unmatched", [])):
+        record = ensure_unmatched_record(raw_record)
+        if record["unmatched_id"] != unmatched_id:
+            continue
+        review = unmatched_review.build_review(record)
+        photo = unmatched_review.find_review_photo(review, photo_id)
+        if category:
+            unmatched_review.validate_category(category)
+            photo["category"] = category
+        result = photo_barcode_check.check_photo_barcode(
+            {**photo, "image_url": photo["source_url"]},
+            unmatched_review.barcode_context(review),
+            use_ocr=True,
+        )
+        photo.update(result)
+        photo["barcode_rescanned_by"] = actor
+        photo["barcode_rescanned_at"] = now_iso()
+        previous_version = int(review.get("version") or 0)
+        review["version"] = previous_version + 1
+        record["temporary_review"] = review
+        current_state["scan_unmatched"][index] = record
+        append_audit_event(
+            "unmatched_review_barcode_rescan",
+            actor,
+            {
+                "unmatched_id": unmatched_id,
+                "photo_id": photo_id,
+                "result": copy.deepcopy(result),
+                "before_version": previous_version,
+                "after_version": review["version"],
+            },
+        )
+        save_all_team_states()
+        return {
+            "record": copy.deepcopy(record),
+            "review": copy.deepcopy(review),
+            "photo": copy.deepcopy(photo),
+        }
+    raise KeyError(unmatched_id)
+
+
+def confirm_unmatched_review(
+    unmatched_id: str,
+    *,
+    actor: str,
+    expected_version: int,
+    confirmed: bool = True,
+) -> dict[str, Any]:
+    current_state = get_state()
+    for index, raw_record in enumerate(current_state.get("scan_unmatched", [])):
+        record = ensure_unmatched_record(raw_record)
+        if record["unmatched_id"] != unmatched_id:
+            continue
+        review = unmatched_review.build_review(record)
+        previous_version = int(review.get("version") or 0)
+        if previous_version != expected_version:
+            raise unmatched_review.ReviewVersionConflict("Unmatched review was updated by another user")
+        review["manual_confirmed"] = bool(confirmed)
+        review["reviewer"] = actor
+        review["reviewed_at"] = now_iso()
+        review["version"] = previous_version + 1
+        record["temporary_review"] = review
+        current_state["scan_unmatched"][index] = record
+        append_audit_event(
+            "unmatched_review_confirmed",
+            actor,
+            {
+                "unmatched_id": unmatched_id,
+                "confirmed": bool(confirmed),
+                "before_version": previous_version,
+                "after_version": review["version"],
+            },
+        )
+        save_all_team_states()
+        return {"record": copy.deepcopy(record), "review": copy.deepcopy(review)}
+    raise KeyError(unmatched_id)
+
+
 def delete_unmatched_record(unmatched_id: str, actor: str, reason: str = "") -> dict[str, Any]:
     state = get_state()
     kept = []

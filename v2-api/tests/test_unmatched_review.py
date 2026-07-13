@@ -98,3 +98,17 @@ def test_apply_review_patch_enforces_photo_update_fields_allowlist(monkeypatch: 
     )
 
     assert updated["photos"][0]["category"] == "unclassified"
+
+
+def test_barcode_context_uses_only_temporary_review_fields() -> None:
+    review = unmatched_review.build_review(sample_record())
+
+    context = unmatched_review.barcode_context(review)
+
+    assert context == {
+        "meter_no": "120000912473",
+        "meter_match_key": "0000912473",
+        "collector": "C001",
+        "module_asset_no": "M001",
+        "photos": review["photos"],
+    }

@@ -4,6 +4,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from app.services.matching import build_total_catalog_match_key
+
 
 REVIEW_SCHEMA_VERSION = 1
 REVIEW_METADATA_FIELDS = {"meter_no", "collector", "module_asset_no"}
@@ -66,6 +68,17 @@ def find_review_photo(review: dict[str, Any], photo_id: str) -> dict[str, Any]:
     if photo is None:
         raise KeyError(photo_id)
     return photo
+
+
+def barcode_context(review: dict[str, Any]) -> dict[str, Any]:
+    meter_no = str(review.get("meter_no") or "")
+    return {
+        "meter_no": meter_no,
+        "meter_match_key": build_total_catalog_match_key(meter_no),
+        "collector": str(review.get("collector") or ""),
+        "module_asset_no": str(review.get("module_asset_no") or ""),
+        "photos": review.get("photos") or [],
+    }
 
 
 def apply_review_patch(
