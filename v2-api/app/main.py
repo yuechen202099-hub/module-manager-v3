@@ -76,33 +76,52 @@ def create_app() -> FastAPI:
         "/ezcodes",
     )
 
-    @app.middleware("http")
-    async def require_production_auth(request: Request, call_next):
-        if (
+    def required_production_write_roles(request: Request) -> tuple[set[str], str]:
+        path = request.url.path.rstrip("/")
+        method = request.method.upper()
+        if method in {"GET", "HEAD", "OPTIONS"} or not path.startswith("/local-test"):
+            return set(), ""
+        if path in {"/local-test/scan/clear", "/local-test/tasks/release-all"}:
+            return {"admin"}, "Administrator role required"
+        if path.startswith("/local-test/construction/"):
+            admin_actions = (
+                "/open",
+                "/close",
+                "/assign",
+                "/unassign",
+            )
+            if (
+                path.startswith("/local-test/construction/tasks/")
+                or path.startswith("/local-test/construction/exception-orders/")
+            ) and path.endswith(admin_actions):
+                return {"admin"}, "Administrator role required"
+            return {"constructor", "admin"}, "Constructor or administrator role required"
+        if path.startswith("/local-test/tasks/"):
+            return {"reviewer", "admin"}, "Reviewer or administrator role required"
+        if path.startswith("/local-test/groups/"):
+            if path.endswith("/terminal"):
+                return {"admin"}, "Administrator role required"
+            return {"reviewer", "admin"}, "Reviewer or administrator role required"
+        return set(), ""
+
+    def production_auth_rejection(request: Request):
+        if not (
             production_mode
             and request.method.upper() != "OPTIONS"
             and request.url.path.startswith(protected_prefixes)
         ):
-            authorization = request.headers.get("authorization", "")
-            if not authorization.lower().startswith("bearer "):
-                return error_response(request, "authentication_required", "Authentication required.", status_code=401)
-            try:
-                request.state.auth = decode_access_token(authorization.split(" ", 1)[1].strip())
-            except ValueError:
-                return error_response(request, "invalid_token", "Invalid access token.", status_code=401)
-            request_path = request.url.path.rstrip("/")
-            required_roles: set[str] = set()
-            role_detail = ""
-            if request.method.upper() == "POST":
-                if request_path.startswith("/local-test/groups/") and request_path.endswith("/photos/upload-images"):
-                    required_roles = {"reviewer", "admin"}
-                    role_detail = "Reviewer or administrator role required"
-                elif request_path.startswith("/local-test/construction/groups/") and request_path.endswith("/upload-batch"):
-                    required_roles = {"constructor", "admin"}
-                    role_detail = "Constructor or administrator role required"
-            if required_roles and set(request.state.auth.get("roles") or []).isdisjoint(required_roles):
-                return error_response(request, "forbidden", role_detail, status_code=403)
-        return await call_next(request)
+            return None
+        authorization = request.headers.get("authorization", "")
+        if not authorization.lower().startswith("bearer "):
+            return error_response(request, "authentication_required", "Authentication required.", status_code=401)
+        try:
+            request.state.auth = decode_access_token(authorization.split(" ", 1)[1].strip())
+        except ValueError:
+            return error_response(request, "invalid_token", "Invalid access token.", status_code=401)
+        required_roles, role_detail = required_production_write_roles(request)
+        if required_roles and set(request.state.auth.get("roles") or []).isdisjoint(required_roles):
+            return error_response(request, "forbidden", role_detail, status_code=403)
+        return None
 
     @app.middleware("http")
     async def block_legacy_static_html(request: Request, call_next):
@@ -112,6 +131,9 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def persist_local_test_state(request: Request, call_next):
+        rejection = production_auth_rejection(request)
+        if rejection is not None:
+            return rejection
         is_json_write = (
             request.url.path.startswith("/local-test")
             and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
@@ -120,14 +142,10 @@ def create_app() -> FastAPI:
         transaction = None
         token = None
         if is_json_write:
-            team_id = request.headers.get("X-Team-Id") or request.query_params.get("team_id") or ""
-            authorization = request.headers.get("authorization", "")
-            if authorization.lower().startswith("bearer "):
-                try:
-                    payload = decode_access_token(authorization.split(" ", 1)[1].strip())
-                    team_id = payload.get("team_id") or team_id
-                except ValueError:
-                    pass
+            if production_mode:
+                team_id = str(request.state.auth.get("team_id") or "")
+            else:
+                team_id = request.headers.get("X-Team-Id") or request.query_params.get("team_id") or ""
             transaction = await run_in_threadpool(begin_authoritative_json_write, team_id)
             token = activate_authoritative_json_write(transaction)
         try:
@@ -144,7 +162,7 @@ def create_app() -> FastAPI:
                 else:
                     abort_authoritative_json_write(completed_transaction, token)
             return response
-        except Exception:
+        except BaseException:
             if transaction is not None:
                 abort_authoritative_json_write(transaction, token)
             raise

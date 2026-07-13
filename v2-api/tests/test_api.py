@@ -450,6 +450,60 @@ def test_production_local_test_persists_only_successful_writes(monkeypatch, tmp_
         assert persist_calls == ["saved"]
 
 
+def test_fourth_review_production_rejections_do_not_create_team_or_lock_state(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    main_module.settings.state_backend = "json"
+    local_test.settings.state_backend = "json"
+    authenticated_team = "north-team-01"
+    untrusted_team = "task-4-untrusted-header"
+    local_simulation._team_states.pop(authenticated_team, None)
+    local_simulation._team_states.pop(untrusted_team, None)
+    local_simulation._authoritative_write_locks.pop(authenticated_team, None)
+    local_simulation._authoritative_write_locks.pop(untrusted_team, None)
+    begin_calls: list[str] = []
+    original_begin = local_simulation.begin_authoritative_json_write
+
+    def tracked_begin(team_id: str):
+        begin_calls.append(local_simulation.normalize_team_id(team_id))
+        return original_begin(team_id)
+
+    monkeypatch.setattr(main_module, "begin_authoritative_json_write", tracked_begin)
+
+    anonymous = production_client.post(
+        "/local-test/scan/clear",
+        headers={"X-Team-Id": untrusted_team},
+    )
+    wrong_role = production_client.post(
+        "/local-test/scan/clear",
+        headers={**headers["reviewer"], "X-Team-Id": untrusted_team},
+    )
+
+    assert anonymous.status_code == 401
+    assert wrong_role.status_code == 403
+    assert begin_calls == []
+    assert untrusted_team not in local_simulation._team_states
+    assert authenticated_team not in local_simulation._team_states
+    assert untrusted_team not in local_simulation._authoritative_write_locks
+    assert authenticated_team not in local_simulation._authoritative_write_locks
+
+    class FakeRepository:
+        def clear_scan_data(self):
+            return {"summary": {"scan_rows": 0}}
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+    allowed = production_client.post(
+        "/local-test/scan/clear",
+        headers={**headers["admin"], "X-Team-Id": untrusted_team},
+    )
+
+    assert allowed.status_code == 200
+    assert begin_calls == [authenticated_team]
+    assert untrusted_team not in local_simulation._team_states
+    assert authenticated_team in local_simulation._team_states
+    assert untrusted_team not in local_simulation._authoritative_write_locks
+    assert authenticated_team not in local_simulation._authoritative_write_locks
+
+
 def test_json_request_write_waits_for_finalizer_cas_and_preserves_both_writes(monkeypatch) -> None:
     team_id = "task-4-third-review"
     team_token = local_simulation.set_current_team(team_id)

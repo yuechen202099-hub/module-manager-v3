@@ -12,7 +12,7 @@ import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -121,7 +121,12 @@ class AuthoritativeJsonWrite:
     base_state: dict[str, Any]
     working_state: dict[str, Any]
     lock: threading.Lock
+    base_present: bool
     committing: bool = False
+    closed: bool = False
+    context_token: Any = None
+    after_commit_actions: list[Callable[[], None]] = field(default_factory=list)
+    after_commit_keys: set[tuple[Any, ...]] = field(default_factory=set)
 
 
 _current_team_id: ContextVar[str] = ContextVar("local_simulation_team_id", default=DEFAULT_TEAM_ID)
@@ -194,6 +199,7 @@ _state["summary"] = empty_summary()
 _team_states[DEFAULT_TEAM_ID] = _state
 _persistence_lock = threading.RLock()
 _authoritative_write_locks: dict[str, threading.Lock] = {}
+_authoritative_write_lock_users: dict[str, int] = {}
 _authoritative_write_locks_guard = threading.Lock()
 _delivery_cache_executor = ThreadPoolExecutor(max_workers=2)
 _delivery_cache_lock = threading.RLock()
@@ -313,31 +319,92 @@ def get_state() -> dict[str, Any]:
     return state_for_team()
 
 
-def _authoritative_write_lock(team_id: str) -> threading.Lock:
+def _acquire_authoritative_write_lock(team_id: str) -> threading.Lock:
     with _authoritative_write_locks_guard:
-        return _authoritative_write_locks.setdefault(team_id, threading.Lock())
+        lock = _authoritative_write_locks.setdefault(team_id, threading.Lock())
+        _authoritative_write_lock_users[team_id] = _authoritative_write_lock_users.get(team_id, 0) + 1
+    try:
+        lock.acquire()
+    except BaseException:
+        _remove_authoritative_write_lock_user(team_id, lock)
+        raise
+    return lock
+
+
+def _remove_authoritative_write_lock_user(team_id: str, lock: threading.Lock) -> None:
+    with _authoritative_write_locks_guard:
+        remaining = _authoritative_write_lock_users.get(team_id, 1) - 1
+        if remaining <= 0:
+            _authoritative_write_lock_users.pop(team_id, None)
+            if _authoritative_write_locks.get(team_id) is lock:
+                _authoritative_write_locks.pop(team_id, None)
+        else:
+            _authoritative_write_lock_users[team_id] = remaining
+
+
+def _release_authoritative_write_lock(team_id: str, lock: threading.Lock) -> None:
+    try:
+        lock.release()
+    finally:
+        _remove_authoritative_write_lock_user(team_id, lock)
 
 
 def begin_authoritative_json_write(team_id: str | None = None) -> AuthoritativeJsonWrite:
     team = normalize_team_id(team_id or current_team_id())
-    lock = _authoritative_write_lock(team)
-    lock.acquire()
+    lock = _acquire_authoritative_write_lock(team)
     try:
         with _persistence_lock:
-            base_state = copy.deepcopy(state_for_team(team))
+            base_present = team in _team_states
+            source_state = _team_states.get(team)
+            if source_state is None:
+                source_state = blank_state(team)
+                source_state["summary"] = empty_summary()
+                source_state["summary"]["team_id"] = team
+            base_state = copy.deepcopy(source_state)
         return AuthoritativeJsonWrite(
             team_id=team,
             base_state=base_state,
             working_state=copy.deepcopy(base_state),
             lock=lock,
+            base_present=base_present,
         )
-    except Exception:
-        lock.release()
+    except BaseException:
+        _release_authoritative_write_lock(team, lock)
         raise
 
 
 def activate_authoritative_json_write(transaction: AuthoritativeJsonWrite):
-    return _private_team_state.set(transaction)
+    if transaction.closed:
+        raise RuntimeError("Authoritative JSON transaction is closed")
+    token = _private_team_state.set(transaction)
+    transaction.context_token = token
+    return token
+
+
+def _close_authoritative_json_write(transaction: AuthoritativeJsonWrite) -> None:
+    if transaction.closed:
+        return
+    transaction.closed = True
+    try:
+        if transaction.context_token is not None:
+            token = transaction.context_token
+            transaction.context_token = None
+            _private_team_state.reset(token)
+    finally:
+        transaction.after_commit_actions.clear()
+        transaction.after_commit_keys.clear()
+        _release_authoritative_write_lock(transaction.team_id, transaction.lock)
+
+
+def _queue_after_authoritative_commit(
+    transaction: AuthoritativeJsonWrite,
+    key: tuple[Any, ...],
+    action: Callable[[], None],
+) -> None:
+    if key in transaction.after_commit_keys:
+        return
+    transaction.after_commit_keys.add(key)
+    transaction.after_commit_actions.append(action)
 
 
 def finish_authoritative_json_write(
@@ -346,9 +413,13 @@ def finish_authoritative_json_write(
     *,
     persist: Callable[[], None] | None = None,
 ) -> None:
+    after_commit_actions: list[Callable[[], None]] = []
     try:
         with _persistence_lock:
-            if _team_states.get(transaction.team_id) != transaction.base_state:
+            live_present = transaction.team_id in _team_states
+            if live_present != transaction.base_present or (
+                live_present and _team_states.get(transaction.team_id) != transaction.base_state
+            ):
                 raise unmatched_review.ReviewVersionConflict(
                     "Local state changed during authoritative JSON write"
                 )
@@ -361,14 +432,15 @@ def finish_authoritative_json_write(
             if transaction.team_id == DEFAULT_TEAM_ID:
                 global _state
                 _state = transaction.working_state
+            after_commit_actions = list(transaction.after_commit_actions)
     finally:
-        _private_team_state.reset(token)
-        transaction.lock.release()
+        _close_authoritative_json_write(transaction)
+    for action in after_commit_actions:
+        action()
 
 
-def abort_authoritative_json_write(transaction: AuthoritativeJsonWrite, token) -> None:
-    _private_team_state.reset(token)
-    transaction.lock.release()
+def abort_authoritative_json_write(transaction: AuthoritativeJsonWrite, token=None) -> None:
+    _close_authoritative_json_write(transaction)
 
 
 def clear_scan_data() -> dict[str, Any]:
@@ -1182,27 +1254,53 @@ def schedule_delivery_cache_build(group_id: str, team_id: str | None = None, for
     if not any(photo_can_build_delivery_cache(photo) for photo in group.get("photos", [])):
         return
     key = (team, group_id)
-    with _delivery_cache_lock:
-        if key in _delivery_cache_inflight:
-            return
-        _delivery_cache_inflight.add(key)
 
     def worker() -> None:
-        token = set_current_team(team)
+        team_token = set_current_team(team)
+        transaction = None
         try:
-            build_delivery_cache_for_group(group_id, force=force)
-        except Exception:
-            group = get_group(group_id)
-            if group:
-                group["delivery_cache_status"] = "failed"
-                group["delivery_cache_error"] = "delivery cache worker failed"
-                save_all_team_states()
+            transaction = begin_authoritative_json_write(team)
+            activate_authoritative_json_write(transaction)
+            try:
+                build_delivery_cache_for_group(group_id, force=force)
+            except Exception:
+                failed_group = get_group(group_id)
+                if failed_group:
+                    failed_group["delivery_cache_status"] = "failed"
+                    failed_group["delivery_cache_error"] = "delivery cache worker failed"
+                    save_all_team_states()
+            finish_authoritative_json_write(transaction, transaction.context_token)
+        except BaseException as exc:
+            if transaction is not None:
+                abort_authoritative_json_write(transaction)
+            if not isinstance(exc, Exception):
+                raise
         finally:
-            reset_current_team(token)
+            reset_current_team(team_token)
             with _delivery_cache_lock:
                 _delivery_cache_inflight.discard(key)
 
-    _delivery_cache_executor.submit(worker)
+    def submit_worker() -> None:
+        with _delivery_cache_lock:
+            if key in _delivery_cache_inflight:
+                return
+            _delivery_cache_inflight.add(key)
+        try:
+            _delivery_cache_executor.submit(worker)
+        except BaseException:
+            with _delivery_cache_lock:
+                _delivery_cache_inflight.discard(key)
+            raise
+
+    active_transaction = _private_team_state.get()
+    if active_transaction is not None and active_transaction.team_id == team:
+        _queue_after_authoritative_commit(
+            active_transaction,
+            ("delivery-cache", team, group_id),
+            submit_worker,
+        )
+        return
+    submit_worker()
 
 
 def copy_oss_reference(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -1910,8 +2008,8 @@ def finalize_unmatched_match(
         )
 
     transaction = begin_authoritative_json_write(team_id)
-    token = activate_authoritative_json_write(transaction)
     try:
+        token = activate_authoritative_json_write(transaction)
         result = _finalize_unmatched_match_in_state(
             unmatched_id,
             actor=actor,
@@ -1920,10 +2018,8 @@ def finalize_unmatched_match(
         )
         finish_authoritative_json_write(transaction, token)
         return result
-    except Exception:
-        if _private_team_state.get() is transaction:
-            abort_authoritative_json_write(transaction, token)
-        raise
+    finally:
+        abort_authoritative_json_write(transaction)
 
 
 def save_unmatched_review(
