@@ -180,11 +180,29 @@ class FakeUnmatchedReviewRepository:
             raise ValueError("Unsupported review state")
         return {"review": self.review, "actor": actor}
 
-    def rescan_unmatched_review_photo(self, unmatched_id: str, photo_id: str, *, actor: str, category: str = "") -> dict:
-        self.calls.append({"method": "rescan", "actor": actor, "photo_id": photo_id, "category": category})
+    def rescan_unmatched_review_photo(
+        self,
+        unmatched_id: str,
+        photo_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        category: str = "",
+    ) -> dict:
+        self.calls.append(
+            {
+                "method": "rescan",
+                "actor": actor,
+                "photo_id": photo_id,
+                "expected_version": expected_version,
+                "category": category,
+            }
+        )
         review = self._review(unmatched_id)["review"]
         if photo_id != "photo-1":
             raise KeyError(photo_id)
+        if expected_version != review["version"]:
+            raise unmatched_review.ReviewVersionConflict("stale")
         return {"review": review, "actor": actor}
 
     def confirm_unmatched_review(self, unmatched_id: str, *, actor: str, expected_version: int, confirmed: bool = True) -> dict:
@@ -279,7 +297,7 @@ def test_production_unmatched_review_role_matrix(monkeypatch, tmp_path) -> None:
         ("patch", review_path, save_body),
         ("get", candidates_path, None),
         ("get", content_path, None),
-        ("post", rescan_path, {"category": "collector_barcode"}),
+        ("post", rescan_path, {"expected_version": 2, "category": "collector_barcode"}),
         ("post", confirm_path, confirm_body),
     ]
     for method, path, body in requests:
@@ -328,7 +346,7 @@ def test_unmatched_rescan_accepts_json_category_and_rejects_invalid(monkeypatch)
 
     accepted = client.post(
         "/local-test/unmatched/unmatched-1/photos/photo-1/rescan",
-        json={"category": "collector_barcode"},
+        json={"expected_version": 2, "category": "collector_barcode"},
     )
 
     assert accepted.status_code == 200
@@ -338,13 +356,14 @@ def test_unmatched_rescan_accepts_json_category_and_rejects_invalid(monkeypatch)
             "method": "rescan",
             "actor": "local-reviewer",
             "photo_id": "photo-1",
+            "expected_version": 2,
             "category": "collector_barcode",
         }
     ]
 
     invalid = client.post(
         "/local-test/unmatched/unmatched-1/photos/photo-1/rescan",
-        json={"category": "not-a-category"},
+        json={"expected_version": 2, "category": "not-a-category"},
     )
 
     assert invalid.status_code == 400
@@ -359,6 +378,7 @@ def test_unmatched_rescan_version_conflict_returns_409_without_persisting(monkey
             photo_id: str,
             *,
             actor: str,
+            expected_version: int,
             category: str = "",
         ) -> dict:
             self.calls.append(
@@ -366,6 +386,7 @@ def test_unmatched_rescan_version_conflict_returns_409_without_persisting(monkey
                     "method": "rescan",
                     "actor": actor,
                     "photo_id": photo_id,
+                    "expected_version": expected_version,
                     "category": category,
                 }
             )
@@ -377,7 +398,7 @@ def test_unmatched_rescan_version_conflict_returns_409_without_persisting(monkey
 
     response = client.post(
         "/local-test/unmatched/unmatched-1/photos/photo-1/rescan",
-        json={"category": "collector_barcode"},
+        json={"expected_version": 1, "category": "collector_barcode"},
     )
 
     assert response.status_code == 409
@@ -388,6 +409,7 @@ def test_unmatched_rescan_version_conflict_returns_409_without_persisting(monkey
             "method": "rescan",
             "actor": "local-reviewer",
             "photo_id": "photo-1",
+            "expected_version": 1,
             "category": "collector_barcode",
         }
     ]
@@ -456,7 +478,7 @@ def test_production_unmatched_review_routes_use_postgres_repository_transactions
     invalid_category = production_client.post(
         f"/local-test/unmatched/unmatched-1/photos/{photo_id}/rescan",
         headers=headers["reviewer"],
-        json={"category": "not-a-category"},
+        json={"expected_version": 2, "category": "not-a-category"},
     )
     assert invalid_category.status_code == 400
     assert len(tracker["sessions"]) == session_count
@@ -464,7 +486,7 @@ def test_production_unmatched_review_routes_use_postgres_repository_transactions
     rescanned = production_client.post(
         f"/local-test/unmatched/unmatched-1/photos/{photo_id}/rescan",
         headers=headers["reviewer"],
-        json={"category": "collector_barcode"},
+        json={"expected_version": 2, "category": "collector_barcode"},
     )
     assert rescanned.status_code == 200
     assert rescanned.json()["data"]["review"]["version"] == 3
@@ -532,7 +554,7 @@ def test_production_unmatched_review_maps_repository_errors(monkeypatch, tmp_pat
     assert production_client.post(
         "/local-test/unmatched/unmatched-1/photos/missing/rescan",
         headers=headers["reviewer"],
-        json={"category": "collector_barcode"},
+        json={"expected_version": 2, "category": "collector_barcode"},
     ).status_code == 404
     assert production_client.post(
         "/local-test/unmatched/unmatched-1/confirm",

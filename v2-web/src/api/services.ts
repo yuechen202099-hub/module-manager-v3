@@ -302,7 +302,6 @@ type BackendUnmatchedRecord = {
 
 type BackendUnmatchedReviewPhoto = {
   id?: string
-  source_url?: string
   category?: string
   barcode_check_status?: string
   barcode_check_values?: string[]
@@ -334,6 +333,11 @@ type BackendUnmatchedMatchCandidate = {
   meter_no?: string
   address?: string
   match_reasons?: string[]
+}
+
+type BackendUnmatchedMatchCandidates = {
+  total?: number
+  items?: BackendUnmatchedMatchCandidate[]
 }
 
 type BackendReplacementRecord = {
@@ -1097,7 +1101,6 @@ export async function searchGroups(options: { query?: string; terminal?: string;
 function mapUnmatchedReviewPhoto(raw: BackendUnmatchedReviewPhoto): UnmatchedReviewPhoto {
   return {
     id: raw.id || '',
-    sourceUrl: raw.source_url || '',
     category: raw.category || 'unclassified',
     barcodeCheckStatus: raw.barcode_check_status || 'not_checked',
     barcodeCheckValues: Array.isArray(raw.barcode_check_values) ? raw.barcode_check_values.map(String) : [],
@@ -1850,13 +1853,14 @@ export async function fetchUnmatchedReviewPhotoObjectUrl(unmatchedId: string, ph
 export async function rescanUnmatchedReviewPhoto(
   unmatchedId: string,
   photoId: string,
+  expectedVersion: number,
   category = '',
 ): Promise<UnmatchedReviewDetail> {
   const data = await api<BackendUnmatchedReviewResponse>(
     `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/photos/${encodeURIComponent(photoId)}/rescan`,
     {
       method: 'POST',
-      body: JSON.stringify({ category }),
+      body: JSON.stringify({ expected_version: expectedVersion, category }),
     },
   )
   return mapUnmatchedReview(data)
@@ -1878,10 +1882,10 @@ export async function confirmUnmatchedReview(
 }
 
 export async function fetchUnmatchedMatchCandidates(unmatchedId: string): Promise<UnmatchedMatchCandidate[]> {
-  const data = await api<BackendUnmatchedMatchCandidate[]>(
+  const data = await api<BackendUnmatchedMatchCandidates>(
     `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/candidates`,
   )
-  return data.map(mapUnmatchedMatchCandidate)
+  return (data.items || []).map(mapUnmatchedMatchCandidate)
 }
 
 export async function finalizeUnmatchedMatch(unmatchedId: string, candidateKey: string, expectedVersion: number) {

@@ -1482,6 +1482,7 @@ class StateRepository(ABC):
         photo_id: str,
         *,
         actor: str,
+        expected_version: int,
         category: str = "",
     ) -> dict[str, Any]:
         raise NotImplementedError
@@ -2034,12 +2035,14 @@ class JsonStateRepository(StateRepository):
         photo_id: str,
         *,
         actor: str,
+        expected_version: int,
         category: str = "",
     ) -> dict[str, Any]:
         return local_simulation.rescan_unmatched_review_photo(
             unmatched_id,
             photo_id,
             actor=actor,
+            expected_version=expected_version,
             category=category,
         )
 
@@ -3998,6 +4001,7 @@ class PostgresStateRepository(StateRepository):
         photo_id: str,
         *,
         actor: str,
+        expected_version: int,
         category: str = "",
     ) -> dict[str, Any]:
         if category:
@@ -4014,10 +4018,10 @@ class PostgresStateRepository(StateRepository):
             if snapshot_record is None:
                 raise KeyError(unmatched_id)
             snapshot_review = unmatched_review.build_review(_unmatched_payload(snapshot_record))
+            unmatched_review.require_version(snapshot_review, expected_version)
             snapshot_photo = unmatched_review.find_review_photo(snapshot_review, photo_id)
             if category:
                 snapshot_photo["category"] = category
-            snapshot_version = int(snapshot_review.get("version") or 0)
             scan_photo = deepcopy(snapshot_photo)
             scan_context = deepcopy(unmatched_review.barcode_context(snapshot_review))
 
@@ -4041,7 +4045,7 @@ class PostgresStateRepository(StateRepository):
                 if record is None:
                     raise KeyError(unmatched_id)
                 review = unmatched_review.build_review(_unmatched_payload(record))
-                unmatched_review.require_version(review, snapshot_version)
+                unmatched_review.require_version(review, expected_version)
                 photo = unmatched_review.find_review_photo(review, photo_id)
                 before_photo = deepcopy(photo)
                 if category:
@@ -4050,7 +4054,7 @@ class PostgresStateRepository(StateRepository):
                 now = datetime.now(UTC).isoformat()
                 photo["barcode_rescanned_by"] = actor
                 photo["barcode_rescanned_at"] = now
-                review["version"] = snapshot_version + 1
+                review["version"] = expected_version + 1
                 review["updated_at"] = now
                 record.payload = {**(record.payload or {}), "temporary_review": review}
                 session.add(
@@ -4061,7 +4065,7 @@ class PostgresStateRepository(StateRepository):
                         action="unmatched_review_barcode_rescan",
                         entity_type="unmatched_record",
                         entity_id=record.id,
-                        before_data={"photo": before_photo, "review_version": snapshot_version},
+                        before_data={"photo": before_photo, "review_version": expected_version},
                         after_data={"photo": deepcopy(photo), "review_version": review["version"]},
                         payload={
                             "unmatched_id": unmatched_id,

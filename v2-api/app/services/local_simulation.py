@@ -2059,6 +2059,7 @@ def rescan_unmatched_review_photo(
     photo_id: str,
     *,
     actor: str,
+    expected_version: int,
     category: str = "",
 ) -> dict[str, Any]:
     current_state = get_state()
@@ -2067,6 +2068,7 @@ def rescan_unmatched_review_photo(
         if record["unmatched_id"] != unmatched_id:
             continue
         review = unmatched_review.build_review(record)
+        unmatched_review.require_version(review, expected_version)
         photo = unmatched_review.find_review_photo(review, photo_id)
         if category:
             unmatched_review.validate_category(category)
@@ -2079,8 +2081,7 @@ def rescan_unmatched_review_photo(
         photo.update(result)
         photo["barcode_rescanned_by"] = actor
         photo["barcode_rescanned_at"] = now_iso()
-        previous_version = int(review.get("version") or 0)
-        review["version"] = previous_version + 1
+        review["version"] = expected_version + 1
         record["temporary_review"] = review
         current_state["scan_unmatched"][index] = record
         append_audit_event(
@@ -2090,7 +2091,7 @@ def rescan_unmatched_review_photo(
                 "unmatched_id": unmatched_id,
                 "photo_id": photo_id,
                 "result": copy.deepcopy(result),
-                "before_version": previous_version,
+                "before_version": expected_version,
                 "after_version": review["version"],
             },
         )

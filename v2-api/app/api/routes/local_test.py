@@ -996,6 +996,7 @@ class UnmatchedReviewConfirmRequest(BaseModel):
 
 
 class UnmatchedReviewRescanRequest(BaseModel):
+    expected_version: int
     category: str = ""
 
 
@@ -1921,6 +1922,7 @@ def rescan_unmatched_review_photo(
             unmatched_id,
             photo_id,
             actor=actor,
+            expected_version=payload.expected_version,
             category=payload.category,
         )
     except unmatched_review.ReviewVersionConflict as exc:

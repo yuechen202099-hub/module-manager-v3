@@ -562,6 +562,7 @@ def test_postgres_rescan_unmatched_review_scans_outside_session_then_relocks_onc
         record.legacy_id,
         photo_id,
         actor="reviewer-a",
+        expected_version=1,
         category="collector_barcode",
     )
 
@@ -610,6 +611,7 @@ def test_postgres_rescan_unmatched_review_rejects_version_drift_before_persisten
             record.legacy_id,
             photo_id,
             actor="reviewer-a",
+            expected_version=1,
             category="collector_barcode",
         )
 
@@ -619,6 +621,41 @@ def test_postgres_rescan_unmatched_review_rejects_version_drift_before_persisten
     assert sessions[1].staged == []
     assert record.payload["temporary_review"]["version"] == 2
     assert record.payload["temporary_review"] != before_scan["payload"]["temporary_review"]
+
+
+def test_postgres_rescan_unmatched_review_rejects_stale_expected_version_before_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _postgres_finalize_record(version=2)
+    before = deepcopy(vars(record))
+    photo_id = _review_photo_id(record)
+    sessions: list[ReviewFakeSession] = []
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            session = ReviewFakeSession(record)
+            sessions.append(session)
+            return session
+
+    monkeypatch.setattr(
+        repository.photo_barcode_check,
+        "check_photo_barcode",
+        lambda *args, **kwargs: pytest.fail("stale rescan must not start a CPU scan"),
+    )
+
+    with pytest.raises(repository.unmatched_review.ReviewVersionConflict):
+        TestPostgresRepository().rescan_unmatched_review_photo(
+            record.legacy_id,
+            photo_id,
+            actor="reviewer-a",
+            expected_version=1,
+            category="collector_barcode",
+        )
+
+    assert len(sessions) == 1
+    assert sessions[0].commit_calls == 0
+    assert sessions[0].rollback_calls == 0
+    assert vars(record) == before
 
 
 def test_postgres_confirm_unmatched_review_locks_and_uses_single_audit_and_commit() -> None:

@@ -487,7 +487,6 @@ export type UnmatchedRecord = {
 
 export type UnmatchedReviewPhoto = {
   id: string
-  sourceUrl: string
   category: string
   barcodeCheckStatus: string
   barcodeCheckValues: string[]
