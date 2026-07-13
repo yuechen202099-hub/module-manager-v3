@@ -8,7 +8,6 @@ import {
   boardEventHeaders,
   boardEventsUrl,
   deleteUnmatchedRecord,
-  dedupeUnmatchedRecords,
   exportExceptionMeters,
   exportPhotoBarcodeReviewGroups,
   fetchConstructionExceptionOrders,
@@ -127,7 +126,6 @@ const installerWorkloadLoading = ref(false)
 const installerWorkloadCache = reactive<Record<string, InstallerWorkloadRow[]>>({})
 const unmatchedDialogVisible = ref(false)
 const unmatchedLoading = ref(false)
-const unmatchedDeduping = ref(false)
 const unmatchedDeletingId = ref('')
 const unmatchedQuery = ref('')
 const unmatchedRows = ref<UnmatchedRecord[]>([])
@@ -1351,32 +1349,6 @@ function exportUnmatchedCsv() {
   downloadText(`未匹配清单-${new Date().toISOString().slice(0, 10)}.csv`, csv)
 }
 
-async function cleanupDuplicateUnmatchedRows() {
-  try {
-    await ElMessageBox.confirm(
-      '系统会按表号/扫码内容等特征保留价值最高的一条，删除重复未匹配项。已指派、项目外施工、换表记录会优先保留。',
-      '清理未匹配重复项',
-      {
-        type: 'warning',
-        confirmButtonText: '清理重复项',
-        cancelButtonText: '取消',
-      },
-    )
-  } catch {
-    return
-  }
-  unmatchedDeduping.value = true
-  try {
-    const result = await dedupeUnmatchedRecords()
-    ElMessage.success(result.removed ? `已清理 ${result.removed} 条重复未匹配项` : '未发现重复未匹配项')
-    await Promise.all([loadUnmatchedRows(), loadBoard()])
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '重复项清理失败')
-  } finally {
-    unmatchedDeduping.value = false
-  }
-}
-
 async function deleteUnmatchedRow(row: UnmatchedRecord) {
   try {
     await ElMessageBox.confirm(
@@ -2159,9 +2131,6 @@ onUnmounted(() => {
               <el-dropdown-menu>
                 <el-dropdown-item :disabled="!unmatchedRows.length" @click="exportUnmatchedCsv">
                   导出清单
-                </el-dropdown-item>
-                <el-dropdown-item :disabled="unmatchedDeduping" @click="cleanupDuplicateUnmatchedRows">
-                  删除重复项
                 </el-dropdown-item>
                 <el-dropdown-item @click="openReplacementFromUnmatchedDialog">
                   换表清单 {{ replacementRows.length ? `(${replacementRows.length})` : '' }}

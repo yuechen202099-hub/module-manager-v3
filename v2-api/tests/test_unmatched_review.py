@@ -25,6 +25,17 @@ def test_build_review_has_stable_photo_ids_and_does_not_create_terminal() -> Non
     assert "terminal" not in first
 
 
+def test_migrated_photo_rows_include_backend_independent_formal_ids() -> None:
+    review = unmatched_review.build_review(sample_record())
+
+    rows = unmatched_review.migrate_review_to_photo_rows(review)
+
+    assert [row.get("id") for row in rows] == [
+        f"p-unmatched-{review['unmatched_id']}-{unmatched_review.hashlib.sha256(photo['id'].encode('utf-8')).hexdigest()[:16]}"
+        for photo in review["photos"]
+    ]
+
+
 def test_apply_review_patch_rejects_stale_version() -> None:
     review = unmatched_review.build_review(sample_record())
     review["version"] = 3

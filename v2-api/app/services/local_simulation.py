@@ -1820,7 +1820,6 @@ def list_unmatched_match_candidates(unmatched_id: str) -> dict[str, Any]:
 def _formal_photos_from_unmatched_review(
     review: dict[str, Any],
     candidate: dict[str, Any],
-    group_id: str,
 ) -> list[dict[str, Any]]:
     photos = []
     for index, migrated in enumerate(unmatched_review.migrate_review_to_photo_rows(review), start=1):
@@ -1842,11 +1841,7 @@ def _formal_photos_from_unmatched_review(
         }
         photo = build_photo_record(index, row)
         photo.update(copy.deepcopy(migrated))
-        photo["id"] = unmatched_review.migrated_formal_photo_id(
-            group_id,
-            str(review.get("unmatched_id") or ""),
-            str(migrated.get("source_fingerprint") or ""),
-        )
+        photo["id"] = str(migrated.get("id") or "")
         photo["image_url"] = source_url
         photo["source_url"] = source_url
         photo["category_label"] = PHOTO_CATEGORIES.get(
@@ -1972,7 +1967,7 @@ def _finalize_unmatched_match_in_state(
     group["collector"] = str(review.get("collector") or "")
     group["module_asset_no"] = str(review.get("module_asset_no") or "")
     group["asset_no"] = str(review.get("module_asset_no") or "")
-    migrated_photos = _formal_photos_from_unmatched_review(review, candidate, str(group["id"]))
+    migrated_photos = _formal_photos_from_unmatched_review(review, candidate)
     existing_by_fingerprint: dict[str, dict[str, Any]] = {}
     existing_by_url_hash: dict[str, dict[str, Any]] = {}
     existing_by_sha: dict[str, dict[str, Any]] = {}
@@ -2953,7 +2948,7 @@ def append_audit_event(action: str, actor: str, payload: dict[str, Any]) -> dict
         "id": f"audit-{len(state.get('audit_events', [])) + 1:06d}",
         "action": action,
         "actor": actor,
-        "payload": payload,
+        "payload": unmatched_review.redact_audit_photo_secrets(payload),
         "created_at": now_iso(),
     }
     state.setdefault("audit_events", []).append(event)
@@ -2995,7 +2990,10 @@ def record_construction_activity_event(
 
 def list_audit_events(limit: int = 100, offset: int = 0) -> dict[str, Any]:
     events = list(reversed(get_state().get("audit_events", [])))
-    return {"total": len(events), "items": events[offset : offset + limit]}
+    return {
+        "total": len(events),
+        "items": unmatched_review.redact_audit_photo_secrets(events[offset : offset + limit]),
+    }
 
 
 def apply_group_photo_urls(group_id: str, urls: dict[str, str]) -> dict[str, Any]:

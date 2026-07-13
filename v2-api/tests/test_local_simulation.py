@@ -14,7 +14,7 @@ from app.main import create_app
 from app.services import local_simulation
 from app.services import photo_barcode_check
 from app.services import unmatched_review
-from app.services.state_repository import JsonStateRepository
+from app.services.state_repository import DualWriteStateRepository, JsonStateRepository
 from app.services.local_simulation import (
     DEFAULT_SCAN_FILE,
     DEFAULT_TOTAL_CATALOG,
@@ -2194,7 +2194,7 @@ def test_json_migrated_photo_ids_do_not_collide_across_unmatched_records(synthet
     group_id = second["group"]["id"]
     photo_ids = [photo["id"] for photo in second["group"]["photos"]]
     expected_second_ids = {
-        f"p-{group_id}-unmatched-{second_id}-{hashlib.sha256(photo['id'].encode('utf-8')).hexdigest()[:16]}"
+        f"p-unmatched-{second_id}-{hashlib.sha256(photo['id'].encode('utf-8')).hexdigest()[:16]}"
         for photo in second_review["photos"]
     }
     assert second["group"]["id"] == first["group"]["id"]
@@ -2691,6 +2691,158 @@ def test_json_state_repository_delegates_unmatched_rescan_and_confirmation(
 
     assert confirmed["review"]["manual_confirmed"] is True
     assert local_simulation.get_unmatched_review(unmatched_id)["review"] == confirmed["review"]
+
+
+def test_dual_unmatched_review_evolves_both_backends_before_finalization(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    synthetic_state["total_catalog"] = []
+    add_unmatched_match_catalog_row(terminal="T-DUAL-FINAL")
+    unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/dual")
+    mirror_state = {"version": 1, "open": True, "operations": []}
+
+    class EvolvingPostgresMirror:
+        @staticmethod
+        def advance(operation: str, expected_version: int) -> None:
+            if not mirror_state["open"] or expected_version != mirror_state["version"]:
+                raise unmatched_review.ReviewVersionConflict("PostgreSQL review version drift")
+            mirror_state["operations"].append(operation)
+            mirror_state["version"] += 1
+
+        def save_unmatched_review(self, unmatched_id: str, *, expected_version: int, **kwargs) -> dict:
+            self.advance("save", expected_version)
+            return {"review": {"version": mirror_state["version"]}}
+
+        def rescan_unmatched_review_photo(
+            self,
+            unmatched_id: str,
+            photo_id: str,
+            *,
+            expected_version: int,
+            **kwargs,
+        ) -> dict:
+            self.advance("rescan", expected_version)
+            return {"review": {"version": mirror_state["version"]}}
+
+        def confirm_unmatched_review(self, unmatched_id: str, *, expected_version: int, **kwargs) -> dict:
+            self.advance("confirm", expected_version)
+            return {"review": {"version": mirror_state["version"]}}
+
+        def finalize_unmatched_match(self, unmatched_id: str, *, expected_version: int, **kwargs) -> dict:
+            if not mirror_state["open"] or expected_version != mirror_state["version"]:
+                raise unmatched_review.ReviewVersionConflict("PostgreSQL review version drift")
+            mirror_state["operations"].append("finalize")
+            mirror_state["open"] = False
+            return {"group": {"id": "g-postgres"}, "attached": False}
+
+    monkeypatch.setattr(DualWriteStateRepository, "postgres_repository_factory", EvolvingPostgresMirror)
+    monkeypatch.setattr(
+        local_simulation.photo_barcode_check,
+        "check_photo_barcode",
+        lambda photo, group, *, use_ocr=False: {"barcode_check_status": "matched"},
+    )
+    repo = DualWriteStateRepository()
+    opened = repo.get_unmatched_review(unmatched_id)
+    photo_id = opened["review"]["photos"][0]["id"]
+
+    saved = repo.save_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=opened["review"]["version"],
+        metadata={"collector": "C-DUAL"},
+        photo_updates=[],
+        state="pending",
+    )
+    rescanned = repo.rescan_unmatched_review_photo(
+        unmatched_id,
+        photo_id,
+        actor="reviewer-a",
+        expected_version=saved["review"]["version"],
+        category="collector_barcode",
+    )
+    confirmed = repo.confirm_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=rescanned["review"]["version"],
+    )
+    candidate = repo.list_unmatched_match_candidates(unmatched_id)["items"][0]
+
+    result = repo.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-a",
+        candidate_key=candidate["candidate_key"],
+        expected_version=confirmed["review"]["version"],
+    )
+
+    assert result["group"]["terminal"] == "T-DUAL-FINAL"
+    assert mirror_state == {
+        "version": 4,
+        "open": False,
+        "operations": ["save", "rescan", "confirm", "finalize"],
+    }
+
+
+def test_dual_finalization_failure_keeps_json_unmatched_record_open(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    synthetic_state["total_catalog"] = []
+    add_unmatched_match_catalog_row(terminal="T-DUAL-FAIL")
+    unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/dual-fail")
+
+    class FailingPostgresMirror:
+        def finalize_unmatched_match(self, *args, **kwargs):
+            raise unmatched_review.ReviewVersionConflict("PostgreSQL finalization refused")
+
+    monkeypatch.setattr(DualWriteStateRepository, "postgres_repository_factory", FailingPostgresMirror)
+    repo = DualWriteStateRepository()
+    opened = repo.get_unmatched_review(unmatched_id)
+    candidate = repo.list_unmatched_match_candidates(unmatched_id)["items"][0]
+
+    with pytest.raises(unmatched_review.ReviewVersionConflict, match="PostgreSQL finalization refused"):
+        repo.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-a",
+            candidate_key=candidate["candidate_key"],
+            expected_version=opened["review"]["version"],
+        )
+
+    still_open = repo.get_unmatched_review(unmatched_id)
+    assert still_open["review"]["version"] == opened["review"]["version"]
+    assert all(group.get("source_unmatched_id") != unmatched_id for group in synthetic_state["groups"])
+
+
+def test_json_audit_events_recursively_redact_photo_storage_secrets(synthetic_state: dict) -> None:
+    event = local_simulation.append_audit_event(
+        "nested-photo-audit",
+        "reviewer-a",
+        {
+            "candidate_key": "catalog:row-1",
+            "nested": {
+                "photos": [
+                    {
+                        "source_url": "https://photos.example/raw.jpg?token=secret",
+                        "signed_url": "https://oss.example/signed.jpg?signature=secret",
+                        "storage": {
+                            "storage_bucket": "private-bucket",
+                            "storage_key": "private/key.jpg",
+                        },
+                    }
+                ]
+            },
+        },
+    )
+
+    photo = event["payload"]["nested"]["photos"][0]
+    assert event["payload"]["candidate_key"] == "catalog:row-1"
+    assert photo["source_url"] == "[REDACTED]"
+    assert photo["signed_url"] == "[REDACTED]"
+    assert photo["storage"] == {
+        "storage_bucket": "[REDACTED]",
+        "storage_key": "[REDACTED]",
+    }
+    assert local_simulation.list_audit_events()["items"][0] == event
 
 
 def test_unmatched_dedupe_removes_duplicate_meter_records(synthetic_state: dict) -> None:

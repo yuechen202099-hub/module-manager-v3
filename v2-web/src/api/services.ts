@@ -16,7 +16,6 @@ import type {
   ReviewTask,
   TaskStatusSummary,
   TaskStatus,
-  UnmatchedDedupeResult,
   UnmatchedMatchCandidate,
   UnmatchedRecord,
   UnmatchedReviewDetail,
@@ -1929,22 +1928,6 @@ export async function fetchReplacementRecords(query = ''): Promise<ReplacementRe
     `/local-test/replacements?${params.toString()}`,
   )
   return (data.items || []).map(mapReplacementRecord)
-}
-
-export async function dedupeUnmatchedRecords(): Promise<UnmatchedDedupeResult> {
-  const data = await api<{ total?: number; kept?: number; removed?: number; duplicate_ids?: string[] }>(
-    '/local-test/unmatched/dedupe',
-    {
-      method: 'POST',
-      body: JSON.stringify({ actor: currentActor() }),
-    },
-  )
-  return {
-    total: Number(data.total || 0),
-    kept: Number(data.kept || 0),
-    removed: Number(data.removed || 0),
-    duplicateIds: Array.isArray(data.duplicate_ids) ? data.duplicate_ids.map(String) : [],
-  }
 }
 
 export async function createBlankUnmatchedRecord(): Promise<UnmatchedRecord> {

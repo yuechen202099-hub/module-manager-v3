@@ -77,6 +77,8 @@ RELEASE_TABLE_ROW_PATTERN = re.compile(
 )
 DEPLOYED_BASELINE_MARKER = "当前已部署生产版本"
 RELEASE_CANDIDATE_MARKER = "当前发布候选版本"
+ENGLISH_DEPLOYED_BASELINE_MARKER = "Deployed production baseline"
+ENGLISH_RELEASE_CANDIDATE_MARKER = "Release candidate"
 STATUS_FIELD_LABELS = {
     "Status": "Status",
     "Deployment state": "Deployment state",
@@ -99,9 +101,17 @@ EVIDENCE_FIELD_LABELS = {
     "Public health check": "Public health check",
 }
 DEPLOYMENT_CLAIM_PATTERN = re.compile(r"\b(?:deployed|shipped|released)\b|已部署|已发布|已上线", re.IGNORECASE)
-NEGATED_ENGLISH_CLAIM_PATTERN = re.compile(r"\bnot\s+(?:deployed|shipped|released)\b", re.IGNORECASE)
+NEGATED_ENGLISH_CLAIM_PATTERN = re.compile(
+    r"\b(?:not|never)\s+(?:yet\s+)?(?:been\s+)?(?:deployed|shipped|released)\b",
+    re.IGNORECASE,
+)
 NEGATED_CHINESE_CLAIM_PATTERN = re.compile(r"(?:未|尚未)(?:部署|发布|上线)")
 PENDING_STATUS_PATTERN = re.compile(r"\bpending\b|待(?:部署|发布|上线|验证)|未(?:部署|发布|上线)", re.IGNORECASE)
+FUTURE_DEPLOYMENT_PATTERN = re.compile(
+    r"\b(?:will|to be|scheduled to be|planned to be)\s+(?:deployed|shipped|released)\b|(?:将|计划|拟)(?:部署|发布|上线)",
+    re.IGNORECASE,
+)
+RELEASE_RECORD_VERSION_PATTERN = re.compile(r"^#\s*(?P<version>V\d+\.\d+\.\d+)\b", re.MULTILINE)
 PLACEHOLDER_PATTERN = re.compile(r"\b(?:tbd|todo|pending|n/?a|unknown)\b|待补充|待验证|(?:^|\s)-(?:$|\s)", re.IGNORECASE)
 SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
 BACKUP_DIRECTORY_PATTERN = re.compile(r"/opt/module-manager-v2/backups/[A-Za-z0-9._-]+")
@@ -198,11 +208,27 @@ def parse_agents_marker(agents: str, marker: str, marker_name: str) -> str:
 
 
 def deployed_production_baseline(agents: str) -> str:
-    return parse_agents_marker(agents, DEPLOYED_BASELINE_MARKER, "deployed production baseline")
+    english = parse_agents_marker(
+        agents,
+        ENGLISH_DEPLOYED_BASELINE_MARKER,
+        "English deployed production baseline",
+    )
+    chinese = parse_agents_marker(agents, DEPLOYED_BASELINE_MARKER, "deployed production baseline")
+    if english != chinese:
+        fail("AGENTS.md English and Chinese deployed production baseline markers must agree")
+    return chinese
 
 
 def release_candidate(agents: str) -> str:
-    return parse_agents_marker(agents, RELEASE_CANDIDATE_MARKER, "release candidate")
+    english = parse_agents_marker(
+        agents,
+        ENGLISH_RELEASE_CANDIDATE_MARKER,
+        "English release candidate",
+    )
+    chinese = parse_agents_marker(agents, RELEASE_CANDIDATE_MARKER, "release candidate")
+    if english != chinese:
+        fail("AGENTS.md English and Chinese release candidate markers must agree")
+    return chinese
 
 
 def release_record_status(record: str) -> str:
@@ -257,6 +283,22 @@ def status_is_pending(status: str) -> bool:
     )
 
 
+def release_record_has_affirmative_version_deployment_prose(record: str) -> bool:
+    version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
+    if version_match is None:
+        return False
+    version = normalize_text(version_match.group("version"))
+    for line in record.splitlines():
+        if version not in normalize_text(line):
+            continue
+        if not has_deployment_claim(line):
+            continue
+        if status_is_pending(line) or FUTURE_DEPLOYMENT_PATTERN.search(line):
+            continue
+        return True
+    return False
+
+
 def valid_sha256(value: str) -> bool:
     return not is_placeholder(value) and SHA256_PATTERN.fullmatch(value.strip()) is not None
 
@@ -298,9 +340,10 @@ def has_single_valid_evidence(
 def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
     status = release_record_status(record)
     deployment_claimed = has_deployment_claim(status)
-    if deployment_claimed and status_is_pending(status):
+    prose_claimed = release_record_has_affirmative_version_deployment_prose(record)
+    if (deployment_claimed or prose_claimed) and status_is_pending(status):
         fail("release record contains contradictory pending and deployment claims")
-    if not deployment_claimed:
+    if not deployment_claimed and not prose_claimed:
         return False
     evidence = release_record_evidence(record)
     return not (

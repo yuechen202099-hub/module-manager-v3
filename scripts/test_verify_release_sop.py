@@ -32,6 +32,33 @@ def test_parses_deployed_baseline_and_release_candidate_independently() -> None:
 
 
 @pytest.mark.parametrize(
+    ("english_marker", "replacement", "parser_name"),
+    [
+        (
+            "- Deployed production baseline: `V3.0.79`.",
+            "- Deployed production baseline: `V3.0.80`.",
+            "deployed_production_baseline",
+        ),
+        (
+            "- Release candidate: `V3.0.80`.",
+            "- Release candidate: `V3.0.81`.",
+            "release_candidate",
+        ),
+    ],
+)
+def test_rejects_disagreement_between_english_and_chinese_agents_markers(
+    english_marker: str,
+    replacement: str,
+    parser_name: str,
+) -> None:
+    verifier = load_verifier()
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(english_marker, replacement)
+
+    with pytest.raises(AssertionError, match="English and Chinese"):
+        getattr(verifier, parser_name)(agents)
+
+
+@pytest.mark.parametrize(
     ("marker", "expected_error"),
     [
         ("当前  已部署 生产版本 ： `V3.0.79`  。", "deployed production baseline"),
@@ -256,3 +283,39 @@ def test_accepts_a_valid_deployed_release_record(status: str) -> None:
     verifier = load_verifier()
 
     assert not verifier.release_record_claims_deployed_without_live_evidence(valid_deployed_record(status))
+
+
+@pytest.mark.parametrize(
+    "affirmative_prose",
+    [
+        "V3.0.80 was deployed to production and verified successfully.",
+        "V3.0.80 已部署至生产环境并完成验证。",
+        "Production successfully shipped V3.0.80.",
+    ],
+)
+def test_rejects_affirmative_candidate_deployment_prose_when_status_is_pending(
+    affirmative_prose: str,
+) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{affirmative_prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize(
+    "pending_or_negated_prose",
+    [
+        "V3.0.80 has not been deployed to production.",
+        "V3.0.80 deployment is pending production approval.",
+        "V3.0.80 尚未部署至生产环境。",
+        "V3.0.80 待部署和验证。",
+    ],
+)
+def test_preserves_negated_or_pending_candidate_deployment_prose(
+    pending_or_negated_prose: str,
+) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{pending_or_negated_prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)

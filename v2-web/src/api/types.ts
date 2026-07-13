@@ -531,10 +531,3 @@ export type ReplacementRecord = {
   replacementBy: string
   replacementAt: string
 }
-
-export type UnmatchedDedupeResult = {
-  total: number
-  kept: number
-  removed: number
-  duplicateIds: string[]
-}

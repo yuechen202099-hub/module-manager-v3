@@ -66,6 +66,7 @@ REQUIRED_FILES = {
     "scripts/cleanup_old_releases.sh",
     "scripts/production_health_check.py",
     "ops/releases/README.md",
+    "ops/releases/V3.0.80.md",
     "ops/releases/V3.0.79.md",
     "ops/releases/V3.0.78.md",
     "ops/releases/V3.0.77.md",

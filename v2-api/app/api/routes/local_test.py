@@ -452,6 +452,19 @@ SAFE_UNMATCHED_REVIEW_PHOTO_FIELDS = (
     *unmatched_review.PHOTO_EVIDENCE_FIELDS,
 )
 
+SAFE_FINALIZED_GROUP_FIELDS = (
+    "id",
+    "task_id",
+    "terminal",
+    "meter_no",
+    "meter_match_key",
+    "address",
+    "status",
+    "photo_count",
+)
+
+SAFE_FINALIZED_PHOTO_FIELDS = ("id", "category")
+
 
 def project_safe_fields(payload: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
     return {key: deepcopy(payload[key]) for key in fields if key in payload}
@@ -483,6 +496,28 @@ def safe_review_response(payload: dict[str, Any]) -> dict[str, Any]:
             )
         review["photos"].append(photo)
     return {"record": record, "review": review}
+
+
+def safe_finalization_response(payload: dict[str, Any]) -> dict[str, Any]:
+    source_group = payload.get("group") or {}
+    group = project_safe_fields(source_group, SAFE_FINALIZED_GROUP_FIELDS)
+    group_id = str(group.get("id") or "")
+    group["photos"] = []
+    for source_photo in source_group.get("photos") or []:
+        photo = project_safe_fields(source_photo, SAFE_FINALIZED_PHOTO_FIELDS)
+        photo_id = str(photo.get("id") or "")
+        if not group_id or not photo_id:
+            continue
+        photo["category"] = str(photo.get("category") or "unclassified")
+        photo["content_url"] = (
+            f"/local-test/groups/{quote(group_id, safe='')}/photos/{quote(photo_id, safe='')}/content"
+        )
+        group["photos"].append(photo)
+    return {"group": group, "attached": bool(payload.get("attached"))}
+
+
+def safe_audit_response(payload: dict[str, Any]) -> dict[str, Any]:
+    return unmatched_review.redact_audit_photo_secrets(payload)
 
 
 def reject_retired_legacy_unmatched_write() -> None:
@@ -2104,11 +2139,13 @@ def finalize_unmatched_match(unmatched_id: str, payload: UnmatchedFinalizeMatchR
         )
     except unmatched_review.ReviewVersionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except unmatched_review.FinalizationIdentityConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ok(request, response_payload(result))
+    return ok(request, safe_finalization_response(result))
 
 
 @router.get("/exception-groups")
@@ -2189,7 +2226,11 @@ def audit_log(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
-    return ok(request, state_repository().list_audit_events(limit=limit, offset=offset))
+    require_production_admin_payload(request)
+    return ok(
+        request,
+        safe_audit_response(state_repository().list_audit_events(limit=limit, offset=offset)),
+    )
 
 
 @router.get("/tasks")

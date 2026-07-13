@@ -615,6 +615,141 @@ def test_production_unmatched_review_role_matrix(monkeypatch, tmp_path) -> None:
     assert production_client.post(finalize_path, headers=headers["admin"], json=finalize_body).status_code == 200
 
 
+def test_unmatched_finalization_response_uses_stable_ids_and_content_routes(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class UnsafeFinalizationRepository(FakeUnmatchedReviewRepository):
+        def finalize_unmatched_match(self, unmatched_id: str, *, actor: str, candidate_key: str, expected_version: int):
+            self.calls.append(
+                {
+                    "method": "finalize",
+                    "actor": actor,
+                    "candidate_key": candidate_key,
+                    "expected_version": expected_version,
+                }
+            )
+            return {
+                "group": {
+                    "id": "group-1",
+                    "task_id": 7,
+                    "terminal": "TERM-1",
+                    "meter_no": "120000000001",
+                    "meter_match_key": "0000000001",
+                    "address": "safe road",
+                    "status": "incomplete",
+                    "photo_count": 1,
+                    "photos": [
+                        {
+                            "id": "p-unmatched-unmatched-1-stable",
+                            "category": "before_box",
+                            "image_url": "https://photos.example/raw.jpg?token=secret",
+                            "source_url": "https://photos.example/source.jpg?token=secret",
+                            "signed_url": "https://photos.example/signed.jpg?token=secret",
+                            "storage_bucket": "private-bucket",
+                            "storage_key": "private/photo.jpg",
+                            "object_key": "private/photo.jpg",
+                        }
+                    ],
+                    "raw_data": {"source_url": "https://photos.example/deep.jpg?token=secret"},
+                },
+                "task": {"id": 7, "raw": {"signed_url": "https://photos.example/task.jpg"}},
+                "attached": False,
+                "added_photos": 1,
+            }
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: UnsafeFinalizationRepository())
+
+    response = production_client.post(
+        "/local-test/unmatched/unmatched-1/finalize-match",
+        headers=headers["admin"],
+        json={"candidate_key": "catalog:row-1", "expected_version": 2},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert set(payload) == {"group", "attached"}
+    assert payload["attached"] is False
+    assert payload["group"] == {
+        "id": "group-1",
+        "task_id": 7,
+        "terminal": "TERM-1",
+        "meter_no": "120000000001",
+        "meter_match_key": "0000000001",
+        "address": "safe road",
+        "status": "incomplete",
+        "photo_count": 1,
+        "photos": [
+            {
+                "id": "p-unmatched-unmatched-1-stable",
+                "category": "before_box",
+                "content_url": "/local-test/groups/group-1/photos/p-unmatched-unmatched-1-stable/content",
+            }
+        ],
+    }
+    assert "token=secret" not in json.dumps(payload)
+
+
+def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class UnsafeAuditRepository:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list_audit_events(self, *, limit: int, offset: int) -> dict:
+            self.calls += 1
+            return {
+                "total": 1,
+                "items": [
+                    {
+                        "id": "audit-1",
+                        "action": "nested-photo-audit",
+                        "actor": "admin-a",
+                        "payload": {
+                            "candidate_key": "catalog:row-1",
+                            "nested": {
+                                "photos": [
+                                    {
+                                        "source_url": "https://photos.example/raw.jpg?token=secret",
+                                        "signed_url": "https://photos.example/signed.jpg?token=secret",
+                                        "storage": {
+                                            "storage_bucket": "private-bucket",
+                                            "storage_key": "private/photo.jpg",
+                                            "object_key": "private/photo.jpg",
+                                        },
+                                    }
+                                ]
+                            },
+                        },
+                    }
+                ],
+            }
+
+    repository = UnsafeAuditRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    assert production_client.get("/local-test/audit-log").status_code == 401
+    assert production_client.get("/local-test/audit-log", headers=headers["constructor"]).status_code == 403
+    assert production_client.get("/local-test/audit-log", headers=headers["reviewer"]).status_code == 403
+    assert repository.calls == 0
+
+    response = production_client.get("/local-test/audit-log", headers=headers["admin"])
+
+    assert response.status_code == 200
+    assert repository.calls == 1
+    payload = response.json()["data"]
+    photo = payload["items"][0]["payload"]["nested"]["photos"][0]
+    assert payload["items"][0]["payload"]["candidate_key"] == "catalog:row-1"
+    assert photo["source_url"] == "[REDACTED]"
+    assert photo["signed_url"] == "[REDACTED]"
+    assert photo["storage"] == {
+        "storage_bucket": "[REDACTED]",
+        "storage_key": "[REDACTED]",
+        "object_key": "[REDACTED]",
+    }
+    assert "token=secret" not in json.dumps(payload)
+
+
 def test_production_unmatched_review_rejects_wrong_roles_before_malformed_body_validation(
     monkeypatch,
     tmp_path,
@@ -871,6 +1006,26 @@ def test_production_unmatched_review_maps_repository_errors(monkeypatch, tmp_pat
         headers=headers["admin"],
         json={"candidate_key": "catalog:row-1", "expected_version": 1},
     ).status_code == 409
+
+
+def test_production_finalization_identity_conflict_returns_409(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class ConflictRepository(FakeUnmatchedReviewRepository):
+        def finalize_unmatched_match(self, *args, **kwargs):
+            conflict_type = getattr(unmatched_review, "FinalizationIdentityConflict", ValueError)
+            raise conflict_type("Candidate conflicts with existing formal group identity")
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: ConflictRepository())
+
+    response = production_client.post(
+        "/local-test/unmatched/unmatched-1/finalize-match",
+        headers=headers["admin"],
+        json={"candidate_key": "catalog:row-1", "expected_version": 2},
+    )
+
+    assert response.status_code == 409
+    assert "conflicts with existing formal group identity" in response.json()["detail"]
 
 
 def test_production_unmatched_photo_content_uses_server_source_and_rejects_ssrf(monkeypatch, tmp_path) -> None:

@@ -37,6 +37,48 @@ class ReviewVersionConflict(ValueError):
     pass
 
 
+class FinalizationIdentityConflict(ValueError):
+    pass
+
+
+AUDIT_REDACTED_VALUE = "[REDACTED]"
+AUDIT_PHOTO_SECRET_FIELDS = {
+    "bucket",
+    "image_url",
+    "image_urls",
+    "object_key",
+    "original_url",
+    "oss_key",
+    "photo_url",
+    "photo_urls",
+    "raw_url",
+    "signed_url",
+    "source_url",
+    "storage_bucket",
+    "storage_key",
+    "url",
+    "urls",
+}
+
+
+def redact_audit_photo_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            normalized_key = str(key).strip().lower().replace("-", "_")
+            redacted[key] = (
+                AUDIT_REDACTED_VALUE
+                if normalized_key in AUDIT_PHOTO_SECRET_FIELDS
+                else redact_audit_photo_secrets(item)
+            )
+        return redacted
+    if isinstance(value, list):
+        return [redact_audit_photo_secrets(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_audit_photo_secrets(item) for item in value)
+    return copy.deepcopy(value)
+
+
 def review_meter_match_key(record: dict[str, Any], review: dict[str, Any]) -> str:
     meter_no = str(review.get("meter_no") or record.get("meter_no") or "").strip()
     if not meter_no:
@@ -128,6 +170,10 @@ def migrate_review_to_photo_rows(review: dict[str, Any]) -> list[dict[str, Any]]
     for photo in review.get("photos") or []:
         source_url = str(photo.get("source_url") or "")
         row = {
+            "id": migrated_formal_photo_id(
+                str(review.get("unmatched_id") or ""),
+                str(photo.get("id") or ""),
+            ),
             "url": source_url,
             "image_url": source_url,
             "source_url": source_url,
@@ -180,9 +226,9 @@ def stable_photo_id(unmatched_id: str, index: int, source_url: str) -> str:
     return f"unmatched-photo-{digest}"
 
 
-def migrated_formal_photo_id(group_id: str, unmatched_id: str, review_photo_id: str) -> str:
+def migrated_formal_photo_id(unmatched_id: str, review_photo_id: str) -> str:
     review_photo_hash = hashlib.sha256(review_photo_id.encode("utf-8")).hexdigest()[:16]
-    return f"p-{group_id}-unmatched-{unmatched_id}-{review_photo_hash}"
+    return f"p-unmatched-{unmatched_id}-{review_photo_hash}"
 
 
 def build_review(record: dict[str, Any]) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
 import logging
 from datetime import datetime
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 
 from app.services import state_repository as repository
 
@@ -385,7 +387,16 @@ class FinalizeFakeSession:
 
     def scalar(self, statement):
         self.statements.append(statement)
-        return self.record
+        sql = str(statement)
+        if "pg_advisory_xact_lock" in sql:
+            return 0
+        if "FROM unmatched_records" in sql:
+            return self.record
+        if "FROM projects" in sql:
+            return uuid4()
+        if "FROM material_groups" in sql:
+            return None
+        return 0
 
     def scalars(self, statement):
         self.statements.append(statement)
@@ -476,6 +487,131 @@ class FormalGroupSuccessSession:
 
     def rollback(self):
         self.rollback_calls += 1
+
+    def refresh(self, value):
+        return None
+
+
+class FinalizationIdentityRaceSession:
+    def __init__(self, record, existing_group, project_id) -> None:
+        self.record = record
+        self.record_snapshot = deepcopy(vars(record))
+        self.existing_group = existing_group
+        self.project_id = project_id
+        self.statements = []
+        self.staged = []
+        self.commit_calls = 0
+        self.rollback_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def scalar(self, statement):
+        self.statements.append(statement)
+        sql = str(statement)
+        if "pg_advisory_xact_lock" in sql:
+            return 0
+        if "FROM unmatched_records" in sql:
+            return self.record
+        if "FROM projects" in sql:
+            return self.project_id
+        if "FROM material_groups" in sql:
+            if "WHERE material_groups.project_id =" in sql and "material_groups.meter_match_key =" in sql:
+                return self.existing_group
+            return None
+        if "count(photos.id)" in sql:
+            return 0
+        return 0
+
+    def scalars(self, statement):
+        self.statements.append(statement)
+        return FinalizeFakeScalars()
+
+    def get(self, model, identity):
+        return None
+
+    def add(self, value):
+        self.staged.append(value)
+
+    def flush(self):
+        return None
+
+    def commit(self):
+        if any(isinstance(value, repository.MaterialGroup) and value is not self.existing_group for value in self.staged):
+            raise IntegrityError("INSERT material_groups", {}, RuntimeError("project/meter identity conflict"))
+        self.commit_calls += 1
+
+    def rollback(self):
+        self.rollback_calls += 1
+        self.staged.clear()
+        vars(self.record).clear()
+        vars(self.record).update(deepcopy(self.record_snapshot))
+
+    def refresh(self, value):
+        return None
+
+
+class LegacyMutationSession:
+    def __init__(self, record, group, *, fail_commit: bool = False) -> None:
+        self.record = record
+        self.group = group
+        self.record_snapshot = deepcopy(vars(record))
+        self.group_snapshot = deepcopy(vars(group))
+        self.fail_commit = fail_commit
+        self.statements = []
+        self.staged = []
+        self.persisted = []
+        self.commit_attempts = 0
+        self.rollback_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            self.rollback()
+        return False
+
+    def scalar(self, statement):
+        self.statements.append(statement)
+        sql = str(statement)
+        if "FROM unmatched_records" in sql:
+            return self.record
+        if "FROM material_groups" in sql:
+            return self.group
+        if "count(photos.id)" in sql:
+            return 0
+        return None
+
+    def scalars(self, statement):
+        self.statements.append(statement)
+        return FinalizeFakeScalars()
+
+    def get(self, model, identity):
+        return None
+
+    def add(self, value):
+        self.staged.append(value)
+
+    def flush(self):
+        return None
+
+    def commit(self):
+        self.commit_attempts += 1
+        if self.fail_commit:
+            raise RuntimeError("legacy mutation commit failed")
+        self.persisted.extend(self.staged)
+
+    def rollback(self):
+        self.rollback_calls += 1
+        self.staged.clear()
+        vars(self.record).clear()
+        vars(self.record).update(deepcopy(self.record_snapshot))
+        vars(self.group).clear()
+        vars(self.group).update(deepcopy(self.group_snapshot))
 
     def refresh(self, value):
         return None
@@ -580,6 +716,116 @@ def test_postgres_unmatched_finalization_materializes_stable_formal_group_id() -
     assert repository._group_payload(session, materialized)["id"] == result["group"]["id"]
     assert session.commit_calls == 1
     assert session.rollback_calls == 0
+
+
+def test_postgres_finalization_reuses_compatible_group_after_duplicate_catalog_race() -> None:
+    record = _postgres_finalize_record()
+    record.payload = {**record.payload, "photo_urls": []}
+    project_id = uuid4()
+    candidate_catalog_id = uuid4()
+    existing_catalog_id = uuid4()
+    task = formal_group_task()
+    group = _postgres_finalize_group()
+    group.project_id = project_id
+    group.task_id = task.id
+    group.legacy_task_id = task.legacy_id
+    group.terminal = "T-FORMAL"
+    group.total_catalog_row_id = existing_catalog_id
+    session = FinalizationIdentityRaceSession(record, group, project_id)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _resolve_unmatched_candidate(self, checked_session, locked_record, review, candidate_key):
+            return {
+                "candidate_key": candidate_key,
+                "catalog_row_db_id": str(candidate_catalog_id),
+                "target_group_id": "",
+                "terminal": "T-FORMAL",
+                "meter_no": "120000912473",
+                "meter_match_key": "0000912473",
+                "address": "formal road",
+            }
+
+        def _ensure_task_for_terminal(self, checked_session, team_id: str, terminal: str):
+            return task
+
+    result = TestPostgresRepository().finalize_unmatched_match(
+        record.legacy_id,
+        actor="admin-a",
+        candidate_key=f"catalog:{candidate_catalog_id}:T-FORMAL",
+        expected_version=1,
+    )
+
+    compiled = [
+        str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for statement in session.statements
+    ]
+    expected_lock_key = int.from_bytes(
+        hashlib.sha256(f"{project_id}\0{record.meter_match_key}".encode("utf-8")).digest()[:8],
+        byteorder="big",
+        signed=True,
+    )
+    assert any(f"pg_advisory_xact_lock({expected_lock_key})" in sql for sql in compiled)
+    assert any(
+        "FROM material_groups" in sql
+        and "WHERE material_groups.project_id =" in sql
+        and "material_groups.meter_match_key =" in sql
+        and "FOR UPDATE" in sql
+        for sql in compiled
+    )
+    assert result["group"]["id"] == group.legacy_id
+    assert result["attached"] is True
+    assert group.total_catalog_row_id == existing_catalog_id
+    assert not any(isinstance(item, repository.MaterialGroup) and item is not group for item in session.staged)
+    assert session.commit_calls == 1
+    assert session.rollback_calls == 0
+
+
+def test_postgres_finalization_rejects_incompatible_group_on_unique_identity() -> None:
+    record = _postgres_finalize_record()
+    record.payload = {**record.payload, "photo_urls": []}
+    project_id = uuid4()
+    task = formal_group_task()
+    group = _postgres_finalize_group()
+    group.project_id = project_id
+    group.task_id = task.id
+    group.legacy_task_id = task.legacy_id
+    group.terminal = "T-OTHER"
+    group.total_catalog_row_id = uuid4()
+    session = FinalizationIdentityRaceSession(record, group, project_id)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _resolve_unmatched_candidate(self, checked_session, locked_record, review, candidate_key):
+            return {
+                "candidate_key": candidate_key,
+                "catalog_row_db_id": str(uuid4()),
+                "target_group_id": "",
+                "terminal": "T-FORMAL",
+                "meter_no": "120000912473",
+                "meter_match_key": "0000912473",
+                "address": "formal road",
+            }
+
+        def _ensure_task_for_terminal(self, checked_session, team_id: str, terminal: str):
+            return task
+
+    with pytest.raises(ValueError, match="conflicts with existing formal group identity"):
+        TestPostgresRepository().finalize_unmatched_match(
+            record.legacy_id,
+            actor="admin-a",
+            candidate_key="catalog:duplicate:T-FORMAL",
+            expected_version=1,
+        )
+
+    assert record.status == "open"
+    assert session.commit_calls == 0
+    assert session.rollback_calls == 1
+    assert session.staged == []
 
 
 @pytest.mark.parametrize(
@@ -1144,8 +1390,7 @@ def test_postgres_finalize_replay_returns_stored_result_without_duplicate_writes
         "expected_version": 1,
         "result": first,
     }
-    assert len(advisory_locks) == 2
-    assert advisory_locks[0] == advisory_locks[1]
+    assert len(advisory_locks) == 1
     assert materialize_calls == 1
     assert sum(item is group for item in fake_session.staged) == 1
     assert sum(item is formal_photo for item in fake_session.staged) == 1
@@ -1273,6 +1518,34 @@ def test_postgres_finalize_unmatched_selects_exact_group_identity_on_shared_term
 
     assert len(candidates) == 1
     assert candidates[0]["target_group_id"] == exact.legacy_id
+
+
+def test_postgres_migrated_photo_uses_same_backend_independent_id_as_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _postgres_finalize_record()
+    review = repository.unmatched_review.build_review(repository._unmatched_payload(record))
+    rows = repository.unmatched_review.migrate_review_to_photo_rows(review)
+    group = _postgres_finalize_group()
+    session = FinalizeFakeSession(record)
+    monkeypatch.setattr(repository, "_reset_group_after_photo_evidence_change", lambda checked_session, checked_group: None)
+
+    result = repository.PostgresStateRepository()._add_photo_records_to_group(
+        session,
+        group,
+        actor="admin-a",
+        photos=rows,
+        source="unmatched-review-finalize",
+    )
+
+    photos = [item for item in session.staged if isinstance(item, repository.Photo)]
+    assert result["added"] == 1
+    assert len(photos) == 1
+    assert rows[0]["id"] == photos[0].legacy_id
+    assert photos[0].legacy_id == repository.unmatched_review.migrated_formal_photo_id(
+        review["unmatched_id"],
+        review["photos"][0]["id"],
+    )
 
 
 def test_postgres_unmatched_review_photo_payload_reads_back_every_evidence_field() -> None:
@@ -1818,6 +2091,156 @@ def test_dual_backend_finalize_unmatched_match_uses_json_first_and_mirrors_ident
             },
         )
     ]
+
+
+LEGACY_UNMATCHED_MUTATION_CASES = (
+    ("update", "unmatched_record_updated"),
+    ("assign", "unmatched_record_assigned"),
+    ("unassign", "unmatched_record_unassigned"),
+    ("outside", "unmatched_record_marked_outside_project"),
+    ("associate", "unmatched_record_associated"),
+    ("delete", "unmatched_record_deleted"),
+)
+
+
+def invoke_legacy_unmatched_mutation(repo, operation: str, *, expected_version: int) -> dict:
+    common = {
+        "unmatched_id": "unmatched-finalize-1",
+        "actor": "admin-a",
+        "expected_version": expected_version,
+    }
+    if operation == "update":
+        return repo.update_unmatched_record(**common, updates={"note": "updated"})
+    if operation == "assign":
+        return repo.assign_unmatched_record(**common, constructor="constructor-a", note="assigned")
+    if operation == "unassign":
+        return repo.unassign_unmatched_record(**common, reason="released")
+    if operation == "outside":
+        return repo.mark_unmatched_outside_project(**common, note="outside")
+    if operation == "associate":
+        return repo.associate_unmatched_record(**common, target_group_id="g-finalized")
+    if operation == "delete":
+        return repo.delete_unmatched_record(**common, reason="invalid source")
+    raise AssertionError(f"Unsupported test operation: {operation}")
+
+
+@pytest.mark.parametrize(("operation", "expected_action"), LEGACY_UNMATCHED_MUTATION_CASES)
+def test_postgres_legacy_unmatched_mutations_stage_transactional_audit(
+    operation: str,
+    expected_action: str,
+) -> None:
+    record = _postgres_finalize_record()
+    group = _postgres_finalize_group()
+    session = LegacyMutationSession(record, group)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+    invoke_legacy_unmatched_mutation(TestPostgresRepository(), operation, expected_version=1)
+
+    audits = [item for item in session.persisted if isinstance(item, repository.AuditLog)]
+    assert len(audits) == 1
+    audit = audits[0]
+    assert audit.actor_username == "admin-a"
+    assert audit.action == expected_action
+    assert audit.entity_type == "unmatched_record"
+    assert audit.entity_id == record.id
+    assert audit.payload["expected_version"] == 1
+    assert audit.before_data["unmatched_id"] == record.legacy_id
+    assert audit.after_data["unmatched_id"] == record.legacy_id
+    assert audit.before_data["photo_urls"] == "[REDACTED]"
+    assert session.commit_attempts == 1
+    assert session.rollback_calls == 0
+
+
+@pytest.mark.parametrize(("operation", "expected_action"), LEGACY_UNMATCHED_MUTATION_CASES)
+def test_postgres_legacy_unmatched_stale_writes_add_no_audit(
+    operation: str,
+    expected_action: str,
+) -> None:
+    del expected_action
+    record = _postgres_finalize_record(version=2)
+    group = _postgres_finalize_group()
+    session = LegacyMutationSession(record, group)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+    with pytest.raises(repository.unmatched_review.ReviewVersionConflict):
+        invoke_legacy_unmatched_mutation(TestPostgresRepository(), operation, expected_version=1)
+
+    assert not any(isinstance(item, repository.AuditLog) for item in session.staged)
+    assert not any(isinstance(item, repository.AuditLog) for item in session.persisted)
+    assert session.commit_attempts == 0
+
+
+@pytest.mark.parametrize(("operation", "expected_action"), LEGACY_UNMATCHED_MUTATION_CASES)
+def test_postgres_legacy_unmatched_failed_writes_persist_no_audit(
+    operation: str,
+    expected_action: str,
+) -> None:
+    del expected_action
+    record = _postgres_finalize_record()
+    group = _postgres_finalize_group()
+    session = LegacyMutationSession(record, group, fail_commit=True)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+    with pytest.raises(RuntimeError, match="legacy mutation commit failed"):
+        invoke_legacy_unmatched_mutation(TestPostgresRepository(), operation, expected_version=1)
+
+    assert not any(isinstance(item, repository.AuditLog) for item in session.persisted)
+    assert session.staged == []
+    assert session.commit_attempts == 1
+    assert session.rollback_calls == 1
+    assert record.status == "open"
+
+
+def test_postgres_construction_activity_audit_redacts_nested_photo_secrets_before_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AuditSession:
+        def __init__(self) -> None:
+            self.staged = []
+
+        def add(self, value) -> None:
+            self.staged.append(value)
+
+    session = AuditSession()
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "default-team")
+
+    repository.PostgresStateRepository()._add_construction_activity_audit(
+        session,
+        "construction_photo_uploaded",
+        "constructor-a",
+        {
+            "group_id": "g-1",
+            "nested": {
+                "source_url": "https://photos.example/raw.jpg?token=secret",
+                "storage": {
+                    "storage_bucket": "private-bucket",
+                    "storage_key": "private/photo.jpg",
+                },
+            },
+        },
+    )
+
+    assert len(session.staged) == 1
+    audit = session.staged[0]
+    assert audit.payload == {
+        "group_id": "g-1",
+        "nested": {
+            "source_url": "[REDACTED]",
+            "storage": {
+                "storage_bucket": "[REDACTED]",
+                "storage_key": "[REDACTED]",
+            },
+        },
+    }
 
 
 def test_postgres_classify_photo_persists_archive_fields() -> None:

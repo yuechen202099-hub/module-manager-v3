@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import String, and_, case, cast, func, literal, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -367,9 +368,36 @@ def _reset_group_after_photo_evidence_change(
     _apply_photo_quality_exception_status(session, group)
 
 
-def _candidate_advisory_lock_key(team_id: str, candidate_key: str) -> int:
-    digest = hashlib.sha256(f"{team_id}\0{candidate_key}".encode("utf-8")).digest()
+def _formal_identity_advisory_lock_key(project_id: Any, meter_match_key: str) -> int:
+    digest = hashlib.sha256(f"{project_id}\0{meter_match_key}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _stage_transactional_audit(
+    session: Session,
+    *,
+    team_id: str,
+    actor: str,
+    action: str,
+    entity_type: str,
+    entity_id: Any = None,
+    before_data: Any = None,
+    after_data: Any = None,
+    payload: Any = None,
+) -> AuditLog:
+    event = AuditLog(
+        team_id=team_id,
+        legacy_id=f"{action}-{uuid4()}",
+        actor_username=actor,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        before_data=unmatched_review.redact_audit_photo_secrets(before_data or {}),
+        after_data=unmatched_review.redact_audit_photo_secrets(after_data or {}),
+        payload=unmatched_review.redact_audit_photo_secrets(payload or {}),
+    )
+    session.add(event)
+    return event
 
 
 def _auto_archive_exception_note(note: str) -> bool:
@@ -3917,45 +3945,48 @@ class PostgresStateRepository(StateRepository):
             )
         except ValueError:
             pass
-        identity_filter = (
-            or_(
-                MaterialGroup.total_catalog_row_id == catalog_row_id,
-                and_(MaterialGroup.total_catalog_row_id.is_(None), MaterialGroup.meter_match_key == meter_key),
-            )
-            if catalog_row_id is not None
-            else MaterialGroup.meter_match_key == meter_key
-        )
+        project_id = self._project_id_for_team(session, record.team_id)
         target_group_id = str(candidate.get("target_group_id") or "").strip()
-        group = None
-        if target_group_id:
+        group = session.scalar(
+            select(MaterialGroup)
+            .where(
+                MaterialGroup.project_id == project_id,
+                MaterialGroup.meter_match_key == meter_key,
+            )
+            .limit(1)
+            .with_for_update()
+        )
+        if group is not None:
+            group_id = str(group.legacy_id or group.id)
+            if str(group.terminal or "").strip() != terminal or (
+                target_group_id and target_group_id != group_id
+            ):
+                raise unmatched_review.FinalizationIdentityConflict(
+                    "Candidate conflicts with existing formal group identity"
+                )
+        elif target_group_id:
             group = session.scalar(
                 select(MaterialGroup)
                 .where(
                     MaterialGroup.team_id == record.team_id,
                     MaterialGroup.legacy_id == target_group_id,
-                    MaterialGroup.terminal == terminal,
-                    identity_filter,
                 )
                 .with_for_update()
             )
             if group is None:
                 raise ValueError("Selected candidate target group is unavailable")
-        else:
-            group = session.scalar(
-                select(MaterialGroup)
-                .where(
-                    MaterialGroup.team_id == record.team_id,
-                    MaterialGroup.terminal == terminal,
-                    identity_filter,
+            if (
+                (group.project_id is not None and group.project_id != project_id)
+                or (str(group.meter_match_key or "").strip() not in {"", meter_key})
+                or str(group.terminal or "").strip() != terminal
+            ):
+                raise unmatched_review.FinalizationIdentityConflict(
+                    "Candidate conflicts with existing formal group identity"
                 )
-                .limit(1)
-                .with_for_update()
-            )
 
         attached = group is not None
         task = self._ensure_task_for_terminal(session, record.team_id, terminal)
         if group is None:
-            project_id = self._project_id_for_team(session, record.team_id)
             group = MaterialGroup(
                 team_id=record.team_id,
                 project_id=project_id,
@@ -3980,7 +4011,8 @@ class PostgresStateRepository(StateRepository):
             session.add(group)
             session.flush()
         else:
-            group.total_catalog_row_id = catalog_row_id or group.total_catalog_row_id
+            group.project_id = group.project_id or project_id
+            group.total_catalog_row_id = group.total_catalog_row_id or catalog_row_id
             group.legacy_task_id = task.legacy_id
             group.task_id = task.id
             group.terminal = terminal
@@ -4045,8 +4077,6 @@ class PostgresStateRepository(StateRepository):
         team_id = local_simulation.current_team_id()
         with self._session() as session:
             try:
-                lock_key = _candidate_advisory_lock_key(team_id, candidate_key)
-                session.scalar(select(func.pg_advisory_xact_lock(lock_key)))
                 record = session.scalar(
                     select(UnmatchedRecord)
                     .where(
@@ -4077,6 +4107,16 @@ class PostgresStateRepository(StateRepository):
                     str(candidate.get("meter_no") or ""),
                 )
                 candidate = {**candidate, "terminal": terminal, "meter_no": meter_no}
+                meter_key = str(
+                    candidate.get("meter_match_key")
+                    or local_simulation.build_total_catalog_match_key(meter_no)
+                    or ""
+                ).strip()
+                if not meter_key:
+                    raise ValueError("Selected candidate has an invalid meter")
+                project_id = self._project_id_for_team(session, team_id)
+                lock_key = _formal_identity_advisory_lock_key(project_id, meter_key)
+                session.scalar(select(func.pg_advisory_xact_lock(lock_key)))
                 group, attached = self._materialize_unmatched_candidate(
                     session,
                     record,
@@ -4091,18 +4131,16 @@ class PostgresStateRepository(StateRepository):
                     "associated_by": actor,
                     "associated_group_id": group.legacy_id,
                 }
-                session.add(
-                    AuditLog(
-                        team_id=team_id,
-                        legacy_id=f"unmatched-review-finalized-{uuid4()}",
-                        actor_username=actor,
-                        action="unmatched_review_finalized",
-                        entity_type="unmatched_record",
-                        entity_id=None,
-                        before_data={"unmatched_id": unmatched_id, "review_version": expected_version},
-                        after_data={"group_id": group.legacy_id, "terminal": candidate["terminal"]},
-                        payload={"candidate_key": candidate_key, "attached": attached},
-                    )
+                _stage_transactional_audit(
+                    session,
+                    team_id=team_id,
+                    actor=actor,
+                    action="unmatched_review_finalized",
+                    entity_type="unmatched_record",
+                    entity_id=record.id,
+                    before_data={"unmatched_id": unmatched_id, "review_version": expected_version},
+                    after_data={"group_id": group.legacy_id, "terminal": candidate["terminal"]},
+                    payload={"candidate_key": candidate_key, "attached": attached},
                 )
                 result = {
                     "group": _group_payload(session, group),
@@ -4118,6 +4156,11 @@ class PostgresStateRepository(StateRepository):
                 }
                 session.commit()
                 return result
+            except IntegrityError as exc:
+                session.rollback()
+                raise unmatched_review.FinalizationIdentityConflict(
+                    "Candidate conflicts with existing formal group identity"
+                ) from exc
             except Exception:
                 session.rollback()
                 raise
@@ -4158,22 +4201,20 @@ class PostgresStateRepository(StateRepository):
                 )
                 audit_event = updated.pop("audit_event")
                 record.payload = {**(record.payload or {}), "temporary_review": updated}
-                session.add(
-                    AuditLog(
-                        team_id=team_id,
-                        legacy_id=f"unmatched-review-saved-{uuid4()}",
-                        actor_username=actor,
-                        action="unmatched_review_saved",
-                        entity_type="unmatched_record",
-                        entity_id=record.id,
-                        before_data=audit_event["before"],
-                        after_data=audit_event["after"],
-                        payload={
-                            "unmatched_id": unmatched_id,
-                            "before_version": audit_event["before_version"],
-                            "after_version": audit_event["after_version"],
-                        },
-                    )
+                _stage_transactional_audit(
+                    session,
+                    team_id=team_id,
+                    actor=actor,
+                    action="unmatched_review_saved",
+                    entity_type="unmatched_record",
+                    entity_id=record.id,
+                    before_data=audit_event["before"],
+                    after_data=audit_event["after"],
+                    payload={
+                        "unmatched_id": unmatched_id,
+                        "before_version": audit_event["before_version"],
+                        "after_version": audit_event["after_version"],
+                    },
                 )
                 session.commit()
                 return {"record": _unmatched_payload(record), "review": deepcopy(updated)}
@@ -4243,22 +4284,20 @@ class PostgresStateRepository(StateRepository):
                 review["version"] = expected_version + 1
                 review["updated_at"] = now
                 record.payload = {**(record.payload or {}), "temporary_review": review}
-                session.add(
-                    AuditLog(
-                        team_id=team_id,
-                        legacy_id=f"unmatched-review-rescan-{uuid4()}",
-                        actor_username=actor,
-                        action="unmatched_review_barcode_rescan",
-                        entity_type="unmatched_record",
-                        entity_id=record.id,
-                        before_data={"photo": before_photo, "review_version": expected_version},
-                        after_data={"photo": deepcopy(photo), "review_version": review["version"]},
-                        payload={
-                            "unmatched_id": unmatched_id,
-                            "photo_id": photo_id,
-                            "category": photo.get("category") or "",
-                        },
-                    )
+                _stage_transactional_audit(
+                    session,
+                    team_id=team_id,
+                    actor=actor,
+                    action="unmatched_review_barcode_rescan",
+                    entity_type="unmatched_record",
+                    entity_id=record.id,
+                    before_data={"photo": before_photo, "review_version": expected_version},
+                    after_data={"photo": deepcopy(photo), "review_version": review["version"]},
+                    payload={
+                        "unmatched_id": unmatched_id,
+                        "photo_id": photo_id,
+                        "category": photo.get("category") or "",
+                    },
                 )
                 session.commit()
                 return {
@@ -4301,23 +4340,21 @@ class PostgresStateRepository(StateRepository):
                 review["reviewed_at"] = reviewed_at
                 review["version"] = expected_version + 1
                 record.payload = {**(record.payload or {}), "temporary_review": review}
-                session.add(
-                    AuditLog(
-                        team_id=team_id,
-                        legacy_id=f"unmatched-review-confirmed-{uuid4()}",
-                        actor_username=actor,
-                        action="unmatched_review_confirmed",
-                        entity_type="unmatched_record",
-                        entity_id=record.id,
-                        before_data=before,
-                        after_data=deepcopy(review),
-                        payload={
-                            "unmatched_id": unmatched_id,
-                            "confirmed": bool(confirmed),
-                            "before_version": expected_version,
-                            "after_version": review["version"],
-                        },
-                    )
+                _stage_transactional_audit(
+                    session,
+                    team_id=team_id,
+                    actor=actor,
+                    action="unmatched_review_confirmed",
+                    entity_type="unmatched_record",
+                    entity_id=record.id,
+                    before_data=before,
+                    after_data=deepcopy(review),
+                    payload={
+                        "unmatched_id": unmatched_id,
+                        "confirmed": bool(confirmed),
+                        "before_version": expected_version,
+                        "after_version": review["version"],
+                    },
                 )
                 session.commit()
                 return {"record": _unmatched_payload(record), "review": deepcopy(review)}
@@ -4381,15 +4418,14 @@ class PostgresStateRepository(StateRepository):
                 record.payload = raw
                 record.status = "deduped"
             if duplicates:
-                event = AuditLog(
+                _stage_transactional_audit(
+                    session,
                     team_id=team_id,
-                    legacy_id=f"dedupe-unmatched-{uuid4()}",
-                    actor_username=actor,
+                    actor=actor,
                     action="dedupe_unmatched",
                     entity_type="unmatched_records",
                     payload={"removed": len(duplicates), "duplicate_ids": duplicate_ids},
                 )
-                session.add(event)
                 session.commit()
             return {
                 "total": len(records),
@@ -4442,6 +4478,7 @@ class PostgresStateRepository(StateRepository):
             if record is None:
                 raise KeyError(unmatched_id)
             review = _checked_unmatched_review(record, expected_version)
+            before = _unmatched_payload(record)
             raw = dict(record.payload or {})
             for key in (
                 "barcode",
@@ -4467,6 +4504,17 @@ class PostgresStateRepository(StateRepository):
                         raw[key] = value
             raw.update({"updated_by": actor, "updated_at": datetime.now(UTC).isoformat()})
             record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
+            _stage_transactional_audit(
+                session,
+                team_id=record.team_id,
+                actor=actor,
+                action="unmatched_record_updated",
+                entity_type="unmatched_record",
+                entity_id=record.id,
+                before_data=before,
+                after_data=_unmatched_payload(record),
+                payload={"expected_version": expected_version},
+            )
             session.commit()
             session.refresh(record)
             return {"record": _unmatched_payload(record)}
@@ -4497,6 +4545,7 @@ class PostgresStateRepository(StateRepository):
             if record is None:
                 raise KeyError(unmatched_id)
             review = _checked_unmatched_review(record, expected_version)
+            before = _unmatched_payload(record)
             terminal = str(record.terminal or "").strip()
             if terminal:
                 task = session.scalar(
@@ -4534,6 +4583,17 @@ class PostgresStateRepository(StateRepository):
                 }
             )
             record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
+            _stage_transactional_audit(
+                session,
+                team_id=record.team_id,
+                actor=actor,
+                action="unmatched_record_assigned",
+                entity_type="unmatched_record",
+                entity_id=record.id,
+                before_data=before,
+                after_data=_unmatched_payload(record),
+                payload={"expected_version": expected_version},
+            )
             session.commit()
             session.refresh(record)
             return {"record": _unmatched_payload(record)}
@@ -4559,6 +4619,7 @@ class PostgresStateRepository(StateRepository):
             if record is None:
                 raise KeyError(unmatched_id)
             review = _checked_unmatched_review(record, expected_version)
+            before = _unmatched_payload(record)
             raw = dict(record.payload or {})
             raw.update(
                 {
@@ -4569,6 +4630,17 @@ class PostgresStateRepository(StateRepository):
                 }
             )
             record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
+            _stage_transactional_audit(
+                session,
+                team_id=record.team_id,
+                actor=actor,
+                action="unmatched_record_unassigned",
+                entity_type="unmatched_record",
+                entity_id=record.id,
+                before_data=before,
+                after_data=_unmatched_payload(record),
+                payload={"expected_version": expected_version},
+            )
             session.commit()
             session.refresh(record)
             return {"record": _unmatched_payload(record)}
@@ -4594,6 +4666,7 @@ class PostgresStateRepository(StateRepository):
             if record is None:
                 raise KeyError(unmatched_id)
             review = _checked_unmatched_review(record, expected_version)
+            before = _unmatched_payload(record)
             raw = dict(record.payload or {})
             raw.update(
                 {
@@ -4605,6 +4678,17 @@ class PostgresStateRepository(StateRepository):
                 }
             )
             record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
+            _stage_transactional_audit(
+                session,
+                team_id=record.team_id,
+                actor=actor,
+                action="unmatched_record_marked_outside_project",
+                entity_type="unmatched_record",
+                entity_id=record.id,
+                before_data=before,
+                after_data=_unmatched_payload(record),
+                payload={"expected_version": expected_version},
+            )
             session.commit()
             session.refresh(record)
             return {"record": _unmatched_payload(record)}
@@ -4834,18 +4918,16 @@ class PostgresStateRepository(StateRepository):
                 field for field in comparable_fields if field in updates and str(before.get(field) or "") != str(after.get(field) or "")
             )
             if changed_fields:
-                session.add(
-                    AuditLog(
-                        team_id=local_simulation.current_team_id(),
-                        legacy_id=f"{audit_action}-{uuid4()}",
-                        actor_username=actor,
-                        action=audit_action,
-                        entity_type="material_group",
-                        entity_id=group.id,
-                        before_data={field: before.get(field) for field in changed_fields},
-                        after_data={field: after.get(field) for field in changed_fields},
-                        payload={"group_id": group.legacy_id or str(group.id), "changed_fields": changed_fields},
-                    )
+                _stage_transactional_audit(
+                    session,
+                    team_id=local_simulation.current_team_id(),
+                    actor=actor,
+                    action=audit_action,
+                    entity_type="material_group",
+                    entity_id=group.id,
+                    before_data={field: before.get(field) for field in changed_fields},
+                    after_data={field: after.get(field) for field in changed_fields},
+                    payload={"group_id": group.legacy_id or str(group.id), "changed_fields": changed_fields},
                 )
             session.commit()
             session.refresh(group)
@@ -4950,7 +5032,9 @@ class PostgresStateRepository(StateRepository):
                         "id": row.legacy_id or str(row.id),
                         "action": row.action,
                         "actor": row.actor_username or "",
-                        "payload": row.payload or row.after_data or {},
+                        "payload": unmatched_review.redact_audit_photo_secrets(
+                            row.payload or row.after_data or {}
+                        ),
                         "created_at": row.created_at.isoformat() if row.created_at else None,
                     }
                     for row in rows
@@ -4990,18 +5074,13 @@ class PostgresStateRepository(StateRepository):
         actor: str,
         event_payload: dict[str, Any],
     ) -> None:
-        session.add(
-            AuditLog(
-                team_id=local_simulation.current_team_id(),
-                legacy_id=f"construction-activity-{uuid4()}",
-                actor_username=actor,
-                action=event_type,
-                entity_type="construction_activity",
-                entity_id=None,
-                payload=event_payload,
-                before_data=None,
-                after_data=None,
-            )
+        _stage_transactional_audit(
+            session,
+            team_id=local_simulation.current_team_id(),
+            actor=actor,
+            action=event_type,
+            entity_type="construction_activity",
+            payload=event_payload,
         )
 
     def list_construction_tasks(self, *, actor: str = "", include_closed: bool = False) -> list[dict[str, Any]]:
@@ -5556,29 +5635,27 @@ class PostgresStateRepository(StateRepository):
                 )
             )
             photo.raw_data = raw_data
-            session.add(
-                AuditLog(
-                    team_id=local_simulation.current_team_id(),
-                    legacy_id=f"photo_barcode_rescan-{uuid4()}",
-                    actor_username=reviewer,
-                    action="photo_barcode_rescan",
-                    entity_type="photo",
-                    entity_id=photo.id,
-                    before_data={},
-                    after_data={
-                        key: raw_data.get(key)
-                        for key in photo_barcode_check.BARCODE_CHECK_FIELDS
-                        if key in raw_data
-                    },
-                    payload={
-                        "group_id": group.legacy_id or str(group.id),
-                        "photo_id": photo.legacy_id or str(photo.id),
-                        "category": next_category,
-                        "status": raw_data.get("barcode_check_status", ""),
-                        "matched_value": raw_data.get("barcode_check_matched_value", ""),
-                        "method": raw_data.get("barcode_check_method", ""),
-                    },
-                )
+            _stage_transactional_audit(
+                session,
+                team_id=local_simulation.current_team_id(),
+                actor=reviewer,
+                action="photo_barcode_rescan",
+                entity_type="photo",
+                entity_id=photo.id,
+                before_data={},
+                after_data={
+                    key: raw_data.get(key)
+                    for key in photo_barcode_check.BARCODE_CHECK_FIELDS
+                    if key in raw_data
+                },
+                payload={
+                    "group_id": group.legacy_id or str(group.id),
+                    "photo_id": photo.legacy_id or str(photo.id),
+                    "category": next_category,
+                    "status": raw_data.get("barcode_check_status", ""),
+                    "matched_value": raw_data.get("barcode_check_matched_value", ""),
+                    "method": raw_data.get("barcode_check_method", ""),
+                },
             )
             session.commit()
             session.refresh(photo)
@@ -5608,30 +5685,28 @@ class PostgresStateRepository(StateRepository):
                 }
             )
             group.raw_data = raw_data
-            session.add(
-                AuditLog(
-                    team_id=local_simulation.current_team_id(),
-                    legacy_id=f"group_barcode_manual_confirmed-{uuid4()}",
-                    actor_username=actor,
-                    action="group_barcode_manual_confirmed",
-                    entity_type="material_group",
-                    entity_id=group.id,
-                    before_data=before_data,
-                    after_data={
-                        key: raw_data.get(key)
-                        for key in (
-                            "group_barcode_manual_confirmed",
-                            "group_barcode_manual_confirmed_fields",
-                            "group_barcode_manual_confirmed_by",
-                            "group_barcode_manual_confirmed_at",
-                        )
-                    },
-                    payload={
-                        "group_id": group.legacy_id or str(group.id),
-                        "fields": raw_data["group_barcode_manual_confirmed_fields"],
-                        "confirmed_at": raw_data["group_barcode_manual_confirmed_at"],
-                    },
-                )
+            _stage_transactional_audit(
+                session,
+                team_id=local_simulation.current_team_id(),
+                actor=actor,
+                action="group_barcode_manual_confirmed",
+                entity_type="material_group",
+                entity_id=group.id,
+                before_data=before_data,
+                after_data={
+                    key: raw_data.get(key)
+                    for key in (
+                        "group_barcode_manual_confirmed",
+                        "group_barcode_manual_confirmed_fields",
+                        "group_barcode_manual_confirmed_by",
+                        "group_barcode_manual_confirmed_at",
+                    )
+                },
+                payload={
+                    "group_id": group.legacy_id or str(group.id),
+                    "fields": raw_data["group_barcode_manual_confirmed_fields"],
+                    "confirmed_at": raw_data["group_barcode_manual_confirmed_at"],
+                },
             )
             session.commit()
             session.refresh(group)
@@ -5726,6 +5801,7 @@ class PostgresStateRepository(StateRepository):
             if record is None:
                 raise KeyError(unmatched_id)
             review = _checked_unmatched_review(record, expected_version)
+            before = _unmatched_payload(record)
             raw = dict(record.payload or {})
             raw["deleted_by"] = actor
             raw["delete_reason"] = reason
@@ -5733,6 +5809,17 @@ class PostgresStateRepository(StateRepository):
             record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
             payload = _unmatched_payload(record)
             record.status = "deleted"
+            _stage_transactional_audit(
+                session,
+                team_id=record.team_id,
+                actor=actor,
+                action="unmatched_record_deleted",
+                entity_type="unmatched_record",
+                entity_id=record.id,
+                before_data=before,
+                after_data=_unmatched_payload(record),
+                payload={"expected_version": expected_version},
+            )
             session.commit()
             return payload
 
@@ -5767,6 +5854,7 @@ class PostgresStateRepository(StateRepository):
             if record is None:
                 raise KeyError(unmatched_id)
             review = _checked_unmatched_review(record, expected_version)
+            before = _unmatched_payload(record)
             group_statement = select(MaterialGroup).where(MaterialGroup.team_id == record.team_id)
             if target_group_id:
                 group_statement = group_statement.where(MaterialGroup.legacy_id == target_group_id)
@@ -5815,6 +5903,17 @@ class PostgresStateRepository(StateRepository):
                 "associated_group_id": group.legacy_id,
             }
             record.payload = _advance_unmatched_review_payload(record_raw, review, expected_version)
+            _stage_transactional_audit(
+                session,
+                team_id=record.team_id,
+                actor=actor,
+                action="unmatched_record_associated",
+                entity_type="unmatched_record",
+                entity_id=record.id,
+                before_data=before,
+                after_data=_unmatched_payload(record),
+                payload={"expected_version": expected_version, "group_id": group.legacy_id},
+            )
             session.commit()
             session.refresh(group)
             return {
@@ -5891,18 +5990,16 @@ class PostgresStateRepository(StateRepository):
                     "associated_group_id": group.legacy_id,
                 }
                 record.payload = _advance_unmatched_review_payload(record_raw, review, expected_version)
-                session.add(
-                    AuditLog(
-                        team_id=team_id,
-                        legacy_id=f"create-group-from-unmatched-{uuid4()}",
-                        actor_username=actor,
-                        action="create_group_from_unmatched",
-                        entity_type="unmatched_record",
-                        entity_id=record.id,
-                        before_data={"unmatched_id": unmatched_id, "review_version": expected_version},
-                        after_data={"group_id": group.legacy_id, "terminal": terminal_value},
-                        payload={"attached": attached, "meter_no": meter_no_value},
-                    )
+                _stage_transactional_audit(
+                    session,
+                    team_id=team_id,
+                    actor=actor,
+                    action="create_group_from_unmatched",
+                    entity_type="unmatched_record",
+                    entity_id=record.id,
+                    before_data={"unmatched_id": unmatched_id, "review_version": expected_version},
+                    after_data={"group_id": group.legacy_id, "terminal": terminal_value},
+                    payload={"attached": attached, "meter_no": meter_no_value},
                 )
                 task = session.get(Task, group.task_id) if group.task_id else None
                 result = {
@@ -6413,33 +6510,31 @@ class PostgresStateRepository(StateRepository):
             group.exception_reasons = []
             group.has_archive_blocker = False
             group.reviewed_at = None
-            session.add(
-                AuditLog(
-                    team_id=local_simulation.current_team_id(),
-                    legacy_id=f"group-reset-to-unconstructed-{uuid4()}",
-                    actor_username=actor,
-                    action="group_reset_to_unconstructed",
-                    entity_type="material_group",
-                    entity_id=group.id,
-                    before_data=before,
-                    after_data={
-                        "status": "pending",
-                        "photo_count": 0,
-                        "reviewer": "",
-                        "review_note": "",
-                        "exception_note": "",
-                        "collector": "",
-                        "module_asset_no": "",
-                        "construction_collector": "",
-                        "construction_module_asset_no": "",
-                        "group_barcode_manual_confirmed": False,
-                    },
-                    payload={
-                        "group_id": group.legacy_id or str(group.id),
-                        "soft_deleted_photos": len(photos),
-                        "reason": reason,
-                    },
-                )
+            _stage_transactional_audit(
+                session,
+                team_id=local_simulation.current_team_id(),
+                actor=actor,
+                action="group_reset_to_unconstructed",
+                entity_type="material_group",
+                entity_id=group.id,
+                before_data=before,
+                after_data={
+                    "status": "pending",
+                    "photo_count": 0,
+                    "reviewer": "",
+                    "review_note": "",
+                    "exception_note": "",
+                    "collector": "",
+                    "module_asset_no": "",
+                    "construction_collector": "",
+                    "construction_module_asset_no": "",
+                    "group_barcode_manual_confirmed": False,
+                },
+                payload={
+                    "group_id": group.legacy_id or str(group.id),
+                    "soft_deleted_photos": len(photos),
+                    "reason": reason,
+                },
             )
             session.commit()
             session.refresh(group)
@@ -6477,23 +6572,21 @@ class PostgresStateRepository(StateRepository):
             group.exception_reasons = []
             group.has_archive_blocker = False
             group.reviewed_at = None
-            session.add(
-                AuditLog(
-                    team_id=local_simulation.current_team_id(),
-                    legacy_id=f"admin-group-reset-unreviewed-{uuid4()}",
-                    actor_username=actor,
-                    action="admin_group_reset_unreviewed",
-                    entity_type="material_group",
-                    entity_id=group.id,
-                    before_data=before,
-                    after_data={
-                        "status": "pending",
-                        "reviewer": "",
-                        "review_note": "",
-                        "exception_note": "",
-                    },
-                    payload={"group_id": group.legacy_id or str(group.id), "reason": reason},
-                )
+            _stage_transactional_audit(
+                session,
+                team_id=local_simulation.current_team_id(),
+                actor=actor,
+                action="admin_group_reset_unreviewed",
+                entity_type="material_group",
+                entity_id=group.id,
+                before_data=before,
+                after_data={
+                    "status": "pending",
+                    "reviewer": "",
+                    "review_note": "",
+                    "exception_note": "",
+                },
+                payload={"group_id": group.legacy_id or str(group.id), "reason": reason},
             )
             session.commit()
             session.refresh(group)
@@ -6589,36 +6682,29 @@ class PostgresStateRepository(StateRepository):
                     raw_data["exception_note"] = ""
                 group.raw_data = raw_data
                 archived_groups.append(group)
-                session.add(
-                    AuditLog(
-                        team_id=local_simulation.current_team_id(),
-                        legacy_id=f"admin-groups-bulk-archive-{uuid4()}",
-                        actor_username=actor,
-                        action="admin_groups_bulk_archive",
-                        entity_type="material_group",
-                        entity_id=group.id,
-                        before_data=before,
-                        after_data=_group_payload(session, group, include_photos=True),
-                        payload={"group_id": group.legacy_id or str(group.id), "reason": reason.strip()},
-                    )
-                )
-            session.add(
-                AuditLog(
+                _stage_transactional_audit(
+                    session,
                     team_id=local_simulation.current_team_id(),
-                    legacy_id=f"admin-groups-bulk-archive-summary-{uuid4()}",
-                    actor_username=actor,
+                    actor=actor,
                     action="admin_groups_bulk_archive",
                     entity_type="material_group",
-                    entity_id=None,
-                    before_data={},
-                    after_data={},
-                    payload={
-                        "group_ids": unique_ids,
-                        "archived_count": len(archived_groups),
-                        "skipped": skipped,
-                        "reason": reason.strip(),
-                    },
+                    entity_id=group.id,
+                    before_data=before,
+                    after_data=_group_payload(session, group, include_photos=True),
+                    payload={"group_id": group.legacy_id or str(group.id), "reason": reason.strip()},
                 )
+            _stage_transactional_audit(
+                session,
+                team_id=local_simulation.current_team_id(),
+                actor=actor,
+                action="admin_groups_bulk_archive",
+                entity_type="material_group",
+                payload={
+                    "group_ids": unique_ids,
+                    "archived_count": len(archived_groups),
+                    "skipped": skipped,
+                    "reason": reason.strip(),
+                },
             )
             session.commit()
             for group in archived_groups:
@@ -6686,6 +6772,19 @@ class DualWriteStateRepository(JsonStateRepository):
         except Exception as exc:  # pragma: no cover - production safety path
             logger.warning("Dual write mirror failed for %s: %s", operation, exc, exc_info=True)
 
+    def _strict_unmatched_review_write(self, operation: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        transaction = local_simulation.begin_authoritative_json_write(local_simulation.current_team_id())
+        token = None
+        try:
+            token = local_simulation.activate_authoritative_json_write(transaction)
+            result = getattr(super(), operation)(*args, **kwargs)
+            mirror = self.postgres_repository_factory()
+            getattr(mirror, operation)(*args, **kwargs)
+            local_simulation.finish_authoritative_json_write(transaction, token)
+            return result
+        finally:
+            local_simulation.abort_authoritative_json_write(transaction, token)
+
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         result = super().claim_task(task_id, reviewer)
         self._mirror_write("claim_task", task_id, reviewer)
@@ -6701,6 +6800,60 @@ class DualWriteStateRepository(JsonStateRepository):
         self._mirror_write("dedupe_unmatched_records", actor=actor)
         return result
 
+    def save_unmatched_review(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        metadata: dict[str, Any] | None = None,
+        photo_updates: list[dict[str, Any]] | None = None,
+        state: str = "pending",
+    ) -> dict[str, Any]:
+        return self._strict_unmatched_review_write(
+            "save_unmatched_review",
+            unmatched_id,
+            actor=actor,
+            expected_version=expected_version,
+            metadata=metadata,
+            photo_updates=photo_updates,
+            state=state,
+        )
+
+    def rescan_unmatched_review_photo(
+        self,
+        unmatched_id: str,
+        photo_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        category: str = "",
+    ) -> dict[str, Any]:
+        return self._strict_unmatched_review_write(
+            "rescan_unmatched_review_photo",
+            unmatched_id,
+            photo_id,
+            actor=actor,
+            expected_version=expected_version,
+            category=category,
+        )
+
+    def confirm_unmatched_review(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        confirmed: bool = True,
+    ) -> dict[str, Any]:
+        return self._strict_unmatched_review_write(
+            "confirm_unmatched_review",
+            unmatched_id,
+            actor=actor,
+            expected_version=expected_version,
+            confirmed=confirmed,
+        )
+
     def finalize_unmatched_match(
         self,
         unmatched_id: str,
@@ -6709,20 +6862,13 @@ class DualWriteStateRepository(JsonStateRepository):
         candidate_key: str,
         expected_version: int,
     ) -> dict[str, Any]:
-        result = super().finalize_unmatched_match(
-            unmatched_id,
-            actor=actor,
-            candidate_key=candidate_key,
-            expected_version=expected_version,
-        )
-        self._mirror_write(
+        return self._strict_unmatched_review_write(
             "finalize_unmatched_match",
             unmatched_id,
             actor=actor,
             candidate_key=candidate_key,
             expected_version=expected_version,
         )
-        return result
 
     def review_group(
         self,

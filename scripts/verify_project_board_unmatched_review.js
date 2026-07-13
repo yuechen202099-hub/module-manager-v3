@@ -78,6 +78,14 @@ for (const token of [
   assertContains(board, token, `board missing ${token}`)
 }
 
+assertNotContains(board, 'dedupeUnmatchedRecords', 'project board must not import retired unmatched dedupe')
+assertNotContains(board, 'cleanupDuplicateUnmatchedRows', 'project board must not expose retired unmatched dedupe')
+assertNotContains(board, 'unmatchedDeduping', 'project board must not retain retired unmatched dedupe state')
+assertNotContains(board, '删除重复项', 'project board must not render the retired unmatched dedupe action')
+assertNotContains(services, 'dedupeUnmatchedRecords', 'API services must not expose retired unmatched dedupe')
+assertNotContains(services, '/local-test/unmatched/dedupe', 'API services must not call retired unmatched dedupe')
+assertNotContains(types, 'UnmatchedDedupeResult', 'API types must not model retired unmatched dedupe')
+
 for (const token of [
   '重新扫码',
   '人工确认',
