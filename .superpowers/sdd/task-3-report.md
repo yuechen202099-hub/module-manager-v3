@@ -141,6 +141,43 @@ The verifier now normalizes marker labels, permits exactly one status-like asser
 
 No package, deployment, production connection, release cleanup, or deployed-baseline advancement occurred.
 
+## Final Parser Normalization Remediation
+
+The full-width dot bypass showed that delimiter-by-delimiter regex expansion could not provide a reliable parser boundary.
+
+### RED
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+```
+
+```text
+16 failed, 117 passed
+```
+
+The failures were the full-width-dot and bracket label variants across unbulleted, `-`, `*`, and `+` marker/status forms.
+
+### GREEN
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+.\.venv\Scripts\python.exe scripts\verify_release_sop.py
+.\.venv\Scripts\python.exe -m py_compile scripts\verify_release_sop.py scripts\test_verify_release_sop.py
+```
+
+```text
+133 passed in 0.25s
+[OK] release SOP files and references are consistent
+```
+
+The parser now uses `unicodedata.normalize('NFKC')`, removes one optional Markdown bullet, matches known labels by normalized case-insensitive prefix, and strips decorative suffix separators only after a label match. It requires nonempty values and retains the existing exact-one marker/status/evidence rules.
+
+### Final Parser Commit
+
+- `0f6a0e9 fix: normalize release verifier labels`
+
+No package, deployment, production connection, release cleanup, or deployed-baseline advancement occurred.
+
 ## Second Re-Review Remediation
 
 The second review identified that `+` and unbulleted semantic fields were ignored, decorative punctuation was not fully normalized, and evidence rows were reduced with last-write-wins behavior.
