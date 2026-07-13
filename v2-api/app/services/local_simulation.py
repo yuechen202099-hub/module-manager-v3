@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key
 from app.services import account_store
 from app.services import photo_barcode_check
+from app.services import unmatched_review
 from app.services.photo_storage import (
     active_storage_backend,
     parse_oss_image_url,
@@ -1605,6 +1606,45 @@ def get_unmatched_record(unmatched_id: str) -> dict[str, Any] | None:
         if item["unmatched_id"] == unmatched_id:
             return item
     return None
+
+
+def get_unmatched_review(unmatched_id: str) -> dict[str, Any]:
+    record = get_unmatched_record(unmatched_id)
+    if record is None:
+        raise KeyError(unmatched_id)
+    return {"record": record, "review": unmatched_review.build_review(record)}
+
+
+def save_unmatched_review(
+    unmatched_id: str,
+    *,
+    actor: str,
+    expected_version: int,
+    metadata: dict[str, Any] | None = None,
+    photo_updates: list[dict[str, Any]] | None = None,
+    state: str = "pending",
+) -> dict[str, Any]:
+    current_state = get_state()
+    for index, raw_record in enumerate(current_state.get("scan_unmatched", [])):
+        record = ensure_unmatched_record(raw_record)
+        if record["unmatched_id"] != unmatched_id:
+            continue
+        previous = unmatched_review.build_review(record)
+        updated = unmatched_review.apply_review_patch(
+            previous,
+            actor=actor,
+            expected_version=expected_version,
+            metadata=metadata or {},
+            photo_updates=photo_updates or [],
+            state=state,
+        )
+        audit_event = updated.pop("audit_event")
+        record["temporary_review"] = updated
+        current_state["scan_unmatched"][index] = record
+        append_audit_event("unmatched_review_saved", actor, audit_event)
+        save_all_team_states()
+        return {"record": record, "review": updated}
+    raise KeyError(unmatched_id)
 
 
 def delete_unmatched_record(unmatched_id: str, actor: str, reason: str = "") -> dict[str, Any]:

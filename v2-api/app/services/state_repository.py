@@ -1441,6 +1441,23 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_unmatched_review(self, unmatched_id: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def save_unmatched_review(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        metadata: dict[str, Any] | None = None,
+        photo_updates: list[dict[str, Any]] | None = None,
+        state: str = "pending",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_replacement_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1930,6 +1947,28 @@ class JsonStateRepository(StateRepository):
 
     def list_unmatched_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         return local_simulation.list_unmatched_records(query=query, limit=limit, offset=offset)
+
+    def get_unmatched_review(self, unmatched_id: str) -> dict[str, Any]:
+        return local_simulation.get_unmatched_review(unmatched_id)
+
+    def save_unmatched_review(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        metadata: dict[str, Any] | None = None,
+        photo_updates: list[dict[str, Any]] | None = None,
+        state: str = "pending",
+    ) -> dict[str, Any]:
+        return local_simulation.save_unmatched_review(
+            unmatched_id,
+            actor=actor,
+            expected_version=expected_version,
+            metadata=metadata,
+            photo_updates=photo_updates,
+            state=state,
+        )
 
     def list_replacement_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         return local_simulation.list_replacement_records(query=query, limit=limit, offset=offset)
@@ -3494,6 +3533,21 @@ class PostgresStateRepository(StateRepository):
                 .limit(limit)
             ).all()
             return {"total": int(total), "items": [_unmatched_payload(record) for record in records]}
+
+    def get_unmatched_review(self, unmatched_id: str) -> dict[str, Any]:
+        raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
+
+    def save_unmatched_review(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int,
+        metadata: dict[str, Any] | None = None,
+        photo_updates: list[dict[str, Any]] | None = None,
+        state: str = "pending",
+    ) -> dict[str, Any]:
+        raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
 
     def list_replacement_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
         with self._session() as session:

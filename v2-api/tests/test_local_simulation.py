@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.services import local_simulation
 from app.services import photo_barcode_check
+from app.services import unmatched_review
+from app.services.state_repository import JsonStateRepository
 from app.services.local_simulation import (
     DEFAULT_SCAN_FILE,
     DEFAULT_TOTAL_CATALOG,
@@ -1315,6 +1317,115 @@ def test_unmatched_records_are_searchable_and_audited(synthetic_state: dict) -> 
     assert deleted["barcode"] == "NO-MATCH-001"
     assert audits["items"][0]["action"] == "delete_unmatched"
     assert audits["items"][0]["actor"] == "alice"
+
+
+def seed_unmatched_review_record() -> str:
+    state = local_simulation.get_state()
+    record = local_simulation.ensure_unmatched_record(
+        {
+            "barcode": "3130001122100009124734",
+            "meter_no": "120000912473",
+            "collector": "C001",
+            "module_asset_no": "M001",
+            "photo_urls": [f"https://photos.example/{index}.jpg" for index in range(4)],
+        }
+    )
+    state["scan_unmatched"].append(record)
+    return record["unmatched_id"]
+
+
+def test_unmatched_review_save_persists_without_creating_group_or_changing_summary(synthetic_state: dict) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    before = deepcopy(local_simulation.get_state())
+
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    saved = local_simulation.save_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=opened["review"]["version"],
+        metadata={"meter_no": "120000912474"},
+        photo_updates=[{"id": opened["review"]["photos"][0]["id"], "category": "before_box"}],
+        state="reviewed",
+    )
+    after = local_simulation.get_state()
+    events = [event for event in after["audit_events"] if event["action"] == "unmatched_review_saved"]
+
+    assert saved["review"]["meter_no"] == "120000912474"
+    assert saved["review"]["photos"][0]["category"] == "before_box"
+    assert saved["record"]["temporary_review"] == saved["review"]
+    assert "audit_event" not in saved["review"]
+    assert len(events) == 1
+    assert events[0]["actor"] == "reviewer-a"
+    assert events[0]["payload"]["before_version"] == 1
+    assert events[0]["payload"]["after_version"] == 2
+    assert "audit_event" not in events[0]["payload"]["after"]
+    assert after["groups"] == before["groups"]
+    assert after["tasks"] == before["tasks"]
+    assert after["summary"] == before["summary"]
+
+
+def test_unmatched_review_save_rejects_stale_version_without_persisting_or_auditing(synthetic_state: dict) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    saved = local_simulation.save_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=opened["review"]["version"],
+        metadata={"meter_no": "120000912474"},
+    )
+
+    with pytest.raises(unmatched_review.ReviewVersionConflict):
+        local_simulation.save_unmatched_review(
+            unmatched_id,
+            actor="reviewer-b",
+            expected_version=opened["review"]["version"],
+            metadata={"meter_no": "120000912475"},
+        )
+
+    reloaded = local_simulation.get_unmatched_review(unmatched_id)
+    events = [event for event in local_simulation.get_state()["audit_events"] if event["action"] == "unmatched_review_saved"]
+    assert reloaded["review"] == saved["review"]
+    assert len(events) == 1
+
+
+def test_unmatched_review_save_persists_across_json_reload(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LOCAL_SIMULATION_STATE_PATH", str(tmp_path / "state.json"))
+    unmatched_id = seed_unmatched_review_record()
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    saved = local_simulation.save_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=opened["review"]["version"],
+        metadata={"collector": "C002"},
+    )
+
+    local_simulation.get_state()["scan_unmatched"] = []
+    assert local_simulation.load_all_team_states() is True
+    reloaded = local_simulation.get_unmatched_review(unmatched_id)
+    events = [event for event in local_simulation.get_state()["audit_events"] if event["action"] == "unmatched_review_saved"]
+
+    assert reloaded["review"] == saved["review"]
+    assert len(events) == 1
+
+
+def test_json_state_repository_saves_unmatched_review_through_local_state(synthetic_state: dict) -> None:
+    repository = JsonStateRepository()
+    unmatched_id = seed_unmatched_review_record()
+    opened = repository.get_unmatched_review(unmatched_id)
+
+    saved = repository.save_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=opened["review"]["version"],
+        metadata={"module_asset_no": "M002"},
+    )
+
+    assert saved["review"]["module_asset_no"] == "M002"
+    assert local_simulation.get_unmatched_review(unmatched_id)["review"] == saved["review"]
 
 
 def test_unmatched_dedupe_removes_duplicate_meter_records(synthetic_state: dict) -> None:
