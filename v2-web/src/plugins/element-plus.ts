@@ -13,7 +13,7 @@ import { ElLoading } from 'element-plus/es/components/loading/index'
 import { ElOption, ElSelect } from 'element-plus/es/components/select/index'
 import { ElPagination } from 'element-plus/es/components/pagination/index'
 import { ElProgress } from 'element-plus/es/components/progress/index'
-import { ElRadioButton, ElRadioGroup } from 'element-plus/es/components/radio/index'
+import { ElRadio, ElRadioButton, ElRadioGroup } from 'element-plus/es/components/radio/index'
 import { ElSegmented } from 'element-plus/es/components/segmented/index'
 import { ElSkeleton } from 'element-plus/es/components/skeleton/index'
 import { ElSwitch } from 'element-plus/es/components/switch/index'
@@ -41,6 +41,7 @@ const components: Plugin[] = [
   ElOption,
   ElPagination,
   ElProgress,
+  ElRadio,
   ElRadioButton,
   ElRadioGroup,
   ElSegmented,

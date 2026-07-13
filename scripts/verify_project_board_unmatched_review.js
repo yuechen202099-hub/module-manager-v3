@@ -4,6 +4,7 @@ const types = fs.readFileSync('v2-web/src/api/types.ts', 'utf8')
 const services = fs.readFileSync('v2-web/src/api/services.ts', 'utf8')
 const board = fs.readFileSync('v2-web/src/views/ProjectBoardView.vue', 'utf8')
 const dialog = fs.readFileSync('v2-web/src/components/UnmatchedReviewDialog.vue', 'utf8')
+const elementPlus = fs.readFileSync('v2-web/src/plugins/element-plus.ts', 'utf8')
 
 function assertContains(source, pattern, message) {
   if (!source.includes(pattern)) throw new Error(message)
@@ -108,6 +109,8 @@ assertContains(dialog, 'function clampCandidatePage()', 'candidate page must be 
 assertContains(dialog, 'Math.min(Math.max(1, candidatePage.value), candidateTotalPages.value)', 'candidate page clamp is incomplete')
 assertContains(dialog, 'v-if="isAdmin"', 'finalization button must be admin only')
 assertContains(dialog, 'if (!isAdmin.value || !detail.value', 'finalization handler must be admin only')
+assertContains(dialog, '<el-radio', 'candidate rows must expose a selection control')
+assertContains(elementPlus, 'ElRadio,', 'candidate radio control must be registered')
 
 const candidateLoad = section(dialog, 'async function loadMatchCandidates()', 'async function finalizeMatch')
 assertContains(dialog, 'function resetCandidateResults()', 'new candidate cycles must invalidate prior results')
