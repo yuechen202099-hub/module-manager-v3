@@ -2552,6 +2552,20 @@ def normalize_unmatched_photo_payload(record: dict[str, Any], updates: dict[str,
     return payload
 
 
+FORMAL_IDENTITY_PLACEHOLDERS = {"", "00000000", "未关联终端"}
+FORMAL_IDENTITY_PREFIXES = ("manual-", "unmatched-")
+
+
+def validate_real_formal_identity(terminal: str, meter_no: str) -> tuple[str, str]:
+    terminal_value = str(terminal or "").strip()
+    meter_no_value = str(meter_no or "").strip()
+    if terminal_value in FORMAL_IDENTITY_PLACEHOLDERS or terminal_value.lower().startswith(FORMAL_IDENTITY_PREFIXES):
+        raise ValueError("A real terminal is required")
+    if meter_no_value in FORMAL_IDENTITY_PLACEHOLDERS or meter_no_value.lower().startswith(FORMAL_IDENTITY_PREFIXES):
+        raise ValueError("A real meter number is required")
+    return terminal_value, meter_no_value
+
+
 def find_existing_group_for_unmatched(terminal: str, meter_match_key: str, meter_no: str) -> dict[str, Any] | None:
     terminal = terminal.strip()
     meter_match_key = meter_match_key.strip()
@@ -2597,8 +2611,6 @@ def create_group_from_unmatched_record(
     expected_version: int = 1,
 ) -> dict[str, Any]:
     terminal = terminal.strip()
-    if not terminal:
-        raise ValueError("Target terminal is required")
     state = get_state()
     record = get_unmatched_record(unmatched_id)
     if record is None:
@@ -2607,6 +2619,7 @@ def create_group_from_unmatched_record(
 
     payload = normalize_unmatched_photo_payload(record, updates or {})
     meter_no = str(payload.get("meter_no") or payload.get("barcode") or payload.get("meter_match_key") or unmatched_id)
+    terminal, meter_no = validate_real_formal_identity(terminal, meter_no)
     meter_match_key = str(payload.get("meter_match_key") or build_total_catalog_match_key(meter_no) or meter_no)
     task = ensure_task_for_terminal(terminal)
     photo_rows = scan_record_to_photo_rows({**payload, "meter_match_key": meter_match_key}, len(state["groups"]) + 1)
@@ -2681,10 +2694,9 @@ def create_empty_group_for_terminal(
     address: str = "",
     meter_match_key: str = "",
 ) -> dict[str, Any]:
-    terminal = terminal.strip()
+    terminal, meter_no = validate_real_formal_identity(terminal, meter_no)
     state = get_state()
-    task = ensure_task_for_terminal(terminal or "未关联终端")
-    meter_no = meter_no.strip() or f"manual-{next_group_id()}"
+    task = ensure_task_for_terminal(terminal)
     meter_match_key = meter_match_key.strip() or build_total_catalog_match_key(meter_no) or meter_no
     group = {
         "id": next_group_id(),

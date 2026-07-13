@@ -163,6 +163,34 @@ def test_production_exact_group_create_requires_admin(monkeypatch, tmp_path) -> 
     assert repository.calls == []
 
 
+def test_production_group_create_rejects_placeholder_formal_identity(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeLegacyUnmatchedRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    invalid_cases = (
+        ("", "120000000001"),
+        ("00000000", "120000000001"),
+        ("未关联终端", "120000000001"),
+        ("manual-terminal", "120000000001"),
+        ("unmatched-terminal", "120000000001"),
+        ("T-001", ""),
+        ("T-001", "00000000"),
+        ("T-001", "未关联终端"),
+        ("T-001", "manual-meter"),
+        ("T-001", "unmatched-meter"),
+    )
+
+    for terminal, meter_no in invalid_cases:
+        response = production_client.post(
+            "/local-test/groups",
+            headers=headers["admin"],
+            json={"actor": "forged-admin", "terminal": terminal, "meter_no": meter_no},
+        )
+        assert response.status_code == 400, (terminal, meter_no, response.text)
+
+    assert repository.calls == []
+
+
 def test_production_legacy_unmatched_mutations_require_admin(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
     repository = FakeLegacyUnmatchedRepository()
@@ -240,6 +268,14 @@ def test_unmatched_review_response_hides_raw_photo_urls(monkeypatch, tmp_path) -
             payload = super()._review(unmatched_id)
             payload["record"]["photo_urls"] = ["https://cdn.allowed.test/raw.jpg?token=secret"]
             payload["record"]["raw"] = {"source_url": "https://cdn.allowed.test/raw.jpg?token=secret"}
+            payload["review"]["raw"] = {"photo_urls": ["https://cdn.allowed.test/nested.jpg?token=secret"]}
+            payload["review"]["photos"][0].update(
+                {
+                    "image_url": "https://cdn.allowed.test/image.jpg?token=secret",
+                    "signed_url": "https://cdn.allowed.test/signed.jpg?token=secret",
+                    "raw": {"photo_urls": ["https://cdn.allowed.test/deep.jpg?token=secret"]},
+                }
+            )
             return payload
 
     repository = UnsafeReviewRepository("https://cdn.allowed.test/raw.jpg?token=secret")
@@ -252,8 +288,67 @@ def test_unmatched_review_response_hides_raw_photo_urls(monkeypatch, tmp_path) -
     serialized = json.dumps(payload)
 
     assert "source_url" not in serialized
+    assert "image_url" not in serialized
+    assert "signed_url" not in serialized
     assert "photo_urls" not in serialized
+    assert "raw" not in serialized
     assert "token=secret" not in serialized
+    photo = payload["review"]["photos"][0]
+    assert photo["content_url"] == "/local-test/unmatched/unmatched-1/photos/photo-1/content"
+    assert set(photo) == {"id", "category", "content_url"}
+
+
+def test_unmatched_list_response_projects_safe_record_fields(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class UnsafeListRepository(FakeLegacyUnmatchedRepository):
+        def list_unmatched_records(self, *, query: str, limit: int, offset: int) -> dict:
+            return {
+                "total": 1,
+                "items": [
+                    {
+                        "unmatched_id": "u-unsafe",
+                        "meter_no": "120000000001",
+                        "review_version": 3,
+                        "photo_urls": ["https://cdn.allowed.test/raw.jpg?token=secret"],
+                        "signed_url": "https://cdn.allowed.test/signed.jpg?token=secret",
+                        "raw": {
+                            "source_url": "https://cdn.allowed.test/nested.jpg?token=secret",
+                            "photo_urls": ["https://cdn.allowed.test/deep.jpg?token=secret"],
+                        },
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: UnsafeListRepository())
+
+    response = production_client.get("/local-test/unmatched", headers=headers["admin"])
+    serialized = json.dumps(response.json()["data"])
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["unmatched_id"] == "u-unsafe"
+    assert response.json()["data"]["items"][0]["review_version"] == 3
+    assert "source_url" not in serialized
+    assert "signed_url" not in serialized
+    assert "photo_urls" not in serialized
+    assert "raw" not in serialized
+    assert "token=secret" not in serialized
+
+
+def test_production_unmatched_dedupe_is_retired_without_write_or_audit(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeLegacyUnmatchedRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    before = repository.snapshot()
+
+    response = production_client.post(
+        "/local-test/unmatched/dedupe",
+        headers=headers["admin"],
+        json={"actor": "forged-admin"},
+    )
+
+    assert response.status_code == 410
+    assert repository.snapshot() == before
 
 
 class FakeUnmatchedReviewRepository:
@@ -356,6 +451,11 @@ class FakeLegacyUnmatchedRepository:
     def create_empty_group_for_terminal(self, *, actor: str, **payload) -> dict:
         self.calls.append({"method": "create_empty_group", "actor": actor, **payload})
         return {"group": {"id": "group-1", **payload}}
+
+    def dedupe_unmatched_records(self, *, actor: str) -> dict:
+        self.calls.append({"method": "dedupe", "actor": actor})
+        self.audit.append({"method": "dedupe", "actor": actor})
+        return {"removed": 1}
 
     def update_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, updates=None) -> dict:
         return self._mutate("update", actor=actor, expected_version=expected_version, **(updates or {}))

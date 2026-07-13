@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
 from urllib.error import HTTPError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, build_opener
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
@@ -124,6 +124,7 @@ from app.services.local_simulation import (
     submit_construction_exception_order,
     sync_state_photos_to_oss,
     unassign_construction_task,
+    validate_real_formal_identity,
     update_group_metadata,
     update_group_terminal,
     upload_construction_group_batch,
@@ -431,13 +432,56 @@ SAFE_UNMATCHED_RECORD_FIELDS = (
     "review_version",
 )
 
+SAFE_UNMATCHED_REVIEW_FIELDS = (
+    "schema_version",
+    "unmatched_id",
+    "version",
+    "state",
+    "meter_no",
+    "collector",
+    "module_asset_no",
+    "manual_confirmed",
+    "reviewer",
+    "reviewed_at",
+    "updated_at",
+)
+
+SAFE_UNMATCHED_REVIEW_PHOTO_FIELDS = (
+    "id",
+    "category",
+    *unmatched_review.PHOTO_EVIDENCE_FIELDS,
+)
+
+
+def project_safe_fields(payload: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    return {key: deepcopy(payload[key]) for key in fields if key in payload}
+
+
+def safe_unmatched_record(payload: dict[str, Any]) -> dict[str, Any]:
+    return project_safe_fields(payload, SAFE_UNMATCHED_RECORD_FIELDS)
+
+
+def safe_unmatched_list_response(payload: dict[str, Any]) -> dict[str, Any]:
+    result = project_safe_fields(payload, ("total", "limit", "offset"))
+    result["items"] = [safe_unmatched_record(item) for item in payload.get("items") or []]
+    return result
+
 
 def safe_review_response(payload: dict[str, Any]) -> dict[str, Any]:
-    review = deepcopy(payload["review"])
-    for photo in review.get("photos", []):
-        photo.pop("source_url", None)
-        photo.pop("image_url", None)
-    record = {key: payload["record"].get(key) for key in SAFE_UNMATCHED_RECORD_FIELDS}
+    record = safe_unmatched_record(payload["record"])
+    source_review = payload["review"]
+    review = project_safe_fields(source_review, SAFE_UNMATCHED_REVIEW_FIELDS)
+    unmatched_id = str(review.get("unmatched_id") or record.get("unmatched_id") or "")
+    review["photos"] = []
+    for source_photo in source_review.get("photos") or []:
+        photo = project_safe_fields(source_photo, SAFE_UNMATCHED_REVIEW_PHOTO_FIELDS)
+        photo_id = str(photo.get("id") or "")
+        photo["category"] = str(photo.get("category") or "unclassified")
+        if unmatched_id and photo_id:
+            photo["content_url"] = (
+                f"/local-test/unmatched/{quote(unmatched_id, safe='')}/photos/{quote(photo_id, safe='')}/content"
+            )
+        review["photos"].append(photo)
     return {"record": record, "review": review}
 
 
@@ -446,6 +490,14 @@ def reject_retired_legacy_unmatched_write() -> None:
         raise HTTPException(
             status_code=410,
             detail="Legacy unmatched write retired; use /review, /match-candidates, and /finalize-match",
+        )
+
+
+def reject_retired_production_unmatched_dedupe() -> None:
+    if settings.app_env.lower() in {"prod", "production"}:
+        raise HTTPException(
+            status_code=410,
+            detail="Legacy unmatched dedupe retired; review and resolve records with current versions",
         )
 
 
@@ -1824,7 +1876,8 @@ def unmatched_records(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
-    return ok(request, state_repository().list_unmatched_records(query=query, limit=limit, offset=offset))
+    result = state_repository().list_unmatched_records(query=query, limit=limit, offset=offset)
+    return ok(request, safe_unmatched_list_response(result))
 
 
 @router.get("/replacements")
@@ -1839,6 +1892,7 @@ def replacement_records(
 
 @router.post("/unmatched/dedupe")
 def dedupe_unmatched(payload: UnmatchedDedupeRequest, request: Request):
+    reject_retired_production_unmatched_dedupe()
     return ok(request, state_repository().dedupe_unmatched_records(actor=request_actor(request)))
 
 
@@ -2280,10 +2334,6 @@ def construction_task_claim(task_id: int, payload: ConstructionActorRequest, req
     actor = bound_construction_actor(request, payload.actor)
     try:
         task = state_repository().claim_construction_task(task_id, actor)
-    except unmatched_review.ReviewVersionConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except unmatched_review.ReviewVersionConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except ValueError as exc:
@@ -2505,10 +2555,11 @@ def group_detail(group_id: str, request: Request):
 @router.post("/groups")
 def create_empty_group(payload: EmptyGroupRequest, request: Request):
     try:
+        terminal, meter_no = validate_real_formal_identity(payload.terminal, payload.meter_no)
         result = state_repository().create_empty_group_for_terminal(
-            terminal=payload.terminal,
+            terminal=terminal,
             actor=request_actor(request),
-            meter_no=payload.meter_no,
+            meter_no=meter_no,
             address=payload.address,
             meter_match_key=payload.meter_match_key,
         )

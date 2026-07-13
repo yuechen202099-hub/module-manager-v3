@@ -2688,6 +2688,79 @@ def test_admin_can_create_empty_group_and_import_missing_photos(synthetic_state:
     assert audits["items"][0]["action"] == "add_group_photos"
 
 
+@pytest.mark.parametrize(
+    ("terminal", "meter_no"),
+    [
+        ("", "120000000001"),
+        ("00000000", "120000000001"),
+        ("未关联终端", "120000000001"),
+        ("manual-terminal", "120000000001"),
+        ("unmatched-terminal", "120000000001"),
+        ("T-REAL", ""),
+        ("T-REAL", "00000000"),
+        ("T-REAL", "未关联终端"),
+        ("T-REAL", "manual-meter"),
+        ("T-REAL", "unmatched-meter"),
+    ],
+)
+def test_json_repository_rejects_placeholder_formal_identity_without_write(
+    synthetic_state: dict,
+    terminal: str,
+    meter_no: str,
+) -> None:
+    before = deepcopy(
+        {
+            "tasks": synthetic_state["tasks"],
+            "groups": synthetic_state["groups"],
+            "audit_events": synthetic_state.get("audit_events", []),
+        }
+    )
+
+    with pytest.raises(ValueError, match="real (terminal|meter number)"):
+        JsonStateRepository().create_empty_group_for_terminal(
+            terminal=terminal,
+            actor="admin",
+            meter_no=meter_no,
+        )
+
+    assert synthetic_state["tasks"] == before["tasks"]
+    assert synthetic_state["groups"] == before["groups"]
+    assert synthetic_state.get("audit_events", []) == before["audit_events"]
+
+
+def test_json_unmatched_group_creation_rejects_placeholder_meter_without_write(synthetic_state: dict) -> None:
+    synthetic_state["scan_unmatched"].append(
+        {
+            "unmatched_id": "invalid-formal-meter",
+            "barcode": "manual-meter",
+            "meter_no": "manual-meter",
+            "meter_match_key": "manual-meter",
+            "photo_urls": ["https://example.test/unsafe.jpg"],
+        }
+    )
+    before = deepcopy(
+        {
+            "tasks": synthetic_state["tasks"],
+            "groups": synthetic_state["groups"],
+            "scan_unmatched": synthetic_state["scan_unmatched"],
+            "audit_events": synthetic_state.get("audit_events", []),
+        }
+    )
+
+    with pytest.raises(ValueError, match="real meter number"):
+        create_group_from_unmatched_record(
+            "invalid-formal-meter",
+            actor="admin",
+            terminal="T-REAL",
+            expected_version=1,
+        )
+
+    assert synthetic_state["tasks"] == before["tasks"]
+    assert synthetic_state["groups"] == before["groups"]
+    assert synthetic_state["scan_unmatched"] == before["scan_unmatched"]
+    assert synthetic_state.get("audit_events", []) == before["audit_events"]
+
+
 def test_group_metadata_form_updates_group_and_photo_fields(synthetic_state: dict) -> None:
     group = synthetic_state["groups"][0]
 

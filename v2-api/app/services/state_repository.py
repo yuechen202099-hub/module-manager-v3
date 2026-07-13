@@ -5740,40 +5740,91 @@ class PostgresStateRepository(StateRepository):
         terminal: str = "",
         updates: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
         with self._session() as session:
-            record = session.scalar(
-                select(UnmatchedRecord)
-                .where(
-                    UnmatchedRecord.team_id == local_simulation.current_team_id(),
-                    UnmatchedRecord.legacy_id == unmatched_id,
-                    UnmatchedRecord.status == "open",
+            try:
+                record = session.scalar(
+                    select(UnmatchedRecord)
+                    .where(
+                        UnmatchedRecord.team_id == team_id,
+                        UnmatchedRecord.legacy_id == unmatched_id,
+                        UnmatchedRecord.status == "open",
+                    )
+                    .with_for_update()
                 )
-                .with_for_update()
-            )
-            if record is None:
-                raise KeyError(unmatched_id)
-            _checked_unmatched_review(record, expected_version)
-            payload = {**_unmatched_payload(record), **(updates or {})}
-        created = self.create_empty_group_for_terminal(
-            terminal=terminal or str(payload.get("terminal") or ""),
-            actor=actor,
-            meter_no=str(payload.get("meter_no") or payload.get("barcode") or ""),
-            address=str(payload.get("address") or ""),
-            meter_match_key=str(payload.get("meter_match_key") or ""),
-        )
-        associated = self.associate_unmatched_record(
-            unmatched_id,
-            actor=actor,
-            expected_version=expected_version,
-            target_group_id=str(created.get("group", {}).get("id") or ""),
-            updates=updates,
-        )
-        return {
-            "group": associated.get("group"),
-            "task": created.get("task"),
-            "attached": False,
-            "added_photos": associated.get("import_result", {}).get("photos_new", 0),
-        }
+                if record is None:
+                    raise KeyError(unmatched_id)
+                review = _checked_unmatched_review(record, expected_version)
+                payload = {**_unmatched_payload(record), **(updates or {})}
+                terminal_value, meter_no_value = local_simulation.validate_real_formal_identity(
+                    terminal or str(payload.get("terminal") or ""),
+                    str(payload.get("meter_no") or payload.get("barcode") or ""),
+                )
+                meter_key = str(payload.get("meter_match_key") or "").strip()
+                if not meter_key:
+                    meter_key = local_simulation.build_total_catalog_match_key(meter_no_value) or meter_no_value
+                review = {
+                    **review,
+                    "meter_no": meter_no_value,
+                    "collector": str(payload.get("collector") or review.get("collector") or ""),
+                    "module_asset_no": str(
+                        payload.get("module_asset_no")
+                        or payload.get("asset_no")
+                        or review.get("module_asset_no")
+                        or ""
+                    ),
+                }
+                candidate = {
+                    "candidate_key": f"legacy-create:{unmatched_id}",
+                    "target_group_id": "",
+                    "terminal": terminal_value,
+                    "meter_no": meter_no_value,
+                    "meter_match_key": meter_key,
+                    "address": str(payload.get("address") or ""),
+                }
+                group, attached = self._materialize_unmatched_candidate(
+                    session,
+                    record,
+                    review,
+                    candidate,
+                    actor,
+                )
+                record.status = "associated"
+                record_raw = {
+                    **(record.payload or {}),
+                    "associated_by": actor,
+                    "associated_group_id": group.legacy_id,
+                }
+                record.payload = _advance_unmatched_review_payload(record_raw, review, expected_version)
+                session.add(
+                    AuditLog(
+                        team_id=team_id,
+                        legacy_id=f"create-group-from-unmatched-{uuid4()}",
+                        actor_username=actor,
+                        action="create_group_from_unmatched",
+                        entity_type="unmatched_record",
+                        entity_id=record.id,
+                        before_data={"unmatched_id": unmatched_id, "review_version": expected_version},
+                        after_data={"group_id": group.legacy_id, "terminal": terminal_value},
+                        payload={"attached": attached, "meter_no": meter_no_value},
+                    )
+                )
+                task = session.get(Task, group.task_id) if group.task_id else None
+                result = {
+                    "group": _group_payload(session, group),
+                    "task": (
+                        _construction_task_payload(task, self._task_stats(session, task))
+                        if task is not None
+                        else None
+                    ),
+                    "attached": attached,
+                    "added_photos": len(review.get("photos") or []),
+                }
+                session.commit()
+                return result
+            except Exception:
+                session.rollback()
+                raise
 
     def create_empty_group_for_terminal(
         self,
@@ -5785,14 +5836,16 @@ class PostgresStateRepository(StateRepository):
         meter_match_key: str = "",
     ) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
-        terminal_value = terminal.strip()
-        task_terminal = terminal_value or "未关联终端"
+        terminal_value, meter_no_value = local_simulation.validate_real_formal_identity(terminal, meter_no)
         with self._session() as session:
             project_id = self._project_id_for_team(session, team_id)
-            task = self._ensure_task_for_terminal(session, team_id, task_terminal)
+            task = self._ensure_task_for_terminal(session, team_id, terminal_value)
             created_at = datetime.now(UTC)
-            meter_no_value = meter_no.strip() or f"manual-{created_at.strftime('%Y%m%d%H%M%S%f')}"
-            meter_key_value = meter_match_key.strip() or meter_no_value
+            meter_key_value = (
+                meter_match_key.strip()
+                or local_simulation.build_total_catalog_match_key(meter_no_value)
+                or meter_no_value
+            )
             group = MaterialGroup(
                 team_id=team_id,
                 project_id=project_id,

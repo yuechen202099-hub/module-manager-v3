@@ -427,6 +427,140 @@ class ReviewFakeSession(FinalizeFakeSession):
         return False
 
 
+@pytest.mark.parametrize(
+    ("terminal", "meter_no"),
+    [
+        ("", "120000000001"),
+        ("00000000", "120000000001"),
+        ("未关联终端", "120000000001"),
+        ("manual-terminal", "120000000001"),
+        ("unmatched-terminal", "120000000001"),
+        ("T-REAL", ""),
+        ("T-REAL", "00000000"),
+        ("T-REAL", "未关联终端"),
+        ("T-REAL", "manual-meter"),
+        ("T-REAL", "unmatched-meter"),
+    ],
+)
+def test_postgres_repository_rejects_placeholder_formal_identity_before_session(
+    terminal: str,
+    meter_no: str,
+) -> None:
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            pytest.fail("invalid formal identity must be rejected before a transaction starts")
+
+    with pytest.raises(ValueError, match="real (terminal|meter number)"):
+        TestPostgresRepository().create_empty_group_for_terminal(
+            terminal=terminal,
+            actor="admin",
+            meter_no=meter_no,
+        )
+
+
+def test_postgres_create_group_from_unmatched_uses_one_locked_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    record = _postgres_finalize_record()
+    fake_session = FinalizeFakeSession(record)
+    helper_calls: list[str] = []
+    group = _postgres_finalize_group()
+    group.task_id = "task-uuid"
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+        def create_empty_group_for_terminal(self, **kwargs):
+            helper_calls.append("create-empty")
+            return {"group": {"id": "split-group"}, "task": {"id": 7}}
+
+        def associate_unmatched_record(self, *args, **kwargs):
+            helper_calls.append("associate")
+            return {"group": {"id": "split-group"}, "import_result": {"photos_new": 1}}
+
+        def _materialize_unmatched_candidate(self, session, locked_record, review, candidate, actor):
+            assert session is fake_session
+            assert locked_record is record
+            assert candidate["terminal"] == "T-ATOMIC"
+            session.add(group)
+            return group, False
+
+    monkeypatch.setattr(repository, "_group_payload", lambda session, value: {"id": value.legacy_id, "terminal": value.terminal})
+
+    result = TestPostgresRepository().create_group_from_unmatched_record(
+        record.legacy_id,
+        actor="admin-a",
+        expected_version=1,
+        terminal="T-ATOMIC",
+        updates={"meter_no": "120000912473"},
+    )
+
+    compiled = str(fake_session.statements[0].compile(dialect=postgresql.dialect()))
+    audits = [item for item in fake_session.staged if isinstance(item, repository.AuditLog)]
+    assert "FOR UPDATE" in compiled
+    assert helper_calls == []
+    assert fake_session.commit_calls == 1
+    assert fake_session.rollback_calls == 0
+    assert record.status == "associated"
+    assert record.payload["temporary_review"]["version"] == 2
+    assert len(audits) == 1
+    assert audits[0].action == "create_group_from_unmatched"
+    assert result["group"]["id"] == "g-finalized"
+
+
+def test_postgres_create_group_from_unmatched_rolls_back_group_task_and_audit_on_failure() -> None:
+    record = _postgres_finalize_record()
+    before = deepcopy(vars(record))
+    fake_session = FinalizeFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+        def _materialize_unmatched_candidate(self, session, locked_record, review, candidate, actor):
+            session.add(SimpleNamespace(kind="task"))
+            session.add(SimpleNamespace(kind="group"))
+            session.add(repository.AuditLog(action="should-rollback", entity_type="test"))
+            raise ValueError("atomic materialization failed")
+
+    with pytest.raises(ValueError, match="atomic materialization failed"):
+        TestPostgresRepository().create_group_from_unmatched_record(
+            record.legacy_id,
+            actor="admin-a",
+            expected_version=1,
+            terminal="T-ATOMIC",
+            updates={"meter_no": "120000912473"},
+        )
+
+    assert fake_session.commit_calls == 0
+    assert fake_session.rollback_calls == 1
+    assert fake_session.staged == []
+    assert vars(record) == before
+
+
+def test_postgres_create_group_from_unmatched_rejects_stale_version_without_staging() -> None:
+    record = _postgres_finalize_record(version=2)
+    before = deepcopy(vars(record))
+    fake_session = FinalizeFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+    with pytest.raises(repository.unmatched_review.ReviewVersionConflict):
+        TestPostgresRepository().create_group_from_unmatched_record(
+            record.legacy_id,
+            actor="admin-a",
+            expected_version=1,
+            terminal="T-ATOMIC",
+            updates={"meter_no": "120000912473"},
+        )
+
+    assert fake_session.commit_calls == 0
+    assert fake_session.rollback_calls == 1
+    assert fake_session.staged == []
+    assert vars(record) == before
+
+
 def _review_photo_id(record: SimpleNamespace) -> str:
     review = repository.unmatched_review.build_review(repository._unmatched_payload(record))
     return review["photos"][0]["id"]
