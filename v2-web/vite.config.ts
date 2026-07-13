@@ -2,10 +2,30 @@ import { fileURLToPath, URL } from 'node:url'
 
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import versionArtifact from './src/version.json'
+
+const runtimeVersionArtifact = `${JSON.stringify(versionArtifact)}\n`
+const runtimeVersionMarker =
+  `__MODULE_MANAGER_VUE_ENTRY_VERSION__:${versionArtifact.version}:__END__`
 
 export default defineConfig({
   base: '/vue/',
-  plugins: [vue()],
+  define: {
+    __MODULE_MANAGER_VUE_ENTRY_VERSION_MARKER__: JSON.stringify(runtimeVersionMarker),
+  },
+  plugins: [
+    vue(),
+    {
+      name: 'emit-runtime-version-artifact',
+      generateBundle() {
+        this.emitFile({
+          type: 'asset',
+          fileName: 'version.json',
+          source: runtimeVersionArtifact,
+        })
+      },
+    },
+  ],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

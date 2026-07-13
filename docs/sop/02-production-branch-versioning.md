@@ -38,8 +38,8 @@
 Before release, verify the same version appears in:
 
 - `v2-web/package.json`
-- `v2-web/public/version.json` (machine-readable runtime source copied by Vite)
-- `v2-web/src/constants/releaseNotes.ts`
+- `v2-web/src/version.json` (the single machine-readable Vue version source)
+- `v2-web/src/constants/releaseNotes.ts` (imports the machine-readable source)
 - `v2-web/index.html`
 - `v2-web/src/components/AppLayout.vue`
 - `v2-api/app/main.py`
@@ -48,7 +48,7 @@ Before release, verify the same version appears in:
 - release package name
 - release record under `ops/releases/`
 
-The package verifier must also match the built `v2-api/app/static/vue/version.json` artifact to every source marker above. A version string found only in an unrelated JavaScript chunk or prose is not runtime version evidence.
+The package verifier must also match the built `v2-api/app/static/vue/version.json` artifact and the exact marker in the module entry bundle referenced by `index.html` to every version surface above. A version string found only in an unrelated JavaScript chunk or prose is not runtime version evidence.
 
 ## Tag Rule
 

@@ -7,3 +7,5 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
+
+declare const __MODULE_MANAGER_VUE_ENTRY_VERSION_MARKER__: string

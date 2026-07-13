@@ -11,7 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 V3080_RELEASE_RECORD = "ops/releases/V3.0.80.md"
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
-SOURCE_VERSION_ARTIFACT = "v2-web/public/version.json"
+SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
 SAFETY_NOTES = (
     "Production mode disables demo accounts by default",
     "Production mode disables /docs, /redoc, and /openapi.json by default",
@@ -72,6 +72,8 @@ def write_release_archive(
     title_version: str | None = None,
     runtime_version: str | None = None,
     source_version: str | None = None,
+    entry_version: str | None = None,
+    unrelated_chunk_entry_version: str = "",
     unrelated_static_version: str = "",
     unrelated_index_text: str = "",
     agents: str = VALID_AGENTS,
@@ -87,6 +89,7 @@ def write_release_archive(
     manifest = "\n".join(("# Release manifest", *version_lines, *SAFETY_NOTES))
     resolved_runtime_version = runtime_version or static_version
     resolved_source_version = source_version or resolved_runtime_version
+    resolved_entry_version = entry_version or resolved_runtime_version
     resolved_title_version = title_version or static_version
     contents = {
         "RELEASE_MANIFEST.md": manifest,
@@ -95,7 +98,8 @@ def write_release_archive(
         RUNTIME_VERSION_ARTIFACT: json.dumps({"version": resolved_runtime_version}),
         SOURCE_VERSION_ARTIFACT: json.dumps({"version": resolved_source_version}),
         "v2-api/app/static/vue/index.html": (
-            f"<!doctype html><title>Module Manager V{resolved_title_version}</title>{unrelated_index_text}"
+            f"<!doctype html><title>Module Manager V{resolved_title_version}</title>"
+            f'<script type="module" src="/vue/assets/app.js"></script>{unrelated_index_text}'
         ),
     }
     with zipfile.ZipFile(archive_path, "w") as archive:
@@ -103,9 +107,16 @@ def write_release_archive(
             archive.writestr(name, contents.get(name, "fixture\n"))
         archive.writestr(
             "v2-api/app/static/vue/assets/app.js",
-            f"const APP_VERSION = '{resolved_runtime_version}';\n"
+            f"const buildMarker = "
+            f"'__MODULE_MANAGER_VUE_ENTRY_VERSION__:{resolved_entry_version}:__END__';\n"
             f"const unrelatedReleaseNote = '{unrelated_static_version}';\n",
         )
+        if unrelated_chunk_entry_version:
+            archive.writestr(
+                "v2-api/app/static/vue/assets/unrelated.js",
+                "const unrelatedBuildMarker = "
+                f"'__MODULE_MANAGER_VUE_ENTRY_VERSION__:{unrelated_chunk_entry_version}:__END__';\n",
+            )
 
 
 def test_archive_missing_v3080_release_record_fails_verification(tmp_path: Path) -> None:
@@ -121,6 +132,15 @@ def test_release_builder_default_version_is_candidate_semantic_version() -> None
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
     assert '[string]$Version = "3.0.80"' in build_script
+
+
+def test_release_builder_stops_when_smoke_check_fails() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    smoke_block = build_script.split("Running release smoke check before packaging...", maxsplit=1)[1]
+    smoke_block = smoke_block.split("$releaseRoot", maxsplit=1)[0]
+
+    assert "$LASTEXITCODE -ne 0" in smoke_block
+    assert 'throw "Release smoke check failed."' in smoke_block
 
 
 def test_archive_missing_manifest_version_fails_verification(tmp_path: Path) -> None:
@@ -198,6 +218,23 @@ def test_archive_source_and_runtime_version_artifacts_must_match(tmp_path: Path)
     write_release_archive(verifier, archive_path, source_version="3.0.79")
 
     with pytest.raises(AssertionError, match="source and built runtime versions"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_stale_entry_bundle_despite_current_sidecars(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "stale-entry-bundle.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        runtime_version="3.0.80",
+        source_version="3.0.80",
+        entry_version="3.0.79",
+        unrelated_static_version="3.0.80",
+        unrelated_chunk_entry_version="3.0.80",
+    )
+
+    with pytest.raises(AssertionError, match="entry bundle version"):
         verifier.verify_package(archive_path)
 
 
@@ -348,6 +385,49 @@ def test_archive_accepts_negative_pending_and_future_live_controls(
 ) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "live-control-prose.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n",
+    )
+
+    verifier.verify_package(archive_path)
+
+
+ROUND5_AFFIRMATIVE_CLAIMS = [
+    "Operators can log in, and V3.0.80 was deployed to production.",
+    "Operators can log in if authorized, and V3.0.80 was deployed to production.",
+    "V3.0.80 has already gone live in production.",
+]
+
+
+ROUND5_NORMATIVE_OR_FUTURE_CLAIMS = [
+    "V3.0.80 should be deployed tomorrow.",
+    "V3.0.80 must be deployed after approval.",
+    "V3.0.80 ought to be deployed tomorrow.",
+    "V3.0.80 应于明日部署至生产环境。",
+    "V3.0.80 必须在验收后部署至生产环境。",
+]
+
+
+@pytest.mark.parametrize("prose", ROUND5_AFFIRMATIVE_CLAIMS)
+def test_archive_rejects_round5_atomic_affirmative_claims(tmp_path: Path, prose: str) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round5-affirmative-prose.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n",
+    )
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("prose", ROUND5_NORMATIVE_OR_FUTURE_CLAIMS)
+def test_archive_accepts_round5_normative_or_future_claims(tmp_path: Path, prose: str) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round5-normative-prose.zip"
     write_release_archive(
         verifier,
         archive_path,

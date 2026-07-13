@@ -35,7 +35,7 @@ finally {
 }
 
 $versionArtifacts = @(
-    (Join-Path $root "v2-web\public\version.json"),
+    (Join-Path $root "v2-web\src\version.json"),
     (Join-Path $root "v2-api\app\static\vue\version.json")
 )
 foreach ($versionArtifact in $versionArtifacts) {
@@ -47,6 +47,9 @@ foreach ($versionArtifact in $versionArtifacts) {
 if (-not $SkipSmoke) {
     Write-Host "Running release smoke check before packaging..."
     .\.venv\Scripts\python.exe .\scripts\smoke-client-demo.py
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release smoke check failed."
+    }
 }
 
 $releaseRoot = Join-Path $root "build\server-release"

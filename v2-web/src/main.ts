@@ -7,6 +7,9 @@ import { installElementPlus } from './plugins/element-plus'
 import router from './router'
 import './styles/index.css'
 
+document.documentElement.dataset.moduleManagerBuildVersion =
+  __MODULE_MANAGER_VUE_ENTRY_VERSION_MARKER__
+
 const app = createApp(App)
 app.use(createPinia()).use(router)
 installElementPlus(app)

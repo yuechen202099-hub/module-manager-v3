@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+from html.parser import HTMLParser
 import importlib.util
 import re
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 
 
 REQUIRED_FILES = {
@@ -128,17 +130,21 @@ REQUIRED_FILES = {
     "v2-api/scripts/migrate_photos_to_oss.py",
     "v2-web/Dockerfile",
     "v2-web/package.json",
-    "v2-web/public/version.json",
+    "v2-web/src/version.json",
     "v2-web/src/main.ts",
 }
 
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
-SOURCE_VERSION_ARTIFACT = "v2-web/public/version.json"
+SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
 MANIFEST_VERSION_LINE_PATTERN = re.compile(r"^- Version:\s*(?P<version>.*?)\s*$", re.MULTILINE)
 SEMANTIC_VERSION_PATTERN = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 STATIC_TITLE_PATTERN = re.compile(
     r"<title>\s*Module Manager V(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\s*</title>",
     re.IGNORECASE,
+)
+ENTRY_VERSION_MARKER_PATTERN = re.compile(
+    rb"__MODULE_MANAGER_VUE_ENTRY_VERSION__:"
+    rb"(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)):__END__"
 )
 
 FORBIDDEN_PARTS = {
@@ -177,6 +183,59 @@ def normalize_zip_name(name: str) -> str:
     return name.replace("\\", "/").lstrip("/")
 
 
+class VueModuleEntryParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.module_sources: list[str] = []
+        self.has_duplicate_attributes = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.casefold() != "script":
+            return
+        attributes: dict[str, str | None] = {}
+        for name, value in attrs:
+            normalized_name = name.casefold()
+            if normalized_name in attributes:
+                self.has_duplicate_attributes = True
+            attributes[normalized_name] = value
+        if (attributes.get("type") or "").casefold() != "module":
+            return
+        source = (attributes.get("src") or "").strip()
+        if source:
+            self.module_sources.append(source)
+
+
+def vue_entry_bundle_path(static_index: str) -> str:
+    parser = VueModuleEntryParser()
+    parser.feed(static_index)
+    if parser.has_duplicate_attributes or len(parser.module_sources) != 1:
+        fail("Vue static index must reference exactly one module entry bundle")
+    source = urlsplit(parser.module_sources[0])
+    if source.scheme or source.netloc or source.query or source.fragment:
+        fail("Vue module entry bundle must be an unambiguous local path")
+    if not source.path.startswith("/vue/"):
+        fail("Vue module entry bundle must be rooted under /vue/")
+    relative_path = PurePosixPath(source.path.removeprefix("/vue/"))
+    if (
+        relative_path.is_absolute()
+        or not relative_path.parts
+        or ".." in relative_path.parts
+        or relative_path.suffix != ".js"
+    ):
+        fail("Vue module entry bundle must be a JavaScript file under /vue/")
+    return f"v2-api/app/static/vue/{relative_path.as_posix()}"
+
+
+def entry_bundle_version(entry_bundle: bytes) -> str:
+    versions = [
+        match.group("version").decode("ascii")
+        for match in ENTRY_VERSION_MARKER_PATTERN.finditer(entry_bundle)
+    ]
+    if len(versions) != 1:
+        fail("Vue entry bundle must contain exactly one machine-readable version marker")
+    return versions[0]
+
+
 def verify_package(zip_path: Path) -> None:
     if not zip_path.exists():
         fail(f"Release zip not found: {zip_path}")
@@ -205,6 +264,10 @@ def verify_package(zip_path: Path) -> None:
             if "v2-api/app/static/vue/index.html" in names
             else ""
         )
+        entry_bundle_name = vue_entry_bundle_path(static_index)
+        if entry_bundle_name not in names:
+            fail(f"Vue module entry bundle is missing from release: {entry_bundle_name}")
+        vue_entry_version = entry_bundle_version(archive.read(entry_bundle_name))
         release_truth = load_release_truth_parser()
         runtime_version = release_truth.runtime_version_from_artifact(
             archive.read(RUNTIME_VERSION_ARTIFACT).decode("utf-8")
@@ -261,6 +324,8 @@ def verify_package(zip_path: Path) -> None:
         fail("Vue built runtime version must match the release manifest Version")
     if source_version != runtime_version:
         fail("Vue source and built runtime versions must agree")
+    if vue_entry_version != runtime_version:
+        fail("Vue entry bundle version must match source and built runtime versions")
 
     deployed_version = release_truth.deployed_production_baseline(agents)
     candidate_version = release_truth.release_candidate(agents)

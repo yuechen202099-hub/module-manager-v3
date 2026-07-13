@@ -1,4 +1,6 @@
-export const APP_VERSION = '3.0.80'
+import versionArtifact from '../version.json'
+
+export const APP_VERSION = versionArtifact.version
 
 export type ReleaseNote = {
   version: string

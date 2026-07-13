@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from io import BytesIO
 import os
 import sys
 import subprocess
@@ -55,6 +56,14 @@ def assert_vue_shell(path: str) -> str:
 
 def login(username: str, password: str):
     return client.post("/auth/login", json={"username": username, "password": password})
+
+
+def tiny_image_bytes(image_format: str, color: str) -> bytes:
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (8, 8), color).save(buffer, format=image_format)
+    return buffer.getvalue()
 
 
 def main() -> int:
@@ -163,8 +172,8 @@ def main() -> int:
         f"/local-test/groups/{group_id}/photos/upload-images",
         data={"actor": "smoke", "collector": "smoke-collector", "module_asset_no": "smoke-module"},
         files=[
-            ("files", ("smoke-a.jpg", b"smoke-image-a", "image/jpeg")),
-            ("files", ("smoke-b.png", b"smoke-image-b", "image/png")),
+            ("files", ("smoke-a.jpg", tiny_image_bytes("JPEG", "red"), "image/jpeg")),
+            ("files", ("smoke-b.png", tiny_image_bytes("PNG", "blue"), "image/png")),
         ],
     )
     check("manual补图 upload route works", uploaded.status_code == 200)

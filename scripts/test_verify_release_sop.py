@@ -431,6 +431,56 @@ def test_round4_negative_pending_and_future_live_controls_remain_nonaffirmative(
     assert not verifier.release_record_claims_deployed_without_live_evidence(record)
 
 
+ROUND5_AFFIRMATIVE_CLAIMS = [
+    "Operators can log in, and V3.0.80 was deployed to production.",
+    "Operators can log in if authorized, and V3.0.80 was deployed to production.",
+    "V3.0.80 has already gone live in production.",
+]
+
+
+ROUND5_NORMATIVE_OR_FUTURE_CLAIMS = [
+    "V3.0.80 should be deployed tomorrow.",
+    "V3.0.80 must be deployed after approval.",
+    "V3.0.80 ought to be deployed tomorrow.",
+    "V3.0.80 应于明日部署至生产环境。",
+    "V3.0.80 必须在验收后部署至生产环境。",
+]
+
+
+@pytest.mark.parametrize("prose", ROUND5_AFFIRMATIVE_CLAIMS)
+def test_round5_atomic_clauses_preserve_affirmative_deployment_claims(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("prose", ROUND5_NORMATIVE_OR_FUTURE_CLAIMS)
+def test_round5_normative_or_future_claims_remain_nonaffirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> None:
+    source_path = ROOT / "v2-web" / "src" / "version.json"
+    legacy_source_path = ROOT / "v2-web" / "public" / "version.json"
+    release_notes = (ROOT / "v2-web" / "src" / "constants" / "releaseNotes.ts").read_text(encoding="utf-8")
+    main = (ROOT / "v2-web" / "src" / "main.ts").read_text(encoding="utf-8")
+    vite_config = (ROOT / "v2-web" / "vite.config.ts").read_text(encoding="utf-8")
+
+    assert source_path.is_file()
+    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.0.80"}
+    assert not legacy_source_path.exists()
+    assert "from '../version.json'" in release_notes
+    assert "APP_VERSION = versionArtifact.version" in release_notes
+    assert "APP_VERSION = '3.0.80'" not in release_notes
+    assert "__MODULE_MANAGER_VUE_ENTRY_VERSION_MARKER__" in main
+    assert "__MODULE_MANAGER_VUE_ENTRY_VERSION__" in vite_config
+
+
 @pytest.mark.parametrize(
     "payload",
     [

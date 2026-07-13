@@ -71,7 +71,7 @@ REQUIRED_FILES = [
     "scripts/verify_project_board_data_center_photos.js",
     "scripts/verify_project_board_unmatched_review.js",
     "scripts/verify_dialog_information_integration.js",
-    "v2-web/public/version.json",
+    "v2-web/src/version.json",
 ]
 
 RELEASE_TABLE_ROW_PATTERN = re.compile(
@@ -108,7 +108,8 @@ MANIFEST_VERSION_LINE_PATTERN = re.compile(r"^- Version:\s*(?P<version>.*?)\s*$"
 DEPLOYMENT_CLAIM_PATTERN = re.compile(
     r"\b(?:deployed|shipped|released)\b"
     r"|\b(?:is|are|was|were|went|has\s+been|have\s+been)\s+(?:now\s+)?live(?:\s+(?:in|on))?\s+production\b"
-    r"|\b(?:has|have)\s+gone\s+live(?:\s+(?:in|on))?\s+production\b"
+    r"|\b(?:has|have)\s+(?:(?:already|now|successfully|fully)\s+)*gone\s+live"
+    r"(?:\s+(?:in|on))?\s+production\b"
     r"|已部署|已发布|已上线|(?:生产(?:环境)?\s*)?(?:部署|发布|上线)已完成"
     r"|已(?:在)?生产(?:环境)?(?:正式)?(?:部署|发布|上线|生效)"
     r"|已完成(?:生产(?:环境)?)?(?:部署|发布|上线)"
@@ -126,17 +127,28 @@ NEGATED_CHINESE_CLAIM_PATTERN = re.compile(
     r"(?:未|尚未)(?:在)?(?:生产(?:环境)?)?(?:正式)?(?:部署|发布|上线|生效)"
     r"|(?:未|尚未)完成(?:生产(?:环境)?)?(?:部署|发布|上线)"
 )
-CONDITIONAL_ENGLISH_CLAIM_PATTERN = re.compile(r"\b(?:can|could|may|might|if|unless)\b", re.IGNORECASE)
+CONDITIONAL_ENGLISH_CLAIM_PATTERN = re.compile(
+    r"\b(?:can|could|may|might|should|must|ought\s+to|if|unless)\b",
+    re.IGNORECASE,
+)
 CONDITIONAL_CHINESE_CLAIM_PATTERN = re.compile(
-    r"(?:可以|可能|或许|也许|若|如果|假如|倘若|除非|否则|仅当|只要|待)"
+    r"(?:可以|可能|或许|也许|应当|应该|应|必须|须|需要|需|若|如果|假如|倘若|除非|否则|仅当|只要|待)"
     r"|可(?=[^,，;；。.!?！？\n]{0,24}(?:部署|发布|上线|生效))"
+)
+CONDITIONAL_SCOPE_ENGLISH_CLAIM_PATTERN = re.compile(
+    r"^\s*(?:[-*+]\s*)?(?:if|unless)\b",
+    re.IGNORECASE,
+)
+CONDITIONAL_SCOPE_CHINESE_CLAIM_PATTERN = re.compile(
+    r"^\s*(?:[-*+]\s*)?(?:若|如果|假如|倘若|除非|否则|仅当|只要|待)"
 )
 PENDING_STATUS_PATTERN = re.compile(r"\bpending\b|待(?:部署|发布|上线|验证)|未(?:部署|发布|上线)", re.IGNORECASE)
 FUTURE_DEPLOYMENT_PATTERN = re.compile(
-    r"\b(?:will|would|shall|going\s+to|to\s+be|scheduled\s+to|planned\s+to)\s+"
+    r"\b(?:will|would|shall|should|must|ought\s+to|going\s+to|to\s+be|scheduled\s+to|planned\s+to)\s+"
     r"(?:(?:be\s+)?(?:deployed|shipped|released)|go\s+live(?:\s+(?:in|on))?\s+production)\b"
     r"|\b(?:before|after|until|once)\b[^,;.!?\n]{0,120}\b(?:deployed|shipped|released)\b"
-    r"|(?:将|计划|拟)(?:于[^,，;；。.!?！？\n]{0,20})?(?:在生产(?:环境)?)?(?:部署|发布|上线|生效)",
+    r"|(?:将|计划|拟|应当|应该|应|必须|须|需要|需)(?:于[^,，;；。.!?！？\n]{0,20})?"
+    r"(?:在生产(?:环境)?)?(?:部署|发布|上线|生效)",
     re.IGNORECASE,
 )
 CLAUSE_BOUNDARY_PATTERN = re.compile(
@@ -322,6 +334,14 @@ def clause_has_conditional_language(clause: str) -> bool:
     )
 
 
+def clause_opens_conditional_scope(clause: str) -> bool:
+    normalized = normalize_claim_text(clause)
+    return bool(
+        CONDITIONAL_SCOPE_ENGLISH_CLAIM_PATTERN.search(normalized)
+        or CONDITIONAL_SCOPE_CHINESE_CLAIM_PATTERN.search(normalized)
+    )
+
+
 def semantic_claim_clauses(value: str) -> list[tuple[str, bool]]:
     protected = VERSION_TOKEN_PATTERN.sub(lambda match: match.group(0).replace(".", "\ue000"), normalize_claim_text(value))
     parts = CLAUSE_BOUNDARY_PATTERN.split(protected)
@@ -332,7 +352,7 @@ def semantic_claim_clauses(value: str) -> list[tuple[str, bool]]:
         clause_is_conditional = clause_has_conditional_language(clause)
         if clause:
             clauses.append((clause, conditional_scope or clause_is_conditional))
-        if clause_is_conditional:
+        if clause_opens_conditional_scope(clause):
             conditional_scope = True
         boundary = parts[index + 1] if index + 1 < len(parts) else ""
         if CLAUSE_SCOPE_RESET_PATTERN.search(boundary):
@@ -499,10 +519,10 @@ def main() -> int:
         fail("build-client-release.ps1 must copy scripts\\verify_dialog_information_integration.js")
     if "scripts/verify_dialog_information_integration.js" not in release_verifier:
         fail("verify-client-release.py must require scripts/verify_dialog_information_integration.js")
-    for artifact in ["v2-api/app/static/vue/version.json", "v2-web/public/version.json"]:
+    for artifact in ["v2-api/app/static/vue/version.json", "v2-web/src/version.json"]:
         if artifact not in release_verifier:
             fail(f"verify-client-release.py must require {artifact}")
-    for artifact in ["v2-web\\public\\version.json", "v2-api\\app\\static\\vue\\version.json"]:
+    for artifact in ["v2-web\\src\\version.json", "v2-api\\app\\static\\vue\\version.json"]:
         if artifact not in build_script:
             fail(f"build-client-release.ps1 must verify the version artifact: {artifact}")
     for path in [
@@ -587,13 +607,12 @@ def main() -> int:
     if release_record_claims_deployed_without_live_evidence(v3080_record):
         fail("V3.0.80 release record claims deployed without complete live evidence")
 
-    source_runtime_version = runtime_version_from_artifact(read("v2-web/public/version.json"))
+    source_runtime_version = runtime_version_from_artifact(read("v2-web/src/version.json"))
     if f"V{source_runtime_version}" != candidate:
         fail("Vue source runtime version artifact must match the AGENTS.md release candidate")
     version_surface_markers = {
         "scripts/build-client-release.ps1": f'[string]$Version = "{source_runtime_version}"',
         "v2-web/package.json": f'"version": "{source_runtime_version}"',
-        "v2-web/src/constants/releaseNotes.ts": f"APP_VERSION = '{source_runtime_version}'",
         "v2-web/index.html": f"<title>Module Manager V{source_runtime_version}</title>",
         "v2-api/app/main.py": f'version="{source_runtime_version}"',
         "v2-api/app/services/ops_status.py": f'return "{source_runtime_version}"',
@@ -601,6 +620,18 @@ def main() -> int:
     for path, marker in version_surface_markers.items():
         if marker not in read(path):
             fail(f"Version update surface {path} must match {source_runtime_version}")
+    version_binding_markers = {
+        "v2-web/src/constants/releaseNotes.ts": [
+            "from '../version.json'",
+            "APP_VERSION = versionArtifact.version",
+        ],
+        "v2-web/src/main.ts": ["__MODULE_MANAGER_VUE_ENTRY_VERSION_MARKER__"],
+        "v2-web/vite.config.ts": ["__MODULE_MANAGER_VUE_ENTRY_VERSION__"],
+    }
+    for path, markers in version_binding_markers.items():
+        for marker in markers:
+            if marker not in read(path):
+                fail(f"Vue runtime version binding {path} must contain {marker}")
 
     manifest_versions = [
         match.group("version")
