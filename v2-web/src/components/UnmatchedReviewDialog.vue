@@ -114,6 +114,12 @@ function clampCandidatePage() {
   candidatePage.value = Math.min(Math.max(1, candidatePage.value), candidateTotalPages.value)
 }
 
+function resetCandidateResults() {
+  candidates.value = []
+  selectedCandidateKey.value = ''
+  candidatePage.value = 1
+}
+
 function isAbortedRequest(error: unknown) {
   return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError'
 }
@@ -274,6 +280,7 @@ async function openMatchMode() {
 async function loadMatchCandidates() {
   if (!props.modelValue || mode.value !== 'match' || !props.unmatchedId) return
   invalidateCandidateRequest()
+  resetCandidateResults()
   const requestSerial = candidateRequestSerial
   const unmatchedId = props.unmatchedId
   const controller = new AbortController()
@@ -284,7 +291,6 @@ async function loadMatchCandidates() {
     const next = await fetchUnmatchedMatchCandidates(unmatchedId, controller.signal)
     if (!isCurrentCandidateRequest(requestSerial, unmatchedId, controller)) return
     candidates.value = next
-    selectedCandidateKey.value = ''
     clampCandidatePage()
   } catch (error) {
     if (!isCurrentCandidateRequest(requestSerial, unmatchedId, controller) || isAbortedRequest(error)) return

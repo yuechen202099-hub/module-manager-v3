@@ -103,3 +103,43 @@ Results:
 ### Re-review Concerns
 
 - Existing Vite VueUse pure-annotation and large-chunk warnings remain. They do not affect the successful TypeScript/Vite build, and static build outputs remain outside the commit.
+
+## Second Re-review Fix
+
+### RED
+
+Command:
+
+```powershell
+node scripts\verify_project_board_unmatched_review.js
+```
+
+Result: exit 1 with `new candidate cycles must invalidate prior results`. The previous implementation left prior candidates and `selectedCandidateKey` in memory while a new post-save candidate request was pending, so a failed request could expose an outdated finalization target.
+
+### GREEN
+
+Commands:
+
+```powershell
+node scripts\verify_project_board_unmatched_review.js
+npm --prefix v2-web run build
+git diff --check
+```
+
+Results:
+
+- UI verifier: exit 0, `project board unmatched review checks passed`.
+- Build: exit 0; `vue-tsc --noEmit` and Vite production build passed.
+- `git diff --check`: exit 0.
+- Build-generated static files were restored or removed before commit.
+
+### Fix And Self-review
+
+- Added `resetCandidateResults()` and invoke it immediately after invalidating an existing request and before creating the new candidate request. It clears candidate rows, clears the selected candidate key, and resets candidate pagination to page 1.
+- A current candidate request failure now leaves the dialog with an error plus the empty candidate state; it cannot reveal a prior candidate or permit finalization against an older reviewed version.
+- Abort/current-request guards remain unchanged. Return-to-review, close, ID changes, and unmount continue to invalidate in-flight candidate work.
+- The 409 path remains separate: it reloads detail with `preserveDraft: true` and does not start a new candidate cycle, so its current UI preservation behavior is retained.
+
+### Second Re-review Concerns
+
+- Existing Vite VueUse pure-annotation and large-chunk warnings remain; they do not affect the successful build. No static build artifacts are included in the commit.

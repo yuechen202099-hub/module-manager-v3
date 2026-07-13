@@ -109,4 +109,11 @@ assertContains(dialog, 'Math.min(Math.max(1, candidatePage.value), candidateTota
 assertContains(dialog, 'v-if="isAdmin"', 'finalization button must be admin only')
 assertContains(dialog, 'if (!isAdmin.value || !detail.value', 'finalization handler must be admin only')
 
+const candidateLoad = section(dialog, 'async function loadMatchCandidates()', 'async function finalizeMatch')
+assertContains(dialog, 'function resetCandidateResults()', 'new candidate cycles must invalidate prior results')
+assertContains(candidateLoad, 'resetCandidateResults()', 'candidate loading must invalidate prior results before fetching')
+const resetIndex = candidateLoad.indexOf('resetCandidateResults()')
+const fetchIndex = candidateLoad.indexOf('fetchUnmatchedMatchCandidates')
+if (resetIndex < 0 || resetIndex > fetchIndex) throw new Error('candidate results must reset before fetching')
+
 console.log('project board unmatched review checks passed')
