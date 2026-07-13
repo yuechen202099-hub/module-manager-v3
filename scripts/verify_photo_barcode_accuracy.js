@@ -30,7 +30,10 @@ const board = read('v2-web/src/views/ProjectBoardView.vue')
 const releaseNotes = read('v2-web/src/constants/releaseNotes.ts')
 const apiMain = read('v2-api/app/main.py')
 const opsStatus = read('v2-api/app/services/ops_status.py')
-const expectedVersion = '3.0.79'
+const packageJson = JSON.parse(read('v2-web/package.json'))
+const webIndex = read('v2-web/index.html')
+const legacyLayout = read('v2-web/src/components/AppLayout.vue')
+const expectedVersion = packageJson.version
 
 for (const field of [
   'photoAccuracyChecked',
@@ -93,7 +96,10 @@ assertContains(releaseNotes, '不计入准确率分母', 'Release notes must sta
 assertContains(releaseNotes, 'V3.0.44', 'Release notes must include V3.0.44')
 assertContains(releaseNotes, '后台静默条码重算', 'Release notes must describe the backend silent recompute in Chinese')
 assertContains(releaseNotes, '资料组条码准确率', 'Release notes must describe the group barcode accuracy feature in Chinese')
+assertContains(releaseNotes, `APP_VERSION = '${expectedVersion}'`, `APP_VERSION must be ${expectedVersion}`)
 assertContains(apiMain, `version="${expectedVersion}"`, `FastAPI app version must be ${expectedVersion}`)
 assertContains(opsStatus, `return "${expectedVersion}"`, `system status version must be ${expectedVersion}`)
+assertContains(webIndex, `Module Manager V${expectedVersion}`, `web HTML title must be ${expectedVersion}`)
+assertContains(legacyLayout, `V${expectedVersion}`, `legacy layout must show ${expectedVersion}`)
 
 console.log('photo barcode accuracy checks passed')

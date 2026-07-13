@@ -29,8 +29,10 @@ const stateRepository = read('v2-api/app/services/state_repository.py')
 const localSimulation = read('v2-api/app/services/local_simulation.py')
 const apiMain = read('v2-api/app/main.py')
 const opsStatus = read('v2-api/app/services/ops_status.py')
-const packageJson = read('v2-web/package.json')
-const expectedVersion = '3.0.79'
+const packageJson = JSON.parse(read('v2-web/package.json'))
+const webIndex = read('v2-web/index.html')
+const legacyLayout = read('v2-web/src/components/AppLayout.vue')
+const expectedVersion = packageJson.version
 
 for (const label of ['终端总数', '已完成施工', '未完成施工', '待归档', '已归档']) {
   assertContains(board, label, `ProjectBoardView must expose the ${label} terminal card`)
@@ -90,6 +92,7 @@ assertContains(releaseNotes, '驾驶舱终端卡片', 'release notes must descri
 assertContains(releaseNotes, '安装人员完成占比', 'release notes must describe terminal installer completion share in Chinese')
 assertContains(apiMain, `version="${expectedVersion}"`, `FastAPI app version must be ${expectedVersion}`)
 assertContains(opsStatus, `return "${expectedVersion}"`, `system status version must be ${expectedVersion}`)
-assertContains(packageJson, `"version": "${expectedVersion}"`, `web package version must be ${expectedVersion}`)
+assertContains(webIndex, `Module Manager V${expectedVersion}`, `web HTML title must be ${expectedVersion}`)
+assertContains(legacyLayout, `V${expectedVersion}`, `legacy layout must show ${expectedVersion}`)
 
 console.log('project board terminal card checks passed')

@@ -24,8 +24,10 @@ const globalSearch = read('v2-web/src/views/GlobalSearchView.vue')
 const releaseNotes = read('v2-web/src/constants/releaseNotes.ts')
 const opsStatus = read('v2-api/app/services/ops_status.py')
 const apiMain = read('v2-api/app/main.py')
-const packageJson = read('v2-web/package.json')
-const expectedVersion = '3.0.79'
+const packageJson = JSON.parse(read('v2-web/package.json'))
+const webIndex = read('v2-web/index.html')
+const legacyLayout = read('v2-web/src/components/AppLayout.vue')
+const expectedVersion = packageJson.version
 
 assertNotContains(projectBoard, 'fetchSystemStatus', 'project board must not fetch unrelated system status')
 assertNotContains(projectBoard, 'systemRows', 'project board must not compute system status rows')
@@ -66,6 +68,7 @@ assertContains(releaseNotes, '数据中台照片加载修复', 'release notes mu
 assertContains(releaseNotes, '删除项目驾驶舱系统状态', 'release notes must describe removing system status in Chinese')
 assertContains(opsStatus, `return "${expectedVersion}"`, `system status version must be ${expectedVersion}`)
 assertContains(apiMain, `version="${expectedVersion}"`, `FastAPI app version must be ${expectedVersion}`)
-assertContains(packageJson, `"version": "${expectedVersion}"`, `web package version must be ${expectedVersion}`)
+assertContains(webIndex, `Module Manager V${expectedVersion}`, `web HTML title must be ${expectedVersion}`)
+assertContains(legacyLayout, `V${expectedVersion}`, `legacy layout must show ${expectedVersion}`)
 
 console.log('project board and data center photo checks passed')
