@@ -1331,6 +1331,10 @@ def _advance_unmatched_review_payload(
     return raw
 
 
+def _new_formal_group_legacy_id() -> str:
+    return f"g-{uuid4().hex}"
+
+
 def _unmatched_duplicate_keys(records: list[UnmatchedRecord]) -> set[str]:
     keys: set[str] = set()
     for record in records:
@@ -3891,7 +3895,7 @@ class PostgresStateRepository(StateRepository):
                 team_id=record.team_id,
                 project_id=project_id,
                 total_catalog_row_id=catalog_row_id,
-                legacy_id=f"unmatched-{record.legacy_id}"[:128],
+                legacy_id=_new_formal_group_legacy_id(),
                 legacy_task_id=task.legacy_id,
                 task_id=task.id,
                 terminal=terminal,
@@ -5840,7 +5844,6 @@ class PostgresStateRepository(StateRepository):
         with self._session() as session:
             project_id = self._project_id_for_team(session, team_id)
             task = self._ensure_task_for_terminal(session, team_id, terminal_value)
-            created_at = datetime.now(UTC)
             meter_key_value = (
                 meter_match_key.strip()
                 or local_simulation.build_total_catalog_match_key(meter_no_value)
@@ -5849,7 +5852,7 @@ class PostgresStateRepository(StateRepository):
             group = MaterialGroup(
                 team_id=team_id,
                 project_id=project_id,
-                legacy_id=f"manual-{created_at.strftime('%Y%m%d%H%M%S%f')}",
+                legacy_id=_new_formal_group_legacy_id(),
                 legacy_task_id=task.legacy_id,
                 task_id=task.id,
                 terminal=terminal_value,

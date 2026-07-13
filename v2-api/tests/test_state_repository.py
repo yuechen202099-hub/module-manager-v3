@@ -4,6 +4,7 @@ from copy import deepcopy
 import logging
 from datetime import datetime
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -425,6 +426,160 @@ class ReviewFakeSession(FinalizeFakeSession):
     def __exit__(self, exc_type, exc, tb):
         self.active = False
         return False
+
+
+class FormalGroupSuccessSession:
+    def __init__(self, *, task: SimpleNamespace, record: SimpleNamespace | None = None) -> None:
+        self.task = task
+        self.record = record
+        self.statements = []
+        self.staged = []
+        self.groups = []
+        self.commit_calls = 0
+        self.rollback_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def scalar(self, statement):
+        self.statements.append(statement)
+        sql = str(statement)
+        if "FROM unmatched_records" in sql:
+            return self.record
+        if "FROM material_groups" in sql:
+            return None
+        return 0
+
+    def scalars(self, statement):
+        self.statements.append(statement)
+        return FinalizeFakeScalars()
+
+    def get(self, model, identity):
+        if model is repository.Task and identity == self.task.id:
+            return self.task
+        return None
+
+    def add(self, value):
+        if isinstance(value, repository.MaterialGroup):
+            value.id = value.id or uuid4()
+            self.groups.append(value)
+        self.staged.append(value)
+
+    def flush(self):
+        return None
+
+    def commit(self):
+        self.commit_calls += 1
+
+    def rollback(self):
+        self.rollback_calls += 1
+
+    def refresh(self, value):
+        return None
+
+
+def formal_group_task() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        legacy_id=41,
+        team_id="default-team",
+        terminal="T-FORMAL",
+        construction_claimed_by=None,
+    )
+
+
+def test_postgres_exact_group_creation_uses_unique_stable_formal_group_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[FormalGroupSuccessSession] = []
+    task = formal_group_task()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            session = FormalGroupSuccessSession(task=task)
+            sessions.append(session)
+            return session
+
+        def _project_id_for_team(self, session, team_id: str):
+            return uuid4()
+
+        def _ensure_task_for_terminal(self, session, team_id: str, terminal: str):
+            return task
+
+        def _task_stats(self, session, checked_task):
+            return {}
+
+    monkeypatch.setattr(repository, "_construction_task_payload", lambda checked_task, stats: {"id": checked_task.legacy_id})
+    repo = TestPostgresRepository()
+
+    first = repo.create_empty_group_for_terminal(
+        terminal="T-FORMAL",
+        actor="admin-a",
+        meter_no="120000000001",
+    )
+    second = repo.create_empty_group_for_terminal(
+        terminal="T-FORMAL",
+        actor="admin-a",
+        meter_no="120000000002",
+    )
+
+    exposed_ids = [first["group"]["id"], second["group"]["id"]]
+    persisted_ids = [sessions[0].groups[0].legacy_id, sessions[1].groups[0].legacy_id]
+    assert all(group_id.startswith("g-") for group_id in exposed_ids)
+    assert all(not group_id.startswith(("manual-", "unmatched-")) for group_id in exposed_ids)
+    assert len(set(exposed_ids)) == 2
+    assert exposed_ids == persisted_ids
+    assert repository._group_payload(sessions[0], sessions[0].groups[0])["id"] == first["group"]["id"]
+    assert all(session.commit_calls == 1 for session in sessions)
+
+
+def test_postgres_unmatched_finalization_materializes_stable_formal_group_id() -> None:
+    record = _postgres_finalize_record()
+    record.payload = {**record.payload, "photo_urls": []}
+    task = formal_group_task()
+    session = FormalGroupSuccessSession(task=task, record=record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _resolve_unmatched_candidate(self, checked_session, locked_record, review, candidate_key):
+            assert checked_session is session
+            assert locked_record is record
+            return {
+                "candidate_key": candidate_key,
+                "target_group_id": "",
+                "terminal": "T-FORMAL",
+                "meter_no": "120000912473",
+                "meter_match_key": "0000912473",
+                "address": "formal road",
+            }
+
+        def _project_id_for_team(self, checked_session, team_id: str):
+            return uuid4()
+
+        def _ensure_task_for_terminal(self, checked_session, team_id: str, terminal: str):
+            return task
+
+    result = TestPostgresRepository().finalize_unmatched_match(
+        record.legacy_id,
+        actor="admin-a",
+        candidate_key="catalog:formal:T-FORMAL",
+        expected_version=1,
+    )
+
+    materialized_groups = [item for item in session.staged if isinstance(item, repository.MaterialGroup)]
+    assert len(materialized_groups) == 1
+    materialized = materialized_groups[0]
+    assert result["group"]["id"].startswith("g-")
+    assert not result["group"]["id"].startswith(("manual-", "unmatched-"))
+    assert result["group"]["id"] == materialized.legacy_id
+    assert repository._group_payload(session, materialized)["id"] == result["group"]["id"]
+    assert session.commit_calls == 1
+    assert session.rollback_calls == 0
 
 
 @pytest.mark.parametrize(
