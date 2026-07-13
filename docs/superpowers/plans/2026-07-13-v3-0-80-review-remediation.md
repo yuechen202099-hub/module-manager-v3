@@ -262,4 +262,3 @@ Build `module-manager-v2-server-3.0.80.zip`, verify local/server SHA256, back up
 - [ ] **Step 7: Record live evidence and advance the deployed baseline**
 
 Only after successful live checks, update `AGENTS.md` to `当前已部署生产版本：V3.0.80`, clear the candidate marker, fill `ops/releases/V3.0.80.md` with backup directory, package SHA256, release directory, service status and page/API results, commit and push.
-
