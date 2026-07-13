@@ -6,9 +6,10 @@ import App from './App.vue'
 import { installElementPlus } from './plugins/element-plus'
 import router from './router'
 import './styles/index.css'
+import versionArtifact from './version.json'
 
 document.documentElement.dataset.moduleManagerBuildVersion =
-  __MODULE_MANAGER_VUE_ENTRY_VERSION_MARKER__
+  versionArtifact.version
 
 const app = createApp(App)
 app.use(createPinia()).use(router)

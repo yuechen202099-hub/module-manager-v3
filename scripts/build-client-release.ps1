@@ -16,6 +16,12 @@ if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
     python -m venv .venv
 }
 
+Write-Host "Verifying administrator release notes..."
+node .\scripts\verify_admin_release_notes.js
+if ($LASTEXITCODE -ne 0) {
+    throw "Administrator release notes verification failed."
+}
+
 Write-Host "Checking Python dependencies..."
 & .\.venv\Scripts\python.exe -m pip install -r .\v2-api\requirements-dev.txt | Out-Null
 if ($LASTEXITCODE -ne 0) {

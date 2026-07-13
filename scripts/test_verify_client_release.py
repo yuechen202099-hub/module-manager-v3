@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
+import subprocess
 import zipfile
 
 import pytest
@@ -73,6 +75,9 @@ def write_release_archive(
     runtime_version: str | None = None,
     source_version: str | None = None,
     entry_version: str | None = None,
+    entry_source: str | None = None,
+    duplicate_entry: bool = False,
+    runtime_entry_sha256: str | None = None,
     unrelated_chunk_entry_version: str = "",
     unrelated_static_version: str = "",
     unrelated_index_text: str = "",
@@ -91,11 +96,25 @@ def write_release_archive(
     resolved_source_version = source_version or resolved_runtime_version
     resolved_entry_version = entry_version or resolved_runtime_version
     resolved_title_version = title_version or static_version
+    resolved_entry_source = entry_source or (
+        "globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__="
+        f'{{"version":"{resolved_entry_version}"}};\n'
+        f"const unrelatedReleaseNote = '{unrelated_static_version}';\n"
+    )
+    resolved_entry_sha256 = runtime_entry_sha256 or hashlib.sha256(
+        resolved_entry_source.encode("utf-8")
+    ).hexdigest()
     contents = {
         "RELEASE_MANIFEST.md": manifest,
         "AGENTS.md": agents,
         V3080_RELEASE_RECORD: release_record,
-        RUNTIME_VERSION_ARTIFACT: json.dumps({"version": resolved_runtime_version}),
+        RUNTIME_VERSION_ARTIFACT: json.dumps(
+            {
+                "version": resolved_runtime_version,
+                "entry": "assets/app.js",
+                "entrySha256": resolved_entry_sha256,
+            }
+        ),
         SOURCE_VERSION_ARTIFACT: json.dumps({"version": resolved_source_version}),
         "v2-api/app/static/vue/index.html": (
             f"<!doctype html><title>Module Manager V{resolved_title_version}</title>"
@@ -105,17 +124,14 @@ def write_release_archive(
     with zipfile.ZipFile(archive_path, "w") as archive:
         for name in sorted(names):
             archive.writestr(name, contents.get(name, "fixture\n"))
-        archive.writestr(
-            "v2-api/app/static/vue/assets/app.js",
-            f"const buildMarker = "
-            f"'__MODULE_MANAGER_VUE_ENTRY_VERSION__:{resolved_entry_version}:__END__';\n"
-            f"const unrelatedReleaseNote = '{unrelated_static_version}';\n",
-        )
+        archive.writestr("v2-api/app/static/vue/assets/app.js", resolved_entry_source)
+        if duplicate_entry:
+            archive.writestr("v2-api/app/static/vue/assets/app.js", resolved_entry_source)
         if unrelated_chunk_entry_version:
             archive.writestr(
                 "v2-api/app/static/vue/assets/unrelated.js",
-                "const unrelatedBuildMarker = "
-                f"'__MODULE_MANAGER_VUE_ENTRY_VERSION__:{unrelated_chunk_entry_version}:__END__';\n",
+                "globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__="
+                f'{{"version":"{unrelated_chunk_entry_version}"}};\n',
             )
 
 
@@ -141,6 +157,30 @@ def test_release_builder_stops_when_smoke_check_fails() -> None:
 
     assert "$LASTEXITCODE -ne 0" in smoke_block
     assert 'throw "Release smoke check failed."' in smoke_block
+
+
+def test_admin_release_notes_gate_executes_against_machine_version_source() -> None:
+    result = subprocess.run(
+        ["node", "scripts/verify_admin_release_notes.js"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "admin release notes checks passed" in result.stdout
+
+
+def test_package_and_acceptance_chains_execute_admin_release_notes_gate() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    acceptance_script = (ROOT / "scripts" / "run-client-acceptance-gate.ps1").read_text(encoding="utf-8")
+
+    command = "node .\\scripts\\verify_admin_release_notes.js"
+    assert command in build_script
+    assert command in acceptance_script
 
 
 def test_archive_missing_manifest_version_fails_verification(tmp_path: Path) -> None:
@@ -235,6 +275,59 @@ def test_archive_rejects_stale_entry_bundle_despite_current_sidecars(tmp_path: P
     )
 
     with pytest.raises(AssertionError, match="entry bundle version"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize(
+    "entry_source",
+    [
+        "/* globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.80\"}; */\n",
+        "const unused = 'globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.80\"};';\n",
+        "if (false) { globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.80\"}; }\n",
+        "/* stale V3.0.79 entry */\nglobalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.80\"};\n",
+    ],
+)
+def test_archive_rejects_non_executable_or_stale_entry_markers(
+    tmp_path: Path,
+    entry_source: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "non-executable-entry-marker.zip"
+    write_release_archive(verifier, archive_path, entry_source=entry_source)
+
+    with pytest.raises(AssertionError, match="entry bundle"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_duplicate_entry_bundle_members(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "duplicate-entry-member.zip"
+    write_release_archive(verifier, archive_path, duplicate_entry=True)
+
+    with pytest.raises(AssertionError, match="duplicate"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_entry_marker_found_only_in_unrelated_chunk(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "unrelated-chunk-marker.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        entry_source="console.log('entry without attestation');\n",
+        unrelated_chunk_entry_version="3.0.80",
+    )
+
+    with pytest.raises(AssertionError, match="entry bundle"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_runtime_attestation_with_wrong_entry_digest(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "wrong-entry-digest.zip"
+    write_release_archive(verifier, archive_path, runtime_entry_sha256="0" * 64)
+
+    with pytest.raises(AssertionError, match="SHA-256"):
         verifier.verify_package(archive_path)
 
 
@@ -410,6 +503,22 @@ ROUND5_NORMATIVE_OR_FUTURE_CLAIMS = [
 ]
 
 
+ROUND6_AFFIRMATIVE_CLAIMS = [
+    "V3.0.80 was deployed to production because operators can verify it.",
+    "V3.0.80 was deployed to production because operators can verify it if authorized.",
+    "V3.0.80 was deployed to production after admins could approve it.",
+    "V3.0.80 已部署到生产环境且响应正常。",
+]
+
+
+ROUND6_NEGATIVE_CONDITIONAL_OR_FUTURE_CLAIMS = [
+    "V3.0.80 did not get deployed to production.",
+    "V3.0.80 should be deployed tomorrow because operators can verify it.",
+    "V3.0.80 应于明日部署至生产环境且响应需验证。",
+    "V3.0.80 仅当验收通过才可部署到生产环境。",
+]
+
+
 @pytest.mark.parametrize("prose", ROUND5_AFFIRMATIVE_CLAIMS)
 def test_archive_rejects_round5_atomic_affirmative_claims(tmp_path: Path, prose: str) -> None:
     verifier = load_verifier()
@@ -428,6 +537,39 @@ def test_archive_rejects_round5_atomic_affirmative_claims(tmp_path: Path, prose:
 def test_archive_accepts_round5_normative_or_future_claims(tmp_path: Path, prose: str) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "round5-normative-prose.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n",
+    )
+
+    verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("prose", ROUND6_AFFIRMATIVE_CLAIMS)
+def test_archive_rejects_round6_modal_tokens_outside_deployment_predicate(
+    tmp_path: Path,
+    prose: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round6-affirmative-prose.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n",
+    )
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("prose", ROUND6_NEGATIVE_CONDITIONAL_OR_FUTURE_CLAIMS)
+def test_archive_accepts_round6_nonaffirmative_deployment_predicate_controls(
+    tmp_path: Path,
+    prose: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round6-nonaffirmative-prose.zip"
     write_release_archive(
         verifier,
         archive_path,

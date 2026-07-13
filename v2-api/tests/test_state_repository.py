@@ -2237,6 +2237,11 @@ def test_postgres_construction_activity_audit_redacts_nested_photo_secrets_befor
                 },
                 "signedUrl": "https://photos.example/camel-signed.jpg?token=secret",
                 "rawUrl": "https://photos.example/camel-raw.jpg?token=secret",
+                "presignedUrl": "https://photos.example/presigned.jpg?token=secret",
+                "rawSignedUrl": "https://photos.example/raw-signed.jpg?token=secret",
+                "bucketName": "private-provider-bucket",
+                "storageObjectKey": "private/storage-object.jpg",
+                "ossObjectKey": "private/oss-object.jpg",
             },
         },
     )
@@ -2257,8 +2262,65 @@ def test_postgres_construction_activity_audit_redacts_nested_photo_secrets_befor
             },
             "signedUrl": "[REDACTED]",
             "rawUrl": "[REDACTED]",
+            "presignedUrl": "[REDACTED]",
+            "rawSignedUrl": "[REDACTED]",
+            "bucketName": "[REDACTED]",
+            "storageObjectKey": "[REDACTED]",
+            "ossObjectKey": "[REDACTED]",
         },
     }
+
+
+def test_postgres_audit_response_recursively_redacts_provider_style_secret_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = SimpleNamespace(
+        legacy_id="audit-round6",
+        id=uuid4(),
+        action="provider-audit",
+        actor_username="admin-a",
+        payload={
+            "candidate_key": "catalog:row-1",
+            "provider": {
+                "presignedUrl": "https://photos.example/presigned.jpg?token=secret",
+                "rawSignedUrl": "https://photos.example/raw-signed.jpg?token=secret",
+                "image-source-url": "https://photos.example/source.jpg?token=secret",
+                "bucket_name": "private-bucket",
+                "storage-object-key": "private/storage.jpg",
+                "oss_ObjectKey": "private/oss.jpg",
+            },
+        },
+        after_data=None,
+        created_at=datetime(2026, 7, 14, 12, 0, 0),
+    )
+
+    class AuditSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def scalar(self, statement):
+            return 1
+
+        def scalars(self, statement):
+            return self
+
+        def all(self):
+            return [row]
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return AuditSession()
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "default-team")
+
+    result = TestPostgresRepository().list_audit_events()
+
+    provider = result["items"][0]["payload"]["provider"]
+    assert result["items"][0]["payload"]["candidate_key"] == "catalog:row-1"
+    assert set(provider.values()) == {"[REDACTED]"}
 
 
 @pytest.mark.parametrize(

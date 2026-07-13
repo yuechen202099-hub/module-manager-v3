@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from html.parser import HTMLParser
 import importlib.util
+import json
 import re
 import sys
 import zipfile
@@ -142,10 +144,12 @@ STATIC_TITLE_PATTERN = re.compile(
     r"<title>\s*Module Manager V(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\s*</title>",
     re.IGNORECASE,
 )
-ENTRY_VERSION_MARKER_PATTERN = re.compile(
-    rb"__MODULE_MANAGER_VUE_ENTRY_VERSION__:"
-    rb"(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)):__END__"
+ENTRY_ATTESTATION_PATTERN = re.compile(
+    rb'\AglobalThis\.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__=\{"version":"'
+    rb"(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))"
+    rb'"\};\n'
 )
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 FORBIDDEN_PARTS = {
     ".env",
@@ -227,13 +231,40 @@ def vue_entry_bundle_path(static_index: str) -> str:
 
 
 def entry_bundle_version(entry_bundle: bytes) -> str:
-    versions = [
-        match.group("version").decode("ascii")
-        for match in ENTRY_VERSION_MARKER_PATTERN.finditer(entry_bundle)
-    ]
-    if len(versions) != 1:
-        fail("Vue entry bundle must contain exactly one machine-readable version marker")
-    return versions[0]
+    match = ENTRY_ATTESTATION_PATTERN.match(entry_bundle)
+    if match is None:
+        fail("Vue entry bundle must start with the executable build attestation")
+    return match.group("version").decode("ascii")
+
+
+def runtime_entry_attestation(value: str) -> dict[str, str]:
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, item in pairs:
+            if key in result:
+                fail("Vue runtime attestation must contain unambiguous fields")
+            result[key] = item
+        return result
+
+    try:
+        payload = json.loads(value, object_pairs_hook=unique_object)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise AssertionError("Vue runtime attestation must be valid JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != {"version", "entry", "entrySha256"}:
+        fail("Vue runtime attestation must bind version, entry, and entry SHA-256")
+    version = payload.get("version")
+    entry = payload.get("entry")
+    entry_sha256 = payload.get("entrySha256")
+    if not isinstance(version, str) or SEMANTIC_VERSION_PATTERN.fullmatch(version) is None:
+        fail("Vue runtime attestation version must be semantic")
+    if not isinstance(entry, str):
+        fail("Vue runtime attestation entry must be a path")
+    entry_path = PurePosixPath(entry)
+    if entry_path.is_absolute() or ".." in entry_path.parts or not entry.startswith("assets/"):
+        fail("Vue runtime attestation entry must be under assets/")
+    if not isinstance(entry_sha256, str) or SHA256_PATTERN.fullmatch(entry_sha256) is None:
+        fail("Vue runtime attestation entry SHA-256 must be exact")
+    return {"version": version, "entry": entry, "entrySha256": entry_sha256}
 
 
 def verify_package(zip_path: Path) -> None:
@@ -243,14 +274,21 @@ def verify_package(zip_path: Path) -> None:
         fail(f"Release zip is empty: {zip_path}")
 
     with zipfile.ZipFile(zip_path) as archive:
-        raw_names = {info.filename for info in archive.infolist() if not info.is_dir()}
+        raw_name_list = [info.filename for info in archive.infolist() if not info.is_dir()]
+        duplicate_names = sorted({name for name in raw_name_list if raw_name_list.count(name) > 1})
+        if duplicate_names:
+            fail("Release zip contains duplicate file names: " + ", ".join(duplicate_names[:20]))
+        raw_names = set(raw_name_list)
         backslash_names = sorted(name for name in raw_names if "\\" in name)
         if backslash_names:
             fail(
                 "Release zip contains Windows path separators: "
                 + ", ".join(backslash_names[:20])
             )
-        names = {normalize_zip_name(name) for name in raw_names}
+        normalized_name_list = [normalize_zip_name(name) for name in raw_name_list]
+        if len(normalized_name_list) != len(set(normalized_name_list)):
+            fail("Release zip contains duplicate normalized file names")
+        names = set(normalized_name_list)
         missing = sorted(REQUIRED_FILES - names)
         if missing:
             fail("Missing required release files: " + ", ".join(missing))
@@ -267,11 +305,13 @@ def verify_package(zip_path: Path) -> None:
         entry_bundle_name = vue_entry_bundle_path(static_index)
         if entry_bundle_name not in names:
             fail(f"Vue module entry bundle is missing from release: {entry_bundle_name}")
-        vue_entry_version = entry_bundle_version(archive.read(entry_bundle_name))
+        entry_bundle = archive.read(entry_bundle_name)
+        vue_entry_version = entry_bundle_version(entry_bundle)
         release_truth = load_release_truth_parser()
-        runtime_version = release_truth.runtime_version_from_artifact(
+        runtime_attestation = runtime_entry_attestation(
             archive.read(RUNTIME_VERSION_ARTIFACT).decode("utf-8")
         )
+        runtime_version = runtime_attestation["version"]
         source_version = release_truth.runtime_version_from_artifact(
             archive.read(SOURCE_VERSION_ARTIFACT).decode("utf-8")
         )
@@ -326,6 +366,11 @@ def verify_package(zip_path: Path) -> None:
         fail("Vue source and built runtime versions must agree")
     if vue_entry_version != runtime_version:
         fail("Vue entry bundle version must match source and built runtime versions")
+    expected_entry = entry_bundle_name.removeprefix("v2-api/app/static/vue/")
+    if runtime_attestation["entry"] != expected_entry:
+        fail("Vue runtime attestation must identify the index-referenced entry bundle")
+    if hashlib.sha256(entry_bundle).hexdigest() != runtime_attestation["entrySha256"]:
+        fail("Vue runtime attestation entry SHA-256 must match the referenced entry bundle")
 
     deployed_version = release_truth.deployed_production_baseline(agents)
     candidate_version = release_truth.release_candidate(agents)

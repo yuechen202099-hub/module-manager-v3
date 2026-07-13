@@ -62,16 +62,36 @@ AUDIT_PHOTO_SECRET_FIELDS = {
 AUDIT_PHOTO_SECRET_KEYS = {
     re.sub(r"[^0-9a-z]+", "", field.casefold()) for field in AUDIT_PHOTO_SECRET_FIELDS
 }
+AUDIT_URL_QUALIFIERS = {"raw", "signed", "presigned", "source", "image", "photo"}
+AUDIT_STORAGE_KEY_QUALIFIERS = {"storage", "object", "oss"}
+
+
+def audit_key_semantic_tokens(key: Any) -> set[str]:
+    value = str(key).strip()
+    value = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", value)
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", value)
+    return set(re.findall(r"[0-9a-z]+", value.casefold()))
+
+
+def audit_key_contains_photo_secret(key: Any) -> bool:
+    normalized_key = re.sub(r"[^0-9a-z]+", "", str(key).strip().casefold())
+    if normalized_key in AUDIT_PHOTO_SECRET_KEYS:
+        return True
+    tokens = audit_key_semantic_tokens(key)
+    if "bucket" in tokens:
+        return True
+    if tokens & {"url", "urls"} and tokens & AUDIT_URL_QUALIFIERS:
+        return True
+    return "key" in tokens and bool(tokens & AUDIT_STORAGE_KEY_QUALIFIERS)
 
 
 def redact_audit_photo_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         redacted = {}
         for key, item in value.items():
-            normalized_key = re.sub(r"[^0-9a-z]+", "", str(key).strip().casefold())
             redacted[key] = (
                 AUDIT_REDACTED_VALUE
-                if normalized_key in AUDIT_PHOTO_SECRET_KEYS
+                if audit_key_contains_photo_secret(key)
                 else redact_audit_photo_secrets(item)
             )
         return redacted

@@ -2216,6 +2216,92 @@ def test_json_state_repository_finalizes_unmatched_match_from_server_candidate(s
     assert local_simulation.get_unmatched_record(unmatched_id) is None
 
 
+def test_json_repository_reselects_compatible_formal_meter_identity_before_mutation(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = JsonStateRepository()
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    catalog = add_unmatched_match_catalog_row(terminal="T-ROUND6-COMPAT")
+    existing = {
+        **deepcopy(state["groups"][0]),
+        "id": "g-round6-compatible",
+        "terminal": catalog["terminal"],
+        "stage_terminal": catalog["terminal"],
+        "meter_no": catalog["meter_no"],
+        "meter_match_key": catalog["meter_match_key"],
+        "photos": [],
+        "photo_count": 0,
+    }
+    state["groups"].append(existing)
+    unmatched_id = seed_unmatched_review_record()
+    candidate = repository.list_unmatched_match_candidates(unmatched_id)["items"][0]
+    candidate = {**candidate, "target_group_id": ""}
+    monkeypatch.setattr(
+        local_simulation,
+        "list_unmatched_match_candidates",
+        lambda checked_id: {"total": 1, "items": [candidate]} if checked_id == unmatched_id else {"total": 0, "items": []},
+    )
+    before_group_count = len(state["groups"])
+
+    result = repository.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-round6",
+        candidate_key=candidate["candidate_key"],
+        expected_version=1,
+    )
+
+    assert result["attached"] is True
+    assert result["group"]["id"] == existing["id"]
+    assert len(local_simulation.get_state()["groups"]) == before_group_count
+
+
+def test_json_repository_rejects_incompatible_formal_meter_identity_without_any_write(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = JsonStateRepository()
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    catalog = add_unmatched_match_catalog_row(terminal="T-ROUND6-NEW")
+    existing = {
+        **deepcopy(state["groups"][0]),
+        "id": "g-round6-incompatible",
+        "terminal": "T-ROUND6-OLD",
+        "stage_terminal": "T-ROUND6-OLD",
+        "meter_no": catalog["meter_no"],
+        "meter_match_key": catalog["meter_match_key"],
+        "photos": [],
+        "photo_count": 0,
+    }
+    state["groups"].append(existing)
+    unmatched_id = seed_unmatched_review_record()
+    candidate = repository.list_unmatched_match_candidates(unmatched_id)["items"][0]
+    assert candidate["target_group_id"] == ""
+    state_path = tmp_path / "round6-json-identity-state.json"
+    monkeypatch.setenv("LOCAL_SIMULATION_STATE_PATH", str(state_path))
+    local_simulation.refresh_summary()
+    local_simulation.save_all_team_states()
+    before = deepcopy(state)
+    before_bytes = state_path.read_bytes()
+
+    with pytest.raises(unmatched_review.FinalizationIdentityConflict):
+        repository.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-round6",
+            candidate_key=candidate["candidate_key"],
+            expected_version=1,
+        )
+
+    after = state
+    for field in ("groups", "tasks", "summary", "audit_events", "unmatched_finalization_replays"):
+        assert after[field] == before[field]
+    assert after == before
+    assert state_path.read_bytes() == before_bytes
+
+
 def test_json_migrated_photo_ids_do_not_collide_across_unmatched_records(synthetic_state: dict) -> None:
     repository = JsonStateRepository()
     state = local_simulation.get_state()
@@ -2852,6 +2938,13 @@ def test_json_audit_events_recursively_redact_photo_storage_secrets(synthetic_st
                         },
                         "signedUrl": "https://oss.example/camel-signed.jpg?signature=secret",
                         "rawUrl": "https://oss.example/camel-raw.jpg?signature=secret",
+                        "presignedUrl": "https://oss.example/presigned.jpg?signature=secret",
+                        "rawSignedUrl": "https://oss.example/raw-signed.jpg?signature=secret",
+                        "photo-source-url": "https://oss.example/photo-source.jpg?signature=secret",
+                        "sourceImageUrl": "https://oss.example/source-image.jpg?signature=secret",
+                        "bucketName": "private-provider-bucket",
+                        "storageObjectKey": "private/storage-object.jpg",
+                        "ossObjectKey": "private/oss-object.jpg",
                     }
                 ]
             },
@@ -2864,6 +2957,16 @@ def test_json_audit_events_recursively_redact_photo_storage_secrets(synthetic_st
     assert photo["signed_url"] == "[REDACTED]"
     assert photo["signedUrl"] == "[REDACTED]"
     assert photo["rawUrl"] == "[REDACTED]"
+    for key in (
+        "presignedUrl",
+        "rawSignedUrl",
+        "photo-source-url",
+        "sourceImageUrl",
+        "bucketName",
+        "storageObjectKey",
+        "ossObjectKey",
+    ):
+        assert photo[key] == "[REDACTED]"
     assert photo["storage"] == {
         "storage_bucket": "[REDACTED]",
         "storage_key": "[REDACTED]",

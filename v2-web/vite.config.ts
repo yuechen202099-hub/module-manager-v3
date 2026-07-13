@@ -1,28 +1,42 @@
+import { createHash } from 'node:crypto'
 import { fileURLToPath, URL } from 'node:url'
 
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import versionArtifact from './src/version.json'
 
-const runtimeVersionArtifact = `${JSON.stringify(versionArtifact)}\n`
-const runtimeVersionMarker =
-  `__MODULE_MANAGER_VUE_ENTRY_VERSION__:${versionArtifact.version}:__END__`
+const entryAttestationPrefix =
+  `globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={"version":"${versionArtifact.version}"};\n`
 
 export default defineConfig({
   base: '/vue/',
-  define: {
-    __MODULE_MANAGER_VUE_ENTRY_VERSION_MARKER__: JSON.stringify(runtimeVersionMarker),
-  },
   plugins: [
     vue(),
     {
       name: 'emit-runtime-version-artifact',
-      generateBundle() {
-        this.emitFile({
-          type: 'asset',
-          fileName: 'version.json',
-          source: runtimeVersionArtifact,
-        })
+      enforce: 'post',
+      generateBundle: {
+        order: 'post',
+        handler(_, bundle) {
+          const entryChunks = Object.values(bundle).filter(
+            (item) => item.type === 'chunk' && item.isEntry,
+          )
+          if (entryChunks.length !== 1) {
+            throw new Error('Vue build must produce exactly one entry chunk')
+          }
+          const entryChunk = entryChunks[0]
+          entryChunk.code = `${entryAttestationPrefix}${entryChunk.code}`
+          const runtimeVersionArtifact = `${JSON.stringify({
+            version: versionArtifact.version,
+            entry: entryChunk.fileName,
+            entrySha256: createHash('sha256').update(entryChunk.code).digest('hex'),
+          })}\n`
+          this.emitFile({
+            type: 'asset',
+            fileName: 'version.json',
+            source: runtimeVersionArtifact,
+          })
+        },
       },
     },
   ],

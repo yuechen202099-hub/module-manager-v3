@@ -4,19 +4,24 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.80'
-const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
-const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
-
 const root = path.resolve(__dirname, '..')
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'utf8')
+const versionArtifact = JSON.parse(read('v2-web/src/version.json'))
+assert.deepEqual(Object.keys(versionArtifact), ['version'], 'version.json must contain only version')
+assert.match(versionArtifact.version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/, 'version.json must contain a semantic version')
+const EXPECTED_VERSION = versionArtifact.version
+const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
+const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
 const releaseNotesPath = path.join(root, 'v2-web', 'src', 'constants', 'releaseNotes.ts')
 assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file must exist')
 
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
-assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
+assert.match(releaseNotes, /^import versionArtifact from '\.\.\/version\.json'$/m, 'release notes must import the machine version source')
+assert.match(releaseNotes, /^export const APP_VERSION = versionArtifact\.version$/m, 'APP_VERSION must derive from version.json')
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
+const expectedReleaseNoteEntries = releaseNotes.match(new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`, 'g')) || []
+assert.equal(expectedReleaseNoteEntries.length, 1, `release notes must include ${EXPECTED_LABEL} exactly once`)
 assert.match(releaseNotes, /title:\s*'扫码未匹配临时审阅'/, 'release notes must describe the V3.0.80 unmatched scan temporary review update in Chinese')
 assert.match(releaseNotes, /项目驾驶舱的扫码未匹配清单支持逐条打开照片并完成分类、重新扫码、二维码与OCR识别和人工确认。/, 'release notes must describe the V3.0.80 unmatched review workflow')
 assert.match(releaseNotes, /临时审阅结果保存到服务器并完整记录审计，匹配终端前不生成正式资料组，也不进入完成量、KPI、归档和条码准确率。/, 'release notes must describe the V3.0.80 temporary review isolation')

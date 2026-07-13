@@ -1915,7 +1915,7 @@ def _finalize_unmatched_match_in_state(
     state = get_state()
     record = get_unmatched_record(unmatched_id)
     replay_key = _unmatched_finalization_replay_key(current_team_id(), unmatched_id)
-    replay = state.setdefault("unmatched_finalization_replays", {}).get(replay_key)
+    replay = (state.get("unmatched_finalization_replays") or {}).get(replay_key)
     if (
         record is None
         and isinstance(replay, dict)
@@ -1948,8 +1948,34 @@ def _finalize_unmatched_match_in_state(
         "meter_match_key": meter_match_key,
     }
 
-    target_group_id = str(candidate.get("target_group_id") or "")
-    group = get_group(target_group_id) if target_group_id else None
+    target_group_id = str(candidate.get("target_group_id") or "").strip()
+    group = next(
+        (
+            item
+            for item in state.get("groups", [])
+            if str(item.get("meter_match_key") or "").strip() == meter_match_key
+        ),
+        None,
+    )
+    if group is not None:
+        group_id = str(group.get("id") or group.get("legacy_id") or "").strip()
+        if str(group.get("terminal") or "").strip() != terminal or (
+            target_group_id and target_group_id != group_id
+        ):
+            raise unmatched_review.FinalizationIdentityConflict(
+                "Candidate conflicts with existing formal group identity"
+            )
+    elif target_group_id:
+        group = get_group(target_group_id)
+        if group is None:
+            raise ValueError("Selected candidate target group is unavailable")
+        if (
+            str(group.get("terminal") or "").strip() != terminal
+            or str(group.get("meter_match_key") or "").strip() not in {"", meter_match_key}
+        ):
+            raise unmatched_review.FinalizationIdentityConflict(
+                "Candidate conflicts with existing formal group identity"
+            )
     attached = group is not None
     task = ensure_task_for_terminal(terminal)
     if group is None:

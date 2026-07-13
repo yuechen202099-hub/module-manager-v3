@@ -46,6 +46,10 @@ Invoke-Step "Install Python dependencies" {
     .\.venv\Scripts\python.exe -m pip install -r .\v2-api\requirements-dev.txt | Out-Null
 }
 
+Invoke-Step "Verify administrator release notes" {
+    node .\scripts\verify_admin_release_notes.js
+}
+
 Invoke-Step "Run backend and workflow tests" {
     .\.venv\Scripts\python.exe -m pytest -q
 }

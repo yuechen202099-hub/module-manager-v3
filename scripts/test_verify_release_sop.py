@@ -447,6 +447,22 @@ ROUND5_NORMATIVE_OR_FUTURE_CLAIMS = [
 ]
 
 
+ROUND6_AFFIRMATIVE_CLAIMS = [
+    "V3.0.80 was deployed to production because operators can verify it.",
+    "V3.0.80 was deployed to production because operators can verify it if authorized.",
+    "V3.0.80 was deployed to production after admins could approve it.",
+    "V3.0.80 已部署到生产环境且响应正常。",
+]
+
+
+ROUND6_NEGATIVE_CONDITIONAL_OR_FUTURE_CLAIMS = [
+    "V3.0.80 did not get deployed to production.",
+    "V3.0.80 should be deployed tomorrow because operators can verify it.",
+    "V3.0.80 应于明日部署至生产环境且响应需验证。",
+    "V3.0.80 仅当验收通过才可部署到生产环境。",
+]
+
+
 @pytest.mark.parametrize("prose", ROUND5_AFFIRMATIVE_CLAIMS)
 def test_round5_atomic_clauses_preserve_affirmative_deployment_claims(prose: str) -> None:
     verifier = load_verifier()
@@ -458,6 +474,23 @@ def test_round5_atomic_clauses_preserve_affirmative_deployment_claims(prose: str
 
 @pytest.mark.parametrize("prose", ROUND5_NORMATIVE_OR_FUTURE_CLAIMS)
 def test_round5_normative_or_future_claims_remain_nonaffirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("prose", ROUND6_AFFIRMATIVE_CLAIMS)
+def test_round6_modal_tokens_outside_deployment_predicate_do_not_hide_claim(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("prose", ROUND6_NEGATIVE_CONDITIONAL_OR_FUTURE_CLAIMS)
+def test_round6_deployment_predicate_scope_preserves_nonaffirmative_controls(prose: str) -> None:
     verifier = load_verifier()
     record = f"{release_record('Status: pending')}\n{prose}\n"
 
@@ -477,8 +510,10 @@ def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> No
     assert "from '../version.json'" in release_notes
     assert "APP_VERSION = versionArtifact.version" in release_notes
     assert "APP_VERSION = '3.0.80'" not in release_notes
-    assert "__MODULE_MANAGER_VUE_ENTRY_VERSION_MARKER__" in main
-    assert "__MODULE_MANAGER_VUE_ENTRY_VERSION__" in vite_config
+    assert "import versionArtifact from './version.json'" in main
+    assert "moduleManagerBuildVersion" in main
+    assert "__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__" in vite_config
+    assert "entrySha256" in vite_config
 
 
 @pytest.mark.parametrize(

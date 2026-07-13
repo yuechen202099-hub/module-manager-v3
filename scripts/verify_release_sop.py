@@ -118,7 +118,7 @@ DEPLOYMENT_CLAIM_PATTERN = re.compile(
 )
 NEGATED_ENGLISH_CLAIM_PATTERN = re.compile(
     r"\b(?:not|never)\s+(?:(?:yet|currently|ever|actually|successfully|fully)\s+)*"
-    r"(?:(?:been|be)\s+)?(?:deployed|shipped|released)\b"
+    r"(?:(?:been|be|get)\s+)?(?:deployed|shipped|released)\b"
     r"|\b(?:not|never)\s+(?:(?:yet|currently|ever|actually|successfully|fully)\s+)*"
     r"(?:go|gone|be)?\s*live(?:\s+(?:in|on))?\s+production\b",
     re.IGNORECASE,
@@ -132,7 +132,7 @@ CONDITIONAL_ENGLISH_CLAIM_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CONDITIONAL_CHINESE_CLAIM_PATTERN = re.compile(
-    r"(?:可以|可能|或许|也许|应当|应该|应|必须|须|需要|需|若|如果|假如|倘若|除非|否则|仅当|只要|待)"
+    r"(?:可以|可能|或许|也许|应当|应该|必须|须|需要|若|如果|假如|倘若|除非|否则|仅当|只要|待)"
     r"|可(?=[^,，;；。.!?！？\n]{0,24}(?:部署|发布|上线|生效))"
 )
 CONDITIONAL_SCOPE_ENGLISH_CLAIM_PATTERN = re.compile(
@@ -156,6 +156,32 @@ CLAUSE_BOUNDARY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CLAUSE_SCOPE_RESET_PATTERN = re.compile(r"[。.!?！？\n]|\b(?:but|however|yet)\b|(?:但是|然而|但|却)", re.IGNORECASE)
+NEGATED_DEPLOYMENT_PREFIX_PATTERN = re.compile(
+    r"\b(?:not|never)\s+(?:(?:yet|currently|ever|actually|successfully|fully)\s+)*"
+    r"(?:(?:been|be|get)\s+)?$",
+    re.IGNORECASE,
+)
+MODAL_DEPLOYMENT_PREFIX_PATTERN = re.compile(
+    r"(?:\b(?:can|could|may|might|should|must|would|will|shall)\s+"
+    r"(?:not\s+)?(?:(?:be|get)\s+)?"
+    r"|\b(?:going|scheduled|planned)\s+to\s+(?:be\s+)?"
+    r"|\bto\s+be\s+)$",
+    re.IGNORECASE,
+)
+CHINESE_MODAL_DEPLOYMENT_PREFIX_PATTERN = re.compile(
+    r"(?:可以|可能|或许|也许|应当|应该|必须|须|需要|需|将|计划|拟|可)"
+    r"(?:于[^,，;；。.!?！？\n]{0,20})?(?:在生产(?:环境)?)?$"
+)
+CONDITIONAL_DEPLOYMENT_PREFIX_PATTERN = re.compile(
+    r"\b(?:only\s+after|before|until|once)\b[^,;.!?\n]{0,80}$"
+    r"|(?:若|如果|假如|倘若|除非|仅当|只要)[^,，;；。.!?！？\n]{0,40}$",
+    re.IGNORECASE,
+)
+POST_DEPLOYMENT_CONDITION_PATTERN = re.compile(
+    r"^\s*(?:(?:to|in|on)\s+production\b\s*)?(?:if|unless)\b"
+    r"|^\s*(?:(?:到|至|在)?生产(?:环境)?\s*)?(?:若|如果|假如|倘若|除非|仅当|只要)",
+    re.IGNORECASE,
+)
 RELEASE_RECORD_VERSION_PATTERN = re.compile(r"^#\s*(?P<version>V\d+\.\d+\.\d+)\b", re.MULTILINE)
 PLACEHOLDER_PATTERN = re.compile(r"\b(?:tbd|todo|pending|n/?a|unknown)\b|待补充|待验证|(?:^|\s)-(?:$|\s)", re.IGNORECASE)
 SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
@@ -179,6 +205,7 @@ def normalize_text(value: str) -> str:
 
 def normalize_claim_text(value: str) -> str:
     text = normalize_text(value)
+    text = text.replace("can't", "can not")
     text = re.sub(
         r"\b(is|are|was|were|has|have|had|do|does|did|can|could|would|should|must)n't\b",
         r"\1 not",
@@ -349,7 +376,7 @@ def semantic_claim_clauses(value: str) -> list[tuple[str, bool]]:
     conditional_scope = False
     for index in range(0, len(parts), 2):
         clause = parts[index].replace("\ue000", ".").strip()
-        clause_is_conditional = clause_has_conditional_language(clause)
+        clause_is_conditional = clause_opens_conditional_scope(clause)
         if clause:
             clauses.append((clause, conditional_scope or clause_is_conditional))
         if clause_opens_conditional_scope(clause):
@@ -366,15 +393,21 @@ def claim_clauses(value: str) -> list[str]:
 
 def clause_has_affirmative_deployment_claim(clause: str) -> bool:
     normalized = normalize_claim_text(clause)
-    if not DEPLOYMENT_CLAIM_PATTERN.search(normalized):
-        return False
-    if clause_has_conditional_language(normalized):
-        return False
-    if NEGATED_ENGLISH_CLAIM_PATTERN.search(normalized) or NEGATED_CHINESE_CLAIM_PATTERN.search(normalized):
-        return False
-    if FUTURE_DEPLOYMENT_PATTERN.search(normalized):
-        return False
-    return True
+    for match in DEPLOYMENT_CLAIM_PATTERN.finditer(normalized):
+        prefix = normalized[max(0, match.start() - 96) : match.start()]
+        suffix = normalized[match.end() : min(len(normalized), match.end() + 96)]
+        if NEGATED_DEPLOYMENT_PREFIX_PATTERN.search(prefix):
+            continue
+        if MODAL_DEPLOYMENT_PREFIX_PATTERN.search(prefix):
+            continue
+        if CHINESE_MODAL_DEPLOYMENT_PREFIX_PATTERN.search(prefix):
+            continue
+        if CONDITIONAL_DEPLOYMENT_PREFIX_PATTERN.search(prefix):
+            continue
+        if POST_DEPLOYMENT_CONDITION_PATTERN.search(suffix):
+            continue
+        return True
+    return False
 
 
 def has_deployment_claim(status: str) -> bool:
@@ -509,6 +542,11 @@ def main() -> int:
     build_script = read("scripts/build-client-release.ps1")
     if "scripts\\verify_admin_release_notes.js" not in build_script:
         fail("build-client-release.ps1 must copy scripts\\verify_admin_release_notes.js")
+    admin_gate_command = "node .\\scripts\\verify_admin_release_notes.js"
+    if admin_gate_command not in build_script:
+        fail("build-client-release.ps1 must execute the administrator release notes gate")
+    if admin_gate_command not in gate:
+        fail("run-client-acceptance-gate.ps1 must execute the administrator release notes gate")
     if "scripts/verify_admin_release_notes.js" not in release_verifier:
         fail("verify-client-release.py must require scripts/verify_admin_release_notes.js")
     if "scripts\\verify_project_board_unmatched_review.js" not in build_script:
@@ -625,8 +663,14 @@ def main() -> int:
             "from '../version.json'",
             "APP_VERSION = versionArtifact.version",
         ],
-        "v2-web/src/main.ts": ["__MODULE_MANAGER_VUE_ENTRY_VERSION_MARKER__"],
-        "v2-web/vite.config.ts": ["__MODULE_MANAGER_VUE_ENTRY_VERSION__"],
+        "v2-web/src/main.ts": [
+            "import versionArtifact from './version.json'",
+            "moduleManagerBuildVersion",
+        ],
+        "v2-web/vite.config.ts": [
+            "__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__",
+            "entrySha256",
+        ],
     }
     for path, markers in version_binding_markers.items():
         for marker in markers:

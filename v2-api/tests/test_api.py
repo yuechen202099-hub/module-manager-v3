@@ -735,6 +735,11 @@ def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch
                                         },
                                         "signedUrl": "https://photos.example/camel-signed.jpg?token=secret",
                                         "rawUrl": "https://photos.example/camel-raw.jpg?token=secret",
+                                        "presignedUrl": "https://photos.example/presigned.jpg?token=secret",
+                                        "rawSignedUrl": "https://photos.example/raw-signed.jpg?token=secret",
+                                        "bucketName": "private-provider-bucket",
+                                        "storageObjectKey": "private/storage-object.jpg",
+                                        "ossObjectKey": "private/oss-object.jpg",
                                     }
                                 ]
                             },
@@ -762,6 +767,8 @@ def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch
     assert photo["signed_url"] == "[REDACTED]"
     assert photo["signedUrl"] == "[REDACTED]"
     assert photo["rawUrl"] == "[REDACTED]"
+    for key in ("presignedUrl", "rawSignedUrl", "bucketName", "storageObjectKey", "ossObjectKey"):
+        assert photo[key] == "[REDACTED]"
     assert photo["storage"] == {
         "storage_bucket": "[REDACTED]",
         "storage_key": "[REDACTED]",
@@ -1642,6 +1649,83 @@ def test_json_http_legacy_assign_rejects_placeholder_terminal_without_state_or_p
     assert local_simulation._team_states[team_id]["summary"] == before["summary"]
     assert local_simulation._team_states[team_id]["audit_events"] == before["audit_events"]
     assert local_simulation._team_states[team_id] == before
+    assert state_path.read_bytes() == before_bytes
+    assert team_id not in local_simulation._authoritative_write_locks
+
+
+def test_json_http_finalization_identity_conflict_is_409_without_state_or_persistence_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    main_module.settings.state_backend = "json"
+    local_test.settings.state_backend = "json"
+    state_repository.settings.state_backend = "json"
+    team_id = "north-team-01"
+    state_path = tmp_path / "round6-http-identity-state.json"
+    monkeypatch.setenv("LOCAL_SIMULATION_STATE_PATH", str(state_path))
+    local_simulation._team_states[team_id] = local_simulation.blank_state(team_id)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        state = local_simulation.get_state()
+        meter_no = "120000912473"
+        meter_key = local_simulation.build_total_catalog_match_key(meter_no)
+        task = local_simulation.ensure_task_for_terminal("T-ROUND6-OLD")
+        state["groups"].append(
+            {
+                "id": "g-round6-http-conflict",
+                "task_id": task["id"],
+                "terminal": "T-ROUND6-OLD",
+                "stage_terminal": "T-ROUND6-OLD",
+                "meter_no": meter_no,
+                "meter_match_key": meter_key,
+                "address": "old road",
+                "status": "incomplete",
+                "photos": [],
+                "photo_count": 0,
+            }
+        )
+        record = local_simulation.ensure_unmatched_record(
+            {
+                "unmatched_id": "round6-http-identity-conflict",
+                "barcode": meter_no,
+                "meter_no": meter_no,
+                "collector": "C001",
+                "module_asset_no": "M001",
+                "photo_urls": ["https://photos.example/round6-http.jpg"],
+            }
+        )
+        state["scan_unmatched"].append(record)
+        state["total_catalog"].append(
+            {
+                "id": "catalog-round6-http-conflict",
+                "terminal": "T-ROUND6-NEW",
+                "meter_no": meter_no,
+                "meter_match_key": meter_key,
+                "address": "new road",
+            }
+        )
+        candidate = local_simulation.list_unmatched_match_candidates(record["unmatched_id"])["items"][0]
+        assert candidate["target_group_id"] == ""
+        local_simulation.refresh_summary()
+        local_simulation.save_all_team_states()
+        before = deepcopy(state)
+        before_bytes = state_path.read_bytes()
+    finally:
+        local_simulation.reset_current_team(token)
+
+    response = production_client.post(
+        f"/local-test/unmatched/{record['unmatched_id']}/finalize-match",
+        headers=headers["admin"],
+        json={"candidate_key": candidate["candidate_key"], "expected_version": 1},
+    )
+
+    assert response.status_code == 409
+    assert "conflicts with existing formal group identity" in response.json()["detail"]
+    after = local_simulation._team_states[team_id]
+    for field in ("groups", "tasks", "summary", "audit_events", "unmatched_finalization_replays"):
+        assert after[field] == before[field]
+    assert after == before
     assert state_path.read_bytes() == before_bytes
     assert team_id not in local_simulation._authoritative_write_locks
 
