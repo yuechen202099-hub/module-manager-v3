@@ -17,7 +17,10 @@ import type {
   TaskStatusSummary,
   TaskStatus,
   UnmatchedDedupeResult,
+  UnmatchedMatchCandidate,
   UnmatchedRecord,
+  UnmatchedReviewDetail,
+  UnmatchedReviewPhoto,
   UserAccount,
   UserRole,
 } from './types'
@@ -295,6 +298,42 @@ type BackendUnmatchedRecord = {
   field_task_type?: string
   source_file?: string
   raw?: Record<string, unknown>
+}
+
+type BackendUnmatchedReviewPhoto = {
+  id?: string
+  source_url?: string
+  category?: string
+  barcode_check_status?: string
+  barcode_check_values?: string[]
+  barcode_check_ocr_values?: string[]
+  barcode_check_method?: string
+  barcode_check_error?: string
+}
+
+type BackendUnmatchedReview = {
+  version?: number
+  state?: string
+  meter_no?: string
+  collector?: string
+  module_asset_no?: string
+  manual_confirmed?: boolean
+  reviewer?: string
+  photos?: BackendUnmatchedReviewPhoto[]
+}
+
+type BackendUnmatchedReviewResponse = {
+  record?: BackendUnmatchedRecord
+  review?: BackendUnmatchedReview
+}
+
+type BackendUnmatchedMatchCandidate = {
+  candidate_key?: string
+  target_group_id?: string
+  terminal?: string
+  meter_no?: string
+  address?: string
+  match_reasons?: string[]
 }
 
 type BackendReplacementRecord = {
@@ -1055,6 +1094,45 @@ export async function searchGroups(options: { query?: string; terminal?: string;
   }
 }
 
+function mapUnmatchedReviewPhoto(raw: BackendUnmatchedReviewPhoto): UnmatchedReviewPhoto {
+  return {
+    id: raw.id || '',
+    sourceUrl: raw.source_url || '',
+    category: raw.category || 'unclassified',
+    barcodeCheckStatus: raw.barcode_check_status || 'not_checked',
+    barcodeCheckValues: Array.isArray(raw.barcode_check_values) ? raw.barcode_check_values.map(String) : [],
+    barcodeCheckOcrValues: Array.isArray(raw.barcode_check_ocr_values) ? raw.barcode_check_ocr_values.map(String) : [],
+    barcodeCheckMethod: raw.barcode_check_method || '',
+    barcodeCheckError: raw.barcode_check_error || '',
+  }
+}
+
+function mapUnmatchedReview(raw: BackendUnmatchedReviewResponse): UnmatchedReviewDetail {
+  const review = raw.review || {}
+  return {
+    record: mapUnmatchedRecord(raw.record || {}),
+    version: Number(review.version || 0),
+    state: review.state === 'reviewed' ? 'reviewed' : 'pending',
+    meterNo: review.meter_no || '',
+    collector: review.collector || '',
+    moduleAssetNo: review.module_asset_no || '',
+    manualConfirmed: Boolean(review.manual_confirmed),
+    reviewer: review.reviewer || '',
+    photos: (review.photos || []).map(mapUnmatchedReviewPhoto),
+  }
+}
+
+function mapUnmatchedMatchCandidate(raw: BackendUnmatchedMatchCandidate): UnmatchedMatchCandidate {
+  return {
+    candidateKey: raw.candidate_key || '',
+    targetGroupId: raw.target_group_id || '',
+    terminal: raw.terminal || '',
+    meterNo: raw.meter_no || '',
+    address: raw.address || '',
+    matchReasons: Array.isArray(raw.match_reasons) ? raw.match_reasons.map(String) : [],
+  }
+}
+
 function mapPhotoBarcodeReviewGroup(raw: BackendPhotoBarcodeReviewGroup): PhotoBarcodeReviewGroup {
   return {
     groupId: raw.group_id || '',
@@ -1723,6 +1801,94 @@ export async function fetchUnmatchedRecords(query = ''): Promise<UnmatchedRecord
   if (query.trim()) params.set('query', query.trim())
   const data = await api<{ total: number; items: BackendUnmatchedRecord[] }>(`/local-test/unmatched?${params.toString()}`)
   return (data.items || []).map(mapUnmatchedRecord)
+}
+
+export async function fetchUnmatchedReview(unmatchedId: string): Promise<UnmatchedReviewDetail> {
+  const data = await api<BackendUnmatchedReviewResponse>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/review`,
+  )
+  return mapUnmatchedReview(data)
+}
+
+export async function saveUnmatchedReview(
+  unmatchedId: string,
+  payload: {
+    expectedVersion: number
+    metadata?: { meterNo?: string; collector?: string; moduleAssetNo?: string }
+    photoUpdates?: Array<{ id: string; category: string }>
+    state?: 'pending' | 'reviewed'
+  },
+): Promise<UnmatchedReviewDetail> {
+  const metadata: Record<string, string> = {}
+  if (payload.metadata?.meterNo !== undefined) metadata.meter_no = payload.metadata.meterNo
+  if (payload.metadata?.collector !== undefined) metadata.collector = payload.metadata.collector
+  if (payload.metadata?.moduleAssetNo !== undefined) metadata.module_asset_no = payload.metadata.moduleAssetNo
+  const data = await api<BackendUnmatchedReviewResponse>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/review`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({
+        expected_version: payload.expectedVersion,
+        metadata,
+        photo_updates: (payload.photoUpdates || []).map((photo) => ({ id: photo.id, category: photo.category })),
+        state: payload.state || 'pending',
+      }),
+    },
+  )
+  return mapUnmatchedReview(data)
+}
+
+export async function fetchUnmatchedReviewPhotoObjectUrl(unmatchedId: string, photoId: string): Promise<string> {
+  const path = `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/photos/${encodeURIComponent(photoId)}/content`
+  const response = await fetchWithAuth(path, { headers: formHeaders() })
+  if (!response.ok) throw new Error(response.statusText || `HTTP ${response.status}`)
+  const blob = await response.blob()
+  if (!blob.type.startsWith('image/')) throw new Error('返回内容不是图片')
+  return createVerifiedImageObjectUrl(blob)
+}
+
+export async function rescanUnmatchedReviewPhoto(
+  unmatchedId: string,
+  photoId: string,
+  category = '',
+): Promise<UnmatchedReviewDetail> {
+  const data = await api<BackendUnmatchedReviewResponse>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/photos/${encodeURIComponent(photoId)}/rescan`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ category }),
+    },
+  )
+  return mapUnmatchedReview(data)
+}
+
+export async function confirmUnmatchedReview(
+  unmatchedId: string,
+  expectedVersion: number,
+  confirmed = true,
+): Promise<UnmatchedReviewDetail> {
+  const data = await api<BackendUnmatchedReviewResponse>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/confirm`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ expected_version: expectedVersion, confirmed }),
+    },
+  )
+  return mapUnmatchedReview(data)
+}
+
+export async function fetchUnmatchedMatchCandidates(unmatchedId: string): Promise<UnmatchedMatchCandidate[]> {
+  const data = await api<BackendUnmatchedMatchCandidate[]>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/candidates`,
+  )
+  return data.map(mapUnmatchedMatchCandidate)
+}
+
+export async function finalizeUnmatchedMatch(unmatchedId: string, candidateKey: string, expectedVersion: number) {
+  return api(`/local-test/unmatched/${encodeURIComponent(unmatchedId)}/finalize-match`, {
+    method: 'POST',
+    body: JSON.stringify({ candidate_key: candidateKey, expected_version: expectedVersion }),
+  })
 }
 
 export async function fetchReplacementRecords(query = ''): Promise<ReplacementRecord[]> {

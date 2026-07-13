@@ -485,6 +485,38 @@ export type UnmatchedRecord = {
   raw?: Record<string, unknown>
 }
 
+export type UnmatchedReviewPhoto = {
+  id: string
+  sourceUrl: string
+  category: string
+  barcodeCheckStatus: string
+  barcodeCheckValues: string[]
+  barcodeCheckOcrValues: string[]
+  barcodeCheckMethod: string
+  barcodeCheckError: string
+}
+
+export type UnmatchedReviewDetail = {
+  record: UnmatchedRecord
+  version: number
+  state: 'pending' | 'reviewed'
+  meterNo: string
+  collector: string
+  moduleAssetNo: string
+  manualConfirmed: boolean
+  reviewer: string
+  photos: UnmatchedReviewPhoto[]
+}
+
+export type UnmatchedMatchCandidate = {
+  candidateKey: string
+  targetGroupId: string
+  terminal: string
+  meterNo: string
+  address: string
+  matchReasons: string[]
+}
+
 export type ReplacementRecord = {
   groupId: string
   taskId: string | number
