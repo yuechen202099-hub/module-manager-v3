@@ -319,3 +319,22 @@ def test_preserves_negated_or_pending_candidate_deployment_prose(
     record = f"{release_record('Status: pending')}\n{pending_or_negated_prose}\n"
 
     assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize(
+    "contradictory_prose",
+    [
+        "V3.0.80 was not deployed yesterday; V3.0.80 was deployed today.",
+        "V3.0.80 was not deployed yesterday, V3.0.80 was deployed today.",
+        "V3.0.80\nhas been deployed to production.",
+        "V3.0.80 尚未部署的记录已过时；V3.0.80 已部署。",
+    ],
+)
+def test_rejects_clause_scoped_and_cross_line_affirmative_deployment_prose(
+    contradictory_prose: str,
+) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{contradictory_prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)

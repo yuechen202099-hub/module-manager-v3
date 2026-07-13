@@ -59,16 +59,19 @@ AUDIT_PHOTO_SECRET_FIELDS = {
     "url",
     "urls",
 }
+AUDIT_PHOTO_SECRET_KEYS = {
+    re.sub(r"[^0-9a-z]+", "", field.casefold()) for field in AUDIT_PHOTO_SECRET_FIELDS
+}
 
 
 def redact_audit_photo_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         redacted = {}
         for key, item in value.items():
-            normalized_key = str(key).strip().lower().replace("-", "_")
+            normalized_key = re.sub(r"[^0-9a-z]+", "", str(key).strip().casefold())
             redacted[key] = (
                 AUDIT_REDACTED_VALUE
-                if normalized_key in AUDIT_PHOTO_SECRET_FIELDS
+                if normalized_key in AUDIT_PHOTO_SECRET_KEYS
                 else redact_audit_photo_secrets(item)
             )
         return redacted

@@ -859,6 +859,20 @@ def test_postgres_repository_rejects_placeholder_formal_identity_before_session(
         )
 
 
+def test_postgres_group_creation_rejects_placeholder_match_key_before_session() -> None:
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            pytest.fail("invalid formal identity must be rejected before a transaction starts")
+
+    with pytest.raises(ValueError, match="real meter match key"):
+        TestPostgresRepository().create_empty_group_for_terminal(
+            terminal="T-REAL",
+            actor="admin",
+            meter_no="120000000001",
+            meter_match_key="unmatched-key",
+        )
+
+
 def test_postgres_create_group_from_unmatched_uses_one_locked_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
     record = _postgres_finalize_record()
     fake_session = FinalizeFakeSession(record)
@@ -2055,12 +2069,10 @@ def test_postgres_finalize_unmatched_checks_version_before_candidate_or_formal_m
     assert fake_session.staged == []
 
 
-def test_dual_backend_finalize_unmatched_match_uses_json_first_and_mirrors_identical_contract(
+def test_dual_backend_finalize_unmatched_match_fails_before_json_or_postgres_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = []
-    json_result = {"group": {"id": "g-json", "terminal": "T-FINAL"}, "attached": False}
-
     class MirrorRepository:
         def finalize_unmatched_match(self, *args, **kwargs):
             calls.append((args, kwargs))
@@ -2069,28 +2081,19 @@ def test_dual_backend_finalize_unmatched_match_uses_json_first_and_mirrors_ident
     monkeypatch.setattr(
         repository.local_simulation,
         "finalize_unmatched_match",
-        lambda unmatched_id, **kwargs: {**json_result, "unmatched_id": unmatched_id, "kwargs": kwargs},
+        lambda unmatched_id, **kwargs: calls.append((unmatched_id, kwargs)),
         raising=False,
     )
 
-    result = repository.DualWriteStateRepository().finalize_unmatched_match(
-        "unmatched-finalize-1",
-        actor="admin-a",
-        candidate_key="catalog:catalog-1:T-FINAL",
-        expected_version=3,
-    )
-
-    assert result["group"] == json_result["group"]
-    assert calls == [
-        (
-            ("unmatched-finalize-1",),
-            {
-                "actor": "admin-a",
-                "candidate_key": "catalog:catalog-1:T-FINAL",
-                "expected_version": 3,
-            },
+    with pytest.raises(repository.StateBackendNotReady, match="before either backend mutated"):
+        repository.DualWriteStateRepository().finalize_unmatched_match(
+            "unmatched-finalize-1",
+            actor="admin-a",
+            candidate_key="catalog:catalog-1:T-FINAL",
+            expected_version=3,
         )
-    ]
+
+    assert calls == []
 
 
 LEGACY_UNMATCHED_MUTATION_CASES = (
@@ -2224,7 +2227,13 @@ def test_postgres_construction_activity_audit_redacts_nested_photo_secrets_befor
                 "storage": {
                     "storage_bucket": "private-bucket",
                     "storage_key": "private/photo.jpg",
+                    "storageBucket": "private-camel-bucket",
+                    "storageKey": "private/camel-photo.jpg",
+                    "objectKey": "private/camel-object.jpg",
+                    "ossKey": "private/camel-oss.jpg",
                 },
+                "signedUrl": "https://photos.example/camel-signed.jpg?token=secret",
+                "rawUrl": "https://photos.example/camel-raw.jpg?token=secret",
             },
         },
     )
@@ -2238,9 +2247,39 @@ def test_postgres_construction_activity_audit_redacts_nested_photo_secrets_befor
             "storage": {
                 "storage_bucket": "[REDACTED]",
                 "storage_key": "[REDACTED]",
+                "storageBucket": "[REDACTED]",
+                "storageKey": "[REDACTED]",
+                "objectKey": "[REDACTED]",
+                "ossKey": "[REDACTED]",
             },
+            "signedUrl": "[REDACTED]",
+            "rawUrl": "[REDACTED]",
         },
     }
+
+
+@pytest.mark.parametrize(
+    ("operation", "value"),
+    [
+        (operation, value)
+        for operation in ("terminal", "meter_no", "meter_match_key")
+        for value in ("00000000", "未关联终端", "manual-placeholder", "unmatched-placeholder")
+    ],
+)
+def test_postgres_formal_identity_updates_reject_placeholders_before_transaction(
+    operation: str,
+    value: str,
+) -> None:
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            pytest.fail("invalid formal identity must be rejected before a transaction starts")
+
+    repo = TestPostgresRepository()
+    with pytest.raises(ValueError, match="real (terminal|meter number|meter match key)"):
+        if operation == "terminal":
+            repo.update_group_terminal("g-1", terminal=value, actor="admin")
+        else:
+            repo.update_group_metadata("g-1", actor="admin", updates={operation: value})
 
 
 def test_postgres_classify_photo_persists_archive_fields() -> None:

@@ -4112,8 +4112,10 @@ class PostgresStateRepository(StateRepository):
                     or local_simulation.build_total_catalog_match_key(meter_no)
                     or ""
                 ).strip()
-                if not meter_key:
-                    raise ValueError("Selected candidate has an invalid meter")
+                meter_key = local_simulation.validate_real_formal_identity_value(
+                    meter_key,
+                    "meter match key",
+                )
                 project_id = self._project_id_for_team(session, team_id)
                 lock_key = _formal_identity_advisory_lock_key(project_id, meter_key)
                 session.scalar(select(func.pg_advisory_xact_lock(lock_key)))
@@ -4808,6 +4810,7 @@ class PostgresStateRepository(StateRepository):
         updates: dict[str, Any],
         audit_action: str = "update_group_metadata",
     ) -> dict[str, Any]:
+        updates = local_simulation.validate_formal_identity_updates(updates)
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             before = _group_payload(session, group, include_photos=False)
@@ -5949,14 +5952,24 @@ class PostgresStateRepository(StateRepository):
                 if record is None:
                     raise KeyError(unmatched_id)
                 review = _checked_unmatched_review(record, expected_version)
-                payload = {**_unmatched_payload(record), **(updates or {})}
+                updates = updates or {}
+                payload = {**_unmatched_payload(record), **updates}
                 terminal_value, meter_no_value = local_simulation.validate_real_formal_identity(
                     terminal or str(payload.get("terminal") or ""),
                     str(payload.get("meter_no") or payload.get("barcode") or ""),
                 )
                 meter_key = str(payload.get("meter_match_key") or "").strip()
-                if not meter_key:
+                if not meter_key or (
+                    meter_key in local_simulation.FORMAL_IDENTITY_PLACEHOLDERS
+                    or meter_key.lower().startswith(local_simulation.FORMAL_IDENTITY_PREFIXES)
+                ):
+                    if "meter_match_key" in updates:
+                        local_simulation.validate_real_formal_identity_value(meter_key, "meter match key")
                     meter_key = local_simulation.build_total_catalog_match_key(meter_no_value) or meter_no_value
+                meter_key = local_simulation.validate_real_formal_identity_value(
+                    meter_key,
+                    "meter match key",
+                )
                 review = {
                     **review,
                     "meter_no": meter_no_value,
@@ -6029,14 +6042,13 @@ class PostgresStateRepository(StateRepository):
     ) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         terminal_value, meter_no_value = local_simulation.validate_real_formal_identity(terminal, meter_no)
+        meter_key_value = local_simulation.validate_real_formal_identity_value(
+            meter_match_key or local_simulation.build_total_catalog_match_key(meter_no_value) or meter_no_value,
+            "meter match key",
+        )
         with self._session() as session:
             project_id = self._project_id_for_team(session, team_id)
             task = self._ensure_task_for_terminal(session, team_id, terminal_value)
-            meter_key_value = (
-                meter_match_key.strip()
-                or local_simulation.build_total_catalog_match_key(meter_no_value)
-                or meter_no_value
-            )
             group = MaterialGroup(
                 team_id=team_id,
                 project_id=project_id,
@@ -6063,9 +6075,7 @@ class PostgresStateRepository(StateRepository):
             return {"group": _group_payload(session, group), "task": _construction_task_payload(task, self._task_stats(session, task))}
 
     def update_group_terminal(self, group_id: str, *, terminal: str, actor: str) -> dict[str, Any]:
-        terminal_value = terminal.strip()
-        if not terminal_value:
-            raise ValueError("Target terminal is required")
+        terminal_value = local_simulation.validate_real_formal_identity_value(terminal, "terminal")
         team_id = local_simulation.current_team_id()
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
@@ -6773,17 +6783,21 @@ class DualWriteStateRepository(JsonStateRepository):
             logger.warning("Dual write mirror failed for %s: %s", operation, exc, exc_info=True)
 
     def _strict_unmatched_review_write(self, operation: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        transaction = local_simulation.begin_authoritative_json_write(local_simulation.current_team_id())
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
         token = None
-        try:
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
             token = local_simulation.activate_authoritative_json_write(transaction)
-            result = getattr(super(), operation)(*args, **kwargs)
-            mirror = self.postgres_repository_factory()
-            getattr(mirror, operation)(*args, **kwargs)
-            local_simulation.finish_authoritative_json_write(transaction, token)
-            return result
+        try:
+            raise StateBackendNotReady(
+                "Dual unmatched-review writes require a coordinated JSON/PostgreSQL transaction; "
+                f"{operation} was rejected before either backend mutated"
+            )
         finally:
-            local_simulation.abort_authoritative_json_write(transaction, token)
+            if owns_transaction:
+                local_simulation.abort_authoritative_json_write(transaction, token)
 
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         result = super().claim_task(task_id, reviewer)

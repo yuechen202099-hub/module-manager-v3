@@ -117,6 +117,12 @@ STATE_BACKEND=dual      # migration mode, reads JSON and mirrors core writes to 
 STATE_BACKEND=json      # compatibility and rollback mode only
 ```
 
+`dual` remains available for migration reads and supported mirror writes. Unmatched-review save,
+rescan, confirm, and finalize return `503` before either backend mutates because the JSON file and
+PostgreSQL repositories do not share a durable transaction coordinator. Use
+`STATE_BACKEND=postgres` for those production writes; dual mode must not claim cross-backend
+success that it cannot prove.
+
 Before claiming full JSON cutover, run the production-route audit:
 
 ```powershell

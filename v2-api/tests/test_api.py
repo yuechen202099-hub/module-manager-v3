@@ -188,6 +188,18 @@ def test_production_group_create_rejects_placeholder_formal_identity(monkeypatch
         )
         assert response.status_code == 400, (terminal, meter_no, response.text)
 
+    invalid_match_key = production_client.post(
+        "/local-test/groups",
+        headers=headers["admin"],
+        json={
+            "actor": "forged-admin",
+            "terminal": "T-001",
+            "meter_no": "120000000001",
+            "meter_match_key": "manual-match-key",
+        },
+    )
+    assert invalid_match_key.status_code == 400
+
     assert repository.calls == []
 
 
@@ -716,7 +728,13 @@ def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch
                                             "storage_bucket": "private-bucket",
                                             "storage_key": "private/photo.jpg",
                                             "object_key": "private/photo.jpg",
+                                            "storageBucket": "private-camel-bucket",
+                                            "storageKey": "private/camel-photo.jpg",
+                                            "objectKey": "private/camel-object.jpg",
+                                            "ossKey": "private/camel-oss.jpg",
                                         },
+                                        "signedUrl": "https://photos.example/camel-signed.jpg?token=secret",
+                                        "rawUrl": "https://photos.example/camel-raw.jpg?token=secret",
                                     }
                                 ]
                             },
@@ -742,10 +760,16 @@ def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch
     assert payload["items"][0]["payload"]["candidate_key"] == "catalog:row-1"
     assert photo["source_url"] == "[REDACTED]"
     assert photo["signed_url"] == "[REDACTED]"
+    assert photo["signedUrl"] == "[REDACTED]"
+    assert photo["rawUrl"] == "[REDACTED]"
     assert photo["storage"] == {
         "storage_bucket": "[REDACTED]",
         "storage_key": "[REDACTED]",
         "object_key": "[REDACTED]",
+        "storageBucket": "[REDACTED]",
+        "storageKey": "[REDACTED]",
+        "objectKey": "[REDACTED]",
+        "ossKey": "[REDACTED]",
     }
     assert "token=secret" not in json.dumps(payload)
 
@@ -1212,9 +1236,15 @@ def test_production_group_metadata_requires_reviewer_or_admin(monkeypatch, tmp_p
         headers=headers["reviewer"],
         json={"actor": "admin", "updates": {"meter_no": "METER-001"}},
     )
+    match_key_denied = production_client.patch(
+        "/local-test/groups/group-1/metadata",
+        headers=headers["reviewer"],
+        json={"updates": {"meter_match_key": "MATCH-001"}},
+    )
 
     assert denied.status_code == 403
     assert spoofed.status_code == 403
+    assert match_key_denied.status_code == 403
     assert repository.update_calls == 0
 
     allowed = production_client.patch(
@@ -1224,6 +1254,43 @@ def test_production_group_metadata_requires_reviewer_or_admin(monkeypatch, tmp_p
     )
     assert allowed.status_code == 200
     assert repository.update_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "updates"),
+    [
+        ("/local-test/groups/group-1/terminal", {"terminal": "00000000"}),
+        ("/local-test/groups/group-1/terminal", {"terminal": "manual-terminal"}),
+        ("/local-test/groups/group-1/metadata", {"updates": {"meter_no": "未关联终端"}}),
+        ("/local-test/groups/group-1/metadata", {"updates": {"meter_match_key": "unmatched-key"}}),
+    ],
+)
+def test_production_formal_identity_updates_reject_placeholders_before_repository_write(
+    monkeypatch,
+    tmp_path,
+    path: str,
+    updates: dict,
+) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class FakeRepository:
+        calls = []
+
+        def update_group_terminal(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {"group": {"id": "group-1"}}
+
+        def update_group_metadata(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return {"group": {"id": "group-1"}}
+
+    repository = FakeRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    response = production_client.patch(path, headers=headers["admin"], json=updates)
+
+    assert response.status_code == 400
+    assert repository.calls == []
 
 
 def test_production_group_photo_url_import_requires_reviewer_or_admin(monkeypatch, tmp_path) -> None:
@@ -1379,6 +1446,146 @@ def test_production_local_test_persists_only_successful_writes(monkeypatch, tmp_
         assert wrong_role.status_code == 403
         assert allowed.status_code == 200
         assert persist_calls == ["saved"]
+
+
+DUAL_UNMATCHED_WRITE_CASES = (
+    (
+        "save",
+        "PATCH",
+        "/local-test/unmatched/{unmatched_id}/review",
+        lambda context: {
+            "expected_version": context["version"],
+            "metadata": {"collector": "C-DUAL"},
+            "photo_updates": [],
+            "state": "pending",
+        },
+        "reviewer",
+    ),
+    (
+        "rescan",
+        "POST",
+        "/local-test/unmatched/{unmatched_id}/photos/{photo_id}/rescan",
+        lambda context: {"expected_version": context["version"], "category": "collector_barcode"},
+        "reviewer",
+    ),
+    (
+        "confirm",
+        "POST",
+        "/local-test/unmatched/{unmatched_id}/confirm",
+        lambda context: {"expected_version": context["version"], "confirmed": True},
+        "reviewer",
+    ),
+    (
+        "finalize",
+        "POST",
+        "/local-test/unmatched/{unmatched_id}/finalize-match",
+        lambda context: {
+            "expected_version": context["version"],
+            "candidate_key": context["candidate_key"],
+        },
+        "admin",
+    ),
+)
+
+
+@pytest.mark.parametrize(("operation", "method", "path_template", "body_factory", "role"), DUAL_UNMATCHED_WRITE_CASES)
+def test_dual_http_unmatched_writes_fail_fast_without_deadlock_or_backend_divergence(
+    monkeypatch,
+    tmp_path,
+    operation: str,
+    method: str,
+    path_template: str,
+    body_factory,
+    role: str,
+) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    main_module.settings.state_backend = "dual"
+    local_test.settings.state_backend = "dual"
+    state_repository.settings.state_backend = "dual"
+    team_id = "north-team-01"
+    local_simulation._team_states[team_id] = local_simulation.blank_state(team_id)
+    local_simulation._team_states[team_id]["summary"] = local_simulation.empty_summary()
+    token = local_simulation.set_current_team(team_id)
+    try:
+        state = local_simulation.get_state()
+        record = local_simulation.ensure_unmatched_record(
+            {
+                "barcode": "3130001122100009124734",
+                "meter_no": "120000912473",
+                "collector": "C001",
+                "module_asset_no": "M001",
+                "photo_urls": [f"https://photos.example/dual-http-{operation}-{index}.jpg" for index in range(4)],
+            }
+        )
+        state["scan_unmatched"].append(record)
+        state["total_catalog"].append(
+            {
+                "id": f"catalog-dual-http-{operation}",
+                "terminal": f"T-DUAL-{operation.upper()}",
+                "meter_no": "120000912473",
+                "meter_match_key": local_simulation.build_total_catalog_match_key("120000912473"),
+                "address": "dual http road",
+            }
+        )
+        review = unmatched_review.build_review(record)
+        candidate = local_simulation.list_unmatched_match_candidates(record["unmatched_id"])["items"][0]
+        context = {
+            "version": review["version"],
+            "candidate_key": candidate["candidate_key"],
+        }
+        photo_id = review["photos"][0]["id"]
+        before = deepcopy(state)
+    finally:
+        local_simulation.reset_current_team(token)
+
+    postgres_calls = []
+
+    class MutatingPostgresMirror:
+        def __getattr__(self, name: str):
+            def mutate(*args, **kwargs):
+                postgres_calls.append((name, args, kwargs))
+                return {"mutated": True}
+
+            return mutate
+
+    persistence_calls = []
+
+    def fail_json_persistence() -> None:
+        persistence_calls.append("attempted")
+        raise OSError(f"injected JSON persistence failure for {operation}")
+
+    monkeypatch.setattr(state_repository.DualWriteStateRepository, "postgres_repository_factory", MutatingPostgresMirror)
+    monkeypatch.setattr(main_module, "save_all_team_states", fail_json_persistence)
+    path = path_template.format(unmatched_id=record["unmatched_id"], photo_id=photo_id)
+    responses = []
+    errors = []
+
+    def issue_request() -> None:
+        try:
+            responses.append(
+                production_client.request(
+                    method,
+                    path,
+                    headers=headers[role],
+                    json=body_factory(context),
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports transport failures
+            errors.append(exc)
+
+    request_thread = Thread(target=issue_request, daemon=True)
+    request_thread.start()
+    request_thread.join(timeout=5)
+
+    assert not request_thread.is_alive(), f"{operation} dual HTTP request exceeded 5-second deadlock guard"
+    assert errors == []
+    assert len(responses) == 1
+    assert responses[0].status_code == 503
+    assert "coordinated" in responses[0].text.lower()
+    assert postgres_calls == []
+    assert persistence_calls == []
+    assert local_simulation._team_states[team_id] == before
+    assert team_id not in local_simulation._authoritative_write_locks
 
 
 def test_fourth_review_production_rejections_do_not_create_team_or_lock_state(monkeypatch, tmp_path) -> None:
@@ -3038,11 +3245,15 @@ def test_construction_upload_rejects_placeholder_group_id_before_file_save() -> 
         f"/local-test/construction/tasks/{task['id']}/groups?limit=1&summary=true",
         headers=constructor_headers,
     ).json()["data"]["items"][0]
-    client.patch(
+    rejected_placeholder_update = client.patch(
         f"/local-test/groups/{group['id']}/metadata",
         headers=admin_headers,
         json={"actor": "admin", "updates": {"meter_no": "00000000"}},
     )
+    assert rejected_placeholder_update.status_code == 400
+    legacy_placeholder_group = local_simulation.get_group(group["id"])
+    assert legacy_placeholder_group is not None
+    legacy_placeholder_group["meter_no"] = "00000000"
 
     before_files = saved_upload_files()
     placeholder_meter_upload = client.post(

@@ -2015,36 +2015,6 @@ export async function deleteUnmatchedRecord(
   return mapUnmatchedRecord(data || {})
 }
 
-export async function rematchUnmatchedRecord(
-  unmatchedId: string,
-  payload: {
-    expectedVersion: number
-    meterNo?: string
-    oldMeterNo?: string
-    terminal?: string
-    updates?: Record<string, unknown>
-  },
-): Promise<{ matched: boolean; record?: UnmatchedRecord; group?: MaterialGroup }> {
-  const data = await api<{ matched?: boolean; record?: BackendUnmatchedRecord; group?: BackendGroup }>(
-    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/rematch`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        expected_version: payload.expectedVersion,
-        meter_no: payload.meterNo || '',
-        old_meter_no: payload.oldMeterNo || '',
-        terminal: payload.terminal || '',
-        updates: payload.updates || {},
-      }),
-    },
-  )
-  return {
-    matched: Boolean(data.matched || data.group),
-    record: data.record ? mapUnmatchedRecord(data.record) : undefined,
-    group: data.group ? mapGroup(data.group) : undefined,
-  }
-}
-
 export async function fetchExceptionGroups(reviewer = currentActor()): Promise<MaterialGroup[]> {
   const query = new URLSearchParams({ limit: '1000' })
   if (reviewer) query.set('reviewer', reviewer)

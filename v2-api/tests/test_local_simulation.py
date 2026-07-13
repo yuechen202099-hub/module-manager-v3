@@ -14,7 +14,7 @@ from app.main import create_app
 from app.services import local_simulation
 from app.services import photo_barcode_check
 from app.services import unmatched_review
-from app.services.state_repository import DualWriteStateRepository, JsonStateRepository
+from app.services.state_repository import DualWriteStateRepository, JsonStateRepository, StateBackendNotReady
 from app.services.local_simulation import (
     DEFAULT_SCAN_FILE,
     DEFAULT_TOTAL_CATALOG,
@@ -2693,124 +2693,92 @@ def test_json_state_repository_delegates_unmatched_rescan_and_confirmation(
     assert local_simulation.get_unmatched_review(unmatched_id)["review"] == confirmed["review"]
 
 
-def test_dual_unmatched_review_evolves_both_backends_before_finalization(
+def test_dual_unmatched_review_writes_fail_before_either_backend_mutates(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     synthetic_state["total_catalog"] = []
     add_unmatched_match_catalog_row(terminal="T-DUAL-FINAL")
     unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/dual")
-    mirror_state = {"version": 1, "open": True, "operations": []}
+    mirror_calls = []
 
-    class EvolvingPostgresMirror:
-        @staticmethod
-        def advance(operation: str, expected_version: int) -> None:
-            if not mirror_state["open"] or expected_version != mirror_state["version"]:
-                raise unmatched_review.ReviewVersionConflict("PostgreSQL review version drift")
-            mirror_state["operations"].append(operation)
-            mirror_state["version"] += 1
+    class MutatingPostgresMirror:
+        def __getattr__(self, operation: str):
+            def mutate(*args, **kwargs):
+                mirror_calls.append((operation, args, kwargs))
+                return {"mutated": True}
 
-        def save_unmatched_review(self, unmatched_id: str, *, expected_version: int, **kwargs) -> dict:
-            self.advance("save", expected_version)
-            return {"review": {"version": mirror_state["version"]}}
+            return mutate
 
-        def rescan_unmatched_review_photo(
-            self,
-            unmatched_id: str,
-            photo_id: str,
-            *,
-            expected_version: int,
-            **kwargs,
-        ) -> dict:
-            self.advance("rescan", expected_version)
-            return {"review": {"version": mirror_state["version"]}}
-
-        def confirm_unmatched_review(self, unmatched_id: str, *, expected_version: int, **kwargs) -> dict:
-            self.advance("confirm", expected_version)
-            return {"review": {"version": mirror_state["version"]}}
-
-        def finalize_unmatched_match(self, unmatched_id: str, *, expected_version: int, **kwargs) -> dict:
-            if not mirror_state["open"] or expected_version != mirror_state["version"]:
-                raise unmatched_review.ReviewVersionConflict("PostgreSQL review version drift")
-            mirror_state["operations"].append("finalize")
-            mirror_state["open"] = False
-            return {"group": {"id": "g-postgres"}, "attached": False}
-
-    monkeypatch.setattr(DualWriteStateRepository, "postgres_repository_factory", EvolvingPostgresMirror)
-    monkeypatch.setattr(
-        local_simulation.photo_barcode_check,
-        "check_photo_barcode",
-        lambda photo, group, *, use_ocr=False: {"barcode_check_status": "matched"},
-    )
+    monkeypatch.setattr(DualWriteStateRepository, "postgres_repository_factory", MutatingPostgresMirror)
     repo = DualWriteStateRepository()
     opened = repo.get_unmatched_review(unmatched_id)
     photo_id = opened["review"]["photos"][0]["id"]
-
-    saved = repo.save_unmatched_review(
-        unmatched_id,
-        actor="reviewer-a",
-        expected_version=opened["review"]["version"],
-        metadata={"collector": "C-DUAL"},
-        photo_updates=[],
-        state="pending",
-    )
-    rescanned = repo.rescan_unmatched_review_photo(
-        unmatched_id,
-        photo_id,
-        actor="reviewer-a",
-        expected_version=saved["review"]["version"],
-        category="collector_barcode",
-    )
-    confirmed = repo.confirm_unmatched_review(
-        unmatched_id,
-        actor="reviewer-a",
-        expected_version=rescanned["review"]["version"],
-    )
     candidate = repo.list_unmatched_match_candidates(unmatched_id)["items"][0]
+    version = opened["review"]["version"]
+    before = deepcopy(synthetic_state)
+    operations = [
+        lambda: repo.save_unmatched_review(
+            unmatched_id,
+            actor="reviewer-a",
+            expected_version=version,
+            metadata={"collector": "C-DUAL"},
+            photo_updates=[],
+            state="pending",
+        ),
+        lambda: repo.rescan_unmatched_review_photo(
+            unmatched_id,
+            photo_id,
+            actor="reviewer-a",
+            expected_version=version,
+            category="collector_barcode",
+        ),
+        lambda: repo.confirm_unmatched_review(
+            unmatched_id,
+            actor="reviewer-a",
+            expected_version=version,
+        ),
+        lambda: repo.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-a",
+            candidate_key=candidate["candidate_key"],
+            expected_version=version,
+        ),
+    ]
 
-    result = repo.finalize_unmatched_match(
-        unmatched_id,
-        actor="admin-a",
-        candidate_key=candidate["candidate_key"],
-        expected_version=confirmed["review"]["version"],
-    )
+    for operation in operations:
+        with pytest.raises(StateBackendNotReady, match="before either backend mutated"):
+            operation()
 
-    assert result["group"]["terminal"] == "T-DUAL-FINAL"
-    assert mirror_state == {
-        "version": 4,
-        "open": False,
-        "operations": ["save", "rescan", "confirm", "finalize"],
-    }
+    assert synthetic_state == before
+    assert mirror_calls == []
 
 
-def test_dual_finalization_failure_keeps_json_unmatched_record_open(
+def test_dual_fail_fast_reuses_but_does_not_close_active_authoritative_transaction(
     synthetic_state: dict,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     synthetic_state["total_catalog"] = []
     add_unmatched_match_catalog_row(terminal="T-DUAL-FAIL")
     unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/dual-fail")
 
-    class FailingPostgresMirror:
-        def finalize_unmatched_match(self, *args, **kwargs):
-            raise unmatched_review.ReviewVersionConflict("PostgreSQL finalization refused")
-
-    monkeypatch.setattr(DualWriteStateRepository, "postgres_repository_factory", FailingPostgresMirror)
     repo = DualWriteStateRepository()
     opened = repo.get_unmatched_review(unmatched_id)
     candidate = repo.list_unmatched_match_candidates(unmatched_id)["items"][0]
+    transaction = local_simulation.begin_authoritative_json_write()
+    token = local_simulation.activate_authoritative_json_write(transaction)
+    try:
+        with pytest.raises(StateBackendNotReady, match="before either backend mutated"):
+            repo.finalize_unmatched_match(
+                unmatched_id,
+                actor="admin-a",
+                candidate_key=candidate["candidate_key"],
+                expected_version=opened["review"]["version"],
+            )
 
-    with pytest.raises(unmatched_review.ReviewVersionConflict, match="PostgreSQL finalization refused"):
-        repo.finalize_unmatched_match(
-            unmatched_id,
-            actor="admin-a",
-            candidate_key=candidate["candidate_key"],
-            expected_version=opened["review"]["version"],
-        )
-
-    still_open = repo.get_unmatched_review(unmatched_id)
-    assert still_open["review"]["version"] == opened["review"]["version"]
-    assert all(group.get("source_unmatched_id") != unmatched_id for group in synthetic_state["groups"])
+        assert transaction.closed is False
+        assert local_simulation.active_authoritative_json_write() is transaction
+    finally:
+        local_simulation.abort_authoritative_json_write(transaction, token)
 
 
 def test_json_audit_events_recursively_redact_photo_storage_secrets(synthetic_state: dict) -> None:
@@ -2827,7 +2795,13 @@ def test_json_audit_events_recursively_redact_photo_storage_secrets(synthetic_st
                         "storage": {
                             "storage_bucket": "private-bucket",
                             "storage_key": "private/key.jpg",
+                            "storageBucket": "private-camel-bucket",
+                            "storageKey": "private/camel-key.jpg",
+                            "objectKey": "private/camel-object.jpg",
+                            "ossKey": "private/camel-oss.jpg",
                         },
+                        "signedUrl": "https://oss.example/camel-signed.jpg?signature=secret",
+                        "rawUrl": "https://oss.example/camel-raw.jpg?signature=secret",
                     }
                 ]
             },
@@ -2838,9 +2812,15 @@ def test_json_audit_events_recursively_redact_photo_storage_secrets(synthetic_st
     assert event["payload"]["candidate_key"] == "catalog:row-1"
     assert photo["source_url"] == "[REDACTED]"
     assert photo["signed_url"] == "[REDACTED]"
+    assert photo["signedUrl"] == "[REDACTED]"
+    assert photo["rawUrl"] == "[REDACTED]"
     assert photo["storage"] == {
         "storage_bucket": "[REDACTED]",
         "storage_key": "[REDACTED]",
+        "storageBucket": "[REDACTED]",
+        "storageKey": "[REDACTED]",
+        "objectKey": "[REDACTED]",
+        "ossKey": "[REDACTED]",
     }
     assert local_simulation.list_audit_events()["items"][0] == event
 
@@ -3184,6 +3164,47 @@ def test_group_metadata_form_updates_group_and_photo_fields(synthetic_state: dic
     assert all(photo["asset_no"] == "module-form" for photo in result["group"]["photos"])
     assert all(photo["creator"] == "installer-form" for photo in result["group"]["photos"])
     assert audits["items"][0]["action"] == "update_group_metadata"
+
+
+@pytest.mark.parametrize(
+    ("operation", "value"),
+    [
+        (operation, value)
+        for operation in ("terminal", "meter_no", "meter_match_key")
+        for value in ("00000000", "未关联终端", "manual-placeholder", "unmatched-placeholder")
+    ],
+)
+def test_json_formal_identity_updates_reject_placeholders_without_state_or_audit_changes(
+    synthetic_state: dict,
+    operation: str,
+    value: str,
+) -> None:
+    group_id = synthetic_state["groups"][0]["id"]
+    before = deepcopy(synthetic_state)
+
+    with pytest.raises(ValueError, match="real (terminal|meter number|meter match key)"):
+        if operation == "terminal":
+            local_simulation.update_group_terminal(group_id, terminal=value, actor="admin")
+        else:
+            update_group_metadata(group_id, actor="admin", updates={operation: value})
+
+    assert synthetic_state == before
+
+
+def test_json_group_creation_rejects_placeholder_match_key_without_state_or_audit_changes(
+    synthetic_state: dict,
+) -> None:
+    before = deepcopy(synthetic_state)
+
+    with pytest.raises(ValueError, match="real meter match key"):
+        create_empty_group_for_terminal(
+            terminal="T-REAL",
+            actor="admin",
+            meter_no="120000000001",
+            meter_match_key="manual-match-key",
+        )
+
+    assert synthetic_state == before
 
 
 def test_incomplete_group_is_marked_exception_after_last_photo_archived(synthetic_state: dict) -> None:

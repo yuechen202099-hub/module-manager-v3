@@ -85,6 +85,8 @@ assertNotContains(board, '删除重复项', 'project board must not render the r
 assertNotContains(services, 'dedupeUnmatchedRecords', 'API services must not expose retired unmatched dedupe')
 assertNotContains(services, '/local-test/unmatched/dedupe', 'API services must not call retired unmatched dedupe')
 assertNotContains(types, 'UnmatchedDedupeResult', 'API types must not model retired unmatched dedupe')
+assertNotContains(services, 'rematchUnmatchedRecord', 'API services must not expose retired unmatched rematch')
+assertNotContains(services, '/local-test/unmatched/${encodeURIComponent(unmatchedId)}/rematch', 'API services must not call retired unmatched rematch')
 
 for (const token of [
   '重新扫码',

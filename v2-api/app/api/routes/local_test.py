@@ -124,7 +124,9 @@ from app.services.local_simulation import (
     submit_construction_exception_order,
     sync_state_photos_to_oss,
     unassign_construction_task,
+    validate_formal_identity_updates,
     validate_real_formal_identity,
+    validate_real_formal_identity_value,
     update_group_metadata,
     update_group_terminal,
     upload_construction_group_batch,
@@ -2048,6 +2050,8 @@ def save_unmatched_review(unmatched_id: str, payload: UnmatchedReviewPatchReques
             photo_updates=payload.photo_updates,
             state=payload.state,
         )
+    except StateBackendNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except unmatched_review.ReviewVersionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
@@ -2086,6 +2090,8 @@ def rescan_unmatched_review_photo(
             expected_version=payload.expected_version,
             category=payload.category,
         )
+    except StateBackendNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except unmatched_review.ReviewVersionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
@@ -2105,6 +2111,8 @@ def confirm_unmatched_review(unmatched_id: str, payload: UnmatchedReviewConfirmR
             expected_version=payload.expected_version,
             confirmed=payload.confirmed,
         )
+    except StateBackendNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except unmatched_review.ReviewVersionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
@@ -2137,6 +2145,8 @@ def finalize_unmatched_match(unmatched_id: str, payload: UnmatchedFinalizeMatchR
             candidate_key=payload.candidate_key,
             expected_version=payload.expected_version,
         )
+    except StateBackendNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except unmatched_review.ReviewVersionConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except unmatched_review.FinalizationIdentityConflict as exc:
@@ -2597,12 +2607,17 @@ def group_detail(group_id: str, request: Request):
 def create_empty_group(payload: EmptyGroupRequest, request: Request):
     try:
         terminal, meter_no = validate_real_formal_identity(payload.terminal, payload.meter_no)
+        meter_match_key = (
+            validate_real_formal_identity_value(payload.meter_match_key, "meter match key")
+            if payload.meter_match_key
+            else ""
+        )
         result = state_repository().create_empty_group_for_terminal(
             terminal=terminal,
             actor=request_actor(request),
             meter_no=meter_no,
             address=payload.address,
-            meter_match_key=payload.meter_match_key,
+            meter_match_key=meter_match_key,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2614,7 +2629,8 @@ def change_group_terminal(group_id: str, payload: GroupTerminalRequest, request:
     admin_payload = require_production_admin_payload(request)
     actor = str(admin_payload.get("username") or admin_payload.get("sub") or payload.actor or "admin").strip() or "admin"
     try:
-        result = state_repository().update_group_terminal(group_id, terminal=payload.terminal, actor=actor)
+        terminal = validate_real_formal_identity_value(payload.terminal, "terminal")
+        result = state_repository().update_group_terminal(group_id, terminal=terminal, actor=actor)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
@@ -2627,6 +2643,8 @@ def change_group_metadata(group_id: str, payload: GroupMetadataRequest, request:
     actor = bound_review_actor(request, payload.actor, fallback="admin")
     if settings.app_env.lower() in {"prod", "production"}:
         privileged_fields = {
+            "meter_no",
+            "meter_match_key",
             "terminal",
             "status",
             "reviewer",
@@ -2638,9 +2656,12 @@ def change_group_metadata(group_id: str, payload: GroupMetadataRequest, request:
         if privileged_fields.intersection(payload.updates or {}):
             require_production_admin_payload(request)
     try:
-        result = state_repository().update_group_metadata(group_id, actor=actor, updates=payload.updates)
+        updates = validate_formal_identity_updates(payload.updates)
+        result = state_repository().update_group_metadata(group_id, actor=actor, updates=updates)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, response_payload(result))
 
 

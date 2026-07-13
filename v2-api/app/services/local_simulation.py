@@ -303,6 +303,14 @@ def state_for_team(team_id: str | None = None) -> dict[str, Any]:
     return _team_states[team]
 
 
+def active_authoritative_json_write(team_id: str | None = None) -> AuthoritativeJsonWrite | None:
+    team = normalize_team_id(team_id or current_team_id())
+    transaction = _private_team_state.get()
+    if transaction is None or transaction.closed or transaction.team_id != team:
+        return None
+    return transaction
+
+
 def list_team_states() -> list[dict[str, Any]]:
     return [
         {
@@ -1929,7 +1937,16 @@ def _finalize_unmatched_match_in_state(
         str(candidate.get("terminal") or ""),
         str(candidate.get("meter_no") or ""),
     )
-    candidate = {**candidate, "terminal": terminal, "meter_no": meter_no}
+    meter_match_key = validate_real_formal_identity_value(
+        candidate.get("meter_match_key") or build_total_catalog_match_key(meter_no) or meter_no,
+        "meter match key",
+    )
+    candidate = {
+        **candidate,
+        "terminal": terminal,
+        "meter_no": meter_no,
+        "meter_match_key": meter_match_key,
+    }
 
     target_group_id = str(candidate.get("target_group_id") or "")
     group = get_group(target_group_id) if target_group_id else None
@@ -2614,14 +2631,31 @@ FORMAL_IDENTITY_PLACEHOLDERS = {"", "00000000", "未关联终端"}
 FORMAL_IDENTITY_PREFIXES = ("manual-", "unmatched-")
 
 
+def validate_real_formal_identity_value(value: Any, identity_name: str) -> str:
+    clean_value = str(value or "").strip()
+    if clean_value in FORMAL_IDENTITY_PLACEHOLDERS or clean_value.lower().startswith(FORMAL_IDENTITY_PREFIXES):
+        raise ValueError(f"A real {identity_name} is required")
+    return clean_value
+
+
 def validate_real_formal_identity(terminal: str, meter_no: str) -> tuple[str, str]:
-    terminal_value = str(terminal or "").strip()
-    meter_no_value = str(meter_no or "").strip()
-    if terminal_value in FORMAL_IDENTITY_PLACEHOLDERS or terminal_value.lower().startswith(FORMAL_IDENTITY_PREFIXES):
-        raise ValueError("A real terminal is required")
-    if meter_no_value in FORMAL_IDENTITY_PLACEHOLDERS or meter_no_value.lower().startswith(FORMAL_IDENTITY_PREFIXES):
-        raise ValueError("A real meter number is required")
-    return terminal_value, meter_no_value
+    return (
+        validate_real_formal_identity_value(terminal, "terminal"),
+        validate_real_formal_identity_value(meter_no, "meter number"),
+    )
+
+
+def validate_formal_identity_updates(updates: dict[str, Any]) -> dict[str, Any]:
+    checked = dict(updates or {})
+    labels = {
+        "terminal": "terminal",
+        "meter_no": "meter number",
+        "meter_match_key": "meter match key",
+    }
+    for field, label in labels.items():
+        if field in checked:
+            checked[field] = validate_real_formal_identity_value(checked[field], label)
+    return checked
 
 
 def find_existing_group_for_unmatched(terminal: str, meter_match_key: str, meter_no: str) -> dict[str, Any] | None:
@@ -2675,10 +2709,20 @@ def create_group_from_unmatched_record(
         raise KeyError(unmatched_id)
     unmatched_review.require_version(unmatched_review.build_review(record), expected_version)
 
-    payload = normalize_unmatched_photo_payload(record, updates or {})
+    updates = updates or {}
+    payload = normalize_unmatched_photo_payload(record, updates)
     meter_no = str(payload.get("meter_no") or payload.get("barcode") or payload.get("meter_match_key") or unmatched_id)
     terminal, meter_no = validate_real_formal_identity(terminal, meter_no)
-    meter_match_key = str(payload.get("meter_match_key") or build_total_catalog_match_key(meter_no) or meter_no)
+    meter_match_key_value = payload.get("meter_match_key")
+    try:
+        meter_match_key = validate_real_formal_identity_value(meter_match_key_value, "meter match key")
+    except ValueError:
+        if "meter_match_key" in updates:
+            raise
+        meter_match_key = validate_real_formal_identity_value(
+            build_total_catalog_match_key(meter_no) or meter_no,
+            "meter match key",
+        )
     task = ensure_task_for_terminal(terminal)
     photo_rows = scan_record_to_photo_rows({**payload, "meter_match_key": meter_match_key}, len(state["groups"]) + 1)
     existing_group = find_existing_group_for_unmatched(terminal, meter_match_key, meter_no)
@@ -2753,9 +2797,12 @@ def create_empty_group_for_terminal(
     meter_match_key: str = "",
 ) -> dict[str, Any]:
     terminal, meter_no = validate_real_formal_identity(terminal, meter_no)
+    meter_match_key = validate_real_formal_identity_value(
+        meter_match_key or build_total_catalog_match_key(meter_no) or meter_no,
+        "meter match key",
+    )
     state = get_state()
     task = ensure_task_for_terminal(terminal)
-    meter_match_key = meter_match_key.strip() or build_total_catalog_match_key(meter_no) or meter_no
     group = {
         "id": next_group_id(),
         "task_id": task["id"],
@@ -2781,12 +2828,10 @@ def create_empty_group_for_terminal(
 
 
 def update_group_terminal(group_id: str, terminal: str, actor: str) -> dict[str, Any]:
+    terminal = validate_real_formal_identity_value(terminal, "terminal")
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
-    terminal = terminal.strip()
-    if not terminal:
-        raise ValueError("Target terminal is required")
     previous_terminal = str(group.get("terminal") or "")
     task = ensure_task_for_terminal(terminal)
     group["terminal"] = terminal
@@ -2807,6 +2852,7 @@ def update_group_metadata(
     updates: dict[str, Any],
     audit_action: str = "update_group_metadata",
 ) -> dict[str, Any]:
+    updates = validate_formal_identity_updates(updates)
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
