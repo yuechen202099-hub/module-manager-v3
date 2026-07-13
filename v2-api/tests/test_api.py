@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
 from app.services.ezcodes_scheduler import sync_manager
-from app.services import account_store, local_simulation
+from app.services import account_store, local_simulation, photo_storage, unmatched_review
 from app.services.photo_storage import resolve_photo_for_response
 
 
@@ -143,6 +143,215 @@ def production_rbac_client(monkeypatch, tmp_path) -> tuple[TestClient, dict[str,
         assert login.status_code == 200
         headers[role] = {"Authorization": f"bearer {login.json()['data']['access_token']}"}
     return production_client, headers
+
+
+class FakeUnmatchedReviewRepository:
+    def __init__(self, source_url: str = "https://cdn.allowed.test/server-photo.jpg") -> None:
+        self.calls: list[dict] = []
+        self.review = {
+            "unmatched_id": "unmatched-1",
+            "version": 2,
+            "state": "pending",
+            "manual_confirmed": False,
+            "photos": [{"id": "photo-1", "source_url": source_url}],
+        }
+
+    def _review(self, unmatched_id: str) -> dict:
+        if unmatched_id != "unmatched-1":
+            raise KeyError(unmatched_id)
+        return {"record": {"unmatched_id": unmatched_id}, "review": self.review}
+
+    def get_unmatched_review(self, unmatched_id: str) -> dict:
+        self.calls.append({"method": "get", "unmatched_id": unmatched_id})
+        return self._review(unmatched_id)
+
+    def list_unmatched_match_candidates(self, unmatched_id: str) -> dict:
+        self.calls.append({"method": "candidates", "unmatched_id": unmatched_id})
+        self._review(unmatched_id)
+        return {"total": 1, "items": [{"candidate_key": "catalog:row-1", "terminal": "TERM-1"}]}
+
+    def save_unmatched_review(self, unmatched_id: str, *, actor: str, expected_version: int, **payload) -> dict:
+        self.calls.append({"method": "save", "actor": actor, "expected_version": expected_version, **payload})
+        self._review(unmatched_id)
+        if expected_version != 2:
+            raise unmatched_review.ReviewVersionConflict("stale")
+        if payload.get("state") == "invalid":
+            raise ValueError("Unsupported review state")
+        return {"review": self.review, "actor": actor}
+
+    def rescan_unmatched_review_photo(self, unmatched_id: str, photo_id: str, *, actor: str, category: str = "") -> dict:
+        self.calls.append({"method": "rescan", "actor": actor, "photo_id": photo_id, "category": category})
+        review = self._review(unmatched_id)["review"]
+        if photo_id != "photo-1":
+            raise KeyError(photo_id)
+        return {"review": review, "actor": actor}
+
+    def confirm_unmatched_review(self, unmatched_id: str, *, actor: str, expected_version: int, confirmed: bool = True) -> dict:
+        self.calls.append({"method": "confirm", "actor": actor, "expected_version": expected_version, "confirmed": confirmed})
+        self._review(unmatched_id)
+        if expected_version != 2:
+            raise unmatched_review.ReviewVersionConflict("stale")
+        return {"review": {**self.review, "manual_confirmed": bool(confirmed)}, "actor": actor}
+
+    def finalize_unmatched_match(self, unmatched_id: str, *, actor: str, candidate_key: str, expected_version: int) -> dict:
+        self.calls.append({"method": "finalize", "actor": actor, "candidate_key": candidate_key, "expected_version": expected_version})
+        self._review(unmatched_id)
+        if expected_version != 2:
+            raise unmatched_review.ReviewVersionConflict("stale")
+        if candidate_key != "catalog:row-1":
+            raise ValueError("Selected candidate is invalid or unavailable")
+        return {"group": {"id": "group-1"}, "attached": False, "actor": actor}
+
+
+def test_production_unmatched_review_role_matrix(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeUnmatchedReviewRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    local_test.settings.photo_proxy_hosts = {"cdn.allowed.test"}
+    monkeypatch.setattr(photo_storage, "settings", local_test.settings)
+    monkeypatch.setattr(local_test, "_resolve_photo_proxy_host_addresses", lambda _hostname: ["8.8.8.8"])
+    monkeypatch.setattr(local_test, "_read_remote_image", lambda *args, **kwargs: (b"image", "image/jpeg"))
+
+    review_path = "/local-test/unmatched/unmatched-1/review"
+    candidates_path = "/local-test/unmatched/unmatched-1/candidates"
+    content_path = "/local-test/unmatched/unmatched-1/photos/photo-1/content"
+    rescan_path = "/local-test/unmatched/unmatched-1/photos/photo-1/rescan"
+    confirm_path = "/local-test/unmatched/unmatched-1/confirm"
+    finalize_path = "/local-test/unmatched/unmatched-1/finalize-match"
+    save_body = {"expected_version": 2, "metadata": {}, "photo_updates": [], "state": "pending"}
+    confirm_body = {"expected_version": 2, "confirmed": True}
+    finalize_body = {"candidate_key": "catalog:row-1", "expected_version": 2}
+
+    requests = [
+        ("get", review_path, None),
+        ("patch", review_path, save_body),
+        ("get", candidates_path, None),
+        ("get", content_path, None),
+        ("post", rescan_path, {"category": "collector_barcode"}),
+        ("post", confirm_path, confirm_body),
+    ]
+    for method, path, body in requests:
+        assert production_client.request(method.upper(), path, json=body).status_code == 401
+        assert production_client.request(method.upper(), path, headers=headers["constructor"], json=body).status_code == 403
+
+    assert production_client.post(finalize_path, json=finalize_body).status_code == 401
+    assert production_client.post(finalize_path, headers=headers["reviewer"], json=finalize_body).status_code == 403
+    assert production_client.post(finalize_path, headers=headers["constructor"], json=finalize_body).status_code == 403
+    assert repository.calls == []
+
+    for method, path, body in requests:
+        assert production_client.request(method.upper(), path, headers=headers["reviewer"], json=body).status_code == 200
+        assert production_client.request(method.upper(), path, headers=headers["admin"], json=body).status_code == 200
+    assert production_client.post(finalize_path, headers=headers["admin"], json=finalize_body).status_code == 200
+
+
+def test_production_unmatched_review_binds_actor_to_signed_in_reviewer(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeUnmatchedReviewRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    response = production_client.patch(
+        "/local-test/unmatched/unmatched-1/review",
+        headers=headers["reviewer"],
+        json={
+            "actor": "root-admin",
+            "expected_version": 2,
+            "metadata": {"meter_no": "METER-001"},
+            "photo_updates": [],
+            "state": "pending",
+        },
+    )
+
+    assert response.status_code == 200
+    save_call = next(call for call in repository.calls if call["method"] == "save")
+    assert save_call["actor"] == "reviewer-a"
+    assert save_call["metadata"] == {"meter_no": "METER-001"}
+
+
+def test_production_unmatched_review_maps_repository_errors(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeUnmatchedReviewRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    assert production_client.get("/local-test/unmatched/missing/review", headers=headers["reviewer"]).status_code == 404
+    assert production_client.patch(
+        "/local-test/unmatched/unmatched-1/review",
+        headers=headers["reviewer"],
+        json={"expected_version": 1},
+    ).status_code == 409
+    assert production_client.patch(
+        "/local-test/unmatched/unmatched-1/review",
+        headers=headers["reviewer"],
+        json={"expected_version": 2, "state": "invalid"},
+    ).status_code == 400
+    assert production_client.post(
+        "/local-test/unmatched/unmatched-1/photos/missing/rescan",
+        headers=headers["reviewer"],
+        json={"category": "collector_barcode"},
+    ).status_code == 404
+    assert production_client.post(
+        "/local-test/unmatched/unmatched-1/confirm",
+        headers=headers["reviewer"],
+        json={"expected_version": 1},
+    ).status_code == 409
+    assert production_client.post(
+        "/local-test/unmatched/unmatched-1/finalize-match",
+        headers=headers["admin"],
+        json={"candidate_key": "invalid", "expected_version": 2},
+    ).status_code == 400
+    assert production_client.post(
+        "/local-test/unmatched/unmatched-1/finalize-match",
+        headers=headers["admin"],
+        json={"candidate_key": "catalog:row-1", "expected_version": 1},
+    ).status_code == 409
+
+
+def test_production_unmatched_photo_content_uses_server_source_and_rejects_ssrf(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeUnmatchedReviewRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    local_test.settings.photo_proxy_hosts = {"cdn.allowed.test"}
+    monkeypatch.setattr(photo_storage, "settings", local_test.settings)
+    monkeypatch.setattr(local_test, "_resolve_photo_proxy_host_addresses", lambda _hostname: ["8.8.8.8"])
+    fetched_urls = []
+
+    def fake_read_remote_image(url: str, **kwargs):
+        kwargs["url_validator"](url)
+        fetched_urls.append(url)
+        return b"image", "image/jpeg"
+
+    monkeypatch.setattr(local_test, "_read_remote_image", fake_read_remote_image)
+    content = production_client.get(
+        "/local-test/unmatched/unmatched-1/photos/photo-1/content?url=http://127.0.0.1/private.jpg",
+        headers=headers["reviewer"],
+    )
+    assert content.status_code == 200
+    assert fetched_urls == ["https://cdn.allowed.test/server-photo.jpg"]
+
+    repository.review["photos"][0]["source_url"] = "http://127.0.0.1/private.jpg"
+    denied = production_client.get(
+        "/local-test/unmatched/unmatched-1/photos/photo-1/content",
+        headers=headers["reviewer"],
+    )
+    assert denied.status_code == 400
+    assert fetched_urls == ["https://cdn.allowed.test/server-photo.jpg"]
+
+
+def test_production_unmatched_review_confirm_is_not_a_formal_scan_pass(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeUnmatchedReviewRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    response = production_client.post(
+        "/local-test/unmatched/unmatched-1/confirm",
+        headers=headers["reviewer"],
+        json={"expected_version": 2, "confirmed": True},
+    )
+
+    assert response.status_code == 200
+    review = response.json()["data"]["review"]
+    assert review["manual_confirmed"] is True
+    assert "formal_scan_pass" not in review
 
 
 def test_production_scan_clear_requires_admin_role(monkeypatch, tmp_path) -> None:

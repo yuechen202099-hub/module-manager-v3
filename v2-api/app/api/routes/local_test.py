@@ -16,7 +16,7 @@ from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -63,6 +63,7 @@ from app.services.photo_storage import (
     validate_remote_image_url,
 )
 from app.services.state_repository import StateBackendNotReady, _unmatched_duplicate_keys, get_state_repository
+from app.services import unmatched_review
 from app.services.local_simulation import (
     add_photo_urls_to_group,
     assign_construction_task,
@@ -982,6 +983,23 @@ class UnmatchedUpdateRequest(BaseModel):
     updates: dict = {}
 
 
+class UnmatchedReviewPatchRequest(BaseModel):
+    expected_version: int
+    metadata: dict = Field(default_factory=dict)
+    photo_updates: list[dict] = Field(default_factory=list)
+    state: str = "pending"
+
+
+class UnmatchedReviewConfirmRequest(BaseModel):
+    expected_version: int
+    confirmed: bool = True
+
+
+class UnmatchedFinalizeMatchRequest(BaseModel):
+    candidate_key: str
+    expected_version: int
+
+
 class UnmatchedAssignRequest(BaseModel):
     actor: str = "module_admin"
     constructor: str
@@ -1579,8 +1597,46 @@ def _local_upload_file_response(url: str) -> FileResponse | None:
     return FileResponse(target, media_type=media_type, headers={"Cache-Control": "private, max-age=86400"})
 
 
+def _photo_content_response_from_source(
+    source_url: str,
+    *,
+    request: Request,
+    variant: str,
+) -> Response | FileResponse:
+    del request
+    source_url = str(source_url or "").strip()
+    local_response = _local_upload_file_response(source_url)
+    if local_response is not None:
+        return local_response
+
+    if source_url.startswith("oss://"):
+        _, storage_key = parse_oss_image_url(source_url)
+        if not storage_key:
+            raise HTTPException(status_code=404, detail="Photo has no readable image source")
+        process = (
+            settings.oss_thumbnail_process
+            if variant == "thumbnail"
+            else settings.oss_preview_process
+            if variant == "preview"
+            else ""
+        )
+        content, media_type = _read_remote_image(sign_oss_server_url(storage_key, process))
+        return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, max-age=600"})
+
+    parsed = urlparse(source_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=404, detail="Photo has no readable image source")
+    _validate_photo_proxy_url(source_url)
+    content, media_type = _read_remote_image(
+        source_url,
+        url_validator=_validate_photo_proxy_url,
+        follow_redirects=False,
+    )
+    return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, max-age=600"})
+
+
 @router.get("/groups/{group_id}/photos/{photo_id}/content")
-def group_photo_content(group_id: str, photo_id: str, kind: str = Query(default="preview")):
+def group_photo_content(group_id: str, photo_id: str, request: Request, kind: str = Query(default="preview")):
     group = state_repository().get_group(group_id)
     if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
@@ -1629,14 +1685,7 @@ def group_photo_content(group_id: str, photo_id: str, kind: str = Query(default=
     )
     if not resolved_url:
         resolved_url = _source_url_for_photo(photo)
-    local_response = _local_upload_file_response(str(resolved_url or ""))
-    if local_response is not None:
-        return local_response
-    parsed = urlparse(str(resolved_url or ""))
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise HTTPException(status_code=404, detail="Photo has no readable image source")
-    content, media_type = _read_remote_image(str(resolved_url), url_validator=_validate_photo_proxy_url)
-    return Response(content=content, media_type=media_type, headers={"Cache-Control": "private, max-age=600"})
+    return _photo_content_response_from_source(str(resolved_url or ""), request=request, variant=normalized_kind)
 
 
 @router.get("/photo-proxy")
@@ -1804,6 +1853,116 @@ def rematch_unmatched(unmatched_id: str, payload: UnmatchedRematchRequest, reque
             terminal=payload.terminal,
             updates=payload.updates,
         )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, response_payload(result))
+
+
+@router.get("/unmatched/{unmatched_id}/review")
+def unmatched_review_detail(unmatched_id: str, request: Request):
+    bound_review_actor(request, "")
+    try:
+        review = state_repository().get_unmatched_review(unmatched_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    return ok(request, response_payload(review))
+
+
+@router.patch("/unmatched/{unmatched_id}/review")
+def save_unmatched_review(unmatched_id: str, payload: UnmatchedReviewPatchRequest, request: Request):
+    actor = bound_review_actor(request, "")
+    try:
+        review = state_repository().save_unmatched_review(
+            unmatched_id,
+            actor=actor,
+            expected_version=payload.expected_version,
+            metadata=payload.metadata,
+            photo_updates=payload.photo_updates,
+            state=payload.state,
+        )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, response_payload(review))
+
+
+@router.get("/unmatched/{unmatched_id}/photos/{photo_id}/content")
+def unmatched_review_photo_content(unmatched_id: str, photo_id: str, request: Request):
+    bound_review_actor(request, "")
+    try:
+        review = state_repository().get_unmatched_review(unmatched_id)["review"]
+        photo = unmatched_review.find_review_photo(review, photo_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched photo not found") from exc
+    return _photo_content_response_from_source(photo.get("source_url", ""), request=request, variant="original")
+
+
+@router.post("/unmatched/{unmatched_id}/photos/{photo_id}/rescan")
+def rescan_unmatched_review_photo(unmatched_id: str, photo_id: str, request: Request, category: str = ""):
+    actor = bound_review_actor(request, "")
+    try:
+        review = state_repository().rescan_unmatched_review_photo(
+            unmatched_id,
+            photo_id,
+            actor=actor,
+            category=category,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched photo not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, response_payload(review))
+
+
+@router.post("/unmatched/{unmatched_id}/confirm")
+def confirm_unmatched_review(unmatched_id: str, payload: UnmatchedReviewConfirmRequest, request: Request):
+    actor = bound_review_actor(request, "")
+    try:
+        review = state_repository().confirm_unmatched_review(
+            unmatched_id,
+            actor=actor,
+            expected_version=payload.expected_version,
+            confirmed=payload.confirmed,
+        )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, response_payload(review))
+
+
+@router.get("/unmatched/{unmatched_id}/candidates")
+def unmatched_match_candidates(unmatched_id: str, request: Request):
+    bound_review_actor(request, "")
+    try:
+        candidates = state_repository().list_unmatched_match_candidates(unmatched_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    return ok(request, response_payload(candidates))
+
+
+@router.post("/unmatched/{unmatched_id}/finalize-match")
+def finalize_unmatched_match(unmatched_id: str, payload: UnmatchedFinalizeMatchRequest, request: Request):
+    admin_payload = require_production_admin_payload(request)
+    actor = str(admin_payload.get("sub") or admin_payload.get("username") or "").strip()
+    if not actor:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        result = state_repository().finalize_unmatched_match(
+            unmatched_id,
+            actor=actor,
+            candidate_key=payload.candidate_key,
+            expected_version=payload.expected_version,
+        )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
