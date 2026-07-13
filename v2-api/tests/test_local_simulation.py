@@ -1610,6 +1610,43 @@ def test_unmatched_rescan_return_value_is_mutation_isolated(synthetic_state: dic
     assert persisted["review"]["photos"][0]["barcode_check_status"] == "unreadable"
 
 
+def test_unmatched_rescan_with_sparse_meter_uses_empty_match_key_and_persists(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    record = local_simulation.get_state()["scan_unmatched"][-1]
+    record["meter_no"] = ""
+    record["barcode"] = ""
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    photo_id = opened["review"]["photos"][0]["id"]
+    calls: list[dict] = []
+
+    def check_photo_barcode(photo: dict, group: dict, *, use_ocr: bool = False) -> dict:
+        calls.append({"group": group, "use_ocr": use_ocr})
+        return {"barcode_check_status": "matched", "barcode_check_method": "barcode_ocr"}
+
+    monkeypatch.setattr(local_simulation.photo_barcode_check, "check_photo_barcode", check_photo_barcode)
+
+    result = local_simulation.rescan_unmatched_review_photo(unmatched_id, photo_id, actor="reviewer-a")
+    events = [
+        event
+        for event in local_simulation.get_state()["audit_events"]
+        if event["action"] == "unmatched_review_barcode_rescan"
+    ]
+
+    assert len(calls) == 1
+    assert calls[0]["use_ocr"] is True
+    assert calls[0]["group"]["meter_no"] == ""
+    assert calls[0]["group"]["meter_match_key"] == ""
+    assert result["review"]["meter_no"] == ""
+    assert result["photo"]["barcode_check_method"] == "barcode_ocr"
+    assert result["review"]["version"] == opened["review"]["version"] + 1
+    assert local_simulation.get_unmatched_review(unmatched_id)["review"] == result["review"]
+    assert len(events) == 1
+    assert "00000000" not in str(result)
+
+
 def test_unmatched_confirmation_persists_reloads_and_keeps_formal_statistics_unchanged(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,

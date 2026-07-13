@@ -72,9 +72,13 @@ def find_review_photo(review: dict[str, Any], photo_id: str) -> dict[str, Any]:
 
 def barcode_context(review: dict[str, Any]) -> dict[str, Any]:
     meter_no = str(review.get("meter_no") or "")
+    try:
+        meter_match_key = build_total_catalog_match_key(meter_no)
+    except ValueError:
+        meter_match_key = ""
     return {
         "meter_no": meter_no,
-        "meter_match_key": build_total_catalog_match_key(meter_no),
+        "meter_match_key": meter_match_key,
         "collector": str(review.get("collector") or ""),
         "module_asset_no": str(review.get("module_asset_no") or ""),
         "photos": review.get("photos") or [],
