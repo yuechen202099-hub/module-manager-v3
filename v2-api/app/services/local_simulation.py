@@ -1841,7 +1841,11 @@ def _formal_photos_from_unmatched_review(
         }
         photo = build_photo_record(index, row)
         photo.update(copy.deepcopy(migrated))
-        photo["id"] = f"p-{group_id}-unmatched-{index}"
+        photo["id"] = unmatched_review.migrated_formal_photo_id(
+            group_id,
+            str(review.get("unmatched_id") or ""),
+            str(migrated.get("source_fingerprint") or ""),
+        )
         photo["image_url"] = source_url
         photo["source_url"] = source_url
         photo["category_label"] = PHOTO_CATEGORIES.get(

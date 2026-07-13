@@ -1,6 +1,7 @@
 from asyncio import CancelledError
 from copy import deepcopy
 from datetime import datetime
+import hashlib
 from io import BytesIO
 from pathlib import Path
 from importlib.util import find_spec
@@ -2014,6 +2015,43 @@ def test_json_state_repository_finalizes_unmatched_match_from_server_candidate(s
 
     assert result["group"]["terminal"] == "T-JSON-FINAL"
     assert local_simulation.get_unmatched_record(unmatched_id) is None
+
+
+def test_json_migrated_photo_ids_do_not_collide_across_unmatched_records(synthetic_state: dict) -> None:
+    repository = JsonStateRepository()
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    add_unmatched_match_catalog_row(terminal="T-JSON-SHARED")
+
+    first_id = seed_unmatched_review_record(photo_prefix="https://photos.example/first")
+    first_candidate = repository.list_unmatched_match_candidates(first_id)["items"][0]
+    first = repository.finalize_unmatched_match(
+        first_id,
+        actor="admin-a",
+        candidate_key=first_candidate["candidate_key"],
+        expected_version=1,
+    )
+
+    second_id = seed_unmatched_review_record(photo_prefix="https://photos.example/second")
+    second_review = repository.get_unmatched_review(second_id)["review"]
+    second_candidate = repository.list_unmatched_match_candidates(second_id)["items"][0]
+    second = repository.finalize_unmatched_match(
+        second_id,
+        actor="admin-a",
+        candidate_key=second_candidate["candidate_key"],
+        expected_version=1,
+    )
+
+    group_id = second["group"]["id"]
+    photo_ids = [photo["id"] for photo in second["group"]["photos"]]
+    expected_second_ids = {
+        f"p-{group_id}-unmatched-{second_id}-{hashlib.sha256(photo['id'].encode('utf-8')).hexdigest()[:16]}"
+        for photo in second_review["photos"]
+    }
+    assert second["group"]["id"] == first["group"]["id"]
+    assert len(photo_ids) == 8
+    assert len(photo_ids) == len(set(photo_ids))
+    assert expected_second_ids.issubset(photo_ids)
 
 
 def test_unmatched_review_save_persists_without_creating_group_or_changing_summary(synthetic_state: dict) -> None:

@@ -47,6 +47,7 @@ MISSING_MODULE_ASSET_REASON = "\u7f3a\u5c11\u6a21\u5757\u8d44\u4ea7\u7f16\u53f7"
 INSUFFICIENT_GROUP_PHOTO_REASON = "\u8d44\u6599\u7ec4\u7167\u7247\u4e0d\u8db3 4 \u5f20"
 MISSING_COLLECTOR_INFO_REASON = "\u7f3a\u5c11\u91c7\u96c6\u5668\u4fe1\u606f"
 MODULE_DUPLICATE_REASON_PREFIX = "\u6a21\u5757\u53f7\u91cd\u590d"
+FINALIZATION_REPLAY_KEY = "finalization_replay"
 
 
 class StateBackendNotReady(RuntimeError):
@@ -305,6 +306,61 @@ def _apply_photo_quality_exception_status(
     else:
         raw["exception_reasons"] = group.exception_reasons
     group.raw_data = raw
+
+
+def _reset_group_after_photo_evidence_change(
+    session: Session,
+    group: MaterialGroup,
+    changed_photos: list[Photo],
+) -> None:
+    group.status = GroupStatus.INCOMPLETE if group.photo_count < 4 else GroupStatus.UNREVIEWED
+    group.reviewed_by_id = None
+    group.reviewer = None
+    group.review_note = ""
+    group.reviewed_at = None
+    group.exception_status = None
+    group.exception_note = ""
+    group.exception_reasons = []
+    group.has_archive_blocker = False
+    raw = dict(group.raw_data or {})
+    raw.update(
+        {
+            "status": "incomplete" if group.photo_count < 4 else "pending",
+            "photo_count": group.photo_count,
+            "reviewer": "",
+            "review_note": "",
+            "reviewed_at": None,
+            "exception_status": "",
+            "exception_note": "",
+            "exception_reasons": [],
+            "has_archive_blocker": False,
+        }
+    )
+    group.raw_data = raw
+    for photo in changed_photos:
+        photo.archive_status = ""
+        photo.archive_filename = ""
+        photo.archived_at = None
+        photo.classified_by = ""
+        photo.classified_at = None
+        photo_raw = dict(photo.raw_data or {})
+        for key in (
+            "archive_status",
+            "archive_filename",
+            "archived_at",
+            "archived_by",
+            "classified_by",
+            "classified_at",
+        ):
+            photo_raw.pop(key, None)
+        photo.raw_data = photo_raw
+    session.flush()
+    _apply_photo_quality_exception_status(session, group)
+
+
+def _candidate_advisory_lock_key(team_id: str, candidate_key: str) -> int:
+    digest = hashlib.sha256(f"{team_id}\0{candidate_key}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
 
 def _auto_archive_exception_note(note: str) -> bool:
@@ -3980,16 +4036,27 @@ class PostgresStateRepository(StateRepository):
         team_id = local_simulation.current_team_id()
         with self._session() as session:
             try:
+                lock_key = _candidate_advisory_lock_key(team_id, candidate_key)
+                session.scalar(select(func.pg_advisory_xact_lock(lock_key)))
                 record = session.scalar(
                     select(UnmatchedRecord)
                     .where(
                         UnmatchedRecord.team_id == team_id,
                         UnmatchedRecord.legacy_id == unmatched_id,
-                        UnmatchedRecord.status == "open",
                     )
                     .with_for_update()
                 )
                 if record is None:
+                    raise KeyError(unmatched_id)
+                replay = (record.payload or {}).get(FINALIZATION_REPLAY_KEY)
+                if (
+                    isinstance(replay, dict)
+                    and replay.get("candidate_key") == candidate_key
+                    and replay.get("expected_version") == expected_version
+                    and isinstance(replay.get("result"), dict)
+                ):
+                    return deepcopy(replay["result"])
+                if record.status != "open":
                     raise KeyError(unmatched_id)
                 review = unmatched_review.build_review(_unmatched_payload(record))
                 unmatched_review.require_version(review, expected_version)
@@ -4024,6 +4091,14 @@ class PostgresStateRepository(StateRepository):
                 result = {
                     "group": _group_payload(session, group),
                     "attached": attached,
+                }
+                record.payload = {
+                    **record.payload,
+                    FINALIZATION_REPLAY_KEY: {
+                        "candidate_key": candidate_key,
+                        "expected_version": expected_version,
+                        "result": deepcopy(result),
+                    },
                 }
                 session.commit()
                 return result
@@ -5941,6 +6016,7 @@ class PostgresStateRepository(StateRepository):
         merged_duplicates = 0
         reactivated_duplicates = 0
         skipped_duplicates = 0
+        changed_photos: list[Photo] = []
         active_count = session.scalar(
             select(func.count(Photo.id)).where(
                 Photo.team_id == group.team_id,
@@ -5996,6 +6072,7 @@ class PostgresStateRepository(StateRepository):
                     duplicate.source_fingerprint = duplicate.source_fingerprint or source_fingerprint
                     duplicate.image_url = duplicate.image_url or image_url
                     merged_duplicates += 1
+                    changed_photos.append(duplicate)
                 continue
             active_count += 1
             legacy_id = str(item.get("id") or f"p-{group.legacy_id or group.id}-{uuid4().hex[:12]}")
@@ -6047,7 +6124,12 @@ class PostgresStateRepository(StateRepository):
             if storage_type and storage_key:
                 register_duplicate(existing_by_storage, (storage_type, storage_key), photo)
             added += 1
-        if added or reactivated_duplicates:
+            if source == "unmatched-review-finalize":
+                changed_photos.append(photo)
+        if source == "unmatched-review-finalize" and (added or merged_duplicates):
+            group.photo_count = int(active_count)
+            _reset_group_after_photo_evidence_change(session, group, changed_photos)
+        elif added or reactivated_duplicates:
             group.photo_count = int(active_count)
             group.status = GroupStatus.INCOMPLETE if group.photo_count < 4 else GroupStatus.UNREVIEWED
             group.reviewer = None

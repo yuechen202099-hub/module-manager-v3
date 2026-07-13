@@ -1006,14 +1006,18 @@ def test_postgres_finalize_unmatched_uses_for_update_and_single_commit() -> None
         expected_version=1,
     )
 
-    compiled = str(
-        fake_session.statements[0].compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
+    compiled = [
+        str(
+            statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
         )
-    )
+        for statement in fake_session.statements
+    ]
     audits = [item for item in fake_session.staged if isinstance(item, repository.AuditLog)]
-    assert "FOR UPDATE" in compiled
+    assert any("pg_advisory_xact_lock" in sql for sql in compiled)
+    assert any("FROM unmatched_records" in sql and "FOR UPDATE" in sql for sql in compiled)
     assert fake_session.commit_calls == 1
     assert fake_session.rollback_calls == 0
     assert record.status == "associated"
@@ -1024,6 +1028,70 @@ def test_postgres_finalize_unmatched_uses_for_update_and_single_commit() -> None
     assert result["group"]["terminal"] == "T-FINAL"
     assert result["attached"] is False
     assert "00000000" not in str(result)
+
+
+def test_postgres_finalize_replay_returns_stored_result_without_duplicate_writes() -> None:
+    record = _postgres_finalize_record()
+    fake_session = FinalizeFakeSession(record)
+    group = _postgres_finalize_group()
+    formal_photo = SimpleNamespace(kind="formal-photo")
+    materialize_calls = 0
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+        def _resolve_unmatched_candidate(self, session, locked_record, review, candidate_key):
+            return {
+                "candidate_key": candidate_key,
+                "target_group_id": "",
+                "terminal": "T-FINAL",
+                "meter_no": "120000912473",
+                "meter_match_key": "0000912473",
+                "address": "match road",
+            }
+
+        def _materialize_unmatched_candidate(self, session, locked_record, review, candidate, actor):
+            nonlocal materialize_calls
+            materialize_calls += 1
+            session.add(group)
+            session.add(formal_photo)
+            return group, False
+
+    repo = TestPostgresRepository()
+    first = repo.finalize_unmatched_match(
+        record.legacy_id,
+        actor="admin-a",
+        candidate_key="catalog:catalog-1:T-FINAL",
+        expected_version=1,
+    )
+    second = repo.finalize_unmatched_match(
+        record.legacy_id,
+        actor="admin-a",
+        candidate_key="catalog:catalog-1:T-FINAL",
+        expected_version=1,
+    )
+
+    compiled = [
+        str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        for statement in fake_session.statements
+    ]
+    advisory_locks = [sql for sql in compiled if "pg_advisory_xact_lock" in sql]
+    audits = [item for item in fake_session.staged if isinstance(item, repository.AuditLog)]
+    stored_replay = record.payload["finalization_replay"]
+    assert second == first
+    assert stored_replay == {
+        "candidate_key": "catalog:catalog-1:T-FINAL",
+        "expected_version": 1,
+        "result": first,
+    }
+    assert len(advisory_locks) == 2
+    assert advisory_locks[0] == advisory_locks[1]
+    assert materialize_calls == 1
+    assert sum(item is group for item in fake_session.staged) == 1
+    assert sum(item is formal_photo for item in fake_session.staged) == 1
+    assert len(audits) == 1
+    assert fake_session.commit_calls == 1
 
 
 def test_postgres_finalize_unmatched_rolls_back_all_staged_writes_on_failure() -> None:
@@ -1228,6 +1296,95 @@ def test_postgres_unmatched_review_locks_and_merges_duplicate_photo_evidence() -
     assert existing.raw_data["qr_values"] == ["QR-001"]
     assert existing.raw_data["barcode_rescanned_by"] == "reviewer-a"
     assert existing.raw_data["temporary_review_manual_confirmed"] is True
+
+
+def test_postgres_duplicate_evidence_resets_formal_review_archive_and_exception_state() -> None:
+    source_url = "https://photos.example/reviewed-duplicate.jpg?token=old"
+    canonical_hash = repository.hashlib.sha256(
+        source_url.split("?", 1)[0].encode("utf-8")
+    ).hexdigest()
+    existing = SimpleNamespace(
+        source_fingerprint="older-explicit-fingerprint",
+        sha256="older-sha",
+        storage_type="",
+        storage_key="",
+        source_url_hash=canonical_hash,
+        raw_data={"archive_status": "archived", "archived_by": "reviewer-old"},
+        category="unclassified",
+        source_url=source_url,
+        image_url=source_url,
+        archive_status="archived",
+        archive_filename="before_box.jpg",
+        is_active=True,
+    )
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-reviewed-duplicate",
+        team_id="default-team",
+        display_meter_no="120000912473",
+        photo_count=4,
+        status=repository.GroupStatus.APPROVED,
+        reviewer="reviewer-old",
+        reviewed_by_id="reviewer-uuid",
+        review_note="approved",
+        exception_status="open",
+        exception_note="stale exception",
+        exception_reasons=["stale exception"],
+        has_archive_blocker=True,
+        reviewed_at=datetime(2026, 7, 12, 9, 0),
+        raw_data={
+            "status": "approved",
+            "reviewer": "reviewer-old",
+            "reviewed_at": "2026-07-12T09:00:00+00:00",
+            "exception_note": "stale exception",
+            "exception_reasons": ["stale exception"],
+        },
+    )
+
+    class DuplicateSession:
+        def __init__(self):
+            self.flush_calls = 0
+
+        def scalars(self, statement):
+            return FinalizeFakeScalars([existing])
+
+        def scalar(self, statement):
+            return 4
+
+        def add(self, value):
+            raise AssertionError("duplicate evidence must update the existing photo")
+
+        def flush(self):
+            self.flush_calls += 1
+
+    result = repository.PostgresStateRepository()._add_photo_records_to_group(
+        DuplicateSession(),
+        group,
+        actor="admin-a",
+        photos=[
+            {
+                "url": source_url,
+                "source_url": source_url,
+                "source_fingerprint": "temporary-review-photo-id",
+                "category": "before_box",
+                "qr_values": ["QR-UPDATED"],
+            }
+        ],
+        source="unmatched-review-finalize",
+    )
+
+    assert result == {"added": 0, "skipped_duplicates": 1, "merged_duplicates": 1}
+    assert repository._legacy_group_status(group) == "pending"
+    assert group.reviewer is None
+    assert group.reviewed_by_id is None
+    assert group.review_note == ""
+    assert group.reviewed_at is None
+    assert group.exception_status is None
+    assert group.exception_note == ""
+    assert group.exception_reasons == []
+    assert group.has_archive_blocker is False
+    assert existing.archive_status != "archived"
+    assert existing.archive_filename == ""
 
 
 def test_postgres_unmatched_review_reactivates_soft_deleted_duplicate_photo() -> None:

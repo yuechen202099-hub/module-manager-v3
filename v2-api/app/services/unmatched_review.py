@@ -180,6 +180,11 @@ def stable_photo_id(unmatched_id: str, index: int, source_url: str) -> str:
     return f"unmatched-photo-{digest}"
 
 
+def migrated_formal_photo_id(group_id: str, unmatched_id: str, review_photo_id: str) -> str:
+    review_photo_hash = hashlib.sha256(review_photo_id.encode("utf-8")).hexdigest()[:16]
+    return f"p-{group_id}-unmatched-{unmatched_id}-{review_photo_hash}"
+
+
 def build_review(record: dict[str, Any]) -> dict[str, Any]:
     existing = dict(record.get("temporary_review") or {})
     urls = normalized_photo_urls(record)
