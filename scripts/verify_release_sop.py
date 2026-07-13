@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 import re
 import sys
 import unicodedata
@@ -70,6 +71,7 @@ REQUIRED_FILES = [
     "scripts/verify_project_board_data_center_photos.js",
     "scripts/verify_project_board_unmatched_review.js",
     "scripts/verify_dialog_information_integration.js",
+    "v2-web/public/version.json",
 ]
 
 RELEASE_TABLE_ROW_PATTERN = re.compile(
@@ -101,31 +103,47 @@ EVIDENCE_FIELD_LABELS = {
     "Public health check": "Public health check",
 }
 VERSION_TOKEN_PATTERN = re.compile(r"\bV\d+\.\d+\.\d+\b", re.IGNORECASE)
+SEMANTIC_VERSION_PATTERN = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
+MANIFEST_VERSION_LINE_PATTERN = re.compile(r"^- Version:\s*(?P<version>.*?)\s*$", re.MULTILINE)
 DEPLOYMENT_CLAIM_PATTERN = re.compile(
     r"\b(?:deployed|shipped|released)\b"
     r"|\b(?:is|are|was|were|went|has\s+been|have\s+been)\s+(?:now\s+)?live(?:\s+(?:in|on))?\s+production\b"
-    r"|已部署|已发布|已上线|(?:生产(?:环境)?\s*)?(?:部署|发布|上线)已完成",
+    r"|\b(?:has|have)\s+gone\s+live(?:\s+(?:in|on))?\s+production\b"
+    r"|已部署|已发布|已上线|(?:生产(?:环境)?\s*)?(?:部署|发布|上线)已完成"
+    r"|已(?:在)?生产(?:环境)?(?:正式)?(?:部署|发布|上线|生效)"
+    r"|已完成(?:生产(?:环境)?)?(?:部署|发布|上线)"
+    r"|现已(?:在)?生产(?:环境)?(?:正式)?生效",
     re.IGNORECASE,
 )
 NEGATED_ENGLISH_CLAIM_PATTERN = re.compile(
     r"\b(?:not|never)\s+(?:(?:yet|currently|ever|actually|successfully|fully)\s+)*"
     r"(?:(?:been|be)\s+)?(?:deployed|shipped|released)\b"
-    r"|\b(?:not|never)\s+(?:now\s+)?live(?:\s+(?:in|on))?\s+production\b",
+    r"|\b(?:not|never)\s+(?:(?:yet|currently|ever|actually|successfully|fully)\s+)*"
+    r"(?:go|gone|be)?\s*live(?:\s+(?:in|on))?\s+production\b",
     re.IGNORECASE,
 )
-NEGATED_CHINESE_CLAIM_PATTERN = re.compile(r"(?:未|尚未)(?:部署|发布|上线)")
+NEGATED_CHINESE_CLAIM_PATTERN = re.compile(
+    r"(?:未|尚未)(?:在)?(?:生产(?:环境)?)?(?:正式)?(?:部署|发布|上线|生效)"
+    r"|(?:未|尚未)完成(?:生产(?:环境)?)?(?:部署|发布|上线)"
+)
+CONDITIONAL_ENGLISH_CLAIM_PATTERN = re.compile(r"\b(?:can|could|may|might|if|unless)\b", re.IGNORECASE)
+CONDITIONAL_CHINESE_CLAIM_PATTERN = re.compile(
+    r"(?:可以|可能|或许|也许|若|如果|假如|倘若|除非|否则|仅当|只要|待)"
+    r"|可(?=[^,，;；。.!?！？\n]{0,24}(?:部署|发布|上线|生效))"
+)
 PENDING_STATUS_PATTERN = re.compile(r"\bpending\b|待(?:部署|发布|上线|验证)|未(?:部署|发布|上线)", re.IGNORECASE)
 FUTURE_DEPLOYMENT_PATTERN = re.compile(
     r"\b(?:will|would|shall|going\s+to|to\s+be|scheduled\s+to|planned\s+to)\s+"
-    r"(?:be\s+)?(?:deployed|shipped|released)\b"
+    r"(?:(?:be\s+)?(?:deployed|shipped|released)|go\s+live(?:\s+(?:in|on))?\s+production)\b"
     r"|\b(?:before|after|until|once)\b[^,;.!?\n]{0,120}\b(?:deployed|shipped|released)\b"
-    r"|(?:将|计划|拟)(?:于[^,，;；。.!?！？\n]{0,20})?(?:部署|发布|上线)",
+    r"|(?:将|计划|拟)(?:于[^,，;；。.!?！？\n]{0,20})?(?:在生产(?:环境)?)?(?:部署|发布|上线|生效)",
     re.IGNORECASE,
 )
 CLAUSE_BOUNDARY_PATTERN = re.compile(
-    r"(?:[,，;；。.!?！？\n]+|\b(?:and|but|however|then|while|yet)\b|(?:并且|并于|并|但是|然而|但|却|然后)|于(?=(?:今日|现已|生产)))",
+    r"([,，;；。.!?！？\n]+|\b(?:and|but|however|then|while|yet)\b|(?:并且|并于|并|但是|然而|但|却|然后)|于(?=(?:今日|现已|生产)))",
     re.IGNORECASE,
 )
+CLAUSE_SCOPE_RESET_PATTERN = re.compile(r"[。.!?！？\n]|\b(?:but|however|yet)\b|(?:但是|然而|但|却)", re.IGNORECASE)
 RELEASE_RECORD_VERSION_PATTERN = re.compile(r"^#\s*(?P<version>V\d+\.\d+\.\d+)\b", re.MULTILINE)
 PLACEHOLDER_PATTERN = re.compile(r"\b(?:tbd|todo|pending|n/?a|unknown)\b|待补充|待验证|(?:^|\s)-(?:$|\s)", re.IGNORECASE)
 SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
@@ -150,11 +168,11 @@ def normalize_text(value: str) -> str:
 def normalize_claim_text(value: str) -> str:
     text = normalize_text(value)
     text = re.sub(
-        r"\b(is|are|was|were|has|have|had|do|does|did|could|would|should|must)n't\b",
+        r"\b(is|are|was|were|has|have|had|do|does|did|can|could|would|should|must)n't\b",
         r"\1 not",
         text,
     )
-    return text.replace("won't", "will not").replace("can't", "cannot")
+    return text.replace("won't", "will not").replace("cannot", "can not")
 
 
 def is_label_character(char: str) -> bool:
@@ -296,18 +314,41 @@ def is_placeholder(value: str) -> bool:
     return PLACEHOLDER_PATTERN.search(value) is not None
 
 
-def claim_clauses(value: str) -> list[str]:
+def clause_has_conditional_language(clause: str) -> bool:
+    normalized = normalize_claim_text(clause)
+    return bool(
+        CONDITIONAL_ENGLISH_CLAIM_PATTERN.search(normalized)
+        or CONDITIONAL_CHINESE_CLAIM_PATTERN.search(normalized)
+    )
+
+
+def semantic_claim_clauses(value: str) -> list[tuple[str, bool]]:
     protected = VERSION_TOKEN_PATTERN.sub(lambda match: match.group(0).replace(".", "\ue000"), normalize_claim_text(value))
-    return [
-        clause.replace("\ue000", ".").strip()
-        for clause in CLAUSE_BOUNDARY_PATTERN.split(protected)
-        if clause.strip()
-    ]
+    parts = CLAUSE_BOUNDARY_PATTERN.split(protected)
+    clauses: list[tuple[str, bool]] = []
+    conditional_scope = False
+    for index in range(0, len(parts), 2):
+        clause = parts[index].replace("\ue000", ".").strip()
+        clause_is_conditional = clause_has_conditional_language(clause)
+        if clause:
+            clauses.append((clause, conditional_scope or clause_is_conditional))
+        if clause_is_conditional:
+            conditional_scope = True
+        boundary = parts[index + 1] if index + 1 < len(parts) else ""
+        if CLAUSE_SCOPE_RESET_PATTERN.search(boundary):
+            conditional_scope = False
+    return clauses
+
+
+def claim_clauses(value: str) -> list[str]:
+    return [clause for clause, _ in semantic_claim_clauses(value)]
 
 
 def clause_has_affirmative_deployment_claim(clause: str) -> bool:
     normalized = normalize_claim_text(clause)
     if not DEPLOYMENT_CLAIM_PATTERN.search(normalized):
+        return False
+    if clause_has_conditional_language(normalized):
         return False
     if NEGATED_ENGLISH_CLAIM_PATTERN.search(normalized) or NEGATED_CHINESE_CLAIM_PATTERN.search(normalized):
         return False
@@ -317,7 +358,10 @@ def clause_has_affirmative_deployment_claim(clause: str) -> bool:
 
 
 def has_deployment_claim(status: str) -> bool:
-    return any(clause_has_affirmative_deployment_claim(clause) for clause in claim_clauses(status))
+    return any(
+        not conditional and clause_has_affirmative_deployment_claim(clause)
+        for clause, conditional in semantic_claim_clauses(status)
+    )
 
 
 def status_is_pending(status: str) -> bool:
@@ -334,16 +378,37 @@ def release_record_has_affirmative_version_deployment_prose(record: str) -> bool
     version = normalize_claim_text(version_match.group("version"))
     active_versions: set[str] = set()
     prose = "\n".join(line for line in record.splitlines() if not line.lstrip().startswith("|"))
-    for clause in claim_clauses(prose):
+    for clause, conditional in semantic_claim_clauses(prose):
         clause_versions = {
             normalize_claim_text(match.group(0))
             for match in VERSION_TOKEN_PATTERN.finditer(clause)
         }
         if clause_versions:
             active_versions = clause_versions
-        if version in active_versions and clause_has_affirmative_deployment_claim(clause):
+        if not conditional and version in active_versions and clause_has_affirmative_deployment_claim(clause):
             return True
     return False
+
+
+def runtime_version_from_artifact(value: str) -> str:
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, item in pairs:
+            if key in result:
+                fail("Version artifact must contain one unambiguous machine-readable runtime version")
+            result[key] = item
+        return result
+
+    try:
+        payload = json.loads(value, object_pairs_hook=unique_object)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise AssertionError("Version artifact must contain one unambiguous machine-readable runtime version") from exc
+    if not isinstance(payload, dict) or set(payload) != {"version"}:
+        fail("Version artifact must contain one unambiguous machine-readable runtime version")
+    version = payload.get("version")
+    if not isinstance(version, str) or SEMANTIC_VERSION_PATTERN.fullmatch(version) is None:
+        fail("Version artifact must contain one unambiguous machine-readable runtime version")
+    return version
 
 
 def valid_sha256(value: str) -> bool:
@@ -434,6 +499,12 @@ def main() -> int:
         fail("build-client-release.ps1 must copy scripts\\verify_dialog_information_integration.js")
     if "scripts/verify_dialog_information_integration.js" not in release_verifier:
         fail("verify-client-release.py must require scripts/verify_dialog_information_integration.js")
+    for artifact in ["v2-api/app/static/vue/version.json", "v2-web/public/version.json"]:
+        if artifact not in release_verifier:
+            fail(f"verify-client-release.py must require {artifact}")
+    for artifact in ["v2-web\\public\\version.json", "v2-api\\app\\static\\vue\\version.json"]:
+        if artifact not in build_script:
+            fail(f"build-client-release.ps1 must verify the version artifact: {artifact}")
     for path in [
         "docs/sop/01-demand-intake-and-priority.md",
         "docs/sop/02-production-branch-versioning.md",
@@ -504,7 +575,8 @@ def main() -> int:
     agents = read("AGENTS.md")
     if deployed_production_baseline(agents) != "V3.0.79":
         fail("AGENTS.md deployed production baseline must be V3.0.79 before deployment")
-    if release_candidate(agents) != "V3.0.80":
+    candidate = release_candidate(agents)
+    if candidate != "V3.0.80":
         fail("AGENTS.md release candidate must be V3.0.80")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
@@ -515,9 +587,27 @@ def main() -> int:
     if release_record_claims_deployed_without_live_evidence(v3080_record):
         fail("V3.0.80 release record claims deployed without complete live evidence")
 
-    manifest = read("RELEASE_MANIFEST.md")
-    if "3.0.80" not in manifest:
-        fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.80")
+    source_runtime_version = runtime_version_from_artifact(read("v2-web/public/version.json"))
+    if f"V{source_runtime_version}" != candidate:
+        fail("Vue source runtime version artifact must match the AGENTS.md release candidate")
+    version_surface_markers = {
+        "scripts/build-client-release.ps1": f'[string]$Version = "{source_runtime_version}"',
+        "v2-web/package.json": f'"version": "{source_runtime_version}"',
+        "v2-web/src/constants/releaseNotes.ts": f"APP_VERSION = '{source_runtime_version}'",
+        "v2-web/index.html": f"<title>Module Manager V{source_runtime_version}</title>",
+        "v2-api/app/main.py": f'version="{source_runtime_version}"',
+        "v2-api/app/services/ops_status.py": f'return "{source_runtime_version}"',
+    }
+    for path, marker in version_surface_markers.items():
+        if marker not in read(path):
+            fail(f"Version update surface {path} must match {source_runtime_version}")
+
+    manifest_versions = [
+        match.group("version")
+        for match in MANIFEST_VERSION_LINE_PATTERN.finditer(read("RELEASE_MANIFEST.md"))
+    ]
+    if manifest_versions != [source_runtime_version]:
+        fail("Root RELEASE_MANIFEST.md must define the candidate version exactly once")
 
     retention_runbook = read("docs/sop/06-production-deploy-runbook.md")
     for text in ["Production Release Retention", "cleanup_old_releases.sh", "keep 5", "--dry-run"]:

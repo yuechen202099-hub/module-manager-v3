@@ -1,9 +1,13 @@
 param(
-    [string]$Version = (Get-Date -Format "yyyyMMdd-HHmm"),
+    [string]$Version = "3.0.80",
     [switch]$SkipSmoke
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+    throw "Release Version must be a semantic version such as 3.0.80."
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -28,6 +32,16 @@ try {
 }
 finally {
     Pop-Location
+}
+
+$versionArtifacts = @(
+    (Join-Path $root "v2-web\public\version.json"),
+    (Join-Path $root "v2-api\app\static\vue\version.json")
+)
+foreach ($versionArtifact in $versionArtifacts) {
+    if (-not (Test-Path -LiteralPath $versionArtifact -PathType Leaf)) {
+        throw "Vue version artifact missing after build: $versionArtifact"
+    }
 }
 
 if (-not $SkipSmoke) {

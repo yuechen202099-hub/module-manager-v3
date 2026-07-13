@@ -30,6 +30,7 @@ Get-FileHash .\build\server-release\module-manager-v2-server-<version>.zip -Algo
 ## Static Asset Gate
 
 After `npm run build`, verify that all `/vue/...` references in `v2-api/app/static/vue/index.html` exist and are tracked by git before committing.
+The build must copy `v2-web/public/version.json` to `v2-api/app/static/vue/version.json`. Package verification must parse that JSON artifact and reconcile it with the manifest Version, Vue title, AGENTS candidate markers, and release record; arbitrary version strings in JavaScript do not count.
 
 ## Dependency Gate
 

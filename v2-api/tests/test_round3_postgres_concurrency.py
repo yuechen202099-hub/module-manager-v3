@@ -32,6 +32,7 @@ def isolated_postgres(monkeypatch: pytest.MonkeyPatch):
     test_engine = create_engine(
         database_url,
         pool_pre_ping=True,
+        execution_options={"schema_translate_map": {None: schema}},
         connect_args={
             "options": f"-csearch_path={schema},public -cstatement_timeout=15000 -clock_timeout=10000"
         },

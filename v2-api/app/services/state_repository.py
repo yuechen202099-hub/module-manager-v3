@@ -4551,33 +4551,32 @@ class PostgresStateRepository(StateRepository):
             )
             if record is None:
                 raise KeyError(unmatched_id)
+            terminal = local_simulation.validate_real_formal_identity_value(record.terminal, "terminal")
             review = _checked_unmatched_review(record, expected_version)
             before = _unmatched_payload(record)
-            terminal = str(record.terminal or "").strip()
-            if terminal:
-                task = session.scalar(
-                    select(Task)
-                    .where(Task.team_id == record.team_id, Task.terminal == terminal)
-                    .with_for_update()
+            task = session.scalar(
+                select(Task)
+                .where(Task.team_id == record.team_id, Task.terminal == terminal)
+                .with_for_update()
+            )
+            if task is not None:
+                self._ensure_construction_assignment_capacity(
+                    session,
+                    team_id=record.team_id,
+                    constructor=constructor,
+                    excluding_task_id=task.id,
                 )
-                if task is not None:
-                    self._ensure_construction_assignment_capacity(
-                        session,
-                        team_id=record.team_id,
-                        constructor=constructor,
-                        excluding_task_id=task.id,
-                    )
-                    now = datetime.now(UTC)
-                    task_raw = dict(task.raw_data or {})
-                    task_raw["construction_assignment_note"] = note.strip()
-                    task_raw["construction_due_date"] = due_date.strip()
-                    task.raw_data = task_raw
-                    task.construction_enabled = True
-                    task.construction_claimed_by = constructor
-                    task.construction_claimed_at = now
-                    task.construction_released_at = None
-                    task.construction_opened_by = actor.strip() or "admin"
-                    task.construction_opened_at = task.construction_opened_at or now
+                now = datetime.now(UTC)
+                task_raw = dict(task.raw_data or {})
+                task_raw["construction_assignment_note"] = note.strip()
+                task_raw["construction_due_date"] = due_date.strip()
+                task.raw_data = task_raw
+                task.construction_enabled = True
+                task.construction_claimed_by = constructor
+                task.construction_claimed_at = now
+                task.construction_released_at = None
+                task.construction_opened_by = actor.strip() or "admin"
+                task.construction_opened_at = task.construction_opened_at or now
             raw = dict(record.payload or {})
             raw.update(
                 {

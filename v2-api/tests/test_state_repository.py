@@ -302,14 +302,14 @@ def test_dual_backend_does_not_break_json_when_postgres_mirror_fails(
     assert "Dual write mirror failed for release_task" in caplog.text
 
 
-def _postgres_finalize_record(*, version: int = 1) -> SimpleNamespace:
+def _postgres_finalize_record(*, version: int = 1, terminal: str = "") -> SimpleNamespace:
     return SimpleNamespace(
         id="unmatched-uuid",
         legacy_id="unmatched-finalize-1",
         team_id="default-team",
         record_type="scan",
         status="open",
-        terminal="",
+        terminal=terminal,
         meter_no="120000912473",
         meter_match_key="0000912473",
         barcode="120000912473",
@@ -2132,7 +2132,7 @@ def test_postgres_legacy_unmatched_mutations_stage_transactional_audit(
     operation: str,
     expected_action: str,
 ) -> None:
-    record = _postgres_finalize_record()
+    record = _postgres_finalize_record(terminal="T-LEGACY-ASSIGN" if operation == "assign" else "")
     group = _postgres_finalize_group()
     session = LegacyMutationSession(record, group)
 
@@ -2163,7 +2163,10 @@ def test_postgres_legacy_unmatched_stale_writes_add_no_audit(
     expected_action: str,
 ) -> None:
     del expected_action
-    record = _postgres_finalize_record(version=2)
+    record = _postgres_finalize_record(
+        version=2,
+        terminal="T-LEGACY-ASSIGN" if operation == "assign" else "",
+    )
     group = _postgres_finalize_group()
     session = LegacyMutationSession(record, group)
 
@@ -2185,7 +2188,7 @@ def test_postgres_legacy_unmatched_failed_writes_persist_no_audit(
     expected_action: str,
 ) -> None:
     del expected_action
-    record = _postgres_finalize_record()
+    record = _postgres_finalize_record(terminal="T-LEGACY-ASSIGN" if operation == "assign" else "")
     group = _postgres_finalize_group()
     session = LegacyMutationSession(record, group, fail_commit=True)
 

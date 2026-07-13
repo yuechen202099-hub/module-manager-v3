@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -365,3 +366,89 @@ def test_semantic_clause_parser_does_not_treat_negative_pending_or_future_as_dep
     record = f"{release_record('Status: pending')}\n{negated_or_future_prose}\n"
 
     assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+ROUND4_CONDITIONAL_OR_NEGATED_CLAIMS = [
+    "V3.0.80 can't be deployed to production.",
+    "V3.0.80 cannot be deployed to production.",
+    "V3.0.80 can be deployed to production.",
+    "V3.0.80 could be deployed to production.",
+    "V3.0.80 may be deployed to production.",
+    "V3.0.80 might be deployed to production.",
+    "V3.0.80 is deployed to production if approval is granted.",
+    "V3.0.80 is deployed to production unless rollback is required.",
+    "V3.0.80 可能已上线生产环境。",
+    "V3.0.80 若通过验收则已上线生产环境。",
+    "如果验证通过，V3.0.80 生产部署已完成。",
+    "除非回归测试失败，否则 V3.0.80 已部署到生产环境。",
+]
+
+
+@pytest.mark.parametrize("prose", ROUND4_CONDITIONAL_OR_NEGATED_CLAIMS)
+def test_round4_conditional_or_negated_claims_are_not_affirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "V3.0.80 has gone live in production.",
+        "V3.0.80 and its assets have gone live in production.",
+        "V3.0.80 could be deployed after approval, but V3.0.80 was deployed today.",
+        "V3.0.80 已在生产环境上线。",
+        "V3.0.80 已完成生产上线。",
+        "V3.0.80 现已在生产环境正式生效。",
+        "V3.0.80 可能在审批后上线，但 V3.0.80 今日已上线生产环境。",
+    ],
+)
+def test_round4_live_and_completion_synonyms_are_affirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "V3.0.80 has not gone live in production.",
+        "V3.0.80 cannot go live in production.",
+        "V3.0.80 may go live in production.",
+        "V3.0.80 will go live in production after approval.",
+        "V3.0.80 尚未在生产环境上线。",
+        "V3.0.80 可能在生产环境上线。",
+        "V3.0.80 将在生产环境上线。",
+    ],
+)
+def test_round4_negative_pending_and_future_live_controls_remain_nonaffirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"version": "3.0.80", "version": "3.0.79"}',
+        '{"version": "V3.0.80"}',
+        '{"version": "3.0.80-beta"}',
+        '{"version": "3.0.80", "note": "ambiguous"}',
+        'not-json',
+    ],
+)
+def test_round4_runtime_version_artifact_rejects_ambiguous_or_nonsemantic_payload(payload: str) -> None:
+    verifier = load_verifier()
+
+    with pytest.raises(AssertionError, match="machine-readable runtime version"):
+        verifier.runtime_version_from_artifact(payload)
+
+
+def test_round4_runtime_version_artifact_reads_exact_semantic_version() -> None:
+    verifier = load_verifier()
+
+    assert verifier.runtime_version_from_artifact(json.dumps({"version": "3.0.80"})) == "3.0.80"

@@ -114,6 +114,7 @@ REQUIRED_FILES = {
     "v2-api/app/main.py",
     "v2-api/app/static/favicon.svg",
     "v2-api/app/static/vue/index.html",
+    "v2-api/app/static/vue/version.json",
     "v2-api/app/static/demo-assets/review-photo-1.svg",
     "v2-api/app/static/demo-assets/review-photo-2.svg",
     "v2-api/app/static/demo-assets/review-photo-3.svg",
@@ -127,8 +128,18 @@ REQUIRED_FILES = {
     "v2-api/scripts/migrate_photos_to_oss.py",
     "v2-web/Dockerfile",
     "v2-web/package.json",
+    "v2-web/public/version.json",
     "v2-web/src/main.ts",
 }
+
+RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
+SOURCE_VERSION_ARTIFACT = "v2-web/public/version.json"
+MANIFEST_VERSION_LINE_PATTERN = re.compile(r"^- Version:\s*(?P<version>.*?)\s*$", re.MULTILINE)
+SEMANTIC_VERSION_PATTERN = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
+STATIC_TITLE_PATTERN = re.compile(
+    r"<title>\s*Module Manager V(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\s*</title>",
+    re.IGNORECASE,
+)
 
 FORBIDDEN_PARTS = {
     ".env",
@@ -185,22 +196,22 @@ def verify_package(zip_path: Path) -> None:
         if missing:
             fail("Missing required release files: " + ", ".join(missing))
         manifest = archive.read("RELEASE_MANIFEST.md").decode("utf-8") if "RELEASE_MANIFEST.md" in names else ""
-        version_match = re.search(r"^- Version:\s*(?P<version>V?\d+\.\d+\.\d+)\s*$", manifest, re.MULTILINE)
-        if version_match is None:
-            fail("Release manifest must define Version")
-        package_version = version_match.group("version").lstrip("Vv")
+        manifest_versions = [match.group("version") for match in MANIFEST_VERSION_LINE_PATTERN.finditer(manifest)]
+        if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
+            fail("Release manifest must define exactly one semantic Version")
+        package_version = manifest_versions[0]
         static_index = (
             archive.read("v2-api/app/static/vue/index.html").decode("utf-8")
             if "v2-api/app/static/vue/index.html" in names
             else ""
         )
-        static_js = ""
-        for name in sorted(names):
-            if name.startswith("v2-api/app/static/vue/assets/") and name.endswith(".js"):
-                chunk = archive.read(name).decode("utf-8", errors="ignore")
-                if package_version in chunk:
-                    static_js = chunk
-                    break
+        release_truth = load_release_truth_parser()
+        runtime_version = release_truth.runtime_version_from_artifact(
+            archive.read(RUNTIME_VERSION_ARTIFACT).decode("utf-8")
+        )
+        source_version = release_truth.runtime_version_from_artifact(
+            archive.read(SOURCE_VERSION_ARTIFACT).decode("utf-8")
+        )
         agents = archive.read("AGENTS.md").decode("utf-8")
         release_record = archive.read("ops/releases/V3.0.80.md").decode("utf-8")
         crlf_shell_scripts = sorted(
@@ -243,12 +254,14 @@ def verify_package(zip_path: Path) -> None:
     ]:
         if text not in manifest:
             fail(f"Release manifest missing production safety note: {text}")
-    if f"Module Manager V{package_version}" not in static_index:
+    title_versions = [match.group("version") for match in STATIC_TITLE_PATTERN.finditer(static_index)]
+    if title_versions != [package_version]:
         fail(f"Vue static index title must be V{package_version}")
-    if package_version not in static_js:
-        fail(f"Vue static assets must include APP_VERSION {package_version}; rebuild v2-web before packaging")
+    if runtime_version != package_version:
+        fail("Vue built runtime version must match the release manifest Version")
+    if source_version != runtime_version:
+        fail("Vue source and built runtime versions must agree")
 
-    release_truth = load_release_truth_parser()
     deployed_version = release_truth.deployed_production_baseline(agents)
     candidate_version = release_truth.release_candidate(agents)
     if deployed_version != "V3.0.79":

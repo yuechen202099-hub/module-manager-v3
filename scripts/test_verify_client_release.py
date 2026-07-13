@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import zipfile
 
@@ -9,6 +10,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 V3080_RELEASE_RECORD = "ops/releases/V3.0.80.md"
+RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
+SOURCE_VERSION_ARTIFACT = "v2-web/public/version.json"
 SAFETY_NOTES = (
     "Production mode disables demo accounts by default",
     "Production mode disables /docs, /redoc, and /openapi.json by default",
@@ -64,20 +67,35 @@ def write_release_archive(
     archive_path: Path,
     *,
     manifest_version: str | None = "3.0.80",
+    manifest_versions: list[str] | None = None,
     static_version: str = "3.0.80",
+    title_version: str | None = None,
+    runtime_version: str | None = None,
+    source_version: str | None = None,
+    unrelated_static_version: str = "",
+    unrelated_index_text: str = "",
     agents: str = VALID_AGENTS,
     release_record: str = PENDING_RELEASE_RECORD,
     omitted: set[str] | None = None,
 ) -> None:
-    names = set(verifier.REQUIRED_FILES) - set(omitted or set())
-    version_line = f"- Version: {manifest_version}\n" if manifest_version is not None else ""
-    manifest = "\n".join(("# Release manifest", version_line.rstrip(), *SAFETY_NOTES))
+    omitted_names = set(omitted or set())
+    names = (set(verifier.REQUIRED_FILES) | {RUNTIME_VERSION_ARTIFACT, SOURCE_VERSION_ARTIFACT}) - omitted_names
+    versions = manifest_versions
+    if versions is None:
+        versions = [] if manifest_version is None else [manifest_version]
+    version_lines = [f"- Version: {version}" for version in versions]
+    manifest = "\n".join(("# Release manifest", *version_lines, *SAFETY_NOTES))
+    resolved_runtime_version = runtime_version or static_version
+    resolved_source_version = source_version or resolved_runtime_version
+    resolved_title_version = title_version or static_version
     contents = {
         "RELEASE_MANIFEST.md": manifest,
         "AGENTS.md": agents,
         V3080_RELEASE_RECORD: release_record,
+        RUNTIME_VERSION_ARTIFACT: json.dumps({"version": resolved_runtime_version}),
+        SOURCE_VERSION_ARTIFACT: json.dumps({"version": resolved_source_version}),
         "v2-api/app/static/vue/index.html": (
-            f"<!doctype html><title>Module Manager V{static_version}</title>"
+            f"<!doctype html><title>Module Manager V{resolved_title_version}</title>{unrelated_index_text}"
         ),
     }
     with zipfile.ZipFile(archive_path, "w") as archive:
@@ -85,7 +103,8 @@ def write_release_archive(
             archive.writestr(name, contents.get(name, "fixture\n"))
         archive.writestr(
             "v2-api/app/static/vue/assets/app.js",
-            f"const APP_VERSION = '{static_version}';\n",
+            f"const APP_VERSION = '{resolved_runtime_version}';\n"
+            f"const unrelatedReleaseNote = '{unrelated_static_version}';\n",
         )
 
 
@@ -98,12 +117,18 @@ def test_archive_missing_v3080_release_record_fails_verification(tmp_path: Path)
         verifier.verify_package(archive_path)
 
 
+def test_release_builder_default_version_is_candidate_semantic_version() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+
+    assert '[string]$Version = "3.0.80"' in build_script
+
+
 def test_archive_missing_manifest_version_fails_verification(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "missing-version.zip"
     write_release_archive(verifier, archive_path, manifest_version=None)
 
-    with pytest.raises(AssertionError, match="manifest must define Version"):
+    with pytest.raises(AssertionError, match="exactly one semantic Version"):
         verifier.verify_package(archive_path)
 
 
@@ -111,6 +136,80 @@ def test_archive_manifest_version_must_match_static_version(tmp_path: Path) -> N
     verifier = load_verifier()
     archive_path = tmp_path / "static-version-mismatch.zip"
     write_release_archive(verifier, archive_path, static_version="3.0.79")
+
+    with pytest.raises(AssertionError, match="static index title"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize(
+    "manifest_versions",
+    [
+        ["3.0.80", "3.0.80"],
+        ["3.0.80", "3.0.79"],
+    ],
+)
+def test_archive_manifest_must_have_exactly_one_version(
+    tmp_path: Path,
+    manifest_versions: list[str],
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "duplicate-manifest-version.zip"
+    write_release_archive(verifier, archive_path, manifest_versions=manifest_versions)
+
+    with pytest.raises(AssertionError, match="exactly one semantic Version"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_manifest_version_must_be_semantic(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "non-semantic-manifest-version.zip"
+    write_release_archive(verifier, archive_path, manifest_version="release-3.0.80")
+
+    with pytest.raises(AssertionError, match="exactly one semantic Version"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_runtime_version_cannot_be_satisfied_by_unrelated_candidate_string(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "forged-runtime-version.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        runtime_version="3.0.79",
+        unrelated_static_version="3.0.80",
+    )
+
+    with pytest.raises(AssertionError, match="runtime version"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_requires_machine_readable_runtime_version_artifact(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "missing-runtime-version-artifact.zip"
+    write_release_archive(verifier, archive_path, omitted={RUNTIME_VERSION_ARTIFACT})
+
+    with pytest.raises(AssertionError, match="version.json"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_source_and_runtime_version_artifacts_must_match(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "source-runtime-version-mismatch.zip"
+    write_release_archive(verifier, archive_path, source_version="3.0.79")
+
+    with pytest.raises(AssertionError, match="source and built runtime versions"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_title_version_cannot_be_satisfied_by_unrelated_index_text(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "forged-title-version.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        title_version="3.0.79",
+        unrelated_index_text="<!-- Module Manager V3.0.80 -->",
+    )
 
     with pytest.raises(AssertionError, match="static index title"):
         verifier.verify_package(archive_path)
@@ -167,5 +266,92 @@ def test_valid_pending_candidate_archive_passes_truthfulness_checks(tmp_path: Pa
     verifier = load_verifier()
     archive_path = tmp_path / "valid-pending.zip"
     write_release_archive(verifier, archive_path)
+
+    verifier.verify_package(archive_path)
+
+
+ROUND4_CONDITIONAL_OR_NEGATED_CLAIMS = [
+    "V3.0.80 can't be deployed to production.",
+    "V3.0.80 cannot be deployed to production.",
+    "V3.0.80 can be deployed to production.",
+    "V3.0.80 could be deployed to production.",
+    "V3.0.80 may be deployed to production.",
+    "V3.0.80 might be deployed to production.",
+    "V3.0.80 is deployed to production if approval is granted.",
+    "V3.0.80 is deployed to production unless rollback is required.",
+    "V3.0.80 可能已上线生产环境。",
+    "V3.0.80 若通过验收则已上线生产环境。",
+    "如果验证通过，V3.0.80 生产部署已完成。",
+    "除非回归测试失败，否则 V3.0.80 已部署到生产环境。",
+]
+
+
+@pytest.mark.parametrize("prose", ROUND4_CONDITIONAL_OR_NEGATED_CLAIMS)
+def test_archive_accepts_conditional_or_negated_deployment_prose(
+    tmp_path: Path,
+    prose: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "conditional-deployment-prose.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n",
+    )
+
+    verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "V3.0.80 has gone live in production.",
+        "V3.0.80 and its assets have gone live in production.",
+        "V3.0.80 could be deployed after approval, but V3.0.80 was deployed today.",
+        "V3.0.80 已在生产环境上线。",
+        "V3.0.80 已完成生产上线。",
+        "V3.0.80 现已在生产环境正式生效。",
+        "V3.0.80 可能在审批后上线，但 V3.0.80 今日已上线生产环境。",
+    ],
+)
+def test_archive_rejects_round4_live_and_completion_synonyms(
+    tmp_path: Path,
+    prose: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "live-synonym-prose.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n",
+    )
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "V3.0.80 has not gone live in production.",
+        "V3.0.80 cannot go live in production.",
+        "V3.0.80 may go live in production.",
+        "V3.0.80 will go live in production after approval.",
+        "V3.0.80 尚未在生产环境上线。",
+        "V3.0.80 可能在生产环境上线。",
+        "V3.0.80 将在生产环境上线。",
+    ],
+)
+def test_archive_accepts_negative_pending_and_future_live_controls(
+    tmp_path: Path,
+    prose: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "live-control-prose.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n",
+    )
 
     verifier.verify_package(archive_path)
