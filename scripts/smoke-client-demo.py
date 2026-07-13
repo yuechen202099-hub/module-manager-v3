@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 from io import BytesIO
+import json
 import os
 import sys
 import subprocess
@@ -217,8 +218,13 @@ def main() -> int:
         check(f"{item} exists", (ROOT / item).exists())
 
     signoff = (ROOT / "docs" / "CLIENT_SIGNOFF_CHECKLIST.md").read_text(encoding="utf-8")
+    version_artifact = json.loads(
+        (ROOT / "v2-web" / "src" / "version.json").read_text(encoding="utf-8")
+    )
+    release_version = str(version_artifact["version"])
+    release_zip_name = f"module-manager-v2-server-{release_version}.zip"
     check("client signoff checklist contains payment acceptance item", "付款流程" in signoff)
-    check("client signoff checklist references final release zip", "module-manager-v2-client-demo-final-delivery-ready.zip" in signoff)
+    check("client signoff checklist references final release zip", release_zip_name in signoff)
 
     visual_qa = (ROOT / "docs" / "CLIENT_VISUAL_QA.md").read_text(encoding="utf-8")
     check("visual QA records shared topbar height", "topbar: 64px" in visual_qa)

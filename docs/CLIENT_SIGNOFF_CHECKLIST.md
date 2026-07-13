@@ -5,7 +5,7 @@
 ## 交付包
 
 ```text
-build/client-release/module-manager-v2-client-demo-final-delivery-ready.zip
+build/server-release/module-manager-v2-server-3.0.80.zip
 ```
 
 ## 演示入口
@@ -40,7 +40,7 @@ build/client-release/module-manager-v2-client-demo-final-delivery-ready.zip
 ## 验证命令
 
 ```powershell
-.\scripts\run-client-acceptance-gate.ps1 -Version final-delivery-ready
+.\scripts\run-client-acceptance-gate.ps1
 ```
 
 最近一次门禁结果：

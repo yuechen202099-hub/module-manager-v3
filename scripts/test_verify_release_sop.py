@@ -463,6 +463,20 @@ ROUND6_NEGATIVE_CONDITIONAL_OR_FUTURE_CLAIMS = [
 ]
 
 
+ROUND7_AFFIRMATIVE_CLAIMS = [
+    "V3.0.80 has gone live.",
+    "V3.0.80 已经部署到生产环境。",
+]
+
+
+ROUND7_NONAFFIRMATIVE_CLAIMS = [
+    "V3.0.80 could have been deployed to production.",
+    "V3.0.80 will have been deployed to production by Friday.",
+    "V3.0.80 was not even deployed to production.",
+    "V3.0.80 may eventually be deployed to production.",
+]
+
+
 @pytest.mark.parametrize("prose", ROUND5_AFFIRMATIVE_CLAIMS)
 def test_round5_atomic_clauses_preserve_affirmative_deployment_claims(prose: str) -> None:
     verifier = load_verifier()
@@ -497,6 +511,23 @@ def test_round6_deployment_predicate_scope_preserves_nonaffirmative_controls(pro
     assert not verifier.release_record_claims_deployed_without_live_evidence(record)
 
 
+@pytest.mark.parametrize("prose", ROUND7_AFFIRMATIVE_CLAIMS)
+def test_round7_common_live_and_chinese_completion_are_affirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("prose", ROUND7_NONAFFIRMATIVE_CLAIMS)
+def test_round7_complete_auxiliary_chains_remain_nonaffirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
 def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> None:
     source_path = ROOT / "v2-web" / "src" / "version.json"
     legacy_source_path = ROOT / "v2-web" / "public" / "version.json"
@@ -514,6 +545,9 @@ def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> No
     assert "moduleManagerBuildVersion" in main
     assert "__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__" in vite_config
     assert "entrySha256" in vite_config
+    assert "assets," in vite_config
+    assert "localeCompare" not in vite_config
+    assert "left.path < right.path" in vite_config
 
 
 @pytest.mark.parametrize(

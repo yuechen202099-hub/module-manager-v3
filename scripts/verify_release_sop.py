@@ -107,9 +107,9 @@ SEMANTIC_VERSION_PATTERN = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-
 MANIFEST_VERSION_LINE_PATTERN = re.compile(r"^- Version:\s*(?P<version>.*?)\s*$", re.MULTILINE)
 DEPLOYMENT_CLAIM_PATTERN = re.compile(
     r"\b(?:deployed|shipped|released)\b"
-    r"|\b(?:is|are|was|were|went|has\s+been|have\s+been)\s+(?:now\s+)?live(?:\s+(?:in|on))?\s+production\b"
-    r"|\b(?:has|have)\s+(?:(?:already|now|successfully|fully)\s+)*gone\s+live"
-    r"(?:\s+(?:in|on))?\s+production\b"
+    r"|\b(?:go|gone|went|be|been|is|are|was|were)\s+"
+    r"(?:(?:already|now|successfully|fully)\s+)*live\b(?:\s+(?:in|on)\s+production\b)?"
+    r"|(?:已|已经|现已)(?:成功|正式)?(?:部署|发布|上线)(?:到|至|在)?生产(?:环境)?"
     r"|已部署|已发布|已上线|(?:生产(?:环境)?\s*)?(?:部署|发布|上线)已完成"
     r"|已(?:在)?生产(?:环境)?(?:正式)?(?:部署|发布|上线|生效)"
     r"|已完成(?:生产(?:环境)?)?(?:部署|发布|上线)"
@@ -157,13 +157,16 @@ CLAUSE_BOUNDARY_PATTERN = re.compile(
 )
 CLAUSE_SCOPE_RESET_PATTERN = re.compile(r"[。.!?！？\n]|\b(?:but|however|yet)\b|(?:但是|然而|但|却)", re.IGNORECASE)
 NEGATED_DEPLOYMENT_PREFIX_PATTERN = re.compile(
-    r"\b(?:not|never)\s+(?:(?:yet|currently|ever|actually|successfully|fully)\s+)*"
-    r"(?:(?:been|be|get)\s+)?$",
+    r"\b(?:not|never)\s+"
+    r"(?:(?:yet|currently|ever|actually|successfully|fully|even|eventually|possibly|already|now)\s+)*"
+    r"(?:(?:have|has|had|been|be|being|get|got|go)\s+)*$",
     re.IGNORECASE,
 )
 MODAL_DEPLOYMENT_PREFIX_PATTERN = re.compile(
     r"(?:\b(?:can|could|may|might|should|must|would|will|shall)\s+"
-    r"(?:not\s+)?(?:(?:be|get)\s+)?"
+    r"(?:not\s+)?"
+    r"(?:(?:yet|currently|ever|actually|successfully|fully|even|eventually|possibly|already|now)\s+)*"
+    r"(?:(?:have|has|had|been|be|being|get|got|go|gone)\s+)*"
     r"|\b(?:going|scheduled|planned)\s+to\s+(?:be\s+)?"
     r"|\bto\s+be\s+)$",
     re.IGNORECASE,
@@ -535,6 +538,15 @@ def main() -> int:
         fail("run-client-acceptance-gate.ps1 still references the legacy client-release package path")
     if "build\\server-release" not in gate:
         fail("run-client-acceptance-gate.ps1 must verify the server-release package")
+    if '[string]$Version = ""' not in gate:
+        fail("run-client-acceptance-gate.ps1 must derive its default version from the machine source")
+    for contract_marker in [
+        "v2-web\\src\\version.json",
+        "ConvertFrom-Json",
+        "must match the machine version source",
+    ]:
+        if contract_marker not in gate:
+            fail("run-client-acceptance-gate.ps1 must validate the machine version contract")
 
     release_verifier = read("scripts/verify-client-release.py")
     if "build/client-release" in release_verifier or "module-manager-v2-client-demo" in release_verifier:

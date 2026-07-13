@@ -62,8 +62,38 @@ AUDIT_PHOTO_SECRET_FIELDS = {
 AUDIT_PHOTO_SECRET_KEYS = {
     re.sub(r"[^0-9a-z]+", "", field.casefold()) for field in AUDIT_PHOTO_SECRET_FIELDS
 }
-AUDIT_URL_QUALIFIERS = {"raw", "signed", "presigned", "source", "image", "photo"}
-AUDIT_STORAGE_KEY_QUALIFIERS = {"storage", "object", "oss"}
+AUDIT_SECRET_LOCATOR_TOKENS = {
+    "bucket",
+    "buckets",
+    "href",
+    "key",
+    "keys",
+    "link",
+    "links",
+    "name",
+    "names",
+    "path",
+    "paths",
+    "uri",
+    "uris",
+    "url",
+    "urls",
+}
+AUDIT_SECRET_QUALIFIER_TOKENS = {
+    "blob",
+    "cos",
+    "image",
+    "minio",
+    "object",
+    "oss",
+    "photo",
+    "presigned",
+    "raw",
+    "s3",
+    "signed",
+    "source",
+    "storage",
+}
 
 
 def audit_key_semantic_tokens(key: Any) -> set[str]:
@@ -78,11 +108,11 @@ def audit_key_contains_photo_secret(key: Any) -> bool:
     if normalized_key in AUDIT_PHOTO_SECRET_KEYS:
         return True
     tokens = audit_key_semantic_tokens(key)
-    if "bucket" in tokens:
+    if tokens & {"bucket", "buckets"}:
         return True
-    if tokens & {"url", "urls"} and tokens & AUDIT_URL_QUALIFIERS:
-        return True
-    return "key" in tokens and bool(tokens & AUDIT_STORAGE_KEY_QUALIFIERS)
+    return bool(tokens & AUDIT_SECRET_LOCATOR_TOKENS) and bool(
+        tokens & AUDIT_SECRET_QUALIFIER_TOKENS
+    )
 
 
 def redact_audit_photo_secrets(value: Any) -> Any:

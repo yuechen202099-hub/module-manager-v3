@@ -740,6 +740,13 @@ def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch
                                         "bucketName": "private-provider-bucket",
                                         "storageObjectKey": "private/storage-object.jpg",
                                         "ossObjectKey": "private/oss-object.jpg",
+                                        "presignedUri": "oss://private/presigned",
+                                        "rawSignedURI": "oss://private/raw-signed",
+                                        "signed-link": "https://photos.example/signed-link",
+                                        "s3Key": "private/s3-object.jpg",
+                                        "cos_object_name": "private/cos-object.jpg",
+                                        "ossPath": "private/oss-path.jpg",
+                                        "objectPath": "private/object-path.jpg",
                                     }
                                 ]
                             },
@@ -767,7 +774,20 @@ def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch
     assert photo["signed_url"] == "[REDACTED]"
     assert photo["signedUrl"] == "[REDACTED]"
     assert photo["rawUrl"] == "[REDACTED]"
-    for key in ("presignedUrl", "rawSignedUrl", "bucketName", "storageObjectKey", "ossObjectKey"):
+    for key in (
+        "presignedUrl",
+        "rawSignedUrl",
+        "bucketName",
+        "storageObjectKey",
+        "ossObjectKey",
+        "presignedUri",
+        "rawSignedURI",
+        "signed-link",
+        "s3Key",
+        "cos_object_name",
+        "ossPath",
+        "objectPath",
+    ):
         assert photo[key] == "[REDACTED]"
     assert photo["storage"] == {
         "storage_bucket": "[REDACTED]",

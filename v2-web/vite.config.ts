@@ -26,10 +26,26 @@ export default defineConfig({
           }
           const entryChunk = entryChunks[0]
           entryChunk.code = `${entryAttestationPrefix}${entryChunk.code}`
+          const assets = Object.values(bundle)
+            .filter((item) => item.fileName !== 'version.json')
+            .map((item) => {
+              const content = Buffer.from(item.type === 'chunk' ? item.code : item.source)
+              return {
+                path: item.fileName,
+                size: content.byteLength,
+                sha256: createHash('sha256').update(content).digest('hex'),
+              }
+            })
+            .sort((left, right) => {
+              if (left.path < right.path) return -1
+              if (left.path > right.path) return 1
+              return 0
+            })
           const runtimeVersionArtifact = `${JSON.stringify({
             version: versionArtifact.version,
             entry: entryChunk.fileName,
             entrySha256: createHash('sha256').update(entryChunk.code).digest('hex'),
+            assets,
           })}\n`
           this.emitFile({
             type: 'asset',

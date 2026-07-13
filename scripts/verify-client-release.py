@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 import importlib.util
 import json
 import re
+import stat
 import sys
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -183,19 +184,58 @@ def fail(message: str) -> None:
     raise AssertionError(message)
 
 
-def normalize_zip_name(name: str) -> str:
-    return name.replace("\\", "/").lstrip("/")
+def canonical_zip_member_name(info: zipfile.ZipInfo) -> str:
+    name = info.filename
+    if stat.S_ISLNK(info.external_attr >> 16):
+        fail("Release zip must not contain symbolic links")
+    if info.is_dir() and name.endswith("/"):
+        name = name[:-1]
+    if (
+        not name
+        or name.startswith("/")
+        or "\\" in name
+        or ":" in name
+        or any(ord(character) < 32 or ord(character) == 127 for character in name)
+    ):
+        fail("Release zip members must use canonical relative POSIX paths")
+    parts = name.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        fail("Release zip members must use canonical relative POSIX paths")
+    path = PurePosixPath(name)
+    if path.is_absolute() or path.as_posix() != name:
+        fail("Release zip members must use canonical relative POSIX paths")
+    return name
+
+
+def validated_zip_file_names(archive: zipfile.ZipFile) -> list[str]:
+    canonical_members: list[tuple[zipfile.ZipInfo, str]] = []
+    casefold_names: dict[str, str] = {}
+    exact_names: set[str] = set()
+    for info in archive.infolist():
+        name = canonical_zip_member_name(info)
+        if name in exact_names:
+            fail(f"Release zip contains duplicate file names: {name}")
+        exact_names.add(name)
+        folded = name.casefold()
+        previous = casefold_names.get(folded)
+        if previous is not None and previous != name:
+            fail(f"Release zip contains case-insensitive file names: {previous}, {name}")
+        casefold_names[folded] = name
+        canonical_members.append((info, name))
+    return [name for info, name in canonical_members if not info.is_dir()]
 
 
 class VueModuleEntryParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.module_sources: list[str] = []
+        self.script_count = 0
         self.has_duplicate_attributes = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.casefold() != "script":
             return
+        self.script_count += 1
         attributes: dict[str, str | None] = {}
         for name, value in attrs:
             normalized_name = name.casefold()
@@ -212,8 +252,8 @@ class VueModuleEntryParser(HTMLParser):
 def vue_entry_bundle_path(static_index: str) -> str:
     parser = VueModuleEntryParser()
     parser.feed(static_index)
-    if parser.has_duplicate_attributes or len(parser.module_sources) != 1:
-        fail("Vue static index must reference exactly one module entry bundle")
+    if parser.has_duplicate_attributes or parser.script_count != 1 or len(parser.module_sources) != 1:
+        fail("Vue static index must contain exactly one executable module entry")
     source = urlsplit(parser.module_sources[0])
     if source.scheme or source.netloc or source.query or source.fragment:
         fail("Vue module entry bundle must be an unambiguous local path")
@@ -237,7 +277,7 @@ def entry_bundle_version(entry_bundle: bytes) -> str:
     return match.group("version").decode("ascii")
 
 
-def runtime_entry_attestation(value: str) -> dict[str, str]:
+def runtime_entry_attestation(value: str) -> dict[str, object]:
     def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
         for key, item in pairs:
@@ -250,11 +290,12 @@ def runtime_entry_attestation(value: str) -> dict[str, str]:
         payload = json.loads(value, object_pairs_hook=unique_object)
     except (json.JSONDecodeError, TypeError) as exc:
         raise AssertionError("Vue runtime attestation must be valid JSON") from exc
-    if not isinstance(payload, dict) or set(payload) != {"version", "entry", "entrySha256"}:
-        fail("Vue runtime attestation must bind version, entry, and entry SHA-256")
+    if not isinstance(payload, dict) or set(payload) != {"version", "entry", "entrySha256", "assets"}:
+        fail("Vue runtime attestation must bind version, entry, entry SHA-256, and Vue assets")
     version = payload.get("version")
     entry = payload.get("entry")
     entry_sha256 = payload.get("entrySha256")
+    assets = payload.get("assets")
     if not isinstance(version, str) or SEMANTIC_VERSION_PATTERN.fullmatch(version) is None:
         fail("Vue runtime attestation version must be semantic")
     if not isinstance(entry, str):
@@ -264,7 +305,57 @@ def runtime_entry_attestation(value: str) -> dict[str, str]:
         fail("Vue runtime attestation entry must be under assets/")
     if not isinstance(entry_sha256, str) or SHA256_PATTERN.fullmatch(entry_sha256) is None:
         fail("Vue runtime attestation entry SHA-256 must be exact")
-    return {"version": version, "entry": entry, "entrySha256": entry_sha256}
+    if not isinstance(assets, list) or not assets:
+        fail("Vue asset manifest must contain at least one asset")
+    normalized_assets: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+    for asset in assets:
+        if not isinstance(asset, dict) or set(asset) != {"path", "size", "sha256"}:
+            fail("Vue asset manifest entries must bind path, size, and SHA-256")
+        path = asset.get("path")
+        size = asset.get("size")
+        sha256 = asset.get("sha256")
+        if not isinstance(path, str) or not path or path == "version.json":
+            fail("Vue asset manifest paths must identify files other than version.json")
+        asset_path = PurePosixPath(path)
+        if asset_path.is_absolute() or "." in asset_path.parts or ".." in asset_path.parts or "\\" in path:
+            fail("Vue asset manifest paths must be canonical relative POSIX paths")
+        if path in seen_paths:
+            fail("Vue asset manifest paths must be unique")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            fail("Vue asset manifest sizes must be non-negative integers")
+        if not isinstance(sha256, str) or SHA256_PATTERN.fullmatch(sha256) is None:
+            fail("Vue asset manifest SHA-256 values must be exact")
+        seen_paths.add(path)
+        normalized_assets.append({"path": path, "size": size, "sha256": sha256})
+    if [asset["path"] for asset in normalized_assets] != sorted(seen_paths):
+        fail("Vue asset manifest must be sorted by path")
+    return {"version": version, "entry": entry, "entrySha256": entry_sha256, "assets": normalized_assets}
+
+
+def verify_vue_asset_manifest(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    runtime_attestation: dict[str, object],
+) -> None:
+    vue_prefix = "v2-api/app/static/vue/"
+    archive_paths = {
+        name.removeprefix(vue_prefix)
+        for name in names
+        if name.startswith(vue_prefix) and name != RUNTIME_VERSION_ARTIFACT
+    }
+    manifest_assets = runtime_attestation["assets"]
+    if not isinstance(manifest_assets, list):
+        fail("Vue asset manifest must be a list")
+    manifest_by_path = {str(asset["path"]): asset for asset in manifest_assets}
+    if set(manifest_by_path) != archive_paths:
+        fail("Vue asset manifest file set must exactly match the release archive")
+    for path, expected in manifest_by_path.items():
+        content = archive.read(f"{vue_prefix}{path}")
+        if len(content) != expected["size"]:
+            fail(f"Vue asset manifest size mismatch: {path}")
+        if hashlib.sha256(content).hexdigest() != expected["sha256"]:
+            fail(f"Vue asset manifest SHA-256 mismatch: {path}")
 
 
 def verify_package(zip_path: Path) -> None:
@@ -274,21 +365,7 @@ def verify_package(zip_path: Path) -> None:
         fail(f"Release zip is empty: {zip_path}")
 
     with zipfile.ZipFile(zip_path) as archive:
-        raw_name_list = [info.filename for info in archive.infolist() if not info.is_dir()]
-        duplicate_names = sorted({name for name in raw_name_list if raw_name_list.count(name) > 1})
-        if duplicate_names:
-            fail("Release zip contains duplicate file names: " + ", ".join(duplicate_names[:20]))
-        raw_names = set(raw_name_list)
-        backslash_names = sorted(name for name in raw_names if "\\" in name)
-        if backslash_names:
-            fail(
-                "Release zip contains Windows path separators: "
-                + ", ".join(backslash_names[:20])
-            )
-        normalized_name_list = [normalize_zip_name(name) for name in raw_name_list]
-        if len(normalized_name_list) != len(set(normalized_name_list)):
-            fail("Release zip contains duplicate normalized file names")
-        names = set(normalized_name_list)
+        names = set(validated_zip_file_names(archive))
         missing = sorted(REQUIRED_FILES - names)
         if missing:
             fail("Missing required release files: " + ", ".join(missing))
@@ -311,6 +388,7 @@ def verify_package(zip_path: Path) -> None:
         runtime_attestation = runtime_entry_attestation(
             archive.read(RUNTIME_VERSION_ARTIFACT).decode("utf-8")
         )
+        verify_vue_asset_manifest(archive, names, runtime_attestation)
         runtime_version = runtime_attestation["version"]
         source_version = release_truth.runtime_version_from_artifact(
             archive.read(SOURCE_VERSION_ARTIFACT).decode("utf-8")

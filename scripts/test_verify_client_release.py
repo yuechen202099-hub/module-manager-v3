@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import stat
 import zipfile
 
 import pytest
@@ -101,38 +102,62 @@ def write_release_archive(
         f'{{"version":"{resolved_entry_version}"}};\n'
         f"const unrelatedReleaseNote = '{unrelated_static_version}';\n"
     )
-    resolved_entry_sha256 = runtime_entry_sha256 or hashlib.sha256(
-        resolved_entry_source.encode("utf-8")
-    ).hexdigest()
     contents = {
         "RELEASE_MANIFEST.md": manifest,
         "AGENTS.md": agents,
         V3080_RELEASE_RECORD: release_record,
-        RUNTIME_VERSION_ARTIFACT: json.dumps(
-            {
-                "version": resolved_runtime_version,
-                "entry": "assets/app.js",
-                "entrySha256": resolved_entry_sha256,
-            }
-        ),
         SOURCE_VERSION_ARTIFACT: json.dumps({"version": resolved_source_version}),
         "v2-api/app/static/vue/index.html": (
             f"<!doctype html><title>Module Manager V{resolved_title_version}</title>"
             f'<script type="module" src="/vue/assets/app.js"></script>{unrelated_index_text}'
         ),
+        "v2-api/app/static/vue/assets/app.js": resolved_entry_source,
     }
+    if unrelated_chunk_entry_version:
+        contents["v2-api/app/static/vue/assets/unrelated.js"] = (
+            "globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__="
+            f'{{"version":"{unrelated_chunk_entry_version}"}};\n'
+        )
+    archive_contents = {
+        name: contents.get(name, "fixture\n")
+        for name in names
+        if name != RUNTIME_VERSION_ARTIFACT
+    }
+    archive_contents["v2-api/app/static/vue/assets/app.js"] = resolved_entry_source
+    if unrelated_chunk_entry_version:
+        archive_contents["v2-api/app/static/vue/assets/unrelated.js"] = contents[
+            "v2-api/app/static/vue/assets/unrelated.js"
+        ]
+    vue_prefix = "v2-api/app/static/vue/"
+    assets = []
+    for name, content in sorted(archive_contents.items()):
+        if not name.startswith(vue_prefix):
+            continue
+        encoded = content.encode("utf-8") if isinstance(content, str) else content
+        assets.append(
+            {
+                "path": name.removeprefix(vue_prefix),
+                "size": len(encoded),
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            }
+        )
+    resolved_entry_sha256 = runtime_entry_sha256 or hashlib.sha256(
+        resolved_entry_source.encode("utf-8")
+    ).hexdigest()
+    if RUNTIME_VERSION_ARTIFACT in names:
+        archive_contents[RUNTIME_VERSION_ARTIFACT] = json.dumps(
+            {
+                "version": resolved_runtime_version,
+                "entry": "assets/app.js",
+                "entrySha256": resolved_entry_sha256,
+                "assets": assets,
+            }
+        )
     with zipfile.ZipFile(archive_path, "w") as archive:
-        for name in sorted(names):
-            archive.writestr(name, contents.get(name, "fixture\n"))
-        archive.writestr("v2-api/app/static/vue/assets/app.js", resolved_entry_source)
+        for name, content in sorted(archive_contents.items()):
+            archive.writestr(name, content)
         if duplicate_entry:
             archive.writestr("v2-api/app/static/vue/assets/app.js", resolved_entry_source)
-        if unrelated_chunk_entry_version:
-            archive.writestr(
-                "v2-api/app/static/vue/assets/unrelated.js",
-                "globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__="
-                f'{{"version":"{unrelated_chunk_entry_version}"}};\n',
-            )
 
 
 def test_archive_missing_v3080_release_record_fails_verification(tmp_path: Path) -> None:
@@ -181,6 +206,29 @@ def test_package_and_acceptance_chains_execute_admin_release_notes_gate() -> Non
     command = "node .\\scripts\\verify_admin_release_notes.js"
     assert command in build_script
     assert command in acceptance_script
+
+
+def test_acceptance_gate_derives_and_validates_machine_version_contract() -> None:
+    acceptance_script = (ROOT / "scripts" / "run-client-acceptance-gate.ps1").read_text(encoding="utf-8")
+    documents = "\n".join(
+        (ROOT / path).read_text(encoding="utf-8")
+        for path in ["README.md", "RELEASE_MANIFEST.md", "docs/CLIENT_SIGNOFF_CHECKLIST.md"]
+    )
+
+    assert '[string]$Version = ""' in acceptance_script
+    assert "v2-web\\src\\version.json" in acceptance_script
+    assert "ConvertFrom-Json" in acceptance_script
+    assert "must match the machine version source" in acceptance_script
+    assert "final-delivery-ready" not in acceptance_script
+    assert "final-delivery-ready" not in documents
+
+
+def test_smoke_check_validates_current_server_release_signoff_package() -> None:
+    smoke_check = (ROOT / "scripts" / "smoke-client-demo.py").read_text(encoding="utf-8")
+
+    assert 'ROOT / "v2-web" / "src" / "version.json"' in smoke_check
+    assert 'f"module-manager-v2-server-{release_version}.zip"' in smoke_check
+    assert "module-manager-v2-client-demo-final-delivery-ready.zip" not in smoke_check
 
 
 def test_archive_missing_manifest_version_fails_verification(tmp_path: Path) -> None:
@@ -519,6 +567,20 @@ ROUND6_NEGATIVE_CONDITIONAL_OR_FUTURE_CLAIMS = [
 ]
 
 
+ROUND7_AFFIRMATIVE_CLAIMS = [
+    "V3.0.80 has gone live.",
+    "V3.0.80 已经部署到生产环境。",
+]
+
+
+ROUND7_NONAFFIRMATIVE_CLAIMS = [
+    "V3.0.80 could have been deployed to production.",
+    "V3.0.80 will have been deployed to production by Friday.",
+    "V3.0.80 was not even deployed to production.",
+    "V3.0.80 may eventually be deployed to production.",
+]
+
+
 @pytest.mark.parametrize("prose", ROUND5_AFFIRMATIVE_CLAIMS)
 def test_archive_rejects_round5_atomic_affirmative_claims(tmp_path: Path, prose: str) -> None:
     verifier = load_verifier()
@@ -577,3 +639,99 @@ def test_archive_accepts_round6_nonaffirmative_deployment_predicate_controls(
     )
 
     verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("prose", ROUND7_AFFIRMATIVE_CLAIMS)
+def test_archive_rejects_round7_common_affirmative_claims(tmp_path: Path, prose: str) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round7-affirmative-prose.zip"
+    write_release_archive(verifier, archive_path, release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n")
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("prose", ROUND7_NONAFFIRMATIVE_CLAIMS)
+def test_archive_accepts_round7_complete_auxiliary_controls(tmp_path: Path, prose: str) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round7-nonaffirmative-prose.zip"
+    write_release_archive(verifier, archive_path, release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n")
+
+    verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_substituted_imported_chunk(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "stale-imported-chunk.zip"
+    entry = (
+        'globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={"version":"3.0.80"};\n'
+        'import "./stale.js";\n'
+    )
+    write_release_archive(verifier, archive_path, entry_source=entry)
+    with zipfile.ZipFile(archive_path, "a") as archive:
+        archive.writestr("v2-api/app/static/vue/assets/stale.js", "const staleVersion = '3.0.79';\n")
+
+    with pytest.raises(AssertionError, match="Vue asset manifest"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_extra_executable_script(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "extra-script.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        unrelated_index_text='<script src="/vue/assets/stale-classic.js"></script>',
+    )
+    with zipfile.ZipFile(archive_path, "a") as archive:
+        archive.writestr("v2-api/app/static/vue/assets/stale-classic.js", "const stale = true;\n")
+
+    with pytest.raises(AssertionError, match="exactly one executable module entry"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "../../outside-release.txt",
+        "/absolute-release.txt",
+        "C:/drive-release.txt",
+        "v2-api/app/static/vue/./dot.js",
+        "v2-api/app/static/vue//empty.js",
+        "v2-api/app/static/vue/control\x01.js",
+    ],
+)
+def test_archive_rejects_noncanonical_member_paths(tmp_path: Path, member_name: str) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "noncanonical-member.zip"
+    write_release_archive(verifier, archive_path)
+    with zipfile.ZipFile(archive_path, "a") as archive:
+        archive.writestr(member_name, "unsafe\n")
+
+    with pytest.raises(AssertionError, match="canonical relative POSIX path"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_symlink_member(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "symlink-member.zip"
+    write_release_archive(verifier, archive_path)
+    link = zipfile.ZipInfo("v2-api/app/static/vue/assets/link.js")
+    link.create_system = 3
+    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(archive_path, "a") as archive:
+        archive.writestr(link, "target.js")
+
+    with pytest.raises(AssertionError, match="symbolic links"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_case_colliding_member(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "case-collision.zip"
+    write_release_archive(verifier, archive_path)
+    with zipfile.ZipFile(archive_path, "a") as archive:
+        archive.writestr("V2-API/app/static/vue/assets/app.js", "collision\n")
+
+    with pytest.raises(AssertionError, match="case-insensitive file names"):
+        verifier.verify_package(archive_path)

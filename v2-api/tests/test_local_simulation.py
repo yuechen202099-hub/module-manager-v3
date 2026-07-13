@@ -2302,6 +2302,27 @@ def test_json_repository_rejects_incompatible_formal_meter_identity_without_any_
     assert state_path.read_bytes() == before_bytes
 
 
+def test_round7_audit_redaction_covers_provider_uri_link_path_and_name_variants() -> None:
+    payload = {
+        "presignedUri": "secret-a",
+        "rawSignedURI": "secret-b",
+        "signed-link": "secret-c",
+        "s3Key": "secret-d",
+        "cos_object_name": "secret-e",
+        "ossPath": "secret-f",
+        "objectPath": "secret-g",
+        "candidate_key": "catalog:1:T-001",
+        "project_id": "1",
+    }
+
+    redacted = unmatched_review.redact_audit_photo_secrets(payload)
+
+    for key in ("presignedUri", "rawSignedURI", "signed-link", "s3Key", "cos_object_name", "ossPath", "objectPath"):
+        assert redacted[key] == unmatched_review.AUDIT_REDACTED_VALUE
+    assert redacted["candidate_key"] == payload["candidate_key"]
+    assert redacted["project_id"] == payload["project_id"]
+
+
 def test_json_migrated_photo_ids_do_not_collide_across_unmatched_records(synthetic_state: dict) -> None:
     repository = JsonStateRepository()
     state = local_simulation.get_state()
@@ -2945,6 +2966,13 @@ def test_json_audit_events_recursively_redact_photo_storage_secrets(synthetic_st
                         "bucketName": "private-provider-bucket",
                         "storageObjectKey": "private/storage-object.jpg",
                         "ossObjectKey": "private/oss-object.jpg",
+                        "presignedUri": "oss://private/presigned",
+                        "rawSignedURI": "oss://private/raw-signed",
+                        "signed-link": "https://oss.example/signed-link",
+                        "s3Key": "private/s3-object.jpg",
+                        "cos_object_name": "private/cos-object.jpg",
+                        "ossPath": "private/oss-path.jpg",
+                        "objectPath": "private/object-path.jpg",
                     }
                 ]
             },
@@ -2965,6 +2993,13 @@ def test_json_audit_events_recursively_redact_photo_storage_secrets(synthetic_st
         "bucketName",
         "storageObjectKey",
         "ossObjectKey",
+        "presignedUri",
+        "rawSignedURI",
+        "signed-link",
+        "s3Key",
+        "cos_object_name",
+        "ossPath",
+        "objectPath",
     ):
         assert photo[key] == "[REDACTED]"
     assert photo["storage"] == {

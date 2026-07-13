@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "final-delivery-ready",
+    [string]$Version = "",
     [int]$Port = 8000,
     [switch]$NoBuild
 )
@@ -8,6 +8,27 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+
+$versionArtifactPath = Join-Path $root "v2-web\src\version.json"
+if (-not (Test-Path -LiteralPath $versionArtifactPath -PathType Leaf)) {
+    throw "Machine version source is missing: $versionArtifactPath"
+}
+try {
+    $versionArtifact = Get-Content -LiteralPath $versionArtifactPath -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+catch {
+    throw "Machine version source is not valid JSON: $versionArtifactPath"
+}
+$machineVersion = [string]$versionArtifact.version
+if ($machineVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+    throw "Machine version source must contain one semantic version."
+}
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $Version = $machineVersion
+}
+elseif ($Version -ne $machineVersion) {
+    throw "Release Version '$Version' must match the machine version source '$machineVersion'."
+}
 
 function Invoke-Step {
     param(
