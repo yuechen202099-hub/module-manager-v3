@@ -1,4 +1,4 @@
-export const APP_VERSION = '3.0.79'
+export const APP_VERSION = '3.0.80'
 
 export type ReleaseNote = {
   version: string
@@ -9,6 +9,17 @@ export type ReleaseNote = {
 }
 
 export const releaseNotes: ReleaseNote[] = [
+  {
+    version: 'V3.0.80',
+    date: '2026-07-13',
+    type: '小更新',
+    title: '扫码未匹配临时审阅',
+    items: [
+      '项目驾驶舱的扫码未匹配清单支持逐条打开照片并完成分类、重新扫码、二维码与OCR识别和人工确认。',
+      '临时审阅结果保存到服务器并完整记录审计，匹配终端前不生成正式资料组，也不进入完成量、KPI、归档和条码准确率。',
+      '管理员确认总清单候选后才原子化生成或并入正式资料组，系统禁止使用00000000等占位终端。',
+    ],
+  },
   {
     version: 'V3.0.79',
     date: '2026-07-10',

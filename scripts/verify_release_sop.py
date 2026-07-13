@@ -64,6 +64,7 @@ REQUIRED_FILES = [
     "scripts/production_health_check.py",
     "scripts/verify_release_retention_policy.py",
     "scripts/verify_project_board_data_center_photos.js",
+    "scripts/verify_project_board_unmatched_review.js",
     "scripts/verify_dialog_information_integration.js",
 ]
 
@@ -101,6 +102,10 @@ def main() -> int:
         fail("build-client-release.ps1 must copy scripts\\verify_admin_release_notes.js")
     if "scripts/verify_admin_release_notes.js" not in release_verifier:
         fail("verify-client-release.py must require scripts/verify_admin_release_notes.js")
+    if "scripts\\verify_project_board_unmatched_review.js" not in build_script:
+        fail("build-client-release.ps1 must copy scripts\\verify_project_board_unmatched_review.js")
+    if "scripts/verify_project_board_unmatched_review.js" not in release_verifier:
+        fail("verify-client-release.py must require scripts/verify_project_board_unmatched_review.js")
     if "scripts\\verify_dialog_information_integration.js" not in build_script:
         fail("build-client-release.ps1 must copy scripts\\verify_dialog_information_integration.js")
     if "scripts/verify_dialog_information_integration.js" not in release_verifier:
@@ -173,14 +178,14 @@ def main() -> int:
         fail("SOP files must not keep stale V3.0.38 deployment examples: " + ", ".join(stale_sop_hits))
 
     agents = read("AGENTS.md")
-    if "V3.0.79" not in agents:
-        fail("AGENTS.md must state current production baseline V3.0.79")
+    if "V3.0.80" not in agents:
+        fail("AGENTS.md must state current production baseline V3.0.80")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
 
     manifest = read("RELEASE_MANIFEST.md")
-    if "3.0.79" not in manifest:
-        fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.79")
+    if "3.0.80" not in manifest:
+        fail("Root RELEASE_MANIFEST.md must be aligned to 3.0.80")
 
     retention_runbook = read("docs/sop/06-production-deploy-runbook.md")
     for text in ["Production Release Retention", "cleanup_old_releases.sh", "keep 5", "--dry-run"]:

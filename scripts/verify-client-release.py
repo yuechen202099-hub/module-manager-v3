@@ -60,6 +60,7 @@ REQUIRED_FILES = {
     "scripts/verify_release_retention_policy.py",
     "scripts/verify_project_board_photo_dialog.js",
     "scripts/verify_project_board_data_center_photos.js",
+    "scripts/verify_project_board_unmatched_review.js",
     "scripts/verify_dialog_information_integration.js",
     "scripts/production_backup.sh",
     "scripts/cleanup_old_releases.sh",

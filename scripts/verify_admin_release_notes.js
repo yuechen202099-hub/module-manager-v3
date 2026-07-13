@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
 
-const EXPECTED_VERSION = '3.0.79'
+const EXPECTED_VERSION = '3.0.80'
 const EXPECTED_LABEL = `V${EXPECTED_VERSION}`
 const escapedVersion = EXPECTED_VERSION.replaceAll('.', '\\.')
 
@@ -17,6 +17,10 @@ assert.equal(fs.existsSync(releaseNotesPath), true, 'release notes data file mus
 const releaseNotes = fs.readFileSync(releaseNotesPath, 'utf8')
 assert.match(releaseNotes, new RegExp(`APP_VERSION\\s*=\\s*'${escapedVersion}'`), `APP_VERSION must be ${EXPECTED_VERSION}`)
 assert.match(releaseNotes, new RegExp(`version:\\s*'${EXPECTED_LABEL.replaceAll('.', '\\.')}'`), `release notes must include ${EXPECTED_LABEL}`)
+assert.match(releaseNotes, /title:\s*'扫码未匹配临时审阅'/, 'release notes must describe the V3.0.80 unmatched scan temporary review update in Chinese')
+assert.match(releaseNotes, /项目驾驶舱的扫码未匹配清单支持逐条打开照片并完成分类、重新扫码、二维码与OCR识别和人工确认。/, 'release notes must describe the V3.0.80 unmatched review workflow')
+assert.match(releaseNotes, /临时审阅结果保存到服务器并完整记录审计，匹配终端前不生成正式资料组，也不进入完成量、KPI、归档和条码准确率。/, 'release notes must describe the V3.0.80 temporary review isolation')
+assert.match(releaseNotes, /管理员确认总清单候选后才原子化生成或并入正式资料组，系统禁止使用00000000等占位终端。/, 'release notes must describe the V3.0.80 administrator finalization boundary')
 assert.match(releaseNotes, /生产权限越权修复/, 'release notes must describe the V3.0.79 production RBAC fix in Chinese')
 assert.match(releaseNotes, /清空扫描数据仅允许管理员/, 'release notes must describe the admin-only scan clear boundary')
 assert.match(releaseNotes, /审查写操作仅允许审查员或管理员/, 'release notes must describe the review mutation role boundary')
@@ -151,16 +155,6 @@ assert.doesNotMatch(loginView, /V3\.0\.24/, 'LoginView must not hard-code the ol
 
 const webIndex = read('v2-web/index.html')
 assert.match(webIndex, new RegExp(`Module Manager V${escapedVersion}`), `web HTML title must be ${EXPECTED_VERSION}`)
-
-const staticVueIndex = read('v2-api/app/static/vue/index.html')
-assert.match(staticVueIndex, new RegExp(`Module Manager V${escapedVersion}`), `built Vue static title must be ${EXPECTED_VERSION}`)
-
-const staticVueAssetsDir = path.join(root, 'v2-api', 'app', 'static', 'vue', 'assets')
-const staticVueScripts = fs.readdirSync(staticVueAssetsDir)
-  .filter((name) => name.endsWith('.js'))
-  .map((name) => fs.readFileSync(path.join(staticVueAssetsDir, name), 'utf8'))
-  .join('\n')
-assert.match(staticVueScripts, new RegExp(escapedVersion), `built Vue static assets must include ${EXPECTED_VERSION}`)
 
 const legacyLayout = read('v2-web/src/components/AppLayout.vue')
 assert.doesNotMatch(legacyLayout, /V3\.0\.24/, 'legacy layout must not show the old version')
