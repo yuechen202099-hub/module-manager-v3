@@ -29,6 +29,17 @@ from app.services.project_board_cache import (
 )
 
 
+LEGACY_UNMATCHED_ADMIN_SUFFIXES = (
+    "/assign",
+    "/unassign",
+    "/outside-project",
+    "/rematch",
+    "/associate",
+    "/create-group",
+    "/delete",
+)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_project_board_summary_cache()
@@ -98,11 +109,15 @@ def create_app() -> FastAPI:
             return {"constructor", "admin"}, "Constructor or administrator role required"
         if path.startswith("/local-test/tasks/"):
             return {"reviewer", "admin"}, "Reviewer or administrator role required"
+        if path == "/local-test/groups":
+            return {"admin"}, "Administrator role required"
         if path.startswith("/local-test/groups/"):
             if path.endswith("/terminal"):
                 return {"admin"}, "Administrator role required"
             return {"reviewer", "admin"}, "Reviewer or administrator role required"
         if path.startswith("/local-test/unmatched/"):
+            if path in {"/local-test/unmatched/dedupe", "/local-test/unmatched/blank"}:
+                return {"admin"}, "Administrator role required"
             if method == "POST" and path.endswith("/finalize-match"):
                 return {"admin"}, "Administrator role required"
             if (
@@ -110,6 +125,10 @@ def create_app() -> FastAPI:
                 or (method == "POST" and path.endswith(("/confirm", "/rescan")))
             ):
                 return {"reviewer", "admin"}, "Reviewer or administrator role required"
+            if path.endswith(LEGACY_UNMATCHED_ADMIN_SUFFIXES):
+                return {"admin"}, "Administrator role required"
+            if method == "PATCH" and path.count("/") == 3:
+                return {"admin"}, "Administrator role required"
         return set(), ""
 
     def production_auth_rejection(request: Request):

@@ -210,6 +210,16 @@ def build_review(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def advance_record_version(record: dict[str, Any], expected_version: int) -> int:
+    review = build_review(record)
+    require_version(review, expected_version)
+    review["version"] = expected_version + 1
+    review["updated_at"] = datetime.now(UTC).isoformat()
+    record["temporary_review"] = review
+    record["review_version"] = review["version"]
+    return review["version"]
+
+
 def find_review_photo(review: dict[str, Any], photo_id: str) -> dict[str, Any]:
     photo = next((item for item in review.get("photos") or [] if item.get("id") == photo_id), None)
     if photo is None:

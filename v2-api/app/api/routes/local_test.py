@@ -401,6 +401,54 @@ def response_payload(payload: dict) -> dict:
     return resolve_result_for_response(payload)
 
 
+SAFE_UNMATCHED_RECORD_FIELDS = (
+    "unmatched_id",
+    "record_type",
+    "status",
+    "terminal",
+    "meter_no",
+    "meter_match_key",
+    "barcode",
+    "collector",
+    "module_asset_no",
+    "asset_no",
+    "address",
+    "creator",
+    "photo_count",
+    "assigned_to",
+    "assigned_by",
+    "assigned_at",
+    "assignment_note",
+    "due_date",
+    "project_outside",
+    "project_outside_by",
+    "project_outside_at",
+    "project_outside_note",
+    "replacement_old_meter_no",
+    "replacement_target_group_id",
+    "field_task_type",
+    "source_file",
+    "review_version",
+)
+
+
+def safe_review_response(payload: dict[str, Any]) -> dict[str, Any]:
+    review = deepcopy(payload["review"])
+    for photo in review.get("photos", []):
+        photo.pop("source_url", None)
+        photo.pop("image_url", None)
+    record = {key: payload["record"].get(key) for key in SAFE_UNMATCHED_RECORD_FIELDS}
+    return {"record": record, "review": review}
+
+
+def reject_retired_legacy_unmatched_write() -> None:
+    if settings.app_env.lower() in {"prod", "production"}:
+        raise HTTPException(
+            status_code=410,
+            detail="Legacy unmatched write retired; use /review, /match-candidates, and /finalize-match",
+        )
+
+
 def _postgres_project_for_team(session, team_id: str) -> Project:
     team = session.get(Team, team_id)
     if team is None:
@@ -954,6 +1002,7 @@ class UrlImportRequest(BaseModel):
 
 class UnmatchedAssociateRequest(BaseModel):
     actor: str = "local-reviewer"
+    expected_version: int
     target_group_id: str = ""
     target_meter_no: str = ""
     updates: dict = {}
@@ -961,12 +1010,14 @@ class UnmatchedAssociateRequest(BaseModel):
 
 class UnmatchedCreateGroupRequest(BaseModel):
     actor: str = "local-reviewer"
+    expected_version: int
     terminal: str
     updates: dict = {}
 
 
 class UnmatchedDeleteRequest(BaseModel):
     actor: str = "local-reviewer"
+    expected_version: int
     reason: str = ""
 
 
@@ -980,6 +1031,7 @@ class BlankUnmatchedRequest(BaseModel):
 
 class UnmatchedUpdateRequest(BaseModel):
     actor: str = "local-reviewer"
+    expected_version: int
     updates: dict = {}
 
 
@@ -1007,6 +1059,7 @@ class UnmatchedFinalizeMatchRequest(BaseModel):
 
 class UnmatchedAssignRequest(BaseModel):
     actor: str = "module_admin"
+    expected_version: int
     constructor: str
     note: str = ""
     due_date: str = ""
@@ -1014,16 +1067,19 @@ class UnmatchedAssignRequest(BaseModel):
 
 class UnmatchedUnassignRequest(BaseModel):
     actor: str = "module_admin"
+    expected_version: int
     reason: str = ""
 
 
 class UnmatchedOutsideProjectRequest(BaseModel):
     actor: str = "local-reviewer"
+    expected_version: int
     note: str = ""
 
 
 class UnmatchedRematchRequest(BaseModel):
     actor: str = "local-reviewer"
+    expected_version: int
     meter_no: str = ""
     old_meter_no: str = ""
     terminal: str = ""
@@ -1783,12 +1839,12 @@ def replacement_records(
 
 @router.post("/unmatched/dedupe")
 def dedupe_unmatched(payload: UnmatchedDedupeRequest, request: Request):
-    return ok(request, state_repository().dedupe_unmatched_records(actor=payload.actor))
+    return ok(request, state_repository().dedupe_unmatched_records(actor=request_actor(request)))
 
 
 @router.post("/unmatched/blank")
 def create_blank_unmatched(payload: BlankUnmatchedRequest, request: Request):
-    return ok(request, state_repository().create_blank_unmatched_record(actor=payload.actor))
+    return ok(request, state_repository().create_blank_unmatched_record(actor=request_actor(request)))
 
 
 @router.patch("/unmatched/{unmatched_id}")
@@ -1796,9 +1852,12 @@ def update_unmatched(unmatched_id: str, payload: UnmatchedUpdateRequest, request
     try:
         record = state_repository().update_unmatched_record(
             unmatched_id,
-            actor=payload.actor,
+            actor=request_actor(request),
+            expected_version=payload.expected_version,
             updates=payload.updates,
         )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     return ok(request, record)
@@ -1809,11 +1868,14 @@ def assign_unmatched(unmatched_id: str, payload: UnmatchedAssignRequest, request
     try:
         record = state_repository().assign_unmatched_record(
             unmatched_id,
-            actor=payload.actor,
+            actor=request_actor(request),
             constructor=payload.constructor,
+            expected_version=payload.expected_version,
             note=payload.note,
             due_date=payload.due_date,
         )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
@@ -1826,9 +1888,12 @@ def unassign_unmatched(unmatched_id: str, payload: UnmatchedUnassignRequest, req
     try:
         record = state_repository().unassign_unmatched_record(
             unmatched_id,
-            actor=payload.actor,
+            actor=request_actor(request),
+            expected_version=payload.expected_version,
             reason=payload.reason,
         )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     return ok(request, record)
@@ -1839,9 +1904,12 @@ def mark_unmatched_outside_project(unmatched_id: str, payload: UnmatchedOutsideP
     try:
         record = state_repository().mark_unmatched_outside_project(
             unmatched_id,
-            actor=payload.actor,
+            actor=request_actor(request),
+            expected_version=payload.expected_version,
             note=payload.note,
         )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     return ok(request, record)
@@ -1849,15 +1917,19 @@ def mark_unmatched_outside_project(unmatched_id: str, payload: UnmatchedOutsideP
 
 @router.post("/unmatched/{unmatched_id}/rematch")
 def rematch_unmatched(unmatched_id: str, payload: UnmatchedRematchRequest, request: Request):
+    reject_retired_legacy_unmatched_write()
     try:
         result = state_repository().rematch_unmatched_record(
             unmatched_id,
-            actor=payload.actor,
+            actor=request_actor(request),
+            expected_version=payload.expected_version,
             meter_no=payload.meter_no,
             old_meter_no=payload.old_meter_no,
             terminal=payload.terminal,
             updates=payload.updates,
         )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
@@ -1872,7 +1944,7 @@ def unmatched_review_detail(unmatched_id: str, request: Request):
         review = state_repository().get_unmatched_review(unmatched_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
-    return ok(request, response_payload(review))
+    return ok(request, safe_review_response(review))
 
 
 @router.patch("/unmatched/{unmatched_id}/review")
@@ -1893,7 +1965,7 @@ def save_unmatched_review(unmatched_id: str, payload: UnmatchedReviewPatchReques
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ok(request, response_payload(review))
+    return ok(request, safe_review_response(review))
 
 
 @router.get("/unmatched/{unmatched_id}/photos/{photo_id}/content")
@@ -1931,7 +2003,7 @@ def rescan_unmatched_review_photo(
         raise HTTPException(status_code=404, detail="Unmatched photo not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ok(request, response_payload(review))
+    return ok(request, safe_review_response(review))
 
 
 @router.post("/unmatched/{unmatched_id}/confirm")
@@ -1950,7 +2022,7 @@ def confirm_unmatched_review(unmatched_id: str, payload: UnmatchedReviewConfirmR
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ok(request, response_payload(review))
+    return ok(request, safe_review_response(review))
 
 
 @router.get("/unmatched/{unmatched_id}/candidates")
@@ -2002,14 +2074,18 @@ def exception_groups(
 
 @router.post("/unmatched/{unmatched_id}/associate")
 def associate_unmatched(unmatched_id: str, payload: UnmatchedAssociateRequest, request: Request):
+    reject_retired_legacy_unmatched_write()
     try:
         result = state_repository().associate_unmatched_record(
             unmatched_id,
-            actor=payload.actor,
+            actor=request_actor(request),
+            expected_version=payload.expected_version,
             target_group_id=payload.target_group_id,
             target_meter_no=payload.target_meter_no,
             updates=payload.updates,
         )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
@@ -2019,13 +2095,17 @@ def associate_unmatched(unmatched_id: str, payload: UnmatchedAssociateRequest, r
 
 @router.post("/unmatched/{unmatched_id}/create-group")
 def create_group_from_unmatched(unmatched_id: str, payload: UnmatchedCreateGroupRequest, request: Request):
+    reject_retired_legacy_unmatched_write()
     try:
         result = state_repository().create_group_from_unmatched_record(
             unmatched_id,
-            actor=payload.actor,
+            actor=request_actor(request),
+            expected_version=payload.expected_version,
             terminal=payload.terminal,
             updates=payload.updates,
         )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
@@ -2036,7 +2116,14 @@ def create_group_from_unmatched(unmatched_id: str, payload: UnmatchedCreateGroup
 @router.post("/unmatched/{unmatched_id}/delete")
 def delete_unmatched(unmatched_id: str, payload: UnmatchedDeleteRequest, request: Request):
     try:
-        record = state_repository().delete_unmatched_record(unmatched_id, actor=payload.actor, reason=payload.reason)
+        record = state_repository().delete_unmatched_record(
+            unmatched_id,
+            actor=request_actor(request),
+            expected_version=payload.expected_version,
+            reason=payload.reason,
+        )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     return ok(request, record)
@@ -2193,6 +2280,10 @@ def construction_task_claim(task_id: int, payload: ConstructionActorRequest, req
     actor = bound_construction_actor(request, payload.actor)
     try:
         task = state_repository().claim_construction_task(task_id, actor)
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except ValueError as exc:
@@ -2416,7 +2507,7 @@ def create_empty_group(payload: EmptyGroupRequest, request: Request):
     try:
         result = state_repository().create_empty_group_for_terminal(
             terminal=payload.terminal,
-            actor=payload.actor,
+            actor=request_actor(request),
             meter_no=payload.meter_no,
             address=payload.address,
             meter_match_key=payload.meter_match_key,

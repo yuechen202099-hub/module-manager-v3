@@ -1,5 +1,6 @@
 import html
 import importlib.util
+import json
 import time
 from copy import deepcopy
 from datetime import datetime
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 from urllib.error import HTTPError
 
 from fastapi.testclient import TestClient
+import pytest
 
 import app.main as main_module
 from app.main import create_app
@@ -146,6 +148,114 @@ def production_rbac_client(monkeypatch, tmp_path) -> tuple[TestClient, dict[str,
     return production_client, headers
 
 
+def test_production_exact_group_create_requires_admin(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeLegacyUnmatchedRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    response = production_client.post(
+        "/local-test/groups",
+        headers=headers["constructor"],
+        json={"actor": "forged-admin", "terminal": "T-001", "meter_no": "120000000001"},
+    )
+
+    assert response.status_code == 403
+    assert repository.calls == []
+
+
+def test_production_legacy_unmatched_mutations_require_admin(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeLegacyUnmatchedRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    for method, suffix, body in legacy_unmatched_mutation_cases():
+        response = production_client.request(
+            method,
+            f"/local-test/unmatched/u-1/{suffix}",
+            headers=headers["reviewer"],
+            json=body,
+        )
+        assert response.status_code == 403
+
+    assert repository.calls == []
+
+
+def test_production_legacy_unmatched_match_writes_return_gone(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeLegacyUnmatchedRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    retired_cases = [case for case in legacy_unmatched_mutation_cases() if case[1] in {"rematch", "associate", "create-group"}]
+
+    for method, suffix, body in retired_cases:
+        response = production_client.request(
+            method,
+            f"/local-test/unmatched/u-1/{suffix}",
+            headers=headers["admin"],
+            json=body,
+        )
+        assert response.status_code == 410
+        assert "/review" in response.text
+        assert "/match-candidates" in response.text
+        assert "/finalize-match" in response.text
+
+    assert repository.calls == []
+
+
+def test_unmatched_mutation_rejects_stale_version_without_write_or_audit(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeLegacyUnmatchedRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    before = repository.snapshot()
+
+    response = production_client.patch(
+        "/local-test/unmatched/u-1",
+        headers=headers["admin"],
+        json={"actor": "forged", "expected_version": 1, "updates": {"note": "stale"}},
+    )
+
+    assert response.status_code == 409
+    assert repository.snapshot() == before
+
+
+def test_production_legacy_unmatched_mutation_uses_authenticated_actor(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeLegacyUnmatchedRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    response = production_client.patch(
+        "/local-test/unmatched/u-1",
+        headers=headers["admin"],
+        json={"actor": "forged", "expected_version": 2, "updates": {"note": "trusted"}},
+    )
+
+    assert response.status_code == 200
+    assert repository.calls[-1]["actor"] == "root-admin"
+
+
+def test_unmatched_review_response_hides_raw_photo_urls(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class UnsafeReviewRepository(FakeUnmatchedReviewRepository):
+        def _review(self, unmatched_id: str) -> dict:
+            payload = super()._review(unmatched_id)
+            payload["record"]["photo_urls"] = ["https://cdn.allowed.test/raw.jpg?token=secret"]
+            payload["record"]["raw"] = {"source_url": "https://cdn.allowed.test/raw.jpg?token=secret"}
+            return payload
+
+    repository = UnsafeReviewRepository("https://cdn.allowed.test/raw.jpg?token=secret")
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    payload = production_client.get(
+        "/local-test/unmatched/unmatched-1/review",
+        headers=headers["admin"],
+    ).json()["data"]
+    serialized = json.dumps(payload)
+
+    assert "source_url" not in serialized
+    assert "photo_urls" not in serialized
+    assert "token=secret" not in serialized
+
+
 class FakeUnmatchedReviewRepository:
     def __init__(self, source_url: str = "https://cdn.allowed.test/server-photo.jpg") -> None:
         self.calls: list[dict] = []
@@ -178,7 +288,7 @@ class FakeUnmatchedReviewRepository:
             raise unmatched_review.ReviewVersionConflict("stale")
         if payload.get("state") == "invalid":
             raise ValueError("Unsupported review state")
-        return {"review": self.review, "actor": actor}
+        return {"record": self._review(unmatched_id)["record"], "review": self.review, "actor": actor}
 
     def rescan_unmatched_review_photo(
         self,
@@ -203,14 +313,18 @@ class FakeUnmatchedReviewRepository:
             raise KeyError(photo_id)
         if expected_version != review["version"]:
             raise unmatched_review.ReviewVersionConflict("stale")
-        return {"review": review, "actor": actor}
+        return {"record": self._review(unmatched_id)["record"], "review": review, "actor": actor}
 
     def confirm_unmatched_review(self, unmatched_id: str, *, actor: str, expected_version: int, confirmed: bool = True) -> dict:
         self.calls.append({"method": "confirm", "actor": actor, "expected_version": expected_version, "confirmed": confirmed})
         self._review(unmatched_id)
         if expected_version != 2:
             raise unmatched_review.ReviewVersionConflict("stale")
-        return {"review": {**self.review, "manual_confirmed": bool(confirmed)}, "actor": actor}
+        return {
+            "record": self._review(unmatched_id)["record"],
+            "review": {**self.review, "manual_confirmed": bool(confirmed)},
+            "actor": actor,
+        }
 
     def finalize_unmatched_match(self, unmatched_id: str, *, actor: str, candidate_key: str, expected_version: int) -> dict:
         self.calls.append({"method": "finalize", "actor": actor, "candidate_key": candidate_key, "expected_version": expected_version})
@@ -220,6 +334,66 @@ class FakeUnmatchedReviewRepository:
         if candidate_key != "catalog:row-1":
             raise ValueError("Selected candidate is invalid or unavailable")
         return {"group": {"id": "group-1"}, "attached": False, "actor": actor}
+
+
+class FakeLegacyUnmatchedRepository:
+    def __init__(self) -> None:
+        self.record = {"unmatched_id": "u-1", "review_version": 2, "note": "before"}
+        self.calls: list[dict] = []
+        self.audit: list[dict] = []
+
+    def snapshot(self) -> dict:
+        return deepcopy({"record": self.record, "calls": self.calls, "audit": self.audit})
+
+    def _mutate(self, method: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+        if expected_version is not None and expected_version != self.record["review_version"]:
+            raise unmatched_review.ReviewVersionConflict("stale")
+        self.calls.append({"method": method, "actor": actor, "expected_version": expected_version, **payload})
+        self.audit.append({"method": method, "actor": actor})
+        self.record = {**self.record, **payload, "review_version": self.record["review_version"] + 1}
+        return {"record": deepcopy(self.record)}
+
+    def create_empty_group_for_terminal(self, *, actor: str, **payload) -> dict:
+        self.calls.append({"method": "create_empty_group", "actor": actor, **payload})
+        return {"group": {"id": "group-1", **payload}}
+
+    def update_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, updates=None) -> dict:
+        return self._mutate("update", actor=actor, expected_version=expected_version, **(updates or {}))
+
+    def assign_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+        return self._mutate("assign", actor=actor, expected_version=expected_version, **payload)
+
+    def unassign_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+        return self._mutate("unassign", actor=actor, expected_version=expected_version, **payload)
+
+    def mark_unmatched_outside_project(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+        return self._mutate("outside-project", actor=actor, expected_version=expected_version, **payload)
+
+    def rematch_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+        return {"matched": False, **self._mutate("rematch", actor=actor, expected_version=expected_version, **payload)}
+
+    def associate_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+        self._mutate("associate", actor=actor, expected_version=expected_version, **payload)
+        return {"group": {"id": "group-1"}}
+
+    def create_group_from_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+        self._mutate("create-group", actor=actor, expected_version=expected_version, **payload)
+        return {"group": {"id": "group-1"}}
+
+    def delete_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+        return self._mutate("delete", actor=actor, expected_version=expected_version, **payload)
+
+
+def legacy_unmatched_mutation_cases():
+    return (
+        ("PATCH", "assign", {"actor": "forged-admin", "expected_version": 2, "constructor": "worker-a"}),
+        ("PATCH", "unassign", {"actor": "forged-admin", "expected_version": 2, "reason": "test"}),
+        ("POST", "outside-project", {"actor": "forged-admin", "expected_version": 2, "note": "test"}),
+        ("POST", "rematch", {"actor": "forged-admin", "expected_version": 2, "meter_no": "120000000001"}),
+        ("POST", "associate", {"actor": "forged-admin", "expected_version": 2, "target_group_id": "g-1"}),
+        ("POST", "create-group", {"actor": "forged-admin", "expected_version": 2, "terminal": "T-001"}),
+        ("POST", "delete", {"actor": "forged-admin", "expected_version": 2, "reason": "test"}),
+    )
 
 
 class ApiReviewSession:
@@ -271,6 +445,32 @@ def postgres_review_record() -> SimpleNamespace:
         address="review road",
         payload={"photo_urls": ["https://photos.example/review.jpg"]},
     )
+
+
+def test_postgres_unmatched_mutation_rejects_stale_version_without_write_or_audit(monkeypatch) -> None:
+    record = postgres_review_record()
+    tracker = {"active_sessions": 0, "commits": 0, "rollbacks": 0, "staged": [], "sessions": []}
+
+    class TestPostgresRepository(state_repository.PostgresStateRepository):
+        def _session(self):
+            session = ApiReviewSession(record, tracker)
+            tracker["sessions"].append(session)
+            return session
+
+    monkeypatch.setattr(state_repository.local_simulation, "current_team_id", lambda: "north-team-01")
+    before = deepcopy(vars(record))
+
+    with pytest.raises(unmatched_review.ReviewVersionConflict):
+        TestPostgresRepository().update_unmatched_record(
+            "unmatched-1",
+            actor="root-admin",
+            expected_version=0,
+            updates={"note": "stale"},
+        )
+
+    assert vars(record) == before
+    assert tracker["commits"] == 0
+    assert tracker["staged"] == []
 
 
 def test_production_unmatched_review_role_matrix(monkeypatch, tmp_path) -> None:
@@ -490,7 +690,7 @@ def test_production_unmatched_review_routes_use_postgres_repository_transactions
     )
     assert rescanned.status_code == 200
     assert rescanned.json()["data"]["review"]["version"] == 3
-    assert rescanned.json()["data"]["photo"]["category"] == "collector_barcode"
+    assert rescanned.json()["data"]["review"]["photos"][0]["category"] == "collector_barcode"
     assert scan_categories == ["collector_barcode"]
 
     confirmed = production_client.post(
@@ -3198,7 +3398,12 @@ def test_unmatched_create_group_route_creates_terminal_task() -> None:
 
     response = client.post(
         f"/local-test/unmatched/{unmatched['unmatched_id']}/create-group",
-        json={"actor": "api-test", "terminal": "T-API", "updates": {"address": "api manual address"}},
+        json={
+            "actor": "api-test",
+            "expected_version": unmatched["review_version"],
+            "terminal": "T-API",
+            "updates": {"address": "api manual address"},
+        },
     )
     tasks = client.get("/local-test/tasks").json()["data"]["items"]
 
@@ -3219,6 +3424,17 @@ def test_unmatched_blank_route_creates_unmatched_record() -> None:
     assert record["record_type"] == "blank_group"
     assert listed["total"] == 1
     assert listed["items"][0]["unmatched_id"] == record["unmatched_id"]
+
+
+def test_unmatched_list_rows_include_review_version() -> None:
+    client.post("/local-test/bootstrap")
+    created = client.post("/local-test/unmatched/blank", json={"actor": "api-test"}).json()["data"]["record"]
+
+    listed = client.get(f"/local-test/unmatched?query={created['unmatched_id']}").json()["data"]["items"]
+
+    assert len(listed) == 1
+    assert isinstance(listed[0]["review_version"], int)
+    assert listed[0]["review_version"] == 1
 
 
 def test_group_metadata_route_updates_form_fields() -> None:

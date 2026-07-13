@@ -458,6 +458,7 @@ export type ImportJob = {
 
 export type UnmatchedRecord = {
   unmatchedId: string
+  reviewVersion: number
   status: string
   barcode: string
   meterNo: string

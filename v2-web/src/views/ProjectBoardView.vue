@@ -23,7 +23,6 @@ import {
   fetchUnmatchedRecords,
   fetchUserAccounts,
   importTotalCatalog,
-  rematchUnmatchedRecord,
   returnGroupToException,
   unassignConstructionExceptionOrder,
 } from '@/api/services'
@@ -130,7 +129,6 @@ const unmatchedDialogVisible = ref(false)
 const unmatchedLoading = ref(false)
 const unmatchedDeduping = ref(false)
 const unmatchedDeletingId = ref('')
-const unmatchedRematchingId = ref('')
 const unmatchedQuery = ref('')
 const unmatchedRows = ref<UnmatchedRecord[]>([])
 const unmatchedPage = ref(1)
@@ -1395,7 +1393,7 @@ async function deleteUnmatchedRow(row: UnmatchedRecord) {
   }
   unmatchedDeletingId.value = row.unmatchedId
   try {
-    await deleteUnmatchedRecord(row.unmatchedId, '项目看板人工删除未匹配记录')
+    await deleteUnmatchedRecord(row.unmatchedId, row.reviewVersion, '项目看板人工删除未匹配记录')
     ElMessage.success('未匹配记录已删除')
     await Promise.all([loadUnmatchedRows(), loadBoard()])
   } catch (error) {
@@ -1405,33 +1403,8 @@ async function deleteUnmatchedRow(row: UnmatchedRecord) {
   }
 }
 
-async function replaceUnmatchedMeter(row: UnmatchedRecord) {
-  try {
-    const { value } = await ElMessageBox.prompt('录入旧表号，用旧表号匹配总清单地址并绑定终端', '换表匹配', {
-      confirmButtonText: '匹配旧表',
-      cancelButtonText: '取消',
-      inputValue: row.replacementOldMeterNo || '',
-      inputPattern: /\S+/,
-      inputErrorMessage: '旧表号不能为空',
-    })
-    unmatchedRematchingId.value = row.unmatchedId
-    const result = await rematchUnmatchedRecord(row.unmatchedId, {
-      meterNo: row.meterNo || row.barcode || '',
-      oldMeterNo: String(value || ''),
-      terminal: row.terminal || '',
-    })
-    if (result.matched) {
-      ElMessage.success('换表关系已绑定')
-    } else {
-      ElMessage.warning('未匹配到旧表地址，已保存换表记录')
-    }
-    await Promise.all([loadUnmatchedRows(), loadBoard()])
-    if (replacementDialogVisible.value) await loadReplacementRows()
-  } catch (error) {
-    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '换表失败')
-  } finally {
-    unmatchedRematchingId.value = ''
-  }
+function replaceUnmatchedMeter(row: UnmatchedRecord) {
+  openUnmatchedReviewRow(row)
 }
 
 function handleExternalRefresh(event: MessageEvent) {
@@ -2231,20 +2204,20 @@ onUnmounted(() => {
               <el-button
                 size="small"
                 plain
-                :loading="unmatchedRematchingId === row.unmatchedId || unmatchedDeletingId === row.unmatchedId"
+                :loading="unmatchedDeletingId === row.unmatchedId"
               >
                 操作
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item
-                    :disabled="unmatchedRematchingId === row.unmatchedId || unmatchedDeletingId === row.unmatchedId"
+                    :disabled="unmatchedDeletingId === row.unmatchedId"
                     @click.stop="replaceUnmatchedMeter(row)"
                   >
                     换表
                   </el-dropdown-item>
                   <el-dropdown-item
-                    :disabled="unmatchedRematchingId === row.unmatchedId || unmatchedDeletingId === row.unmatchedId"
+                    :disabled="unmatchedDeletingId === row.unmatchedId"
                     @click.stop="deleteUnmatchedRow(row)"
                   >
                     删除

@@ -21,7 +21,6 @@ import {
   fetchTasks,
   groupPhotoContentUrl,
   markUnmatchedOutsideProject,
-  rematchUnmatchedRecord,
   resetGroupToUnconstructed,
   rescanPhotoBarcode,
   returnGroupToException,
@@ -32,6 +31,7 @@ import {
   uploadGroupImages,
 } from '@/api/services'
 import type { ConstructionExceptionOrder, MaterialGroup, ReviewPhoto, ReviewTask, UnmatchedRecord } from '@/api/types'
+import UnmatchedReviewDialog from '@/components/UnmatchedReviewDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const categories = [
@@ -75,6 +75,7 @@ const confirmingBarcode = ref(false)
 const tasks = ref<ReviewTask[]>([])
 const groups = ref<MaterialGroup[]>([])
 const unmatchedRecords = ref<UnmatchedRecord[]>([])
+const unmatchedReviewId = ref('')
 const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
 const activeTaskMode = ref<ReviewTaskMode>('terminal')
 const selectedTaskId = ref('')
@@ -1409,57 +1410,22 @@ async function exportOutsideProjectRecords() {
   }
 }
 
-async function editUnmatchedMeter(record: UnmatchedRecord) {
+function openUnmatchedReview(record: UnmatchedRecord) {
   markInteraction()
-  try {
-    const { value } = await ElMessageBox.prompt('录入正确表号后重新匹配总清单地址', '修改表号', {
-      confirmButtonText: '重新匹配',
-      cancelButtonText: '取消',
-      inputValue: record.meterNo || record.barcode || '',
-      inputPattern: /\S+/,
-      inputErrorMessage: '表号不能为空',
-    })
-    const result = await rematchUnmatchedRecord(record.unmatchedId, {
-      meterNo: String(value || ''),
-      terminal: record.terminal || '',
-    })
-    await loadFieldTasks()
-    if (result.matched) {
-      ElMessage.success('已匹配到资料组')
-      if (selectedTaskId.value) await refreshGroupsSilently()
-    } else {
-      ElMessage.warning('未匹配到资料组，已保存新表号')
-    }
-  } catch (error) {
-    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '修改失败')
-  }
+  unmatchedReviewId.value = record.unmatchedId
 }
 
-async function replaceUnmatchedMeter(record: UnmatchedRecord) {
-  markInteraction()
-  try {
-    const { value } = await ElMessageBox.prompt('录入旧表号，用旧表号匹配总清单地址并绑定终端', '换表匹配', {
-      confirmButtonText: '匹配旧表',
-      cancelButtonText: '取消',
-      inputValue: record.replacementOldMeterNo || '',
-      inputPattern: /\S+/,
-      inputErrorMessage: '旧表号不能为空',
-    })
-    const result = await rematchUnmatchedRecord(record.unmatchedId, {
-      meterNo: record.meterNo || record.barcode || '',
-      oldMeterNo: String(value || ''),
-      terminal: record.terminal || '',
-    })
-    await loadFieldTasks()
-    if (result.matched) {
-      ElMessage.success('换表关系已绑定')
-      if (selectedTaskId.value) await refreshGroupsSilently()
-    } else {
-      ElMessage.warning('未匹配到旧表地址，已保存换表记录')
-    }
-  } catch (error) {
-    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '换表失败')
-  }
+function editUnmatchedMeter(record: UnmatchedRecord) {
+  openUnmatchedReview(record)
+}
+
+function replaceUnmatchedMeter(record: UnmatchedRecord) {
+  openUnmatchedReview(record)
+}
+
+async function handleUnmatchedReviewChanged() {
+  await loadFieldTasks()
+  if (selectedTaskId.value) await refreshGroupsSilently()
 }
 
 async function markOutsideProject(record: UnmatchedRecord) {
@@ -1470,7 +1436,7 @@ async function markOutsideProject(record: UnmatchedRecord) {
       cancelButtonText: '取消',
       inputValue: record.projectOutsideNote || '',
     })
-    await markUnmatchedOutsideProject(record.unmatchedId, String(value || ''))
+    await markUnmatchedOutsideProject(record.unmatchedId, record.reviewVersion, String(value || ''))
     await loadFieldTasks()
     ElMessage.success('已记录项目外施工')
   } catch (error) {
@@ -1488,7 +1454,7 @@ async function assignUnmatched(record: UnmatchedRecord) {
       inputPattern: /\S+/,
       inputErrorMessage: '施工员账号不能为空',
     })
-    await assignUnmatchedRecord(record.unmatchedId, String(value || ''), record.assignmentNote || '')
+    await assignUnmatchedRecord(record.unmatchedId, record.reviewVersion, String(value || ''), record.assignmentNote || '')
     await loadFieldTasks()
     ElMessage.success('已指派施工员')
   } catch (error) {
@@ -1499,7 +1465,7 @@ async function assignUnmatched(record: UnmatchedRecord) {
 async function releaseUnmatchedAssignment(record: UnmatchedRecord) {
   markInteraction()
   try {
-    await unassignUnmatchedRecord(record.unmatchedId, '管理员取消指派')
+    await unassignUnmatchedRecord(record.unmatchedId, record.reviewVersion, '管理员取消指派')
     await loadFieldTasks()
     ElMessage.success('已取消指派')
   } catch (error) {
@@ -1516,7 +1482,7 @@ async function deleteUnmatched(record: UnmatchedRecord) {
       cancelButtonText: '取消',
       type: 'warning',
     })
-    await deleteUnmatchedRecord(record.unmatchedId, '管理员删除')
+    await deleteUnmatchedRecord(record.unmatchedId, record.reviewVersion, '管理员删除')
     await loadFieldTasks()
     ElMessage.success('已删除未匹配资料组')
   } catch (error) {
@@ -1983,6 +1949,14 @@ onUnmounted(() => {
       </template>
       <ElEmpty v-else description="请选择资料组开始审阅" />
     </main>
+
+    <UnmatchedReviewDialog
+      :model-value="Boolean(unmatchedReviewId)"
+      :unmatched-id="unmatchedReviewId"
+      @update:model-value="(visible) => { if (!visible) unmatchedReviewId = '' }"
+      @updated="handleUnmatchedReviewChanged"
+      @matched="handleUnmatchedReviewChanged"
+    />
 
     <Teleport to="body">
       <div v-if="lightbox.open && selectedPhoto" class="review-lightbox" @click.self="closeLightbox">

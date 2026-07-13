@@ -271,6 +271,7 @@ type BackendImportJob = {
 
 type BackendUnmatchedRecord = {
   unmatched_id?: string
+  review_version?: number
   barcode?: string
   meter_no?: string
   meter_match_key?: string
@@ -867,6 +868,7 @@ function mapUnmatchedRecord(raw: BackendUnmatchedRecord): UnmatchedRecord {
   const photoUrls = Array.isArray(raw.photo_urls) ? raw.photo_urls : []
   return {
     unmatchedId: raw.unmatched_id || '',
+    reviewVersion: Number(raw.review_version || 1),
     status: raw.status || '',
     barcode: raw.barcode || '',
     meterNo: raw.meter_no || '',
@@ -1955,13 +1957,14 @@ export async function createBlankUnmatchedRecord(): Promise<UnmatchedRecord> {
 
 export async function updateUnmatchedRecord(
   unmatchedId: string,
+  expectedVersion: number,
   updates: Record<string, unknown>,
 ): Promise<UnmatchedRecord> {
   const data = await api<{ record?: BackendUnmatchedRecord }>(
     `/local-test/unmatched/${encodeURIComponent(unmatchedId)}`,
     {
       method: 'PATCH',
-      body: JSON.stringify({ actor: currentActor(), updates }),
+      body: JSON.stringify({ expected_version: expectedVersion, updates }),
     },
   )
   return mapUnmatchedRecord(data.record || {})
@@ -1969,6 +1972,7 @@ export async function updateUnmatchedRecord(
 
 export async function assignUnmatchedRecord(
   unmatchedId: string,
+  expectedVersion: number,
   constructor: string,
   note = '',
   dueDate = '',
@@ -1977,40 +1981,52 @@ export async function assignUnmatchedRecord(
     `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/assign`,
     {
       method: 'PATCH',
-      body: JSON.stringify({ actor: currentActor(), constructor, note, due_date: dueDate }),
+      body: JSON.stringify({ expected_version: expectedVersion, constructor, note, due_date: dueDate }),
     },
   )
   return mapUnmatchedRecord(data.record || {})
 }
 
-export async function unassignUnmatchedRecord(unmatchedId: string, reason = ''): Promise<UnmatchedRecord> {
+export async function unassignUnmatchedRecord(
+  unmatchedId: string,
+  expectedVersion: number,
+  reason = '',
+): Promise<UnmatchedRecord> {
   const data = await api<{ record?: BackendUnmatchedRecord }>(
     `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/unassign`,
     {
       method: 'PATCH',
-      body: JSON.stringify({ actor: currentActor(), reason }),
+      body: JSON.stringify({ expected_version: expectedVersion, reason }),
     },
   )
   return mapUnmatchedRecord(data.record || {})
 }
 
-export async function markUnmatchedOutsideProject(unmatchedId: string, note = ''): Promise<UnmatchedRecord> {
+export async function markUnmatchedOutsideProject(
+  unmatchedId: string,
+  expectedVersion: number,
+  note = '',
+): Promise<UnmatchedRecord> {
   const data = await api<{ record?: BackendUnmatchedRecord }>(
     `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/outside-project`,
     {
       method: 'POST',
-      body: JSON.stringify({ actor: currentActor(), note }),
+      body: JSON.stringify({ expected_version: expectedVersion, note }),
     },
   )
   return mapUnmatchedRecord(data.record || {})
 }
 
-export async function deleteUnmatchedRecord(unmatchedId: string, reason = ''): Promise<UnmatchedRecord> {
+export async function deleteUnmatchedRecord(
+  unmatchedId: string,
+  expectedVersion: number,
+  reason = '',
+): Promise<UnmatchedRecord> {
   const data = await api<BackendUnmatchedRecord>(
     `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/delete`,
     {
       method: 'POST',
-      body: JSON.stringify({ actor: currentActor(), reason }),
+      body: JSON.stringify({ expected_version: expectedVersion, reason }),
     },
   )
   return mapUnmatchedRecord(data || {})
@@ -2019,6 +2035,7 @@ export async function deleteUnmatchedRecord(unmatchedId: string, reason = ''): P
 export async function rematchUnmatchedRecord(
   unmatchedId: string,
   payload: {
+    expectedVersion: number
     meterNo?: string
     oldMeterNo?: string
     terminal?: string
@@ -2030,7 +2047,7 @@ export async function rematchUnmatchedRecord(
     {
       method: 'POST',
       body: JSON.stringify({
-        actor: currentActor(),
+        expected_version: payload.expectedVersion,
         meter_no: payload.meterNo || '',
         old_meter_no: payload.oldMeterNo || '',
         terminal: payload.terminal || '',

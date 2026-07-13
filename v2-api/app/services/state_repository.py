@@ -1278,7 +1278,7 @@ def _unmatched_payload(record: UnmatchedRecord) -> dict[str, Any]:
         photo_urls = [item.strip() for item in re.split(r"[\r\n,]+", photo_urls) if item.strip()]
     if not isinstance(photo_urls, list):
         photo_urls = []
-    return {
+    result = {
         "unmatched_id": record.legacy_id,
         "record_type": record.record_type,
         "status": record.status,
@@ -1309,6 +1309,26 @@ def _unmatched_payload(record: UnmatchedRecord) -> dict[str, Any]:
         "temporary_review": payload.get("temporary_review") or {},
         "raw": payload,
     }
+    result["review_version"] = int(unmatched_review.build_review(result)["version"])
+    return result
+
+
+def _checked_unmatched_review(record: UnmatchedRecord, expected_version: int) -> dict[str, Any]:
+    review = unmatched_review.build_review(_unmatched_payload(record))
+    unmatched_review.require_version(review, expected_version)
+    return review
+
+
+def _advance_unmatched_review_payload(
+    raw: dict[str, Any],
+    review: dict[str, Any],
+    expected_version: int,
+) -> dict[str, Any]:
+    updated = deepcopy(review)
+    updated["version"] = expected_version + 1
+    updated["updated_at"] = datetime.now(UTC).isoformat()
+    raw["temporary_review"] = updated
+    return raw
 
 
 def _unmatched_duplicate_keys(records: list[UnmatchedRecord]) -> set[str]:
@@ -1516,6 +1536,7 @@ class StateRepository(ABC):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         updates: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
@@ -1527,17 +1548,32 @@ class StateRepository(ABC):
         *,
         actor: str,
         constructor: str,
+        expected_version: int = 1,
         note: str = "",
         due_date: str = "",
     ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
-    def unassign_unmatched_record(self, unmatched_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+    def unassign_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int = 1,
+        reason: str = "",
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
-    def mark_unmatched_outside_project(self, unmatched_id: str, *, actor: str, note: str = "") -> dict[str, Any]:
+    def mark_unmatched_outside_project(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int = 1,
+        note: str = "",
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -1546,6 +1582,7 @@ class StateRepository(ABC):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         meter_no: str = "",
         old_meter_no: str = "",
         terminal: str = "",
@@ -1651,6 +1688,7 @@ class StateRepository(ABC):
         order_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         updates: dict[str, Any] | None = None,
         note: str = "",
     ) -> dict[str, Any]:
@@ -1706,7 +1744,14 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def delete_unmatched_record(self, unmatched_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+    def delete_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int = 1,
+        reason: str = "",
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -1715,6 +1760,7 @@ class StateRepository(ABC):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         target_group_id: str = "",
         target_meter_no: str = "",
         updates: dict[str, Any] | None = None,
@@ -1727,6 +1773,7 @@ class StateRepository(ABC):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         terminal: str = "",
         updates: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2075,9 +2122,17 @@ class JsonStateRepository(StateRepository):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         updates: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {"record": local_simulation.update_unmatched_record(unmatched_id, actor=actor, updates=updates)}
+        return {
+            "record": local_simulation.update_unmatched_record(
+                unmatched_id,
+                actor=actor,
+                updates=updates,
+                expected_version=expected_version,
+            )
+        }
 
     def assign_unmatched_record(
         self,
@@ -2085,6 +2140,7 @@ class JsonStateRepository(StateRepository):
         *,
         actor: str,
         constructor: str,
+        expected_version: int = 1,
         note: str = "",
         due_date: str = "",
     ) -> dict[str, Any]:
@@ -2093,25 +2149,42 @@ class JsonStateRepository(StateRepository):
                 unmatched_id,
                 actor=actor,
                 constructor=constructor,
+                expected_version=expected_version,
                 note=note,
                 due_date=due_date,
             )
         }
 
-    def unassign_unmatched_record(self, unmatched_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+    def unassign_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int = 1,
+        reason: str = "",
+    ) -> dict[str, Any]:
         return {
             "record": local_simulation.unassign_unmatched_record(
                 unmatched_id,
                 actor=actor,
+                expected_version=expected_version,
                 reason=reason,
             )
         }
 
-    def mark_unmatched_outside_project(self, unmatched_id: str, *, actor: str, note: str = "") -> dict[str, Any]:
+    def mark_unmatched_outside_project(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int = 1,
+        note: str = "",
+    ) -> dict[str, Any]:
         return {
             "record": local_simulation.mark_unmatched_outside_project(
                 unmatched_id,
                 actor=actor,
+                expected_version=expected_version,
                 note=note,
             )
         }
@@ -2121,6 +2194,7 @@ class JsonStateRepository(StateRepository):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         meter_no: str = "",
         old_meter_no: str = "",
         terminal: str = "",
@@ -2129,6 +2203,7 @@ class JsonStateRepository(StateRepository):
         return local_simulation.rematch_unmatched_record(
             unmatched_id,
             actor=actor,
+            expected_version=expected_version,
             meter_no=meter_no,
             old_meter_no=old_meter_no,
             terminal=terminal,
@@ -2294,14 +2369,27 @@ class JsonStateRepository(StateRepository):
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
         return local_simulation.delete_group_photo(group_id, photo_id, reviewer)
 
-    def delete_unmatched_record(self, unmatched_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
-        return local_simulation.delete_unmatched_record(unmatched_id, actor=actor, reason=reason)
+    def delete_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int = 1,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        return local_simulation.delete_unmatched_record(
+            unmatched_id,
+            actor=actor,
+            expected_version=expected_version,
+            reason=reason,
+        )
 
     def associate_unmatched_record(
         self,
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         target_group_id: str = "",
         target_meter_no: str = "",
         updates: dict[str, Any] | None = None,
@@ -2309,6 +2397,7 @@ class JsonStateRepository(StateRepository):
         return local_simulation.associate_unmatched_record(
             unmatched_id,
             actor=actor,
+            expected_version=expected_version,
             target_group_id=target_group_id,
             target_meter_no=target_meter_no,
             updates=updates,
@@ -2319,12 +2408,14 @@ class JsonStateRepository(StateRepository):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         terminal: str = "",
         updates: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return local_simulation.create_group_from_unmatched_record(
             unmatched_id,
             actor=actor,
+            expected_version=expected_version,
             terminal=terminal,
             updates=updates,
         )
@@ -4239,6 +4330,7 @@ class PostgresStateRepository(StateRepository):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         updates: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         updates = updates or {}
@@ -4254,6 +4346,7 @@ class PostgresStateRepository(StateRepository):
             )
             if record is None:
                 raise KeyError(unmatched_id)
+            review = _checked_unmatched_review(record, expected_version)
             raw = dict(record.payload or {})
             for key in (
                 "barcode",
@@ -4277,7 +4370,8 @@ class PostgresStateRepository(StateRepository):
                         setattr(record, key, value)
                     else:
                         raw[key] = value
-            record.payload = {**raw, "updated_by": actor, "updated_at": datetime.now(UTC).isoformat()}
+            raw.update({"updated_by": actor, "updated_at": datetime.now(UTC).isoformat()})
+            record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
             session.commit()
             session.refresh(record)
             return {"record": _unmatched_payload(record)}
@@ -4288,6 +4382,7 @@ class PostgresStateRepository(StateRepository):
         *,
         actor: str,
         constructor: str,
+        expected_version: int = 1,
         note: str = "",
         due_date: str = "",
     ) -> dict[str, Any]:
@@ -4306,6 +4401,7 @@ class PostgresStateRepository(StateRepository):
             )
             if record is None:
                 raise KeyError(unmatched_id)
+            review = _checked_unmatched_review(record, expected_version)
             terminal = str(record.terminal or "").strip()
             if terminal:
                 task = session.scalar(
@@ -4342,12 +4438,19 @@ class PostgresStateRepository(StateRepository):
                     "field_task_type": "unmatched",
                 }
             )
-            record.payload = raw
+            record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
             session.commit()
             session.refresh(record)
             return {"record": _unmatched_payload(record)}
 
-    def unassign_unmatched_record(self, unmatched_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+    def unassign_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int = 1,
+        reason: str = "",
+    ) -> dict[str, Any]:
         with self._session() as session:
             record = session.scalar(
                 select(UnmatchedRecord)
@@ -4360,6 +4463,7 @@ class PostgresStateRepository(StateRepository):
             )
             if record is None:
                 raise KeyError(unmatched_id)
+            review = _checked_unmatched_review(record, expected_version)
             raw = dict(record.payload or {})
             raw.update(
                 {
@@ -4369,12 +4473,19 @@ class PostgresStateRepository(StateRepository):
                     "unassign_reason": reason.strip(),
                 }
             )
-            record.payload = raw
+            record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
             session.commit()
             session.refresh(record)
             return {"record": _unmatched_payload(record)}
 
-    def mark_unmatched_outside_project(self, unmatched_id: str, *, actor: str, note: str = "") -> dict[str, Any]:
+    def mark_unmatched_outside_project(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int = 1,
+        note: str = "",
+    ) -> dict[str, Any]:
         with self._session() as session:
             record = session.scalar(
                 select(UnmatchedRecord)
@@ -4387,6 +4498,7 @@ class PostgresStateRepository(StateRepository):
             )
             if record is None:
                 raise KeyError(unmatched_id)
+            review = _checked_unmatched_review(record, expected_version)
             raw = dict(record.payload or {})
             raw.update(
                 {
@@ -4397,7 +4509,7 @@ class PostgresStateRepository(StateRepository):
                     "field_task_type": "outside_project",
                 }
             )
-            record.payload = raw
+            record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
             session.commit()
             session.refresh(record)
             return {"record": _unmatched_payload(record)}
@@ -4407,6 +4519,7 @@ class PostgresStateRepository(StateRepository):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         meter_no: str = "",
         old_meter_no: str = "",
         terminal: str = "",
@@ -4428,7 +4541,12 @@ class PostgresStateRepository(StateRepository):
             updates["terminal"] = terminal
         if old_meter_no:
             updates["replacement_old_meter_no"] = old_meter_no
-        updated = self.update_unmatched_record(unmatched_id, actor=actor, updates=updates)["record"]
+        updated = self.update_unmatched_record(
+            unmatched_id,
+            actor=actor,
+            expected_version=expected_version,
+            updates=updates,
+        )["record"]
         reference = old_meter_no or meter_no or str(updated.get("meter_no") or updated.get("barcode") or "")
         match_key = local_simulation.build_total_catalog_match_key(reference) or reference
         with self._session() as session:
@@ -4455,6 +4573,7 @@ class PostgresStateRepository(StateRepository):
         associated = self.associate_unmatched_record(
             unmatched_id,
             actor=actor,
+            expected_version=int(updated["review_version"]),
             target_group_id=str(target.legacy_id),
             updates=associate_updates,
         )
@@ -5491,23 +5610,33 @@ class PostgresStateRepository(StateRepository):
         session.flush()
         return task
 
-    def delete_unmatched_record(self, unmatched_id: str, *, actor: str, reason: str = "") -> dict[str, Any]:
+    def delete_unmatched_record(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        expected_version: int = 1,
+        reason: str = "",
+    ) -> dict[str, Any]:
         with self._session() as session:
             record = session.scalar(
-                select(UnmatchedRecord).where(
+                select(UnmatchedRecord)
+                .where(
                     UnmatchedRecord.team_id == local_simulation.current_team_id(),
                     UnmatchedRecord.legacy_id == unmatched_id,
                     UnmatchedRecord.status == "open",
                 )
+                .with_for_update()
             )
             if record is None:
                 raise KeyError(unmatched_id)
-            payload = _unmatched_payload(record)
+            review = _checked_unmatched_review(record, expected_version)
             raw = dict(record.payload or {})
             raw["deleted_by"] = actor
             raw["delete_reason"] = reason
             raw["deleted_at"] = datetime.now(UTC).isoformat()
-            record.payload = raw
+            record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
+            payload = _unmatched_payload(record)
             record.status = "deleted"
             session.commit()
             return payload
@@ -5525,6 +5654,7 @@ class PostgresStateRepository(StateRepository):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         target_group_id: str = "",
         target_meter_no: str = "",
         updates: dict[str, Any] | None = None,
@@ -5541,6 +5671,7 @@ class PostgresStateRepository(StateRepository):
             )
             if record is None:
                 raise KeyError(unmatched_id)
+            review = _checked_unmatched_review(record, expected_version)
             group_statement = select(MaterialGroup).where(MaterialGroup.team_id == record.team_id)
             if target_group_id:
                 group_statement = group_statement.where(MaterialGroup.legacy_id == target_group_id)
@@ -5583,7 +5714,12 @@ class PostgresStateRepository(StateRepository):
                 source="unmatched-associate",
             )
             record.status = "associated"
-            record.payload = {**(record.payload or {}), "associated_by": actor, "associated_group_id": group.legacy_id}
+            record_raw = {
+                **(record.payload or {}),
+                "associated_by": actor,
+                "associated_group_id": group.legacy_id,
+            }
+            record.payload = _advance_unmatched_review_payload(record_raw, review, expected_version)
             session.commit()
             session.refresh(group)
             return {
@@ -5600,19 +5736,23 @@ class PostgresStateRepository(StateRepository):
         unmatched_id: str,
         *,
         actor: str,
+        expected_version: int = 1,
         terminal: str = "",
         updates: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._session() as session:
             record = session.scalar(
-                select(UnmatchedRecord).where(
+                select(UnmatchedRecord)
+                .where(
                     UnmatchedRecord.team_id == local_simulation.current_team_id(),
                     UnmatchedRecord.legacy_id == unmatched_id,
                     UnmatchedRecord.status == "open",
                 )
+                .with_for_update()
             )
             if record is None:
                 raise KeyError(unmatched_id)
+            _checked_unmatched_review(record, expected_version)
             payload = {**_unmatched_payload(record), **(updates or {})}
         created = self.create_empty_group_for_terminal(
             terminal=terminal or str(payload.get("terminal") or ""),
@@ -5624,6 +5764,7 @@ class PostgresStateRepository(StateRepository):
         associated = self.associate_unmatched_record(
             unmatched_id,
             actor=actor,
+            expected_version=expected_version,
             target_group_id=str(created.get("group", {}).get("id") or ""),
             updates=updates,
         )

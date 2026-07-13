@@ -1612,6 +1612,7 @@ def ensure_unmatched_record(record: dict[str, Any]) -> dict[str, Any]:
     item["unmatched_id"] = str(item.get("unmatched_id") or make_unmatched_id(item))
     item["record_type"] = str(item.get("record_type") or "scan")
     item["created_at"] = str(item.get("created_at") or now_iso())
+    item["review_version"] = int(unmatched_review.build_review(item)["version"])
     item["text_index"] = build_record_text_index(item)
     return item
 
@@ -2141,13 +2142,19 @@ def confirm_unmatched_review(
     raise KeyError(unmatched_id)
 
 
-def delete_unmatched_record(unmatched_id: str, actor: str, reason: str = "") -> dict[str, Any]:
+def delete_unmatched_record(
+    unmatched_id: str,
+    actor: str,
+    reason: str = "",
+    expected_version: int = 1,
+) -> dict[str, Any]:
     state = get_state()
     kept = []
     deleted = None
     for record in state.get("scan_unmatched", []):
         item = ensure_unmatched_record(record)
         if item["unmatched_id"] == unmatched_id:
+            unmatched_review.advance_record_version(item, expected_version)
             deleted = item
         else:
             kept.append(item)
@@ -2207,6 +2214,7 @@ def update_unmatched_record(
     unmatched_id: str,
     actor: str,
     updates: dict[str, Any] | None = None,
+    expected_version: int = 1,
 ) -> dict[str, Any]:
     state = get_state()
     updates = updates or {}
@@ -2214,6 +2222,7 @@ def update_unmatched_record(
         item = ensure_unmatched_record(record)
         if item["unmatched_id"] != unmatched_id:
             continue
+        unmatched_review.advance_record_version(item, expected_version)
         for key in UNMATCHED_EDIT_FIELDS:
             if key in updates:
                 item[key] = str(updates.get(key) or "").strip()
@@ -2235,6 +2244,7 @@ def assign_unmatched_record(
     constructor: str,
     note: str = "",
     due_date: str = "",
+    expected_version: int = 1,
 ) -> dict[str, Any]:
     constructor = constructor.strip()
     if not constructor:
@@ -2245,6 +2255,7 @@ def assign_unmatched_record(
         {
             "assignment_note": note,
         },
+        expected_version=expected_version,
     )
     terminal = str(record.get("terminal") or "").strip()
     if terminal:
@@ -2274,12 +2285,18 @@ def assign_unmatched_record(
     return record
 
 
-def unassign_unmatched_record(unmatched_id: str, actor: str, reason: str = "") -> dict[str, Any]:
+def unassign_unmatched_record(
+    unmatched_id: str,
+    actor: str,
+    reason: str = "",
+    expected_version: int = 1,
+) -> dict[str, Any]:
     state = get_state()
     for index, record in enumerate(state.get("scan_unmatched", [])):
         item = ensure_unmatched_record(record)
         if item["unmatched_id"] != unmatched_id:
             continue
+        unmatched_review.advance_record_version(item, expected_version)
         previous = item.get("assigned_to") or ""
         item["assigned_to"] = ""
         item["unassigned_by"] = actor
@@ -2296,12 +2313,18 @@ def unassign_unmatched_record(unmatched_id: str, actor: str, reason: str = "") -
     raise KeyError(unmatched_id)
 
 
-def mark_unmatched_outside_project(unmatched_id: str, actor: str, note: str = "") -> dict[str, Any]:
+def mark_unmatched_outside_project(
+    unmatched_id: str,
+    actor: str,
+    note: str = "",
+    expected_version: int = 1,
+) -> dict[str, Any]:
     state = get_state()
     for index, record in enumerate(state.get("scan_unmatched", [])):
         item = ensure_unmatched_record(record)
         if item["unmatched_id"] != unmatched_id:
             continue
+        unmatched_review.advance_record_version(item, expected_version)
         item["project_outside"] = True
         item["project_outside_by"] = actor
         item["project_outside_at"] = now_iso()
@@ -2345,6 +2368,7 @@ def rematch_unmatched_record(
     old_meter_no: str = "",
     terminal: str = "",
     updates: dict[str, Any] | None = None,
+    expected_version: int = 1,
 ) -> dict[str, Any]:
     merged_updates = dict(updates or {})
     if meter_no:
@@ -2357,7 +2381,12 @@ def rematch_unmatched_record(
         merged_updates["replacement_old_meter_no"] = old_meter_no
         merged_updates["replacement_by"] = actor
         merged_updates["replacement_at"] = now_iso()
-    record = update_unmatched_record(unmatched_id, actor, merged_updates)
+    record = update_unmatched_record(
+        unmatched_id,
+        actor,
+        merged_updates,
+        expected_version=expected_version,
+    )
     target = find_group_by_meter_reference(old_meter_no or meter_no or record.get("meter_no") or record.get("barcode"), terminal or record.get("terminal", ""))
     if target is None and not terminal:
         target = find_group_by_meter_reference(old_meter_no or meter_no or record.get("meter_no") or record.get("barcode"), "")
@@ -2382,6 +2411,7 @@ def rematch_unmatched_record(
         actor,
         target_group_id=str(target.get("id") or ""),
         updates=associate_updates,
+        expected_version=int(record["review_version"]),
     )
     associated["matched"] = True
     associated["replacement_old_meter_no"] = old_meter_no
@@ -2394,11 +2424,13 @@ def associate_unmatched_record(
     target_group_id: str = "",
     target_meter_no: str = "",
     updates: dict[str, Any] | None = None,
+    expected_version: int = 1,
 ) -> dict[str, Any]:
     state = get_state()
     record = get_unmatched_record(unmatched_id)
     if record is None:
         raise KeyError(unmatched_id)
+    unmatched_review.require_version(unmatched_review.build_review(record), expected_version)
     group = None
     if target_group_id:
         group = get_group(target_group_id)
@@ -2412,7 +2444,12 @@ def associate_unmatched_record(
     payload["meter_no"] = group["meter_no"]
     payload["terminal"] = group["terminal"]
     result = apply_synced_scan_records([payload])
-    delete_unmatched_record(unmatched_id, actor, "associated to data group")
+    delete_unmatched_record(
+        unmatched_id,
+        actor,
+        "associated to data group",
+        expected_version=expected_version,
+    )
     append_audit_event(
         "associate_unmatched",
         actor,
@@ -2557,6 +2594,7 @@ def create_group_from_unmatched_record(
     actor: str,
     terminal: str,
     updates: dict[str, Any] | None = None,
+    expected_version: int = 1,
 ) -> dict[str, Any]:
     terminal = terminal.strip()
     if not terminal:
@@ -2565,6 +2603,7 @@ def create_group_from_unmatched_record(
     record = get_unmatched_record(unmatched_id)
     if record is None:
         raise KeyError(unmatched_id)
+    unmatched_review.require_version(unmatched_review.build_review(record), expected_version)
 
     payload = normalize_unmatched_photo_payload(record, updates or {})
     meter_no = str(payload.get("meter_no") or payload.get("barcode") or payload.get("meter_match_key") or unmatched_id)
@@ -2579,7 +2618,12 @@ def create_group_from_unmatched_record(
         existing_group["task_id"] = task["id"]
         if payload.get("address"):
             existing_group["address"] = str(payload.get("address") or "")
-        delete_unmatched_record(unmatched_id, actor, "attached to existing terminal data group")
+        delete_unmatched_record(
+            unmatched_id,
+            actor,
+            "attached to existing terminal data group",
+            expected_version=expected_version,
+        )
         append_audit_event(
             "attach_unmatched_to_existing_group",
             actor,
@@ -2615,7 +2659,12 @@ def create_group_from_unmatched_record(
         "source_unmatched_id": unmatched_id,
     }
     state["groups"].append(group)
-    delete_unmatched_record(unmatched_id, actor, "created data group for terminal")
+    delete_unmatched_record(
+        unmatched_id,
+        actor,
+        "created data group for terminal",
+        expected_version=expected_version,
+    )
     append_audit_event(
         "create_group_from_unmatched",
         actor,
