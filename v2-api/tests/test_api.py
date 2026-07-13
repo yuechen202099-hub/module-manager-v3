@@ -351,6 +351,48 @@ def test_unmatched_rescan_accepts_json_category_and_rejects_invalid(monkeypatch)
     assert [call for call in repository.calls if call["method"] == "rescan"] == rescan_calls
 
 
+def test_unmatched_rescan_version_conflict_returns_409_without_persisting(monkeypatch) -> None:
+    class ConflictRepository(FakeUnmatchedReviewRepository):
+        def rescan_unmatched_review_photo(
+            self,
+            unmatched_id: str,
+            photo_id: str,
+            *,
+            actor: str,
+            category: str = "",
+        ) -> dict:
+            self.calls.append(
+                {
+                    "method": "rescan",
+                    "actor": actor,
+                    "photo_id": photo_id,
+                    "category": category,
+                }
+            )
+            raise unmatched_review.ReviewVersionConflict("stale rescan snapshot")
+
+    repository = ConflictRepository()
+    review_before = deepcopy(repository.review)
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    response = client.post(
+        "/local-test/unmatched/unmatched-1/photos/photo-1/rescan",
+        json={"category": "collector_barcode"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "stale rescan snapshot"
+    assert repository.review == review_before
+    assert repository.calls == [
+        {
+            "method": "rescan",
+            "actor": "local-reviewer",
+            "photo_id": "photo-1",
+            "category": "collector_barcode",
+        }
+    ]
+
+
 def test_production_unmatched_review_routes_use_postgres_repository_transactions(
     monkeypatch,
     tmp_path,

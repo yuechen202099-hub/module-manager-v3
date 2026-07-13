@@ -1923,6 +1923,8 @@ def rescan_unmatched_review_photo(
             actor=actor,
             category=payload.category,
         )
+    except unmatched_review.ReviewVersionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched photo not found") from exc
     except ValueError as exc:
