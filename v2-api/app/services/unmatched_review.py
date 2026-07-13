@@ -10,10 +10,124 @@ from app.services.matching import build_total_catalog_match_key
 REVIEW_SCHEMA_VERSION = 1
 REVIEW_METADATA_FIELDS = {"meter_no", "collector", "module_asset_no"}
 PHOTO_UPDATE_FIELDS = {"category"}
+INVALID_TERMINALS = {"", "00000000"}
+PHOTO_EVIDENCE_FIELDS = (
+    "barcode_check_status",
+    "barcode_check_expected_type",
+    "barcode_check_values",
+    "barcode_check_normalized_values",
+    "barcode_check_ocr_values",
+    "barcode_check_ocr_normalized_values",
+    "barcode_check_expected_values",
+    "barcode_check_matched_value",
+    "barcode_checked_at",
+    "barcode_check_method",
+    "barcode_check_error",
+    "barcode_rescanned_by",
+    "barcode_rescanned_at",
+    "qr_values",
+    "qr_normalized_values",
+    "ocr_values",
+    "ocr_normalized_values",
+)
 
 
 class ReviewVersionConflict(ValueError):
     pass
+
+
+def review_meter_match_key(record: dict[str, Any], review: dict[str, Any]) -> str:
+    meter_no = str(review.get("meter_no") or record.get("meter_no") or "").strip()
+    if not meter_no:
+        return ""
+    try:
+        return build_total_catalog_match_key(meter_no)
+    except ValueError:
+        return ""
+
+
+def build_match_candidates(
+    record: dict[str, Any],
+    review: dict[str, Any],
+    catalog_rows: list[dict[str, Any]],
+    groups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    meter_key = review_meter_match_key(record, review)
+    if not meter_key:
+        return []
+
+    groups_by_terminal: dict[str, dict[str, Any]] = {}
+    for group in sorted(groups, key=lambda item: str(item.get("id") or item.get("legacy_id") or "")):
+        terminal = str(group.get("terminal") or "").strip()
+        if terminal not in INVALID_TERMINALS:
+            groups_by_terminal.setdefault(terminal, group)
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for row in catalog_rows:
+        row_meter = str(row.get("meter_no") or row.get("meter_match_key") or "").strip()
+        try:
+            row_key = build_total_catalog_match_key(row_meter)
+        except ValueError:
+            continue
+        if row_key != meter_key:
+            continue
+        terminal = str(row.get("terminal") or "").strip()
+        if terminal in INVALID_TERMINALS:
+            continue
+        target_group = groups_by_terminal.get(terminal) or {}
+        catalog_id = str(row.get("id") or row.get("legacy_id") or meter_key)
+        candidate_key = f"catalog:{catalog_id}:{terminal}"
+        reasons = ["表号精确匹配"]
+        review_collector = str(review.get("collector") or "").strip()
+        if review_collector and review_collector == str(row.get("collector") or "").strip():
+            reasons.append("采集器号一致")
+        review_module = str(review.get("module_asset_no") or "").strip()
+        row_modules = {
+            str(row.get("module_asset_no") or "").strip(),
+            str(row.get("asset_no") or "").strip(),
+        }
+        if review_module and review_module in row_modules:
+            reasons.append("模块号一致")
+        candidates[candidate_key] = {
+            "candidate_key": candidate_key,
+            "catalog_row_id": catalog_id,
+            "target_group_id": str(target_group.get("id") or target_group.get("legacy_id") or ""),
+            "terminal": terminal,
+            "meter_no": str(row.get("meter_no") or review.get("meter_no") or ""),
+            "meter_match_key": meter_key,
+            "address": str(row.get("address") or row.get("installation_address") or ""),
+            "match_reasons": reasons,
+        }
+    return sorted(
+        candidates.values(),
+        key=lambda item: (-len(item["match_reasons"]), item["terminal"], item["candidate_key"]),
+    )
+
+
+def require_version(review: dict[str, Any], expected_version: int) -> None:
+    if int(review.get("version") or 0) != expected_version:
+        raise ReviewVersionConflict("Unmatched review was updated by another user")
+
+
+def migrate_review_to_photo_rows(review: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for photo in review.get("photos") or []:
+        source_url = str(photo.get("source_url") or "")
+        row = {
+            "url": source_url,
+            "image_url": source_url,
+            "source_url": source_url,
+            "source_fingerprint": str(photo.get("id") or ""),
+            "category": photo.get("category") or "unclassified",
+            "temporary_review_manual_confirmed": bool(review.get("manual_confirmed")),
+            "temporary_review_reviewer": review.get("reviewer") or "",
+            "temporary_review_reviewed_at": review.get("reviewed_at") or "",
+        }
+        for key in PHOTO_EVIDENCE_FIELDS:
+            if key in photo:
+                row[key] = copy.deepcopy(photo[key])
+        rows.append(row)
+    return rows
 
 
 def normalized_photo_urls(record: dict[str, Any]) -> list[str]:

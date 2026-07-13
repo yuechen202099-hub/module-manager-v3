@@ -33,7 +33,7 @@ from app.models import (
     UnmatchedRecord,
 )
 from app.services import account_store
-from app.services import local_simulation, photo_barcode_check
+from app.services import local_simulation, photo_barcode_check, unmatched_review
 
 
 logger = logging.getLogger(__name__)
@@ -691,6 +691,9 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
         "barcode_checked_at",
         "barcode_check_error",
         "barcode_check_method",
+        "temporary_review_manual_confirmed",
+        "temporary_review_reviewer",
+        "temporary_review_reviewed_at",
     ):
         if key in raw:
             payload[key] = raw[key]
@@ -1026,6 +1029,14 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
         "replacement_new_meter_no",
         "replacement_by",
         "replacement_at",
+        "source_unmatched_id",
+        "group_barcode_check_status",
+        "group_barcode_missing_fields",
+        "group_barcode_missing_expected_fields",
+        "group_barcode_expected_values",
+        "group_barcode_detected_values",
+        "group_barcode_matched_fields",
+        "group_barcode_unmatched_values",
     ):
         if key in raw and key not in payload:
             payload[key] = raw[key]
@@ -1304,6 +1315,7 @@ def _unmatched_payload(record: UnmatchedRecord) -> dict[str, Any]:
         "replacement_target_group_id": payload.get("replacement_target_group_id") or "",
         "field_task_type": payload.get("field_task_type") or "",
         "source_file": payload.get("source_file") or "",
+        "temporary_review": payload.get("temporary_review") or {},
         "raw": payload,
     }
 
@@ -1442,6 +1454,21 @@ class StateRepository(ABC):
 
     @abstractmethod
     def get_unmatched_review(self, unmatched_id: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_unmatched_match_candidates(self, unmatched_id: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def finalize_unmatched_match(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        candidate_key: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -1972,6 +1999,24 @@ class JsonStateRepository(StateRepository):
 
     def get_unmatched_review(self, unmatched_id: str) -> dict[str, Any]:
         return local_simulation.get_unmatched_review(unmatched_id)
+
+    def list_unmatched_match_candidates(self, unmatched_id: str) -> dict[str, Any]:
+        return local_simulation.list_unmatched_match_candidates(unmatched_id)
+
+    def finalize_unmatched_match(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        candidate_key: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        return local_simulation.finalize_unmatched_match(
+            unmatched_id,
+            actor=actor,
+            candidate_key=candidate_key,
+            expected_version=expected_version,
+        )
 
     def save_unmatched_review(
         self,
@@ -3588,6 +3633,273 @@ class PostgresStateRepository(StateRepository):
 
     def get_unmatched_review(self, unmatched_id: str) -> dict[str, Any]:
         raise NotImplementedError("Unmatched temporary reviews are not available in the PostgreSQL repository")
+
+    def _unmatched_match_candidates_for_session(
+        self,
+        session: Session,
+        record: UnmatchedRecord,
+        review: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        record_payload = _unmatched_payload(record)
+        meter_key = unmatched_review.review_meter_match_key(record_payload, review)
+        if not meter_key:
+            return []
+        catalog_rows = list(
+            session.scalars(
+                select(TotalCatalogRow).where(
+                    TotalCatalogRow.team_id == record.team_id,
+                    TotalCatalogRow.meter_match_key == meter_key,
+                )
+            ).all()
+        )
+        catalog_payloads = [_catalog_row_payload(row) for row in catalog_rows]
+        terminals = sorted(
+            {
+                str(row.get("terminal") or "").strip()
+                for row in catalog_payloads
+                if str(row.get("terminal") or "").strip() not in unmatched_review.INVALID_TERMINALS
+            }
+        )
+        groups = []
+        if terminals:
+            groups = list(
+                session.scalars(
+                    select(MaterialGroup).where(
+                        MaterialGroup.team_id == record.team_id,
+                        MaterialGroup.terminal.in_(terminals),
+                    )
+                ).all()
+            )
+        group_payloads = [
+            {
+                "id": str(group.legacy_id or group.id),
+                "terminal": str(group.terminal or ""),
+            }
+            for group in groups
+        ]
+        return unmatched_review.build_match_candidates(
+            record_payload,
+            review,
+            catalog_payloads,
+            group_payloads,
+        )
+
+    def list_unmatched_match_candidates(self, unmatched_id: str) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            record = session.scalar(
+                select(UnmatchedRecord).where(
+                    UnmatchedRecord.team_id == team_id,
+                    UnmatchedRecord.legacy_id == unmatched_id,
+                    UnmatchedRecord.status == "open",
+                )
+            )
+            if record is None:
+                raise KeyError(unmatched_id)
+            review = unmatched_review.build_review(_unmatched_payload(record))
+            candidates = self._unmatched_match_candidates_for_session(session, record, review)
+            return {"total": len(candidates), "items": candidates}
+
+    def _resolve_unmatched_candidate(
+        self,
+        session: Session,
+        record: UnmatchedRecord,
+        review: dict[str, Any],
+        candidate_key: str,
+    ) -> dict[str, Any]:
+        candidates = self._unmatched_match_candidates_for_session(session, record, review)
+        candidate = next((item for item in candidates if item["candidate_key"] == candidate_key), None)
+        if candidate is None:
+            raise ValueError("Selected candidate is invalid or unavailable")
+        if str(candidate.get("terminal") or "").strip() in unmatched_review.INVALID_TERMINALS:
+            raise ValueError("Selected candidate has an invalid terminal")
+        return candidate
+
+    def _materialize_unmatched_candidate(
+        self,
+        session: Session,
+        record: UnmatchedRecord,
+        review: dict[str, Any],
+        candidate: dict[str, Any],
+        actor: str,
+    ) -> tuple[MaterialGroup, bool]:
+        terminal = str(candidate.get("terminal") or "").strip()
+        meter_no = str(candidate.get("meter_no") or "").strip()
+        meter_key = str(candidate.get("meter_match_key") or "").strip()
+        if terminal in unmatched_review.INVALID_TERMINALS:
+            raise ValueError("Selected candidate has an invalid terminal")
+        if not meter_no or not meter_key:
+            raise ValueError("Selected candidate has an invalid meter")
+
+        target_group_id = str(candidate.get("target_group_id") or "").strip()
+        group = None
+        if target_group_id:
+            group = session.scalar(
+                select(MaterialGroup)
+                .where(
+                    MaterialGroup.team_id == record.team_id,
+                    MaterialGroup.legacy_id == target_group_id,
+                )
+                .with_for_update()
+            )
+            if group is None:
+                raise ValueError("Selected candidate target group is unavailable")
+        else:
+            group = session.scalar(
+                select(MaterialGroup)
+                .where(MaterialGroup.team_id == record.team_id, MaterialGroup.terminal == terminal)
+                .limit(1)
+                .with_for_update()
+            )
+
+        attached = group is not None
+        task = self._ensure_task_for_terminal(session, record.team_id, terminal)
+        catalog_row_id = None
+        try:
+            catalog_row_id = UUID(str(candidate.get("catalog_row_id") or ""))
+        except ValueError:
+            pass
+        if group is None:
+            project_id = self._project_id_for_team(session, record.team_id)
+            group = MaterialGroup(
+                team_id=record.team_id,
+                project_id=project_id,
+                total_catalog_row_id=catalog_row_id,
+                legacy_id=f"unmatched-{record.legacy_id}"[:128],
+                legacy_task_id=task.legacy_id,
+                task_id=task.id,
+                terminal=terminal,
+                meter_match_key=meter_key,
+                display_meter_no=meter_no,
+                installation_address=str(candidate.get("address") or ""),
+                status=GroupStatus.INCOMPLETE,
+                photo_count=0,
+                raw_data={
+                    "manual_created": False,
+                    "created_by": actor,
+                    "source_unmatched_id": record.legacy_id,
+                    "status": "incomplete",
+                    "stage_terminal": terminal,
+                },
+            )
+            session.add(group)
+            session.flush()
+        else:
+            group.total_catalog_row_id = catalog_row_id or group.total_catalog_row_id
+            group.legacy_task_id = task.legacy_id
+            group.task_id = task.id
+            group.terminal = terminal
+            group.meter_match_key = meter_key
+            group.display_meter_no = meter_no
+            group.installation_address = str(candidate.get("address") or "")
+
+        raw = dict(group.raw_data or {})
+        raw.update(
+            {
+                "source_unmatched_id": record.legacy_id,
+                "meter_no": meter_no,
+                "meter_match_key": meter_key,
+                "collector": str(review.get("collector") or ""),
+                "module_asset_no": str(review.get("module_asset_no") or ""),
+                "asset_no": str(review.get("module_asset_no") or ""),
+                "stage_terminal": terminal,
+            }
+        )
+        for key in (
+            "group_barcode_manual_confirmed",
+            "group_barcode_manual_confirmed_fields",
+            "group_barcode_manual_confirmed_by",
+            "group_barcode_manual_confirmed_at",
+        ):
+            raw.pop(key, None)
+        group.raw_data = raw
+        self._add_photo_records_to_group(
+            session,
+            group,
+            actor=actor,
+            photos=unmatched_review.migrate_review_to_photo_rows(review),
+            collector=str(review.get("collector") or ""),
+            module_asset_no=str(review.get("module_asset_no") or ""),
+            creator=str(review.get("reviewer") or actor),
+            source="unmatched-review-finalize",
+        )
+        photos = list(
+            session.scalars(
+                select(Photo).where(
+                    Photo.team_id == group.team_id,
+                    Photo.group_id == group.id,
+                    Photo.is_active.is_(True),
+                )
+            ).all()
+        )
+        formal_check = photo_barcode_check.build_group_barcode_check(_group_barcode_payload(group, photos))
+        raw = dict(group.raw_data or {})
+        raw.update(formal_check)
+        group.raw_data = raw
+        session.flush()
+        return group, attached
+
+    def finalize_unmatched_match(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        candidate_key: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            try:
+                record = session.scalar(
+                    select(UnmatchedRecord)
+                    .where(
+                        UnmatchedRecord.team_id == team_id,
+                        UnmatchedRecord.legacy_id == unmatched_id,
+                        UnmatchedRecord.status == "open",
+                    )
+                    .with_for_update()
+                )
+                if record is None:
+                    raise KeyError(unmatched_id)
+                review = unmatched_review.build_review(_unmatched_payload(record))
+                unmatched_review.require_version(review, expected_version)
+                candidate = self._resolve_unmatched_candidate(session, record, review, candidate_key)
+                group, attached = self._materialize_unmatched_candidate(
+                    session,
+                    record,
+                    review,
+                    candidate,
+                    actor,
+                )
+                record.status = "associated"
+                record.payload = {
+                    **(record.payload or {}),
+                    "temporary_review": review,
+                    "associated_by": actor,
+                    "associated_group_id": group.legacy_id,
+                }
+                session.add(
+                    AuditLog(
+                        team_id=team_id,
+                        legacy_id=f"unmatched-review-finalized-{uuid4()}",
+                        actor_username=actor,
+                        action="unmatched_review_finalized",
+                        entity_type="unmatched_record",
+                        entity_id=None,
+                        before_data={"unmatched_id": unmatched_id, "review_version": expected_version},
+                        after_data={"group_id": group.legacy_id, "terminal": candidate["terminal"]},
+                        payload={"candidate_key": candidate_key, "attached": attached},
+                    )
+                )
+                result = {
+                    "group": _group_payload(session, group),
+                    "attached": attached,
+                }
+                session.commit()
+                return result
+            except Exception:
+                session.rollback()
+                raise
 
     def save_unmatched_review(
         self,
@@ -5839,6 +6151,29 @@ class DualWriteStateRepository(JsonStateRepository):
     def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:
         result = super().dedupe_unmatched_records(actor=actor)
         self._mirror_write("dedupe_unmatched_records", actor=actor)
+        return result
+
+    def finalize_unmatched_match(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        candidate_key: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        result = super().finalize_unmatched_match(
+            unmatched_id,
+            actor=actor,
+            candidate_key=candidate_key,
+            expected_version=expected_version,
+        )
+        self._mirror_write(
+            "finalize_unmatched_match",
+            unmatched_id,
+            actor=actor,
+            candidate_key=candidate_key,
+            expected_version=expected_version,
+        )
         return result
 
     def review_group(

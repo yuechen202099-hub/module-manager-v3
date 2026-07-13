@@ -1617,6 +1617,165 @@ def get_unmatched_review(unmatched_id: str) -> dict[str, Any]:
     return {"record": copy.deepcopy(record), "review": copy.deepcopy(review)}
 
 
+def list_unmatched_match_candidates(unmatched_id: str) -> dict[str, Any]:
+    record = get_unmatched_record(unmatched_id)
+    if record is None:
+        raise KeyError(unmatched_id)
+    review = unmatched_review.build_review(record)
+    state = get_state()
+    candidates = unmatched_review.build_match_candidates(
+        record,
+        review,
+        list(state.get("total_catalog") or []),
+        list(state.get("groups") or []),
+    )
+    return {"total": len(candidates), "items": copy.deepcopy(candidates)}
+
+
+def _formal_photos_from_unmatched_review(
+    review: dict[str, Any],
+    candidate: dict[str, Any],
+    group_id: str,
+) -> list[dict[str, Any]]:
+    photos = []
+    for index, migrated in enumerate(unmatched_review.migrate_review_to_photo_rows(review), start=1):
+        source_url = str(migrated.get("source_url") or "")
+        row = {
+            "row_number": f"unmatched-{review.get('unmatched_id')}-{index}",
+            "barcode": str(review.get("meter_no") or candidate.get("meter_no") or ""),
+            "meter_match_key": str(candidate.get("meter_match_key") or ""),
+            "source_file": "unmatched-review-finalize",
+            "collector": str(review.get("collector") or ""),
+            "asset_no": str(review.get("module_asset_no") or ""),
+            "asset_type": "module",
+            "creator": str(review.get("reviewer") or ""),
+            "created_at": str(review.get("reviewed_at") or review.get("updated_at") or ""),
+            "has_image": bool(source_url),
+            "image_url": source_url,
+            "source_url": source_url,
+            "source_fingerprint": str(migrated.get("source_fingerprint") or ""),
+        }
+        photo = build_photo_record(index, row)
+        photo.update(copy.deepcopy(migrated))
+        photo["id"] = f"p-{group_id}-unmatched-{index}"
+        photo["image_url"] = source_url
+        photo["source_url"] = source_url
+        photo["category_label"] = PHOTO_CATEGORIES.get(
+            str(photo.get("category") or "unclassified"),
+            PHOTO_CATEGORIES["unclassified"],
+        )
+        photos.append(photo)
+    return photos
+
+
+def _apply_formal_group_barcode_check(group: dict[str, Any]) -> None:
+    group["group_barcode_manual_confirmed"] = False
+    group["group_barcode_manual_confirmed_fields"] = []
+    group["group_barcode_manual_confirmed_by"] = ""
+    group["group_barcode_manual_confirmed_at"] = ""
+    group.update(photo_barcode_check.build_group_barcode_check(group))
+
+
+def finalize_unmatched_match(
+    unmatched_id: str,
+    *,
+    actor: str,
+    candidate_key: str,
+    expected_version: int,
+) -> dict[str, Any]:
+    state = get_state()
+    record = get_unmatched_record(unmatched_id)
+    if record is None:
+        raise KeyError(unmatched_id)
+    review = unmatched_review.build_review(record)
+    unmatched_review.require_version(review, expected_version)
+    candidates = list_unmatched_match_candidates(unmatched_id)["items"]
+    candidate = next((item for item in candidates if item["candidate_key"] == candidate_key), None)
+    if candidate is None:
+        raise ValueError("Selected candidate is invalid or unavailable")
+    terminal = str(candidate.get("terminal") or "").strip()
+    if terminal in unmatched_review.INVALID_TERMINALS:
+        raise ValueError("Selected candidate has an invalid terminal")
+
+    target_group_id = str(candidate.get("target_group_id") or "")
+    group = get_group(target_group_id) if target_group_id else None
+    attached = group is not None
+    task = ensure_task_for_terminal(terminal)
+    if group is None:
+        group = {
+            "id": next_group_id(),
+            "task_id": task["id"],
+            "meter_match_key": str(candidate.get("meter_match_key") or ""),
+            "meter_no": str(candidate.get("meter_no") or ""),
+            "terminal": terminal,
+            "address": str(candidate.get("address") or ""),
+            "stage_meter_no": "",
+            "stage_terminal": terminal,
+            "status": "incomplete",
+            "reviewer": None,
+            "review_note": "",
+            "exception_note": "",
+            "reviewed_at": None,
+            "photo_count": 0,
+            "photos": [],
+            "manual_created": False,
+        }
+        state["groups"].append(group)
+    else:
+        group["task_id"] = task["id"]
+        group["terminal"] = terminal
+        group["stage_terminal"] = terminal
+        group["meter_no"] = str(candidate.get("meter_no") or "")
+        group["meter_match_key"] = str(candidate.get("meter_match_key") or "")
+        group["address"] = str(candidate.get("address") or "")
+
+    group["source_unmatched_id"] = unmatched_id
+    group["collector"] = str(review.get("collector") or "")
+    group["module_asset_no"] = str(review.get("module_asset_no") or "")
+    group["asset_no"] = str(review.get("module_asset_no") or "")
+    migrated_photos = _formal_photos_from_unmatched_review(review, candidate, str(group["id"]))
+    existing_keys = {make_photo_unique_key(photo) for photo in group.get("photos") or []}
+    added = 0
+    for photo in migrated_photos:
+        key = make_photo_unique_key(photo)
+        if key in existing_keys:
+            continue
+        group.setdefault("photos", []).append(photo)
+        existing_keys.add(key)
+        added += 1
+    group["photo_count"] = len(group.get("photos") or [])
+    group["status"] = "pending" if group["photo_count"] >= 4 else "incomplete"
+    group["reviewer"] = None
+    group["reviewed_at"] = None
+    _apply_formal_group_barcode_check(group)
+
+    state["scan_unmatched"] = [
+        item
+        for item in state.get("scan_unmatched", [])
+        if ensure_unmatched_record(item)["unmatched_id"] != unmatched_id
+    ]
+    append_audit_event(
+        "unmatched_review_finalized",
+        actor,
+        {
+            "unmatched_id": unmatched_id,
+            "review_version": expected_version,
+            "candidate_key": candidate_key,
+            "group_id": group["id"],
+            "terminal": terminal,
+            "attached": attached,
+        },
+    )
+    refresh_summary()
+    save_all_team_states()
+    return {
+        "group": copy.deepcopy(group),
+        "task": copy.deepcopy(task),
+        "attached": attached,
+        "added_photos": added,
+    }
+
+
 def save_unmatched_review(
     unmatched_id: str,
     *,

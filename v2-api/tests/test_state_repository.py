@@ -298,6 +298,257 @@ def test_dual_backend_does_not_break_json_when_postgres_mirror_fails(
     assert "Dual write mirror failed for release_task" in caplog.text
 
 
+def _postgres_finalize_record(*, version: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="unmatched-uuid",
+        legacy_id="unmatched-finalize-1",
+        team_id="default-team",
+        record_type="scan",
+        status="open",
+        terminal="",
+        meter_no="120000912473",
+        meter_match_key="0000912473",
+        barcode="120000912473",
+        collector="C001",
+        module_asset_no="M001",
+        address="match road",
+        payload={
+            "photo_urls": ["https://photos.example/1.jpg"],
+            "temporary_review": {
+                "schema_version": 1,
+                "unmatched_id": "unmatched-finalize-1",
+                "version": version,
+                "state": "reviewed",
+                "meter_no": "120000912473",
+                "collector": "C001",
+                "module_asset_no": "M001",
+                "manual_confirmed": True,
+                "reviewer": "reviewer-a",
+                "reviewed_at": "2026-07-13T09:00:00+00:00",
+                "updated_at": "2026-07-13T09:00:00+00:00",
+                "photos": [],
+            },
+        },
+    )
+
+
+def _postgres_finalize_group() -> SimpleNamespace:
+    return SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-finalized",
+        legacy_task_id=7,
+        task_id=None,
+        team_id="default-team",
+        terminal="T-FINAL",
+        display_meter_no="120000912473",
+        meter_match_key="0000912473",
+        installation_address="match road",
+        status=repository.GroupStatus.INCOMPLETE,
+        photo_count=0,
+        reviewer=None,
+        reviewed_at=None,
+        review_note="",
+        exception_note="",
+        exception_reasons=[],
+        has_archive_blocker=False,
+        raw_data={"status": "incomplete", "source_unmatched_id": "unmatched-finalize-1"},
+    )
+
+
+class FinalizeFakeScalars:
+    def all(self):
+        return []
+
+
+class FinalizeFakeSession:
+    def __init__(self, record: SimpleNamespace):
+        self.record = record
+        self.statements = []
+        self.staged = []
+        self.commit_calls = 0
+        self.rollback_calls = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def scalar(self, statement):
+        self.statements.append(statement)
+        return self.record
+
+    def scalars(self, statement):
+        self.statements.append(statement)
+        return FinalizeFakeScalars()
+
+    def get(self, model, identity):
+        return None
+
+    def add(self, value):
+        self.staged.append(value)
+
+    def commit(self):
+        self.commit_calls += 1
+
+    def rollback(self):
+        self.rollback_calls += 1
+        self.staged.clear()
+
+    def refresh(self, value):
+        return None
+
+
+def test_postgres_finalize_unmatched_uses_for_update_and_single_commit() -> None:
+    record = _postgres_finalize_record()
+    fake_session = FinalizeFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+        def _resolve_unmatched_candidate(self, session, locked_record, review, candidate_key):
+            assert locked_record is record
+            assert review["version"] == 1
+            assert candidate_key == "catalog:catalog-1:T-FINAL"
+            return {
+                "candidate_key": candidate_key,
+                "target_group_id": "",
+                "terminal": "T-FINAL",
+                "meter_no": "120000912473",
+                "address": "match road",
+                "match_reasons": ["meter exact"],
+            }
+
+        def _materialize_unmatched_candidate(self, session, locked_record, review, candidate, actor):
+            return _postgres_finalize_group(), False
+
+    result = TestPostgresRepository().finalize_unmatched_match(
+        record.legacy_id,
+        actor="admin-a",
+        candidate_key="catalog:catalog-1:T-FINAL",
+        expected_version=1,
+    )
+
+    compiled = str(
+        fake_session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    audits = [item for item in fake_session.staged if isinstance(item, repository.AuditLog)]
+    assert "FOR UPDATE" in compiled
+    assert fake_session.commit_calls == 1
+    assert fake_session.rollback_calls == 0
+    assert record.status == "associated"
+    assert record.payload["temporary_review"]["version"] == 1
+    assert record.payload["associated_group_id"] == "g-finalized"
+    assert len(audits) == 1
+    assert audits[0].action == "unmatched_review_finalized"
+    assert result["group"]["terminal"] == "T-FINAL"
+    assert result["attached"] is False
+    assert "00000000" not in str(result)
+
+
+def test_postgres_finalize_unmatched_rolls_back_all_staged_writes_on_failure() -> None:
+    record = _postgres_finalize_record()
+    fake_session = FinalizeFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+        def _resolve_unmatched_candidate(self, session, locked_record, review, candidate_key):
+            return {"candidate_key": candidate_key, "terminal": "T-FINAL"}
+
+        def _materialize_unmatched_candidate(self, session, locked_record, review, candidate, actor):
+            session.add(_postgres_finalize_group())
+            raise ValueError("candidate materialization failed")
+
+    with pytest.raises(ValueError, match="materialization failed"):
+        TestPostgresRepository().finalize_unmatched_match(
+            record.legacy_id,
+            actor="admin-a",
+            candidate_key="catalog:catalog-1:T-FINAL",
+            expected_version=1,
+        )
+
+    assert fake_session.commit_calls == 0
+    assert fake_session.rollback_calls == 1
+    assert fake_session.staged == []
+    assert record.status == "open"
+    assert record.payload.get("associated_group_id") is None
+
+
+def test_postgres_finalize_unmatched_checks_version_before_candidate_or_formal_mutation() -> None:
+    record = _postgres_finalize_record(version=2)
+    fake_session = FinalizeFakeSession(record)
+    calls = {"resolve": 0, "materialize": 0}
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+        def _resolve_unmatched_candidate(self, session, locked_record, review, candidate_key):
+            calls["resolve"] += 1
+            return {}
+
+        def _materialize_unmatched_candidate(self, session, locked_record, review, candidate, actor):
+            calls["materialize"] += 1
+            return _postgres_finalize_group(), False
+
+    with pytest.raises(repository.unmatched_review.ReviewVersionConflict):
+        TestPostgresRepository().finalize_unmatched_match(
+            record.legacy_id,
+            actor="admin-a",
+            candidate_key="catalog:catalog-1:T-FINAL",
+            expected_version=1,
+        )
+
+    assert calls == {"resolve": 0, "materialize": 0}
+    assert fake_session.commit_calls == 0
+    assert fake_session.rollback_calls == 1
+    assert fake_session.staged == []
+
+
+def test_dual_backend_finalize_unmatched_match_uses_json_first_and_mirrors_identical_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    json_result = {"group": {"id": "g-json", "terminal": "T-FINAL"}, "attached": False}
+
+    class MirrorRepository:
+        def finalize_unmatched_match(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", MirrorRepository)
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "finalize_unmatched_match",
+        lambda unmatched_id, **kwargs: {**json_result, "unmatched_id": unmatched_id, "kwargs": kwargs},
+        raising=False,
+    )
+
+    result = repository.DualWriteStateRepository().finalize_unmatched_match(
+        "unmatched-finalize-1",
+        actor="admin-a",
+        candidate_key="catalog:catalog-1:T-FINAL",
+        expected_version=3,
+    )
+
+    assert result["group"] == json_result["group"]
+    assert calls == [
+        (
+            ("unmatched-finalize-1",),
+            {
+                "actor": "admin-a",
+                "candidate_key": "catalog:catalog-1:T-FINAL",
+                "expected_version": 3,
+            },
+        )
+    ]
+
+
 def test_postgres_classify_photo_persists_archive_fields() -> None:
     photo = SimpleNamespace(
         id="photo-uuid",
