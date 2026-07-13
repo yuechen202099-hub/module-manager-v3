@@ -45,6 +45,21 @@ def test_rejects_duplicate_normalized_version_markers(marker: str, expected_erro
         parser(agents)
 
 
+@pytest.mark.parametrize(
+    "marker_line",
+    [
+        "+ 当前已部署生产版本: `V3.0.79`",
+        "【当前已部署生产版本】！： `V3.0.79`",
+    ],
+)
+def test_rejects_plus_and_punctuation_duplicate_version_markers(marker_line: str) -> None:
+    verifier = load_verifier()
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8") + f"\n{marker_line}\n"
+
+    with pytest.raises(AssertionError, match="deployed production baseline"):
+        verifier.deployed_production_baseline(agents)
+
+
 def release_record(*status_lines: str, sha256: str = "", backup: str = "", release: str = "", health: str = "") -> str:
     statuses = "\n".join(f"- {line}" for line in status_lines)
     return f"""# V3.0.80 Production Release Record
@@ -85,6 +100,15 @@ def valid_deployed_record(
     )
 
 
+def valid_unbulleted_deployed_record() -> str:
+    return f"""Status: shipped
+SHA256: {VALID_SHA256}
+Backup directory: /opt/module-manager-v2/backups/V3.0.80-pre-20260713_120000
+Release directory: /opt/module-manager-v2/releases/v3.0.80-20260713_120000
+Public health check: https://www.sgcc.online/health passed
+"""
+
+
 def test_rejects_multiple_or_contradictory_status_claims() -> None:
     verifier = load_verifier()
     record = valid_deployed_record("Status: pending", "Deployment state: deployed")
@@ -100,6 +124,65 @@ def test_detects_shipped_and_chinese_deployment_status_claims() -> None:
         release_record("Deployment state: shipped")
     )
     assert verifier.release_record_claims_deployed_without_live_evidence(release_record("部署状态：已上线"))
+
+
+@pytest.mark.parametrize("status_line", ["+ Status: shipped", "Status！ shipped"])
+def test_parses_plus_and_unbulleted_punctuation_status_claims(status_line: str) -> None:
+    verifier = load_verifier()
+    record = valid_deployed_record().replace("- Status: deployed", status_line)
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+def test_parses_unbulleted_evidence_lines() -> None:
+    verifier = load_verifier()
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(valid_unbulleted_deployed_record())
+
+
+def replace_evidence_row(record: str, label: str, value: str) -> str:
+    return "\n".join(
+        f"| {label} | {value} |" if line.startswith(f"| {label} |") else line
+        for line in record.splitlines()
+    )
+
+
+def append_evidence_row(record: str, label: str, value: str) -> str:
+    return f"{record}\n| {label} | {value} |\n"
+
+
+@pytest.mark.parametrize(
+    ("label", "invalid", "valid"),
+    [
+        ("SHA256", "TBD", VALID_SHA256),
+        ("Backup directory", "TBD", "/opt/module-manager-v2/backups/V3.0.80-pre-20260713_120000"),
+        ("Release directory", "TBD", "/opt/module-manager-v2/releases/v3.0.80-20260713_120000"),
+        ("Public health check", "TBD", "https://www.sgcc.online/health passed"),
+    ],
+)
+def test_rejects_duplicate_invalid_and_valid_evidence(label: str, invalid: str, valid: str) -> None:
+    verifier = load_verifier()
+    record = replace_evidence_row(valid_deployed_record(), label, invalid)
+    record = append_evidence_row(record, label, valid)
+
+    assert verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    [
+        ("SHA256", VALID_SHA256),
+        ("Backup directory", "/opt/module-manager-v2/backups/V3.0.80-pre-20260713_120000"),
+        ("Release directory", "/opt/module-manager-v2/releases/v3.0.80-20260713_120000"),
+        ("Public health check", "https://www.sgcc.online/health passed"),
+    ],
+)
+def test_rejects_duplicate_valid_evidence(label: str, value: str) -> None:
+    verifier = load_verifier()
+
+    assert verifier.release_record_claims_deployed_without_live_evidence(
+        append_evidence_row(valid_deployed_record(), label, value)
+    )
 
 
 @pytest.mark.parametrize(

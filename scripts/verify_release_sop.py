@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import re
 import sys
 from pathlib import Path
@@ -71,11 +72,11 @@ REQUIRED_FILES = [
 ]
 
 AGENTS_MARKER_PATTERN = re.compile(
-    r"^\s*[-*]\s*(?P<label>[^:：\n]+?)\s*[:：]\s*`?\s*(?P<version>V\d+\.\d+\.\d+)\s*`?\s*[。.]?\s*$",
+    r"^\s*(?:[-*+]\s*)?(?P<label>.+?)\s*[:：!！?？;；.。]+\s*`?\s*(?P<version>V\d+\.\d+\.\d+)\s*`?\s*[:：!！?？;；.。]*\s*$",
     re.MULTILINE,
 )
-STATUS_FIELD_PATTERN = re.compile(
-    r"^\s*[-*]\s*(?P<label>[^:：\n]+?)\s*[:：]\s*(?P<value>.+?)\s*$", re.MULTILINE
+FIELD_LINE_PATTERN = re.compile(
+    r"^\s*(?:[-*+]\s*)?(?P<label>.+?)\s*[:：!！?？;；.。]+\s*(?P<value>.+?)\s*$", re.MULTILINE
 )
 RELEASE_TABLE_ROW_PATTERN = re.compile(
     r"^\|\s*(?P<evidence>[^|]+?)\s*\|\s*(?P<value>[^|]*)\s*\|\s*$", re.MULTILINE
@@ -96,6 +97,12 @@ STATUS_FIELD_LABELS = {
     "部署",
     "发布",
     "上线",
+}
+EVIDENCE_FIELD_LABELS = {
+    "sha256": "SHA256",
+    "backupdirectory": "Backup directory",
+    "releasedirectory": "Release directory",
+    "publichealthcheck": "Public health check",
 }
 DEPLOYMENT_CLAIM_PATTERN = re.compile(r"\b(?:deployed|shipped|released)\b|已部署|已发布|已上线", re.IGNORECASE)
 NEGATED_ENGLISH_CLAIM_PATTERN = re.compile(r"\bnot\s+(?:deployed|shipped|released)\b", re.IGNORECASE)
@@ -118,7 +125,7 @@ def read(path: str) -> str:
 
 
 def normalize_label(label: str) -> str:
-    return re.sub(r"[\s:：。.`'\"-]+", "", label).casefold()
+    return re.sub(r"[\s:：!！?？;；,.。．、`'\"“”‘’()\[\]{}<>（）【】〈〉《》「」『』\-—_+*]+", "", label).casefold()
 
 
 def parse_agents_marker(agents: str, marker: str, marker_name: str) -> str:
@@ -143,7 +150,7 @@ def release_candidate(agents: str) -> str:
 def release_record_status(record: str) -> str:
     claims = [
         match.group("value").strip()
-        for match in STATUS_FIELD_PATTERN.finditer(record)
+        for match in FIELD_LINE_PATTERN.finditer(record)
         if normalize_label(match.group("label")) in STATUS_FIELD_LABELS
     ]
     claims.extend(
@@ -158,11 +165,17 @@ def release_record_status(record: str) -> str:
     return claims[0]
 
 
-def release_record_evidence(record: str) -> dict[str, str]:
-    return {
-        match.group("evidence").strip(): match.group("value").strip()
-        for match in RELEASE_TABLE_ROW_PATTERN.finditer(record)
-    }
+def release_record_evidence(record: str) -> dict[str, list[str]]:
+    evidence = {field: [] for field in EVIDENCE_FIELD_LABELS.values()}
+    for match in RELEASE_TABLE_ROW_PATTERN.finditer(record):
+        field = EVIDENCE_FIELD_LABELS.get(normalize_label(match.group("evidence")))
+        if field is not None:
+            evidence[field].append(match.group("value").strip())
+    for match in FIELD_LINE_PATTERN.finditer(record):
+        field = EVIDENCE_FIELD_LABELS.get(normalize_label(match.group("label")))
+        if field is not None:
+            evidence[field].append(match.group("value").strip())
+    return evidence
 
 
 def is_placeholder(value: str) -> bool:
@@ -212,6 +225,13 @@ def valid_public_health_evidence(value: str) -> bool:
     )
 
 
+def has_single_valid_evidence(
+    evidence: dict[str, list[str]], field: str, validator: Callable[[str], bool]
+) -> bool:
+    values = evidence[field]
+    return len(values) == 1 and validator(values[0])
+
+
 def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
     status = release_record_status(record)
     deployment_claimed = has_deployment_claim(status)
@@ -221,10 +241,10 @@ def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
         return False
     evidence = release_record_evidence(record)
     return not (
-        valid_sha256(evidence.get("SHA256", ""))
-        and valid_backup_directory(evidence.get("Backup directory", ""))
-        and valid_release_directory(evidence.get("Release directory", ""))
-        and valid_public_health_evidence(evidence.get("Public health check", ""))
+        has_single_valid_evidence(evidence, "SHA256", valid_sha256)
+        and has_single_valid_evidence(evidence, "Backup directory", valid_backup_directory)
+        and has_single_valid_evidence(evidence, "Release directory", valid_release_directory)
+        and has_single_valid_evidence(evidence, "Public health check", valid_public_health_evidence)
     )
 
 
