@@ -97,3 +97,46 @@ The front-end build regenerated `v2-api/app/static/vue` assets; all generated as
 
 - `git diff --check 94bdadc..HEAD` currently fails on a pre-existing blank line at `docs/superpowers/plans/2026-07-13-v3-0-80-review-remediation.md:265`, which is outside Task 3 ownership. The Task 3 working diff passed `git diff --check`.
 - Whole-branch approval, packaging, deployment, release retention, production health checks, and advancing the deployed baseline remain controller-owned.
+
+## Review Remediation
+
+The Task 3 review found that the first implementation read only the first `Status` field, accepted non-empty evidence without format validation, and required literal marker spelling.
+
+### RED
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+```
+
+```text
+14 failed, 2 passed
+```
+
+The failures covered normalized duplicate markers, multiple `Status`/`Deployment state` claims, shipped and Chinese deployed-status claims, invalid or placeholder evidence, and valid deployed records using non-`Status` fields.
+
+Two additional adversarial RED checks then exposed health evidence with an embedded `TBD` placeholder and `.`/`..` path leaves:
+
+```text
+1 failed, 21 passed
+2 failed, 22 passed
+```
+
+### GREEN
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+.\.venv\Scripts\python.exe scripts\verify_release_sop.py
+```
+
+```text
+24 passed in 0.04s
+[OK] release SOP files and references are consistent
+```
+
+The verifier now normalizes marker labels, permits exactly one status-like assertion, recognizes deployed/shipped/released and Chinese equivalents in that assertion, rejects contradictory/multiple fields, and requires valid SHA256, backup/release paths, and successful public `sgcc.online/health` evidence for deployment claims.
+
+### Remediation Commit
+
+- `205ba9f fix: harden release truthfulness verifier`
+
+No package, deployment, production connection, release cleanup, or deployed-baseline advancement occurred.
