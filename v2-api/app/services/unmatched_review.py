@@ -56,11 +56,7 @@ def build_match_candidates(
     if not meter_key:
         return []
 
-    groups_by_terminal: dict[str, dict[str, Any]] = {}
-    for group in sorted(groups, key=lambda item: str(item.get("id") or item.get("legacy_id") or "")):
-        terminal = str(group.get("terminal") or "").strip()
-        if terminal not in INVALID_TERMINALS:
-            groups_by_terminal.setdefault(terminal, group)
+    sorted_groups = sorted(groups, key=lambda item: str(item.get("id") or item.get("legacy_id") or ""))
 
     candidates: dict[str, dict[str, Any]] = {}
     for row in catalog_rows:
@@ -74,8 +70,24 @@ def build_match_candidates(
         terminal = str(row.get("terminal") or "").strip()
         if terminal in INVALID_TERMINALS:
             continue
-        target_group = groups_by_terminal.get(terminal) or {}
         catalog_id = str(row.get("id") or row.get("legacy_id") or meter_key)
+        catalog_db_id = str(row.get("catalog_row_db_id") or catalog_id)
+        target_group = next(
+            (
+                group
+                for group in sorted_groups
+                if str(group.get("terminal") or "").strip() == terminal
+                and (
+                    str(group.get("total_catalog_row_id") or group.get("catalog_row_id") or "").strip()
+                    in {catalog_id, catalog_db_id}
+                    or (
+                        not str(group.get("total_catalog_row_id") or group.get("catalog_row_id") or "").strip()
+                        and str(group.get("meter_match_key") or "").strip() == meter_key
+                    )
+                )
+            ),
+            {},
+        )
         candidate_key = f"catalog:{catalog_id}:{terminal}"
         reasons = ["表号精确匹配"]
         review_collector = str(review.get("collector") or "").strip()
@@ -91,6 +103,7 @@ def build_match_candidates(
         candidates[candidate_key] = {
             "candidate_key": candidate_key,
             "catalog_row_id": catalog_id,
+            "catalog_row_db_id": catalog_db_id,
             "target_group_id": str(target_group.get("id") or target_group.get("legacy_id") or ""),
             "terminal": terminal,
             "meter_no": str(row.get("meter_no") or review.get("meter_no") or ""),
@@ -128,6 +141,20 @@ def migrate_review_to_photo_rows(review: dict[str, Any]) -> list[dict[str, Any]]
                 row[key] = copy.deepcopy(photo[key])
         rows.append(row)
     return rows
+
+
+def merge_migrated_photo_evidence(target: dict[str, Any], migrated: dict[str, Any]) -> None:
+    for key in (
+        "category",
+        "source_url",
+        "source_fingerprint",
+        *PHOTO_EVIDENCE_FIELDS,
+        "temporary_review_manual_confirmed",
+        "temporary_review_reviewer",
+        "temporary_review_reviewed_at",
+    ):
+        if key in migrated:
+            target[key] = copy.deepcopy(migrated[key])
 
 
 def normalized_photo_urls(record: dict[str, Any]) -> list[str]:

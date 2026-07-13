@@ -1676,7 +1676,7 @@ def _apply_formal_group_barcode_check(group: dict[str, Any]) -> None:
     group.update(photo_barcode_check.build_group_barcode_check(group))
 
 
-def finalize_unmatched_match(
+def _finalize_unmatched_match_in_state(
     unmatched_id: str,
     *,
     actor: str,
@@ -1734,14 +1734,46 @@ def finalize_unmatched_match(
     group["module_asset_no"] = str(review.get("module_asset_no") or "")
     group["asset_no"] = str(review.get("module_asset_no") or "")
     migrated_photos = _formal_photos_from_unmatched_review(review, candidate, str(group["id"]))
-    existing_keys = {make_photo_unique_key(photo) for photo in group.get("photos") or []}
+    existing_by_fingerprint: dict[str, dict[str, Any]] = {}
+    existing_by_url_hash: dict[str, dict[str, Any]] = {}
+    existing_by_sha: dict[str, dict[str, Any]] = {}
+    for existing in group.get("photos") or []:
+        ensure_photo_identity_fields(existing)
+        existing_url = str(existing.get("source_url") or existing.get("image_url") or "")
+        existing_url_hash = hash_text(normalized_photo_source_url(existing_url)) if existing_url else ""
+        if existing.get("source_fingerprint"):
+            existing_by_fingerprint[str(existing["source_fingerprint"])] = existing
+        if existing_url_hash:
+            existing_by_url_hash[existing_url_hash] = existing
+        if existing.get("sha256"):
+            existing_by_sha[str(existing["sha256"])] = existing
     added = 0
     for photo in migrated_photos:
-        key = make_photo_unique_key(photo)
-        if key in existing_keys:
+        ensure_photo_identity_fields(photo)
+        photo_url = str(photo.get("source_url") or photo.get("image_url") or "")
+        photo_url_hash = hash_text(normalized_photo_source_url(photo_url)) if photo_url else ""
+        existing = (
+            existing_by_fingerprint.get(str(photo.get("source_fingerprint") or ""))
+            or existing_by_url_hash.get(photo_url_hash)
+            or existing_by_sha.get(str(photo.get("sha256") or ""))
+        )
+        if existing is not None:
+            unmatched_review.merge_migrated_photo_evidence(existing, photo)
+            source_url = str(photo.get("source_url") or "")
+            if source_url and not existing.get("image_url"):
+                existing["image_url"] = source_url
+            existing["category_label"] = PHOTO_CATEGORIES.get(
+                str(existing.get("category") or "unclassified"),
+                PHOTO_CATEGORIES["unclassified"],
+            )
             continue
         group.setdefault("photos", []).append(photo)
-        existing_keys.add(key)
+        if photo.get("source_fingerprint"):
+            existing_by_fingerprint[str(photo["source_fingerprint"])] = photo
+        if photo_url_hash:
+            existing_by_url_hash[photo_url_hash] = photo
+        if photo.get("sha256"):
+            existing_by_sha[str(photo["sha256"])] = photo
         added += 1
     group["photo_count"] = len(group.get("photos") or [])
     group["status"] = "pending" if group["photo_count"] >= 4 else "incomplete"
@@ -1774,6 +1806,28 @@ def finalize_unmatched_match(
         "attached": attached,
         "added_photos": added,
     }
+
+
+def finalize_unmatched_match(
+    unmatched_id: str,
+    *,
+    actor: str,
+    candidate_key: str,
+    expected_version: int,
+) -> dict[str, Any]:
+    state = get_state()
+    snapshot = copy.deepcopy(state)
+    try:
+        return _finalize_unmatched_match_in_state(
+            unmatched_id,
+            actor=actor,
+            candidate_key=candidate_key,
+            expected_version=expected_version,
+        )
+    except Exception:
+        state.clear()
+        state.update(snapshot)
+        raise
 
 
 def save_unmatched_review(

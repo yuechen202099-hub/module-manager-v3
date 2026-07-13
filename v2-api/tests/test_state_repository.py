@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 from datetime import datetime
 from types import SimpleNamespace
@@ -356,15 +357,22 @@ def _postgres_finalize_group() -> SimpleNamespace:
 
 
 class FinalizeFakeScalars:
+    def __init__(self, items=None):
+        self.items = list(items or [])
+
     def all(self):
-        return []
+        return self.items
 
 
 class FinalizeFakeSession:
-    def __init__(self, record: SimpleNamespace):
+    def __init__(self, record: SimpleNamespace, *, fail_commit: bool = False):
         self.record = record
+        self.record_snapshot = deepcopy(vars(record))
+        self.fail_commit = fail_commit
         self.statements = []
         self.staged = []
+        self.rolled_back_staged = []
+        self.commit_attempts = 0
         self.commit_calls = 0
         self.rollback_calls = 0
 
@@ -389,11 +397,17 @@ class FinalizeFakeSession:
         self.staged.append(value)
 
     def commit(self):
+        self.commit_attempts += 1
+        if self.fail_commit:
+            raise RuntimeError("late PostgreSQL commit failure")
         self.commit_calls += 1
 
     def rollback(self):
         self.rollback_calls += 1
+        self.rolled_back_staged = list(self.staged)
         self.staged.clear()
+        vars(self.record).clear()
+        vars(self.record).update(deepcopy(self.record_snapshot))
 
     def refresh(self, value):
         return None
@@ -478,6 +492,223 @@ def test_postgres_finalize_unmatched_rolls_back_all_staged_writes_on_failure() -
     assert fake_session.staged == []
     assert record.status == "open"
     assert record.payload.get("associated_group_id") is None
+
+
+def test_postgres_finalize_unmatched_selects_exact_group_identity_on_shared_terminal() -> None:
+    record = _postgres_finalize_record()
+    catalog_id = "11111111-1111-1111-1111-111111111111"
+    catalog = SimpleNamespace(
+        id=catalog_id,
+        terminal="T-SHARED",
+        original_meter_no="120000912473",
+        meter_match_key="0000912473",
+        installation_address="match road",
+        installer="",
+        source_file="catalog.xlsx",
+        source_row_number=2,
+        raw_data={},
+    )
+    unrelated = SimpleNamespace(
+        id="group-unrelated-uuid",
+        legacy_id="g-shared-a-unrelated",
+        terminal="T-SHARED",
+        total_catalog_row_id="22222222-2222-2222-2222-222222222222",
+        meter_match_key="9999999999",
+    )
+    exact = SimpleNamespace(
+        id="group-exact-uuid",
+        legacy_id="g-shared-z-exact",
+        terminal="T-SHARED",
+        total_catalog_row_id=catalog_id,
+        meter_match_key="0000912473",
+    )
+
+    class CandidateSession:
+        def __init__(self):
+            self.calls = 0
+
+        def scalars(self, statement):
+            self.calls += 1
+            return FinalizeFakeScalars([catalog] if self.calls == 1 else [unrelated, exact])
+
+    candidates = repository.PostgresStateRepository()._unmatched_match_candidates_for_session(
+        CandidateSession(),
+        record,
+        repository.unmatched_review.build_review(repository._unmatched_payload(record)),
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["target_group_id"] == exact.legacy_id
+
+
+def test_postgres_unmatched_review_photo_payload_reads_back_every_evidence_field() -> None:
+    evidence = {
+        key: [f"{key}-value"]
+        for key in repository.unmatched_review.PHOTO_EVIDENCE_FIELDS
+    }
+    evidence.update(
+        {
+            "barcode_check_status": "matched",
+            "barcode_checked_at": "2026-07-13T09:00:00+00:00",
+            "barcode_check_method": "barcode_qr_ocr",
+            "barcode_check_error": "",
+            "barcode_rescanned_by": "reviewer-a",
+            "barcode_rescanned_at": "2026-07-13T08:59:00+00:00",
+            "temporary_review_manual_confirmed": True,
+            "temporary_review_reviewer": "reviewer-a",
+            "temporary_review_reviewed_at": "2026-07-13T09:00:00+00:00",
+        }
+    )
+    photo = SimpleNamespace(
+        id="photo-uuid",
+        legacy_id="p-evidence",
+        image_url="https://photos.example/evidence.jpg",
+        source_url="https://photos.example/evidence.jpg",
+        storage_type="",
+        storage_bucket="",
+        storage_key="",
+        sha256="sha-evidence",
+        category="before_box",
+        archive_filename="",
+        archive_status="",
+        sort_order=1,
+        barcode="120000912473",
+        collector="C001",
+        asset_no="M001",
+        creator="reviewer-a",
+        raw_data=evidence,
+    )
+
+    payload = repository._photo_payload(photo)
+
+    for key in repository.unmatched_review.PHOTO_EVIDENCE_FIELDS:
+        assert payload[key] == evidence[key]
+    assert payload["temporary_review_manual_confirmed"] is True
+    assert payload["temporary_review_reviewer"] == "reviewer-a"
+    assert payload["temporary_review_reviewed_at"] == "2026-07-13T09:00:00+00:00"
+
+
+def test_postgres_unmatched_review_locks_and_merges_duplicate_photo_evidence() -> None:
+    source_url = "https://photos.example/duplicate.jpg?token=old"
+    canonical_hash = repository.hashlib.sha256(
+        source_url.split("?", 1)[0].encode("utf-8")
+    ).hexdigest()
+    existing = SimpleNamespace(
+        source_fingerprint="older-explicit-fingerprint",
+        sha256="older-sha",
+        storage_type="",
+        storage_key="",
+        source_url_hash=canonical_hash,
+        raw_data={},
+        category="unclassified",
+        source_url=source_url,
+        image_url=source_url,
+    )
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-duplicate",
+        team_id="default-team",
+        display_meter_no="120000912473",
+        photo_count=1,
+        status=repository.GroupStatus.INCOMPLETE,
+        reviewer=None,
+        review_note="",
+        exception_note="",
+        reviewed_at=None,
+        raw_data={},
+    )
+
+    class DuplicateSession:
+        def __init__(self):
+            self.statements = []
+            self.flush_calls = 0
+            self.added = []
+
+        def scalars(self, statement):
+            self.statements.append(statement)
+            return FinalizeFakeScalars([existing])
+
+        def scalar(self, statement):
+            self.statements.append(statement)
+            return 1
+
+        def add(self, value):
+            self.added.append(value)
+
+        def flush(self):
+            self.flush_calls += 1
+
+    session = DuplicateSession()
+    result = repository.PostgresStateRepository()._add_photo_records_to_group(
+        session,
+        group,
+        actor="admin-a",
+        photos=[
+            {
+                "url": source_url,
+                "source_url": source_url,
+                "source_fingerprint": "temporary-review-photo-id",
+                "category": "before_box",
+                "qr_values": ["QR-001"],
+                "barcode_rescanned_by": "reviewer-a",
+                "temporary_review_manual_confirmed": True,
+            }
+        ],
+        source="unmatched-review-finalize",
+    )
+
+    compiled = str(session.statements[0].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled
+    assert result == {"added": 0, "skipped_duplicates": 1, "merged_duplicates": 1}
+    assert session.added == []
+    assert session.flush_calls == 1
+    assert existing.category == "before_box"
+    assert existing.raw_data["qr_values"] == ["QR-001"]
+    assert existing.raw_data["barcode_rescanned_by"] == "reviewer-a"
+    assert existing.raw_data["temporary_review_manual_confirmed"] is True
+
+
+def test_postgres_finalize_unmatched_rolls_back_after_all_writes_are_staged() -> None:
+    record = _postgres_finalize_record()
+    before = deepcopy(vars(record))
+    fake_session = FinalizeFakeSession(record, fail_commit=True)
+    formal_photo = SimpleNamespace(kind="formal-photo")
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+        def _resolve_unmatched_candidate(self, session, locked_record, review, candidate_key):
+            return {
+                "candidate_key": candidate_key,
+                "target_group_id": "",
+                "terminal": "T-FINAL",
+                "meter_no": "120000912473",
+                "meter_match_key": "0000912473",
+                "address": "match road",
+            }
+
+        def _materialize_unmatched_candidate(self, session, locked_record, review, candidate, actor):
+            group = _postgres_finalize_group()
+            session.add(group)
+            session.add(formal_photo)
+            return group, False
+
+    with pytest.raises(RuntimeError, match="late PostgreSQL commit failure"):
+        TestPostgresRepository().finalize_unmatched_match(
+            record.legacy_id,
+            actor="admin-a",
+            candidate_key="catalog:catalog-1:T-FINAL",
+            expected_version=1,
+        )
+
+    assert fake_session.commit_attempts == 1
+    assert fake_session.commit_calls == 0
+    assert fake_session.rollback_calls == 1
+    assert fake_session.staged == []
+    assert any(item is formal_photo for item in fake_session.rolled_back_staged)
+    assert any(isinstance(item, repository.AuditLog) for item in fake_session.rolled_back_staged)
+    assert vars(record) == before
 
 
 def test_postgres_finalize_unmatched_checks_version_before_candidate_or_formal_mutation() -> None:

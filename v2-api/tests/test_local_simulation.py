@@ -1360,8 +1360,8 @@ def test_unmatched_match_candidates_return_zero_for_empty_or_short_meter(
     meter_no: str,
 ) -> None:
     unmatched_id = seed_unmatched_review_record()
-    record = local_simulation.get_unmatched_record(unmatched_id)
-    assert record is not None
+    state = local_simulation.get_state()
+    record = next(item for item in state["scan_unmatched"] if item["unmatched_id"] == unmatched_id)
     record["meter_no"] = meter_no
     record["barcode"] = meter_no
 
@@ -1478,6 +1478,147 @@ def test_unmatched_finalize_rejects_stale_version_before_any_formal_mutation(syn
             actor="admin-a",
             candidate_key=candidate["candidate_key"],
             expected_version=0,
+        )
+
+    assert local_simulation.get_state() == before
+
+
+def test_unmatched_finalize_attaches_only_exact_meter_group_on_shared_terminal(synthetic_state: dict) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    catalog = add_unmatched_match_catalog_row(terminal="T-SHARED")
+    template = deepcopy(state["groups"][0])
+    unrelated = {
+        **deepcopy(template),
+        "id": "g-shared-a-unrelated",
+        "terminal": "T-SHARED",
+        "stage_terminal": "T-SHARED",
+        "meter_no": "999999999999",
+        "meter_match_key": "9999999999",
+        "total_catalog_row_id": "catalog-unrelated",
+        "photos": [],
+        "photo_count": 0,
+        "status": "incomplete",
+    }
+    exact = {
+        **deepcopy(template),
+        "id": "g-shared-z-exact",
+        "terminal": "T-SHARED",
+        "stage_terminal": "T-SHARED",
+        "meter_no": catalog["meter_no"],
+        "meter_match_key": catalog["meter_match_key"],
+        "total_catalog_row_id": catalog["id"],
+        "photos": [],
+        "photo_count": 0,
+        "status": "incomplete",
+    }
+    state["groups"].extend([unrelated, exact])
+
+    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
+    assert candidate["target_group_id"] == exact["id"]
+
+    result = local_simulation.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-a",
+        candidate_key=candidate["candidate_key"],
+        expected_version=1,
+    )
+
+    assert result["attached"] is True
+    assert result["group"]["id"] == exact["id"]
+    assert unrelated["meter_no"] == "999999999999"
+    assert "source_unmatched_id" not in unrelated
+
+
+def test_unmatched_finalize_merges_review_evidence_into_duplicate_photo(synthetic_state: dict) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    catalog = add_unmatched_match_catalog_row(terminal="T-DUPLICATE")
+    record = next(item for item in state["scan_unmatched"] if item["unmatched_id"] == unmatched_id)
+    review = unmatched_review.build_review(record)
+    review["manual_confirmed"] = True
+    review["reviewer"] = "reviewer-a"
+    review["reviewed_at"] = "2026-07-13T09:00:00+00:00"
+    review["photos"][0].update(
+        {
+            "category": "before_box",
+            "qr_values": ["QR-001"],
+            "ocr_normalized_values": ["ocr-001"],
+            "barcode_rescanned_by": "reviewer-a",
+            "barcode_rescanned_at": "2026-07-13T08:59:00+00:00",
+        }
+    )
+    record["temporary_review"] = review
+    template = deepcopy(state["groups"][0])
+    existing_photo = deepcopy(template["photos"][0])
+    existing_photo.update(
+        {
+            "id": "p-existing-duplicate",
+            "image_url": review["photos"][0]["source_url"],
+            "source_url": review["photos"][0]["source_url"],
+            "source_fingerprint": "older-explicit-fingerprint",
+            "category": "unclassified",
+        }
+    )
+    existing_photo.pop("source_url_hash", None)
+    group = {
+        **template,
+        "id": "g-duplicate-target",
+        "terminal": "T-DUPLICATE",
+        "stage_terminal": "T-DUPLICATE",
+        "meter_no": catalog["meter_no"],
+        "meter_match_key": catalog["meter_match_key"],
+        "total_catalog_row_id": catalog["id"],
+        "photos": [existing_photo],
+        "photo_count": 1,
+        "status": "incomplete",
+    }
+    state["groups"].append(group)
+    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
+
+    result = local_simulation.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-a",
+        candidate_key=candidate["candidate_key"],
+        expected_version=1,
+    )
+
+    merged = next(photo for photo in result["group"]["photos"] if photo["id"] == "p-existing-duplicate")
+    assert result["added_photos"] == 3
+    assert merged["category"] == "before_box"
+    assert merged["qr_values"] == ["QR-001"]
+    assert merged["ocr_normalized_values"] == ["ocr-001"]
+    assert merged["barcode_rescanned_by"] == "reviewer-a"
+    assert merged["barcode_rescanned_at"] == "2026-07-13T08:59:00+00:00"
+    assert merged["temporary_review_manual_confirmed"] is True
+    assert merged["temporary_review_reviewer"] == "reviewer-a"
+    assert merged["source_url"] == review["photos"][0]["source_url"]
+
+
+def test_unmatched_finalize_restores_complete_json_state_after_late_failure(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    add_unmatched_match_catalog_row(terminal="T-ROLLBACK")
+    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
+    before = deepcopy(state)
+
+    def fail_after_all_state_writes() -> None:
+        raise RuntimeError("late JSON persistence failure")
+
+    monkeypatch.setattr(local_simulation, "save_all_team_states", fail_after_all_state_writes)
+
+    with pytest.raises(RuntimeError, match="late JSON persistence failure"):
+        local_simulation.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-a",
+            candidate_key=candidate["candidate_key"],
+            expected_version=1,
         )
 
     assert local_simulation.get_state() == before

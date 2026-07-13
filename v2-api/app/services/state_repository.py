@@ -680,17 +680,7 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
         "upload_source": raw.get("upload_source") or raw.get("storage_source") or "",
     }
     for key in (
-        "barcode_check_status",
-        "barcode_check_expected_type",
-        "barcode_check_values",
-        "barcode_check_normalized_values",
-        "barcode_check_ocr_values",
-        "barcode_check_ocr_normalized_values",
-        "barcode_check_expected_values",
-        "barcode_check_matched_value",
-        "barcode_checked_at",
-        "barcode_check_error",
-        "barcode_check_method",
+        *unmatched_review.PHOTO_EVIDENCE_FIELDS,
         "temporary_review_manual_confirmed",
         "temporary_review_reviewer",
         "temporary_review_reviewed_at",
@@ -3652,7 +3642,11 @@ class PostgresStateRepository(StateRepository):
                 )
             ).all()
         )
-        catalog_payloads = [_catalog_row_payload(row) for row in catalog_rows]
+        catalog_payloads = []
+        for row in catalog_rows:
+            payload = _catalog_row_payload(row)
+            payload["catalog_row_db_id"] = str(row.id)
+            catalog_payloads.append(payload)
         terminals = sorted(
             {
                 str(row.get("terminal") or "").strip()
@@ -3667,6 +3661,10 @@ class PostgresStateRepository(StateRepository):
                     select(MaterialGroup).where(
                         MaterialGroup.team_id == record.team_id,
                         MaterialGroup.terminal.in_(terminals),
+                        or_(
+                            MaterialGroup.total_catalog_row_id.in_([row.id for row in catalog_rows]),
+                            MaterialGroup.meter_match_key == meter_key,
+                        ),
                     )
                 ).all()
             )
@@ -3674,6 +3672,8 @@ class PostgresStateRepository(StateRepository):
             {
                 "id": str(group.legacy_id or group.id),
                 "terminal": str(group.terminal or ""),
+                "total_catalog_row_id": str(group.total_catalog_row_id or ""),
+                "meter_match_key": str(group.meter_match_key or ""),
             }
             for group in groups
         ]
@@ -3731,6 +3731,21 @@ class PostgresStateRepository(StateRepository):
         if not meter_no or not meter_key:
             raise ValueError("Selected candidate has an invalid meter")
 
+        catalog_row_id = None
+        try:
+            catalog_row_id = UUID(
+                str(candidate.get("catalog_row_db_id") or candidate.get("catalog_row_id") or "")
+            )
+        except ValueError:
+            pass
+        identity_filter = (
+            or_(
+                MaterialGroup.total_catalog_row_id == catalog_row_id,
+                and_(MaterialGroup.total_catalog_row_id.is_(None), MaterialGroup.meter_match_key == meter_key),
+            )
+            if catalog_row_id is not None
+            else MaterialGroup.meter_match_key == meter_key
+        )
         target_group_id = str(candidate.get("target_group_id") or "").strip()
         group = None
         if target_group_id:
@@ -3739,6 +3754,8 @@ class PostgresStateRepository(StateRepository):
                 .where(
                     MaterialGroup.team_id == record.team_id,
                     MaterialGroup.legacy_id == target_group_id,
+                    MaterialGroup.terminal == terminal,
+                    identity_filter,
                 )
                 .with_for_update()
             )
@@ -3747,18 +3764,17 @@ class PostgresStateRepository(StateRepository):
         else:
             group = session.scalar(
                 select(MaterialGroup)
-                .where(MaterialGroup.team_id == record.team_id, MaterialGroup.terminal == terminal)
+                .where(
+                    MaterialGroup.team_id == record.team_id,
+                    MaterialGroup.terminal == terminal,
+                    identity_filter,
+                )
                 .limit(1)
                 .with_for_update()
             )
 
         attached = group is not None
         task = self._ensure_task_for_terminal(session, record.team_id, terminal)
-        catalog_row_id = None
-        try:
-            catalog_row_id = UUID(str(candidate.get("catalog_row_id") or ""))
-        except ValueError:
-            pass
         if group is None:
             project_id = self._project_id_for_team(session, record.team_id)
             group = MaterialGroup(
@@ -5510,17 +5526,24 @@ class PostgresStateRepository(StateRepository):
     ) -> dict[str, Any]:
         if source == "construction":
             _validate_construction_upload_required_slots(session, group, photos)
-        existing_keys: set[tuple[str, str]] = set()
-        existing_sha: set[str] = set()
-        existing_storage: set[tuple[str, str]] = set()
-        for photo in session.scalars(select(Photo).where(Photo.team_id == group.team_id, Photo.group_id == group.id)).all():
+        existing_by_fingerprint: dict[str, Photo] = {}
+        existing_by_sha: dict[str, Photo] = {}
+        existing_by_storage: dict[tuple[str, str], Photo] = {}
+        existing_by_url_hash: dict[str, Photo] = {}
+        existing_statement = select(Photo).where(Photo.team_id == group.team_id, Photo.group_id == group.id)
+        if source == "unmatched-review-finalize":
+            existing_statement = existing_statement.with_for_update()
+        for photo in session.scalars(existing_statement).all():
             if photo.source_fingerprint:
-                existing_keys.add(("fingerprint", photo.source_fingerprint))
+                existing_by_fingerprint[photo.source_fingerprint] = photo
             if photo.sha256:
-                existing_sha.add(photo.sha256)
+                existing_by_sha[photo.sha256] = photo
             if photo.storage_type and photo.storage_key:
-                existing_storage.add((photo.storage_type, photo.storage_key))
+                existing_by_storage[(photo.storage_type, photo.storage_key)] = photo
+            if getattr(photo, "source_url_hash", None):
+                existing_by_url_hash[photo.source_url_hash] = photo
         added = 0
+        merged_duplicates = 0
         skipped_duplicates = 0
         active_count = session.scalar(
             select(func.count(Photo.id)).where(
@@ -5537,6 +5560,7 @@ class PostgresStateRepository(StateRepository):
             storage_key = str(item.get("storage_key") or "").strip()
             sha256 = str(item.get("sha256") or "").strip() or hashlib.sha256(image_url.encode("utf-8")).hexdigest()
             source_url = str(item.get("source_url") or image_url)
+            source_url_hash = hashlib.sha256(source_url.split("?", 1)[0].encode("utf-8")).hexdigest()
             fingerprint_seed = "|".join(
                 [
                     str(group.legacy_id or group.id),
@@ -5546,12 +5570,24 @@ class PostgresStateRepository(StateRepository):
                 ]
             )
             source_fingerprint = str(item.get("source_fingerprint") or hashlib.sha256(fingerprint_seed.encode("utf-8")).hexdigest()[:32])
-            if (
-                ("fingerprint", source_fingerprint) in existing_keys
-                or sha256 in existing_sha
-                or (storage_type and storage_key and (storage_type, storage_key) in existing_storage)
-            ):
+            duplicate = (
+                existing_by_fingerprint.get(source_fingerprint)
+                or existing_by_sha.get(sha256)
+                or existing_by_url_hash.get(source_url_hash)
+                or (existing_by_storage.get((storage_type, storage_key)) if storage_type and storage_key else None)
+            )
+            if duplicate is not None:
                 skipped_duplicates += 1
+                if source == "unmatched-review-finalize":
+                    raw_payload = dict(duplicate.raw_data or {})
+                    unmatched_review.merge_migrated_photo_evidence(raw_payload, item)
+                    duplicate.raw_data = raw_payload
+                    duplicate.category = str(item.get("category") or duplicate.category or "unclassified")
+                    duplicate.source_url = source_url
+                    duplicate.source_url_hash = source_url_hash
+                    duplicate.source_fingerprint = duplicate.source_fingerprint or source_fingerprint
+                    duplicate.image_url = duplicate.image_url or image_url
+                    merged_duplicates += 1
                 continue
             active_count += 1
             legacy_id = str(item.get("id") or f"p-{group.legacy_id or group.id}-{uuid4().hex[:12]}")
@@ -5577,7 +5613,7 @@ class PostgresStateRepository(StateRepository):
                 creator=creator or actor,
                 image_url=image_url,
                 source_url=source_url,
-                source_url_hash=hashlib.sha256(source_url.split("?", 1)[0].encode("utf-8")).hexdigest(),
+                source_url_hash=source_url_hash,
                 source_file_id=str(item.get("source_file_id") or ""),
                 source_fingerprint=source_fingerprint,
                 storage_type=storage_type,
@@ -5597,10 +5633,11 @@ class PostgresStateRepository(StateRepository):
                 raw_data=raw_payload,
             )
             session.add(photo)
-            existing_keys.add(("fingerprint", source_fingerprint))
-            existing_sha.add(sha256)
+            existing_by_fingerprint[source_fingerprint] = photo
+            existing_by_sha[sha256] = photo
+            existing_by_url_hash[source_url_hash] = photo
             if storage_type and storage_key:
-                existing_storage.add((storage_type, storage_key))
+                existing_by_storage[(storage_type, storage_key)] = photo
             added += 1
         if added:
             group.photo_count = int(active_count)
@@ -5614,7 +5651,13 @@ class PostgresStateRepository(StateRepository):
             group.raw_data = raw
             session.flush()
             _apply_photo_quality_exception_status(session, group)
-        return {"added": added, "skipped_duplicates": skipped_duplicates}
+        elif merged_duplicates:
+            session.flush()
+        return {
+            "added": added,
+            "skipped_duplicates": skipped_duplicates,
+            "merged_duplicates": merged_duplicates,
+        }
 
     def add_photo_urls_to_group(
         self,
