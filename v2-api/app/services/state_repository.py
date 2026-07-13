@@ -5544,6 +5544,7 @@ class PostgresStateRepository(StateRepository):
                 existing_by_url_hash[photo.source_url_hash] = photo
         added = 0
         merged_duplicates = 0
+        reactivated_duplicates = 0
         skipped_duplicates = 0
         active_count = session.scalar(
             select(func.count(Photo.id)).where(
@@ -5581,6 +5582,18 @@ class PostgresStateRepository(StateRepository):
                 if source == "unmatched-review-finalize":
                     raw_payload = dict(duplicate.raw_data or {})
                     unmatched_review.merge_migrated_photo_evidence(raw_payload, item)
+                    if not getattr(duplicate, "is_active", True):
+                        active_count += 1
+                        duplicate.is_active = True
+                        duplicate.deleted_at = None
+                        duplicate.deleted_by = ""
+                        duplicate.delete_reason = ""
+                        duplicate.sort_order = active_count
+                        raw_payload.pop("deleted_at", None)
+                        raw_payload.pop("deleted_by", None)
+                        raw_payload.pop("delete_reason", None)
+                        raw_payload["is_active"] = True
+                        reactivated_duplicates += 1
                     duplicate.raw_data = raw_payload
                     duplicate.category = str(item.get("category") or duplicate.category or "unclassified")
                     duplicate.source_url = source_url
@@ -5639,7 +5652,7 @@ class PostgresStateRepository(StateRepository):
             if storage_type and storage_key:
                 existing_by_storage[(storage_type, storage_key)] = photo
             added += 1
-        if added:
+        if added or reactivated_duplicates:
             group.photo_count = int(active_count)
             group.status = GroupStatus.INCOMPLETE if group.photo_count < 4 else GroupStatus.UNREVIEWED
             group.reviewer = None
@@ -5653,11 +5666,14 @@ class PostgresStateRepository(StateRepository):
             _apply_photo_quality_exception_status(session, group)
         elif merged_duplicates:
             session.flush()
-        return {
+        result = {
             "added": added,
             "skipped_duplicates": skipped_duplicates,
             "merged_duplicates": merged_duplicates,
         }
+        if reactivated_duplicates:
+            result["reactivated_duplicates"] = reactivated_duplicates
+        return result
 
     def add_photo_urls_to_group(
         self,

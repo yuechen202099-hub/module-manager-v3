@@ -3,6 +3,7 @@ from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from importlib.util import find_spec
+from threading import Event, Thread
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1319,15 +1320,20 @@ def test_unmatched_records_are_searchable_and_audited(synthetic_state: dict) -> 
     assert audits["items"][0]["actor"] == "alice"
 
 
-def seed_unmatched_review_record() -> str:
+def seed_unmatched_review_record(
+    *,
+    meter_no: str = "120000912473",
+    photo_prefix: str = "https://photos.example",
+) -> str:
     state = local_simulation.get_state()
+    barcode = "3130001122100009124734" if meter_no == "120000912473" else meter_no
     record = local_simulation.ensure_unmatched_record(
         {
-            "barcode": "3130001122100009124734",
-            "meter_no": "120000912473",
+            "barcode": barcode,
+            "meter_no": meter_no,
             "collector": "C001",
             "module_asset_no": "M001",
-            "photo_urls": [f"https://photos.example/{index}.jpg" for index in range(4)],
+            "photo_urls": [f"{photo_prefix}/{index}.jpg" for index in range(4)],
         }
     )
     state["scan_unmatched"].append(record)
@@ -1622,6 +1628,97 @@ def test_unmatched_finalize_restores_complete_json_state_after_late_failure(
         )
 
     assert local_simulation.get_state() == before
+
+
+def test_unmatched_finalize_interleaving_hides_partial_state_and_preserves_successful_write(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    failing_id = seed_unmatched_review_record(
+        meter_no="120000912473",
+        photo_prefix="https://photos.example/failing",
+    )
+    successful_id = seed_unmatched_review_record(
+        meter_no="120000912474",
+        photo_prefix="https://photos.example/successful",
+    )
+    add_unmatched_match_catalog_row(
+        catalog_id="catalog-failing",
+        terminal="T-FAILING",
+        meter_no="120000912473",
+    )
+    add_unmatched_match_catalog_row(
+        catalog_id="catalog-successful",
+        terminal="T-SUCCESSFUL",
+        meter_no="120000912474",
+    )
+    failing_candidate = local_simulation.list_unmatched_match_candidates(failing_id)["items"][0]
+    successful_candidate = local_simulation.list_unmatched_match_candidates(successful_id)["items"][0]
+    failing_recompute_started = Event()
+    release_failing_recompute = Event()
+    original_recompute = local_simulation._apply_formal_group_barcode_check
+    failure: list[Exception] = []
+
+    def interleaved_recompute(group: dict) -> None:
+        if group.get("source_unmatched_id") == failing_id:
+            failing_recompute_started.set()
+            if not release_failing_recompute.wait(timeout=5):
+                raise TimeoutError("test did not release failing finalizer")
+            raise RuntimeError("interleaved failing finalizer")
+        original_recompute(group)
+
+    def run_failing_finalizer() -> None:
+        try:
+            local_simulation.finalize_unmatched_match(
+                failing_id,
+                actor="admin-failing",
+                candidate_key=failing_candidate["candidate_key"],
+                expected_version=1,
+            )
+        except Exception as exc:
+            failure.append(exc)
+
+    monkeypatch.setattr(local_simulation, "_apply_formal_group_barcode_check", interleaved_recompute)
+    thread = Thread(target=run_failing_finalizer)
+    thread.start()
+    assert failing_recompute_started.wait(timeout=5)
+
+    try:
+        live_during_failure = deepcopy(local_simulation.get_state())
+        successful_result = local_simulation.finalize_unmatched_match(
+            successful_id,
+            actor="admin-successful",
+            candidate_key=successful_candidate["candidate_key"],
+            expected_version=1,
+        )
+    finally:
+        release_failing_recompute.set()
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert len(failure) == 1
+    assert isinstance(failure[0], RuntimeError)
+    assert str(failure[0]) == "interleaved failing finalizer"
+    assert failing_id in {item["unmatched_id"] for item in live_during_failure["scan_unmatched"]}
+    assert all(
+        group.get("source_unmatched_id") != failing_id
+        for group in live_during_failure["groups"]
+    )
+
+    final_state = local_simulation.get_state()
+    assert local_simulation.get_unmatched_record(failing_id) is not None
+    assert local_simulation.get_unmatched_record(successful_id) is None
+    assert successful_result["group"]["source_unmatched_id"] == successful_id
+    assert any(group.get("source_unmatched_id") == successful_id for group in final_state["groups"])
+    assert all(group.get("source_unmatched_id") != failing_id for group in final_state["groups"])
+    finalized_ids = {
+        event["payload"]["unmatched_id"]
+        for event in final_state["audit_events"]
+        if event["action"] == "unmatched_review_finalized"
+    }
+    assert finalized_ids == {successful_id}
 
 
 def test_json_state_repository_finalizes_unmatched_match_from_server_candidate(synthetic_state: dict) -> None:

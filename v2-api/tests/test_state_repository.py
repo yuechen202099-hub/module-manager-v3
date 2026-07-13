@@ -668,6 +668,102 @@ def test_postgres_unmatched_review_locks_and_merges_duplicate_photo_evidence() -
     assert existing.raw_data["temporary_review_manual_confirmed"] is True
 
 
+def test_postgres_unmatched_review_reactivates_soft_deleted_duplicate_photo() -> None:
+    source_url = "https://photos.example/soft-deleted.jpg?token=old"
+    canonical_hash = repository.hashlib.sha256(
+        source_url.split("?", 1)[0].encode("utf-8")
+    ).hexdigest()
+    deleted_at = datetime(2026, 7, 12, 9, 0)
+    existing = SimpleNamespace(
+        source_fingerprint="older-explicit-fingerprint",
+        sha256="older-sha",
+        storage_type="",
+        storage_key="",
+        source_url_hash=canonical_hash,
+        raw_data={"delete_reason": "temporary duplicate"},
+        category="unclassified",
+        source_url=source_url,
+        image_url=source_url,
+        is_active=False,
+        deleted_at=deleted_at,
+        deleted_by="reviewer-old",
+        delete_reason="temporary duplicate",
+        sort_order=7,
+    )
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-soft-deleted",
+        team_id="default-team",
+        display_meter_no="120000912473",
+        photo_count=0,
+        status=repository.GroupStatus.INCOMPLETE,
+        reviewer=None,
+        review_note="",
+        exception_status="",
+        exception_note="",
+        exception_reasons=[],
+        has_archive_blocker=False,
+        reviewed_at=None,
+        raw_data={"photo_count": 0, "status": "incomplete"},
+    )
+
+    class SoftDeletedSession:
+        def __init__(self):
+            self.statements = []
+            self.flush_calls = 0
+
+        def scalars(self, statement):
+            self.statements.append(statement)
+            return FinalizeFakeScalars([existing])
+
+        def scalar(self, statement):
+            self.statements.append(statement)
+            return 0
+
+        def add(self, value):
+            raise AssertionError("soft-deleted duplicate must be reactivated, not recreated")
+
+        def flush(self):
+            self.flush_calls += 1
+
+    session = SoftDeletedSession()
+    result = repository.PostgresStateRepository()._add_photo_records_to_group(
+        session,
+        group,
+        actor="admin-a",
+        photos=[
+            {
+                "url": source_url,
+                "source_url": source_url,
+                "source_fingerprint": "temporary-review-photo-id",
+                "category": "before_box",
+                "qr_values": ["QR-REACTIVATED"],
+                "temporary_review_manual_confirmed": True,
+            }
+        ],
+        source="unmatched-review-finalize",
+    )
+
+    compiled = str(session.statements[0].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled
+    assert result == {
+        "added": 0,
+        "skipped_duplicates": 1,
+        "merged_duplicates": 1,
+        "reactivated_duplicates": 1,
+    }
+    assert existing.is_active is True
+    assert existing.deleted_at is None
+    assert existing.deleted_by == ""
+    assert existing.delete_reason == ""
+    assert existing.sort_order == 1
+    assert existing.category == "before_box"
+    assert existing.raw_data["qr_values"] == ["QR-REACTIVATED"]
+    assert group.photo_count == 1
+    assert group.raw_data["photo_count"] == 1
+    assert session.flush_calls >= 1
+
+
 def test_postgres_finalize_unmatched_rolls_back_after_all_writes_are_staged() -> None:
     record = _postgres_finalize_record()
     before = deepcopy(vars(record))

@@ -116,6 +116,10 @@ class LocalTestPaths:
 
 
 _current_team_id: ContextVar[str] = ContextVar("local_simulation_team_id", default=DEFAULT_TEAM_ID)
+_private_team_state: ContextVar[tuple[str, dict[str, Any]] | None] = ContextVar(
+    "local_simulation_private_team_state",
+    default=None,
+)
 
 
 def blank_state(team_id: str = DEFAULT_TEAM_ID) -> dict[str, Any]:
@@ -196,10 +200,15 @@ def save_all_team_states() -> None:
     path = persisted_state_path()
     if path is None:
         return
+    private_state = _private_team_state.get()
+    states = _team_states
+    if private_state is not None:
+        team_id, working_state = private_state
+        states = {**_team_states, team_id: working_state}
     payload = {
         "version": 1,
         "saved_at": datetime.now(UTC).isoformat(),
-        "teams": _team_states,
+        "teams": states,
     }
     with _persistence_lock:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -261,6 +270,12 @@ load_all_team_states()
 
 def state_for_team(team_id: str | None = None) -> dict[str, Any]:
     team = normalize_team_id(team_id or current_team_id())
+    private_state = _private_team_state.get()
+    if private_state is not None and private_state[0] == team:
+        state = private_state[1]
+        state.setdefault("summary", empty_summary())
+        state["summary"]["team_id"] = team
+        return state
     if team not in _team_states:
         _team_states[team] = blank_state(team)
         _team_states[team]["summary"] = empty_summary()
@@ -1799,7 +1814,6 @@ def _finalize_unmatched_match_in_state(
         },
     )
     refresh_summary()
-    save_all_team_states()
     return {
         "group": copy.deepcopy(group),
         "task": copy.deepcopy(task),
@@ -1815,19 +1829,35 @@ def finalize_unmatched_match(
     candidate_key: str,
     expected_version: int,
 ) -> dict[str, Any]:
-    state = get_state()
-    snapshot = copy.deepcopy(state)
+    team_id = current_team_id()
+    with _persistence_lock:
+        live_state = state_for_team(team_id)
+        base_state = copy.deepcopy(live_state)
+        if live_state != base_state:
+            raise unmatched_review.ReviewVersionConflict("Local state changed while finalization was starting")
+    working_state = copy.deepcopy(base_state)
+    token = _private_team_state.set((team_id, working_state))
     try:
-        return _finalize_unmatched_match_in_state(
+        result = _finalize_unmatched_match_in_state(
             unmatched_id,
             actor=actor,
             candidate_key=candidate_key,
             expected_version=expected_version,
         )
-    except Exception:
-        state.clear()
-        state.update(snapshot)
-        raise
+        with _persistence_lock:
+            current_state = _team_states.get(team_id)
+            if current_state != base_state:
+                raise unmatched_review.ReviewVersionConflict(
+                    "Local state changed during unmatched finalization"
+                )
+            save_all_team_states()
+            _team_states[team_id] = working_state
+            if team_id == DEFAULT_TEAM_ID:
+                global _state
+                _state = working_state
+        return result
+    finally:
+        _private_team_state.reset(token)
 
 
 def save_unmatched_review(
