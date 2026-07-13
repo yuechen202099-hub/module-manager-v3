@@ -90,4 +90,23 @@ for (const token of [
 
 assertNotContains(dialog, '<el-image', 'dialog must use verified object URLs with native img')
 
+assertContains(services, 'export class ApiRequestError extends Error', 'API errors must preserve HTTP status')
+assertContains(services, 'readonly status: number', 'API errors must expose an HTTP status')
+assertContains(services, 'export function getApiErrorStatus', 'components need a structured API status helper')
+assertContains(services, 'new ApiRequestError(', 'API failures must use the structured error')
+
+assertContains(dialog, 'return getApiErrorStatus(error) === 409', '409 handling must use the structured status')
+assertNotContains(dialog, "message.includes('409')", '409 handling must not inspect error text')
+assertNotContains(dialog, "message.includes('版本')", '409 handling must not inspect localized error text')
+assertContains(dialog, 'let candidateRequestSerial = 0', 'candidate requests need a monotonic sequence')
+assertContains(dialog, 'function invalidateCandidateRequest()', 'candidate requests need explicit invalidation')
+assertContains(dialog, 'candidateAbortController?.abort()', 'candidate invalidation must abort the old request')
+assertContains(dialog, 'fetchUnmatchedMatchCandidates(unmatchedId, controller.signal)', 'candidate request must receive an abort signal')
+assertContains(dialog, 'function isCurrentCandidateRequest', 'candidate writes must check the active request')
+assertContains(dialog, "mode.value === 'match'", 'candidate writes must remain in match mode')
+assertContains(dialog, 'function clampCandidatePage()', 'candidate page must be clamped explicitly')
+assertContains(dialog, 'Math.min(Math.max(1, candidatePage.value), candidateTotalPages.value)', 'candidate page clamp is incomplete')
+assertContains(dialog, 'v-if="isAdmin"', 'finalization button must be admin only')
+assertContains(dialog, 'if (!isAdmin.value || !detail.value', 'finalization handler must be admin only')
+
 console.log('project board unmatched review checks passed')

@@ -501,6 +501,27 @@ type BackendInstallerWorkload = {
 
 const delay = (ms = 120) => new Promise((resolve) => window.setTimeout(resolve, ms))
 
+export class ApiRequestError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiRequestError'
+    this.status = status
+  }
+}
+
+export function getApiErrorStatus(error: unknown) {
+  if (error instanceof ApiRequestError) return error.status
+  if (typeof error !== 'object' || error === null) return undefined
+  const status = (error as { status?: unknown }).status
+  return typeof status === 'number' ? status : undefined
+}
+
+function createApiRequestError(response: Response, payload?: ApiEnvelope<unknown>) {
+  return new ApiRequestError(payload?.detail || payload?.error?.message || response.statusText, response.status)
+}
+
 function readLegacySession(): LegacySession | null {
   try {
     return JSON.parse(localStorage.getItem('module_manager_session') || 'null') as LegacySession | null
@@ -586,7 +607,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   })
   const payload = (await response.json()) as ApiEnvelope<T>
   if (!response.ok || payload.error) {
-    throw new Error(payload.detail || payload.error?.message || response.statusText)
+    throw createApiRequestError(response, payload)
   }
   if (method !== 'GET' && method !== 'HEAD') emitDataMutated(`api:${method}:${path}`)
   return payload.data as T
@@ -600,7 +621,7 @@ async function formApi<T>(path: string, formData: FormData): Promise<T> {
   })
   const payload = (await response.json()) as ApiEnvelope<T>
   if (!response.ok || payload.error) {
-    throw new Error(payload.detail || payload.error?.message || response.statusText)
+    throw createApiRequestError(response, payload)
   }
   emitDataMutated(`form:${path}`)
   return payload.data as T
@@ -1844,7 +1865,7 @@ export async function saveUnmatchedReview(
 export async function fetchUnmatchedReviewPhotoObjectUrl(unmatchedId: string, photoId: string): Promise<string> {
   const path = `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/photos/${encodeURIComponent(photoId)}/content`
   const response = await fetchWithAuth(path, { headers: formHeaders() })
-  if (!response.ok) throw new Error(response.statusText || `HTTP ${response.status}`)
+  if (!response.ok) throw createApiRequestError(response)
   const blob = await response.blob()
   if (!blob.type.startsWith('image/')) throw new Error('返回内容不是图片')
   return createVerifiedImageObjectUrl(blob)
@@ -1881,9 +1902,13 @@ export async function confirmUnmatchedReview(
   return mapUnmatchedReview(data)
 }
 
-export async function fetchUnmatchedMatchCandidates(unmatchedId: string): Promise<UnmatchedMatchCandidate[]> {
+export async function fetchUnmatchedMatchCandidates(
+  unmatchedId: string,
+  signal?: AbortSignal,
+): Promise<UnmatchedMatchCandidate[]> {
   const data = await api<BackendUnmatchedMatchCandidates>(
     `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/candidates`,
+    { signal },
   )
   return (data.items || []).map(mapUnmatchedMatchCandidate)
 }

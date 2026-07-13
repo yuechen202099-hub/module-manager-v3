@@ -9,6 +9,7 @@ import {
   fetchUnmatchedReview,
   fetchUnmatchedReviewPhotoObjectUrl,
   finalizeUnmatchedMatch,
+  getApiErrorStatus,
   rescanUnmatchedReviewPhoto,
   saveUnmatchedReview,
 } from '@/api/services'
@@ -45,6 +46,8 @@ const narrowScreen = ref(false)
 
 let detailRequestSerial = 0
 let imageRequestSerial = 0
+let candidateRequestSerial = 0
+let candidateAbortController: AbortController | null = null
 let loadedUnmatchedId = ''
 
 const isAdmin = computed(() => Boolean(auth.user?.roles?.includes('admin') || auth.user?.role === 'admin'))
@@ -88,8 +91,31 @@ function applyDetail(next: UnmatchedReviewDetail, preserveDraft = false) {
 }
 
 function isVersionConflict(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error || '')
-  return message.includes('409') || message.includes('版本') || message.toLowerCase().includes('conflict')
+  return getApiErrorStatus(error) === 409
+}
+
+function invalidateCandidateRequest() {
+  candidateRequestSerial += 1
+  candidateAbortController?.abort()
+  candidateAbortController = null
+}
+
+function isCurrentCandidateRequest(requestSerial: number, unmatchedId: string, controller: AbortController) {
+  return (
+    requestSerial === candidateRequestSerial &&
+    candidateAbortController === controller &&
+    props.modelValue &&
+    props.unmatchedId === unmatchedId &&
+    mode.value === 'match'
+  )
+}
+
+function clampCandidatePage() {
+  candidatePage.value = Math.min(Math.max(1, candidatePage.value), candidateTotalPages.value)
+}
+
+function isAbortedRequest(error: unknown) {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError'
 }
 
 async function loadDetail(options: { preserveDraft?: boolean } = {}) {
@@ -238,25 +264,41 @@ async function confirmReview() {
 }
 
 async function openMatchMode() {
+  const unmatchedId = props.unmatchedId
   const saved = await saveReview('reviewed')
-  if (!saved || !detail.value) return
+  if (!saved || !detail.value || !props.modelValue || props.unmatchedId !== unmatchedId) return
   mode.value = 'match'
+  await loadMatchCandidates()
+}
+
+async function loadMatchCandidates() {
+  if (!props.modelValue || mode.value !== 'match' || !props.unmatchedId) return
+  invalidateCandidateRequest()
+  const requestSerial = candidateRequestSerial
+  const unmatchedId = props.unmatchedId
+  const controller = new AbortController()
+  candidateAbortController = controller
   candidatesLoading.value = true
-  candidates.value = []
-  selectedCandidateKey.value = ''
-  candidatePage.value = 1
   errorMessage.value = ''
   try {
-    candidates.value = await fetchUnmatchedMatchCandidates(props.unmatchedId)
+    const next = await fetchUnmatchedMatchCandidates(unmatchedId, controller.signal)
+    if (!isCurrentCandidateRequest(requestSerial, unmatchedId, controller)) return
+    candidates.value = next
+    selectedCandidateKey.value = ''
+    clampCandidatePage()
   } catch (error) {
+    if (!isCurrentCandidateRequest(requestSerial, unmatchedId, controller) || isAbortedRequest(error)) return
     errorMessage.value = error instanceof Error ? error.message : '候选终端加载失败'
   } finally {
-    candidatesLoading.value = false
+    if (isCurrentCandidateRequest(requestSerial, unmatchedId, controller)) {
+      candidatesLoading.value = false
+      candidateAbortController = null
+    }
   }
 }
 
 async function finalizeMatch() {
-  if (!detail.value || !selectedCandidateKey.value || finalizing.value) return
+  if (!isAdmin.value || !detail.value || !selectedCandidateKey.value || finalizing.value) return
   finalizing.value = true
   errorMessage.value = ''
   try {
@@ -274,26 +316,36 @@ async function finalizeMatch() {
   }
 }
 
+function returnToReview() {
+  mode.value = 'review'
+  invalidateCandidateRequest()
+  candidatesLoading.value = false
+}
+
 watch(
   () => [props.modelValue, props.unmatchedId] as const,
   ([visible, unmatchedId]) => {
     if (!visible) {
       detailRequestSerial += 1
       imageRequestSerial += 1
+      invalidateCandidateRequest()
       replaceImageObjectUrl()
       loadedUnmatchedId = ''
       mode.value = 'review'
       candidates.value = []
       selectedCandidateKey.value = ''
       candidatePage.value = 1
+      candidatesLoading.value = false
       return
     }
     if (unmatchedId !== loadedUnmatchedId) {
+      invalidateCandidateRequest()
       mode.value = 'review'
       candidates.value = []
       selectedCandidateKey.value = ''
       candidatePage.value = 1
       selectedPhotoId.value = ''
+      candidatesLoading.value = false
     }
     void loadDetail()
   },
@@ -301,7 +353,7 @@ watch(
 )
 
 watch(candidateTotalPages, (totalPages) => {
-  if (candidatePage.value > totalPages) candidatePage.value = totalPages
+  clampCandidatePage()
 })
 
 onMounted(() => {
@@ -312,6 +364,7 @@ onMounted(() => {
 onUnmounted(() => {
   detailRequestSerial += 1
   imageRequestSerial += 1
+  invalidateCandidateRequest()
   replaceImageObjectUrl()
   window.removeEventListener('resize', updateNarrowScreen)
 })
@@ -426,7 +479,7 @@ onUnmounted(() => {
     </template>
 
     <template #footer>
-      <el-button v-if="mode === 'match'" @click="mode = 'review'">返回继续修改</el-button>
+      <el-button v-if="mode === 'match'" @click="returnToReview">返回继续修改</el-button>
       <el-button @click="closeDialog">关闭</el-button>
     </template>
   </el-dialog>

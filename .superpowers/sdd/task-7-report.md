@@ -4,6 +4,7 @@
 
 - `v2-web/src/components/UnmatchedReviewDialog.vue`
 - `v2-web/src/views/ProjectBoardView.vue`
+- `v2-web/src/api/services.ts`
 - `scripts/verify_project_board_unmatched_review.js`
 - `.superpowers/sdd/task-7-report.md`
 
@@ -53,3 +54,52 @@ Results:
 ## Concerns
 
 - Vite still emits the existing VueUse pure-annotation and large-chunk warnings. The build exits successfully; no static artifacts are included in this task.
+
+## Re-review Fixes
+
+### RED
+
+Command:
+
+```powershell
+node scripts\verify_project_board_unmatched_review.js
+```
+
+Result: exit 1 with `API errors must preserve HTTP status`. The new static checks intentionally failed against the original Task 7 implementation, which inferred 409 conflicts from error text and did not invalidate candidate requests.
+
+### GREEN
+
+Commands:
+
+```powershell
+node scripts\verify_project_board_unmatched_review.js
+npm --prefix v2-web run build
+git diff --check
+```
+
+Results:
+
+- UI verifier: exit 0, `project board unmatched review checks passed`.
+- Build: exit 0; `vue-tsc --noEmit` and Vite production build passed.
+- `git diff --check`: exit 0.
+- The build-generated static files were restored or removed before commit.
+
+### Fixes
+
+- Added `ApiRequestError extends Error` with a numeric `status`, plus `getApiErrorStatus`. The shared JSON and form API paths now create this error after their existing response handling, so the 401 clear-and-redirect behavior is unchanged. The unmatched photo-content failure path also reports the structured status.
+- All unmatched save, rescan, manual-confirm, and finalize catches continue to use one conflict helper, which now only accepts `getApiErrorStatus(error) === 409`; it no longer inspects localized text or status text.
+- Candidate retrieval now accepts an optional abort signal. The dialog owns both a monotonic request serial and an `AbortController`; starting another candidate load, returning to edit, closing, changing `unmatchedId`, and unmounting invalidates the prior request.
+- Only the current request for the same visible unmatched record while still in `match` mode may update candidates, loading, or error state. Candidate failures preserve previously loaded candidate data, and stale or aborted failures do not write UI state.
+- Candidate page numbers are explicitly clamped to the inclusive `[1, candidateTotalPages]` range. Finalization remains hidden in the template for non-admins and now has an explicit non-admin function guard.
+- Extended the verifier to fail for absent structured 409 handling, candidate invalidation/abort/current-request checks, page clamping, and either missing administrator finalization condition.
+
+### Re-review Self-review
+
+- A 409 reload still calls `loadDetail({ preserveDraft: true })`; it retains the draft, selected photo, current mode, selected candidate, and candidate page.
+- Candidate request starts keep existing candidate rows until the current request succeeds. Current-request checks prevent failed or invalidated older requests from replacing candidates, clearing newer loading state, or presenting stale errors.
+- Closing and reopening invalidates candidate work before reset; a delayed save cannot enter match mode or initiate candidate loading after the dialog closes or the record changes.
+- The object URL lifecycle is unchanged: image replacement, stale image completion, close, and unmount all revoke object URLs.
+
+### Re-review Concerns
+
+- Existing Vite VueUse pure-annotation and large-chunk warnings remain. They do not affect the successful TypeScript/Vite build, and static build outputs remain outside the commit.
