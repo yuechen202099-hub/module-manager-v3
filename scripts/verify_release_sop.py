@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import sys
 import re
+import sys
 from pathlib import Path
 
 
@@ -70,22 +70,43 @@ REQUIRED_FILES = [
     "scripts/verify_dialog_information_integration.js",
 ]
 
-DEPLOYED_BASELINE_PATTERN = re.compile(
-    r"^- 当前已部署生产版本：`(?P<version>V\d+\.\d+\.\d+)`。$", re.MULTILINE
+AGENTS_MARKER_PATTERN = re.compile(
+    r"^\s*[-*]\s*(?P<label>[^:：\n]+?)\s*[:：]\s*`?\s*(?P<version>V\d+\.\d+\.\d+)\s*`?\s*[。.]?\s*$",
+    re.MULTILINE,
 )
-RELEASE_CANDIDATE_PATTERN = re.compile(
-    r"^- 当前发布候选版本：`(?P<version>V\d+\.\d+\.\d+)`。$", re.MULTILINE
+STATUS_FIELD_PATTERN = re.compile(
+    r"^\s*[-*]\s*(?P<label>[^:：\n]+?)\s*[:：]\s*(?P<value>.+?)\s*$", re.MULTILINE
 )
-RELEASE_STATUS_PATTERN = re.compile(r"^- Status:\s*(?P<status>.+?)\s*$", re.MULTILINE)
 RELEASE_TABLE_ROW_PATTERN = re.compile(
     r"^\|\s*(?P<evidence>[^|]+?)\s*\|\s*(?P<value>[^|]*)\s*\|\s*$", re.MULTILINE
 )
-DEPLOYMENT_EVIDENCE_FIELDS = (
-    "SHA256",
-    "Backup directory",
-    "Release directory",
-    "Public health check",
-)
+DEPLOYED_BASELINE_MARKER = "当前已部署生产版本"
+RELEASE_CANDIDATE_MARKER = "当前发布候选版本"
+STATUS_FIELD_LABELS = {
+    "status",
+    "deploymentstate",
+    "deploymentstatus",
+    "releasestatus",
+    "release",
+    "deployment",
+    "状态",
+    "部署状态",
+    "发布状态",
+    "上线状态",
+    "部署",
+    "发布",
+    "上线",
+}
+DEPLOYMENT_CLAIM_PATTERN = re.compile(r"\b(?:deployed|shipped|released)\b|已部署|已发布|已上线", re.IGNORECASE)
+NEGATED_ENGLISH_CLAIM_PATTERN = re.compile(r"\bnot\s+(?:deployed|shipped|released)\b", re.IGNORECASE)
+NEGATED_CHINESE_CLAIM_PATTERN = re.compile(r"(?:未|尚未)(?:部署|发布|上线)")
+PENDING_STATUS_PATTERN = re.compile(r"\bpending\b|待(?:部署|发布|上线|验证)|未(?:部署|发布|上线)", re.IGNORECASE)
+PLACEHOLDER_PATTERN = re.compile(r"\b(?:tbd|todo|pending|n/?a|unknown)\b|待补充|待验证|(?:^|\s)-(?:$|\s)", re.IGNORECASE)
+SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
+BACKUP_DIRECTORY_PATTERN = re.compile(r"/opt/module-manager-v2/backups/[A-Za-z0-9._-]+")
+RELEASE_DIRECTORY_PATTERN = re.compile(r"/opt/module-manager-v2/releases/[A-Za-z0-9._-]+")
+PUBLIC_HEALTH_URL_PATTERN = re.compile(r"https://(?:www\.)?sgcc\.online/health(?:[/?#\s]|$)", re.IGNORECASE)
+SUCCESS_STATUS_PATTERN = re.compile(r"\b(?:passed|pass|success|successful|healthy|ok)\b|通过|成功", re.IGNORECASE)
 
 
 def fail(message: str) -> None:
@@ -96,26 +117,45 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def parse_agents_marker(agents: str, pattern: re.Pattern[str], marker_name: str) -> str:
-    matches = list(pattern.finditer(agents))
+def normalize_label(label: str) -> str:
+    return re.sub(r"[\s:：。.`'\"-]+", "", label).casefold()
+
+
+def parse_agents_marker(agents: str, marker: str, marker_name: str) -> str:
+    matches = [
+        match
+        for match in AGENTS_MARKER_PATTERN.finditer(agents)
+        if normalize_label(match.group("label")) == normalize_label(marker)
+    ]
     if len(matches) != 1:
         fail(f"AGENTS.md must define exactly one {marker_name} marker")
     return matches[0].group("version")
 
 
 def deployed_production_baseline(agents: str) -> str:
-    return parse_agents_marker(agents, DEPLOYED_BASELINE_PATTERN, "deployed production baseline")
+    return parse_agents_marker(agents, DEPLOYED_BASELINE_MARKER, "deployed production baseline")
 
 
 def release_candidate(agents: str) -> str:
-    return parse_agents_marker(agents, RELEASE_CANDIDATE_PATTERN, "release candidate")
+    return parse_agents_marker(agents, RELEASE_CANDIDATE_MARKER, "release candidate")
 
 
 def release_record_status(record: str) -> str:
-    match = RELEASE_STATUS_PATTERN.search(record)
-    if match is None:
-        fail("release record must include a Status field")
-    return match.group("status").strip()
+    claims = [
+        match.group("value").strip()
+        for match in STATUS_FIELD_PATTERN.finditer(record)
+        if normalize_label(match.group("label")) in STATUS_FIELD_LABELS
+    ]
+    claims.extend(
+        match.group("value").strip()
+        for match in RELEASE_TABLE_ROW_PATTERN.finditer(record)
+        if normalize_label(match.group("evidence")) in STATUS_FIELD_LABELS
+    )
+    if not claims:
+        fail("release record must include a status-like field")
+    if len(claims) != 1:
+        fail("release record must not contain multiple status-like claims")
+    return claims[0]
 
 
 def release_record_evidence(record: str) -> dict[str, str]:
@@ -125,11 +165,67 @@ def release_record_evidence(record: str) -> dict[str, str]:
     }
 
 
+def is_placeholder(value: str) -> bool:
+    return PLACEHOLDER_PATTERN.search(value) is not None
+
+
+def has_deployment_claim(status: str) -> bool:
+    if NEGATED_ENGLISH_CLAIM_PATTERN.search(status) or NEGATED_CHINESE_CLAIM_PATTERN.search(status):
+        return False
+    return DEPLOYMENT_CLAIM_PATTERN.search(status) is not None
+
+
+def status_is_pending(status: str) -> bool:
+    return bool(PENDING_STATUS_PATTERN.search(status)) or bool(
+        NEGATED_ENGLISH_CLAIM_PATTERN.search(status) or NEGATED_CHINESE_CLAIM_PATTERN.search(status)
+    )
+
+
+def valid_sha256(value: str) -> bool:
+    return not is_placeholder(value) and SHA256_PATTERN.fullmatch(value.strip()) is not None
+
+
+def valid_backup_directory(value: str) -> bool:
+    path = value.strip()
+    return (
+        not is_placeholder(path)
+        and BACKUP_DIRECTORY_PATTERN.fullmatch(path) is not None
+        and path.rsplit("/", 1)[-1] not in {".", ".."}
+    )
+
+
+def valid_release_directory(value: str) -> bool:
+    path = value.strip()
+    return (
+        not is_placeholder(path)
+        and RELEASE_DIRECTORY_PATTERN.fullmatch(path) is not None
+        and path.rsplit("/", 1)[-1] not in {".", ".."}
+    )
+
+
+def valid_public_health_evidence(value: str) -> bool:
+    return (
+        not is_placeholder(value)
+        and PUBLIC_HEALTH_URL_PATTERN.search(value) is not None
+        and SUCCESS_STATUS_PATTERN.search(value) is not None
+        and not PENDING_STATUS_PATTERN.search(value)
+    )
+
+
 def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
-    if "deployed" not in release_record_status(record).casefold():
+    status = release_record_status(record)
+    deployment_claimed = has_deployment_claim(status)
+    if deployment_claimed and status_is_pending(status):
+        fail("release record contains contradictory pending and deployment claims")
+    if not deployment_claimed:
         return False
     evidence = release_record_evidence(record)
-    return any(not evidence.get(field, "").strip() for field in DEPLOYMENT_EVIDENCE_FIELDS)
+    return not (
+        valid_sha256(evidence.get("SHA256", ""))
+        and valid_backup_directory(evidence.get("Backup directory", ""))
+        and valid_release_directory(evidence.get("Release directory", ""))
+        and valid_public_health_evidence(evidence.get("Public health check", ""))
+    )
 
 
 def main() -> int:
