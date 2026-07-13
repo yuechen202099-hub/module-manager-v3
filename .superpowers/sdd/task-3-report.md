@@ -140,3 +140,40 @@ The verifier now normalizes marker labels, permits exactly one status-like asser
 - `205ba9f fix: harden release truthfulness verifier`
 
 No package, deployment, production connection, release cleanup, or deployed-baseline advancement occurred.
+
+## Second Re-Review Remediation
+
+The second review identified that `+` and unbulleted semantic fields were ignored, decorative punctuation was not fully normalized, and evidence rows were reduced with last-write-wins behavior.
+
+### RED
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+```
+
+```text
+13 failed, 24 passed
+```
+
+The failures covered `+` version/status lines, unbulleted and punctuation-delimited fields, unbulleted evidence, and duplicate required evidence fields where a final valid row masked an earlier invalid or duplicate row.
+
+### GREEN
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+.\.venv\Scripts\python.exe scripts\verify_release_sop.py
+.\.venv\Scripts\python.exe -m py_compile scripts\verify_release_sop.py scripts\test_verify_release_sop.py
+```
+
+```text
+37 passed in 0.06s
+[OK] release SOP files and references are consistent
+```
+
+The verifier now accepts `-`, `*`, `+`, and unbulleted semantic fields; canonicalizes ASCII/full-width decorative punctuation around labels; and keeps every required evidence occurrence. A deployment claim requires exactly one valid occurrence of each required evidence field, so duplicate, blank, malformed, placeholder, and conflicting rows all fail.
+
+### Second Re-Review Commit
+
+- `14236b6 fix: close release record parser bypasses`
+
+No package, deployment, production connection, release cleanup, or deployed-baseline advancement occurred.
