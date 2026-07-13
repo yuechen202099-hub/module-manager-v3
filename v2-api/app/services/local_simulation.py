@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import hashlib
 import json
+import copy
 import mimetypes
 import os
 import re
@@ -1612,7 +1613,8 @@ def get_unmatched_review(unmatched_id: str) -> dict[str, Any]:
     record = get_unmatched_record(unmatched_id)
     if record is None:
         raise KeyError(unmatched_id)
-    return {"record": record, "review": unmatched_review.build_review(record)}
+    review = unmatched_review.build_review(record)
+    return {"record": copy.deepcopy(record), "review": copy.deepcopy(review)}
 
 
 def save_unmatched_review(
@@ -1643,7 +1645,7 @@ def save_unmatched_review(
         current_state["scan_unmatched"][index] = record
         append_audit_event("unmatched_review_saved", actor, audit_event)
         save_all_team_states()
-        return {"record": record, "review": updated}
+        return {"record": copy.deepcopy(record), "review": copy.deepcopy(updated)}
     raise KeyError(unmatched_id)
 
 

@@ -1362,6 +1362,64 @@ def test_unmatched_review_save_persists_without_creating_group_or_changing_summa
     assert after["groups"] == before["groups"]
     assert after["tasks"] == before["tasks"]
     assert after["summary"] == before["summary"]
+    assert [
+        (task["id"], task["terminal"], task["status"])
+        for task in after["tasks"]
+    ] == [
+        (task["id"], task["terminal"], task["status"])
+        for task in before["tasks"]
+    ]
+    assert {
+        key: after["summary"][key]
+        for key in (
+            "groups",
+            "matched_groups",
+            "incomplete_groups",
+            "approved_groups",
+            "exception_groups",
+            "review_progress",
+            "photo_accuracy_checked",
+            "photo_accuracy_passed",
+            "photo_accuracy_failed",
+            "photo_accuracy_unreadable",
+            "photo_accuracy_rate",
+            "group_barcode_accuracy_checked",
+            "group_barcode_accuracy_passed",
+            "group_barcode_accuracy_failed",
+            "group_barcode_accuracy_unreadable",
+            "group_barcode_accuracy_rate",
+        )
+    } == {
+        key: before["summary"][key]
+        for key in (
+            "groups",
+            "matched_groups",
+            "incomplete_groups",
+            "approved_groups",
+            "exception_groups",
+            "review_progress",
+            "photo_accuracy_checked",
+            "photo_accuracy_passed",
+            "photo_accuracy_failed",
+            "photo_accuracy_unreadable",
+            "photo_accuracy_rate",
+            "group_barcode_accuracy_checked",
+            "group_barcode_accuracy_passed",
+            "group_barcode_accuracy_failed",
+            "group_barcode_accuracy_unreadable",
+            "group_barcode_accuracy_rate",
+        )
+    }
+    assert [
+        (group["id"], [(photo["id"], photo.get("archive_status")) for photo in group["photos"]])
+        for group in after["groups"]
+    ] == [
+        (group["id"], [(photo["id"], photo.get("archive_status")) for photo in group["photos"]])
+        for group in before["groups"]
+    ]
+    assert "00000000" not in str(after["groups"])
+    assert "00000000" not in str(after["tasks"])
+    assert "00000000" not in str(after["summary"])
 
 
 def test_unmatched_review_save_rejects_stale_version_without_persisting_or_auditing(synthetic_state: dict) -> None:
@@ -1410,6 +1468,52 @@ def test_unmatched_review_save_persists_across_json_reload(
 
     assert reloaded["review"] == saved["review"]
     assert len(events) == 1
+
+
+def test_unmatched_review_open_return_values_are_mutation_isolated(synthetic_state: dict) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    initial = local_simulation.get_unmatched_review(unmatched_id)
+    local_simulation.save_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=initial["review"]["version"],
+        photo_updates=[{"id": initial["review"]["photos"][0]["id"], "category": "before_box"}],
+    )
+    before = deepcopy(local_simulation.get_state())
+
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    opened["record"]["temporary_review"]["photos"][0]["category"] = "after_box"
+    opened["review"]["meter_no"] = "mutated-meter"
+
+    after = local_simulation.get_state()
+    persisted = local_simulation.get_unmatched_review(unmatched_id)
+    assert after == before
+    assert persisted["review"]["version"] == before["scan_unmatched"][-1]["temporary_review"]["version"]
+    assert persisted["review"]["photos"][0]["category"] == "before_box"
+    assert after["audit_events"] == before["audit_events"]
+
+
+def test_unmatched_review_save_return_values_are_mutation_isolated(synthetic_state: dict) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    saved = local_simulation.save_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=opened["review"]["version"],
+        photo_updates=[{"id": opened["review"]["photos"][0]["id"], "category": "before_box"}],
+    )
+    before = deepcopy(local_simulation.get_state())
+
+    saved["record"]["temporary_review"]["meter_no"] = "mutated-meter"
+    saved["review"]["photos"][0]["category"] = "after_box"
+
+    after = local_simulation.get_state()
+    persisted = local_simulation.get_unmatched_review(unmatched_id)
+    assert after == before
+    assert persisted["review"]["version"] == before["scan_unmatched"][-1]["temporary_review"]["version"]
+    assert persisted["review"]["meter_no"] != "mutated-meter"
+    assert persisted["review"]["photos"][0]["category"] == "before_box"
+    assert after["audit_events"] == before["audit_events"]
 
 
 def test_json_state_repository_saves_unmatched_review_through_local_state(synthetic_state: dict) -> None:
