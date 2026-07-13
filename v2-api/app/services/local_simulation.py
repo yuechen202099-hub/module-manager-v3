@@ -153,6 +153,7 @@ def blank_state(team_id: str = DEFAULT_TEAM_ID) -> dict[str, Any]:
         "review_events": [],
         "photo_events": [],
         "audit_events": [],
+        "unmatched_finalization_replays": {},
     }
 
 
@@ -1864,6 +1865,43 @@ def _apply_formal_group_barcode_check(group: dict[str, Any]) -> None:
     group.update(photo_barcode_check.build_group_barcode_check(group))
 
 
+def _unmatched_finalization_replay_key(team_id: str, unmatched_id: str) -> str:
+    return f"{team_id}:{unmatched_id}"
+
+
+def _reset_group_after_migrated_evidence(group: dict[str, Any]) -> None:
+    group["status"] = "pending" if int(group.get("photo_count") or 0) >= 4 else "incomplete"
+    group["reviewer"] = None
+    group["review_note"] = ""
+    group["reviewed_at"] = None
+    group["exception_status"] = ""
+    group["exception_note"] = ""
+    group["exception_reasons"] = []
+    group["exception_flags"] = []
+    group["has_archive_blocker"] = False
+    for key in (
+        "archive_status",
+        "archive_filename",
+        "archived_at",
+        "archived_by",
+        "photo_category_complete",
+        "photo_category_classified_count",
+        "photo_category_total_count",
+        "classification_complete",
+        "classified_by",
+        "classified_at",
+        "bulk_archive_reason",
+    ):
+        group.pop(key, None)
+    for photo in group.get("photos") or []:
+        photo["archive_status"] = "pending"
+        photo["archive_filename"] = ""
+        photo["archived_at"] = ""
+        photo["classified_by"] = ""
+        photo["classified_at"] = ""
+    apply_photo_quality_exception_status(group)
+
+
 def _finalize_unmatched_match_in_state(
     unmatched_id: str,
     *,
@@ -1873,6 +1911,17 @@ def _finalize_unmatched_match_in_state(
 ) -> dict[str, Any]:
     state = get_state()
     record = get_unmatched_record(unmatched_id)
+    replay_key = _unmatched_finalization_replay_key(current_team_id(), unmatched_id)
+    replay = state.setdefault("unmatched_finalization_replays", {}).get(replay_key)
+    if (
+        record is None
+        and isinstance(replay, dict)
+        and replay.get("status") == "associated"
+        and replay.get("candidate_key") == candidate_key
+        and replay.get("expected_version") == expected_version
+        and isinstance(replay.get("result"), dict)
+    ):
+        return copy.deepcopy(replay["result"])
     if record is None:
         raise KeyError(unmatched_id)
     review = unmatched_review.build_review(record)
@@ -1881,9 +1930,11 @@ def _finalize_unmatched_match_in_state(
     candidate = next((item for item in candidates if item["candidate_key"] == candidate_key), None)
     if candidate is None:
         raise ValueError("Selected candidate is invalid or unavailable")
-    terminal = str(candidate.get("terminal") or "").strip()
-    if terminal in unmatched_review.INVALID_TERMINALS:
-        raise ValueError("Selected candidate has an invalid terminal")
+    terminal, meter_no = validate_real_formal_identity(
+        str(candidate.get("terminal") or ""),
+        str(candidate.get("meter_no") or ""),
+    )
+    candidate = {**candidate, "terminal": terminal, "meter_no": meter_no}
 
     target_group_id = str(candidate.get("target_group_id") or "")
     group = get_group(target_group_id) if target_group_id else None
@@ -1894,7 +1945,7 @@ def _finalize_unmatched_match_in_state(
             "id": next_group_id(),
             "task_id": task["id"],
             "meter_match_key": str(candidate.get("meter_match_key") or ""),
-            "meter_no": str(candidate.get("meter_no") or ""),
+            "meter_no": meter_no,
             "terminal": terminal,
             "address": str(candidate.get("address") or ""),
             "stage_meter_no": "",
@@ -1913,7 +1964,7 @@ def _finalize_unmatched_match_in_state(
         group["task_id"] = task["id"]
         group["terminal"] = terminal
         group["stage_terminal"] = terminal
-        group["meter_no"] = str(candidate.get("meter_no") or "")
+        group["meter_no"] = meter_no
         group["meter_match_key"] = str(candidate.get("meter_match_key") or "")
         group["address"] = str(candidate.get("address") or "")
 
@@ -1936,6 +1987,7 @@ def _finalize_unmatched_match_in_state(
         if existing.get("sha256"):
             existing_by_sha[str(existing["sha256"])] = existing
     added = 0
+    merged = 0
     for photo in migrated_photos:
         ensure_photo_identity_fields(photo)
         photo_url = str(photo.get("source_url") or photo.get("image_url") or "")
@@ -1954,6 +2006,7 @@ def _finalize_unmatched_match_in_state(
                 str(existing.get("category") or "unclassified"),
                 PHOTO_CATEGORIES["unclassified"],
             )
+            merged += 1
             continue
         group.setdefault("photos", []).append(photo)
         if photo.get("source_fingerprint"):
@@ -1964,11 +2017,22 @@ def _finalize_unmatched_match_in_state(
             existing_by_sha[str(photo["sha256"])] = photo
         added += 1
     group["photo_count"] = len(group.get("photos") or [])
-    group["status"] = "pending" if group["photo_count"] >= 4 else "incomplete"
-    group["reviewer"] = None
-    group["reviewed_at"] = None
+    if added or merged:
+        _reset_group_after_migrated_evidence(group)
     _apply_formal_group_barcode_check(group)
 
+    result = {
+        "group": copy.deepcopy(group),
+        "task": copy.deepcopy(task),
+        "attached": attached,
+        "added_photos": added,
+    }
+    state.setdefault("unmatched_finalization_replays", {})[replay_key] = {
+        "status": "associated",
+        "candidate_key": candidate_key,
+        "expected_version": expected_version,
+        "result": copy.deepcopy(result),
+    }
     state["scan_unmatched"] = [
         item
         for item in state.get("scan_unmatched", [])
@@ -1987,12 +2051,7 @@ def _finalize_unmatched_match_in_state(
         },
     )
     refresh_summary()
-    return {
-        "group": copy.deepcopy(group),
-        "task": copy.deepcopy(task),
-        "attached": attached,
-        "added_photos": added,
-    }
+    return copy.deepcopy(result)
 
 
 def finalize_unmatched_match(

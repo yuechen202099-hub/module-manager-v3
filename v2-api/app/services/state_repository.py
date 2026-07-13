@@ -311,7 +311,6 @@ def _apply_photo_quality_exception_status(
 def _reset_group_after_photo_evidence_change(
     session: Session,
     group: MaterialGroup,
-    changed_photos: list[Photo],
 ) -> None:
     group.status = GroupStatus.INCOMPLETE if group.photo_count < 4 else GroupStatus.UNREVIEWED
     group.reviewed_by_id = None
@@ -337,7 +336,17 @@ def _reset_group_after_photo_evidence_change(
         }
     )
     group.raw_data = raw
-    for photo in changed_photos:
+    session.flush()
+    active_photos = list(
+        session.scalars(
+            select(Photo).where(
+                Photo.team_id == group.team_id,
+                Photo.group_id == group.id,
+                Photo.is_active.is_(True),
+            )
+        ).all()
+    )
+    for photo in active_photos:
         photo.archive_status = ""
         photo.archive_filename = ""
         photo.archived_at = None
@@ -4049,18 +4058,25 @@ class PostgresStateRepository(StateRepository):
                 if record is None:
                     raise KeyError(unmatched_id)
                 replay = (record.payload or {}).get(FINALIZATION_REPLAY_KEY)
-                if (
-                    isinstance(replay, dict)
-                    and replay.get("candidate_key") == candidate_key
-                    and replay.get("expected_version") == expected_version
-                    and isinstance(replay.get("result"), dict)
-                ):
-                    return deepcopy(replay["result"])
+                if record.status == "associated":
+                    if (
+                        isinstance(replay, dict)
+                        and replay.get("candidate_key") == candidate_key
+                        and replay.get("expected_version") == expected_version
+                        and isinstance(replay.get("result"), dict)
+                    ):
+                        return deepcopy(replay["result"])
+                    raise KeyError(unmatched_id)
                 if record.status != "open":
                     raise KeyError(unmatched_id)
                 review = unmatched_review.build_review(_unmatched_payload(record))
                 unmatched_review.require_version(review, expected_version)
                 candidate = self._resolve_unmatched_candidate(session, record, review, candidate_key)
+                terminal, meter_no = local_simulation.validate_real_formal_identity(
+                    str(candidate.get("terminal") or ""),
+                    str(candidate.get("meter_no") or ""),
+                )
+                candidate = {**candidate, "terminal": terminal, "meter_no": meter_no}
                 group, attached = self._materialize_unmatched_candidate(
                     session,
                     record,
@@ -6016,7 +6032,6 @@ class PostgresStateRepository(StateRepository):
         merged_duplicates = 0
         reactivated_duplicates = 0
         skipped_duplicates = 0
-        changed_photos: list[Photo] = []
         active_count = session.scalar(
             select(func.count(Photo.id)).where(
                 Photo.team_id == group.team_id,
@@ -6072,7 +6087,6 @@ class PostgresStateRepository(StateRepository):
                     duplicate.source_fingerprint = duplicate.source_fingerprint or source_fingerprint
                     duplicate.image_url = duplicate.image_url or image_url
                     merged_duplicates += 1
-                    changed_photos.append(duplicate)
                 continue
             active_count += 1
             legacy_id = str(item.get("id") or f"p-{group.legacy_id or group.id}-{uuid4().hex[:12]}")
@@ -6124,11 +6138,9 @@ class PostgresStateRepository(StateRepository):
             if storage_type and storage_key:
                 register_duplicate(existing_by_storage, (storage_type, storage_key), photo)
             added += 1
-            if source == "unmatched-review-finalize":
-                changed_photos.append(photo)
         if source == "unmatched-review-finalize" and (added or merged_duplicates):
             group.photo_count = int(active_count)
-            _reset_group_after_photo_evidence_change(session, group, changed_photos)
+            _reset_group_after_photo_evidence_change(session, group)
         elif added or reactivated_duplicates:
             group.photo_count = int(active_count)
             group.status = GroupStatus.INCOMPLETE if group.photo_count < 4 else GroupStatus.UNREVIEWED

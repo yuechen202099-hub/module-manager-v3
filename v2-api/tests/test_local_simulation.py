@@ -1419,6 +1419,53 @@ def test_unmatched_match_requires_server_candidate_and_creates_no_placeholder(sy
     assert all(group.get("terminal") != "00000000" for group in state["groups"])
 
 
+@pytest.mark.parametrize(
+    ("terminal", "meter_no"),
+    [
+        ("manual-1", "120000912473"),
+        ("unmatched-1", "120000912473"),
+        ("未关联终端", "120000912473"),
+        ("00000000", "120000912473"),
+        ("T-STRICT", "manual-1"),
+        ("T-STRICT", "unmatched-1"),
+        ("T-STRICT", "未关联终端"),
+        ("T-STRICT", "00000000"),
+    ],
+)
+def test_json_candidate_finalization_rejects_synthetic_identity_without_writes(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: str,
+    meter_no: str,
+) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    candidate_key = f"catalog:strict:{terminal}:{meter_no}"
+    candidate = {
+        "candidate_key": candidate_key,
+        "target_group_id": "",
+        "terminal": terminal,
+        "meter_no": meter_no,
+        "meter_match_key": "0000912473",
+        "address": "strict road",
+    }
+    monkeypatch.setattr(
+        local_simulation,
+        "list_unmatched_match_candidates",
+        lambda checked_id: {"total": 1, "items": [candidate]} if checked_id == unmatched_id else {"total": 0, "items": []},
+    )
+    before = deepcopy(local_simulation.get_state())
+
+    with pytest.raises(ValueError, match="real (terminal|meter number)"):
+        local_simulation.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-a",
+            candidate_key=candidate_key,
+            expected_version=1,
+        )
+
+    assert local_simulation.get_state() == before
+
+
 def test_unmatched_finalize_migrates_review_recomputes_formal_status_and_removes_open_record(
     synthetic_state: dict,
 ) -> None:
@@ -1603,6 +1650,108 @@ def test_unmatched_finalize_merges_review_evidence_into_duplicate_photo(syntheti
     assert merged["temporary_review_manual_confirmed"] is True
     assert merged["temporary_review_reviewer"] == "reviewer-a"
     assert merged["source_url"] == review["photos"][0]["source_url"]
+
+
+def test_json_migrated_evidence_resets_whole_group_review_archive_and_exception_state(
+    synthetic_state: dict,
+) -> None:
+    unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/whole-reset")
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    catalog = add_unmatched_match_catalog_row(terminal="T-WHOLE-RESET")
+    record = next(item for item in state["scan_unmatched"] if item["unmatched_id"] == unmatched_id)
+    review = unmatched_review.build_review(record)
+    categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
+    for photo, category in zip(review["photos"], categories, strict=True):
+        photo["category"] = category
+    review["photos"][0]["qr_values"] = ["QR-WHOLE-RESET"]
+    record["temporary_review"] = review
+
+    template = deepcopy(state["groups"][0])
+    photo_template = deepcopy(template["photos"][0])
+    existing_photos = []
+    for index, review_photo in enumerate(review["photos"], start=1):
+        existing = deepcopy(photo_template)
+        existing.update(
+            {
+                "id": f"p-whole-reset-{index}",
+                "source_url": review_photo["source_url"],
+                "image_url": review_photo["source_url"],
+                "source_fingerprint": f"existing-whole-reset-{index}",
+                "sha256": "",
+                "source_url_hash": "",
+                "asset_no": f"asset-whole-reset-{index}",
+                "category": "unclassified",
+                "archive_status": "archived",
+                "archive_filename": f"old-{index}.jpg",
+                "archived_at": "2026-07-12T09:00:00+00:00",
+                "classified_by": "reviewer-old",
+                "classified_at": "2026-07-12T08:00:00+00:00",
+            }
+        )
+        existing_photos.append(existing)
+    group = {
+        **template,
+        "id": "g-whole-reset-target",
+        "terminal": "T-WHOLE-RESET",
+        "stage_terminal": "T-WHOLE-RESET",
+        "meter_no": catalog["meter_no"],
+        "meter_match_key": catalog["meter_match_key"],
+        "total_catalog_row_id": catalog["id"],
+        "photos": existing_photos,
+        "photo_count": 4,
+        "status": "approved",
+        "reviewer": "reviewer-old",
+        "review_note": "approved",
+        "reviewed_at": "2026-07-12T09:00:00+00:00",
+        "exception_status": "open",
+        "exception_note": "stale exception",
+        "exception_reasons": ["stale exception"],
+        "exception_flags": ["stale exception"],
+        "has_archive_blocker": True,
+        "archive_status": "archived",
+        "photo_category_complete": True,
+        "photo_category_classified_count": 4,
+        "classified_by": "reviewer-old",
+        "classified_at": "2026-07-12T08:00:00+00:00",
+        "bulk_archive_reason": "old archive",
+    }
+    state["groups"].append(group)
+    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
+
+    result = local_simulation.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-a",
+        candidate_key=candidate["candidate_key"],
+        expected_version=1,
+    )
+
+    reset = result["group"]
+    assert result["added_photos"] == 0
+    assert reset["status"] == "pending"
+    assert reset["reviewer"] is None
+    assert reset["review_note"] == ""
+    assert reset["reviewed_at"] is None
+    assert reset["exception_status"] == ""
+    assert reset["exception_note"] == ""
+    assert reset["exception_reasons"] == []
+    assert reset["exception_flags"] == []
+    assert reset["has_archive_blocker"] is False
+    for stale_key in (
+        "archive_status",
+        "photo_category_complete",
+        "photo_category_classified_count",
+        "classified_by",
+        "classified_at",
+        "bulk_archive_reason",
+    ):
+        assert stale_key not in reset
+    assert [photo["category"] for photo in reset["photos"]] == categories
+    assert reset["photos"][0]["qr_values"] == ["QR-WHOLE-RESET"]
+    assert all(photo["archive_status"] == "pending" for photo in reset["photos"])
+    assert all(photo["archive_filename"] == "" for photo in reset["photos"])
+    assert all(photo["classified_by"] == "" for photo in reset["photos"])
+    assert all(photo["classified_at"] == "" for photo in reset["photos"])
 
 
 def test_unmatched_finalize_restores_complete_json_state_after_late_failure(
@@ -2052,6 +2201,68 @@ def test_json_migrated_photo_ids_do_not_collide_across_unmatched_records(synthet
     assert len(photo_ids) == 8
     assert len(photo_ids) == len(set(photo_ids))
     assert expected_second_ids.issubset(photo_ids)
+
+
+def test_json_finalize_exact_replay_uses_authoritative_ledger_without_duplicate_writes(
+    synthetic_state: dict,
+) -> None:
+    repository = JsonStateRepository()
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    add_unmatched_match_catalog_row(terminal="T-JSON-REPLAY")
+    unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/json-replay")
+    candidate = repository.list_unmatched_match_candidates(unmatched_id)["items"][0]
+
+    first = repository.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-a",
+        candidate_key=candidate["candidate_key"],
+        expected_version=1,
+    )
+    after_first = deepcopy(local_simulation.get_state())
+    second = repository.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-retry",
+        candidate_key=candidate["candidate_key"],
+        expected_version=1,
+    )
+
+    replay_key = f"{local_simulation.current_team_id()}:{unmatched_id}"
+    ledger = local_simulation.get_state()["unmatched_finalization_replays"]
+    assert second == first
+    assert local_simulation.get_state() == after_first
+    assert ledger[replay_key] == {
+        "status": "associated",
+        "candidate_key": candidate["candidate_key"],
+        "expected_version": 1,
+        "result": first,
+    }
+
+    second["group"]["terminal"] = "tampered-return"
+    third = repository.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-retry",
+        candidate_key=candidate["candidate_key"],
+        expected_version=1,
+    )
+    assert third == first
+    assert ledger[replay_key]["result"] == first
+
+    with pytest.raises(KeyError):
+        repository.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-retry",
+            candidate_key="catalog:different:T-JSON-REPLAY",
+            expected_version=1,
+        )
+    with pytest.raises(KeyError):
+        repository.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-retry",
+            candidate_key=candidate["candidate_key"],
+            expected_version=2,
+        )
+    assert local_simulation.get_state() == after_first
 
 
 def test_unmatched_review_save_persists_without_creating_group_or_changing_summary(synthetic_state: dict) -> None:
