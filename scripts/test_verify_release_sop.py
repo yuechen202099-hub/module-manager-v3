@@ -28,7 +28,7 @@ def test_parses_deployed_baseline_and_release_candidate_independently() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert verifier.deployed_production_baseline(agents) == "V3.0.79"
+    assert verifier.deployed_production_baseline(agents) == "V3.0.80"
     assert verifier.release_candidate(agents) == "V3.0.80"
 
 
@@ -36,8 +36,8 @@ def test_parses_deployed_baseline_and_release_candidate_independently() -> None:
     ("english_marker", "replacement", "parser_name"),
     [
         (
-            "- Deployed production baseline: `V3.0.79`.",
             "- Deployed production baseline: `V3.0.80`.",
+            "- Deployed production baseline: `V3.0.81`.",
             "deployed_production_baseline",
         ),
         (
