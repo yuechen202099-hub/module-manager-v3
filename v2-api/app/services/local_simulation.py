@@ -2164,45 +2164,63 @@ def rescan_unmatched_review_photo(
     expected_version: int,
     category: str = "",
 ) -> dict[str, Any]:
-    current_state = get_state()
-    for index, raw_record in enumerate(current_state.get("scan_unmatched", [])):
-        record = ensure_unmatched_record(raw_record)
-        if record["unmatched_id"] != unmatched_id:
+    snapshot_state = get_state()
+    for raw_record in snapshot_state.get("scan_unmatched", []):
+        snapshot_record = ensure_unmatched_record(raw_record)
+        if snapshot_record["unmatched_id"] != unmatched_id:
             continue
-        review = unmatched_review.build_review(record)
-        unmatched_review.require_version(review, expected_version)
-        photo = unmatched_review.find_review_photo(review, photo_id)
+        snapshot_review = unmatched_review.build_review(snapshot_record)
+        unmatched_review.require_version(snapshot_review, expected_version)
+        snapshot_photo = unmatched_review.find_review_photo(snapshot_review, photo_id)
         if category:
             unmatched_review.validate_category(category)
-            photo["category"] = category
+            snapshot_photo["category"] = category
         result = photo_barcode_check.check_photo_barcode(
-            {**photo, "image_url": photo["source_url"]},
-            unmatched_review.barcode_context(review),
+            {**snapshot_photo, "image_url": snapshot_photo["source_url"]},
+            unmatched_review.barcode_context(snapshot_review),
             use_ocr=True,
         )
-        photo.update(result)
-        photo["barcode_rescanned_by"] = actor
-        photo["barcode_rescanned_at"] = now_iso()
-        review["version"] = expected_version + 1
-        record["temporary_review"] = review
-        current_state["scan_unmatched"][index] = record
-        append_audit_event(
-            "unmatched_review_barcode_rescan",
-            actor,
-            {
-                "unmatched_id": unmatched_id,
-                "photo_id": photo_id,
-                "result": copy.deepcopy(result),
-                "before_version": expected_version,
-                "after_version": review["version"],
-            },
-        )
-        save_all_team_states()
-        return {
-            "record": copy.deepcopy(record),
-            "review": copy.deepcopy(review),
-            "photo": copy.deepcopy(photo),
-        }
+
+        current_state = get_state()
+        for index, current_raw_record in enumerate(current_state.get("scan_unmatched", [])):
+            record = ensure_unmatched_record(current_raw_record)
+            if record["unmatched_id"] != unmatched_id:
+                continue
+            review = unmatched_review.build_review(record)
+            unmatched_review.require_version(review, expected_version)
+            before_review = copy.deepcopy(review)
+            photo = unmatched_review.find_review_photo(review, photo_id)
+            if category:
+                photo["category"] = category
+            photo.update(result)
+            photo["barcode_rescanned_by"] = actor
+            photo["barcode_rescanned_at"] = now_iso()
+            unmatched_review.invalidate_manual_confirmation_if_evidence_changed(before_review, review)
+            before_confirmation = unmatched_review.manual_confirmation_state(before_review)
+            after_confirmation = unmatched_review.manual_confirmation_state(review)
+            review["version"] = expected_version + 1
+            record["temporary_review"] = review
+            current_state["scan_unmatched"][index] = record
+            append_audit_event(
+                "unmatched_review_barcode_rescan",
+                actor,
+                {
+                    "unmatched_id": unmatched_id,
+                    "photo_id": photo_id,
+                    "result": copy.deepcopy(result),
+                    "before_version": expected_version,
+                    "after_version": review["version"],
+                    "before_confirmation": before_confirmation,
+                    "after_confirmation": after_confirmation,
+                },
+            )
+            save_all_team_states()
+            return {
+                "record": copy.deepcopy(record),
+                "review": copy.deepcopy(review),
+                "photo": copy.deepcopy(photo),
+            }
+        raise KeyError(unmatched_id)
     raise KeyError(unmatched_id)
 
 

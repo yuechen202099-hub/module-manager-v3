@@ -31,6 +31,14 @@ PHOTO_EVIDENCE_FIELDS = (
     "ocr_values",
     "ocr_normalized_values",
 )
+CONFIRMATION_PHOTO_EVIDENCE_FIELDS = (
+    "category",
+    *(
+        field
+        for field in PHOTO_EVIDENCE_FIELDS
+        if field not in {"barcode_checked_at", "barcode_rescanned_by", "barcode_rescanned_at"}
+    ),
+)
 
 
 class ReviewVersionConflict(ValueError):
@@ -346,6 +354,44 @@ def barcode_context(review: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def confirmation_evidence(review: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "metadata": {
+            key: str(review.get(key) or "").strip()
+            for key in REVIEW_METADATA_FIELDS
+        },
+        "photos": [
+            {
+                "id": str(photo.get("id") or ""),
+                **{
+                    key: copy.deepcopy(photo.get(key))
+                    for key in CONFIRMATION_PHOTO_EVIDENCE_FIELDS
+                    if key in photo
+                },
+            }
+            for photo in review.get("photos") or []
+        ],
+    }
+
+
+def invalidate_manual_confirmation_if_evidence_changed(
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> bool:
+    if confirmation_evidence(before) == confirmation_evidence(after):
+        return False
+    after["manual_confirmed"] = False
+    after["reviewed_at"] = ""
+    return True
+
+
+def manual_confirmation_state(review: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "manual_confirmed": bool(review.get("manual_confirmed")),
+        "reviewed_at": str(review.get("reviewed_at") or ""),
+    }
+
+
 def apply_review_patch(
     review: dict[str, Any],
     *,
@@ -370,6 +416,7 @@ def apply_review_patch(
             if key == "category":
                 validate_category(str(patch[key] or ""))
             photo[key] = str(patch[key])
+    invalidate_manual_confirmation_if_evidence_changed(review, updated)
     updated["state"] = state
     updated["reviewer"] = actor
     updated["updated_at"] = datetime.now(UTC).isoformat()

@@ -4280,6 +4280,7 @@ class PostgresStateRepository(StateRepository):
                     raise KeyError(unmatched_id)
                 review = unmatched_review.build_review(_unmatched_payload(record))
                 unmatched_review.require_version(review, expected_version)
+                before_review = deepcopy(review)
                 photo = unmatched_review.find_review_photo(review, photo_id)
                 before_photo = deepcopy(photo)
                 if category:
@@ -4288,6 +4289,9 @@ class PostgresStateRepository(StateRepository):
                 now = datetime.now(UTC).isoformat()
                 photo["barcode_rescanned_by"] = actor
                 photo["barcode_rescanned_at"] = now
+                unmatched_review.invalidate_manual_confirmation_if_evidence_changed(before_review, review)
+                before_confirmation = unmatched_review.manual_confirmation_state(before_review)
+                after_confirmation = unmatched_review.manual_confirmation_state(review)
                 review["version"] = expected_version + 1
                 review["updated_at"] = now
                 record.payload = {**(record.payload or {}), "temporary_review": review}
@@ -4298,8 +4302,16 @@ class PostgresStateRepository(StateRepository):
                     action="unmatched_review_barcode_rescan",
                     entity_type="unmatched_record",
                     entity_id=record.id,
-                    before_data={"photo": before_photo, "review_version": expected_version},
-                    after_data={"photo": deepcopy(photo), "review_version": review["version"]},
+                    before_data={
+                        "photo": before_photo,
+                        "review_version": expected_version,
+                        "confirmation": before_confirmation,
+                    },
+                    after_data={
+                        "photo": deepcopy(photo),
+                        "review_version": review["version"],
+                        "confirmation": after_confirmation,
+                    },
                     payload={
                         "unmatched_id": unmatched_id,
                         "photo_id": photo_id,

@@ -14,7 +14,7 @@ build/server-release/module-manager-v2-server-3.0.80.zip
 - 项目看板：`http://127.0.0.1:8000/project-board`
 - 任务领取：`http://127.0.0.1:8000/claim-tasks`
 - 审阅工作台：`http://127.0.0.1:8000/task-hall`
-- 异常处理：`http://127.0.0.1:8000/unmatched`
+- 异常处理：`http://127.0.0.1:8000/project-board` 中的“扫码未匹配”清单
 - 同步说明：`http://127.0.0.1:8000/sync-config`
 
 ## 演示账号
@@ -45,11 +45,11 @@ build/server-release/module-manager-v2-server-3.0.80.zip
 
 最近一次门禁结果：
 
-- 全量测试：`91 passed, 1 warning`
-- 静态页面校验：通过
-- 部署样例校验：通过
-- 演示 smoke：通过
-- 发布包验包：通过
+- V3.0.80 发布校验测试：结果以 `ops/releases/V3.0.80.md` 中本轮记录为准；不沿用历史测试计数。
+- 静态页面校验：待本轮完整门禁记录
+- 部署样例校验：待本轮完整门禁记录
+- 演示 smoke：待本轮完整门禁记录
+- 发布包验包：待生成 V3.0.80 服务器发布包后记录
 
 ## 签字
 

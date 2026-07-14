@@ -1126,9 +1126,19 @@ def test_postgres_rescan_unmatched_review_scans_outside_session_then_relocks_onc
     assert sessions[1].rollback_calls == 0
     assert len(audits) == 1
     assert audits[0].action == "unmatched_review_barcode_rescan"
+    assert audits[0].before_data["confirmation"] == {
+        "manual_confirmed": True,
+        "reviewed_at": "2026-07-13T09:00:00+00:00",
+    }
+    assert audits[0].after_data["confirmation"] == {
+        "manual_confirmed": False,
+        "reviewed_at": "",
+    }
     assert scan_calls[0][0]["category"] == "collector_barcode"
     assert scan_calls[0][2] is True
     assert result["review"]["version"] == 2
+    assert result["review"]["manual_confirmed"] is False
+    assert result["review"]["reviewed_at"] == ""
     assert result["photo"]["barcode_check_status"] == "matched"
     assert result["photo"]["barcode_rescanned_by"] == "reviewer-a"
 

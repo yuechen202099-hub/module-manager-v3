@@ -21,6 +21,12 @@ function section(source, start, end) {
   return source.slice(startIndex, endIndex)
 }
 
+function assertBefore(source, first, second, message) {
+  const firstIndex = source.indexOf(first)
+  const secondIndex = source.indexOf(second)
+  if (firstIndex < 0 || secondIndex < 0 || firstIndex >= secondIndex) throw new Error(message)
+}
+
 for (const token of [
   'UnmatchedReviewDetail',
   'UnmatchedReviewPhoto',
@@ -100,6 +106,28 @@ for (const token of [
 }
 
 assertNotContains(dialog, '<el-image', 'dialog must use verified object URLs with native img')
+
+const rescanAction = section(dialog, 'async function rescanPhoto()', 'async function confirmReview()')
+assertContains(rescanAction, 'persistReview(detail.value.state, false)', 'rescan must persist the current draft and state first')
+assertContains(rescanAction, 'saved.version', 'rescan must use the saved review version')
+assertBefore(
+  rescanAction,
+  'persistReview(detail.value.state, false)',
+  'rescanUnmatchedReviewPhoto(',
+  'rescan must persist the current draft before starting barcode recognition',
+)
+assertNotContains(rescanAction, 'detail.value.version', 'rescan must not submit the stale detail version')
+
+const confirmAction = section(dialog, 'async function confirmReview()', 'async function openMatchMode()')
+assertContains(confirmAction, 'persistReview(detail.value.state, false)', 'confirmation must persist the current draft and state first')
+assertContains(confirmAction, 'saved.version', 'confirmation must use the saved review version')
+assertBefore(
+  confirmAction,
+  'persistReview(detail.value.state, false)',
+  'confirmUnmatchedReview(',
+  'confirmation must persist the current draft before confirming',
+)
+assertNotContains(confirmAction, 'detail.value.version', 'confirmation must not submit the stale detail version')
 
 assertContains(services, 'export class ApiRequestError extends Error', 'API errors must preserve HTTP status')
 assertContains(services, 'readonly status: number', 'API errors must expose an HTTP status')

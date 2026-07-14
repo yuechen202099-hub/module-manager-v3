@@ -85,6 +85,61 @@ def test_apply_review_patch_updates_only_allowed_fields() -> None:
     assert updated["photos"][0]["source_url"] == "https://photos.example/a.jpg"
 
 
+@pytest.mark.parametrize(
+    ("metadata", "photo_updates"),
+    [
+        ({"meter_no": "120000912474"}, []),
+        ({"collector": "C002"}, []),
+        ({"module_asset_no": "M002"}, []),
+        ({}, [{"category": "collector_barcode"}]),
+    ],
+)
+def test_apply_review_patch_invalidates_manual_confirmation_when_evidence_changes(
+    metadata: dict,
+    photo_updates: list[dict],
+) -> None:
+    review = unmatched_review.build_review(sample_record())
+    review["manual_confirmed"] = True
+    review["reviewed_at"] = "2026-07-13T09:00:00+00:00"
+    if photo_updates:
+        photo_updates[0]["id"] = review["photos"][0]["id"]
+
+    updated = unmatched_review.apply_review_patch(
+        review,
+        actor="reviewer-b",
+        expected_version=1,
+        metadata=metadata,
+        photo_updates=photo_updates,
+        state="reviewed",
+    )
+
+    assert updated["manual_confirmed"] is False
+    assert updated["reviewed_at"] == ""
+
+
+def test_apply_review_patch_preserves_manual_confirmation_when_evidence_is_unchanged() -> None:
+    review = unmatched_review.build_review(sample_record())
+    review["manual_confirmed"] = True
+    review["reviewed_at"] = "2026-07-13T09:00:00+00:00"
+    photo_id = review["photos"][0]["id"]
+
+    updated = unmatched_review.apply_review_patch(
+        review,
+        actor="reviewer-b",
+        expected_version=1,
+        metadata={
+            "meter_no": review["meter_no"],
+            "collector": review["collector"],
+            "module_asset_no": review["module_asset_no"],
+        },
+        photo_updates=[{"id": photo_id, "category": review["photos"][0]["category"]}],
+        state="reviewed",
+    )
+
+    assert updated["manual_confirmed"] is True
+    assert updated["reviewed_at"] == "2026-07-13T09:00:00+00:00"
+
+
 def test_apply_review_patch_emits_persistable_audit_event_without_mutating_source() -> None:
     review = unmatched_review.build_review(sample_record())
     source_snapshot = copy.deepcopy(review)

@@ -1,4 +1,4 @@
-# 甲方第一版视觉 QA 记录
+# 甲方第一版历史视觉 QA 记录
 
 本记录用于证明第一版演示页面已经做过真实浏览器视觉巡检。巡检目标不是替代现场演示，而是降低交付前出现页面跳动、横向溢出、中文乱码、首屏空白等低级观感问题的风险。
 
@@ -13,7 +13,7 @@
   - `/project-board`
   - `/claim-tasks`
   - `/task-hall`
-  - `/unmatched`
+  - 当时的异常处理页面（现已退休）
   - `/sync-config`
 
 ## 视觉验收项
@@ -53,13 +53,6 @@
   horizontal overflow: false
   mojibake hits: none
 
-/unmatched
-  topbar: 64px
-  panel header: 48px
-  page nav: 37px
-  horizontal overflow: false
-  mojibake hits: none
-
 /sync-config
   topbar: 64px
   page nav: 37px
@@ -74,6 +67,11 @@
 - `scripts/verify-static-pages.py` 已检查常见中文乱码片段，例如 `椤圭洰`、`鐪嬫澘`、`浠诲姟`、`瀹￠槄`。
 - `v2-api/tests/test_api.py` 已包含静态页面乱码防线自测试，确保真实乱码页面会被拒绝。
 
+## V3.0.80 待验证项
+
+- `/project-board` 的扫码未匹配清单与逐条审阅弹窗不继承 2026-06-10 的历史视觉结论。
+- V3.0.80 本轮桌面与手机浏览器验证结果应写入 `ops/releases/V3.0.80.md`，在执行前保持待验证。
+
 ## 结论
 
-第一版演示主页面已经通过浏览器级视觉巡检，具备交付演示所需的稳定观感。现场给甲方演示前，仍建议按 `docs/CLIENT_DEMO_SCRIPT.md` 从登录页开始完整走一遍。
+本文件仅保留 2026-06-10 第一版页面的历史巡检证据，不作为 V3.0.80 新弹窗已验证的证明。现场验收前按 `docs/CLIENT_DEMO_SCRIPT.md` 和本轮发布记录重新执行视觉检查。

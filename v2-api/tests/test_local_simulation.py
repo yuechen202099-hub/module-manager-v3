@@ -1570,6 +1570,93 @@ def test_unmatched_finalize_migrates_review_recomputes_formal_status_and_removes
     assert "00000000" not in str(result)
 
 
+def test_unmatched_finalize_does_not_migrate_confirmation_after_metadata_edit(
+    synthetic_state: dict,
+) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    local_simulation.get_state()["total_catalog"] = []
+    add_unmatched_match_catalog_row()
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    photo_id = opened["review"]["photos"][0]["id"]
+    classified = local_simulation.save_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=opened["review"]["version"],
+        photo_updates=[{"id": photo_id, "category": "before_box"}],
+    )
+    confirmed = local_simulation.confirm_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=classified["review"]["version"],
+    )
+    edited = local_simulation.save_unmatched_review(
+        unmatched_id,
+        actor="reviewer-b",
+        expected_version=confirmed["review"]["version"],
+        metadata={"collector": "C002"},
+        state="reviewed",
+    )
+    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
+
+    result = local_simulation.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-a",
+        candidate_key=candidate["candidate_key"],
+        expected_version=edited["review"]["version"],
+    )
+
+    photo = result["group"]["photos"][0]
+    assert photo["category"] == "before_box"
+    assert photo["temporary_review_manual_confirmed"] is False
+    assert photo["temporary_review_reviewed_at"] == ""
+
+
+def test_unmatched_finalize_does_not_migrate_confirmation_after_rescan(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    local_simulation.get_state()["total_catalog"] = []
+    add_unmatched_match_catalog_row()
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    photo_id = opened["review"]["photos"][0]["id"]
+    confirmed = local_simulation.confirm_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=opened["review"]["version"],
+    )
+    monkeypatch.setattr(
+        local_simulation.photo_barcode_check,
+        "check_photo_barcode",
+        lambda photo, group, *, use_ocr=False: {
+            "barcode_check_status": "matched",
+            "barcode_check_values": ["120000912473"],
+            "barcode_check_method": "barcode_ocr",
+        },
+    )
+    rescanned = local_simulation.rescan_unmatched_review_photo(
+        unmatched_id,
+        photo_id,
+        actor="reviewer-b",
+        expected_version=confirmed["review"]["version"],
+        category="before_box",
+    )
+    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
+
+    result = local_simulation.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-a",
+        candidate_key=candidate["candidate_key"],
+        expected_version=rescanned["review"]["version"],
+    )
+
+    photo = result["group"]["photos"][0]
+    assert photo["category"] == "before_box"
+    assert photo["barcode_check_values"] == ["120000912473"]
+    assert photo["temporary_review_manual_confirmed"] is False
+    assert photo["temporary_review_reviewed_at"] == ""
+
+
 def test_unmatched_finalize_rejects_stale_version_before_any_formal_mutation(synthetic_state: dict) -> None:
     unmatched_id = seed_unmatched_review_record()
     local_simulation.get_state()["total_catalog"] = []
@@ -2677,6 +2764,88 @@ def test_unmatched_rescan_uses_ocr_persists_audits_and_keeps_formal_accuracy_unc
     assert local_simulation.get_state()["groups"] == before["groups"]
     assert local_simulation.get_state()["tasks"] == before["tasks"]
     assert local_simulation.get_state()["summary"] == before["summary"]
+
+
+def test_unmatched_rescan_invalidates_prior_manual_confirmation(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    photo_id = opened["review"]["photos"][0]["id"]
+    confirmed = local_simulation.confirm_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=opened["review"]["version"],
+    )
+    monkeypatch.setattr(
+        local_simulation.photo_barcode_check,
+        "check_photo_barcode",
+        lambda photo, group, *, use_ocr=False: {
+            "barcode_check_status": "matched",
+            "barcode_check_values": ["120000912473"],
+        },
+    )
+
+    rescanned = local_simulation.rescan_unmatched_review_photo(
+        unmatched_id,
+        photo_id,
+        actor="reviewer-b",
+        expected_version=confirmed["review"]["version"],
+    )
+
+    assert rescanned["review"]["manual_confirmed"] is False
+    assert rescanned["review"]["reviewed_at"] == ""
+    events = [
+        event
+        for event in local_simulation.get_state()["audit_events"]
+        if event["action"] == "unmatched_review_barcode_rescan"
+    ]
+    assert events[-1]["payload"]["before_confirmation"] == {
+        "manual_confirmed": True,
+        "reviewed_at": confirmed["review"]["reviewed_at"],
+    }
+    assert events[-1]["payload"]["after_confirmation"] == {
+        "manual_confirmed": False,
+        "reviewed_at": "",
+    }
+
+
+def test_unmatched_rescan_rechecks_version_after_scan_before_persisting(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    opened = local_simulation.get_unmatched_review(unmatched_id)
+    photo_id = opened["review"]["photos"][0]["id"]
+
+    def drifting_scan(photo: dict, group: dict, *, use_ocr: bool = False) -> dict:
+        local_simulation.save_unmatched_review(
+            unmatched_id,
+            actor="reviewer-concurrent",
+            expected_version=opened["review"]["version"],
+            metadata={"collector": "C-CONCURRENT"},
+        )
+        return {"barcode_check_status": "matched", "barcode_check_values": ["120000912473"]}
+
+    monkeypatch.setattr(local_simulation.photo_barcode_check, "check_photo_barcode", drifting_scan)
+
+    with pytest.raises(unmatched_review.ReviewVersionConflict):
+        local_simulation.rescan_unmatched_review_photo(
+            unmatched_id,
+            photo_id,
+            actor="reviewer-a",
+            expected_version=opened["review"]["version"],
+        )
+
+    persisted = local_simulation.get_unmatched_review(unmatched_id)["review"]
+    assert persisted["collector"] == "C-CONCURRENT"
+    assert persisted["version"] == opened["review"]["version"] + 1
+    assert persisted["photos"][0]["barcode_check_status"] == "not_checked"
+    assert not any(
+        event["action"] == "unmatched_review_barcode_rescan"
+        for event in local_simulation.get_state()["audit_events"]
+    )
 
 
 def test_unmatched_rescan_return_value_is_mutation_isolated(synthetic_state: dict, monkeypatch: pytest.MonkeyPatch) -> None:

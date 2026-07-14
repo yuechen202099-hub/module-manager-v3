@@ -100,15 +100,15 @@ Talk track:
 Open:
 
 ```text
-http://127.0.0.1:8000/unmatched
+http://127.0.0.1:8000/project-board
 ```
 
 Talk track:
 
-- Unmatched scan rows can be converted into terminal-linked groups.
-- Admin can create an empty group for a terminal.
-- Missing photos are supplemented from `/unmatched` after selecting an exception data group; the project board only owns spreadsheet import and progress review.
-- Importing new valid photos can return incomplete reviewed groups to unreviewed status for re-checking.
+- Open one row from the unmatched-scan list and review its server-owned photos in the dialog.
+- Correct metadata and photo categories before running barcode, QR, and OCR recognition or manual confirmation.
+- Temporary review does not create a formal group and does not enter completion, KPI, archive, or barcode-accuracy statistics.
+- Only an administrator can select a real total-catalog candidate and atomically create or merge the formal terminal group; placeholder terminals are rejected.
 
 ## 7. Server Readiness
 

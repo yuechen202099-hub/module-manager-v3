@@ -202,36 +202,46 @@ function savePayload(state: 'pending' | 'reviewed') {
   }
 }
 
-async function saveReview(state: 'pending' | 'reviewed' = 'pending') {
-  if (!detail.value || saving.value) return false
+async function persistReview(
+  state: 'pending' | 'reviewed' = 'pending',
+  showSuccess = true,
+): Promise<UnmatchedReviewDetail | null> {
+  if (!detail.value || saving.value) return null
   saving.value = true
   errorMessage.value = ''
   try {
     const next = await saveUnmatchedReview(props.unmatchedId, savePayload(state))
     applyDetail(next)
-    ElMessage.success('已保存')
+    if (showSuccess) ElMessage.success('已保存')
     emit('updated')
-    return true
+    return next
   } catch (error) {
     if (isVersionConflict(error)) await reloadAfterConflict()
     else errorMessage.value = error instanceof Error ? error.message : '保存失败'
-    return false
+    return null
   } finally {
     saving.value = false
   }
 }
 
+async function saveReview(state: 'pending' | 'reviewed' = 'pending') {
+  return Boolean(await persistReview(state))
+}
+
 async function rescanPhoto() {
-  if (!detail.value || !selectedPhoto.value || rescanning.value) return
+  if (!detail.value || !selectedPhoto.value || saving.value || rescanning.value || confirming.value) return
   const photoId = selectedPhoto.value.id
   rescanning.value = true
   errorMessage.value = ''
   try {
+    const saved = await persistReview(detail.value.state, false)
+    if (!saved) return
+    const savedPhoto = saved.photos.find((photo) => photo.id === photoId)
     const next = await rescanUnmatchedReviewPhoto(
       props.unmatchedId,
       photoId,
-      detail.value.version,
-      photoCategories[photoId] || selectedPhoto.value.category,
+      saved.version,
+      savedPhoto?.category || '',
     )
     const refreshedPhoto = next.photos.find((photo) => photo.id === photoId)
     detail.value = {
@@ -253,11 +263,13 @@ async function rescanPhoto() {
 }
 
 async function confirmReview() {
-  if (!detail.value || confirming.value) return
+  if (!detail.value || saving.value || rescanning.value || confirming.value) return
   confirming.value = true
   errorMessage.value = ''
   try {
-    const next = await confirmUnmatchedReview(props.unmatchedId, detail.value.version)
+    const saved = await persistReview(detail.value.state, false)
+    if (!saved) return
+    const next = await confirmUnmatchedReview(props.unmatchedId, saved.version)
     applyDetail(next, true)
     ElMessage.success('已人工确认')
     emit('updated')
@@ -420,9 +432,9 @@ onUnmounted(() => {
 
         <section class="unmatched-review-form">
           <el-form label-position="top">
-            <el-form-item label="表号 / 扫码内容"><el-input v-model="draft.meterNo" /></el-form-item>
-            <el-form-item label="采集器"><el-input v-model="draft.collector" /></el-form-item>
-            <el-form-item label="模块"><el-input v-model="draft.moduleAssetNo" /></el-form-item>
+            <el-form-item label="表号 / 扫码内容"><el-input v-model="draft.meterNo" :disabled="saving || rescanning || confirming" /></el-form-item>
+            <el-form-item label="采集器"><el-input v-model="draft.collector" :disabled="saving || rescanning || confirming" /></el-form-item>
+            <el-form-item label="模块"><el-input v-model="draft.moduleAssetNo" :disabled="saving || rescanning || confirming" /></el-form-item>
           </el-form>
 
           <div class="unmatched-category-actions">
@@ -431,6 +443,7 @@ onUnmounted(() => {
               :key="option.value"
               size="small"
               :type="(photoCategories[selectedPhotoId] || selectedPhoto?.category) === option.value ? 'primary' : 'default'"
+              :disabled="saving || rescanning || confirming"
               @click="selectedPhotoId && (photoCategories[selectedPhotoId] = option.value)"
             >
               {{ option.label }}
@@ -443,10 +456,10 @@ onUnmounted(() => {
           </div>
 
           <div class="unmatched-review-actions">
-            <el-button :icon="Refresh" :loading="rescanning" :disabled="!selectedPhoto" @click="rescanPhoto">重新扫码</el-button>
-            <el-button :icon="Check" :loading="confirming" @click="confirmReview">人工确认</el-button>
-            <el-button :loading="saving" @click="saveReview()">保存</el-button>
-            <el-button type="primary" :icon="CircleCheck" :loading="saving" @click="openMatchMode">完成审阅并匹配清单</el-button>
+            <el-button :icon="Refresh" :loading="rescanning" :disabled="!selectedPhoto || saving || confirming" @click="rescanPhoto">重新扫码</el-button>
+            <el-button :icon="Check" :loading="confirming" :disabled="saving || rescanning" @click="confirmReview">人工确认</el-button>
+            <el-button :loading="saving" :disabled="rescanning || confirming" @click="saveReview()">保存</el-button>
+            <el-button type="primary" :icon="CircleCheck" :loading="saving" :disabled="rescanning || confirming" @click="openMatchMode">完成审阅并匹配清单</el-button>
           </div>
         </section>
       </div>

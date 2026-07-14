@@ -151,6 +151,32 @@ ENTRY_ATTESTATION_PATTERN = re.compile(
     rb'"\};\n'
 )
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+RELEASE_MARKDOWN_STALE_PATTERNS = (
+    ("legacy final-delivery-ready release name", re.compile(r"final-delivery-ready", re.IGNORECASE)),
+    ("legacy client-release package path", re.compile(r"build[\\/]client-release", re.IGNORECASE)),
+    ("obsolete 91 passed evidence", re.compile(r"\b91 passed\b", re.IGNORECASE)),
+    (
+        "retired unmatched direct-group workflow",
+        re.compile(
+            r"(?:空白组(?:可先)?创建为未关联终端|创建为关联终端的资料组|新建空资料组|直接关联终端)",
+            re.IGNORECASE,
+        ),
+    ),
+    ("retired upload-images endpoint", re.compile(r"(?:`|/)upload-images(?:`|\b)", re.IGNORECASE)),
+    ("retired unmatched page route", re.compile(r"(?<!local-test)/unmatched(?:\b|`)", re.IGNORECASE)),
+)
+OPERATIONAL_RELEASE_VERSION_PATTERNS = (
+    re.compile(
+        r"(?:build-client-release|run-client-acceptance-gate)\.ps1\s+-Version\s+"
+        r"(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"module-manager-v2-server-(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\.zip",
+        re.IGNORECASE,
+    ),
+)
+HISTORICAL_RELEASE_RECORD_PATTERN = re.compile(r"^ops/releases/V\d+\.\d+\.\d+\.md$")
 
 FORBIDDEN_PARTS = {
     ".env",
@@ -223,6 +249,37 @@ def validated_zip_file_names(archive: zipfile.ZipFile) -> list[str]:
         casefold_names[folded] = name
         canonical_members.append((info, name))
     return [name for info, name in canonical_members if not info.is_dir()]
+
+
+def verify_release_markdown_text(path: str, content: str, package_version: str) -> None:
+    for marker_name, marker in RELEASE_MARKDOWN_STALE_PATTERNS:
+        if marker.search(content):
+            fail(f"{path} contains stale release-document marker: {marker_name}")
+    if (
+        HISTORICAL_RELEASE_RECORD_PATTERN.fullmatch(path)
+        and path != f"ops/releases/V{package_version}.md"
+    ):
+        return
+    for version_pattern in OPERATIONAL_RELEASE_VERSION_PATTERNS:
+        for match in version_pattern.finditer(content):
+            if match.group("version") != package_version:
+                fail(
+                    f"{path} contains non-current release version "
+                    f"{match.group('version')}; expected {package_version}"
+                )
+
+
+def verify_release_markdown_documents(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    package_version: str,
+) -> None:
+    for path in sorted(name for name in names if name.endswith(".md")):
+        try:
+            content = archive.read(path).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            fail(f"{path} must be valid UTF-8 Markdown: {exc}")
+        verify_release_markdown_text(path, content, package_version)
 
 
 class VueModuleEntryParser(HTMLParser):
@@ -374,6 +431,7 @@ def verify_package(zip_path: Path) -> None:
         if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
             fail("Release manifest must define exactly one semantic Version")
         package_version = manifest_versions[0]
+        verify_release_markdown_documents(archive, names, package_version)
         static_index = (
             archive.read("v2-api/app/static/vue/index.html").decode("utf-8")
             if "v2-api/app/static/vue/index.html" in names

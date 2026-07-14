@@ -134,7 +134,7 @@ Expected public pages:
 - `/project-board`
 - `/task-hall`
 - `/claim-tasks`
-- `/unmatched`
+- `/project-board` 中的“扫码未匹配”清单与逐条审阅弹窗
 
 Expected production-hidden endpoints:
 

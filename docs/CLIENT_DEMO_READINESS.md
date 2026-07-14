@@ -8,7 +8,7 @@ This file tracks what must be true before showing the first web build to the cli
 - Admin board: `http://127.0.0.1:8000/project-board`
 - Reviewer workbench: `http://127.0.0.1:8000/task-hall`
 - Task claim page: `http://127.0.0.1:8000/claim-tasks`
-- Unmatched data handling: `http://127.0.0.1:8000/unmatched`
+- Unmatched data handling: `http://127.0.0.1:8000/project-board` 中的扫码未匹配清单
 - Sync status guidance: `http://127.0.0.1:8000/sync-config`
 
 Use `docs/CLIENT_DEMO_SCRIPT.md` as the spoken walkthrough order.
@@ -31,9 +31,9 @@ The project board is visible to reviewers as a read-only progress view. Import, 
 - Classification remains keyboard-first: number keys select category, Enter archives the current photo, arrow keys switch photos/groups.
 - Spreadsheet import is the main workflow. Spreadsheet photo files are not downloaded to local storage; imported photo URLs and metadata are stored.
 - The discontinued sync page must explain that supplier API sync is not part of the first delivery and must not expose a token/request JSON input.
-- Admin can create an empty group without forcing a terminal, then handle terminal association and missing-photo uploads from `/unmatched`.
-- Unmatched scan rows can be manually converted into terminal-linked groups.
-- The UI uses one calm workstation visual language across login, board, claim, review, and unmatched pages.
+- Unmatched scan rows stay in temporary review while metadata, photo categories, barcode, QR, OCR, and manual confirmation are corrected.
+- Only an administrator-confirmed catalog candidate can atomically create or merge a formal terminal group; placeholder terminals are forbidden.
+- The UI uses one calm workstation visual language across login, board, claim, review, and the unmatched-review dialog.
 - The demo startup script seeds four local static review image URLs if the current runtime has no visible photo, preventing the review workbench from opening on an empty image state during a client walkthrough.
 
 ## Local Run

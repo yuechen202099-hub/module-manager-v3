@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import stat
 import zipfile
@@ -85,6 +86,7 @@ def write_release_archive(
     agents: str = VALID_AGENTS,
     release_record: str = PENDING_RELEASE_RECORD,
     omitted: set[str] | None = None,
+    content_overrides: dict[str, str] | None = None,
 ) -> None:
     omitted_names = set(omitted or set())
     names = (set(verifier.REQUIRED_FILES) | {RUNTIME_VERSION_ARTIFACT, SOURCE_VERSION_ARTIFACT}) - omitted_names
@@ -123,6 +125,7 @@ def write_release_archive(
         for name in names
         if name != RUNTIME_VERSION_ARTIFACT
     }
+    archive_contents.update(content_overrides or {})
     archive_contents["v2-api/app/static/vue/assets/app.js"] = resolved_entry_source
     if unrelated_chunk_entry_version:
         archive_contents["v2-api/app/static/vue/assets/unrelated.js"] = contents[
@@ -221,6 +224,66 @@ def test_acceptance_gate_derives_and_validates_machine_version_contract() -> Non
     assert "must match the machine version source" in acceptance_script
     assert "final-delivery-ready" not in acceptance_script
     assert "final-delivery-ready" not in documents
+
+
+def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
+    verifier = load_verifier()
+    document_paths = sorted(
+        path
+        for path in verifier.REQUIRED_FILES
+        if path.endswith(".md")
+    )
+
+    assert document_paths
+    for document_path in document_paths:
+        content = (ROOT / document_path).read_text(encoding="utf-8")
+        verifier.verify_release_markdown_text(document_path, content, "3.0.80")
+
+
+@pytest.mark.parametrize(
+    "document_path",
+    sorted(path for path in load_verifier().REQUIRED_FILES if path.endswith(".md")),
+)
+def test_archive_rejects_stale_marker_in_every_required_markdown(
+    tmp_path: Path,
+    document_path: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / f"stale-markdown-{hashlib.sha256(document_path.encode()).hexdigest()[:8]}.zip"
+    stale_content = "final-delivery-ready\n"
+    if document_path == "RELEASE_MANIFEST.md":
+        stale_content = "\n".join(("# Release manifest", "- Version: 3.0.80", *SAFETY_NOTES, stale_content))
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={document_path: stale_content},
+    )
+
+    with pytest.raises(AssertionError, match=re.escape(document_path)):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize(
+    "stale_text",
+    [
+        ".\\scripts\\build-client-release.ps1 -Version 3.0.39",
+        "build/server-release/module-manager-v2-server-3.0.39.zip",
+    ],
+)
+def test_archive_rejects_non_current_version_in_operational_document(
+    tmp_path: Path,
+    stale_text: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "stale-operational-version.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={"README.md": stale_text},
+    )
+
+    with pytest.raises(AssertionError, match="non-current release version"):
+        verifier.verify_package(archive_path)
 
 
 def test_smoke_check_validates_current_server_release_signoff_package() -> None:
@@ -581,6 +644,12 @@ ROUND7_NONAFFIRMATIVE_CLAIMS = [
 ]
 
 
+ROUND8_AFFIRMATIVE_LIVE_CLAIMS = [
+    "V3.0.80 is currently live in production.",
+    "V3.0.80 is presently live in production.",
+]
+
+
 @pytest.mark.parametrize("prose", ROUND5_AFFIRMATIVE_CLAIMS)
 def test_archive_rejects_round5_atomic_affirmative_claims(tmp_path: Path, prose: str) -> None:
     verifier = load_verifier()
@@ -658,6 +727,16 @@ def test_archive_accepts_round7_complete_auxiliary_controls(tmp_path: Path, pros
     write_release_archive(verifier, archive_path, release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n")
 
     verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("prose", ROUND8_AFFIRMATIVE_LIVE_CLAIMS)
+def test_archive_rejects_round8_current_live_adverbs(tmp_path: Path, prose: str) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round8-current-live-prose.zip"
+    write_release_archive(verifier, archive_path, release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n")
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.verify_package(archive_path)
 
 
 def test_archive_rejects_substituted_imported_chunk(tmp_path: Path) -> None:

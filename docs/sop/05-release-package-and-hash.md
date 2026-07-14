@@ -12,7 +12,7 @@ Production server packages are created under:
 build/server-release/module-manager-v2-server-<version>.zip
 ```
 
-The old `build/client-release` path is for historical demo notes only and must not be used for production deployment.
+Historical client-demo package instructions are not part of the production workflow. Production deployment uses only the server-release package.
 
 ## Build Command
 

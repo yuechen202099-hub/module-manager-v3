@@ -477,6 +477,12 @@ ROUND7_NONAFFIRMATIVE_CLAIMS = [
 ]
 
 
+ROUND8_AFFIRMATIVE_LIVE_CLAIMS = [
+    "V3.0.80 is currently live in production.",
+    "V3.0.80 is presently live in production.",
+]
+
+
 @pytest.mark.parametrize("prose", ROUND5_AFFIRMATIVE_CLAIMS)
 def test_round5_atomic_clauses_preserve_affirmative_deployment_claims(prose: str) -> None:
     verifier = load_verifier()
@@ -526,6 +532,15 @@ def test_round7_complete_auxiliary_chains_remain_nonaffirmative(prose: str) -> N
     record = f"{release_record('Status: pending')}\n{prose}\n"
 
     assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("prose", ROUND8_AFFIRMATIVE_LIVE_CLAIMS)
+def test_round8_current_live_adverbs_are_affirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
 
 
 def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> None:
