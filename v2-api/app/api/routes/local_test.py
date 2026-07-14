@@ -467,6 +467,15 @@ SAFE_FINALIZED_GROUP_FIELDS = (
 
 SAFE_FINALIZED_PHOTO_FIELDS = ("id", "category")
 
+SAFE_UNMATCHED_MATCH_CANDIDATE_FIELDS = (
+    "candidate_key",
+    "has_existing_group",
+    "terminal",
+    "meter_no",
+    "address",
+    "match_reasons",
+)
+
 
 def project_safe_fields(payload: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
     return {key: deepcopy(payload[key]) for key in fields if key in payload}
@@ -479,7 +488,16 @@ def safe_unmatched_record(payload: dict[str, Any]) -> dict[str, Any]:
 def safe_unmatched_list_response(payload: dict[str, Any]) -> dict[str, Any]:
     result = project_safe_fields(payload, ("total", "limit", "offset"))
     result["items"] = [safe_unmatched_record(item) for item in payload.get("items") or []]
+    source_stats = payload.get("stats") or {}
+    result["stats"] = {
+        key: int(source_stats.get(key) or 0)
+        for key in ("pending", "assigned", "outside")
+    }
     return result
+
+
+def safe_unmatched_record_response(payload: dict[str, Any]) -> dict[str, Any]:
+    return {"record": safe_unmatched_record(payload.get("record") or {})}
 
 
 def safe_review_response(payload: dict[str, Any]) -> dict[str, Any]:
@@ -498,6 +516,15 @@ def safe_review_response(payload: dict[str, Any]) -> dict[str, Any]:
             )
         review["photos"].append(photo)
     return {"record": record, "review": review}
+
+
+def safe_unmatched_match_candidates_response(payload: dict[str, Any]) -> dict[str, Any]:
+    items = [
+        project_safe_fields(item, SAFE_UNMATCHED_MATCH_CANDIDATE_FIELDS)
+        for item in payload.get("items") or []
+        if unmatched_review.is_opaque_candidate_key(item.get("candidate_key"))
+    ]
+    return {"total": len(items), "items": items}
 
 
 def safe_finalization_response(payload: dict[str, Any]) -> dict[str, Any]:
@@ -519,14 +546,21 @@ def safe_finalization_response(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def safe_audit_response(payload: dict[str, Any]) -> dict[str, Any]:
-    return unmatched_review.redact_audit_photo_secrets(payload)
+    items = []
+    for source in payload.get("items") or []:
+        event = project_safe_fields(source, ("id", "action", "actor", "created_at"))
+        event["payload"] = unmatched_review.redact_audit_photo_secrets(
+            source.get("payload") or {}
+        )
+        items.append(event)
+    return {"total": int(payload.get("total") or len(items)), "items": items}
 
 
 def reject_retired_legacy_unmatched_write() -> None:
     if settings.app_env.lower() in {"prod", "production"}:
         raise HTTPException(
             status_code=410,
-            detail="Legacy unmatched write retired; use /review, /match-candidates, and /finalize-match",
+            detail="Legacy unmatched write retired; use /review, /candidates, and /finalize-match",
         )
 
 
@@ -1913,7 +1947,38 @@ def unmatched_records(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
-    result = state_repository().list_unmatched_records(query=query, limit=limit, offset=offset)
+    assigned_to = ""
+    if settings.app_env.lower() in {"prod", "production"}:
+        auth_payload = request_auth_payload(request)
+        roles = set(auth_payload.get("roles") or [])
+        if "constructor" in roles and roles.isdisjoint({"admin", "reviewer"}):
+            assigned_to = str(
+                auth_payload.get("sub") or auth_payload.get("username") or ""
+            ).strip()
+    list_options = {"query": query, "limit": limit, "offset": offset}
+    if assigned_to:
+        list_options["assigned_to"] = assigned_to
+    result = state_repository().list_unmatched_records(**list_options)
+    return ok(request, safe_unmatched_list_response(result))
+
+
+UNMATCHED_EXPORT_LIMIT = 100_000
+
+
+@router.get("/unmatched/export")
+def export_unmatched_records(request: Request, query: str = ""):
+    require_production_admin_payload(request)
+    result = state_repository().export_unmatched_records(
+        query=query,
+        limit=UNMATCHED_EXPORT_LIMIT,
+    )
+    total = int(result.get("total") or 0)
+    items = result.get("items") or []
+    if total != len(items):
+        raise HTTPException(
+            status_code=409,
+            detail="Unmatched export snapshot is incomplete; retry after current changes finish",
+        )
     return ok(request, safe_unmatched_list_response(result))
 
 
@@ -1935,7 +2000,8 @@ def dedupe_unmatched(payload: UnmatchedDedupeRequest, request: Request):
 
 @router.post("/unmatched/blank")
 def create_blank_unmatched(payload: BlankUnmatchedRequest, request: Request):
-    return ok(request, state_repository().create_blank_unmatched_record(actor=request_actor(request)))
+    result = state_repository().create_blank_unmatched_record(actor=request_actor(request))
+    return ok(request, safe_unmatched_record_response(result))
 
 
 @router.patch("/unmatched/{unmatched_id}")
@@ -1951,7 +2017,7 @@ def update_unmatched(unmatched_id: str, payload: UnmatchedUpdateRequest, request
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
-    return ok(request, record)
+    return ok(request, safe_unmatched_record_response(record))
 
 
 @router.patch("/unmatched/{unmatched_id}/assign")
@@ -1971,7 +2037,7 @@ def assign_unmatched(unmatched_id: str, payload: UnmatchedAssignRequest, request
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ok(request, record)
+    return ok(request, safe_unmatched_record_response(record))
 
 
 @router.patch("/unmatched/{unmatched_id}/unassign")
@@ -1987,7 +2053,7 @@ def unassign_unmatched(unmatched_id: str, payload: UnmatchedUnassignRequest, req
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
-    return ok(request, record)
+    return ok(request, safe_unmatched_record_response(record))
 
 
 @router.post("/unmatched/{unmatched_id}/outside-project")
@@ -2003,7 +2069,7 @@ def mark_unmatched_outside_project(unmatched_id: str, payload: UnmatchedOutsideP
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
-    return ok(request, record)
+    return ok(request, safe_unmatched_record_response(record))
 
 
 @router.post("/unmatched/{unmatched_id}/rematch")
@@ -2122,14 +2188,19 @@ def confirm_unmatched_review(unmatched_id: str, payload: UnmatchedReviewConfirmR
     return ok(request, safe_review_response(review))
 
 
+@router.get("/unmatched/{unmatched_id}/match-candidates", include_in_schema=False)
 @router.get("/unmatched/{unmatched_id}/candidates")
 def unmatched_match_candidates(unmatched_id: str, request: Request):
-    bound_review_actor(request, "")
+    actor = bound_review_actor(request, "")
     try:
-        candidates = state_repository().list_unmatched_match_candidates(unmatched_id)
+        candidates = state_repository().list_unmatched_match_candidates(unmatched_id, actor=actor)
+    except StateBackendNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
-    return ok(request, response_payload(candidates))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, safe_unmatched_match_candidates_response(candidates))
 
 
 @router.post("/unmatched/{unmatched_id}/finalize-match")
@@ -2227,7 +2298,7 @@ def delete_unmatched(unmatched_id: str, payload: UnmatchedDeleteRequest, request
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
-    return ok(request, record)
+    return ok(request, safe_unmatched_record(record))
 
 
 @router.get("/audit-log")

@@ -110,7 +110,7 @@ def safe_review_response(payload: dict[str, Any]) -> dict[str, Any]:
     return {"record": record, "review": review}
 ```
 
-Use `request_actor(request)` for every legacy mutation. Add `expected_version` to each request model and repository method. In production, `/rematch`, `/associate`, and `/create-group` return `410` with the instruction to use `/review`, `/match-candidates`, and `/finalize-match`; update both Vue callers to open the review flow instead of invoking those endpoints.
+Use `request_actor(request)` for every legacy mutation. Add `expected_version` to each request model and repository method. In production, `/rematch`, `/associate`, and `/create-group` return `410` with the instruction to use `/review`, `/candidates`, and `/finalize-match`; update both Vue callers to open the review flow instead of invoking those endpoints.
 
 - [ ] **Step 4: Run focused backend and frontend contract checks**
 

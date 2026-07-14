@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -31,6 +32,20 @@ PHOTO_EVIDENCE_FIELDS = (
     "ocr_values",
     "ocr_normalized_values",
 )
+
+
+def normalize_legacy_identity_updates(updates: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(updates or {})
+    if "module_asset_no" in normalized or "asset_no" in normalized:
+        module_asset_no = (
+            normalized.get("module_asset_no")
+            if "module_asset_no" in normalized
+            else normalized.get("asset_no")
+        )
+        canonical_value = str(module_asset_no or "").strip()
+        normalized["module_asset_no"] = canonical_value
+        normalized["asset_no"] = canonical_value
+    return normalized
 CONFIRMATION_PHOTO_EVIDENCE_FIELDS = (
     "category",
     *(
@@ -70,6 +85,21 @@ AUDIT_PHOTO_SECRET_FIELDS = {
 AUDIT_PHOTO_SECRET_KEYS = {
     re.sub(r"[^0-9a-z]+", "", field.casefold()) for field in AUDIT_PHOTO_SECRET_FIELDS
 }
+AUDIT_PRIVATE_FIELDS = {
+    "catalog_row_db_id",
+    "catalog_row_id",
+    "database_id",
+    "db_id",
+    "entity_id",
+    "raw",
+    "raw_data",
+    "target_group_id",
+}
+AUDIT_PRIVATE_KEYS = {
+    re.sub(r"[^0-9a-z]+", "", field.casefold()) for field in AUDIT_PRIVATE_FIELDS
+}
+ABSOLUTE_URI_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+OPAQUE_CANDIDATE_KEY_PATTERN = re.compile(r"candidate:[0-9a-f]{64}")
 AUDIT_SECRET_LOCATOR_TOKENS = {
     "bucket",
     "buckets",
@@ -123,21 +153,60 @@ def audit_key_contains_photo_secret(key: Any) -> bool:
     )
 
 
+def is_opaque_candidate_key(value: Any) -> bool:
+    return OPAQUE_CANDIDATE_KEY_PATTERN.fullmatch(str(value or "").strip()) is not None
+
+
 def redact_audit_photo_secrets(value: Any) -> Any:
     if isinstance(value, dict):
         redacted = {}
         for key, item in value.items():
-            redacted[key] = (
-                AUDIT_REDACTED_VALUE
-                if audit_key_contains_photo_secret(key)
-                else redact_audit_photo_secrets(item)
+            normalized_key = re.sub(r"[^0-9a-z]+", "", str(key).strip().casefold())
+            should_redact = (
+                audit_key_contains_photo_secret(key)
+                or normalized_key in AUDIT_PRIVATE_KEYS
+                or (normalized_key == "candidatekey" and not is_opaque_candidate_key(item))
             )
+            redacted[key] = AUDIT_REDACTED_VALUE if should_redact else redact_audit_photo_secrets(item)
         return redacted
     if isinstance(value, list):
         return [redact_audit_photo_secrets(item) for item in value]
     if isinstance(value, tuple):
         return tuple(redact_audit_photo_secrets(item) for item in value)
+    if isinstance(value, str) and ABSOLUTE_URI_PATTERN.search(value):
+        return AUDIT_REDACTED_VALUE
     return copy.deepcopy(value)
+
+
+def opaque_candidate_key(
+    *,
+    catalog_id: str,
+    catalog_db_id: str,
+    terminal: str,
+    meter_key: str,
+) -> str:
+    canonical = json.dumps(
+        [catalog_id, catalog_db_id, terminal, meter_key],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return f"candidate:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+def candidate_snapshot_digest(candidates: list[dict[str, Any]]) -> str:
+    snapshot = [
+        {
+            "candidate_key": str(candidate.get("candidate_key") or ""),
+            "terminal": str(candidate.get("terminal") or ""),
+            "meter_no": str(candidate.get("meter_no") or ""),
+            "address": str(candidate.get("address") or ""),
+            "match_reasons": [str(item) for item in candidate.get("match_reasons") or []],
+            "has_existing_group": bool(candidate.get("has_existing_group")),
+        }
+        for candidate in candidates
+    ]
+    canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def review_meter_match_key(record: dict[str, Any], review: dict[str, Any]) -> str:
@@ -192,7 +261,12 @@ def build_match_candidates(
             ),
             {},
         )
-        candidate_key = f"catalog:{catalog_id}:{terminal}"
+        candidate_key = opaque_candidate_key(
+            catalog_id=catalog_id,
+            catalog_db_id=catalog_db_id,
+            terminal=terminal,
+            meter_key=meter_key,
+        )
         reasons = ["表号精确匹配"]
         review_collector = str(review.get("collector") or "").strip()
         if review_collector and review_collector == str(row.get("collector") or "").strip():
@@ -209,6 +283,7 @@ def build_match_candidates(
             "catalog_row_id": catalog_id,
             "catalog_row_db_id": catalog_db_id,
             "target_group_id": str(target_group.get("id") or target_group.get("legacy_id") or ""),
+            "has_existing_group": bool(target_group),
             "terminal": terminal,
             "meter_no": str(row.get("meter_no") or review.get("meter_no") or ""),
             "meter_match_key": meter_key,
@@ -381,8 +456,32 @@ def invalidate_manual_confirmation_if_evidence_changed(
     if confirmation_evidence(before) == confirmation_evidence(after):
         return False
     after["manual_confirmed"] = False
+    after["reviewer"] = ""
     after["reviewed_at"] = ""
     return True
+
+
+def synchronize_review_identity_after_legacy_patch(
+    review: dict[str, Any],
+    record: dict[str, Any],
+    updated_fields: set[str],
+) -> dict[str, Any]:
+    synchronized = copy.deepcopy(review)
+    if updated_fields & {"meter_no", "barcode"}:
+        synchronized["meter_no"] = str(record.get("meter_no") or record.get("barcode") or "").strip()
+    if "collector" in updated_fields:
+        synchronized["collector"] = str(record.get("collector") or "").strip()
+    if updated_fields & {"module_asset_no", "asset_no"}:
+        synchronized["module_asset_no"] = str(
+            record.get("module_asset_no") or record.get("asset_no") or ""
+        ).strip()
+    invalidate_manual_confirmation_if_evidence_changed(review, synchronized)
+    return synchronized
+
+
+def require_manual_confirmation(review: dict[str, Any]) -> None:
+    if not bool(review.get("manual_confirmed")):
+        raise ValueError("Manual confirmation required before final matching")
 
 
 def manual_confirmation_state(review: dict[str, Any]) -> dict[str, Any]:
@@ -416,9 +515,10 @@ def apply_review_patch(
             if key == "category":
                 validate_category(str(patch[key] or ""))
             photo[key] = str(patch[key])
-    invalidate_manual_confirmation_if_evidence_changed(review, updated)
+    confirmation_invalidated = invalidate_manual_confirmation_if_evidence_changed(review, updated)
     updated["state"] = state
-    updated["reviewer"] = actor
+    if confirmation_invalidated or not bool(updated.get("manual_confirmed")):
+        updated["reviewer"] = actor
     updated["updated_at"] = datetime.now(UTC).isoformat()
     updated["version"] = expected_version + 1
     updated["audit_event"] = audit_diff(

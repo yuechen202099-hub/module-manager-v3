@@ -16,7 +16,7 @@ import {
   fetchConstructionExceptionOrders,
   fetchGroupPhotoObjectUrl,
   fetchGroup,
-  fetchUnmatchedRecords,
+  fetchAllUnmatchedRecords,
   fetchTaskGroups,
   fetchTasks,
   groupPhotoContentUrl,
@@ -726,7 +726,7 @@ async function loadFieldTasks(force = false) {
   fieldTasksRequest = (async () => {
     try {
       const [unmatched, orders] = await Promise.all([
-        fetchUnmatchedRecords(''),
+        fetchAllUnmatchedRecords(''),
         fetchConstructionExceptionOrders('', isAdmin.value ? '' : actor.value),
       ])
       unmatchedRecords.value = unmatched

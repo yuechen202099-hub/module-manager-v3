@@ -105,11 +105,21 @@ EVIDENCE_FIELD_LABELS = {
 VERSION_TOKEN_PATTERN = re.compile(r"\bV\d+\.\d+\.\d+\b", re.IGNORECASE)
 SEMANTIC_VERSION_PATTERN = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 MANIFEST_VERSION_LINE_PATTERN = re.compile(r"^- Version:\s*(?P<version>.*?)\s*$", re.MULTILINE)
+AFFIRMATIVE_STATE_ADVERB_PATTERN = (
+    r"(?!(?:not|never|possibly|probably|potentially|allegedly|reportedly|supposedly)\b)"
+    r"(?:[a-z]+ly|already|now|long)"
+)
+MODAL_PREFIX_ADVERB_PATTERN = r"(?:[a-z]+ly|well|long|already|now|yet|ever|even)"
 DEPLOYMENT_CLAIM_PATTERN = re.compile(
     r"\b(?:deployed|shipped|released)\b"
     r"|\b(?:go|gone|went|be|been|is|are|was|were)\s+"
     r"(?:(?:already|currently|now|presently|successfully|fully)\s+)*live\b"
     r"(?:\s+(?:in|on)\s+production\b)?"
+    r"|\b(?:(?:is|are|was|were)|(?:has|have|had)\s+"
+    rf"(?:(?:{AFFIRMATIVE_STATE_ADVERB_PATTERN})\s+)*been)\s+"
+    rf"(?:(?:{AFFIRMATIVE_STATE_ADVERB_PATTERN})\s+)*"
+    r"(?!not\b)(?:running"
+    rf"(?:\s+(?:{AFFIRMATIVE_STATE_ADVERB_PATTERN}))*\s+)?in\s+production\b"
     r"|(?:已|已经|现已)(?:成功|正式)?(?:部署|发布|上线)(?:到|至|在)?生产(?:环境)?"
     r"|已部署|已发布|已上线|(?:生产(?:环境)?\s*)?(?:部署|发布|上线)已完成"
     r"|已(?:在)?生产(?:环境)?(?:正式)?(?:部署|发布|上线|生效)"
@@ -166,7 +176,7 @@ NEGATED_DEPLOYMENT_PREFIX_PATTERN = re.compile(
 MODAL_DEPLOYMENT_PREFIX_PATTERN = re.compile(
     r"(?:\b(?:can|could|may|might|should|must|would|will|shall)\s+"
     r"(?:not\s+)?"
-    r"(?:(?:yet|currently|ever|actually|successfully|fully|even|eventually|possibly|already|now)\s+)*"
+    rf"(?:(?:{MODAL_PREFIX_ADVERB_PATTERN})\s+)*"
     r"(?:(?:have|has|had|been|be|being|get|got|go|gone)\s+)*"
     r"|\b(?:going|scheduled|planned)\s+to\s+(?:be\s+)?"
     r"|\bto\s+be\s+)$",
@@ -184,6 +194,20 @@ CONDITIONAL_DEPLOYMENT_PREFIX_PATTERN = re.compile(
 POST_DEPLOYMENT_CONDITION_PATTERN = re.compile(
     r"^\s*(?:(?:to|in|on)\s+production\b\s*)?(?:if|unless)\b"
     r"|^\s*(?:(?:到|至|在)?生产(?:环境)?\s*)?(?:若|如果|假如|倘若|除非|仅当|只要)",
+    re.IGNORECASE,
+)
+NONASSERTIVE_DEPLOYMENT_PREFIX_PATTERN = re.compile(
+    r"\b(?:there\s+(?:is|was)\s+)?no\s+(?:credible\s+)?evidence\s+(?:that|to\s+show)\b.*$"
+    r"|\b(?:we|i|they)\s+(?:can\s+not|could\s+not|must\s+not|should\s+not|do\s+not)\s+"
+    r"(?:claim|say|conclude|state)\s+(?:that\s+)?\b.*$"
+    r"|\bit\s+is\s+not\s+true\s+that\b.*$"
+    r"|(?:目前|当前)?没有(?:任何)?证据(?:表明|证明|显示).*$"
+    r"|(?:我们|本记录)?(?:不能|无法|不可|不应)(?:声称|断言|认定|说明).*$",
+    re.IGNORECASE,
+)
+MARKDOWN_FENCE_PATTERN = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})")
+EXAMPLE_LINE_PATTERN = re.compile(
+    r"^\s*(?:[-*+]\s*)?(?:example|for\s+example|sample|e\.g\.|示例|例如|举例)\s*[:：,，]",
     re.IGNORECASE,
 )
 RELEASE_RECORD_VERSION_PATTERN = re.compile(r"^#\s*(?P<version>V\d+\.\d+\.\d+)\b", re.MULTILINE)
@@ -395,6 +419,43 @@ def claim_clauses(value: str) -> list[str]:
     return [clause for clause, _ in semantic_claim_clauses(value)]
 
 
+def deployment_claim_prose(record: str) -> str:
+    lines: list[str] = []
+    fence_character = ""
+    fence_length = 0
+    quote_pairs = {'"': '"', "'": "'", "“": "”", "‘": "’"}
+    for line in record.splitlines():
+        if line.startswith("    ") or line.startswith("\t"):
+            continue
+        fence_match = MARKDOWN_FENCE_PATTERN.match(line)
+        if fence_match is not None:
+            marker = fence_match.group("fence")
+            if not fence_character:
+                fence_character = marker[0]
+                fence_length = len(marker)
+            elif marker[0] == fence_character and len(marker) >= fence_length:
+                fence_character = ""
+                fence_length = 0
+            continue
+        if fence_character:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if EXAMPLE_LINE_PATTERN.search(normalize_claim_text(stripped)):
+            continue
+        quoted_candidate = strip_optional_markdown_bullet(stripped)
+        quoted_candidate = re.sub(r"^\d+[.)]\s+", "", quoted_candidate, count=1).lstrip()
+        if quoted_candidate.startswith(">"):
+            continue
+        if len(quoted_candidate) >= 2 and quote_pairs.get(quoted_candidate[0]) == quoted_candidate[-1]:
+            continue
+        table_row = RELEASE_TABLE_ROW_PATTERN.match(stripped) if stripped.startswith("|") else None
+        prose_line = table_row.group("value") if table_row is not None else line
+        lines.append(re.sub(r"`+[^`\n]*`+", "", prose_line))
+    return "\n".join(lines)
+
+
 def clause_has_affirmative_deployment_claim(clause: str) -> bool:
     normalized = normalize_claim_text(clause)
     for match in DEPLOYMENT_CLAIM_PATTERN.finditer(normalized):
@@ -407,6 +468,8 @@ def clause_has_affirmative_deployment_claim(clause: str) -> bool:
         if CHINESE_MODAL_DEPLOYMENT_PREFIX_PATTERN.search(prefix):
             continue
         if CONDITIONAL_DEPLOYMENT_PREFIX_PATTERN.search(prefix):
+            continue
+        if NONASSERTIVE_DEPLOYMENT_PREFIX_PATTERN.search(prefix):
             continue
         if POST_DEPLOYMENT_CONDITION_PATTERN.search(suffix):
             continue
@@ -434,7 +497,7 @@ def release_record_has_affirmative_version_deployment_prose(record: str) -> bool
         return False
     version = normalize_claim_text(version_match.group("version"))
     active_versions: set[str] = set()
-    prose = "\n".join(line for line in record.splitlines() if not line.lstrip().startswith("|"))
+    prose = deployment_claim_prose(record)
     for clause, conditional in semantic_claim_clauses(prose):
         clause_versions = {
             normalize_claim_text(match.group(0))

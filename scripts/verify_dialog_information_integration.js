@@ -51,7 +51,6 @@ for (const name of [
   'pagedWorkloadRows',
   'pagedExceptionRows',
   'pagedReplacementRows',
-  'pagedUnmatchedRows',
   'pagedWorkloadSegmentAddresses',
   'pagedWorkloadExceptionGroups',
 ]) {
@@ -61,7 +60,22 @@ for (const name of [
 assertContains(projectBoard, ':data="pagedWorkloadRows"', 'workload dialog table must use paged rows')
 assertContains(projectBoard, ':data="pagedExceptionRows"', 'exception dialog table must use paged rows')
 assertContains(projectBoard, ':data="pagedReplacementRows"', 'replacement dialog table must use paged rows')
-assertContains(projectBoard, ':data="pagedUnmatchedRows"', 'unmatched dialog table must use paged rows')
+assertContains(projectBoard, 'const unmatchedRows = ref<UnmatchedRecord[]>([])', 'unmatched dialog must store the current server page')
+assertContains(projectBoard, 'const unmatchedTotal = ref(0)', 'unmatched dialog must store the server total')
+assertContains(
+  projectBoard,
+  'fetchUnmatchedRecords(query, requestedPage, DIALOG_PAGE_SIZE)',
+  'unmatched dialog must request the selected 20-row server page',
+)
+assertContains(projectBoard, 'requestSerial !== unmatchedLoadSerial', 'unmatched dialog must ignore stale server pages')
+assertContains(projectBoard, ':data="unmatchedRows"', 'unmatched dialog table must render the current server page')
+assertContains(projectBoard, ':total="unmatchedTotal"', 'unmatched dialog pagination must use the server total')
+assertContains(
+  projectBoard,
+  '@current-change="handleUnmatchedPageChange"',
+  'unmatched dialog page changes must request a new server page',
+)
+assertNotContains(projectBoard, 'const pagedUnmatchedRows = computed', 'unmatched dialog must not client-slice a partial server page')
 assertContains(projectBoard, ':data="pagedWorkloadSegmentAddresses"', 'workload segment dialog table must use paged rows')
 assertContains(projectBoard, ':data="pagedWorkloadExceptionGroups"', 'workload exception dialog table must use paged rows')
 assertCountAtLeast(projectBoard, 'class="dialog-pagination"', 7, 'project board list dialogs must render standard pagination')

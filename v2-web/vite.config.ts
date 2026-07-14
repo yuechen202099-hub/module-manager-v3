@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { fileURLToPath, URL } from 'node:url'
 
-import { defineConfig } from 'vite'
+import { defineConfig, type Rollup } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import versionArtifact from './src/version.json'
 
@@ -19,7 +19,7 @@ export default defineConfig({
         order: 'post',
         handler(_, bundle) {
           const entryChunks = Object.values(bundle).filter(
-            (item) => item.type === 'chunk' && item.isEntry,
+            (item): item is Rollup.OutputChunk => item.type === 'chunk' && item.isEntry,
           )
           if (entryChunks.length !== 1) {
             throw new Error('Vue build must produce exactly one entry chunk')

@@ -161,9 +161,16 @@ def create_app() -> FastAPI:
         rejection = production_auth_rejection(request)
         if rejection is not None:
             return rejection
+        path = request.url.path.rstrip("/")
+        method = request.method.upper()
+        is_audited_unmatched_get = (
+            method == "GET"
+            and path.startswith("/local-test/unmatched/")
+            and path.endswith(("/candidates", "/match-candidates"))
+        )
         is_json_write = (
-            request.url.path.startswith("/local-test")
-            and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+            path.startswith("/local-test")
+            and (method not in {"GET", "HEAD", "OPTIONS"} or is_audited_unmatched_get)
             and settings.state_backend.lower() in {"json", "dual"}
         )
         transaction = None

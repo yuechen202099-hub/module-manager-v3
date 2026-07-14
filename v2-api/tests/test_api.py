@@ -235,7 +235,7 @@ def test_production_legacy_unmatched_match_writes_return_gone(monkeypatch, tmp_p
         )
         assert response.status_code == 410
         assert "/review" in response.text
-        assert "/match-candidates" in response.text
+        assert "/candidates" in response.text
         assert "/finalize-match" in response.text
 
     assert repository.calls == []
@@ -347,6 +347,256 @@ def test_unmatched_list_response_projects_safe_record_fields(monkeypatch, tmp_pa
     assert "token=secret" not in serialized
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "body", "wrapped"),
+    (
+        ("POST", "/local-test/unmatched/blank", {"actor": "forged"}, True),
+        ("PATCH", "/local-test/unmatched/u-1", {"expected_version": 2, "updates": {"note": "updated"}}, True),
+        (
+            "PATCH",
+            "/local-test/unmatched/u-1/assign",
+            {"expected_version": 2, "constructor": "worker-a"},
+            True,
+        ),
+        ("PATCH", "/local-test/unmatched/u-1/unassign", {"expected_version": 2, "reason": "retry"}, True),
+        ("POST", "/local-test/unmatched/u-1/outside-project", {"expected_version": 2, "note": "outside"}, True),
+        ("POST", "/local-test/unmatched/u-1/delete", {"expected_version": 2, "reason": "duplicate"}, False),
+    ),
+)
+def test_active_unmatched_mutation_responses_project_safe_record_fields(
+    monkeypatch,
+    tmp_path,
+    method: str,
+    path: str,
+    body: dict,
+    wrapped: bool,
+) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class UnsafeMutationRepository(FakeLegacyUnmatchedRepository):
+        @staticmethod
+        def _unsafe(record: dict) -> dict:
+            return {
+                **record,
+                "meter_no": "120000000001",
+                "photo_urls": ["https://cdn.allowed.test/raw.jpg?token=secret"],
+                "signed_url": "https://cdn.allowed.test/signed.jpg?token=secret",
+                "database_id": "internal-database-id",
+                "catalog_row_db_id": "internal-catalog-id",
+                "target_group_id": "internal-target-id",
+                "raw": {"storage_key": "private/photo.jpg", "secret": "must-not-leak"},
+            }
+
+        def _mutate(self, method: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+            result = super()._mutate(method, actor=actor, expected_version=expected_version, **payload)
+            result["record"] = self._unsafe(result["record"])
+            return result
+
+        def create_blank_unmatched_record(self, *, actor: str) -> dict:
+            return {"record": self._unsafe(deepcopy(self.record))}
+
+        def delete_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
+            return self._mutate("delete", actor=actor, expected_version=expected_version, **payload)["record"]
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: UnsafeMutationRepository())
+
+    response = production_client.request(method, path, headers=headers["admin"], json=body)
+    payload = response.json()["data"]
+    record = payload["record"] if wrapped else payload
+    serialized = json.dumps(payload)
+
+    assert response.status_code == 200
+    assert record["unmatched_id"] == "u-1"
+    assert record["meter_no"] == "120000000001"
+    for private_value in (
+        "photo_urls",
+        "signed_url",
+        "database_id",
+        "catalog_row_db_id",
+        "target_group_id",
+        "raw",
+        "token=secret",
+        "private/photo.jpg",
+        "must-not-leak",
+    ):
+        assert private_value not in serialized
+
+
+def test_unmatched_list_response_preserves_full_filtered_stats(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class StatsListRepository(FakeLegacyUnmatchedRepository):
+        def list_unmatched_records(self, *, query: str, limit: int, offset: int) -> dict:
+            assert query == "status-stats"
+            assert limit == 1
+            assert offset == 0
+            return {
+                "total": 3,
+                "limit": limit,
+                "offset": offset,
+                "items": [{"unmatched_id": "u-page-1", "review_version": 1}],
+                "stats": {
+                    "pending": "1",
+                    "assigned": 1,
+                    "outside": 1,
+                    "private_note": "must-not-leak",
+                },
+            }
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: StatsListRepository())
+
+    response = production_client.get(
+        "/local-test/unmatched?query=status-stats&limit=1&offset=0",
+        headers=headers["admin"],
+    )
+    payload = response.json()["data"]
+
+    assert response.status_code == 200
+    assert payload["total"] == 3
+    assert len(payload["items"]) == 1
+    assert payload["stats"] == {"pending": 1, "assigned": 1, "outside": 1}
+
+
+def test_production_constructor_unmatched_list_is_scoped_to_authenticated_actor(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class ScopedListRepository(FakeLegacyUnmatchedRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.list_calls: list[dict] = []
+
+        def list_unmatched_records(
+            self,
+            *,
+            query: str,
+            limit: int,
+            offset: int,
+            assigned_to: str = "",
+        ) -> dict:
+            self.list_calls.append(
+                {
+                    "query": query,
+                    "limit": limit,
+                    "offset": offset,
+                    "assigned_to": assigned_to,
+                }
+            )
+            return {
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "items": [],
+                "stats": {"pending": 0, "assigned": 0, "outside": 0},
+            }
+
+    repository = ScopedListRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    constructor = production_client.get(
+        "/local-test/unmatched?query=mine&limit=20&offset=0",
+        headers=headers["constructor"],
+    )
+    admin = production_client.get(
+        "/local-test/unmatched?query=all&limit=20&offset=0",
+        headers=headers["admin"],
+    )
+
+    assert constructor.status_code == 200
+    assert admin.status_code == 200
+    assert repository.list_calls == [
+        {"query": "mine", "limit": 20, "offset": 0, "assigned_to": "constructor-a"},
+        {"query": "all", "limit": 20, "offset": 0, "assigned_to": ""},
+    ]
+
+
+def test_production_unmatched_export_is_admin_only_and_uses_one_server_snapshot(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class ExportRepository(FakeLegacyUnmatchedRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.export_calls: list[dict] = []
+
+        def export_unmatched_records(
+            self,
+            *,
+            query: str,
+            limit: int,
+        ) -> dict:
+            self.export_calls.append(
+                {
+                    "query": query,
+                    "limit": limit,
+                }
+            )
+            return {
+                "total": 2,
+                "items": [
+                    {"unmatched_id": "u-export-1", "review_version": 1},
+                    {"unmatched_id": "u-export-2", "review_version": 1},
+                ],
+                "stats": {"pending": 2, "assigned": 0, "outside": 0},
+            }
+
+    repository = ExportRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    constructor = production_client.get(
+        "/local-test/unmatched/export?query=full-list",
+        headers=headers["constructor"],
+    )
+    reviewer = production_client.get(
+        "/local-test/unmatched/export?query=full-list",
+        headers=headers["reviewer"],
+    )
+    admin = production_client.get(
+        "/local-test/unmatched/export?query=full-list",
+        headers=headers["admin"],
+    )
+
+    assert constructor.status_code == 403
+    assert reviewer.status_code == 403
+    assert admin.status_code == 200
+    assert [item["unmatched_id"] for item in admin.json()["data"]["items"]] == [
+        "u-export-1",
+        "u-export-2",
+    ]
+    assert repository.export_calls == [
+        {
+            "query": "full-list",
+            "limit": local_test.UNMATCHED_EXPORT_LIMIT,
+        }
+    ]
+
+
+def test_production_unmatched_export_rejects_truncated_server_snapshot(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class TruncatedExportRepository(FakeLegacyUnmatchedRepository):
+        def export_unmatched_records(self, **kwargs) -> dict:
+            return {
+                "total": 2,
+                "items": [{"unmatched_id": "u-export-1", "review_version": 1}],
+                "stats": {"pending": 2, "assigned": 0, "outside": 0},
+            }
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: TruncatedExportRepository())
+
+    response = production_client.get(
+        "/local-test/unmatched/export",
+        headers=headers["admin"],
+    )
+
+    assert response.status_code == 409
+    assert "snapshot" in response.text.lower()
+
+
 def test_production_unmatched_dedupe_is_retired_without_write_or_audit(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
     repository = FakeLegacyUnmatchedRepository()
@@ -383,8 +633,8 @@ class FakeUnmatchedReviewRepository:
         self.calls.append({"method": "get", "unmatched_id": unmatched_id})
         return self._review(unmatched_id)
 
-    def list_unmatched_match_candidates(self, unmatched_id: str) -> dict:
-        self.calls.append({"method": "candidates", "unmatched_id": unmatched_id})
+    def list_unmatched_match_candidates(self, unmatched_id: str, *, actor: str) -> dict:
+        self.calls.append({"method": "candidates", "unmatched_id": unmatched_id, "actor": actor})
         self._review(unmatched_id)
         return {"total": 1, "items": [{"candidate_key": "catalog:row-1", "terminal": "TERM-1"}]}
 
@@ -625,6 +875,164 @@ def test_production_unmatched_review_role_matrix(monkeypatch, tmp_path) -> None:
         assert production_client.request(method.upper(), path, headers=headers["reviewer"], json=body).status_code == 200
         assert production_client.request(method.upper(), path, headers=headers["admin"], json=body).status_code == 200
     assert production_client.post(finalize_path, headers=headers["admin"], json=finalize_body).status_code == 200
+    candidate_calls = [call for call in repository.calls if call["method"] == "candidates"]
+    assert {call["actor"] for call in candidate_calls} == {"reviewer-a", "root-admin"}
+
+
+def test_unmatched_candidate_compatibility_route_uses_same_audited_handler(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    main_module.settings.state_backend = "json"
+    repository = FakeUnmatchedReviewRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    begin_calls: list[str] = []
+    original_begin = local_simulation.begin_authoritative_json_write
+
+    def tracked_begin(team_id: str):
+        begin_calls.append(local_simulation.normalize_team_id(team_id))
+        return original_begin(team_id)
+
+    monkeypatch.setattr(main_module, "begin_authoritative_json_write", tracked_begin)
+
+    canonical = production_client.get(
+        "/local-test/unmatched/unmatched-1/candidates",
+        headers=headers["admin"],
+    )
+    compatibility = production_client.get(
+        "/local-test/unmatched/unmatched-1/match-candidates",
+        headers=headers["admin"],
+    )
+
+    assert canonical.status_code == 200
+    assert compatibility.status_code == 200
+    assert compatibility.json()["data"] == canonical.json()["data"]
+    assert [call["actor"] for call in repository.calls if call["method"] == "candidates"] == [
+        "root-admin",
+        "root-admin",
+    ]
+    assert begin_calls == ["north-team-01", "north-team-01"]
+    assert "north-team-01" not in local_simulation._authoritative_write_locks
+
+
+def test_unmatched_candidate_response_projects_safe_fields(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class UnsafeCandidateRepository(FakeUnmatchedReviewRepository):
+        def list_unmatched_match_candidates(self, unmatched_id: str, *, actor: str) -> dict:
+            return {
+                "total": 1,
+                "items": [
+                    {
+                        "candidate_key": f"candidate:{'a' * 64}",
+                        "catalog_row_id": "row-1",
+                        "catalog_row_db_id": "internal-postgres-uuid",
+                        "target_group_id": "group-1",
+                        "has_existing_group": True,
+                        "terminal": "TERM-1",
+                        "meter_no": "120000000001",
+                        "meter_match_key": "0000000001",
+                        "address": "测试地址",
+                        "match_reasons": ["表号精确匹配"],
+                        "raw": {"secret": "must-not-leak"},
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: UnsafeCandidateRepository())
+
+    response = production_client.get(
+        "/local-test/unmatched/unmatched-1/candidates",
+        headers=headers["admin"],
+    )
+    payload = response.json()["data"]
+    serialized = json.dumps(payload)
+
+    assert response.status_code == 200
+    assert payload == {
+        "total": 1,
+        "items": [
+            {
+                "candidate_key": f"candidate:{'a' * 64}",
+                "has_existing_group": True,
+                "terminal": "TERM-1",
+                "meter_no": "120000000001",
+                "address": "测试地址",
+                "match_reasons": ["表号精确匹配"],
+            }
+        ],
+    }
+    for private_field in (
+        "catalog_row_id",
+        "catalog_row_db_id",
+        "target_group_id",
+        "meter_match_key",
+        "raw",
+        "must-not-leak",
+    ):
+        assert private_field not in serialized
+
+
+def test_unmatched_candidate_response_drops_legacy_internal_candidate_keys(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class LegacyCandidateRepository(FakeUnmatchedReviewRepository):
+        def list_unmatched_match_candidates(self, unmatched_id: str, *, actor: str) -> dict:
+            return {
+                "total": 1,
+                "items": [
+                    {
+                        "candidate_key": "catalog:internal-row-uuid:T-1",
+                        "terminal": "T-1",
+                        "meter_no": "120000000001",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: LegacyCandidateRepository())
+
+    response = production_client.get(
+        "/local-test/unmatched/unmatched-1/candidates",
+        headers=headers["admin"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"total": 0, "items": []}
+    assert "internal-row-uuid" not in response.text
+
+
+def test_dual_unmatched_candidate_unavailable_maps_to_503(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class DualUnavailableCandidateRepository(FakeUnmatchedReviewRepository):
+        def list_unmatched_match_candidates(self, unmatched_id: str, *, actor: str) -> dict:
+            raise state_repository.StateBackendNotReady("Dual unmatched-review writes require coordination")
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: DualUnavailableCandidateRepository())
+
+    response = production_client.get(
+        "/local-test/unmatched/unmatched-1/candidates",
+        headers=headers["admin"],
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Dual unmatched-review writes require coordination"
+
+
+def test_unmatched_candidate_requires_manual_confirmation_maps_to_400(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class UnconfirmedCandidateRepository(FakeUnmatchedReviewRepository):
+        def list_unmatched_match_candidates(self, unmatched_id: str, *, actor: str) -> dict:
+            raise ValueError("Manual confirmation required before final matching")
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: UnconfirmedCandidateRepository())
+
+    response = production_client.get(
+        "/local-test/unmatched/unmatched-1/candidates",
+        headers=headers["admin"],
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Manual confirmation required before final matching"
 
 
 def test_unmatched_finalization_response_uses_stable_ids_and_content_routes(monkeypatch, tmp_path) -> None:
@@ -717,8 +1125,13 @@ def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch
                         "id": "audit-1",
                         "action": "nested-photo-audit",
                         "actor": "admin-a",
+                        "entity_id": "internal-audit-entity-uuid",
                         "payload": {
-                            "candidate_key": "catalog:row-1",
+                            "candidate_key": "catalog:internal-row-uuid",
+                            "catalog_row_db_id": "internal-row-uuid",
+                            "target_group_id": "internal-group-uuid",
+                            "raw": {"secret": "raw-private-value"},
+                            "innocent_label": "https://photos.example/hidden.jpg?token=secret",
                             "nested": {
                                 "photos": [
                                     {
@@ -769,7 +1182,12 @@ def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch
     assert repository.calls == 1
     payload = response.json()["data"]
     photo = payload["items"][0]["payload"]["nested"]["photos"][0]
-    assert payload["items"][0]["payload"]["candidate_key"] == "catalog:row-1"
+    assert set(payload["items"][0]) == {"id", "action", "actor", "payload"}
+    assert payload["items"][0]["payload"]["candidate_key"] == "[REDACTED]"
+    assert payload["items"][0]["payload"]["catalog_row_db_id"] == "[REDACTED]"
+    assert payload["items"][0]["payload"]["target_group_id"] == "[REDACTED]"
+    assert payload["items"][0]["payload"]["raw"] == "[REDACTED]"
+    assert payload["items"][0]["payload"]["innocent_label"] == "[REDACTED]"
     assert photo["source_url"] == "[REDACTED]"
     assert photo["signed_url"] == "[REDACTED]"
     assert photo["signedUrl"] == "[REDACTED]"
@@ -789,6 +1207,15 @@ def test_production_audit_log_is_admin_only_and_recursively_redacted(monkeypatch
         "objectPath",
     ):
         assert photo[key] == "[REDACTED]"
+    serialized = json.dumps(payload)
+    for secret in (
+        "internal-audit-entity-uuid",
+        "internal-row-uuid",
+        "internal-group-uuid",
+        "raw-private-value",
+        "token=secret",
+    ):
+        assert secret not in serialized
     assert photo["storage"] == {
         "storage_bucket": "[REDACTED]",
         "storage_key": "[REDACTED]",
@@ -1555,6 +1982,12 @@ def test_dual_http_unmatched_writes_fail_fast_without_deadlock_or_backend_diverg
             }
         )
         review = unmatched_review.build_review(record)
+        confirmed = local_simulation.confirm_unmatched_review(
+            record["unmatched_id"],
+            actor="reviewer-a",
+            expected_version=review["version"],
+        )
+        review = confirmed["review"]
         candidate = local_simulation.list_unmatched_match_candidates(record["unmatched_id"])["items"][0]
         context = {
             "version": review["version"],
@@ -1715,6 +2148,15 @@ def test_json_http_finalization_identity_conflict_is_409_without_state_or_persis
                 "photo_urls": ["https://photos.example/round6-http.jpg"],
             }
         )
+        review = unmatched_review.build_review(record)
+        review.update(
+            {
+                "manual_confirmed": True,
+                "reviewer": "root-admin",
+                "reviewed_at": "2026-07-13T12:00:00+00:00",
+            }
+        )
+        record["temporary_review"] = review
         state["scan_unmatched"].append(record)
         state["total_catalog"].append(
             {
@@ -1821,6 +2263,15 @@ def test_json_request_write_waits_for_finalizer_cas_and_preserves_both_writes(mo
                 "photo_urls": [f"https://photos.example/third-review/{index}.jpg" for index in range(4)],
             }
         )
+        review = unmatched_review.build_review(record)
+        review.update(
+            {
+                "manual_confirmed": True,
+                "reviewer": "admin-finalizer",
+                "reviewed_at": "2026-07-13T12:00:00+00:00",
+            }
+        )
+        record["temporary_review"] = review
         state["scan_unmatched"].append(record)
         state["total_catalog"].append(
             {

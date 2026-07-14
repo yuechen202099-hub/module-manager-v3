@@ -15,7 +15,10 @@ const checks = [
   ['scanner explains HTTPS requirement', source.includes('https://') && source.includes('摄像头')],
   ['scanner has mobile photo/file fallback', source.includes('capture="environment"') && source.includes('scannerFileInput')],
   ['scanner can decode selected image fallback', source.includes('decodeFromImageElement') || source.includes('decodeFromImageUrl')],
-  ['scanner cleans up on component unmount', source.includes('onUnmounted(stopScanner)')],
+  [
+    'scanner cleans up on component unmount',
+    /onUnmounted\(\(\)\s*=>\s*\{\s*stopScanner\(\)/m.test(source),
+  ],
   ['scanner file input is visually hidden instead of display none', source.includes('position: absolute') && !source.includes('display: none')],
 ]
 

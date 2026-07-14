@@ -68,8 +68,8 @@
 | `GET /local-test/unmatched/{id}/review` | 返回未匹配记录、稳定照片列表和临时审阅状态 |
 | `PATCH /local-test/unmatched/{id}/review` | 保存表号、采集器号、模块号、分类和审阅状态 |
 | `POST /local-test/unmatched/{id}/photos/{photo_id}/rescan` | 对单张照片执行现有条码、二维码和 OCR 识别链 |
-| `POST /local-test/unmatched/{id}/barcode/manual-confirm` | 保存临时人工确认和审计信息 |
-| `GET /local-test/unmatched/{id}/match-candidates` | 根据修正后的编号返回总清单候选及终端 |
+| `POST /local-test/unmatched/{id}/confirm` | 保存临时人工确认和审计信息 |
+| `GET /local-test/unmatched/{id}/candidates` | 根据修正后的编号返回总清单候选及终端；兼容 `/match-candidates` |
 | `POST /local-test/unmatched/{id}/finalize-match` | 管理员确认候选后原子化生成或并入正式资料组 |
 
 候选匹配以标准化表号精确匹配为首要条件，模块号和采集器号只用于辅助排序和冲突提示。唯一候选也需要管理员确认；多个候选必须人工选择；零候选不允许提交终端。

@@ -43,7 +43,8 @@ assertContains(globalSearch, '@error="handleGroupPhotoRenderedError(photoGroup, 
 assertContains(globalSearch, '<img', 'data center photo dialog must render native images for reliable object URL display')
 assertNotContains(globalSearch, '<el-image', 'data center photo dialog must not depend on Element Plus image rendering')
 
-assertContains(releaseNotes, `APP_VERSION = '${expectedVersion}'`, `APP_VERSION must be ${expectedVersion}`)
+assertContains(releaseNotes, "import versionArtifact from '../version.json'", 'release notes must import the shared version artifact')
+assertContains(releaseNotes, 'APP_VERSION = versionArtifact.version', 'APP_VERSION must derive from the shared version artifact')
 assertContains(releaseNotes, "version: 'V3.0.78'", 'release notes must include V3.0.78')
 assertContains(releaseNotes, '弹窗信息整合', 'release notes must describe the V3.0.78 dialog information integration in Chinese')
 assertContains(releaseNotes, '20 条分页结构', 'release notes must describe the V3.0.78 dialog pagination update in Chinese')

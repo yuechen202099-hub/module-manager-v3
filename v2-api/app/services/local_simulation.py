@@ -1676,18 +1676,41 @@ def build_record_text_index(record: dict[str, Any]) -> str:
             values.extend(str(item) for item in value)
         elif not isinstance(value, dict):
             values.append(str(value))
+    temporary_review = record.get("temporary_review")
+    if isinstance(temporary_review, dict):
+        values.extend(
+            str(temporary_review.get(key) or "")
+            for key in unmatched_review.REVIEW_METADATA_FIELDS
+        )
     return " ".join(values).lower()
 
 
-def list_unmatched_records(query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+def list_unmatched_records(
+    query: str = "",
+    limit: int = 100,
+    offset: int = 0,
+    assigned_to: str = "",
+) -> dict[str, Any]:
     state = get_state()
     records = [ensure_unmatched_record(item) for item in state.get("scan_unmatched", [])]
+    assigned_scope = str(assigned_to or "").strip()
+    if assigned_scope:
+        records = [
+            item
+            for item in records
+            if str(item.get("assigned_to") or "").strip() == assigned_scope
+        ]
     q = query.strip().lower()
     if q:
         terms = [item for item in re.split(r"\s+", q) if item]
         records = [item for item in records if all(term in item.get("text_index", "") for term in terms)]
     records = sorted(records, key=lambda item: (str(item.get("terminal") or ""), str(item.get("barcode") or "")))
-    return {"total": len(records), "items": records[offset : offset + limit]}
+    stats = {
+        "pending": sum(1 for item in records if not item.get("project_outside") and not item.get("assigned_to")),
+        "assigned": sum(1 for item in records if str(item.get("assigned_to") or "").strip()),
+        "outside": sum(1 for item in records if bool(item.get("project_outside"))),
+    }
+    return {"total": len(records), "items": records[offset : offset + limit], "stats": stats}
 
 
 def replacement_record_payload(group: dict[str, Any]) -> dict[str, Any] | None:
@@ -1810,11 +1833,12 @@ def get_unmatched_review(unmatched_id: str) -> dict[str, Any]:
     return {"record": copy.deepcopy(record), "review": copy.deepcopy(review)}
 
 
-def list_unmatched_match_candidates(unmatched_id: str) -> dict[str, Any]:
+def list_unmatched_match_candidates(unmatched_id: str, *, actor: str = "") -> dict[str, Any]:
     record = get_unmatched_record(unmatched_id)
     if record is None:
         raise KeyError(unmatched_id)
     review = unmatched_review.build_review(record)
+    unmatched_review.require_manual_confirmation(review)
     state = get_state()
     candidates = unmatched_review.build_match_candidates(
         record,
@@ -1822,7 +1846,20 @@ def list_unmatched_match_candidates(unmatched_id: str) -> dict[str, Any]:
         list(state.get("total_catalog") or []),
         list(state.get("groups") or []),
     )
-    return {"total": len(candidates), "items": copy.deepcopy(candidates)}
+    result = {"total": len(candidates), "items": copy.deepcopy(candidates)}
+    if actor.strip():
+        append_audit_event(
+            "unmatched_review_candidates_viewed",
+            actor.strip(),
+            {
+                "unmatched_id": unmatched_id,
+                "review_version": int(review.get("version") or 0),
+                "candidate_count": len(candidates),
+                "candidate_digest": unmatched_review.candidate_snapshot_digest(candidates),
+            },
+        )
+        save_all_team_states()
+    return result
 
 
 def _formal_photos_from_unmatched_review(
@@ -1929,6 +1966,7 @@ def _finalize_unmatched_match_in_state(
         raise KeyError(unmatched_id)
     review = unmatched_review.build_review(record)
     unmatched_review.require_version(review, expected_version)
+    unmatched_review.require_manual_confirmation(review)
     candidates = list_unmatched_match_candidates(unmatched_id)["items"]
     candidate = next((item for item in candidates if item["candidate_key"] == candidate_key), None)
     if candidate is None:
@@ -2336,17 +2374,31 @@ def update_unmatched_record(
     expected_version: int = 1,
 ) -> dict[str, Any]:
     state = get_state()
-    updates = updates or {}
+    updates = unmatched_review.normalize_legacy_identity_updates(updates)
     for index, record in enumerate(state.get("scan_unmatched", [])):
         item = ensure_unmatched_record(record)
         if item["unmatched_id"] != unmatched_id:
             continue
-        unmatched_review.advance_record_version(item, expected_version)
+        previous_review = unmatched_review.build_review(item)
+        unmatched_review.require_version(previous_review, expected_version)
+        changed_fields: set[str] = set()
         for key in UNMATCHED_EDIT_FIELDS:
             if key in updates:
-                item[key] = str(updates.get(key) or "").strip()
+                value = str(updates.get(key) or "").strip()
+                if str(item.get(key) or "").strip() != value:
+                    changed_fields.add(key)
+                item[key] = value
         if item.get("module_asset_no") and not item.get("asset_no"):
             item["asset_no"] = item["module_asset_no"]
+        synchronized_review = unmatched_review.synchronize_review_identity_after_legacy_patch(
+            previous_review,
+            item,
+            changed_fields,
+        )
+        synchronized_review["version"] = expected_version + 1
+        synchronized_review["updated_at"] = now_iso()
+        item["temporary_review"] = synchronized_review
+        item["review_version"] = synchronized_review["version"]
         item["updated_by"] = actor
         item["updated_at"] = now_iso()
         item["text_index"] = build_record_text_index(item)

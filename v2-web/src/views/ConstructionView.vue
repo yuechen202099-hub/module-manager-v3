@@ -20,7 +20,7 @@ import {
   fetchConstructionTaskGroups,
   fetchConstructionTasks,
   fetchGroup,
-  fetchUnmatchedRecords,
+  fetchAllUnmatchedRecords,
   fetchUserAccounts,
   recordConstructionHeartbeat,
   recordConstructionNonIdleEvent,
@@ -1801,7 +1801,7 @@ async function loadFieldTaskCards() {
   try {
     const [orders, unmatched] = await Promise.all([
       fetchConstructionExceptionOrders('', actor.value),
-      fetchUnmatchedRecords(''),
+      fetchAllUnmatchedRecords(''),
     ])
     fieldExceptionOrders.value = orders
     unmatchedRecords.value = unmatched

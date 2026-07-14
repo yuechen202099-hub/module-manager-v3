@@ -1322,10 +1322,48 @@ def test_unmatched_records_are_searchable_and_audited(synthetic_state: dict) -> 
     assert audits["items"][0]["actor"] == "alice"
 
 
+def test_json_unmatched_pagination_stats_cover_the_full_filtered_result(
+    synthetic_state: dict,
+) -> None:
+    state = local_simulation.get_state()
+    state["scan_unmatched"] = []
+    for suffix, updates in (
+        ("PENDING", {}),
+        ("ASSIGNED", {"assigned_to": "installer-a"}),
+        ("OUTSIDE", {"project_outside": True}),
+    ):
+        record = local_simulation.ensure_unmatched_record(
+            {
+                "barcode": f"FILTERED-{suffix}",
+                "meter_no": f"FILTERED-{suffix}",
+                "terminal": f"T-{suffix}",
+                **updates,
+            }
+        )
+        state["scan_unmatched"].append(record)
+
+    result = local_simulation.list_unmatched_records(query="FILTERED", limit=1, offset=0)
+
+    assert result["total"] == 3
+    assert len(result["items"]) == 1
+    assert result["stats"] == {"pending": 1, "assigned": 1, "outside": 1}
+
+    scoped = local_simulation.list_unmatched_records(
+        query="FILTERED",
+        limit=20,
+        offset=0,
+        assigned_to="installer-a",
+    )
+    assert scoped["total"] == 1
+    assert [item["assigned_to"] for item in scoped["items"]] == ["installer-a"]
+    assert scoped["stats"] == {"pending": 0, "assigned": 1, "outside": 0}
+
+
 def seed_unmatched_review_record(
     *,
     meter_no: str = "120000912473",
     photo_prefix: str = "https://photos.example",
+    manual_confirmed: bool = False,
 ) -> str:
     state = local_simulation.get_state()
     barcode = "3130001122100009124734" if meter_no == "120000912473" else meter_no
@@ -1338,6 +1376,15 @@ def seed_unmatched_review_record(
             "photo_urls": [f"{photo_prefix}/{index}.jpg" for index in range(4)],
         }
     )
+    if manual_confirmed:
+        review = unmatched_review.build_review(record)
+        review["state"] = "reviewed"
+        review["manual_confirmed"] = True
+        review["reviewer"] = "reviewer-a"
+        review["reviewed_at"] = "2026-07-13T09:00:00+00:00"
+        review["updated_at"] = "2026-07-13T09:00:00+00:00"
+        record["temporary_review"] = review
+        record["review_version"] = review["version"]
     state["scan_unmatched"].append(record)
     return record["unmatched_id"]
 
@@ -1417,7 +1464,7 @@ def test_unmatched_match_candidates_return_zero_for_empty_or_short_meter(
     synthetic_state: dict,
     meter_no: str,
 ) -> None:
-    unmatched_id = seed_unmatched_review_record()
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     state = local_simulation.get_state()
     record = next(item for item in state["scan_unmatched"] if item["unmatched_id"] == unmatched_id)
     record["meter_no"] = meter_no
@@ -1429,7 +1476,7 @@ def test_unmatched_match_candidates_return_zero_for_empty_or_short_meter(
 def test_unmatched_match_candidates_are_server_derived_deterministic_and_reject_invalid_terminals(
     synthetic_state: dict,
 ) -> None:
-    unmatched_id = seed_unmatched_review_record()
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     state = local_simulation.get_state()
     state["total_catalog"] = []
 
@@ -1443,7 +1490,7 @@ def test_unmatched_match_candidates_are_server_derived_deterministic_and_reject_
     multiple = local_simulation.list_unmatched_match_candidates(unmatched_id)
     assert multiple["total"] == 2
     assert [item["terminal"] for item in multiple["items"]] == ["T-MATCH-A", "T-MATCH-B"]
-    assert all(item["candidate_key"].startswith("catalog:") for item in multiple["items"])
+    assert all(item["candidate_key"].startswith("candidate:") for item in multiple["items"])
 
     state["total_catalog"] = [state["total_catalog"][-1]]
     unique = local_simulation.list_unmatched_match_candidates(unmatched_id)
@@ -1451,8 +1498,70 @@ def test_unmatched_match_candidates_are_server_derived_deterministic_and_reject_
     assert unique["items"][0]["terminal"] == "T-MATCH-A"
 
 
-def test_unmatched_match_requires_server_candidate_and_creates_no_placeholder(synthetic_state: dict) -> None:
+def test_json_unmatched_search_includes_corrected_temporary_review_identity(
+    synthetic_state: dict,
+) -> None:
     unmatched_id = seed_unmatched_review_record()
+    record = next(
+        item
+        for item in local_simulation.get_state()["scan_unmatched"]
+        if item["unmatched_id"] == unmatched_id
+    )
+    review = unmatched_review.build_review(record)
+    review["meter_no"] = "CORRECTED-METER-001"
+    review["collector"] = "CORRECTED-COLLECTOR-001"
+    review["module_asset_no"] = "CORRECTED-MODULE-001"
+    record["temporary_review"] = review
+
+    for query in ("CORRECTED-METER-001", "CORRECTED-COLLECTOR-001", "CORRECTED-MODULE-001"):
+        result = local_simulation.list_unmatched_records(query=query, limit=20, offset=0)
+        assert result["total"] == 1
+        assert result["items"][0]["unmatched_id"] == unmatched_id
+
+
+def test_json_candidate_view_is_audited_with_authenticated_actor(
+    synthetic_state: dict,
+) -> None:
+    synthetic_state["total_catalog"] = []
+    add_unmatched_match_catalog_row(terminal="T-CANDIDATE-AUDIT")
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
+
+    result = JsonStateRepository().list_unmatched_match_candidates(
+        unmatched_id,
+        actor="reviewer-a",
+    )
+
+    event = local_simulation.get_state()["audit_events"][-1]
+    assert result["total"] == 1
+    assert event["action"] == "unmatched_review_candidates_viewed"
+    assert event["actor"] == "reviewer-a"
+    assert event["payload"] == {
+        "unmatched_id": unmatched_id,
+        "review_version": 1,
+        "candidate_count": 1,
+        "candidate_digest": unmatched_review.candidate_snapshot_digest(result["items"]),
+    }
+
+
+def test_json_candidate_view_requires_manual_confirmation_without_audit(
+    synthetic_state: dict,
+) -> None:
+    synthetic_state["total_catalog"] = []
+    add_unmatched_match_catalog_row(terminal="T-CANDIDATE-CONFIRM")
+    unmatched_id = seed_unmatched_review_record()
+    before_audits = deepcopy(local_simulation.get_state()["audit_events"])
+
+    with pytest.raises(ValueError, match="Manual confirmation required"):
+        JsonStateRepository().list_unmatched_match_candidates(
+            unmatched_id,
+            actor="reviewer-a",
+        )
+
+    assert local_simulation.get_state()["audit_events"] == before_audits
+
+
+def test_unmatched_match_requires_server_candidate_and_creates_no_placeholder(synthetic_state: dict) -> None:
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     local_simulation.get_state()["total_catalog"] = []
     review = local_simulation.get_unmatched_review(unmatched_id)["review"]
 
@@ -1488,7 +1597,7 @@ def test_json_candidate_finalization_rejects_synthetic_identity_without_writes(
     terminal: str,
     meter_no: str,
 ) -> None:
-    unmatched_id = seed_unmatched_review_record()
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     candidate_key = f"catalog:strict:{terminal}:{meter_no}"
     candidate = {
         "candidate_key": candidate_key,
@@ -1570,7 +1679,7 @@ def test_unmatched_finalize_migrates_review_recomputes_formal_status_and_removes
     assert "00000000" not in str(result)
 
 
-def test_unmatched_finalize_does_not_migrate_confirmation_after_metadata_edit(
+def test_unmatched_finalize_rejects_after_metadata_edit_revokes_confirmation(
     synthetic_state: dict,
 ) -> None:
     unmatched_id = seed_unmatched_review_record()
@@ -1589,6 +1698,7 @@ def test_unmatched_finalize_does_not_migrate_confirmation_after_metadata_edit(
         actor="reviewer-a",
         expected_version=classified["review"]["version"],
     )
+    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
     edited = local_simulation.save_unmatched_review(
         unmatched_id,
         actor="reviewer-b",
@@ -1596,22 +1706,22 @@ def test_unmatched_finalize_does_not_migrate_confirmation_after_metadata_edit(
         metadata={"collector": "C002"},
         state="reviewed",
     )
-    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
 
-    result = local_simulation.finalize_unmatched_match(
-        unmatched_id,
-        actor="admin-a",
-        candidate_key=candidate["candidate_key"],
-        expected_version=edited["review"]["version"],
-    )
+    before_groups = deepcopy(local_simulation.get_state()["groups"])
 
-    photo = result["group"]["photos"][0]
-    assert photo["category"] == "before_box"
-    assert photo["temporary_review_manual_confirmed"] is False
-    assert photo["temporary_review_reviewed_at"] == ""
+    with pytest.raises(ValueError, match="Manual confirmation required"):
+        local_simulation.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-a",
+            candidate_key=candidate["candidate_key"],
+            expected_version=edited["review"]["version"],
+        )
+
+    assert local_simulation.get_state()["groups"] == before_groups
+    assert local_simulation.get_unmatched_record(unmatched_id)["temporary_review"]["manual_confirmed"] is False
 
 
-def test_unmatched_finalize_does_not_migrate_confirmation_after_rescan(
+def test_unmatched_finalize_rejects_after_rescan_revokes_confirmation(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1625,6 +1735,7 @@ def test_unmatched_finalize_does_not_migrate_confirmation_after_rescan(
         actor="reviewer-a",
         expected_version=opened["review"]["version"],
     )
+    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
     monkeypatch.setattr(
         local_simulation.photo_barcode_check,
         "check_photo_barcode",
@@ -1641,24 +1752,23 @@ def test_unmatched_finalize_does_not_migrate_confirmation_after_rescan(
         expected_version=confirmed["review"]["version"],
         category="before_box",
     )
-    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
 
-    result = local_simulation.finalize_unmatched_match(
-        unmatched_id,
-        actor="admin-a",
-        candidate_key=candidate["candidate_key"],
-        expected_version=rescanned["review"]["version"],
-    )
+    before_groups = deepcopy(local_simulation.get_state()["groups"])
 
-    photo = result["group"]["photos"][0]
-    assert photo["category"] == "before_box"
-    assert photo["barcode_check_values"] == ["120000912473"]
-    assert photo["temporary_review_manual_confirmed"] is False
-    assert photo["temporary_review_reviewed_at"] == ""
+    with pytest.raises(ValueError, match="Manual confirmation required"):
+        local_simulation.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-a",
+            candidate_key=candidate["candidate_key"],
+            expected_version=rescanned["review"]["version"],
+        )
+
+    assert local_simulation.get_state()["groups"] == before_groups
+    assert local_simulation.get_unmatched_record(unmatched_id)["temporary_review"]["manual_confirmed"] is False
 
 
 def test_unmatched_finalize_rejects_stale_version_before_any_formal_mutation(synthetic_state: dict) -> None:
-    unmatched_id = seed_unmatched_review_record()
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     local_simulation.get_state()["total_catalog"] = []
     add_unmatched_match_catalog_row()
     candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
@@ -1676,7 +1786,7 @@ def test_unmatched_finalize_rejects_stale_version_before_any_formal_mutation(syn
 
 
 def test_unmatched_finalize_attaches_only_exact_meter_group_on_shared_terminal(synthetic_state: dict) -> None:
-    unmatched_id = seed_unmatched_review_record()
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     state = local_simulation.get_state()
     state["total_catalog"] = []
     catalog = add_unmatched_match_catalog_row(terminal="T-SHARED")
@@ -1792,7 +1902,10 @@ def test_unmatched_finalize_merges_review_evidence_into_duplicate_photo(syntheti
 def test_json_migrated_evidence_resets_whole_group_review_archive_and_exception_state(
     synthetic_state: dict,
 ) -> None:
-    unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/whole-reset")
+    unmatched_id = seed_unmatched_review_record(
+        photo_prefix="https://photos.example/whole-reset",
+        manual_confirmed=True,
+    )
     state = local_simulation.get_state()
     state["total_catalog"] = []
     catalog = add_unmatched_match_catalog_row(terminal="T-WHOLE-RESET")
@@ -1895,7 +2008,7 @@ def test_unmatched_finalize_restores_complete_json_state_after_late_failure(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    unmatched_id = seed_unmatched_review_record()
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     state = local_simulation.get_state()
     state["total_catalog"] = []
     add_unmatched_match_catalog_row(terminal="T-ROLLBACK")
@@ -1927,10 +2040,12 @@ def test_unmatched_finalize_interleaving_hides_partial_state_and_preserves_succe
     failing_id = seed_unmatched_review_record(
         meter_no="120000912473",
         photo_prefix="https://photos.example/failing",
+        manual_confirmed=True,
     )
     successful_id = seed_unmatched_review_record(
         meter_no="120000912474",
         photo_prefix="https://photos.example/successful",
+        manual_confirmed=True,
     )
     add_unmatched_match_catalog_row(
         catalog_id="catalog-failing",
@@ -2097,7 +2212,7 @@ def test_fourth_review_cancelled_finalizer_releases_team_for_reacquisition(
     try:
         state = local_simulation.get_state()
         state["total_catalog"] = []
-        unmatched_id = seed_unmatched_review_record()
+        unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
         add_unmatched_match_catalog_row(terminal="T-CANCELLED")
         candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
 
@@ -2205,6 +2320,7 @@ def test_fourth_review_delivery_cache_worker_serializes_with_finalizer(
     unmatched_id = seed_unmatched_review_record(
         meter_no="120000912474",
         photo_prefix="https://photos.example/cache-finalizer",
+        manual_confirmed=True,
     )
     add_unmatched_match_catalog_row(
         catalog_id="catalog-cache-finalizer",
@@ -2286,7 +2402,7 @@ def test_fourth_review_delivery_cache_worker_serializes_with_finalizer(
 
 def test_json_state_repository_finalizes_unmatched_match_from_server_candidate(synthetic_state: dict) -> None:
     repository = JsonStateRepository()
-    unmatched_id = seed_unmatched_review_record()
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     local_simulation.get_state()["total_catalog"] = []
     add_unmatched_match_catalog_row(terminal="T-JSON-FINAL")
     review = repository.get_unmatched_review(unmatched_id)["review"]
@@ -2322,7 +2438,7 @@ def test_json_repository_reselects_compatible_formal_meter_identity_before_mutat
         "photo_count": 0,
     }
     state["groups"].append(existing)
-    unmatched_id = seed_unmatched_review_record()
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     candidate = repository.list_unmatched_match_candidates(unmatched_id)["items"][0]
     candidate = {**candidate, "target_group_id": ""}
     monkeypatch.setattr(
@@ -2364,7 +2480,7 @@ def test_json_repository_rejects_incompatible_formal_meter_identity_without_any_
         "photo_count": 0,
     }
     state["groups"].append(existing)
-    unmatched_id = seed_unmatched_review_record()
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
     candidate = repository.list_unmatched_match_candidates(unmatched_id)["items"][0]
     assert candidate["target_group_id"] == ""
     state_path = tmp_path / "round6-json-identity-state.json"
@@ -2399,6 +2515,7 @@ def test_round7_audit_redaction_covers_provider_uri_link_path_and_name_variants(
         "ossPath": "secret-f",
         "objectPath": "secret-g",
         "candidate_key": "catalog:1:T-001",
+        "opaque_candidate_key": f"candidate:{'a' * 64}",
         "project_id": "1",
     }
 
@@ -2406,7 +2523,8 @@ def test_round7_audit_redaction_covers_provider_uri_link_path_and_name_variants(
 
     for key in ("presignedUri", "rawSignedURI", "signed-link", "s3Key", "cos_object_name", "ossPath", "objectPath"):
         assert redacted[key] == unmatched_review.AUDIT_REDACTED_VALUE
-    assert redacted["candidate_key"] == payload["candidate_key"]
+    assert redacted["candidate_key"] == unmatched_review.AUDIT_REDACTED_VALUE
+    assert redacted["opaque_candidate_key"] == payload["opaque_candidate_key"]
     assert redacted["project_id"] == payload["project_id"]
 
 
@@ -2416,7 +2534,10 @@ def test_json_migrated_photo_ids_do_not_collide_across_unmatched_records(synthet
     state["total_catalog"] = []
     add_unmatched_match_catalog_row(terminal="T-JSON-SHARED")
 
-    first_id = seed_unmatched_review_record(photo_prefix="https://photos.example/first")
+    first_id = seed_unmatched_review_record(
+        photo_prefix="https://photos.example/first",
+        manual_confirmed=True,
+    )
     first_candidate = repository.list_unmatched_match_candidates(first_id)["items"][0]
     first = repository.finalize_unmatched_match(
         first_id,
@@ -2425,7 +2546,10 @@ def test_json_migrated_photo_ids_do_not_collide_across_unmatched_records(synthet
         expected_version=1,
     )
 
-    second_id = seed_unmatched_review_record(photo_prefix="https://photos.example/second")
+    second_id = seed_unmatched_review_record(
+        photo_prefix="https://photos.example/second",
+        manual_confirmed=True,
+    )
     second_review = repository.get_unmatched_review(second_id)["review"]
     second_candidate = repository.list_unmatched_match_candidates(second_id)["items"][0]
     second = repository.finalize_unmatched_match(
@@ -2454,7 +2578,10 @@ def test_json_finalize_exact_replay_uses_authoritative_ledger_without_duplicate_
     state = local_simulation.get_state()
     state["total_catalog"] = []
     add_unmatched_match_catalog_row(terminal="T-JSON-REPLAY")
-    unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/json-replay")
+    unmatched_id = seed_unmatched_review_record(
+        photo_prefix="https://photos.example/json-replay",
+        manual_confirmed=True,
+    )
     candidate = repository.list_unmatched_match_candidates(unmatched_id)["items"][0]
 
     first = repository.finalize_unmatched_match(
@@ -2507,6 +2634,89 @@ def test_json_finalize_exact_replay_uses_authoritative_ledger_without_duplicate_
             expected_version=2,
         )
     assert local_simulation.get_state() == after_first
+
+
+def test_json_finalize_requires_manual_confirmation_without_mutating_state(
+    synthetic_state: dict,
+) -> None:
+    synthetic_state["total_catalog"] = []
+    add_unmatched_match_catalog_row(terminal="T-CONFIRM-REQUIRED")
+    unmatched_id = seed_unmatched_review_record(
+        photo_prefix="https://photos.example/confirm-required",
+        manual_confirmed=True,
+    )
+    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
+    record = local_simulation.get_unmatched_record(unmatched_id)
+    record["temporary_review"]["manual_confirmed"] = False
+    record["temporary_review"]["reviewer"] = ""
+    record["temporary_review"]["reviewed_at"] = ""
+    before = deepcopy(local_simulation.get_state())
+
+    with pytest.raises(ValueError, match="Manual confirmation required"):
+        local_simulation.finalize_unmatched_match(
+            unmatched_id,
+            actor="admin-a",
+            candidate_key=candidate["candidate_key"],
+            expected_version=1,
+        )
+
+    assert local_simulation.get_state() == before
+
+
+def test_json_legacy_identity_patch_syncs_review_and_revokes_confirmation(
+    synthetic_state: dict,
+) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    confirmed = local_simulation.confirm_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=1,
+    )
+
+    updated = local_simulation.update_unmatched_record(
+        unmatched_id,
+        actor="admin-a",
+        expected_version=confirmed["review"]["version"],
+        updates={
+            "meter_no": "120000912474",
+            "collector": "C002",
+            "module_asset_no": "M002",
+        },
+    )
+
+    review = updated["temporary_review"]
+    assert review["meter_no"] == "120000912474"
+    assert review["collector"] == "C002"
+    assert review["module_asset_no"] == "M002"
+    assert review["manual_confirmed"] is False
+    assert review["reviewer"] == ""
+    assert review["reviewed_at"] == ""
+
+
+def test_json_asset_no_alias_syncs_canonical_module_and_revokes_confirmation(
+    synthetic_state: dict,
+) -> None:
+    unmatched_id = seed_unmatched_review_record()
+    confirmed = local_simulation.confirm_unmatched_review(
+        unmatched_id,
+        actor="reviewer-a",
+        expected_version=1,
+    )
+
+    updated = local_simulation.update_unmatched_record(
+        unmatched_id,
+        actor="admin-a",
+        expected_version=confirmed["review"]["version"],
+        updates={"asset_no": "M002"},
+    )
+
+    review = updated["temporary_review"]
+    assert updated["module_asset_no"] == "M002"
+    assert updated["asset_no"] == "M002"
+    assert review["module_asset_no"] == "M002"
+    assert review["manual_confirmed"] is False
+    assert review["reviewer"] == ""
+    assert review["reviewed_at"] == ""
 
 
 def test_unmatched_review_save_persists_without_creating_group_or_changing_summary(synthetic_state: dict) -> None:
@@ -3025,7 +3235,10 @@ def test_dual_unmatched_review_writes_fail_before_either_backend_mutates(
 ) -> None:
     synthetic_state["total_catalog"] = []
     add_unmatched_match_catalog_row(terminal="T-DUAL-FINAL")
-    unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/dual")
+    unmatched_id = seed_unmatched_review_record(
+        photo_prefix="https://photos.example/dual",
+        manual_confirmed=True,
+    )
     mirror_calls = []
 
     class MutatingPostgresMirror:
@@ -3085,7 +3298,10 @@ def test_dual_fail_fast_reuses_but_does_not_close_active_authoritative_transacti
 ) -> None:
     synthetic_state["total_catalog"] = []
     add_unmatched_match_catalog_row(terminal="T-DUAL-FAIL")
-    unmatched_id = seed_unmatched_review_record(photo_prefix="https://photos.example/dual-fail")
+    unmatched_id = seed_unmatched_review_record(
+        photo_prefix="https://photos.example/dual-fail",
+        manual_confirmed=True,
+    )
 
     repo = DualWriteStateRepository()
     opened = repo.get_unmatched_review(unmatched_id)
@@ -3149,7 +3365,7 @@ def test_json_audit_events_recursively_redact_photo_storage_secrets(synthetic_st
     )
 
     photo = event["payload"]["nested"]["photos"][0]
-    assert event["payload"]["candidate_key"] == "catalog:row-1"
+    assert event["payload"]["candidate_key"] == "[REDACTED]"
     assert photo["source_url"] == "[REDACTED]"
     assert photo["signed_url"] == "[REDACTED]"
     assert photo["signedUrl"] == "[REDACTED]"

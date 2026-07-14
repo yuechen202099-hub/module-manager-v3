@@ -87,7 +87,8 @@ for (const [source, text] of [
   assertNotContains(source, text, `production UI must remove explanatory copy: ${text}`)
 }
 
-assertContains(releaseNotes, `APP_VERSION = '${expectedVersion}'`, `APP_VERSION must be ${expectedVersion}`)
+assertContains(releaseNotes, "import versionArtifact from '../version.json'", 'release notes must import the shared version artifact')
+assertContains(releaseNotes, 'APP_VERSION = versionArtifact.version', 'APP_VERSION must derive from the shared version artifact')
 assertContains(releaseNotes, '驾驶舱终端卡片', 'release notes must describe the dashboard terminal card change in Chinese')
 assertContains(releaseNotes, '安装人员完成占比', 'release notes must describe terminal installer completion share in Chinese')
 assertContains(apiMain, `version="${expectedVersion}"`, `FastAPI app version must be ${expectedVersion}`)

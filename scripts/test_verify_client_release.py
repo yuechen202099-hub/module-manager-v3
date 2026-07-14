@@ -650,6 +650,40 @@ ROUND8_AFFIRMATIVE_LIVE_CLAIMS = [
 ]
 
 
+ROUND9_AFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS = [
+    "V3.0.80 has been running in production since Monday.",
+    "V3.0.80 has been in production since Monday.",
+    "V3.0.80 and its assets have been running in production since Monday.",
+    "V3.0.80 had been in production before the rollback.",
+    "V3.0.80 has been continuously running in production since Monday.",
+    "V3.0.80 has been running successfully in production since Monday.",
+    "V3.0.80 has recently been running in production since Monday.",
+    "V3.0.80 has long been running steadily in production.",
+    "V3.0.80 has been running reliably in production.",
+]
+
+
+ROUND9_NONAFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS = [
+    "V3.0.80 has not been continuously running in production.",
+    "V3.0.80 will have been continuously running in production by Friday.",
+    "V3.0.80 may have been running successfully in production.",
+    "V3.0.80 has possibly been running in production.",
+    "V3.0.80 may recently have been running steadily in production.",
+    "V3.0.80 may well have been running in production.",
+    "V3.0.80 could recently have been running in production.",
+]
+
+ROUND10_NONCLAIM_CONTEXTS = [
+    '> Example: "V3.0.80 was deployed to production."',
+    '`V3.0.80 was deployed to production.`',
+    '示例：“V3.0.80 已在生产环境上线。”',
+    'There is no evidence that V3.0.80 was deployed to production.',
+    'We cannot claim that V3.0.80 has been released to production.',
+    '目前没有证据表明 V3.0.80 已在生产环境上线。',
+    '我们不能声称 V3.0.80 已部署到生产环境。',
+]
+
+
 @pytest.mark.parametrize("prose", ROUND5_AFFIRMATIVE_CLAIMS)
 def test_archive_rejects_round5_atomic_affirmative_claims(tmp_path: Path, prose: str) -> None:
     verifier = load_verifier()
@@ -737,6 +771,38 @@ def test_archive_rejects_round8_current_live_adverbs(tmp_path: Path, prose: str)
 
     with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
         verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("prose", ROUND9_AFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS)
+def test_archive_rejects_round9_perfect_production_states(tmp_path: Path, prose: str) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round9-perfect-production-state.zip"
+    write_release_archive(verifier, archive_path, release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n")
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("prose", ROUND9_NONAFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS)
+def test_archive_accepts_round9_nonaffirmative_perfect_states(tmp_path: Path, prose: str) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round9-nonaffirmative-perfect-production-state.zip"
+    write_release_archive(verifier, archive_path, release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n")
+
+    verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("prose", ROUND10_NONCLAIM_CONTEXTS)
+def test_archive_accepts_round10_nonclaim_contexts(tmp_path: Path, prose: str) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "round10-nonclaim-context.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        release_record=f"{PENDING_RELEASE_RECORD}\n{prose}\n",
+    )
+
+    verifier.verify_package(archive_path)
 
 
 def test_archive_rejects_substituted_imported_chunk(tmp_path: Path) -> None:

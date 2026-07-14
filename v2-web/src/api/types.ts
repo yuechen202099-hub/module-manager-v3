@@ -486,6 +486,12 @@ export type UnmatchedRecord = {
   raw?: Record<string, unknown>
 }
 
+export type UnmatchedListStats = {
+  pending: number
+  assigned: number
+  outside: number
+}
+
 export type UnmatchedReviewPhoto = {
   id: string
   category: string
@@ -510,7 +516,7 @@ export type UnmatchedReviewDetail = {
 
 export type UnmatchedMatchCandidate = {
   candidateKey: string
-  targetGroupId: string
+  hasExistingGroup: boolean
   terminal: string
   meterNo: string
   address: string

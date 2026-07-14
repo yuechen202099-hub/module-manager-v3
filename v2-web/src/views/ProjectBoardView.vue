@@ -10,6 +10,7 @@ import {
   deleteUnmatchedRecord,
   exportExceptionMeters,
   exportPhotoBarcodeReviewGroups,
+  exportUnmatchedRecords,
   fetchConstructionExceptionOrders,
   fetchExceptionGroups,
   fetchGroupPhotoObjectUrl,
@@ -38,6 +39,7 @@ import type {
   ReplacementRecord,
   ReviewTask,
   TaskStatusSummary,
+  UnmatchedListStats,
   UnmatchedRecord,
   UserAccount,
 } from '@/api/types'
@@ -126,11 +128,15 @@ const installerWorkloadLoading = ref(false)
 const installerWorkloadCache = reactive<Record<string, InstallerWorkloadRow[]>>({})
 const unmatchedDialogVisible = ref(false)
 const unmatchedLoading = ref(false)
+const unmatchedExporting = ref(false)
 const unmatchedDeletingId = ref('')
 const unmatchedQuery = ref('')
 const unmatchedRows = ref<UnmatchedRecord[]>([])
+const unmatchedTotal = ref(0)
+const unmatchedStats = ref<UnmatchedListStats>({ pending: 0, assigned: 0, outside: 0 })
 const unmatchedPage = ref(1)
 const unmatchedReviewId = ref('')
+let unmatchedLoadSerial = 0
 const replacementDialogVisible = ref(false)
 const replacementLoading = ref(false)
 const replacementQuery = ref('')
@@ -345,16 +351,7 @@ const installerScopeHint = computed(() => {
   if (installerWorkloadScope.value === 'week') return `${anchorDate} 至 ${shiftDate(anchorDate, 6)}`
   return anchorDate.slice(0, 7)
 })
-const unmatchedDialogStats = computed(() => {
-  const outside = unmatchedRows.value.filter((item) => item.projectOutside).length
-  const assigned = unmatchedRows.value.filter((item) => item.assignedTo).length
-  return {
-    total: unmatchedRows.value.length,
-    outside,
-    assigned,
-    pending: unmatchedRows.value.filter((item) => !item.projectOutside && !item.assignedTo).length,
-  }
-})
+const unmatchedDialogStats = computed(() => ({ total: unmatchedTotal.value, ...unmatchedStats.value }))
 const photoBarcodeDialogStats = computed(() => ({
   total: photoBarcodeTotal.value,
   matched:
@@ -431,7 +428,6 @@ const workloadSegmentAddresses = computed(() => workloadSegment.value?.addresses
 const pagedWorkloadRows = computed(() => paginateDialogRows(workloadRows.value, workloadPage.value))
 const pagedExceptionRows = computed(() => paginateDialogRows(filteredExceptionRows.value, exceptionPage.value))
 const pagedReplacementRows = computed(() => paginateDialogRows(replacementRows.value, replacementPage.value))
-const pagedUnmatchedRows = computed(() => paginateDialogRows(unmatchedRows.value, unmatchedPage.value))
 const pagedWorkloadSegmentAddresses = computed(() =>
   paginateDialogRows(workloadSegmentAddresses.value, workloadSegmentPage.value),
 )
@@ -1187,19 +1183,35 @@ async function unassignExceptionGroup(row: MaterialGroup) {
 }
 
 async function loadUnmatchedRows(options: { preservePage?: boolean } = {}) {
-  const previousPage = unmatchedPage.value
+  const requestSerial = ++unmatchedLoadSerial
+  const query = unmatchedQuery.value
+  let requestedPage = options.preservePage ? unmatchedPage.value : 1
   unmatchedLoading.value = true
-  if (!options.preservePage) unmatchedPage.value = 1
+  if (!options.preservePage) unmatchedPage.value = requestedPage
   try {
-    unmatchedRows.value = await fetchUnmatchedRecords(unmatchedQuery.value)
-    if (options.preservePage) {
-      unmatchedPage.value = Math.min(previousPage, Math.max(1, Math.ceil(unmatchedRows.value.length / DIALOG_PAGE_SIZE)))
+    let result = await fetchUnmatchedRecords(query, requestedPage, DIALOG_PAGE_SIZE)
+    if (requestSerial !== unmatchedLoadSerial) return
+    const totalPages = Math.max(1, Math.ceil(result.total / DIALOG_PAGE_SIZE))
+    if (requestedPage > totalPages) {
+      requestedPage = totalPages
+      result = await fetchUnmatchedRecords(query, requestedPage, DIALOG_PAGE_SIZE)
+      if (requestSerial !== unmatchedLoadSerial) return
     }
+    unmatchedPage.value = requestedPage
+    unmatchedRows.value = result.items
+    unmatchedTotal.value = result.total
+    unmatchedStats.value = result.stats
   } catch (error) {
+    if (requestSerial !== unmatchedLoadSerial) return
     ElMessage.error(error instanceof Error ? error.message : '未匹配清单加载失败')
   } finally {
-    unmatchedLoading.value = false
+    if (requestSerial === unmatchedLoadSerial) unmatchedLoading.value = false
   }
+}
+
+async function handleUnmatchedPageChange(page: number) {
+  unmatchedPage.value = page
+  await loadUnmatchedRows({ preservePage: true })
 }
 
 async function loadPhotoBarcodeRows() {
@@ -1325,28 +1337,37 @@ function exportReplacementCsv() {
   downloadText(`换表清单-${new Date().toISOString().slice(0, 10)}.csv`, csv)
 }
 
-function exportUnmatchedCsv() {
-  const rows = [
-    ['未匹配ID', '表号/扫码内容', '短表号', '终端', '地址', '采集器', '模块', '安装人员', '照片数', '状态', '指派施工员', '项目外施工', '备注', '来源文件'],
-    ...unmatchedRows.value.map((item) => [
-      item.unmatchedId,
-      item.barcode || item.meterNo,
-      item.meterMatchKey,
-      item.terminal,
-      item.address,
-      item.collector,
-      item.moduleAssetNo,
-      item.creator,
-      item.photoCount,
-      item.status,
-      item.assignedTo || '',
-      item.projectOutside ? '是' : '否',
-      item.projectOutsideNote || item.assignmentNote || '',
-      item.sourceFile || '',
-    ]),
-  ]
-  const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}`
-  downloadText(`未匹配清单-${new Date().toISOString().slice(0, 10)}.csv`, csv)
+async function exportUnmatchedCsv() {
+  if (unmatchedExporting.value) return
+  unmatchedExporting.value = true
+  try {
+    const records = await exportUnmatchedRecords(unmatchedQuery.value)
+    const rows = [
+      ['未匹配ID', '表号/扫码内容', '短表号', '终端', '地址', '采集器', '模块', '安装人员', '照片数', '状态', '指派施工员', '项目外施工', '备注', '来源文件'],
+      ...records.map((item) => [
+        item.unmatchedId,
+        item.barcode || item.meterNo,
+        item.meterMatchKey,
+        item.terminal,
+        item.address,
+        item.collector,
+        item.moduleAssetNo,
+        item.creator,
+        item.photoCount,
+        item.status,
+        item.assignedTo || '',
+        item.projectOutside ? '是' : '否',
+        item.projectOutsideNote || item.assignmentNote || '',
+        item.sourceFile || '',
+      ]),
+    ]
+    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}`
+    downloadText(`未匹配清单-${new Date().toISOString().slice(0, 10)}.csv`, csv)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '未匹配清单导出失败')
+  } finally {
+    unmatchedExporting.value = false
+  }
 }
 
 async function deleteUnmatchedRow(row: UnmatchedRecord) {
@@ -2129,8 +2150,8 @@ onUnmounted(() => {
             </el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item :disabled="!unmatchedRows.length" @click="exportUnmatchedCsv">
-                  导出清单
+                <el-dropdown-item :disabled="!unmatchedTotal || unmatchedExporting" @click="exportUnmatchedCsv">
+                  导出完整清单
                 </el-dropdown-item>
                 <el-dropdown-item @click="openReplacementFromUnmatchedDialog">
                   换表清单 {{ replacementRows.length ? `(${replacementRows.length})` : '' }}
@@ -2140,7 +2161,7 @@ onUnmounted(() => {
           </el-dropdown>
         </div>
       </div>
-      <el-table v-loading="unmatchedLoading" :data="pagedUnmatchedRows" height="520" size="small" @row-click="openUnmatchedReviewRow">
+      <el-table v-loading="unmatchedLoading" :data="unmatchedRows" height="520" size="small" @row-click="openUnmatchedReviewRow">
         <el-table-column type="index" width="54" label="#" />
         <el-table-column prop="terminal" label="终端" min-width="120" />
         <el-table-column label="表号 / 扫码内容" min-width="150">
@@ -2202,13 +2223,21 @@ onUnmounted(() => {
           v-model:current-page="unmatchedPage"
           background
           layout="total, prev, pager, next"
-          :total="unmatchedRows.length"
+          :total="unmatchedTotal"
           :page-size="DIALOG_PAGE_SIZE"
+          @current-change="handleUnmatchedPageChange"
         />
       </div>
       <template #footer>
         <el-button @click="unmatchedDialogVisible = false">关闭</el-button>
-        <el-button type="primary" :disabled="!unmatchedRows.length" @click="exportUnmatchedCsv">导出当前清单</el-button>
+        <el-button
+          type="primary"
+          :disabled="!unmatchedTotal"
+          :loading="unmatchedExporting"
+          @click="exportUnmatchedCsv"
+        >
+          导出完整清单
+        </el-button>
       </template>
     </el-dialog>
 

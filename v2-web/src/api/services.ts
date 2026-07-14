@@ -17,6 +17,7 @@ import type {
   TaskStatusSummary,
   TaskStatus,
   UnmatchedMatchCandidate,
+  UnmatchedListStats,
   UnmatchedRecord,
   UnmatchedReviewDetail,
   UnmatchedReviewPhoto,
@@ -300,6 +301,12 @@ type BackendUnmatchedRecord = {
   raw?: Record<string, unknown>
 }
 
+type BackendUnmatchedListStats = {
+  pending?: number
+  assigned?: number
+  outside?: number
+}
+
 type BackendUnmatchedReviewPhoto = {
   id?: string
   category?: string
@@ -328,7 +335,7 @@ type BackendUnmatchedReviewResponse = {
 
 type BackendUnmatchedMatchCandidate = {
   candidate_key?: string
-  target_group_id?: string
+  has_existing_group?: boolean
   terminal?: string
   meter_no?: string
   address?: string
@@ -1150,7 +1157,7 @@ function mapUnmatchedReview(raw: BackendUnmatchedReviewResponse): UnmatchedRevie
 function mapUnmatchedMatchCandidate(raw: BackendUnmatchedMatchCandidate): UnmatchedMatchCandidate {
   return {
     candidateKey: raw.candidate_key || '',
-    targetGroupId: raw.target_group_id || '',
+    hasExistingGroup: Boolean(raw.has_existing_group),
     terminal: raw.terminal || '',
     meterNo: raw.meter_no || '',
     address: raw.address || '',
@@ -1821,10 +1828,47 @@ export async function fetchScanImportJob(jobId: string): Promise<ImportJob> {
   return mapImportJob(job)
 }
 
-export async function fetchUnmatchedRecords(query = ''): Promise<UnmatchedRecord[]> {
-  const params = new URLSearchParams({ limit: '500' })
+export async function fetchUnmatchedRecords(
+  query = '',
+  page = 1,
+  pageSize = 20,
+): Promise<{ total: number; items: UnmatchedRecord[]; stats: UnmatchedListStats }> {
+  const safePage = Math.max(1, Math.floor(Number(page) || 1))
+  const safePageSize = Math.max(1, Math.min(1000, Math.floor(Number(pageSize) || 20)))
+  const params = new URLSearchParams({
+    limit: String(safePageSize),
+    offset: String((safePage - 1) * safePageSize),
+  })
   if (query.trim()) params.set('query', query.trim())
-  const data = await api<{ total: number; items: BackendUnmatchedRecord[] }>(`/local-test/unmatched?${params.toString()}`)
+  const data = await api<{ total: number; items: BackendUnmatchedRecord[]; stats?: BackendUnmatchedListStats }>(
+    `/local-test/unmatched?${params.toString()}`,
+  )
+  return {
+    total: Number(data.total || 0),
+    items: (data.items || []).map(mapUnmatchedRecord),
+    stats: {
+      pending: Number(data.stats?.pending || 0),
+      assigned: Number(data.stats?.assigned || 0),
+      outside: Number(data.stats?.outside || 0),
+    },
+  }
+}
+
+export async function fetchAllUnmatchedRecords(query = ''): Promise<UnmatchedRecord[]> {
+  const pageSize = 500
+  const records: UnmatchedRecord[] = []
+  for (let page = 1; ; page += 1) {
+    const result = await fetchUnmatchedRecords(query, page, pageSize)
+    records.push(...result.items)
+    if (!result.items.length || records.length >= result.total) break
+  }
+  return records
+}
+
+export async function exportUnmatchedRecords(query = ''): Promise<UnmatchedRecord[]> {
+  let path = '/local-test/unmatched/export'
+  if (query.trim()) path += `?query=${encodeURIComponent(query.trim())}`
+  const data = await api<{ total: number; items: BackendUnmatchedRecord[] }>(path)
   return (data.items || []).map(mapUnmatchedRecord)
 }
 
@@ -1915,10 +1959,11 @@ export async function fetchUnmatchedMatchCandidates(
 }
 
 export async function finalizeUnmatchedMatch(unmatchedId: string, candidateKey: string, expectedVersion: number) {
-  return api(`/local-test/unmatched/${encodeURIComponent(unmatchedId)}/finalize-match`, {
+  const data = await api<{ group?: { id?: string } }>(`/local-test/unmatched/${encodeURIComponent(unmatchedId)}/finalize-match`, {
     method: 'POST',
     body: JSON.stringify({ candidate_key: candidateKey, expected_version: expectedVersion }),
   })
+  return data.group?.id || ''
 }
 
 export async function fetchReplacementRecords(query = ''): Promise<ReplacementRecord[]> {

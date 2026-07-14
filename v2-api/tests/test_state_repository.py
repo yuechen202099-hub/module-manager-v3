@@ -21,7 +21,10 @@ def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytes
     monkeypatch.setattr(
         repository.local_simulation,
         "list_unmatched_records",
-        lambda query="", limit=100, offset=0: {"total": 1, "items": [{"unmatched_id": "u-1"}]},
+        lambda query="", limit=100, offset=0, assigned_to="": {
+            "total": 1,
+            "items": [{"unmatched_id": "u-1"}],
+        },
     )
     monkeypatch.setattr(
         repository.local_simulation,
@@ -57,6 +60,31 @@ def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytes
         "group": {"id": "g-1", "actor": "reviewer-a", "updates": {"collector": "c"}}
     }
     assert repo.claim_task(7, "reviewer-a") == {"id": 7, "claimed_by": "reviewer-a"}
+
+
+def test_json_unmatched_export_returns_one_copied_filtered_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = {
+        "total": 2,
+        "items": [
+            {"unmatched_id": "u-export-1", "raw": {"source": "a"}},
+            {"unmatched_id": "u-export-2", "raw": {"source": "b"}},
+        ],
+        "stats": {"pending": 2, "assigned": 0, "outside": 0},
+    }
+    calls: list[dict] = []
+
+    def list_snapshot(query="", limit=100, offset=0, assigned_to=""):
+        calls.append({"query": query, "limit": limit, "offset": offset, "assigned_to": assigned_to})
+        return source
+
+    monkeypatch.setattr(repository.local_simulation, "list_unmatched_records", list_snapshot)
+
+    result = repository.JsonStateRepository().export_unmatched_records(query="meter-a", limit=500)
+    result["items"][0]["raw"]["source"] = "changed"
+
+    assert calls == [{"query": "meter-a", "limit": 500, "offset": 0, "assigned_to": ""}]
+    assert result["total"] == 2
+    assert source["items"][0]["raw"]["source"] == "a"
 
 
 def test_postgres_unmatched_payload_counts_image_urls() -> None:
@@ -1300,6 +1328,84 @@ def test_postgres_finalize_unmatched_uses_for_update_and_single_commit() -> None
     assert "00000000" not in str(result)
 
 
+def test_postgres_finalize_requires_manual_confirmation_without_writes() -> None:
+    record = _postgres_finalize_record()
+    record.payload["temporary_review"]["manual_confirmed"] = False
+    record.payload["temporary_review"]["reviewer"] = ""
+    record.payload["temporary_review"]["reviewed_at"] = ""
+    before = deepcopy(vars(record))
+    fake_session = FinalizeFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return fake_session
+
+    with pytest.raises(ValueError, match="Manual confirmation required"):
+        TestPostgresRepository().finalize_unmatched_match(
+            record.legacy_id,
+            actor="admin-a",
+            candidate_key="catalog:catalog-1:T-FINAL",
+            expected_version=1,
+        )
+
+    assert fake_session.commit_calls == 0
+    assert fake_session.staged == []
+    assert vars(record) == before
+
+
+def test_postgres_legacy_identity_patch_syncs_review_and_revokes_confirmation() -> None:
+    record = _postgres_finalize_record()
+    group = _postgres_finalize_group()
+    session = LegacyMutationSession(record, group)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+    result = TestPostgresRepository().update_unmatched_record(
+        record.legacy_id,
+        actor="admin-a",
+        expected_version=1,
+        updates={
+            "meter_no": "120000912474",
+            "collector": "C002",
+            "module_asset_no": "M002",
+        },
+    )
+
+    review = result["record"]["temporary_review"]
+    assert review["meter_no"] == "120000912474"
+    assert review["collector"] == "C002"
+    assert review["module_asset_no"] == "M002"
+    assert review["manual_confirmed"] is False
+    assert review["reviewer"] == ""
+    assert review["reviewed_at"] == ""
+
+
+def test_postgres_asset_no_alias_syncs_canonical_module_and_revokes_confirmation() -> None:
+    record = _postgres_finalize_record()
+    group = _postgres_finalize_group()
+    session = LegacyMutationSession(record, group)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+    result = TestPostgresRepository().update_unmatched_record(
+        record.legacy_id,
+        actor="admin-a",
+        expected_version=1,
+        updates={"asset_no": "M002"},
+    )
+
+    review = result["record"]["temporary_review"]
+    assert result["record"]["module_asset_no"] == "M002"
+    assert review["module_asset_no"] == "M002"
+    assert review["manual_confirmed"] is False
+    assert review["reviewer"] == ""
+    assert review["reviewed_at"] == ""
+
+
 @pytest.mark.parametrize(
     ("terminal", "meter_no"),
     [
@@ -1542,6 +1648,150 @@ def test_postgres_finalize_unmatched_selects_exact_group_identity_on_shared_term
 
     assert len(candidates) == 1
     assert candidates[0]["target_group_id"] == exact.legacy_id
+
+
+def test_postgres_unmatched_search_includes_corrected_temporary_review_identity() -> None:
+    record = _postgres_finalize_record()
+    record.payload["temporary_review"].update(
+        {
+            "meter_no": "CORRECTED-METER-001",
+            "collector": "CORRECTED-COLLECTOR-001",
+            "module_asset_no": "CORRECTED-MODULE-001",
+        }
+    )
+    class SearchSession(FinalizeFakeSession):
+        def scalar(self, statement):
+            self.statements.append(statement)
+            return 1
+
+        def scalars(self, statement):
+            self.statements.append(statement)
+            return FinalizeFakeScalars([record])
+
+    session = SearchSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+    result = TestPostgresRepository().list_unmatched_records(
+        query="CORRECTED-METER-001",
+        limit=20,
+        offset=40,
+        assigned_to="constructor-a",
+    )
+
+    compiled_statements = [
+        statement.compile(dialect=postgresql.dialect())
+        for statement in session.statements
+    ]
+    compiled_sql = "\n".join(str(statement) for statement in compiled_statements)
+    compiled_params = [
+        value
+        for statement in compiled_statements
+        for value in statement.params.values()
+    ]
+    assert "->>" in compiled_sql
+    assert all(
+        value in compiled_params
+        for value in (
+            "temporary_review",
+            "meter_no",
+            "collector",
+            "module_asset_no",
+            "assigned_to",
+            "constructor-a",
+        )
+    )
+    assert "LIMIT" in compiled_sql and "OFFSET" in compiled_sql
+    assert result["stats"] == {"pending": 1, "assigned": 1, "outside": 1}
+
+
+def test_postgres_unmatched_export_uses_one_windowed_snapshot_statement() -> None:
+    first = _postgres_finalize_record()
+    first.legacy_id = "u-export-1"
+    second = deepcopy(first)
+    second.legacy_id = "u-export-2"
+
+    class ExportSession(FinalizeFakeSession):
+        def execute(self, statement):
+            self.statements.append(statement)
+            return SimpleNamespace(all=lambda: [(first, 2), (second, 2)])
+
+        def scalar(self, _statement):
+            raise AssertionError("export must not issue a separate count statement")
+
+        def scalars(self, _statement):
+            raise AssertionError("export must not issue a separate records statement")
+
+    session = ExportSession(first)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+    result = TestPostgresRepository().export_unmatched_records(
+        query="CORRECTED-METER-001",
+        limit=500,
+    )
+
+    assert len(session.statements) == 1
+    compiled = session.statements[0].compile(dialect=postgresql.dialect())
+    compiled_sql = str(compiled)
+    assert "count(*) OVER ()" in compiled_sql
+    assert "LIMIT" in compiled_sql
+    assert all(
+        value in compiled.params.values()
+        for value in ("temporary_review", "meter_no", "collector", "module_asset_no")
+    )
+    assert result["total"] == 2
+    assert [item["unmatched_id"] for item in result["items"]] == ["u-export-1", "u-export-2"]
+
+
+def test_postgres_candidate_view_is_transactionally_audited() -> None:
+    record = _postgres_finalize_record()
+    session = FinalizeFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+    result = TestPostgresRepository().list_unmatched_match_candidates(
+        record.legacy_id,
+        actor="reviewer-a",
+    )
+
+    audits = [item for item in session.staged if isinstance(item, repository.AuditLog)]
+    assert result == {"total": 0, "items": []}
+    assert session.commit_calls == 1
+    assert len(audits) == 1
+    assert audits[0].action == "unmatched_review_candidates_viewed"
+    assert audits[0].actor_username == "reviewer-a"
+    assert audits[0].payload == {
+        "unmatched_id": record.legacy_id,
+        "review_version": 1,
+        "candidate_count": 0,
+        "candidate_digest": repository.unmatched_review.candidate_snapshot_digest([]),
+    }
+
+
+def test_postgres_candidate_view_requires_manual_confirmation_without_audit() -> None:
+    record = _postgres_finalize_record()
+    record.payload["temporary_review"]["manual_confirmed"] = False
+    session = FinalizeFakeSession(record)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+    with pytest.raises(ValueError, match="Manual confirmation required"):
+        TestPostgresRepository().list_unmatched_match_candidates(
+            record.legacy_id,
+            actor="reviewer-a",
+        )
+
+    assert session.commit_calls == 0
+    assert [item for item in session.staged if isinstance(item, repository.AuditLog)] == []
 
 
 def test_postgres_migrated_photo_uses_same_backend_independent_id_as_json(
@@ -2106,6 +2356,32 @@ def test_dual_backend_finalize_unmatched_match_fails_before_json_or_postgres_wri
     assert calls == []
 
 
+def test_dual_backend_candidate_view_fails_before_json_or_postgres_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    class MirrorRepository:
+        def list_unmatched_match_candidates(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            raise RuntimeError("postgres audit unavailable")
+
+    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", MirrorRepository)
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "list_unmatched_match_candidates",
+        lambda unmatched_id, actor="": calls.append((unmatched_id, actor)),
+    )
+
+    with pytest.raises(repository.StateBackendNotReady, match="before either backend mutated"):
+        repository.DualWriteStateRepository().list_unmatched_match_candidates(
+            "unmatched-candidate-1",
+            actor="reviewer-a",
+        )
+
+    assert calls == []
+
+
 LEGACY_UNMATCHED_MUTATION_CASES = (
     ("update", "unmatched_record_updated"),
     ("assign", "unmatched_record_assigned"),
@@ -2350,7 +2626,7 @@ def test_postgres_audit_response_recursively_redacts_provider_style_secret_keys(
     result = TestPostgresRepository().list_audit_events()
 
     provider = result["items"][0]["payload"]["provider"]
-    assert result["items"][0]["payload"]["candidate_key"] == "catalog:row-1"
+    assert result["items"][0]["payload"]["candidate_key"] == "[REDACTED]"
     assert set(provider.values()) == {"[REDACTED]"}
 
 

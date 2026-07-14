@@ -1,4 +1,6 @@
 import copy
+import json
+import re
 
 import pytest
 
@@ -120,6 +122,7 @@ def test_apply_review_patch_invalidates_manual_confirmation_when_evidence_change
 def test_apply_review_patch_preserves_manual_confirmation_when_evidence_is_unchanged() -> None:
     review = unmatched_review.build_review(sample_record())
     review["manual_confirmed"] = True
+    review["reviewer"] = "reviewer-a"
     review["reviewed_at"] = "2026-07-13T09:00:00+00:00"
     photo_id = review["photos"][0]["id"]
 
@@ -137,6 +140,7 @@ def test_apply_review_patch_preserves_manual_confirmation_when_evidence_is_uncha
     )
 
     assert updated["manual_confirmed"] is True
+    assert updated["reviewer"] == "reviewer-a"
     assert updated["reviewed_at"] == "2026-07-13T09:00:00+00:00"
 
 
@@ -195,3 +199,63 @@ def test_barcode_context_uses_only_temporary_review_fields() -> None:
         "module_asset_no": "M001",
         "photos": review["photos"],
     }
+
+
+def test_match_candidates_use_opaque_keys_without_internal_ids() -> None:
+    review = unmatched_review.build_review(sample_record())
+    catalog_id = "catalog-public-id"
+    catalog_db_id = "8a56330f-e241-43fe-a847-a0166559263e"
+    target_group_id = "90f9d31b-982e-46a3-bc79-4b982a7c6997"
+
+    candidates = unmatched_review.build_match_candidates(
+        sample_record(),
+        review,
+        [
+            {
+                "id": catalog_id,
+                "catalog_row_db_id": catalog_db_id,
+                "terminal": "T-OPAQUE",
+                "meter_no": "120000912473",
+                "address": "opaque road",
+            }
+        ],
+        [
+            {
+                "id": target_group_id,
+                "terminal": "T-OPAQUE",
+                "total_catalog_row_id": catalog_db_id,
+            }
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert re.fullmatch(r"candidate:[0-9a-f]{64}", candidates[0]["candidate_key"])
+    assert candidates[0]["has_existing_group"] is True
+    serialized = json.dumps(candidates[0])
+    assert catalog_id not in candidates[0]["candidate_key"]
+    assert catalog_db_id not in candidates[0]["candidate_key"]
+    assert target_group_id not in candidates[0]["candidate_key"]
+    assert target_group_id in serialized
+
+
+def test_audit_redaction_hides_private_fields_urls_and_legacy_candidate_keys() -> None:
+    payload = {
+        "unmatched_id": "unmatched-public-id",
+        "candidate_key": "catalog:8a56330f-e241-43fe-a847-a0166559263e:T-1",
+        "catalog_row_db_id": "8a56330f-e241-43fe-a847-a0166559263e",
+        "target_group_id": "90f9d31b-982e-46a3-bc79-4b982a7c6997",
+        "raw": {"private": "must-not-leak"},
+        "nested": {"note": "https://photos.example/object.jpg?token=secret"},
+    }
+
+    redacted = unmatched_review.redact_audit_photo_secrets(payload)
+    serialized = json.dumps(redacted)
+
+    assert redacted["unmatched_id"] == "unmatched-public-id"
+    assert redacted["candidate_key"] == unmatched_review.AUDIT_REDACTED_VALUE
+    assert redacted["catalog_row_db_id"] == unmatched_review.AUDIT_REDACTED_VALUE
+    assert redacted["target_group_id"] == unmatched_review.AUDIT_REDACTED_VALUE
+    assert redacted["raw"] == unmatched_review.AUDIT_REDACTED_VALUE
+    assert redacted["nested"]["note"] == unmatched_review.AUDIT_REDACTED_VALUE
+    for secret in ("must-not-leak", "8a56330f", "90f9d31b", "token=secret"):
+        assert secret not in serialized

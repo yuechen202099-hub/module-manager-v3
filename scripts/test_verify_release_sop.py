@@ -480,6 +480,57 @@ ROUND7_NONAFFIRMATIVE_CLAIMS = [
 ROUND8_AFFIRMATIVE_LIVE_CLAIMS = [
     "V3.0.80 is currently live in production.",
     "V3.0.80 is presently live in production.",
+    "V3.0.80 is running in production.",
+    "V3.0.80 is in production.",
+]
+
+
+ROUND8_NONAFFIRMATIVE_PRODUCTION_STATE_CLAIMS = [
+    "V3.0.80 is not running in production.",
+    "V3.0.80 is currently not in production.",
+    "V3.0.80 will be running in production after approval.",
+    "V3.0.80 may be in production after approval.",
+]
+
+
+ROUND9_AFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS = [
+    "V3.0.80 has been running in production since Monday.",
+    "V3.0.80 has been in production since Monday.",
+    "V3.0.80 and its assets have been running in production since Monday.",
+    "V3.0.80 had been in production before the rollback.",
+    "V3.0.80 has been continuously running in production since Monday.",
+    "V3.0.80 has been running successfully in production since Monday.",
+    "V3.0.80 has recently been running in production since Monday.",
+    "V3.0.80 has long been running steadily in production.",
+    "V3.0.80 has been running reliably in production.",
+]
+
+
+ROUND9_NONAFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS = [
+    "V3.0.80 has not been continuously running in production.",
+    "V3.0.80 will have been continuously running in production by Friday.",
+    "V3.0.80 may have been running successfully in production.",
+    "V3.0.80 has possibly been running in production.",
+    "V3.0.80 may recently have been running steadily in production.",
+    "V3.0.80 may well have been running in production.",
+    "V3.0.80 could recently have been running in production.",
+]
+
+ROUND10_NONCLAIM_CONTEXTS = [
+    '> Example: "V3.0.80 was deployed to production."',
+    'Example: "V3.0.80 was deployed to production."',
+    '- "V3.0.80 was deployed to production."',
+    '`V3.0.80 was deployed to production.`',
+    '    V3.0.80 was deployed to production.',
+    '```text\nV3.0.80 was deployed to production.\n```',
+    '~~~\nV3.0.80 was deployed to production.\n~~~',
+    '"V3.0.80 was deployed to production."',
+    '示例：“V3.0.80 已在生产环境上线。”',
+    '“V3.0.80 已在生产环境上线。”',
+    'There is no evidence that V3.0.80 was deployed to production.',
+    'We cannot claim that V3.0.80 has been released to production.',
+    '目前没有证据表明 V3.0.80 已在生产环境上线。',
+    '我们不能声称 V3.0.80 已部署到生产环境。',
 ]
 
 
@@ -541,6 +592,87 @@ def test_round8_current_live_adverbs_are_affirmative(prose: str) -> None:
 
     with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
         verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("prose", ROUND8_NONAFFIRMATIVE_PRODUCTION_STATE_CLAIMS)
+def test_round8_negative_future_or_modal_production_states_are_not_affirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("prose", ROUND9_AFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS)
+def test_round9_perfect_production_states_are_affirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("prose", ROUND9_NONAFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS)
+def test_round9_negative_future_or_modal_perfect_states_are_not_affirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+@pytest.mark.parametrize("prose", ROUND10_NONCLAIM_CONTEXTS)
+def test_round10_quotes_examples_and_scoped_negations_are_not_affirmative(prose: str) -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+def test_round10_ignored_code_does_not_hide_a_later_real_deployment_claim() -> None:
+    verifier = load_verifier()
+    prose = "```text\nV3.0.80 will be deployed to production.\n```\nV3.0.80 was deployed to production."
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+def test_round10_table_prose_with_a_real_deployment_claim_is_affirmative() -> None:
+    verifier = load_verifier()
+    record = f"{release_record('Status: pending')}\n| Note | V3.0.80 was deployed to production. |\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+def test_round11_indented_fence_marker_does_not_hide_later_real_deployment_claim() -> None:
+    verifier = load_verifier()
+    prose = "    ```text\nV3.0.80 was deployed to production."
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+def test_round11_nested_bullet_blockquote_is_not_affirmative() -> None:
+    verifier = load_verifier()
+    record = f'{release_record("Status: pending")}\n- > "V3.0.80 was deployed to production."\n'
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+def test_round11_ordered_list_full_quote_is_not_affirmative() -> None:
+    verifier = load_verifier()
+    record = f'{release_record("Status: pending")}\n1. "V3.0.80 was deployed to production."\n'
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
+
+
+def test_round11_not_true_scopes_negation_over_deployment_claim() -> None:
+    verifier = load_verifier()
+    prose = "It is not true that V3.0.80 was deployed to production."
+    record = f"{release_record('Status: pending')}\n{prose}\n"
+
+    assert not verifier.release_record_claims_deployed_without_live_evidence(record)
 
 
 def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> None:

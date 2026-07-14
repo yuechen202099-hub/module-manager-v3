@@ -47,6 +47,7 @@ const narrowScreen = ref(false)
 let detailRequestSerial = 0
 let imageRequestSerial = 0
 let candidateRequestSerial = 0
+let mutationSessionSerial = 0
 let candidateAbortController: AbortController | null = null
 let loadedUnmatchedId = ''
 
@@ -94,6 +95,37 @@ function isVersionConflict(error: unknown) {
   return getApiErrorStatus(error) === 409
 }
 
+function isCurrentReviewRecord(unmatchedId: string) {
+  return Boolean(unmatchedId && props.modelValue && props.unmatchedId === unmatchedId)
+}
+
+function resetMutationState() {
+  saving.value = false
+  rescanning.value = false
+  confirming.value = false
+  finalizing.value = false
+}
+
+function invalidateMutationSession() {
+  mutationSessionSerial += 1
+  resetMutationState()
+}
+
+function isCurrentMutation(mutationSession: number, unmatchedId: string) {
+  return mutationSession === mutationSessionSerial && isCurrentReviewRecord(unmatchedId)
+}
+
+function resetReviewContent() {
+  detail.value = null
+  draft.meterNo = ''
+  draft.collector = ''
+  draft.moduleAssetNo = ''
+  for (const key of Object.keys(photoCategories)) delete photoCategories[key]
+  selectedPhotoId.value = ''
+  errorMessage.value = ''
+  replaceImageObjectUrl()
+}
+
 function invalidateCandidateRequest() {
   candidateRequestSerial += 1
   candidateAbortController?.abort()
@@ -124,27 +156,46 @@ function isAbortedRequest(error: unknown) {
   return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError'
 }
 
+function handleUnavailableRecord(error: unknown, unmatchedId: string) {
+  if (getApiErrorStatus(error) !== 404 || !isCurrentReviewRecord(unmatchedId)) return false
+  detailRequestSerial += 1
+  imageRequestSerial += 1
+  invalidateCandidateRequest()
+  invalidateMutationSession()
+  resetReviewContent()
+  resetCandidateResults()
+  loadedUnmatchedId = ''
+  mode.value = 'review'
+  candidatesLoading.value = false
+  emit('updated')
+  emit('update:modelValue', false)
+  ElMessage.warning('记录已由其他管理员处理，列表已刷新')
+  return true
+}
+
 async function loadDetail(options: { preserveDraft?: boolean } = {}) {
   if (!props.unmatchedId) return
+  const unmatchedId = props.unmatchedId
   const requestSerial = ++detailRequestSerial
   loading.value = true
   errorMessage.value = ''
   try {
-    const next = await fetchUnmatchedReview(props.unmatchedId)
-    if (requestSerial !== detailRequestSerial || !props.modelValue) return
+    const next = await fetchUnmatchedReview(unmatchedId)
+    if (requestSerial !== detailRequestSerial || !isCurrentReviewRecord(unmatchedId)) return
     applyDetail(next, options.preserveDraft)
-    loadedUnmatchedId = props.unmatchedId
+    loadedUnmatchedId = unmatchedId
   } catch (error) {
     if (requestSerial !== detailRequestSerial) return
+    if (handleUnavailableRecord(error, unmatchedId)) return
     errorMessage.value = error instanceof Error ? error.message : '审阅详情加载失败'
   } finally {
     if (requestSerial === detailRequestSerial) loading.value = false
   }
 }
 
-async function reloadAfterConflict() {
+async function reloadAfterConflict(unmatchedId: string, mutationSession: number) {
   await loadDetail({ preserveDraft: true })
-  ElMessage.warning('记录已更新，请确认后重试')
+  if (isCurrentMutation(mutationSession, unmatchedId)) ElMessage.warning('记录已更新，请确认后重试')
 }
 
 async function loadSelectedPhoto() {
@@ -154,6 +205,7 @@ async function loadSelectedPhoto() {
   replaceImageObjectUrl()
   if (!photoId || !unmatchedId || !props.modelValue) return
   imageLoading.value = true
+  errorMessage.value = ''
   try {
     const next = await fetchUnmatchedReviewPhotoObjectUrl(unmatchedId, photoId)
     if (
@@ -168,7 +220,9 @@ async function loadSelectedPhoto() {
     replaceImageObjectUrl(next)
   } catch (error) {
     if (requestSerial === imageRequestSerial) {
-      errorMessage.value = error instanceof Error ? error.message : '图片加载失败'
+      errorMessage.value = getApiErrorStatus(error) === 404
+        ? '当前照片无法加载，可继续审阅其他照片'
+        : error instanceof Error ? error.message : '图片加载失败'
     }
   } finally {
     if (requestSerial === imageRequestSerial) imageLoading.value = false
@@ -206,21 +260,27 @@ async function persistReview(
   state: 'pending' | 'reviewed' = 'pending',
   showSuccess = true,
 ): Promise<UnmatchedReviewDetail | null> {
-  if (!detail.value || saving.value) return null
+  if (!detail.value || detail.value.record.unmatchedId !== props.unmatchedId || saving.value) return null
+  const unmatchedId = props.unmatchedId
+  if (!unmatchedId) return null
+  const mutationSession = mutationSessionSerial
   saving.value = true
   errorMessage.value = ''
   try {
-    const next = await saveUnmatchedReview(props.unmatchedId, savePayload(state))
+    const next = await saveUnmatchedReview(unmatchedId, savePayload(state))
+    if (!isCurrentMutation(mutationSession, unmatchedId)) return null
     applyDetail(next)
     if (showSuccess) ElMessage.success('已保存')
     emit('updated')
     return next
   } catch (error) {
-    if (isVersionConflict(error)) await reloadAfterConflict()
+    if (!isCurrentMutation(mutationSession, unmatchedId)) return null
+    if (handleUnavailableRecord(error, unmatchedId)) return null
+    if (isVersionConflict(error)) await reloadAfterConflict(unmatchedId, mutationSession)
     else errorMessage.value = error instanceof Error ? error.message : '保存失败'
     return null
   } finally {
-    saving.value = false
+    if (isCurrentMutation(mutationSession, unmatchedId)) saving.value = false
   }
 }
 
@@ -230,19 +290,22 @@ async function saveReview(state: 'pending' | 'reviewed' = 'pending') {
 
 async function rescanPhoto() {
   if (!detail.value || !selectedPhoto.value || saving.value || rescanning.value || confirming.value) return
+  const unmatchedId = props.unmatchedId
   const photoId = selectedPhoto.value.id
+  const mutationSession = mutationSessionSerial
   rescanning.value = true
   errorMessage.value = ''
   try {
     const saved = await persistReview(detail.value.state, false)
-    if (!saved) return
+    if (!saved || !isCurrentMutation(mutationSession, unmatchedId)) return
     const savedPhoto = saved.photos.find((photo) => photo.id === photoId)
     const next = await rescanUnmatchedReviewPhoto(
-      props.unmatchedId,
+      unmatchedId,
       photoId,
       saved.version,
       savedPhoto?.category || '',
     )
+    if (!isCurrentMutation(mutationSession, unmatchedId)) return
     const refreshedPhoto = next.photos.find((photo) => photo.id === photoId)
     detail.value = {
       ...detail.value,
@@ -255,36 +318,47 @@ async function rescanPhoto() {
     ElMessage.success('重新扫码完成')
     emit('updated')
   } catch (error) {
-    if (isVersionConflict(error)) await reloadAfterConflict()
+    if (!isCurrentMutation(mutationSession, unmatchedId)) return
+    if (handleUnavailableRecord(error, unmatchedId)) return
+    if (isVersionConflict(error)) await reloadAfterConflict(unmatchedId, mutationSession)
     else errorMessage.value = error instanceof Error ? error.message : '重新扫码失败'
   } finally {
-    rescanning.value = false
+    if (isCurrentMutation(mutationSession, unmatchedId)) rescanning.value = false
   }
 }
 
 async function confirmReview() {
   if (!detail.value || saving.value || rescanning.value || confirming.value) return
+  const unmatchedId = props.unmatchedId
+  const mutationSession = mutationSessionSerial
   confirming.value = true
   errorMessage.value = ''
   try {
     const saved = await persistReview(detail.value.state, false)
-    if (!saved) return
-    const next = await confirmUnmatchedReview(props.unmatchedId, saved.version)
+    if (!saved || !isCurrentMutation(mutationSession, unmatchedId)) return
+    const next = await confirmUnmatchedReview(unmatchedId, saved.version)
+    if (!isCurrentMutation(mutationSession, unmatchedId)) return
     applyDetail(next, true)
     ElMessage.success('已人工确认')
     emit('updated')
   } catch (error) {
-    if (isVersionConflict(error)) await reloadAfterConflict()
+    if (!isCurrentMutation(mutationSession, unmatchedId)) return
+    if (handleUnavailableRecord(error, unmatchedId)) return
+    if (isVersionConflict(error)) await reloadAfterConflict(unmatchedId, mutationSession)
     else errorMessage.value = error instanceof Error ? error.message : '人工确认失败'
   } finally {
-    confirming.value = false
+    if (isCurrentMutation(mutationSession, unmatchedId)) confirming.value = false
   }
 }
 
 async function openMatchMode() {
   const unmatchedId = props.unmatchedId
-  const saved = await saveReview('reviewed')
+  const saved = await persistReview('reviewed')
   if (!saved || !detail.value || !props.modelValue || props.unmatchedId !== unmatchedId) return
+  if (!saved.manualConfirmed) {
+    ElMessage.warning('请先完成人工确认')
+    return
+  }
   mode.value = 'match'
   await loadMatchCandidates()
 }
@@ -306,6 +380,7 @@ async function loadMatchCandidates() {
     clampCandidatePage()
   } catch (error) {
     if (!isCurrentCandidateRequest(requestSerial, unmatchedId, controller) || isAbortedRequest(error)) return
+    if (handleUnavailableRecord(error, unmatchedId)) return
     errorMessage.value = error instanceof Error ? error.message : '候选终端加载失败'
   } finally {
     if (isCurrentCandidateRequest(requestSerial, unmatchedId, controller)) {
@@ -317,20 +392,26 @@ async function loadMatchCandidates() {
 
 async function finalizeMatch() {
   if (!isAdmin.value || !detail.value || !selectedCandidateKey.value || finalizing.value) return
+  const unmatchedId = props.unmatchedId
+  const candidateKey = selectedCandidateKey.value
+  const expectedVersion = detail.value.version
+  const mutationSession = mutationSessionSerial
   finalizing.value = true
   errorMessage.value = ''
   try {
-    const selected = candidates.value.find((candidate) => candidate.candidateKey === selectedCandidateKey.value)
-    await finalizeUnmatchedMatch(props.unmatchedId, selectedCandidateKey.value, detail.value.version)
+    const groupId = await finalizeUnmatchedMatch(unmatchedId, candidateKey, expectedVersion)
+    if (!isCurrentMutation(mutationSession, unmatchedId)) return
     ElMessage.success('已匹配清单')
-    emit('matched', selected?.targetGroupId || '')
+    emit('matched', groupId)
     emit('updated')
     closeDialog()
   } catch (error) {
-    if (isVersionConflict(error)) await reloadAfterConflict()
+    if (!isCurrentMutation(mutationSession, unmatchedId)) return
+    if (handleUnavailableRecord(error, unmatchedId)) return
+    if (isVersionConflict(error)) await reloadAfterConflict(unmatchedId, mutationSession)
     else errorMessage.value = error instanceof Error ? error.message : '匹配清单失败'
   } finally {
-    finalizing.value = false
+    if (isCurrentMutation(mutationSession, unmatchedId)) finalizing.value = false
   }
 }
 
@@ -347,23 +428,26 @@ watch(
       detailRequestSerial += 1
       imageRequestSerial += 1
       invalidateCandidateRequest()
-      replaceImageObjectUrl()
+      resetReviewContent()
       loadedUnmatchedId = ''
       mode.value = 'review'
       candidates.value = []
       selectedCandidateKey.value = ''
       candidatePage.value = 1
       candidatesLoading.value = false
+      invalidateMutationSession()
       return
     }
     if (unmatchedId !== loadedUnmatchedId) {
+      resetReviewContent()
+      loadedUnmatchedId = ''
       invalidateCandidateRequest()
       mode.value = 'review'
       candidates.value = []
       selectedCandidateKey.value = ''
       candidatePage.value = 1
-      selectedPhotoId.value = ''
       candidatesLoading.value = false
+      invalidateMutationSession()
     }
     void loadDetail()
   },
@@ -382,6 +466,7 @@ onMounted(() => {
 onUnmounted(() => {
   detailRequestSerial += 1
   imageRequestSerial += 1
+  invalidateMutationSession()
   invalidateCandidateRequest()
   replaceImageObjectUrl()
   window.removeEventListener('resize', updateNarrowScreen)
@@ -413,7 +498,15 @@ onUnmounted(() => {
       <div class="unmatched-review-grid">
         <section class="unmatched-photo-panel">
           <div class="unmatched-photo-stage" :class="{ loading: imageLoading }">
-            <img v-if="imageObjectUrl" :src="imageObjectUrl" alt="未匹配照片" />
+            <el-image
+              v-if="imageObjectUrl"
+              :src="imageObjectUrl"
+              :preview-src-list="[imageObjectUrl]"
+              preview-teleported
+              hide-on-click-modal
+              fit="contain"
+              alt="未匹配照片"
+            />
             <span v-else>{{ detail.photos.length ? '图片加载中' : '暂无照片' }}</span>
           </div>
           <div class="unmatched-photo-indexes">
@@ -475,7 +568,9 @@ onUnmounted(() => {
           <el-table-column prop="terminal" label="终端" min-width="130" />
           <el-table-column prop="meterNo" label="表号" min-width="150" />
           <el-table-column prop="address" label="地址" min-width="240" show-overflow-tooltip />
-          <el-table-column prop="targetGroupId" label="已有资料组" min-width="170" show-overflow-tooltip />
+          <el-table-column label="已有资料组" width="110" align="center">
+            <template #default="{ row }"><el-tag effect="plain">{{ row.hasExistingGroup ? '是' : '否' }}</el-tag></template>
+          </el-table-column>
           <el-table-column label="匹配依据" min-width="180" show-overflow-tooltip>
             <template #default="{ row }">{{ row.matchReasons.join('；') || '-' }}</template>
           </el-table-column>
@@ -517,8 +612,9 @@ onUnmounted(() => {
 .unmatched-review-loading { min-height: 340px; padding: 24px; }
 .unmatched-review-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(340px, .9fr); gap: 24px; }
 .unmatched-photo-panel, .unmatched-review-form { min-width: 0; }
-.unmatched-photo-stage { display: grid; min-height: 420px; place-items: center; overflow: hidden; border: 1px solid var(--el-border-color); background: var(--el-fill-color-lighter); }
-.unmatched-photo-stage img { display: block; width: 100%; height: 100%; max-height: 620px; object-fit: contain; }
+.unmatched-photo-stage { display: grid; height: clamp(420px, 58vh, 620px); min-height: 420px; place-items: center; overflow: hidden; border: 1px solid var(--el-border-color); background: var(--el-fill-color-lighter); }
+.unmatched-photo-stage :deep(.el-image) { display: block; width: 100%; height: 100%; }
+.unmatched-photo-stage :deep(.el-image__inner) { display: block; width: 100%; height: 100%; object-fit: contain; }
 .unmatched-photo-stage span { color: var(--el-text-color-secondary); }
 .unmatched-photo-indexes { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; }
 .unmatched-photo-index { width: 34px; height: 34px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-bg-color); color: var(--el-text-color-regular); cursor: pointer; }
@@ -534,7 +630,7 @@ onUnmounted(() => {
   .unmatched-review-title { gap: 8px; }
   .unmatched-review-title strong { font-size: 16px; }
   .unmatched-review-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  .unmatched-photo-stage { min-height: min(48vh, 420px); }
+  .unmatched-photo-stage { height: min(48vh, 420px); min-height: 280px; }
   .unmatched-review-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .unmatched-review-actions :deep(.el-button) { width: 100%; }
   .unmatched-candidate-footer { align-items: stretch; flex-direction: column; }

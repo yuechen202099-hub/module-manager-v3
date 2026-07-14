@@ -1562,7 +1562,18 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_unmatched_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    def list_unmatched_records(
+        self,
+        *,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        assigned_to: str = "",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def export_unmatched_records(self, *, query: str = "", limit: int = 100_000) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -1570,7 +1581,7 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_unmatched_match_candidates(self, unmatched_id: str) -> dict[str, Any]:
+    def list_unmatched_match_candidates(self, unmatched_id: str, *, actor: str = "") -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -2135,14 +2146,35 @@ class JsonStateRepository(StateRepository):
     def get_group(self, group_id: str) -> dict[str, Any] | None:
         return local_simulation.get_group(group_id)
 
-    def list_unmatched_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
-        return local_simulation.list_unmatched_records(query=query, limit=limit, offset=offset)
+    def list_unmatched_records(
+        self,
+        *,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        assigned_to: str = "",
+    ) -> dict[str, Any]:
+        return local_simulation.list_unmatched_records(
+            query=query,
+            limit=limit,
+            offset=offset,
+            assigned_to=assigned_to,
+        )
+
+    def export_unmatched_records(self, *, query: str = "", limit: int = 100_000) -> dict[str, Any]:
+        return deepcopy(
+            local_simulation.list_unmatched_records(
+                query=query,
+                limit=limit,
+                offset=0,
+            )
+        )
 
     def get_unmatched_review(self, unmatched_id: str) -> dict[str, Any]:
         return local_simulation.get_unmatched_review(unmatched_id)
 
-    def list_unmatched_match_candidates(self, unmatched_id: str) -> dict[str, Any]:
-        return local_simulation.list_unmatched_match_candidates(unmatched_id)
+    def list_unmatched_match_candidates(self, unmatched_id: str, *, actor: str = "") -> dict[str, Any]:
+        return local_simulation.list_unmatched_match_candidates(unmatched_id, actor=actor)
 
     def finalize_unmatched_match(
         self,
@@ -3790,12 +3822,20 @@ class PostgresStateRepository(StateRepository):
             )
             return _group_payload(session, group) if group is not None else None
 
-    def list_unmatched_records(self, *, query: str = "", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    def _unmatched_records_statement(self, *, query: str = "", assigned_to: str = ""):
         team_id = local_simulation.current_team_id()
         statement = select(UnmatchedRecord).where(
             UnmatchedRecord.team_id == team_id,
             UnmatchedRecord.status == "open",
         )
+        assigned_scope = str(assigned_to or "").strip()
+        if assigned_scope:
+            statement = statement.where(
+                func.trim(
+                    func.coalesce(UnmatchedRecord.payload["assigned_to"].astext, "")
+                )
+                == assigned_scope
+            )
         for term in [item.strip() for item in query.split() if item.strip()]:
             pattern = f"%{term}%"
             statement = statement.where(
@@ -3807,16 +3847,65 @@ class PostgresStateRepository(StateRepository):
                     UnmatchedRecord.address.ilike(pattern),
                     UnmatchedRecord.collector.ilike(pattern),
                     UnmatchedRecord.module_asset_no.ilike(pattern),
+                    UnmatchedRecord.payload["temporary_review"]["meter_no"].astext.ilike(pattern),
+                    UnmatchedRecord.payload["temporary_review"]["collector"].astext.ilike(pattern),
+                    UnmatchedRecord.payload["temporary_review"]["module_asset_no"].astext.ilike(pattern),
                 )
             )
+        return statement
+
+    def list_unmatched_records(
+        self,
+        *,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        assigned_to: str = "",
+    ) -> dict[str, Any]:
+        statement = self._unmatched_records_statement(query=query, assigned_to=assigned_to)
         with self._session() as session:
-            total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+            filtered = statement.subquery()
+            outside_condition = func.lower(
+                func.coalesce(filtered.c.payload["project_outside"].astext, "false")
+            ).in_(("true", "1"))
+            assigned_condition = func.length(
+                func.trim(func.coalesce(filtered.c.payload["assigned_to"].astext, ""))
+            ) > 0
+            total = session.scalar(select(func.count()).select_from(filtered)) or 0
+            outside = session.scalar(
+                select(func.count()).select_from(filtered).where(outside_condition)
+            ) or 0
+            assigned = session.scalar(
+                select(func.count()).select_from(filtered).where(assigned_condition)
+            ) or 0
+            pending = session.scalar(
+                select(func.count()).select_from(filtered).where(~outside_condition, ~assigned_condition)
+            ) or 0
             records = session.scalars(
                 statement.order_by(UnmatchedRecord.terminal, UnmatchedRecord.barcode, UnmatchedRecord.legacy_id)
                 .offset(offset)
                 .limit(limit)
             ).all()
-            return {"total": int(total), "items": [_unmatched_payload(record) for record in records]}
+            return {
+                "total": int(total),
+                "items": [_unmatched_payload(record) for record in records],
+                "stats": {"pending": int(pending), "assigned": int(assigned), "outside": int(outside)},
+            }
+
+    def export_unmatched_records(self, *, query: str = "", limit: int = 100_000) -> dict[str, Any]:
+        statement = (
+            self._unmatched_records_statement(query=query)
+            .add_columns(func.count().over().label("export_total"))
+            .order_by(UnmatchedRecord.terminal, UnmatchedRecord.barcode, UnmatchedRecord.legacy_id)
+            .limit(max(1, int(limit or 1)))
+        )
+        with self._session() as session:
+            rows = session.execute(statement).all()
+        total = int(rows[0][1]) if rows else 0
+        return {
+            "total": total,
+            "items": [_unmatched_payload(row[0]) for row in rows],
+        }
 
     def get_unmatched_review(self, unmatched_id: str) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
@@ -3896,7 +3985,7 @@ class PostgresStateRepository(StateRepository):
             group_payloads,
         )
 
-    def list_unmatched_match_candidates(self, unmatched_id: str) -> dict[str, Any]:
+    def list_unmatched_match_candidates(self, unmatched_id: str, *, actor: str = "") -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         with self._session() as session:
             record = session.scalar(
@@ -3909,7 +3998,26 @@ class PostgresStateRepository(StateRepository):
             if record is None:
                 raise KeyError(unmatched_id)
             review = unmatched_review.build_review(_unmatched_payload(record))
+            unmatched_review.require_manual_confirmation(review)
             candidates = self._unmatched_match_candidates_for_session(session, record, review)
+            if actor.strip():
+                _stage_transactional_audit(
+                    session,
+                    team_id=team_id,
+                    actor=actor.strip(),
+                    action="unmatched_review_candidates_viewed",
+                    entity_type="unmatched_record",
+                    entity_id=record.id,
+                    before_data={},
+                    after_data={},
+                    payload={
+                        "unmatched_id": unmatched_id,
+                        "review_version": int(review.get("version") or 0),
+                        "candidate_count": len(candidates),
+                        "candidate_digest": unmatched_review.candidate_snapshot_digest(candidates),
+                    },
+                )
+                session.commit()
             return {"total": len(candidates), "items": candidates}
 
     def _resolve_unmatched_candidate(
@@ -4106,6 +4214,7 @@ class PostgresStateRepository(StateRepository):
                     raise KeyError(unmatched_id)
                 review = unmatched_review.build_review(_unmatched_payload(record))
                 unmatched_review.require_version(review, expected_version)
+                unmatched_review.require_manual_confirmation(review)
                 candidate = self._resolve_unmatched_candidate(session, record, review, candidate_key)
                 terminal, meter_no = local_simulation.validate_real_formal_identity(
                     str(candidate.get("terminal") or ""),
@@ -4483,7 +4592,7 @@ class PostgresStateRepository(StateRepository):
         expected_version: int = 1,
         updates: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        updates = updates or {}
+        updates = unmatched_review.normalize_legacy_identity_updates(updates)
         with self._session() as session:
             record = session.scalar(
                 select(UnmatchedRecord)
@@ -4499,6 +4608,7 @@ class PostgresStateRepository(StateRepository):
             review = _checked_unmatched_review(record, expected_version)
             before = _unmatched_payload(record)
             raw = dict(record.payload or {})
+            changed_fields: set[str] = set()
             for key in (
                 "barcode",
                 "meter_no",
@@ -4516,13 +4626,24 @@ class PostgresStateRepository(StateRepository):
                 if key in updates:
                     value = str(updates.get(key) or "").strip()
                     if key == "asset_no":
+                        if str(record.module_asset_no or "").strip() != value:
+                            changed_fields.add(key)
                         record.module_asset_no = value
                     elif hasattr(record, key):
+                        if str(getattr(record, key) or "").strip() != value:
+                            changed_fields.add(key)
                         setattr(record, key, value)
                     else:
+                        if str(raw.get(key) or "").strip() != value:
+                            changed_fields.add(key)
                         raw[key] = value
             raw.update({"updated_by": actor, "updated_at": datetime.now(UTC).isoformat()})
-            record.payload = _advance_unmatched_review_payload(raw, review, expected_version)
+            synchronized_review = unmatched_review.synchronize_review_identity_after_legacy_patch(
+                review,
+                _unmatched_payload(record),
+                changed_fields,
+            )
+            record.payload = _advance_unmatched_review_payload(raw, synchronized_review, expected_version)
             _stage_transactional_audit(
                 session,
                 team_id=record.team_id,
@@ -6832,6 +6953,15 @@ class DualWriteStateRepository(JsonStateRepository):
         result = super().dedupe_unmatched_records(actor=actor)
         self._mirror_write("dedupe_unmatched_records", actor=actor)
         return result
+
+    def list_unmatched_match_candidates(self, unmatched_id: str, *, actor: str = "") -> dict[str, Any]:
+        if actor.strip():
+            return self._strict_unmatched_review_write(
+                "list_unmatched_match_candidates",
+                unmatched_id,
+                actor=actor,
+            )
+        return super().list_unmatched_match_candidates(unmatched_id, actor=actor)
 
     def save_unmatched_review(
         self,

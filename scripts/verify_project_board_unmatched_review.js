@@ -84,6 +84,36 @@ for (const token of [
   assertContains(board, token, `board missing ${token}`)
 }
 
+const unmatchedFetch = section(services, 'export async function fetchUnmatchedRecords', 'export async function fetchUnmatchedReview')
+assertContains(types, 'export type UnmatchedListStats', 'unmatched list must expose full-filter server statistics')
+assertContains(unmatchedFetch, 'page = 1', 'unmatched API must accept a server page')
+assertContains(unmatchedFetch, 'pageSize = 20', 'unmatched API must accept a server page size')
+assertContains(unmatchedFetch, 'offset', 'unmatched API must send a server offset')
+assertContains(unmatchedFetch, 'stats:', 'unmatched API must map full-filter server statistics')
+assertNotContains(unmatchedFetch, "limit: '500'", 'unmatched API must not truncate the list at 500 rows')
+assertContains(board, 'const unmatchedTotal = ref(0)', 'project board must track the server unmatched total')
+assertContains(board, 'const unmatchedStats = ref<UnmatchedListStats>', 'project board must retain full-filter server statistics')
+assertContains(board, 'let unmatchedLoadSerial = 0', 'unmatched requests need a monotonic sequence')
+assertContains(board, 'const requestSerial = ++unmatchedLoadSerial', 'each unmatched request must capture its sequence')
+assertContains(board, 'requestSerial !== unmatchedLoadSerial', 'stale unmatched responses must be ignored')
+assertContains(board, 'unmatchedRows.value = result.items', 'project board must render the server page')
+assertContains(board, 'unmatchedTotal.value = result.total', 'project board must retain the server total')
+assertContains(board, 'unmatchedStats.value = result.stats', 'project board statistics must use the full filtered result')
+assertContains(board, ':data="unmatchedRows"', 'project board must not paginate a truncated client list')
+assertContains(board, ':total="unmatchedTotal"', 'project board pagination must use the server total')
+assertContains(board, '@current-change="handleUnmatchedPageChange"', 'page changes must load the requested server page')
+assertNotContains(board, ':data="pagedUnmatchedRows"', 'project board must not present client slicing as full pagination')
+const unmatchedExport = section(board, 'async function exportUnmatchedCsv()', 'async function deleteUnmatchedRow')
+assertContains(unmatchedExport, 'exportUnmatchedRecords(unmatchedQuery.value)', 'unmatched export must use the administrator-only snapshot endpoint')
+assertNotContains(unmatchedExport, 'fetchAllUnmatchedRecords(', 'project board export must not use the shared field-page loader')
+const fetchAllUnmatched = section(services, 'export async function fetchAllUnmatchedRecords', 'export async function exportUnmatchedRecords')
+assertContains(fetchAllUnmatched, 'fetchUnmatchedRecords(query, page, pageSize)', 'shared field-page loader must retain paginated non-admin access')
+assertNotContains(fetchAllUnmatched, "'/local-test/unmatched/export'", 'shared field-page loader must not call an administrator-only endpoint')
+const exportUnmatched = section(services, 'export async function exportUnmatchedRecords', 'export async function fetchUnmatchedReview')
+assertContains(exportUnmatched, "'/local-test/unmatched/export'", 'complete export must use one server snapshot endpoint')
+assertNotContains(exportUnmatched, 'for (let page =', 'complete export must not stitch mutable offset pages')
+assertContains(board, '导出完整清单', 'unmatched export must state that it exports the complete list')
+
 assertNotContains(board, 'dedupeUnmatchedRecords', 'project board must not import retired unmatched dedupe')
 assertNotContains(board, 'cleanupDuplicateUnmatchedRows', 'project board must not expose retired unmatched dedupe')
 assertNotContains(board, 'unmatchedDeduping', 'project board must not retain retired unmatched dedupe state')
@@ -101,11 +131,18 @@ for (const token of [
   'fetchUnmatchedReviewPhotoObjectUrl',
   'URL.revokeObjectURL',
   'candidatePageSize = 20',
+  ':preview-src-list="[imageObjectUrl]"',
 ]) {
   assertContains(dialog, token, `dialog missing ${token}`)
 }
 
-assertNotContains(dialog, '<el-image', 'dialog must use verified object URLs with native img')
+assertContains(dialog, '<el-image', 'dialog must expose the verified object URL through the controlled preview component')
+assertContains(elementPlus, "import { ElImage } from 'element-plus/es/components/image/index'", 'ElImage must be imported for global registration')
+assertContains(elementPlus, '  ElImage,', 'ElImage must be installed with the other Element Plus components')
+assertContains(dialog, '.unmatched-photo-stage :deep(.el-image)', 'the ElImage host must have stable preview dimensions')
+assertNotContains(types, 'targetGroupId: string', 'candidate DTO must not expose internal group ids')
+assertNotContains(candidateContract, 'target_group_id?: string', 'candidate backend DTO must not receive internal group ids')
+assertNotContains(dialog, 'prop="targetGroupId"', 'candidate table must not render internal group ids')
 
 const rescanAction = section(dialog, 'async function rescanPhoto()', 'async function confirmReview()')
 assertContains(rescanAction, 'persistReview(detail.value.state, false)', 'rescan must persist the current draft and state first')
@@ -119,8 +156,11 @@ assertBefore(
 assertNotContains(rescanAction, 'detail.value.version', 'rescan must not submit the stale detail version')
 
 const confirmAction = section(dialog, 'async function confirmReview()', 'async function openMatchMode()')
+assertContains(confirmAction, 'const unmatchedId = props.unmatchedId', 'confirmation must capture the record id before saving')
 assertContains(confirmAction, 'persistReview(detail.value.state, false)', 'confirmation must persist the current draft and state first')
 assertContains(confirmAction, 'saved.version', 'confirmation must use the saved review version')
+assertContains(confirmAction, 'confirmUnmatchedReview(unmatchedId, saved.version)', 'confirmation must use the captured record id')
+assertNotContains(confirmAction, 'confirmUnmatchedReview(props.unmatchedId', 'confirmation must not re-read a changed prop after saving')
 assertBefore(
   confirmAction,
   'persistReview(detail.value.state, false)',
@@ -129,15 +169,66 @@ assertBefore(
 )
 assertNotContains(confirmAction, 'detail.value.version', 'confirmation must not submit the stale detail version')
 
+const openMatchAction = section(dialog, 'async function openMatchMode()', 'async function loadMatchCandidates()')
+assertContains(openMatchAction, 'if (!saved.manualConfirmed)', 'matching must re-check confirmation after saving')
+assertContains(openMatchAction, "ElMessage.warning('请先完成人工确认')", 'matching must explain the confirmation requirement')
+assertBefore(
+  openMatchAction,
+  'if (!saved.manualConfirmed)',
+  "mode.value = 'match'",
+  'matching must enforce confirmation before entering candidate mode',
+)
+
 assertContains(services, 'export class ApiRequestError extends Error', 'API errors must preserve HTTP status')
 assertContains(services, 'readonly status: number', 'API errors must expose an HTTP status')
 assertContains(services, 'export function getApiErrorStatus', 'components need a structured API status helper')
 assertContains(services, 'new ApiRequestError(', 'API failures must use the structured error')
 
 assertContains(dialog, 'return getApiErrorStatus(error) === 409', '409 handling must use the structured status')
+assertContains(dialog, 'function handleUnavailableRecord(', '404 handling must use one record invalidation path')
+const unavailableHandler = section(dialog, 'function handleUnavailableRecord(', 'async function loadDetail')
+assertContains(unavailableHandler, 'getApiErrorStatus(error) !== 404', 'missing-record handling must use HTTP status 404')
+assertContains(unavailableHandler, "emit('updated')", 'missing-record handling must refresh the parent list')
+assertContains(unavailableHandler, "emit('update:modelValue', false)", 'missing-record handling must close the stale dialog')
+const photoLoadAction = section(dialog, 'async function loadSelectedPhoto()', 'function selectPhoto')
+assertNotContains(photoLoadAction, 'handleUnavailableRecord(', 'a missing photo must not invalidate an otherwise available record')
+assertContains(photoLoadAction, "getApiErrorStatus(error) === 404", 'missing photo handling must use the structured status')
+assertContains(photoLoadAction, '可继续审阅其他照片', 'missing photo handling must keep the review workflow available')
 assertNotContains(dialog, "message.includes('409')", '409 handling must not inspect error text')
 assertNotContains(dialog, "message.includes('版本')", '409 handling must not inspect localized error text')
 assertContains(dialog, 'let candidateRequestSerial = 0', 'candidate requests need a monotonic sequence')
+assertContains(dialog, 'function isCurrentReviewRecord', 'review mutations must verify the active record')
+assertContains(dialog, 'let mutationSessionSerial = 0', 'review mutations need a non-reusable dialog session sequence')
+assertContains(dialog, 'function invalidateMutationSession()', 'record switches must invalidate the prior mutation session')
+assertContains(dialog, 'mutationSessionSerial += 1', 'mutation invalidation must advance the dialog session sequence')
+assertContains(dialog, 'function isCurrentMutation(', 'review mutations must verify their captured dialog session')
+assertContains(dialog, 'function resetReviewContent()', 'record switches must clear stale review content')
+const resetReviewContent = section(dialog, 'function resetReviewContent()', 'function invalidateCandidateRequest()')
+assertContains(resetReviewContent, 'detail.value = null', 'record switches must clear stale detail')
+assertContains(resetReviewContent, "draft.meterNo = ''", 'record switches must clear the stale meter draft')
+assertContains(resetReviewContent, "draft.collector = ''", 'record switches must clear the stale collector draft')
+assertContains(resetReviewContent, "draft.moduleAssetNo = ''", 'record switches must clear the stale module draft')
+const resetReviewContentOccurrences = dialog.split('resetReviewContent()').length - 1
+if (resetReviewContentOccurrences < 3) throw new Error('close and record-switch branches must both clear stale review content')
+const persistAction = section(dialog, 'async function persistReview(', 'async function saveReview')
+assertContains(
+  persistAction,
+  'detail.value.record.unmatchedId !== props.unmatchedId',
+  'save must reject detail that belongs to another unmatched record',
+)
+const finalizeAction = section(dialog, 'async function finalizeMatch()', 'function returnToReview()')
+assertContains(finalizeAction, 'const groupId = await finalizeUnmatchedMatch', 'finalization must use the server result group id')
+assertContains(finalizeAction, "emit('matched', groupId)", 'finalization must emit only the server result group id')
+assertNotContains(finalizeAction, 'selected?.targetGroupId', 'finalization must not depend on a candidate internal group id')
+for (const [name, action] of [
+  ['save', persistAction],
+  ['rescan', rescanAction],
+  ['confirm', confirmAction],
+  ['finalize', finalizeAction],
+]) {
+  assertContains(action, 'const mutationSession = mutationSessionSerial', `${name} must capture the dialog mutation session`)
+  assertContains(action, 'isCurrentMutation(mutationSession, unmatchedId)', `${name} must reject stale ABA results`)
+}
 assertContains(dialog, 'function invalidateCandidateRequest()', 'candidate requests need explicit invalidation')
 assertContains(dialog, 'candidateAbortController?.abort()', 'candidate invalidation must abort the old request')
 assertContains(dialog, 'fetchUnmatchedMatchCandidates(unmatchedId, controller.signal)', 'candidate request must receive an abort signal')

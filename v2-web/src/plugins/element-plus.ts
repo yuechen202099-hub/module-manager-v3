@@ -8,6 +8,7 @@ import { ElDropdown, ElDropdownItem, ElDropdownMenu } from 'element-plus/es/comp
 import { ElEmpty } from 'element-plus/es/components/empty/index'
 import { ElForm, ElFormItem } from 'element-plus/es/components/form/index'
 import { ElIcon } from 'element-plus/es/components/icon/index'
+import { ElImage } from 'element-plus/es/components/image/index'
 import { ElInput } from 'element-plus/es/components/input/index'
 import { ElLoading } from 'element-plus/es/components/loading/index'
 import { ElOption, ElSelect } from 'element-plus/es/components/select/index'
@@ -37,6 +38,7 @@ const components: Plugin[] = [
   ElForm,
   ElFormItem,
   ElIcon,
+  ElImage,
   ElInput,
   ElOption,
   ElPagination,
