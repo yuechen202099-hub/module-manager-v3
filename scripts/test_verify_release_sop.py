@@ -70,6 +70,35 @@ def test_accepts_pending_v3081_candidate_release_record() -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "conflicting_line"),
+    [
+        ("Package", "* Package: module-manager-v2-server-3.0.81.zip"),
+        ("Local Verification", "+ Local Verification: passed"),
+        ("Production Reconciliation", "Production Reconciliation: completed"),
+        ("Production Reconciliation", "- Production Reconciliation\uff1a completed"),
+    ],
+)
+def test_rejects_candidate_record_with_normalized_duplicate_lifecycle_field(
+    field: str,
+    conflicting_line: str,
+) -> None:
+    verifier = load_verifier()
+    record = f"""# V3.0.81 Production Release Record
+
+- Status: pending
+- Local Verification: not run
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.0.80
+{conflicting_line}
+"""
+
+    with pytest.raises(AssertionError, match=rf"{field}: .* exactly once"):
+        verifier.candidate_release_record_is_pending(record, "V3.0.81")
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("Package", "module-manager-v2-server-3.0.81.zip"),

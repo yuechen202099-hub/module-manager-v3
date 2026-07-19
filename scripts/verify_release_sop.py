@@ -636,10 +636,16 @@ def candidate_release_record_is_pending(record: str, version: str, deployed_base
         "Production Reconciliation": "pending",
         "Rollback target": deployed_baseline,
     }
+    lifecycle_values = {field: [] for field in required_fields}
+    lifecycle_labels = {field: field for field in required_fields}
+    for line in record.splitlines():
+        parsed = parse_known_label_value(line, lifecycle_labels)
+        if parsed is not None:
+            field, value = parsed
+            lifecycle_values[field].append(value)
     for field, value in required_fields.items():
-        matches = re.findall(rf"(?m)^-[ \t]*{re.escape(field)}:[ \t]*{re.escape(value)}[ \t]*$", record)
-        all_values = re.findall(rf"(?m)^-[ \t]*{re.escape(field)}:[ \t]*(.*?)[ \t]*$", record)
-        if len(matches) != 1 or all_values != [value]:
+        values = lifecycle_values[field]
+        if len(values) != 1 or normalize_text(values[0]).strip() != normalize_text(value):
             fail(f"{version} release record must define {field}: {value} exactly once")
     if release_record_claims_deployed_without_live_evidence(record):
         fail(f"{version} pending release record must not claim production deployment")

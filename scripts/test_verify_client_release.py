@@ -515,6 +515,45 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
         verifier.verify_package(archive_path)
 
 
+@pytest.mark.parametrize(
+    ("case_name", "field", "conflicting_line"),
+    [
+        (
+            "star-package",
+            "Package",
+            "* Package: module-manager-v2-server-3.0.81.zip",
+        ),
+        ("plus-local-verification", "Local Verification", "+ Local Verification: passed"),
+        (
+            "unbulleted-reconciliation",
+            "Production Reconciliation",
+            "Production Reconciliation: completed",
+        ),
+        (
+            "fullwidth-colon-reconciliation",
+            "Production Reconciliation",
+            "- Production Reconciliation\uff1a completed",
+        ),
+    ],
+)
+def test_archive_rejects_normalized_duplicate_candidate_lifecycle_field(
+    tmp_path: Path,
+    case_name: str,
+    field: str,
+    conflicting_line: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / f"{case_name}.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        release_record=f"{PENDING_RELEASE_RECORD}\n{conflicting_line}\n",
+    )
+
+    with pytest.raises(AssertionError, match=rf"{field}: .* exactly once"):
+        verifier.verify_package(archive_path)
+
+
 def test_archive_rejects_deployed_record_without_live_evidence(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "unsupported-deployed-record.zip"
