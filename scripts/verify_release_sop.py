@@ -220,6 +220,7 @@ BACKUP_DIRECTORY_PATTERN = re.compile(r"/opt/module-manager-v2/backups/[A-Za-z0-
 RELEASE_DIRECTORY_PATTERN = re.compile(r"/opt/module-manager-v2/releases/[A-Za-z0-9._-]+")
 PUBLIC_HEALTH_URL_PATTERN = re.compile(r"https://(?:www\.)?sgcc\.online/health(?:[/?#\s]|$)", re.IGNORECASE)
 SUCCESS_STATUS_PATTERN = re.compile(r"\b(?:passed|pass|success|successful|healthy|ok)\b|通过|成功", re.IGNORECASE)
+DEPLOYED_LIFECYCLE_STATUS = "reviewed, packaged, deployed, and verified in production"
 
 
 def fail(message: str) -> None:
@@ -540,23 +541,11 @@ def status_is_pending(status: str) -> bool:
     )
 
 
-def release_record_has_affirmative_version_deployment_prose(record: str) -> bool:
-    version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
-    if version_match is None:
-        return False
-    version = normalize_claim_text(version_match.group("version"))
-    active_versions: set[str] = set()
-    prose = deployment_claim_prose(record)
-    for clause, conditional in semantic_claim_clauses(prose):
-        clause_versions = {
-            normalize_claim_text(match.group(0))
-            for match in VERSION_TOKEN_PATTERN.finditer(clause)
-        }
-        if clause_versions:
-            active_versions = clause_versions
-        if not conditional and version in active_versions and clause_has_affirmative_deployment_claim(clause):
-            return True
-    return False
+def release_record_has_affirmative_deployment_prose(record: str) -> bool:
+    return any(
+        not conditional and clause_has_affirmative_deployment_claim(clause)
+        for clause, conditional in semantic_claim_clauses(deployment_claim_prose(record))
+    )
 
 
 def runtime_version_from_artifact(value: str) -> str:
@@ -621,7 +610,7 @@ def has_single_valid_evidence(
 def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
     status = release_record_status(record)
     deployment_claimed = has_deployment_claim(status)
-    prose_claimed = release_record_has_affirmative_version_deployment_prose(record)
+    prose_claimed = release_record_has_affirmative_deployment_prose(record)
     if (deployment_claimed or prose_claimed) and status_is_pending(status):
         fail("release record contains contradictory pending and deployment claims")
     if not deployment_claimed and not prose_claimed:
@@ -660,8 +649,12 @@ def deployed_release_record_is_verified(record: str, version: str) -> None:
     version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
     if version_match is None or version_match.group("version") != version:
         fail(f"{version} release record must have a matching title")
-    if not has_deployment_claim(release_record_status(record)):
-        fail(f"{version} deployed baseline record must claim production deployment")
+    status = release_record_status(record)
+    if normalize_claim_text(status).strip() != DEPLOYED_LIFECYCLE_STATUS:
+        fail(
+            f"{version} deployed baseline record status must confirm "
+            f"{DEPLOYED_LIFECYCLE_STATUS}"
+        )
     if release_record_claims_deployed_without_live_evidence(record):
         fail(f"{version} deployed baseline record claims deployment without complete live evidence")
 
@@ -676,6 +669,20 @@ def release_record_matches_lifecycle_state(
         candidate_release_record_is_pending(record, version, deployed_baseline)
         return
     fail(f"{version} release record does not match the deployed baseline or release candidate")
+
+
+def validate_release_lifecycle_records(
+    read_record: Callable[[str], str],
+    deployed_baseline: str,
+    release_candidate_version: str,
+) -> None:
+    for version in dict.fromkeys((deployed_baseline, release_candidate_version)):
+        release_record_matches_lifecycle_state(
+            read_record(version),
+            version,
+            deployed_baseline,
+            release_candidate_version,
+        )
 
 
 def main() -> int:
@@ -801,16 +808,14 @@ def main() -> int:
     agents = read("AGENTS.md")
     deployed_baseline = deployed_production_baseline(agents)
     candidate = release_candidate(agents)
-    if deployed_baseline == candidate:
-        fail("AGENTS.md deployed production baseline and release candidate must differ")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
 
-    deployed_record = read(f"ops/releases/{deployed_baseline}.md")
-    release_record_matches_lifecycle_state(deployed_record, deployed_baseline, deployed_baseline, candidate)
-
-    candidate_record = read(f"ops/releases/{candidate}.md")
-    release_record_matches_lifecycle_state(candidate_record, candidate, deployed_baseline, candidate)
+    validate_release_lifecycle_records(
+        lambda version: read(f"ops/releases/{version}.md"),
+        deployed_baseline,
+        candidate,
+    )
 
     source_runtime_version = runtime_version_from_artifact(read("v2-web/src/version.json"))
     if f"V{source_runtime_version}" != candidate:

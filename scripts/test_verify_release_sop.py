@@ -118,9 +118,36 @@ def test_rejects_candidate_record_with_hidden_deployment_claim_and_valid_evidenc
         verifier.candidate_release_record_is_pending(record, "V3.0.81")
 
 
+def test_rejects_pending_candidate_with_unversioned_deployment_claim_and_complete_evidence() -> None:
+    verifier = load_verifier()
+    record = f"""# V3.0.81 Production Release Record
+
+- Status: pending
+- Local Verification: not run
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.0.80
+
+Production was deployed successfully.
+
+| Evidence | Value |
+| --- | --- |
+| SHA256 | {VALID_SHA256} |
+| Backup directory | /opt/module-manager-v2/backups/V3.0.81-pre-20260719_120000 |
+| Release directory | /opt/module-manager-v2/releases/v3.0.81-20260719_120000 |
+| Public health check | https://www.sgcc.online/health passed |
+"""
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.candidate_release_record_is_pending(record, "V3.0.81")
+
+
 def test_candidate_lifecycle_uses_the_deployed_baseline_after_task5() -> None:
     verifier = load_verifier()
-    record = valid_deployed_record("Status: deployed").replace("V3.0.80", "V3.0.81")
+    record = valid_deployed_record(
+        "Status: reviewed, packaged, deployed, and verified in production"
+    ).replace("V3.0.80", "V3.0.81")
 
     verifier.release_record_matches_lifecycle_state(record, "V3.0.81", "V3.0.81", "V3.0.82")
 
@@ -277,6 +304,43 @@ Backup directory: /opt/module-manager-v2/backups/V3.0.80-pre-20260713_120000
 Release directory: /opt/module-manager-v2/releases/v3.0.80-20260713_120000
 Public health check: https://www.sgcc.online/health passed
 """
+
+
+def test_deployed_lifecycle_rejects_bare_deployed_status() -> None:
+    verifier = load_verifier()
+
+    with pytest.raises(AssertionError, match="reviewed, packaged, deployed, and verified"):
+        verifier.deployed_release_record_is_verified(
+            valid_deployed_record("Status: deployed"),
+            "V3.0.80",
+        )
+
+
+def test_deployed_lifecycle_accepts_complete_status() -> None:
+    verifier = load_verifier()
+
+    verifier.deployed_release_record_is_verified(
+        valid_deployed_record(
+            "Status: reviewed, packaged, deployed, and verified in production"
+        ),
+        "V3.0.80",
+    )
+
+
+def test_post_deploy_equal_markers_validate_one_deployed_record() -> None:
+    verifier = load_verifier()
+    reads: list[str] = []
+    record = valid_deployed_record(
+        "Status: reviewed, packaged, deployed, and verified in production"
+    ).replace("V3.0.80", "V3.0.81")
+
+    verifier.validate_release_lifecycle_records(
+        lambda version: reads.append(version) or record,
+        "V3.0.81",
+        "V3.0.81",
+    )
+
+    assert reads == ["V3.0.81"]
 
 
 def test_rejects_multiple_or_contradictory_status_claims() -> None:

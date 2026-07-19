@@ -14,9 +14,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 V3079_RELEASE_RECORD = "ops/releases/V3.0.79.md"
+V3080_RELEASE_RECORD = "ops/releases/V3.0.80.md"
 V3081_RELEASE_RECORD = "ops/releases/V3.0.81.md"
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
+VALID_SHA256 = "a" * 64
 SAFETY_NOTES = (
     "Production mode disables demo accounts by default",
     "Production mode disables /docs, /redoc, and /openapi.json by default",
@@ -40,6 +42,11 @@ PENDING_RELEASE_RECORD = """# V3.0.81 Production Release Record
 ## Summary
 
 - Status: pending
+- Local Verification: not run
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.0.80
 - V3.0.81 has not been deployed to production.
 
 ## Package
@@ -55,6 +62,29 @@ PENDING_RELEASE_RECORD = """# V3.0.81 Production Release Record
 | Backup directory | |
 | Release directory | |
 | Public health check | |
+"""
+
+
+def deployed_release_record(version: str, status: str) -> str:
+    return f"""# V{version} Production Release Record
+
+## Summary
+
+- {status}
+
+## Package
+
+| Evidence | Value |
+| --- | --- |
+| SHA256 | {VALID_SHA256} |
+
+## Production Deployment
+
+| Evidence | Value |
+| --- | --- |
+| Backup directory | /opt/module-manager-v2/backups/V{version}-pre-20260719_120000 |
+| Release directory | /opt/module-manager-v2/releases/v{version}-20260719_120000 |
+| Public health check | https://www.sgcc.online/health passed |
 """
 
 
@@ -110,6 +140,10 @@ def write_release_archive(
     contents = {
         "RELEASE_MANIFEST.md": manifest,
         "AGENTS.md": agents,
+        V3080_RELEASE_RECORD: deployed_release_record(
+            "3.0.80",
+            "Status: reviewed, packaged, deployed, and verified in production",
+        ),
         V3081_RELEASE_RECORD: release_record,
         SOURCE_VERSION_ARTIFACT: json.dumps({"version": resolved_source_version}),
         "v2-api/app/static/vue/index.html": (
@@ -484,10 +518,19 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
 def test_archive_rejects_deployed_record_without_live_evidence(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "unsupported-deployed-record.zip"
-    record = PENDING_RELEASE_RECORD.replace("Status: pending", "Status: deployed")
-    write_release_archive(verifier, archive_path, release_record=record)
+    agents = VALID_AGENTS.replace("V3.0.80", "V3.0.81")
+    record = deployed_release_record(
+        "3.0.81",
+        "Status: reviewed, packaged, deployed, and verified in production",
+    ).replace(f"| SHA256 | {VALID_SHA256} |", "| SHA256 | |")
+    write_release_archive(
+        verifier,
+        archive_path,
+        agents=agents,
+        release_record=record,
+    )
 
-    with pytest.raises(AssertionError, match="claims deployed without complete live evidence"):
+    with pytest.raises(AssertionError, match="claims deployment without complete live evidence"):
         verifier.verify_package(archive_path)
 
 
@@ -513,6 +556,74 @@ def test_archive_rejects_pending_record_with_affirmative_deployment_prose(
 
     with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
         verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_pending_candidate_with_unversioned_claim_and_complete_evidence(
+    tmp_path: Path,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "forged-complete-pending.zip"
+    record = (
+        PENDING_RELEASE_RECORD.replace("- V3.0.81 has not been deployed to production.\n", "")
+        .replace(f"| SHA256 | |", f"| SHA256 | {VALID_SHA256} |")
+        .replace(
+            "| Backup directory | |",
+            "| Backup directory | /opt/module-manager-v2/backups/forged-complete |",
+        )
+        .replace(
+            "| Release directory | |",
+            "| Release directory | /opt/module-manager-v2/releases/forged-complete |",
+        )
+        .replace(
+            "| Public health check | |",
+            "| Public health check | https://www.sgcc.online/health passed |",
+        )
+    )
+    record += "\nProduction was deployed successfully.\n"
+    write_release_archive(verifier, archive_path, release_record=record)
+
+    with pytest.raises(AssertionError, match="contradictory pending and deployment claims"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_bare_deployed_baseline_status(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "bare-deployed-baseline.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={
+            V3080_RELEASE_RECORD: deployed_release_record("3.0.80", "Status: deployed")
+        },
+    )
+
+    with pytest.raises(AssertionError, match="reviewed, packaged, deployed, and verified"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_accepts_complete_deployed_baseline_status(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "complete-deployed-baseline.zip"
+    write_release_archive(verifier, archive_path)
+
+    verifier.verify_package(archive_path)
+
+
+def test_archive_accepts_equal_post_deploy_markers_as_one_deployed_record(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "post-deploy-equal-markers.zip"
+    agents = VALID_AGENTS.replace("V3.0.80", "V3.0.81")
+    write_release_archive(
+        verifier,
+        archive_path,
+        agents=agents,
+        release_record=deployed_release_record(
+            "3.0.81",
+            "Status: reviewed, packaged, deployed, and verified in production",
+        ),
+    )
+
+    verifier.verify_package(archive_path)
 
 
 def test_valid_pending_candidate_archive_passes_truthfulness_checks(tmp_path: Path) -> None:

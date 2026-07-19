@@ -453,7 +453,11 @@ def verify_package(zip_path: Path) -> None:
             archive.read(SOURCE_VERSION_ARTIFACT).decode("utf-8")
         )
         agents = archive.read("AGENTS.md").decode("utf-8")
-        release_record = archive.read("ops/releases/V3.0.81.md").decode("utf-8")
+        release_records = {
+            name: archive.read(name).decode("utf-8")
+            for name in names
+            if HISTORICAL_RELEASE_RECORD_PATTERN.fullmatch(name)
+        }
         crlf_shell_scripts = sorted(
             name
             for name in names
@@ -511,19 +515,13 @@ def verify_package(zip_path: Path) -> None:
 
     deployed_version = release_truth.deployed_production_baseline(agents)
     candidate_version = release_truth.release_candidate(agents)
-    if deployed_version != "V3.0.80":
-        fail("Packaged AGENTS.md deployed production baseline must remain V3.0.80")
-    if candidate_version != "V3.0.81":
-        fail("Packaged AGENTS.md release candidate must be V3.0.81")
     if candidate_version != f"V{package_version}":
         fail("Release manifest Version must match packaged AGENTS.md release candidate")
-    record_version = release_truth.RELEASE_RECORD_VERSION_PATTERN.search(release_record)
-    if record_version is None or record_version.group("version") != candidate_version:
-        fail("Packaged release record version must match the release candidate")
-    if release_truth.release_record_claims_deployed_without_live_evidence(release_record):
-        fail("Packaged V3.0.81 release record claims deployed without complete live evidence")
-    if not release_truth.status_is_pending(release_truth.release_record_status(release_record)):
-        fail("Packaged V3.0.81 release record must remain pending before deployment")
+    release_truth.validate_release_lifecycle_records(
+        lambda version: release_records[f"ops/releases/{version}.md"],
+        deployed_version,
+        candidate_version,
+    )
 
     print(f"[OK] release zip exists: {zip_path}")
     print(f"[OK] release zip size: {zip_path.stat().st_size} bytes")
