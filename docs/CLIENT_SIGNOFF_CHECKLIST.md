@@ -5,7 +5,7 @@
 ## 交付包
 
 ```text
-build/server-release/module-manager-v2-server-3.0.81.zip
+build/server-release/module-manager-v2-server-3.0.82.zip
 ```
 
 ## 演示入口
@@ -45,11 +45,11 @@ build/server-release/module-manager-v2-server-3.0.81.zip
 
 最近一次门禁结果：
 
-- V3.0.81 发布校验测试：结果以 `ops/releases/V3.0.81.md` 中本轮记录为准；不沿用历史测试计数。
+- V3.0.82 发布校验测试：结果以 `ops/releases/V3.0.82.md` 中本轮记录为准；不沿用历史测试计数。
 - 静态页面校验：待本轮完整门禁记录
 - 部署样例校验：待本轮完整门禁记录
 - 演示 smoke：待本轮完整门禁记录
-- 发布包验包：待生成 V3.0.81 服务器发布包后记录
+- 发布包验包：待生成 V3.0.82 服务器发布包后记录
 
 ## 签字
 
