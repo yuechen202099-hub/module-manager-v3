@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 from contextlib import contextmanager
@@ -174,6 +175,86 @@ def matched_review_photo_ids(
         ):
             matched.add(photo_id)
     return matched
+
+
+def physical_source_matched_review_photo_ids(
+    photos: list[Photo] | list[Any],
+    evidence: list[dict[str, str]],
+) -> set[str]:
+    source_url_hashes: set[str] = set()
+    for photo in photos:
+        source_url = str(
+            getattr(photo, "source_url", "")
+            or getattr(photo, "image_url", "")
+            or ""
+        ).strip()
+        source_url_hash = (
+            _identity_hash(local_simulation.normalized_photo_source_url(source_url))
+            if source_url
+            else str(getattr(photo, "source_url_hash", "") or "").strip()
+        )
+        if source_url_hash:
+            source_url_hashes.add(source_url_hash)
+    return {
+        str(item.get("id") or "")
+        for item in evidence
+        if str(item.get("id") or "")
+        and str(item.get("source_url_hash") or "") in source_url_hashes
+    }
+
+
+def canonicalize_surviving_photo_identity(
+    photo: Photo | Any,
+    group: MaterialGroup | Any,
+    migrated_row: dict[str, Any],
+) -> None:
+    legacy_id = str(migrated_row.get("id") or "").strip()
+    require(legacy_id, "canonical migrated photo legacy id is empty")
+    image_url = str(migrated_row.get("url") or migrated_row.get("image_url") or "").strip()
+    source_url = str(migrated_row.get("source_url") or image_url)
+    normalized_source_url = local_simulation.normalized_photo_source_url(source_url)
+    source_url_hash = _identity_hash(normalized_source_url)
+    sha256 = str(migrated_row.get("sha256") or "").strip() or _identity_hash(image_url)
+    fingerprint_seed = "|".join(
+        [
+            str(getattr(group, "legacy_id", "") or getattr(group, "id", "") or ""),
+            str(migrated_row.get("client_photo_id") or ""),
+            str(migrated_row.get("source_fingerprint") or ""),
+            normalized_source_url,
+        ]
+    )
+    source_fingerprint = str(
+        migrated_row.get("source_fingerprint")
+        or hashlib.sha256(fingerprint_seed.encode("utf-8")).hexdigest()[:32]
+    )
+    storage_type = str(migrated_row.get("storage_type") or "").strip()
+    storage_bucket = str(migrated_row.get("storage_bucket") or "").strip()
+    storage_key = str(migrated_row.get("storage_key") or "").strip()
+    category = str(
+        migrated_row.get("slot")
+        or migrated_row.get("category")
+        or "unclassified"
+    )
+
+    raw_payload = dict(getattr(photo, "raw_data", None) or {})
+    unmatched_review.merge_migrated_photo_evidence(raw_payload, migrated_row)
+    photo.legacy_id = legacy_id
+    photo.source_fingerprint = source_fingerprint
+    photo.raw_data = raw_payload
+    photo.source_url = source_url
+    photo.source_url_hash = source_url_hash
+    photo.image_url = image_url
+    photo.sha256 = sha256
+    photo.category = category
+    photo.storage_type = storage_type
+    photo.storage_bucket = storage_bucket
+    photo.storage_key = storage_key
+    photo.object_key = storage_key or image_url or str(getattr(photo, "legacy_id", "") or "")
+    photo.source_file_id = str(migrated_row.get("source_file_id") or "")
+    photo.original_filename = str(migrated_row.get("filename") or "")
+    photo.content_type = str(migrated_row.get("content_type") or "")
+    if hasattr(photo, "image_file_id"):
+        photo.image_file_id = str(migrated_row.get("image_file_id") or "")
 
 
 def _restore_instance_attribute(target: Any, name: str, previous: Any) -> None:
@@ -641,7 +722,14 @@ def repair_dry_run_record(team_id: str, unmatched_id: str) -> dict[str, Any]:
             ).all()
         )
         matched = matched_review_photo_ids(active_photos, list(snapshot["review_photo_evidence"]))
-        missing = sorted(set(snapshot["review_photo_ids"]) - matched)
+        physical_source_matched = physical_source_matched_review_photo_ids(
+            active_photos,
+            list(snapshot["review_photo_evidence"]),
+        )
+        legacy_alias_missing = sorted(set(snapshot["review_photo_ids"]) - matched)
+        physical_source_missing = sorted(
+            set(snapshot["review_photo_ids"]) - physical_source_matched
+        )
         audits = matching_repair_audits(
             session,
             team_id=team_id,
@@ -655,9 +743,12 @@ def repair_dry_run_record(team_id: str, unmatched_id: str) -> dict[str, Any]:
             "review_photo_count": len(snapshot["review_photo_ids"]),
             "unique_review_photo_source_count": int(snapshot["unique_review_photo_source_count"]),
             "active_photo_count": len(active_photos),
-            "matched_review_photo_count": len(matched),
-            "missing_review_photo_count": len(missing),
-            "missing_review_photo_ids": missing,
+            "historical_alias_matched_review_photo_count": len(matched),
+            "historical_alias_missing_review_photo_count": len(legacy_alias_missing),
+            "historical_alias_missing_review_photo_ids": legacy_alias_missing,
+            "physical_source_matched_review_photo_count": len(physical_source_matched),
+            "physical_source_missing_review_photo_count": len(physical_source_missing),
+            "physical_source_missing_review_photo_ids": physical_source_missing,
             "repair_audit_count": len(audits),
         }
 
@@ -722,11 +813,15 @@ def repair_associated_photo_evidence(
                     .with_for_update()
                 ).all()
             )
-            matched_before = matched_review_photo_ids(
+            broad_matched_before = matched_review_photo_ids(
                 active_before,
                 list(snapshot["review_photo_evidence"]),
             )
-            missing_before = review_photo_ids - matched_before
+            physical_source_matched_before = physical_source_matched_review_photo_ids(
+                active_before,
+                list(snapshot["review_photo_evidence"]),
+            )
+            physical_source_missing_before = review_photo_ids - physical_source_matched_before
             repair_audits = matching_repair_audits(
                 session,
                 team_id=team_id,
@@ -734,7 +829,7 @@ def repair_associated_photo_evidence(
                 unmatched_id=unmatched_id,
                 target_group_id=target_group_id,
             )
-            replayed = not missing_before
+            replayed = physical_source_matched_before == review_photo_ids
             add_result: dict[str, Any] = {
                 "added": 0,
                 "skipped_duplicates": 0,
@@ -746,16 +841,42 @@ def repair_associated_photo_evidence(
                 require(len(repair_audits) == 1, f"exact photo repair audit count is not one: {len(repair_audits)}")
                 repair_audit = repair_audits[0]
             else:
+                require(
+                    len(physical_source_matched_before) == 1,
+                    "physical-source matched review photo count is not one: "
+                    f"{len(physical_source_matched_before)}",
+                )
                 require(len(active_before) == 1, f"unexpected pre-repair photo count: {len(active_before)}")
-                require(len(matched_before) == 1, f"unexpected matched evidence count: {len(matched_before)}")
-                require(len(missing_before) == 3, f"unexpected missing evidence count: {len(missing_before)}")
+                require(
+                    len(physical_source_missing_before) == 3,
+                    f"unexpected missing physical-source evidence count: {len(physical_source_missing_before)}",
+                )
                 require(not repair_audits, "photo repair audit exists before repair")
                 review = unmatched_review.build_review(_unmatched_payload(record))
+                migrated_photo_rows = unmatched_review.migrate_review_to_photo_rows(review)
+                require(len(migrated_photo_rows) == 4, "photo repair migration did not produce exactly four rows")
+                canonical_review_photo_id = next(iter(physical_source_matched_before))
+                canonical_rows = [
+                    row
+                    for row in migrated_photo_rows
+                    if str(row.get("source_fingerprint") or "") == canonical_review_photo_id
+                ]
+                require(
+                    len(canonical_rows) == 1,
+                    "physical-source canonical migration row count is not one: "
+                    f"{len(canonical_rows)}",
+                )
+                canonicalize_surviving_photo_identity(
+                    active_before[0],
+                    group,
+                    copy.deepcopy(canonical_rows[0]),
+                )
+                session.flush()
                 add_result = repository._add_photo_records_to_group(
                     session,
                     group,
                     actor=REPAIR_ACTOR,
-                    photos=unmatched_review.migrate_review_to_photo_rows(review),
+                    photos=migrated_photo_rows,
                     collector=str(review.get("collector") or ""),
                     module_asset_no=str(review.get("module_asset_no") or ""),
                     creator=str(review.get("reviewer") or REPAIR_ACTOR),
@@ -795,6 +916,24 @@ def repair_associated_photo_evidence(
                 placeholders_before=placeholders_before,
             )
             require(transaction_evidence["target_photo_count_after"] == 4, "photo repair count is not four")
+            active_after = list(
+                session.scalars(
+                    select(Photo).where(
+                        Photo.team_id == team_id,
+                        Photo.group_id == group.id,
+                        Photo.is_active.is_(True),
+                    )
+                ).all()
+            )
+            require(len(active_after) == 4, "photo repair active photo count is not four")
+            require(
+                physical_source_matched_review_photo_ids(
+                    active_after,
+                    list(snapshot["review_photo_evidence"]),
+                )
+                == review_photo_ids,
+                "not all review physical source identities migrated",
+            )
             require(
                 len(
                     matching_repair_audits(
@@ -816,6 +955,10 @@ def repair_associated_photo_evidence(
                 "repair_replayed": replayed,
                 "repair_added_photo_count": int(add_result.get("added") or 0),
                 "repair_merged_duplicate_count": int(add_result.get("merged_duplicates") or 0),
+                "repair_broad_matched_review_photo_count_before": len(broad_matched_before),
+                "repair_physical_source_matched_review_photo_count_before": len(
+                    physical_source_matched_before
+                ),
             }
         finally:
             session.close()
