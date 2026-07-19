@@ -74,6 +74,7 @@ REQUIRED_FILES = {
     "ops/releases/README.md",
     "ops/releases/V3.0.81.md",
     "ops/releases/V3.0.80.md",
+    "ops/releases/V3.0.79.md",
     "ops/releases/V3.0.78.md",
     "ops/releases/V3.0.77.md",
     "ops/releases/V3.0.76.md",

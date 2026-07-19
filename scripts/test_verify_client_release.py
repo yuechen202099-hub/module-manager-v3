@@ -13,6 +13,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+V3079_RELEASE_RECORD = "ops/releases/V3.0.79.md"
 V3081_RELEASE_RECORD = "ops/releases/V3.0.81.md"
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
@@ -171,6 +172,15 @@ def test_archive_missing_v3081_release_record_fails_verification(tmp_path: Path)
     write_release_archive(verifier, archive_path, omitted={V3081_RELEASE_RECORD})
 
     with pytest.raises(AssertionError, match=r"ops/releases/V3\.0\.81\.md"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "module-manager-v2-server-v3.0.81.zip"
+    write_release_archive(verifier, archive_path, omitted={V3079_RELEASE_RECORD})
+
+    with pytest.raises(AssertionError, match=r"ops/releases/V3\.0\.79\.md"):
         verifier.verify_package(archive_path)
 
 
