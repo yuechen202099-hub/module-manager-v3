@@ -82,6 +82,8 @@ DEPLOYED_BASELINE_MARKER = "当前已部署生产版本"
 RELEASE_CANDIDATE_MARKER = "当前发布候选版本"
 ENGLISH_DEPLOYED_BASELINE_MARKER = "Deployed production baseline"
 ENGLISH_RELEASE_CANDIDATE_MARKER = "Release candidate"
+ENGLISH_RELEASE_CANDIDATE_BRANCH_MARKER = "Release-candidate maintenance branch"
+RELEASE_CANDIDATE_BRANCH_MARKER = "\u5f53\u524d\u5019\u9009\u7ef4\u62a4\u5206\u652f"
 STATUS_FIELD_LABELS = {
     "Status": "Status",
     "Deployment state": "Deployment state",
@@ -303,6 +305,17 @@ def parse_marker_version(value: str) -> str | None:
     return match.group("version")
 
 
+def parse_maintenance_branch(value: str) -> str | None:
+    normalized = strip_decorative_prefix(unicodedata.normalize("NFKC", value))
+    match = re.match(
+        r"(?P<branch>production/V3/(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)))(?P<trailing>.*)$",
+        normalized,
+    )
+    if match is None or strip_decorative_prefix(match.group("trailing")).strip():
+        return None
+    return match.group("branch")
+
+
 def parse_agents_marker(agents: str, marker: str, marker_name: str) -> str:
     matches = []
     for line in agents.splitlines():
@@ -313,6 +326,21 @@ def parse_agents_marker(agents: str, marker: str, marker_name: str) -> str:
         version = parse_marker_version(value)
         if version is not None:
             matches.append(version)
+    if len(matches) != 1:
+        fail(f"AGENTS.md must define exactly one {marker_name} marker")
+    return matches[0]
+
+
+def parse_agents_maintenance_branch(agents: str, marker: str, marker_name: str) -> str:
+    matches = []
+    for line in agents.splitlines():
+        parsed = parse_known_label_value(line, {marker: marker})
+        if parsed is None:
+            continue
+        _, value = parsed
+        branch = parse_maintenance_branch(value)
+        if branch is not None:
+            matches.append(branch)
     if len(matches) != 1:
         fail(f"AGENTS.md must define exactly one {marker_name} marker")
     return matches[0]
@@ -330,6 +358,22 @@ def deployed_production_baseline(agents: str) -> str:
     return chinese
 
 
+def release_candidate_maintenance_branch(agents: str) -> str:
+    english = parse_agents_maintenance_branch(
+        agents,
+        ENGLISH_RELEASE_CANDIDATE_BRANCH_MARKER,
+        "English release-candidate maintenance branch",
+    )
+    chinese = parse_agents_maintenance_branch(
+        agents,
+        RELEASE_CANDIDATE_BRANCH_MARKER,
+        "release-candidate maintenance branch",
+    )
+    if english != chinese:
+        fail("AGENTS.md English and Chinese release-candidate maintenance branch markers must agree")
+    return chinese
+
+
 def release_candidate(agents: str) -> str:
     english = parse_agents_marker(
         agents,
@@ -339,6 +383,10 @@ def release_candidate(agents: str) -> str:
     chinese = parse_agents_marker(agents, RELEASE_CANDIDATE_MARKER, "release candidate")
     if english != chinese:
         fail("AGENTS.md English and Chinese release candidate markers must agree")
+    maintenance_branch = release_candidate_maintenance_branch(agents)
+    expected_branch = f"production/V3/{chinese.removeprefix('V')}"
+    if maintenance_branch != expected_branch:
+        fail("AGENTS.md release-candidate maintenance branch must match the release candidate")
     return chinese
 
 
@@ -587,7 +635,7 @@ def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
     )
 
 
-def candidate_release_record_is_pending(record: str, version: str) -> None:
+def candidate_release_record_is_pending(record: str, version: str, deployed_baseline: str = "V3.0.80") -> None:
     version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
     if version_match is None or version_match.group("version") != version:
         fail(f"{version} release record must have a matching title")
@@ -597,14 +645,37 @@ def candidate_release_record_is_pending(record: str, version: str) -> None:
         "Package": "pending",
         "Production Deployment": "pending",
         "Production Reconciliation": "pending",
-        "Rollback target": "V3.0.80",
+        "Rollback target": deployed_baseline,
     }
     for field, value in required_fields.items():
-        matches = re.findall(rf"(?m)^-\s*{re.escape(field)}:\s*{re.escape(value)}\s*$", record)
-        if len(matches) != 1:
+        matches = re.findall(rf"(?m)^-[ \t]*{re.escape(field)}:[ \t]*{re.escape(value)}[ \t]*$", record)
+        all_values = re.findall(rf"(?m)^-[ \t]*{re.escape(field)}:[ \t]*(.*?)[ \t]*$", record)
+        if len(matches) != 1 or all_values != [value]:
             fail(f"{version} release record must define {field}: {value} exactly once")
     if release_record_claims_deployed_without_live_evidence(record):
         fail(f"{version} pending release record must not claim production deployment")
+
+
+def deployed_release_record_is_verified(record: str, version: str) -> None:
+    version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
+    if version_match is None or version_match.group("version") != version:
+        fail(f"{version} release record must have a matching title")
+    if not has_deployment_claim(release_record_status(record)):
+        fail(f"{version} deployed baseline record must claim production deployment")
+    if release_record_claims_deployed_without_live_evidence(record):
+        fail(f"{version} deployed baseline record claims deployment without complete live evidence")
+
+
+def release_record_matches_lifecycle_state(
+    record: str, version: str, deployed_baseline: str, release_candidate_version: str
+) -> None:
+    if version == deployed_baseline:
+        deployed_release_record_is_verified(record, version)
+        return
+    if version == release_candidate_version:
+        candidate_release_record_is_pending(record, version, deployed_baseline)
+        return
+    fail(f"{version} release record does not match the deployed baseline or release candidate")
 
 
 def main() -> int:
@@ -728,22 +799,18 @@ def main() -> int:
         fail("SOP files must not keep stale V3.0.38 deployment examples: " + ", ".join(stale_sop_hits))
 
     agents = read("AGENTS.md")
-    if deployed_production_baseline(agents) != "V3.0.80":
-        fail("AGENTS.md deployed production baseline must be V3.0.80 after deployment")
+    deployed_baseline = deployed_production_baseline(agents)
     candidate = release_candidate(agents)
-    if candidate != "V3.0.81":
-        fail("AGENTS.md release candidate must be V3.0.81")
+    if deployed_baseline == candidate:
+        fail("AGENTS.md deployed production baseline and release candidate must differ")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
 
-    v3080_record = read("ops/releases/V3.0.80.md")
-    if release_record_status(v3080_record).casefold() != "reviewed, packaged, deployed, and verified in production":
-        fail("V3.0.80 release record status must confirm reviewed, packaged, deployed, and verified in production")
-    if release_record_claims_deployed_without_live_evidence(v3080_record):
-        fail("V3.0.80 release record claims deployed without complete live evidence")
+    deployed_record = read(f"ops/releases/{deployed_baseline}.md")
+    release_record_matches_lifecycle_state(deployed_record, deployed_baseline, deployed_baseline, candidate)
 
-    v3081_record = read("ops/releases/V3.0.81.md")
-    candidate_release_record_is_pending(v3081_record, candidate)
+    candidate_record = read(f"ops/releases/{candidate}.md")
+    release_record_matches_lifecycle_state(candidate_record, candidate, deployed_baseline, candidate)
 
     source_runtime_version = runtime_version_from_artifact(read("v2-web/src/version.json"))
     if f"V{source_runtime_version}" != candidate:

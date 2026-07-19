@@ -329,3 +329,58 @@ The verifier now accepts `-`, `*`, `+`, and unbulleted semantic fields; canonica
 - `14236b6 fix: close release record parser bypasses`
 
 No package, deployment, production connection, release cleanup, or deployed-baseline advancement occurred.
+
+## V3.0.81 Task 3 Review Findings: RED
+
+Added targeted regression coverage before changing the verifier for hidden candidate deployment claims, non-pending lifecycle evidence, maintenance-branch agreement, post-Task-5 deployed-baseline lifecycle selection, and the pending manifest state.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+```
+
+```text
+8 failed, 260 passed in 0.73s
+```
+
+The failures confirmed that a pending V3.0.81 record accepted an additional `Production Deployment: deployed` claim with complete valid evidence, accepted other non-pending lifecycle values, did not validate either maintenance-branch marker, did not select a deployed baseline record after promotion, and still described a generated package in `RELEASE_MANIFEST.md`.
+
+## V3.0.81 Task 3 Review Findings: GREEN And Self-Review
+
+### Implementation
+
+- Candidate records now require one and only one value for each lifecycle field. `Status`, `Package`, `Production Deployment`, and `Production Reconciliation` remain pending, local verification remains not run, and the rollback target is the current deployed baseline.
+- English and Chinese release-candidate maintenance-branch markers are parsed independently, must agree, and must equal `production/V3/<candidate version>`.
+- The release verifier resolves the deployed and candidate records from `AGENTS.md`. The deployed baseline requires a deployed claim and complete live evidence; only the current candidate is subject to the pending-record rule. After Task 5, V3.0.81 can therefore become the baseline and be validated as deployed while V3.0.82 becomes the pending candidate.
+- `RELEASE_MANIFEST.md` now records `Package`, `Name`, and `Generated at` as pending. Task 4 may replace them with real package evidence.
+
+### Additional RED
+
+The self-review identified that the candidate rollback target was still hard-coded to V3.0.80. A post-Task-5 candidate record correctly using V3.0.81 therefore failed before the final implementation change:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+```
+
+```text
+1 failed, 268 passed in 0.69s
+```
+
+### Final Verification
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+.\.venv\Scripts\python.exe scripts\verify_release_sop.py
+.\.venv\Scripts\python.exe -m py_compile scripts\verify_release_sop.py scripts\test_verify_release_sop.py
+git diff --check
+```
+
+```text
+269 passed in 0.62s
+[OK] release SOP files and references are consistent
+py_compile: exit 0 with no output
+git diff --check: exit 0; only expected LF-to-CRLF working-copy warnings
+```
+
+### Scope And Concerns
+
+Modified only `scripts/verify_release_sop.py`, `scripts/test_verify_release_sop.py`, `RELEASE_MANIFEST.md`, and this Task 3 report. No product files, package, production deployment, production evidence, or deployed-baseline advancement were changed. An independent reviewer agent was unavailable in this session, so the final read-only diff self-review checked lifecycle-state selection, branch-marker agreement, candidate field uniqueness, and the future V3.0.81-to-baseline transition directly.

@@ -2,9 +2,10 @@
 
 ## Package
 
-- Name: module-manager-v2-server-3.0.81
+- Package: pending
+- Name: pending
 - Version: 3.0.81
-- Generated at: 2026-07-10 00:00 +08:00
+- Generated at: pending
 
 ## Included
 

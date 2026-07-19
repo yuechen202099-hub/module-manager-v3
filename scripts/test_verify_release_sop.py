@@ -32,6 +32,28 @@ def test_parses_deployed_baseline_and_release_candidate_independently() -> None:
     assert verifier.release_candidate(agents) == "V3.0.81"
 
 
+def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
+    verifier = load_verifier()
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
+        "production/V3/3.0.81", "production/V3/3.0.80"
+    )
+
+    with pytest.raises(AssertionError, match="maintenance branch"):
+        verifier.release_candidate(agents)
+
+
+def test_rejects_inconsistent_release_candidate_maintenance_branch_markers() -> None:
+    verifier = load_verifier()
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
+        "- Release-candidate maintenance branch: `production/V3/3.0.81`.",
+        "- Release-candidate maintenance branch: `production/V3/3.0.80`.",
+        1,
+    )
+
+    with pytest.raises(AssertionError, match="English and Chinese release-candidate maintenance branch"):
+        verifier.release_candidate(agents)
+
+
 def test_accepts_pending_v3081_candidate_release_record() -> None:
     verifier = load_verifier()
     record = """# V3.0.81 Production Release Record
@@ -45,6 +67,85 @@ def test_accepts_pending_v3081_candidate_release_record() -> None:
 """
 
     verifier.candidate_release_record_is_pending(record, "V3.0.81")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("Package", "module-manager-v2-server-3.0.81.zip"),
+        ("Production Deployment", "deployed"),
+        ("Production Reconciliation", "released"),
+    ],
+)
+def test_rejects_candidate_record_with_non_pending_lifecycle_evidence(field: str, value: str) -> None:
+    verifier = load_verifier()
+    record = f"""# V3.0.81 Production Release Record
+
+- Status: pending
+- Local Verification: not run
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.0.80
+- {field}: {value}
+"""
+
+    with pytest.raises(AssertionError, match=rf"{field}: .* exactly once"):
+        verifier.candidate_release_record_is_pending(record, "V3.0.81")
+
+
+def test_rejects_candidate_record_with_hidden_deployment_claim_and_valid_evidence() -> None:
+    verifier = load_verifier()
+    record = f"""# V3.0.81 Production Release Record
+
+- Status: pending
+- Local Verification: not run
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.0.80
+- Production Deployment: deployed
+
+| Evidence | Value |
+| --- | --- |
+| SHA256 | {VALID_SHA256} |
+| Backup directory | /opt/module-manager-v2/backups/V3.0.81-pre-20260719_120000 |
+| Release directory | /opt/module-manager-v2/releases/v3.0.81-20260719_120000 |
+| Public health check | https://www.sgcc.online/health passed |
+"""
+
+    with pytest.raises(AssertionError, match="Production Deployment: pending exactly once"):
+        verifier.candidate_release_record_is_pending(record, "V3.0.81")
+
+
+def test_candidate_lifecycle_uses_the_deployed_baseline_after_task5() -> None:
+    verifier = load_verifier()
+    record = valid_deployed_record("Status: deployed").replace("V3.0.80", "V3.0.81")
+
+    verifier.release_record_matches_lifecycle_state(record, "V3.0.81", "V3.0.81", "V3.0.82")
+
+
+def test_post_task5_candidate_uses_the_deployed_baseline_as_its_rollback_target() -> None:
+    verifier = load_verifier()
+    record = """# V3.0.82 Production Release Record
+
+- Status: pending
+- Local Verification: not run
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.0.81
+"""
+
+    verifier.release_record_matches_lifecycle_state(record, "V3.0.82", "V3.0.81", "V3.0.82")
+
+
+def test_v3081_manifest_is_explicitly_pending_before_packaging() -> None:
+    manifest = (ROOT / "RELEASE_MANIFEST.md").read_text(encoding="utf-8")
+
+    assert "- Package: pending" in manifest
+    assert "- Name: pending" in manifest
+    assert "- Generated at: pending" in manifest
 
 
 def test_v3081_candidate_release_record_passes_the_pending_gate() -> None:
