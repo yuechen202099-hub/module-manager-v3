@@ -201,6 +201,37 @@ def test_barcode_context_uses_only_temporary_review_fields() -> None:
     }
 
 
+def test_long_scanned_meter_barcode_matches_total_catalog_candidate() -> None:
+    record = sample_record()
+    review = unmatched_review.build_review(record)
+    review["meter_no"] = "3130001112100041536116"
+
+    candidates = unmatched_review.build_match_candidates(
+        record,
+        review,
+        [{
+            "id": "catalog-long-scan",
+            "catalog_row_db_id": "catalog-long-scan-db",
+            "terminal": "350000135073",
+            "meter_no": "110004153611",
+            "meter_match_key": "0004153611",
+            "address": "long scan road",
+        }],
+        [{
+            "id": "g-12102",
+            "terminal": "350000135073",
+            "total_catalog_row_id": "catalog-long-scan-db",
+            "meter_match_key": "0004153611",
+        }],
+    )
+
+    assert unmatched_review.review_meter_match_key(record, review) == "0004153611"
+    assert unmatched_review.barcode_context(review)["meter_match_key"] == "0004153611"
+    assert len(candidates) == 1
+    assert candidates[0]["target_group_id"] == "g-12102"
+    assert candidates[0]["has_existing_group"] is True
+
+
 def test_match_candidates_use_opaque_keys_without_internal_ids() -> None:
     review = unmatched_review.build_review(sample_record())
     catalog_id = "catalog-public-id"

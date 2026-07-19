@@ -5,7 +5,11 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from app.services.matching import build_total_catalog_match_key
+from app.services.matching import (
+    build_long_scan_match_key,
+    build_total_catalog_match_key,
+    normalize_meter_text,
+)
 
 
 REVIEW_SCHEMA_VERSION = 1
@@ -209,14 +213,21 @@ def candidate_snapshot_digest(candidates: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def review_meter_match_key(record: dict[str, Any], review: dict[str, Any]) -> str:
-    meter_no = str(review.get("meter_no") or record.get("meter_no") or "").strip()
-    if not meter_no:
+def normalized_review_meter_match_key(value: Any) -> str:
+    normalized = normalize_meter_text(str(value or ""))
+    if not normalized:
         return ""
     try:
-        return build_total_catalog_match_key(meter_no)
+        if len(normalized) > 12:
+            return build_long_scan_match_key(normalized)
+        return build_total_catalog_match_key(normalized)
     except ValueError:
         return ""
+
+
+def review_meter_match_key(record: dict[str, Any], review: dict[str, Any]) -> str:
+    meter_no = review.get("meter_no") or record.get("meter_no") or ""
+    return normalized_review_meter_match_key(meter_no)
 
 
 def build_match_candidates(
@@ -416,10 +427,7 @@ def find_review_photo(review: dict[str, Any], photo_id: str) -> dict[str, Any]:
 
 def barcode_context(review: dict[str, Any]) -> dict[str, Any]:
     meter_no = str(review.get("meter_no") or "")
-    try:
-        meter_match_key = build_total_catalog_match_key(meter_no)
-    except ValueError:
-        meter_match_key = ""
+    meter_match_key = normalized_review_meter_match_key(meter_no)
     return {
         "meter_no": meter_no,
         "meter_match_key": meter_match_key,
