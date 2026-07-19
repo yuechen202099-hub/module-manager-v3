@@ -28,14 +28,14 @@ def test_parses_deployed_baseline_and_release_candidate_independently() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert verifier.deployed_production_baseline(agents) == "V3.0.80"
-    assert verifier.release_candidate(agents) == "V3.0.81"
+    assert verifier.deployed_production_baseline(agents) == "V3.0.81"
+    assert verifier.release_candidate(agents) == "V3.0.82"
 
 
 def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
-        "production/V3/3.0.81", "production/V3/3.0.80"
+        "production/V3/3.0.82", "production/V3/3.0.81"
     )
 
     with pytest.raises(AssertionError, match="maintenance branch"):
@@ -45,8 +45,8 @@ def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
 def test_rejects_inconsistent_release_candidate_maintenance_branch_markers() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
+        "- Release-candidate maintenance branch: `production/V3/3.0.82`.",
         "- Release-candidate maintenance branch: `production/V3/3.0.81`.",
-        "- Release-candidate maintenance branch: `production/V3/3.0.80`.",
         1,
     )
 
@@ -196,7 +196,7 @@ def test_post_task5_candidate_uses_the_deployed_baseline_as_its_rollback_target(
     verifier.release_record_matches_lifecycle_state(record, "V3.0.82", "V3.0.81", "V3.0.82")
 
 
-def test_v3081_manifest_is_explicitly_pending_before_packaging() -> None:
+def test_v3082_manifest_is_explicitly_pending_before_packaging() -> None:
     manifest = (ROOT / "RELEASE_MANIFEST.md").read_text(encoding="utf-8")
 
     assert "- Package: pending" in manifest
@@ -204,24 +204,24 @@ def test_v3081_manifest_is_explicitly_pending_before_packaging() -> None:
     assert "- Generated at: pending" in manifest
 
 
-def test_v3081_candidate_release_record_passes_the_pending_gate() -> None:
+def test_v3082_candidate_release_record_passes_the_pending_gate() -> None:
     verifier = load_verifier()
-    record = (ROOT / "ops" / "releases" / "V3.0.81.md").read_text(encoding="utf-8")
+    record = (ROOT / "ops" / "releases" / "V3.0.82.md").read_text(encoding="utf-8")
 
-    verifier.candidate_release_record_is_pending(record, "V3.0.81")
+    verifier.candidate_release_record_is_pending(record, "V3.0.82", "V3.0.81")
 
 
 @pytest.mark.parametrize(
     ("english_marker", "replacement", "parser_name"),
     [
         (
-            "- Deployed production baseline: `V3.0.80`.",
             "- Deployed production baseline: `V3.0.81`.",
+            "- Deployed production baseline: `V3.0.82`.",
             "deployed_production_baseline",
         ),
         (
-            "- Release candidate: `V3.0.81`.",
             "- Release candidate: `V3.0.82`.",
+            "- Release candidate: `V3.0.83`.",
             "release_candidate",
         ),
     ],
@@ -899,7 +899,7 @@ def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> No
     vite_config = (ROOT / "v2-web" / "vite.config.ts").read_text(encoding="utf-8")
 
     assert source_path.is_file()
-    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.0.81"}
+    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.0.82"}
     assert not legacy_source_path.exists()
     assert "from '../version.json'" in release_notes
     assert "APP_VERSION = versionArtifact.version" in release_notes

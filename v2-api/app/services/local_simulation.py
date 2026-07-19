@@ -856,31 +856,38 @@ def infer_photo_storage(image_url: str) -> dict[str, str]:
 
 
 def normalized_photo_source_url(image_url: str) -> str:
-    raw = str(image_url or "").strip()
-    if not raw:
+    normalized = str(image_url or "").strip()
+    if not normalized:
         return ""
-    parsed = urlparse(raw)
-    query_items = parse_qsl(parsed.query, keep_blank_values=True)
-    for key, value in query_items:
-        if key.lower() == "downloadimg" and value:
-            return value.strip()
-    if parsed.scheme in {"http", "https"}:
-        kept = [
-            (key, value)
-            for key, value in query_items
-            if key.lower() not in VOLATILE_URL_QUERY_KEYS
-        ]
-        return urlunparse(
-            (
-                parsed.scheme.lower(),
-                parsed.netloc.lower(),
-                parsed.path,
-                "",
-                urlencode(kept, doseq=True),
-                "",
-            )
+    for _ in range(4):
+        parsed = urlparse(normalized)
+        query_items = parse_qsl(parsed.query, keep_blank_values=True)
+        download_url = next(
+            (value.strip() for key, value in query_items if key.lower() == "downloadimg" and value.strip()),
+            "",
         )
-    return raw
+        if download_url:
+            normalized = download_url
+            continue
+        break
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"}:
+        return normalized
+    kept = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() not in VOLATILE_URL_QUERY_KEYS
+    ]
+    return urlunparse(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path,
+            "",
+            urlencode(kept, doseq=True),
+            "",
+        )
+    )
 
 
 def hash_text(value: str) -> str:

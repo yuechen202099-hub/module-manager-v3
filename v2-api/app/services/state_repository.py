@@ -6275,6 +6275,14 @@ class PostgresStateRepository(StateRepository):
             if photo.storage_type and photo.storage_key:
                 register_duplicate(existing_by_storage, (photo.storage_type, photo.storage_key), photo)
             register_duplicate(existing_by_url_hash, getattr(photo, "source_url_hash", None), photo)
+            existing_source_url = str(photo.source_url or photo.image_url or "").strip()
+            normalized_existing_source_url = local_simulation.normalized_photo_source_url(existing_source_url)
+            if normalized_existing_source_url:
+                register_duplicate(
+                    existing_by_url_hash,
+                    hashlib.sha256(normalized_existing_source_url.encode("utf-8")).hexdigest(),
+                    photo,
+                )
         added = 0
         merged_duplicates = 0
         reactivated_duplicates = 0
@@ -6294,13 +6302,14 @@ class PostgresStateRepository(StateRepository):
             storage_key = str(item.get("storage_key") or "").strip()
             sha256 = str(item.get("sha256") or "").strip() or hashlib.sha256(image_url.encode("utf-8")).hexdigest()
             source_url = str(item.get("source_url") or image_url)
-            source_url_hash = hashlib.sha256(source_url.split("?", 1)[0].encode("utf-8")).hexdigest()
+            normalized_source_url = local_simulation.normalized_photo_source_url(source_url)
+            source_url_hash = hashlib.sha256(normalized_source_url.encode("utf-8")).hexdigest()
             fingerprint_seed = "|".join(
                 [
                     str(group.legacy_id or group.id),
                     str(item.get("client_photo_id") or ""),
                     str(item.get("source_fingerprint") or ""),
-                    source_url.split("?", 1)[0],
+                    normalized_source_url,
                 ]
             )
             source_fingerprint = str(item.get("source_fingerprint") or hashlib.sha256(fingerprint_seed.encode("utf-8")).hexdigest()[:32])

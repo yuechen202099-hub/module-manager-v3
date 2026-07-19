@@ -21,6 +21,7 @@ REQUIRED_FILES = [
     "docs/sop/07-rollback-and-incident-review.md",
     "docs/sop/08-business-acceptance-templates.md",
     "ops/releases/README.md",
+    "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.81.md",
     "ops/releases/V3.0.79.md",
     "ops/releases/V3.0.80.md",

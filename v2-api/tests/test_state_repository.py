@@ -1822,6 +1822,41 @@ def test_postgres_migrated_photo_uses_same_backend_independent_id_as_json(
     )
 
 
+def test_postgres_unmatched_review_keeps_distinct_download_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _postgres_finalize_record()
+    group = _postgres_finalize_group()
+    session = FinalizeFakeSession(record)
+    monkeypatch.setattr(repository, "_reset_group_after_photo_evidence_change", lambda checked_session, checked_group: None)
+
+    result = repository.PostgresStateRepository()._add_photo_records_to_group(
+        session,
+        group,
+        actor="admin-a",
+        photos=[
+            {
+                "id": "photo-a",
+                "url": "https://example.test/detail?downloadImg=cloud%3A%2F%2Fphoto-a.jpg",
+                "source_url": "https://example.test/detail?downloadImg=cloud%3A%2F%2Fphoto-a.jpg",
+                "category": "before_box",
+            },
+            {
+                "id": "photo-b",
+                "url": "https://example.test/detail?downloadImg=cloud%3A%2F%2Fphoto-b.jpg",
+                "source_url": "https://example.test/detail?downloadImg=cloud%3A%2F%2Fphoto-b.jpg",
+                "category": "after_box",
+            },
+        ],
+        source="unmatched-review-finalize",
+    )
+
+    photos = [item for item in session.staged if isinstance(item, repository.Photo)]
+    assert result["added"] == 2
+    assert len(photos) == 2
+    assert photos[0].source_url_hash != photos[1].source_url_hash
+
+
 def test_postgres_unmatched_review_photo_payload_reads_back_every_evidence_field() -> None:
     evidence = {
         key: [f"{key}-value"]

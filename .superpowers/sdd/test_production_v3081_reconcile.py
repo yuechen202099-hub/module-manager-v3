@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -187,6 +189,34 @@ def test_photo_evidence_reports_an_unmigrated_distinct_source() -> None:
     assert reconcile.unique_review_photo_source_count(evidence) == 2
 
 
+def test_photo_evidence_keeps_distinct_download_targets_separate() -> None:
+    evidence = reconcile.build_review_photo_evidence(
+        [
+            {
+                "id": "review-a",
+                "source_url": "https://example.test/detail?downloadImg=cloud%3A%2F%2Fphoto-a.jpg",
+            },
+            {
+                "id": "review-b",
+                "source_url": "https://example.test/detail?downloadImg=cloud%3A%2F%2Fphoto-b.jpg",
+            },
+        ]
+    )
+    active_photos = [
+        SimpleNamespace(
+            source_fingerprint="stored-photo",
+            raw_data={},
+            sha256="",
+            storage_type="",
+            storage_key="",
+            source_url_hash=evidence[0]["source_url_hash"],
+        )
+    ]
+
+    assert reconcile.matched_review_photo_ids(active_photos, evidence) == {"review-a"}
+    assert reconcile.unique_review_photo_source_count(evidence) == 2
+
+
 def test_activate_team_uses_normalized_repository_team_id() -> None:
     token, team_id = reconcile.activate_team(" Default-Team ")
     try:
@@ -209,6 +239,271 @@ def test_apply_checks_for_safe_replay_before_requiring_open_dry_run() -> None:
     source = inspect.getsource(reconcile.apply_record)
 
     assert source.index("associated_snapshot(") < source.index("dry_run_record(")
+
+
+class RepairState:
+    def __init__(self, *, replayed: bool = False) -> None:
+        self.raw_url = "https://photos.example/review-a.jpg?signature=secret&stable=identity"
+        review_rows = [
+            {"id": "review-1", "source_url": self.raw_url},
+            *[
+                {"id": f"review-{index}", "source_url": f"https://photos.example/review-{index}.jpg?signature={index}"}
+                for index in range(2, 5)
+            ],
+        ]
+        self.evidence = reconcile.build_review_photo_evidence(review_rows)
+        self.record = SimpleNamespace(
+            id=17,
+            legacy_id="scan-unmatched-422f7a0a030a6d41ebbf788a",
+            status="associated",
+            payload={
+                "associated_group_id": "g-12102",
+                "associated_by": reconcile.ACTOR,
+            },
+        )
+        self.group = SimpleNamespace(id=31, legacy_id="g-12102")
+        self.photos = [
+            SimpleNamespace(source_url_hash=item["source_url_hash"], is_active=True)
+            for item in (self.evidence if replayed else self.evidence[:1])
+        ]
+        self.audits: list[SimpleNamespace] = []
+        self.locks: list[str] = []
+        self.add_calls = 0
+        self.commits = 0
+        self.verifications = 0
+        self.fail_validation = False
+        self.fail_post_commit_observation = False
+
+
+class RepairScalars:
+    def __init__(self, rows) -> None:
+        self.rows = rows
+
+    def all(self):
+        return list(self.rows)
+
+
+class RepairSession:
+    def __init__(self, state: RepairState, *_args, **_kwargs) -> None:
+        self.state = state
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> bool:
+        return False
+
+    def close(self) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def scalar(self, statement):
+        entity = statement.column_descriptions[0].get("entity")
+        if getattr(statement, "_for_update_arg", None) is not None:
+            self.state.locks.append(entity.__name__)
+        if entity is reconcile.UnmatchedRecord:
+            return self.state.record
+        if entity is reconcile.MaterialGroup:
+            return self.state.group
+        raise AssertionError(f"unexpected scalar entity: {entity}")
+
+    def scalars(self, statement):
+        entity = statement.column_descriptions[0].get("entity")
+        if getattr(statement, "_for_update_arg", None) is not None:
+            self.state.locks.append(entity.__name__)
+        if entity is reconcile.Photo:
+            return RepairScalars([photo for photo in self.state.photos if photo.is_active])
+        if entity is reconcile.AuditLog:
+            return RepairScalars(self.state.audits)
+        raise AssertionError(f"unexpected scalars entity: {entity}")
+
+
+class RepairRepository:
+    def __init__(self, state: RepairState) -> None:
+        self.state = state
+
+    def _add_photo_records_to_group(self, _session, _group, **_kwargs):
+        self.state.add_calls += 1
+        for evidence in self.state.evidence[1:]:
+            self.state.photos.append(SimpleNamespace(source_url_hash=evidence["source_url_hash"], is_active=True))
+        return {"added": 3, "skipped_duplicates": 0, "merged_duplicates": 0}
+
+
+def _matching_repair_audit(state: RepairState) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=93,
+        legacy_id="repair-audit-93",
+        before_data={"unmatched_id": state.record.legacy_id, "group_id": state.group.legacy_id},
+        after_data={"group_id": state.group.legacy_id, "active_photo_count": 4},
+        payload={"review_photo_count": 4},
+    )
+
+
+def install_repair_fakes(monkeypatch: pytest.MonkeyPatch, state: RepairState) -> RepairRepository:
+    @contextmanager
+    def guarded_transaction(_repository):
+        before_photos = list(state.photos)
+        before_audits = list(state.audits)
+        try:
+            yield object()
+        except Exception:
+            state.photos[:] = before_photos
+            state.audits[:] = before_audits
+            raise
+        else:
+            state.commits += 1
+
+    def stage_audit(_session, **_kwargs):
+        audit = _matching_repair_audit(state)
+        state.audits.append(audit)
+        return audit
+
+    def verify(_session, _team_id, _snapshot, *, groups_before, placeholders_before, result=None):
+        state.verifications += 1
+        if state.fail_post_commit_observation and state.verifications > 1:
+            raise RuntimeError("post-commit observation failed")
+        if state.fail_validation:
+            raise RuntimeError("failed repair invariant")
+        assert len([photo for photo in state.photos if photo.is_active]) == 4
+        if groups_before is None:
+            assert placeholders_before is None
+        else:
+            assert groups_before == 12
+            assert placeholders_before == 0
+        assert len(state.audits) == 1
+        return {
+            "target_photo_count_after": 4,
+            "group_count_before": groups_before,
+            "group_count_after": 12,
+            "placeholder_count_before": placeholders_before,
+            "placeholder_count_after": 0,
+        }
+
+    snapshot = {
+        "unmatched_id": state.record.legacy_id,
+        "target_group_id": state.group.legacy_id,
+        "target_before": {"db_id": state.group.id, "photo_count": 1},
+        "review_photo_ids": [item["id"] for item in state.evidence],
+        "review_photo_evidence": state.evidence,
+        "unique_review_photo_source_count": 4,
+    }
+    monkeypatch.setattr(reconcile, "associated_snapshot", lambda _team_id, _unmatched_id: snapshot)
+    monkeypatch.setattr(reconcile, "group_count", lambda _team_id: 12)
+    monkeypatch.setattr(reconcile, "placeholder_group_count", lambda _team_id: 0)
+    monkeypatch.setattr(reconcile, "repository_commit_guard", guarded_transaction)
+    monkeypatch.setattr(reconcile, "Session", lambda *_args, **_kwargs: RepairSession(state))
+    monkeypatch.setattr(reconcile, "SessionLocal", lambda: RepairSession(state))
+    monkeypatch.setattr(reconcile, "_stage_transactional_audit", stage_audit)
+    monkeypatch.setattr(reconcile, "_unmatched_payload", lambda _record: {})
+    monkeypatch.setattr(reconcile.unmatched_review, "build_review", lambda _payload: {"reviewer": "repairer"})
+    monkeypatch.setattr(reconcile.unmatched_review, "migrate_review_to_photo_rows", lambda _review: [{}, {}, {}])
+    monkeypatch.setattr(reconcile, "verify_associated_in_session", verify)
+    return RepairRepository(state)
+
+
+def test_review_photo_evidence_normalizes_nested_download_urls_without_erasing_stable_identity() -> None:
+    evidence = reconcile.build_review_photo_evidence(
+        [
+            {
+                "id": "review-a",
+                "source_url": "https://wrapper.example/open?downloadImg=https%3A%2F%2Fcdn.example%2Fphotos%2Fa.jpg%3Fsignature%3Done%26token%3Dfirst%26variant%3Dfull",
+            },
+            {
+                "id": "review-b",
+                "source_url": "https://wrapper.example/open?downloadImg=https%3A%2F%2Fcdn.example%2Fphotos%2Fa.jpg%3Fsignature%3Dtwo%26token%3Dsecond%26variant%3Dfull",
+            },
+            {
+                "id": "review-c",
+                "source_url": "https://wrapper.example/open?downloadImg=https%3A%2F%2Fcdn.example%2Fphotos%2Fb.jpg%3Fvariant%3Dfull",
+            },
+            {
+                "id": "review-d",
+                "source_url": "https://wrapper.example/open?downloadImg=https%3A%2F%2Fcdn.example%2Fphotos%2Fa.jpg%3Fvariant%3Dthumbnail",
+            },
+        ]
+    )
+
+    assert evidence[0]["source_url_hash"] == evidence[1]["source_url_hash"]
+    assert evidence[0]["source_url_hash"] != evidence[2]["source_url_hash"]
+    assert evidence[0]["source_url_hash"] != evidence[3]["source_url_hash"]
+
+
+def test_photo_repair_transitions_one_active_photo_to_four_with_locks_and_sanitized_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RepairState()
+    repository = install_repair_fakes(monkeypatch, state)
+
+    result = reconcile.repair_associated_photo_evidence(repository, "team-1", state.record.legacy_id)
+
+    assert len(state.photos) == 4
+    assert state.add_calls == 1
+    assert state.commits == 1
+    assert state.locks == ["UnmatchedRecord", "MaterialGroup", "Photo"]
+    assert len(state.audits) == 1
+    assert result["repair_added_photo_count"] == 3
+    assert result["group_count_before"] == result["group_count_after"] == 12
+    assert result["placeholder_count_before"] == result["placeholder_count_after"] == 0
+    rendered = json.dumps(result, sort_keys=True)
+    assert state.raw_url not in rendered
+    assert "signature=" not in rendered
+
+
+def test_photo_repair_rejects_duplicate_audit_without_adding_photos(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = RepairState()
+    state.audits.append(_matching_repair_audit(state))
+    repository = install_repair_fakes(monkeypatch, state)
+
+    with pytest.raises(RuntimeError, match="photo repair audit exists before repair"):
+        reconcile.repair_associated_photo_evidence(repository, "team-1", state.record.legacy_id)
+
+    assert len(state.photos) == 1
+    assert len(state.audits) == 1
+    assert state.add_calls == 0
+    assert state.commits == 0
+
+
+def test_photo_repair_rolls_back_added_photos_and_audit_when_an_invariant_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RepairState()
+    state.fail_validation = True
+    repository = install_repair_fakes(monkeypatch, state)
+
+    with pytest.raises(RuntimeError, match="failed repair invariant"):
+        reconcile.repair_associated_photo_evidence(repository, "team-1", state.record.legacy_id)
+
+    assert len(state.photos) == 1
+    assert state.audits == []
+    assert state.add_calls == 1
+    assert state.commits == 0
+
+
+def test_photo_repair_replays_idempotently_with_exactly_one_audit(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = RepairState(replayed=True)
+    state.audits.append(_matching_repair_audit(state))
+    repository = install_repair_fakes(monkeypatch, state)
+
+    result = reconcile.repair_associated_photo_evidence(repository, "team-1", state.record.legacy_id)
+
+    assert len(state.photos) == 4
+    assert state.add_calls == 0
+    assert len(state.audits) == 1
+    assert result["repair_replayed"] is True
+    assert result["repair_added_photo_count"] == 0
+
+
+def test_photo_repair_treats_post_commit_reads_as_observational(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = RepairState()
+    state.fail_post_commit_observation = True
+    repository = install_repair_fakes(monkeypatch, state)
+
+    result = reconcile.repair_associated_photo_evidence(repository, "team-1", state.record.legacy_id)
+
+    assert result["repair_added_photo_count"] == 3
+    assert state.commits == 1
 
 
 def test_dry_run_requires_nonempty_photo_evidence() -> None:

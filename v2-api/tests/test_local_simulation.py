@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import Path
 from importlib.util import find_spec
 from threading import Event, Thread
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -694,6 +695,31 @@ def test_normalize_cell_repairs_latin1_mojibake() -> None:
 
     assert normalize_cell(mojibake) == "\u5b9d\u5c71\u533a\u9526\u79cb\u8def1152\u53f7"
     assert normalize_cell("\u4e0a\u6d77\u5e02\u5b9d\u5c71\u533a") == "\u4e0a\u6d77\u5e02\u5b9d\u5c71\u533a"
+
+
+def test_normalized_photo_source_url_sanitizes_terminal_url_after_exactly_four_wrappers() -> None:
+    def wrap_four_times(terminal_url: str) -> str:
+        wrapped = terminal_url
+        for level in range(4):
+            wrapped = f"https://wrapper-{level}.example/open?downloadImg={quote(wrapped, safe='')}"
+        return wrapped
+
+    first = local_simulation.normalized_photo_source_url(
+        wrap_four_times("https://cdn.example/photos/a.jpg?signature=one&token=first&variant=full")
+    )
+    equivalent = local_simulation.normalized_photo_source_url(
+        wrap_four_times("https://cdn.example/photos/a.jpg?signature=two&token=second&variant=full")
+    )
+    different_path = local_simulation.normalized_photo_source_url(
+        wrap_four_times("https://cdn.example/photos/b.jpg?variant=full")
+    )
+    different_stable_identity = local_simulation.normalized_photo_source_url(
+        wrap_four_times("https://cdn.example/photos/a.jpg?variant=thumbnail")
+    )
+
+    assert first == equivalent == "https://cdn.example/photos/a.jpg?variant=full"
+    assert first != different_path
+    assert first != different_stable_identity
 
 
 def test_review_group_updates_status_and_summary(synthetic_state: dict) -> None:

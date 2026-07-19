@@ -12,15 +12,19 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.database import SessionLocal, engine
 from app.models import AuditLog, MaterialGroup, Photo, UnmatchedRecord
-from app.services import local_simulation
+from app.services import local_simulation, unmatched_review
 from app.services.state_repository import (
     FINALIZATION_REPLAY_KEY,
     PostgresStateRepository,
+    _stage_transactional_audit,
+    _unmatched_payload,
     get_state_repository,
 )
 
 
 ACTOR = "production-maintenance-v3.0.81"
+REPAIR_ACTOR = "production-maintenance-v3.0.82"
+REPAIR_ACTION = "unmatched_review_photo_evidence_repaired"
 EXPECTED_TARGETS = {
     "scan-unmatched-422f7a0a030a6d41ebbf788a": "g-12102",
     "scan-unmatched-af685ed60b9d412231b51382": "g-12164",
@@ -66,7 +70,8 @@ def build_review_photo_evidence(photos: list[dict[str, Any]]) -> list[dict[str, 
             or photo.get("image_url")
             or photo.get("url")
             or ""
-        ).split("?", 1)[0]
+        )
+        normalized_source_url = local_simulation.normalized_photo_source_url(source_url)
         storage_type = str(photo.get("storage_type") or "").strip()
         storage_key = str(photo.get("storage_key") or "").strip()
         evidence.append(
@@ -78,7 +83,7 @@ def build_review_photo_evidence(photos: list[dict[str, Any]]) -> list[dict[str, 
                     if storage_type and storage_key
                     else ""
                 ),
-                "source_url_hash": _identity_hash(source_url),
+                "source_url_hash": _identity_hash(normalized_source_url),
             }
         )
     return evidence
@@ -133,6 +138,23 @@ def matched_review_photo_ids(
         for photo in photos
         if str(getattr(photo, "source_url_hash", "") or "").strip()
     }
+    source_url_hashes.update(
+        _identity_hash(
+            local_simulation.normalized_photo_source_url(
+                str(
+                    getattr(photo, "source_url", "")
+                    or getattr(photo, "image_url", "")
+                    or ""
+                )
+            )
+        )
+        for photo in photos
+        if str(
+            getattr(photo, "source_url", "")
+            or getattr(photo, "image_url", "")
+            or ""
+        ).strip()
+    )
     matched: set[str] = set()
     for item in evidence:
         photo_id = str(item.get("id") or "")
@@ -559,6 +581,262 @@ def verify_associated_in_session(
     }
 
 
+def matching_repair_audits(
+    session: Session,
+    *,
+    team_id: str,
+    record_id: Any,
+    unmatched_id: str,
+    target_group_id: str,
+) -> list[AuditLog]:
+    rows = list(
+        session.scalars(
+            select(AuditLog).where(
+                AuditLog.team_id == team_id,
+                AuditLog.entity_id == record_id,
+                AuditLog.actor_username == REPAIR_ACTOR,
+                AuditLog.action == REPAIR_ACTION,
+            )
+        ).all()
+    )
+    return [
+        row
+        for row in rows
+        if str((row.before_data or {}).get("unmatched_id") or "") == unmatched_id
+        and str((row.after_data or {}).get("group_id") or "") == target_group_id
+        and int((row.after_data or {}).get("active_photo_count") or 0) == 4
+        and int((row.payload or {}).get("review_photo_count") or 0) == 4
+    ]
+
+
+def repair_dry_run_record(team_id: str, unmatched_id: str) -> dict[str, Any]:
+    snapshot = associated_snapshot(team_id, unmatched_id)
+    require(snapshot is not None, f"record is not associated: {unmatched_id}")
+    require(
+        int(snapshot["unique_review_photo_source_count"]) == len(snapshot["review_photo_ids"]),
+        f"review does not contain distinct physical photo evidence: {unmatched_id}",
+    )
+    with SessionLocal() as session:
+        record = session.scalar(
+            select(UnmatchedRecord).where(
+                UnmatchedRecord.team_id == team_id,
+                UnmatchedRecord.legacy_id == unmatched_id,
+            )
+        )
+        require(record is not None, f"record disappeared: {unmatched_id}")
+        group = session.scalar(
+            select(MaterialGroup).where(
+                MaterialGroup.team_id == team_id,
+                MaterialGroup.legacy_id == snapshot["target_group_id"],
+            )
+        )
+        require(group is not None, f"associated target is missing: {snapshot['target_group_id']}")
+        active_photos = list(
+            session.scalars(
+                select(Photo).where(
+                    Photo.team_id == team_id,
+                    Photo.group_id == group.id,
+                    Photo.is_active.is_(True),
+                )
+            ).all()
+        )
+        matched = matched_review_photo_ids(active_photos, list(snapshot["review_photo_evidence"]))
+        missing = sorted(set(snapshot["review_photo_ids"]) - matched)
+        audits = matching_repair_audits(
+            session,
+            team_id=team_id,
+            record_id=record.id,
+            unmatched_id=unmatched_id,
+            target_group_id=str(snapshot["target_group_id"]),
+        )
+        return {
+            "unmatched_id": unmatched_id,
+            "target_group_id": str(snapshot["target_group_id"]),
+            "review_photo_count": len(snapshot["review_photo_ids"]),
+            "unique_review_photo_source_count": int(snapshot["unique_review_photo_source_count"]),
+            "active_photo_count": len(active_photos),
+            "matched_review_photo_count": len(matched),
+            "missing_review_photo_count": len(missing),
+            "missing_review_photo_ids": missing,
+            "repair_audit_count": len(audits),
+        }
+
+
+def repair_associated_photo_evidence(
+    repository: PostgresStateRepository,
+    team_id: str,
+    unmatched_id: str,
+) -> dict[str, Any]:
+    snapshot = associated_snapshot(team_id, unmatched_id)
+    require(snapshot is not None, f"record is not associated: {unmatched_id}")
+    review_photo_ids = set(snapshot["review_photo_ids"])
+    require(len(review_photo_ids) == 4, f"review photo count is not four: {unmatched_id}")
+    require(
+        int(snapshot["unique_review_photo_source_count"]) == len(review_photo_ids),
+        f"review does not contain four distinct physical photos: {unmatched_id}",
+    )
+    groups_before = group_count(team_id)
+    placeholders_before = placeholder_group_count(team_id)
+    require(placeholders_before == 0, "placeholder formal groups exist before photo repair")
+
+    with repository_commit_guard(repository) as connection:
+        session = Session(
+            bind=connection,
+            autoflush=False,
+            expire_on_commit=False,
+            join_transaction_mode="rollback_only",
+        )
+        try:
+            record = session.scalar(
+                select(UnmatchedRecord)
+                .where(
+                    UnmatchedRecord.team_id == team_id,
+                    UnmatchedRecord.legacy_id == unmatched_id,
+                )
+                .with_for_update()
+            )
+            require(record is not None, f"record disappeared: {unmatched_id}")
+            require(record.status == "associated", f"record is not associated: {unmatched_id}")
+            payload = dict(record.payload or {})
+            target_group_id = str(snapshot["target_group_id"])
+            require(payload.get("associated_group_id") == target_group_id, "associated group mismatch")
+            require(payload.get("associated_by") == ACTOR, "associated actor mismatch")
+            group = session.scalar(
+                select(MaterialGroup)
+                .where(
+                    MaterialGroup.team_id == team_id,
+                    MaterialGroup.legacy_id == target_group_id,
+                )
+                .with_for_update()
+            )
+            require(group is not None, f"associated target is missing: {target_group_id}")
+            require(str(group.id) == str(snapshot["target_before"]["db_id"]), "associated target row changed")
+            active_before = list(
+                session.scalars(
+                    select(Photo)
+                    .where(
+                        Photo.team_id == team_id,
+                        Photo.group_id == group.id,
+                        Photo.is_active.is_(True),
+                    )
+                    .with_for_update()
+                ).all()
+            )
+            matched_before = matched_review_photo_ids(
+                active_before,
+                list(snapshot["review_photo_evidence"]),
+            )
+            missing_before = review_photo_ids - matched_before
+            repair_audits = matching_repair_audits(
+                session,
+                team_id=team_id,
+                record_id=record.id,
+                unmatched_id=unmatched_id,
+                target_group_id=target_group_id,
+            )
+            replayed = not missing_before
+            add_result: dict[str, Any] = {
+                "added": 0,
+                "skipped_duplicates": 0,
+                "merged_duplicates": 0,
+            }
+            repair_audit: AuditLog
+            if replayed:
+                require(len(active_before) == 4, "replayed photo repair count is not four")
+                require(len(repair_audits) == 1, f"exact photo repair audit count is not one: {len(repair_audits)}")
+                repair_audit = repair_audits[0]
+            else:
+                require(len(active_before) == 1, f"unexpected pre-repair photo count: {len(active_before)}")
+                require(len(matched_before) == 1, f"unexpected matched evidence count: {len(matched_before)}")
+                require(len(missing_before) == 3, f"unexpected missing evidence count: {len(missing_before)}")
+                require(not repair_audits, "photo repair audit exists before repair")
+                review = unmatched_review.build_review(_unmatched_payload(record))
+                add_result = repository._add_photo_records_to_group(
+                    session,
+                    group,
+                    actor=REPAIR_ACTOR,
+                    photos=unmatched_review.migrate_review_to_photo_rows(review),
+                    collector=str(review.get("collector") or ""),
+                    module_asset_no=str(review.get("module_asset_no") or ""),
+                    creator=str(review.get("reviewer") or REPAIR_ACTOR),
+                    source="unmatched-review-finalize",
+                )
+                require(int(add_result.get("added") or 0) == 3, "photo repair did not add exactly three photos")
+                repair_audit = _stage_transactional_audit(
+                    session,
+                    team_id=team_id,
+                    actor=REPAIR_ACTOR,
+                    action=REPAIR_ACTION,
+                    entity_type="unmatched_record",
+                    entity_id=record.id,
+                    before_data={
+                        "unmatched_id": unmatched_id,
+                        "group_id": target_group_id,
+                        "active_photo_count": len(active_before),
+                    },
+                    after_data={
+                        "unmatched_id": unmatched_id,
+                        "group_id": target_group_id,
+                        "active_photo_count": 4,
+                    },
+                    payload={
+                        "review_photo_count": len(review_photo_ids),
+                        "added_photo_count": int(add_result.get("added") or 0),
+                        "merged_duplicate_count": int(add_result.get("merged_duplicates") or 0),
+                    },
+                )
+                session.flush()
+
+            transaction_evidence = verify_associated_in_session(
+                session,
+                team_id,
+                snapshot,
+                groups_before=groups_before,
+                placeholders_before=placeholders_before,
+            )
+            require(transaction_evidence["target_photo_count_after"] == 4, "photo repair count is not four")
+            require(
+                len(
+                    matching_repair_audits(
+                        session,
+                        team_id=team_id,
+                        record_id=record.id,
+                        unmatched_id=unmatched_id,
+                        target_group_id=target_group_id,
+                    )
+                )
+                == 1,
+                "photo repair audit was not persisted exactly once",
+            )
+            repair_evidence = {
+                **transaction_evidence,
+                "repair_actor": REPAIR_ACTOR,
+                "repair_audit_id": str(repair_audit.id),
+                "repair_audit_legacy_id": str(repair_audit.legacy_id or ""),
+                "repair_replayed": replayed,
+                "repair_added_photo_count": int(add_result.get("added") or 0),
+                "repair_merged_duplicate_count": int(add_result.get("merged_duplicates") or 0),
+            }
+        finally:
+            session.close()
+
+    post_commit_repair_verified = False
+    try:
+        with SessionLocal() as session:
+            post_commit_evidence = verify_associated_in_session(
+                session,
+                team_id,
+                snapshot,
+                groups_before=None,
+                placeholders_before=None,
+            )
+            post_commit_repair_verified = post_commit_evidence["target_photo_count_after"] == 4
+    except Exception:
+        # The guarded transaction already enforced every release invariant.
+        post_commit_repair_verified = False
+    return {**repair_evidence, "post_commit_repair_verified": post_commit_repair_verified}
+
+
 def apply_record(
     repository: PostgresStateRepository,
     team_id: str,
@@ -624,14 +902,41 @@ def apply_record(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--apply", choices=sorted(EXPECTED_TARGETS))
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--apply", choices=sorted(EXPECTED_TARGETS))
+    actions.add_argument("--repair-photos", choices=sorted(EXPECTED_TARGETS))
+    actions.add_argument("--repair-dry-run", action="store_true")
     args = parser.parse_args()
 
     repository = get_state_repository()
     require(isinstance(repository, PostgresStateRepository), "production repository is not PostgreSQL")
     token, team_id = activate_team(str(settings.admin_team_id or ""))
     try:
-        if args.apply:
+        if args.repair_photos:
+            output = {
+                "mode": "repair-photos-one",
+                "actor": REPAIR_ACTOR,
+                "team_id": team_id,
+                "result": repair_associated_photo_evidence(
+                    repository,
+                    team_id,
+                    args.repair_photos,
+                ),
+            }
+        elif args.repair_dry_run:
+            placeholders = placeholder_group_count(team_id)
+            require(placeholders == 0, "placeholder formal groups exist before repair dry-run")
+            output = {
+                "mode": "repair-dry-run",
+                "team_id": team_id,
+                "group_count": group_count(team_id),
+                "placeholder_group_count": placeholders,
+                "records": [
+                    repair_dry_run_record(team_id, unmatched_id)
+                    for unmatched_id in EXPECTED_TARGETS
+                ],
+            }
+        elif args.apply:
             output = {
                 "mode": "apply-one",
                 "actor": ACTOR,
