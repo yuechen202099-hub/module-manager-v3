@@ -117,10 +117,10 @@
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-生成 V3.0.80 服务器发布包：
+生成 V3.0.81 服务器发布包：
 
 ```powershell
-.\scripts\build-client-release.ps1 -Version 3.0.80
+.\scripts\build-client-release.ps1 -Version 3.0.81
 ```
 
 发布包内会包含 `RELEASE_MANIFEST.md`，用于说明版本、生成时间、包含内容、排除项、验证命令和上线前注意事项。

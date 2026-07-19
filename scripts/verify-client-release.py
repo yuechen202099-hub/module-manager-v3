@@ -72,8 +72,8 @@ REQUIRED_FILES = {
     "scripts/cleanup_old_releases.sh",
     "scripts/production_health_check.py",
     "ops/releases/README.md",
+    "ops/releases/V3.0.81.md",
     "ops/releases/V3.0.80.md",
-    "ops/releases/V3.0.79.md",
     "ops/releases/V3.0.78.md",
     "ops/releases/V3.0.77.md",
     "ops/releases/V3.0.76.md",
@@ -452,7 +452,7 @@ def verify_package(zip_path: Path) -> None:
             archive.read(SOURCE_VERSION_ARTIFACT).decode("utf-8")
         )
         agents = archive.read("AGENTS.md").decode("utf-8")
-        release_record = archive.read("ops/releases/V3.0.80.md").decode("utf-8")
+        release_record = archive.read("ops/releases/V3.0.81.md").decode("utf-8")
         crlf_shell_scripts = sorted(
             name
             for name in names
@@ -510,19 +510,19 @@ def verify_package(zip_path: Path) -> None:
 
     deployed_version = release_truth.deployed_production_baseline(agents)
     candidate_version = release_truth.release_candidate(agents)
-    if deployed_version != "V3.0.79":
-        fail("Packaged AGENTS.md deployed production baseline must remain V3.0.79")
-    if candidate_version != "V3.0.80":
-        fail("Packaged AGENTS.md release candidate must be V3.0.80")
+    if deployed_version != "V3.0.80":
+        fail("Packaged AGENTS.md deployed production baseline must remain V3.0.80")
+    if candidate_version != "V3.0.81":
+        fail("Packaged AGENTS.md release candidate must be V3.0.81")
     if candidate_version != f"V{package_version}":
         fail("Release manifest Version must match packaged AGENTS.md release candidate")
     record_version = release_truth.RELEASE_RECORD_VERSION_PATTERN.search(release_record)
     if record_version is None or record_version.group("version") != candidate_version:
         fail("Packaged release record version must match the release candidate")
     if release_truth.release_record_claims_deployed_without_live_evidence(release_record):
-        fail("Packaged V3.0.80 release record claims deployed without complete live evidence")
+        fail("Packaged V3.0.81 release record claims deployed without complete live evidence")
     if not release_truth.status_is_pending(release_truth.release_record_status(release_record)):
-        fail("Packaged V3.0.80 release record must remain pending before deployment")
+        fail("Packaged V3.0.81 release record must remain pending before deployment")
 
     print(f"[OK] release zip exists: {zip_path}")
     print(f"[OK] release zip size: {zip_path.stat().st_size} bytes")

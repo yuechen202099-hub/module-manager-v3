@@ -22,15 +22,15 @@
 | 甲方签收清单 | `docs/CLIENT_SIGNOFF_CHECKLIST.md`，列出可现场确认并签字的验收项 | 已完成 |
 | 页面高级感 | 登录页重做，主页面固定导航清理，统一工作台视觉语言 | 已完成，需人眼最终确认 |
 | 服务器部署准备 | `docs/SERVER_DEPLOYMENT_PREP.md`、Nginx 配置、systemd 服务、生产账号注意事项 | 已完成 |
-| 发布包 | `build/server-release/module-manager-v2-server-3.0.80.zip` | 待发布 |
+| 发布包 | `build/server-release/module-manager-v2-server-3.0.81.zip` | 待发布 |
 
 ## 已运行验证
 
 ```powershell
-.\scripts\run-client-acceptance-gate.ps1 -Version 3.0.80
+.\scripts\run-client-acceptance-gate.ps1 -Version 3.0.81
 ```
 
-结果：部署前按 V3.0.80 机器版本源执行；最终结果写入 `ops/releases/V3.0.80.md`。该记录在生产执行完成前保持待发布，不填写虚构的上线证据。
+结果：部署前按 V3.0.81 机器版本源执行；最终结果写入 `ops/releases/V3.0.81.md`。该记录在生产执行完成前保持待发布，不填写虚构的上线证据。
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
@@ -57,7 +57,7 @@
 结果：通过。确认 `.env.example`、Nginx、systemd 和服务器部署准备材料具备生产交接所需的关键配置项。
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.0.80.zip
+.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.0.81.zip
 ```
 
 结果：待发布包生成后执行；当前不填写发布包存在、验包或部署完成的虚假证据。
@@ -65,7 +65,7 @@
 ## 发布包
 
 ```text
-build/server-release/module-manager-v2-server-3.0.80.zip
+build/server-release/module-manager-v2-server-3.0.81.zip
 ```
 
 ## 演示顺序

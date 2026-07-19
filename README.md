@@ -134,7 +134,7 @@ It blocks default secrets, demo auth, weak admin credentials, and incomplete dep
 Build a clean production server release package:
 
 ```powershell
-.\scripts\build-client-release.ps1 -Version 3.0.80
+.\scripts\build-client-release.ps1 -Version 3.0.81
 ```
 
 The release package is created under `build/server-release/` and includes `RELEASE_MANIFEST.md` with version, generated time, included files, excluded local artifacts, verification commands, and production notes. Historical client-demo package instructions are not part of the production workflow; production deployment uses only the server-release package.

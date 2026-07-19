@@ -13,7 +13,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-V3080_RELEASE_RECORD = "ops/releases/V3.0.80.md"
+V3081_RELEASE_RECORD = "ops/releases/V3.0.81.md"
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
 SAFETY_NOTES = (
@@ -27,17 +27,19 @@ SAFETY_NOTES = (
 
 VALID_AGENTS = """# Package fixture
 
-- Deployed production baseline: `V3.0.79`.
-- Release candidate: `V3.0.80`.
-- 当前已部署生产版本：`V3.0.79`。
-- 当前发布候选版本：`V3.0.80`。
+- Deployed production baseline: `V3.0.80`.
+- Release candidate: `V3.0.81`.
+- Release-candidate maintenance branch: `production/V3/3.0.81`.
+- 当前已部署生产版本：`V3.0.80`。
+- 当前发布候选版本：`V3.0.81`。
+- 当前候选维护分支：`production/V3/3.0.81`。
 """
-PENDING_RELEASE_RECORD = """# V3.0.80 Production Release Record
+PENDING_RELEASE_RECORD = """# V3.0.81 Production Release Record
 
 ## Summary
 
 - Status: pending
-- V3.0.80 has not been deployed to production.
+- V3.0.81 has not been deployed to production.
 
 ## Package
 
@@ -70,9 +72,9 @@ def write_release_archive(
     verifier,
     archive_path: Path,
     *,
-    manifest_version: str | None = "3.0.80",
+    manifest_version: str | None = "3.0.81",
     manifest_versions: list[str] | None = None,
-    static_version: str = "3.0.80",
+    static_version: str = "3.0.81",
     title_version: str | None = None,
     runtime_version: str | None = None,
     source_version: str | None = None,
@@ -107,7 +109,7 @@ def write_release_archive(
     contents = {
         "RELEASE_MANIFEST.md": manifest,
         "AGENTS.md": agents,
-        V3080_RELEASE_RECORD: release_record,
+        V3081_RELEASE_RECORD: release_record,
         SOURCE_VERSION_ARTIFACT: json.dumps({"version": resolved_source_version}),
         "v2-api/app/static/vue/index.html": (
             f"<!doctype html><title>Module Manager V{resolved_title_version}</title>"
@@ -163,19 +165,19 @@ def write_release_archive(
             archive.writestr("v2-api/app/static/vue/assets/app.js", resolved_entry_source)
 
 
-def test_archive_missing_v3080_release_record_fails_verification(tmp_path: Path) -> None:
+def test_archive_missing_v3081_release_record_fails_verification(tmp_path: Path) -> None:
     verifier = load_verifier()
-    archive_path = tmp_path / "module-manager-v2-server-v3.0.80.zip"
-    write_release_archive(verifier, archive_path, omitted={V3080_RELEASE_RECORD})
+    archive_path = tmp_path / "module-manager-v2-server-v3.0.81.zip"
+    write_release_archive(verifier, archive_path, omitted={V3081_RELEASE_RECORD})
 
-    with pytest.raises(AssertionError, match=r"ops/releases/V3\.0\.80\.md"):
+    with pytest.raises(AssertionError, match=r"ops/releases/V3\.0\.81\.md"):
         verifier.verify_package(archive_path)
 
 
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.0.80"' in build_script
+    assert '[string]$Version = "3.0.81"' in build_script
 
 
 def test_release_builder_stops_when_smoke_check_fails() -> None:
@@ -237,7 +239,7 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.0.80")
+        verifier.verify_release_markdown_text(document_path, content, "3.0.81")
 
 
 @pytest.mark.parametrize(
@@ -252,7 +254,7 @@ def test_archive_rejects_stale_marker_in_every_required_markdown(
     archive_path = tmp_path / f"stale-markdown-{hashlib.sha256(document_path.encode()).hexdigest()[:8]}.zip"
     stale_content = "final-delivery-ready\n"
     if document_path == "RELEASE_MANIFEST.md":
-        stale_content = "\n".join(("# Release manifest", "- Version: 3.0.80", *SAFETY_NOTES, stale_content))
+        stale_content = "\n".join(("# Release manifest", "- Version: 3.0.81", *SAFETY_NOTES, stale_content))
     write_release_archive(
         verifier,
         archive_path,
@@ -306,7 +308,7 @@ def test_archive_missing_manifest_version_fails_verification(tmp_path: Path) -> 
 def test_archive_manifest_version_must_match_static_version(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "static-version-mismatch.zip"
-    write_release_archive(verifier, archive_path, static_version="3.0.79")
+    write_release_archive(verifier, archive_path, static_version="3.0.80")
 
     with pytest.raises(AssertionError, match="static index title"):
         verifier.verify_package(archive_path)
@@ -315,8 +317,8 @@ def test_archive_manifest_version_must_match_static_version(tmp_path: Path) -> N
 @pytest.mark.parametrize(
     "manifest_versions",
     [
-        ["3.0.80", "3.0.80"],
-        ["3.0.80", "3.0.79"],
+        ["3.0.81", "3.0.81"],
+        ["3.0.81", "3.0.80"],
     ],
 )
 def test_archive_manifest_must_have_exactly_one_version(
@@ -334,7 +336,7 @@ def test_archive_manifest_must_have_exactly_one_version(
 def test_archive_manifest_version_must_be_semantic(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "non-semantic-manifest-version.zip"
-    write_release_archive(verifier, archive_path, manifest_version="release-3.0.80")
+    write_release_archive(verifier, archive_path, manifest_version="release-3.0.81")
 
     with pytest.raises(AssertionError, match="exactly one semantic Version"):
         verifier.verify_package(archive_path)
@@ -346,8 +348,8 @@ def test_archive_runtime_version_cannot_be_satisfied_by_unrelated_candidate_stri
     write_release_archive(
         verifier,
         archive_path,
-        runtime_version="3.0.79",
-        unrelated_static_version="3.0.80",
+        runtime_version="3.0.80",
+        unrelated_static_version="3.0.81",
     )
 
     with pytest.raises(AssertionError, match="runtime version"):
@@ -366,7 +368,7 @@ def test_archive_requires_machine_readable_runtime_version_artifact(tmp_path: Pa
 def test_archive_source_and_runtime_version_artifacts_must_match(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "source-runtime-version-mismatch.zip"
-    write_release_archive(verifier, archive_path, source_version="3.0.79")
+    write_release_archive(verifier, archive_path, source_version="3.0.80")
 
     with pytest.raises(AssertionError, match="source and built runtime versions"):
         verifier.verify_package(archive_path)
@@ -378,11 +380,11 @@ def test_archive_rejects_stale_entry_bundle_despite_current_sidecars(tmp_path: P
     write_release_archive(
         verifier,
         archive_path,
-        runtime_version="3.0.80",
-        source_version="3.0.80",
-        entry_version="3.0.79",
-        unrelated_static_version="3.0.80",
-        unrelated_chunk_entry_version="3.0.80",
+        runtime_version="3.0.81",
+        source_version="3.0.81",
+        entry_version="3.0.80",
+        unrelated_static_version="3.0.81",
+        unrelated_chunk_entry_version="3.0.81",
     )
 
     with pytest.raises(AssertionError, match="entry bundle version"):
@@ -392,10 +394,10 @@ def test_archive_rejects_stale_entry_bundle_despite_current_sidecars(tmp_path: P
 @pytest.mark.parametrize(
     "entry_source",
     [
-        "/* globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.80\"}; */\n",
-        "const unused = 'globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.80\"};';\n",
-        "if (false) { globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.80\"}; }\n",
-        "/* stale V3.0.79 entry */\nglobalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.80\"};\n",
+        "/* globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.81\"}; */\n",
+        "const unused = 'globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.81\"};';\n",
+        "if (false) { globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.81\"}; }\n",
+        "/* stale V3.0.80 entry */\nglobalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={\"version\":\"3.0.81\"};\n",
     ],
 )
 def test_archive_rejects_non_executable_or_stale_entry_markers(
@@ -426,7 +428,7 @@ def test_archive_rejects_entry_marker_found_only_in_unrelated_chunk(tmp_path: Pa
         verifier,
         archive_path,
         entry_source="console.log('entry without attestation');\n",
-        unrelated_chunk_entry_version="3.0.80",
+        unrelated_chunk_entry_version="3.0.81",
     )
 
     with pytest.raises(AssertionError, match="entry bundle"):
@@ -448,8 +450,8 @@ def test_archive_title_version_cannot_be_satisfied_by_unrelated_index_text(tmp_p
     write_release_archive(
         verifier,
         archive_path,
-        title_version="3.0.79",
-        unrelated_index_text="<!-- Module Manager V3.0.80 -->",
+        title_version="3.0.80",
+        unrelated_index_text="<!-- Module Manager V3.0.81 -->",
     )
 
     with pytest.raises(AssertionError, match="static index title"):
@@ -460,8 +462,8 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
     verifier = load_verifier()
     archive_path = tmp_path / "contradictory-agents.zip"
     agents = VALID_AGENTS.replace(
-        "Deployed production baseline: `V3.0.79`",
         "Deployed production baseline: `V3.0.80`",
+        "Deployed production baseline: `V3.0.81`",
     )
     write_release_archive(verifier, archive_path, agents=agents)
 
@@ -482,9 +484,9 @@ def test_archive_rejects_deployed_record_without_live_evidence(tmp_path: Path) -
 @pytest.mark.parametrize(
     "affirmative_prose",
     [
-        "V3.0.80 was not deployed yesterday and was deployed today.",
-        "V3.0.80\n\nhas been deployed to production.",
-        "V3.0.80 生产部署已完成。",
+        "V3.0.81 was not deployed yesterday and was deployed today.",
+        "V3.0.81\n\nhas been deployed to production.",
+        "V3.0.81 生产部署已完成。",
     ],
 )
 def test_archive_rejects_pending_record_with_affirmative_deployment_prose(
@@ -512,18 +514,18 @@ def test_valid_pending_candidate_archive_passes_truthfulness_checks(tmp_path: Pa
 
 
 ROUND4_CONDITIONAL_OR_NEGATED_CLAIMS = [
-    "V3.0.80 can't be deployed to production.",
-    "V3.0.80 cannot be deployed to production.",
-    "V3.0.80 can be deployed to production.",
-    "V3.0.80 could be deployed to production.",
-    "V3.0.80 may be deployed to production.",
-    "V3.0.80 might be deployed to production.",
-    "V3.0.80 is deployed to production if approval is granted.",
-    "V3.0.80 is deployed to production unless rollback is required.",
-    "V3.0.80 可能已上线生产环境。",
-    "V3.0.80 若通过验收则已上线生产环境。",
-    "如果验证通过，V3.0.80 生产部署已完成。",
-    "除非回归测试失败，否则 V3.0.80 已部署到生产环境。",
+    "V3.0.81 can't be deployed to production.",
+    "V3.0.81 cannot be deployed to production.",
+    "V3.0.81 can be deployed to production.",
+    "V3.0.81 could be deployed to production.",
+    "V3.0.81 may be deployed to production.",
+    "V3.0.81 might be deployed to production.",
+    "V3.0.81 is deployed to production if approval is granted.",
+    "V3.0.81 is deployed to production unless rollback is required.",
+    "V3.0.81 可能已上线生产环境。",
+    "V3.0.81 若通过验收则已上线生产环境。",
+    "如果验证通过，V3.0.81 生产部署已完成。",
+    "除非回归测试失败，否则 V3.0.81 已部署到生产环境。",
 ]
 
 
@@ -546,13 +548,13 @@ def test_archive_accepts_conditional_or_negated_deployment_prose(
 @pytest.mark.parametrize(
     "prose",
     [
-        "V3.0.80 has gone live in production.",
-        "V3.0.80 and its assets have gone live in production.",
-        "V3.0.80 could be deployed after approval, but V3.0.80 was deployed today.",
-        "V3.0.80 已在生产环境上线。",
-        "V3.0.80 已完成生产上线。",
-        "V3.0.80 现已在生产环境正式生效。",
-        "V3.0.80 可能在审批后上线，但 V3.0.80 今日已上线生产环境。",
+        "V3.0.81 has gone live in production.",
+        "V3.0.81 and its assets have gone live in production.",
+        "V3.0.81 could be deployed after approval, but V3.0.81 was deployed today.",
+        "V3.0.81 已在生产环境上线。",
+        "V3.0.81 已完成生产上线。",
+        "V3.0.81 现已在生产环境正式生效。",
+        "V3.0.81 可能在审批后上线，但 V3.0.81 今日已上线生产环境。",
     ],
 )
 def test_archive_rejects_round4_live_and_completion_synonyms(
@@ -574,13 +576,13 @@ def test_archive_rejects_round4_live_and_completion_synonyms(
 @pytest.mark.parametrize(
     "prose",
     [
-        "V3.0.80 has not gone live in production.",
-        "V3.0.80 cannot go live in production.",
-        "V3.0.80 may go live in production.",
-        "V3.0.80 will go live in production after approval.",
-        "V3.0.80 尚未在生产环境上线。",
-        "V3.0.80 可能在生产环境上线。",
-        "V3.0.80 将在生产环境上线。",
+        "V3.0.81 has not gone live in production.",
+        "V3.0.81 cannot go live in production.",
+        "V3.0.81 may go live in production.",
+        "V3.0.81 will go live in production after approval.",
+        "V3.0.81 尚未在生产环境上线。",
+        "V3.0.81 可能在生产环境上线。",
+        "V3.0.81 将在生产环境上线。",
     ],
 )
 def test_archive_accepts_negative_pending_and_future_live_controls(
@@ -599,88 +601,88 @@ def test_archive_accepts_negative_pending_and_future_live_controls(
 
 
 ROUND5_AFFIRMATIVE_CLAIMS = [
-    "Operators can log in, and V3.0.80 was deployed to production.",
-    "Operators can log in if authorized, and V3.0.80 was deployed to production.",
-    "V3.0.80 has already gone live in production.",
+    "Operators can log in, and V3.0.81 was deployed to production.",
+    "Operators can log in if authorized, and V3.0.81 was deployed to production.",
+    "V3.0.81 has already gone live in production.",
 ]
 
 
 ROUND5_NORMATIVE_OR_FUTURE_CLAIMS = [
-    "V3.0.80 should be deployed tomorrow.",
-    "V3.0.80 must be deployed after approval.",
-    "V3.0.80 ought to be deployed tomorrow.",
-    "V3.0.80 应于明日部署至生产环境。",
-    "V3.0.80 必须在验收后部署至生产环境。",
+    "V3.0.81 should be deployed tomorrow.",
+    "V3.0.81 must be deployed after approval.",
+    "V3.0.81 ought to be deployed tomorrow.",
+    "V3.0.81 应于明日部署至生产环境。",
+    "V3.0.81 必须在验收后部署至生产环境。",
 ]
 
 
 ROUND6_AFFIRMATIVE_CLAIMS = [
-    "V3.0.80 was deployed to production because operators can verify it.",
-    "V3.0.80 was deployed to production because operators can verify it if authorized.",
-    "V3.0.80 was deployed to production after admins could approve it.",
-    "V3.0.80 已部署到生产环境且响应正常。",
+    "V3.0.81 was deployed to production because operators can verify it.",
+    "V3.0.81 was deployed to production because operators can verify it if authorized.",
+    "V3.0.81 was deployed to production after admins could approve it.",
+    "V3.0.81 已部署到生产环境且响应正常。",
 ]
 
 
 ROUND6_NEGATIVE_CONDITIONAL_OR_FUTURE_CLAIMS = [
-    "V3.0.80 did not get deployed to production.",
-    "V3.0.80 should be deployed tomorrow because operators can verify it.",
-    "V3.0.80 应于明日部署至生产环境且响应需验证。",
-    "V3.0.80 仅当验收通过才可部署到生产环境。",
+    "V3.0.81 did not get deployed to production.",
+    "V3.0.81 should be deployed tomorrow because operators can verify it.",
+    "V3.0.81 应于明日部署至生产环境且响应需验证。",
+    "V3.0.81 仅当验收通过才可部署到生产环境。",
 ]
 
 
 ROUND7_AFFIRMATIVE_CLAIMS = [
-    "V3.0.80 has gone live.",
-    "V3.0.80 已经部署到生产环境。",
+    "V3.0.81 has gone live.",
+    "V3.0.81 已经部署到生产环境。",
 ]
 
 
 ROUND7_NONAFFIRMATIVE_CLAIMS = [
-    "V3.0.80 could have been deployed to production.",
-    "V3.0.80 will have been deployed to production by Friday.",
-    "V3.0.80 was not even deployed to production.",
-    "V3.0.80 may eventually be deployed to production.",
+    "V3.0.81 could have been deployed to production.",
+    "V3.0.81 will have been deployed to production by Friday.",
+    "V3.0.81 was not even deployed to production.",
+    "V3.0.81 may eventually be deployed to production.",
 ]
 
 
 ROUND8_AFFIRMATIVE_LIVE_CLAIMS = [
-    "V3.0.80 is currently live in production.",
-    "V3.0.80 is presently live in production.",
+    "V3.0.81 is currently live in production.",
+    "V3.0.81 is presently live in production.",
 ]
 
 
 ROUND9_AFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS = [
-    "V3.0.80 has been running in production since Monday.",
-    "V3.0.80 has been in production since Monday.",
-    "V3.0.80 and its assets have been running in production since Monday.",
-    "V3.0.80 had been in production before the rollback.",
-    "V3.0.80 has been continuously running in production since Monday.",
-    "V3.0.80 has been running successfully in production since Monday.",
-    "V3.0.80 has recently been running in production since Monday.",
-    "V3.0.80 has long been running steadily in production.",
-    "V3.0.80 has been running reliably in production.",
+    "V3.0.81 has been running in production since Monday.",
+    "V3.0.81 has been in production since Monday.",
+    "V3.0.81 and its assets have been running in production since Monday.",
+    "V3.0.81 had been in production before the rollback.",
+    "V3.0.81 has been continuously running in production since Monday.",
+    "V3.0.81 has been running successfully in production since Monday.",
+    "V3.0.81 has recently been running in production since Monday.",
+    "V3.0.81 has long been running steadily in production.",
+    "V3.0.81 has been running reliably in production.",
 ]
 
 
 ROUND9_NONAFFIRMATIVE_PERFECT_PRODUCTION_STATE_CLAIMS = [
-    "V3.0.80 has not been continuously running in production.",
-    "V3.0.80 will have been continuously running in production by Friday.",
-    "V3.0.80 may have been running successfully in production.",
-    "V3.0.80 has possibly been running in production.",
-    "V3.0.80 may recently have been running steadily in production.",
-    "V3.0.80 may well have been running in production.",
-    "V3.0.80 could recently have been running in production.",
+    "V3.0.81 has not been continuously running in production.",
+    "V3.0.81 will have been continuously running in production by Friday.",
+    "V3.0.81 may have been running successfully in production.",
+    "V3.0.81 has possibly been running in production.",
+    "V3.0.81 may recently have been running steadily in production.",
+    "V3.0.81 may well have been running in production.",
+    "V3.0.81 could recently have been running in production.",
 ]
 
 ROUND10_NONCLAIM_CONTEXTS = [
-    '> Example: "V3.0.80 was deployed to production."',
-    '`V3.0.80 was deployed to production.`',
-    '示例：“V3.0.80 已在生产环境上线。”',
-    'There is no evidence that V3.0.80 was deployed to production.',
-    'We cannot claim that V3.0.80 has been released to production.',
-    '目前没有证据表明 V3.0.80 已在生产环境上线。',
-    '我们不能声称 V3.0.80 已部署到生产环境。',
+    '> Example: "V3.0.81 was deployed to production."',
+    '`V3.0.81 was deployed to production.`',
+    '示例：“V3.0.81 已在生产环境上线。”',
+    'There is no evidence that V3.0.81 was deployed to production.',
+    'We cannot claim that V3.0.81 has been released to production.',
+    '目前没有证据表明 V3.0.81 已在生产环境上线。',
+    '我们不能声称 V3.0.81 已部署到生产环境。',
 ]
 
 
@@ -809,12 +811,12 @@ def test_archive_rejects_substituted_imported_chunk(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "stale-imported-chunk.zip"
     entry = (
-        'globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={"version":"3.0.80"};\n'
+        'globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={"version":"3.0.81"};\n'
         'import "./stale.js";\n'
     )
     write_release_archive(verifier, archive_path, entry_source=entry)
     with zipfile.ZipFile(archive_path, "a") as archive:
-        archive.writestr("v2-api/app/static/vue/assets/stale.js", "const staleVersion = '3.0.79';\n")
+        archive.writestr("v2-api/app/static/vue/assets/stale.js", "const staleVersion = '3.0.80';\n")
 
     with pytest.raises(AssertionError, match="Vue asset manifest"):
         verifier.verify_package(archive_path)
