@@ -377,6 +377,7 @@ async function loadMatchCandidates() {
     const next = await fetchUnmatchedMatchCandidates(unmatchedId, controller.signal)
     if (!isCurrentCandidateRequest(requestSerial, unmatchedId, controller)) return
     candidates.value = next
+    selectedCandidateKey.value = next.length === 1 ? next[0].candidateKey : ''
     clampCandidatePage()
   } catch (error) {
     if (!isCurrentCandidateRequest(requestSerial, unmatchedId, controller) || isAbortedRequest(error)) return

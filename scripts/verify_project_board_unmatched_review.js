@@ -247,5 +247,15 @@ assertContains(candidateLoad, 'resetCandidateResults()', 'candidate loading must
 const resetIndex = candidateLoad.indexOf('resetCandidateResults()')
 const fetchIndex = candidateLoad.indexOf('fetchUnmatchedMatchCandidates')
 if (resetIndex < 0 || resetIndex > fetchIndex) throw new Error('candidate results must reset before fetching')
+assertContains(
+  dialog,
+  "selectedCandidateKey.value = next.length === 1 ? next[0].candidateKey : ''",
+  'a unique unmatched candidate must be selected by default',
+)
+assertNotContains(
+  section(dialog, 'async function loadMatchCandidates()', 'async function finalizeMatch()'),
+  'finalizeUnmatchedMatch(',
+  'loading candidates must never auto-finalize a match',
+)
 
 console.log('project board unmatched review checks passed')
