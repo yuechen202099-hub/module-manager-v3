@@ -21,6 +21,7 @@ REQUIRED_FILES = [
     "docs/sop/07-rollback-and-incident-review.md",
     "docs/sop/08-business-acceptance-templates.md",
     "ops/releases/README.md",
+    "ops/releases/V3.0.81.md",
     "ops/releases/V3.0.79.md",
     "ops/releases/V3.0.80.md",
     "ops/releases/V3.0.78.md",
@@ -586,6 +587,26 @@ def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
     )
 
 
+def candidate_release_record_is_pending(record: str, version: str) -> None:
+    version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
+    if version_match is None or version_match.group("version") != version:
+        fail(f"{version} release record must have a matching title")
+    required_fields = {
+        "Status": "pending",
+        "Local Verification": "not run",
+        "Package": "pending",
+        "Production Deployment": "pending",
+        "Production Reconciliation": "pending",
+        "Rollback target": "V3.0.80",
+    }
+    for field, value in required_fields.items():
+        matches = re.findall(rf"(?m)^-\s*{re.escape(field)}:\s*{re.escape(value)}\s*$", record)
+        if len(matches) != 1:
+            fail(f"{version} release record must define {field}: {value} exactly once")
+    if release_record_claims_deployed_without_live_evidence(record):
+        fail(f"{version} pending release record must not claim production deployment")
+
+
 def main() -> int:
     missing = [path for path in REQUIRED_FILES if not (ROOT / path).exists()]
     if missing:
@@ -710,8 +731,8 @@ def main() -> int:
     if deployed_production_baseline(agents) != "V3.0.80":
         fail("AGENTS.md deployed production baseline must be V3.0.80 after deployment")
     candidate = release_candidate(agents)
-    if candidate != "V3.0.80":
-        fail("AGENTS.md release candidate must be V3.0.80")
+    if candidate != "V3.0.81":
+        fail("AGENTS.md release candidate must be V3.0.81")
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
 
@@ -720,6 +741,9 @@ def main() -> int:
         fail("V3.0.80 release record status must confirm reviewed, packaged, deployed, and verified in production")
     if release_record_claims_deployed_without_live_evidence(v3080_record):
         fail("V3.0.80 release record claims deployed without complete live evidence")
+
+    v3081_record = read("ops/releases/V3.0.81.md")
+    candidate_release_record_is_pending(v3081_record, candidate)
 
     source_runtime_version = runtime_version_from_artifact(read("v2-web/src/version.json"))
     if f"V{source_runtime_version}" != candidate:

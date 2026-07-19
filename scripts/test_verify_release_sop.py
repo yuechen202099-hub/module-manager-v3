@@ -29,7 +29,29 @@ def test_parses_deployed_baseline_and_release_candidate_independently() -> None:
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
     assert verifier.deployed_production_baseline(agents) == "V3.0.80"
-    assert verifier.release_candidate(agents) == "V3.0.80"
+    assert verifier.release_candidate(agents) == "V3.0.81"
+
+
+def test_accepts_pending_v3081_candidate_release_record() -> None:
+    verifier = load_verifier()
+    record = """# V3.0.81 Production Release Record
+
+- Status: pending
+- Local Verification: not run
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.0.80
+"""
+
+    verifier.candidate_release_record_is_pending(record, "V3.0.81")
+
+
+def test_v3081_candidate_release_record_passes_the_pending_gate() -> None:
+    verifier = load_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.0.81.md").read_text(encoding="utf-8")
+
+    verifier.candidate_release_record_is_pending(record, "V3.0.81")
 
 
 @pytest.mark.parametrize(
@@ -41,8 +63,8 @@ def test_parses_deployed_baseline_and_release_candidate_independently() -> None:
             "deployed_production_baseline",
         ),
         (
-            "- Release candidate: `V3.0.80`.",
             "- Release candidate: `V3.0.81`.",
+            "- Release candidate: `V3.0.82`.",
             "release_candidate",
         ),
     ],
@@ -683,7 +705,7 @@ def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> No
     vite_config = (ROOT / "v2-web" / "vite.config.ts").read_text(encoding="utf-8")
 
     assert source_path.is_file()
-    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.0.80"}
+    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.0.81"}
     assert not legacy_source_path.exists()
     assert "from '../version.json'" in release_notes
     assert "APP_VERSION = versionArtifact.version" in release_notes

@@ -141,6 +141,121 @@ The verifier now normalizes marker labels, permits exactly one status-like asser
 
 No package, deployment, production connection, release cleanup, or deployed-baseline advancement occurred.
 
+## V3.0.81 Task 3 Completion: Build Script Surface
+
+### Supplemental RED
+
+The prior Task 3 RED and targeted version/SOP RED coverage remained valid. The final strict SOP check reproduced the additional missing version surface before this change:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\verify_release_sop.py
+```
+
+```text
+[FAIL] Version update surface scripts/build-client-release.ps1 must match 3.0.81
+```
+
+Root cause: `scripts/build-client-release.ps1` still declared its default package version as `3.0.80`, while all other candidate surfaces and the strict release verifier required `3.0.81`.
+
+### GREEN
+
+Updated only the explicitly authorized `scripts/build-client-release.ps1` candidate surface:
+
+- `[string]$Version = "3.0.81"`
+- its semantic-version example now uses `3.0.81`
+
+Fresh verification after the update:
+
+```text
+v2-api version tests: 5 passed, 139 deselected, 1 existing dependency deprecation warning
+release SOP tests: 260 passed
+scripts/verify_release_sop.py: [OK] release SOP files and references are consistent
+git diff --check: exit 0; only expected Windows LF-to-CRLF warnings
+```
+
+### Final Scope And State
+
+The only newly authorized file outside the original brief is `scripts/build-client-release.ps1`; all other Task 3 changes remain within the brief's Files list. `AGENTS.md` still states deployed production baseline `V3.0.80`, release candidate `V3.0.81`, and branch `production/V3/3.0.81`. `ops/releases/V3.0.81.md` still contains only `pending` or `not run` operational fields and rollback target `V3.0.80`.
+
+### Final Commit
+
+- Implementation commit SHA: `084cc23` (`chore: prepare V3.0.81 production release`)
+
+### Final Concerns
+
+- No package, production deployment, production health check, production reconciliation, or deployed-baseline advancement was performed; the V3.0.81 release record intentionally remains pending/not run.
+- The focused API test emits the pre-existing Starlette/httpx deprecation warning. `git diff --check` emits only the repository's expected Windows LF-to-CRLF warnings.
+
+## V3.0.81 Task 3: Version And Pending Release Record
+
+### Modified Files
+
+- `AGENTS.md`
+- `v2-api/app/main.py`
+- `v2-api/app/services/ops_status.py`
+- `v2-api/pyproject.toml`
+- `v2-api/tests/test_api.py`
+- `v2-web/index.html`
+- `v2-web/package.json`
+- `v2-web/src/version.json`
+- `v2-web/src/components/AppLayout.vue`
+- `v2-web/src/constants/releaseNotes.ts`
+- `RELEASE_MANIFEST.md`
+- `ops/releases/V3.0.81.md`
+- `scripts/verify_release_sop.py`
+- `scripts/test_verify_release_sop.py`
+- `scripts/build-client-release.ps1`
+
+`v2-web/pnpm-lock.yaml` was inspected but has no root package-version field, so it required no semantic change.
+
+### RED
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -k version -q
+```
+
+After making the system-status version test selectable by `-k version`, it failed as expected because runtime code returned `3.0.80` instead of `3.0.81`.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+```
+
+This failed as expected before implementation because the candidate remained `V3.0.80` and `v2-web/src/version.json` remained `3.0.80`. A focused release-record test also failed before the pending-record gate existed, then exposed and covered the parser collision caused by a Chinese `发布` prose prefix.
+
+### GREEN
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -k version -q
+```
+
+`5 passed, 139 deselected, 1 warning`
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest scripts\test_verify_release_sop.py -q
+```
+
+`260 passed`
+
+The version and release-record tests confirm deployed baseline `V3.0.80`, candidate `V3.0.81`, the maintenance branch `production/V3/3.0.81`, the machine-readable runtime version, and a pending-only V3.0.81 record with rollback target `V3.0.80`.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\verify_release_sop.py
+```
+
+Failed: `Version update surface scripts/build-client-release.ps1 must match 3.0.81`.
+
+### Self Review
+
+`git diff --check` passed for the current task diff. The deployed baseline remains `V3.0.80`; the new release note is titled `未匹配长条码候选修复` and states that long barcodes can match existing data groups, while a unique candidate is preselected but still requires administrator confirmation. `ops/releases/V3.0.81.md` contains only pending/not-run operational status and no deployment evidence.
+
+### Commit
+
+Commit SHA: not created. The required SOP verification is failing, so no incomplete candidate commit was made.
+
+### Concern
+
+`scripts/build-client-release.ps1` has `[string]$Version = "3.0.80"`. It is outside the Task 3 brief's allowed Files list, but the strict verifier correctly requires it to match `3.0.81`. Updating that script requires its owner or explicit permission; weakening the verifier would hide a real candidate-version mismatch.
+
 ## Final Parser Normalization Remediation
 
 The full-width dot bypass showed that delimiter-by-delimiter regex expansion could not provide a reliable parser boundary.

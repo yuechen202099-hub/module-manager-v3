@@ -12,6 +12,16 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.0.81',
+    date: '2026-07-19',
+    type: 'BUG 修复',
+    title: '未匹配长条码候选修复',
+    items: [
+      '未匹配长条码现在可以命中现有资料组，避免长条码识别结果被遗漏。',
+      '唯一候选会默认选中，仍需管理员确认后才会生成或并入正式资料组。',
+    ],
+  },
+  {
     version: 'V3.0.80',
     date: '2026-07-13',
     type: '小更新',

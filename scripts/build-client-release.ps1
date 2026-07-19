@@ -1,12 +1,12 @@
 param(
-    [string]$Version = "3.0.80",
+    [string]$Version = "3.0.81",
     [switch]$SkipSmoke
 )
 
 $ErrorActionPreference = "Stop"
 
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
-    throw "Release Version must be a semantic version such as 3.0.80."
+    throw "Release Version must be a semantic version such as 3.0.81."
 }
 
 $root = Split-Path -Parent $PSScriptRoot

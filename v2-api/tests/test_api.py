@@ -2446,7 +2446,7 @@ def test_health_check() -> None:
     assert payload["request_id"] == "test-request"
 
 
-def test_system_status_requires_admin_and_reports_runtime_state() -> None:
+def test_system_status_version_requires_admin_and_reports_runtime_state() -> None:
     admin = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
     reviewer = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
     admin_headers = {"Authorization": f"bearer {admin.json()['data']['access_token']}"}
@@ -2458,7 +2458,7 @@ def test_system_status_requires_admin_and_reports_runtime_state() -> None:
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.0.80"
+    assert data["version"] == "3.0.81"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
