@@ -140,6 +140,53 @@ def test_collect_migrated_photo_ids_accepts_direct_and_merged_evidence() -> None
     }
 
 
+def test_deduplicated_photo_can_satisfy_multiple_review_entries_with_same_source() -> None:
+    evidence = reconcile.build_review_photo_evidence(
+        [
+            {"id": "review-a", "source_url": "https://example.test/photo.jpg?signature=one"},
+            {"id": "review-b", "source_url": "https://example.test/photo.jpg?signature=two"},
+        ]
+    )
+    active_photos = [
+        SimpleNamespace(
+            source_fingerprint="stored-photo",
+            raw_data={},
+            sha256="",
+            storage_type="",
+            storage_key="",
+            source_url_hash=evidence[0]["source_url_hash"],
+        )
+    ]
+
+    assert reconcile.matched_review_photo_ids(active_photos, evidence) == {
+        "review-a",
+        "review-b",
+    }
+    assert reconcile.unique_review_photo_source_count(evidence) == 1
+
+
+def test_photo_evidence_reports_an_unmigrated_distinct_source() -> None:
+    evidence = reconcile.build_review_photo_evidence(
+        [
+            {"id": "review-a", "source_url": "https://example.test/a.jpg"},
+            {"id": "review-b", "source_url": "https://example.test/b.jpg"},
+        ]
+    )
+    active_photos = [
+        SimpleNamespace(
+            source_fingerprint="stored-photo",
+            raw_data={},
+            sha256="",
+            storage_type="",
+            storage_key="",
+            source_url_hash=evidence[0]["source_url_hash"],
+        )
+    ]
+
+    assert reconcile.matched_review_photo_ids(active_photos, evidence) == {"review-a"}
+    assert reconcile.unique_review_photo_source_count(evidence) == 2
+
+
 def test_activate_team_uses_normalized_repository_team_id() -> None:
     token, team_id = reconcile.activate_team(" Default-Team ")
     try:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from contextlib import contextmanager
 from typing import Any
@@ -49,6 +50,108 @@ def collect_migrated_photo_ids(photos: list[Photo] | list[Any]) -> set[str]:
         if merged:
             evidence.add(merged)
     return evidence
+
+
+def _identity_hash(*parts: str) -> str:
+    value = "\0".join(str(part or "").strip() for part in parts)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value.strip("\0") else ""
+
+
+def build_review_photo_evidence(photos: list[dict[str, Any]]) -> list[dict[str, str]]:
+    evidence: list[dict[str, str]] = []
+    for photo in photos:
+        photo_id = str(photo.get("id") or "").strip()
+        source_url = str(
+            photo.get("source_url")
+            or photo.get("image_url")
+            or photo.get("url")
+            or ""
+        ).split("?", 1)[0]
+        storage_type = str(photo.get("storage_type") or "").strip()
+        storage_key = str(photo.get("storage_key") or "").strip()
+        evidence.append(
+            {
+                "id": photo_id,
+                "sha256": str(photo.get("sha256") or "").strip(),
+                "storage_identity_hash": (
+                    _identity_hash(storage_type, storage_key)
+                    if storage_type and storage_key
+                    else ""
+                ),
+                "source_url_hash": _identity_hash(source_url),
+            }
+        )
+    return evidence
+
+
+def unique_review_photo_source_count(evidence: list[dict[str, str]]) -> int:
+    identities = {
+        next(
+            (
+                value
+                for value in (
+                    f"sha256:{item.get('sha256')}" if item.get("sha256") else "",
+                    (
+                        f"storage:{item.get('storage_identity_hash')}"
+                        if item.get("storage_identity_hash")
+                        else ""
+                    ),
+                    f"url:{item.get('source_url_hash')}" if item.get("source_url_hash") else "",
+                    f"id:{item.get('id')}" if item.get("id") else "",
+                )
+                if value
+            ),
+            "",
+        )
+        for item in evidence
+    }
+    identities.discard("")
+    return len(identities)
+
+
+def matched_review_photo_ids(
+    photos: list[Photo] | list[Any],
+    evidence: list[dict[str, str]],
+) -> set[str]:
+    migrated_ids = collect_migrated_photo_ids(photos)
+    sha256_values = {
+        str(getattr(photo, "sha256", "") or "").strip()
+        for photo in photos
+        if str(getattr(photo, "sha256", "") or "").strip()
+    }
+    storage_identities = {
+        _identity_hash(
+            str(getattr(photo, "storage_type", "") or ""),
+            str(getattr(photo, "storage_key", "") or ""),
+        )
+        for photo in photos
+        if str(getattr(photo, "storage_type", "") or "").strip()
+        and str(getattr(photo, "storage_key", "") or "").strip()
+    }
+    source_url_hashes = {
+        str(getattr(photo, "source_url_hash", "") or "").strip()
+        for photo in photos
+        if str(getattr(photo, "source_url_hash", "") or "").strip()
+    }
+    matched: set[str] = set()
+    for item in evidence:
+        photo_id = str(item.get("id") or "")
+        if not photo_id:
+            continue
+        if (
+            photo_id in migrated_ids
+            or (item.get("sha256") and item["sha256"] in sha256_values)
+            or (
+                item.get("storage_identity_hash")
+                and item["storage_identity_hash"] in storage_identities
+            )
+            or (
+                item.get("source_url_hash")
+                and item["source_url_hash"] in source_url_hashes
+            )
+        ):
+            matched.add(photo_id)
+    return matched
 
 
 def _restore_instance_attribute(target: Any, name: str, previous: Any) -> None:
@@ -234,6 +337,13 @@ def dry_run_record(
         }
     )
     require(bool(review_photo_ids), f"review has no photo evidence: {unmatched_id}")
+    review_photo_evidence = build_review_photo_evidence(
+        [dict(photo) for photo in review.get("photos") or [] if str(photo.get("id") or "")]
+    )
+    require(
+        len(review_photo_evidence) == len(review_photo_ids),
+        f"review photo evidence is ambiguous: {unmatched_id}",
+    )
     return {
         "unmatched_id": unmatched_id,
         "status": "open",
@@ -247,6 +357,8 @@ def dry_run_record(
         "has_existing_group": True,
         "review_photo_ids": review_photo_ids,
         "review_photo_count": len(review_photo_ids),
+        "review_photo_evidence": review_photo_evidence,
+        "unique_review_photo_source_count": unique_review_photo_source_count(review_photo_evidence),
         "target_before": target,
     }
 
@@ -287,6 +399,13 @@ def associated_snapshot(team_id: str, unmatched_id: str) -> dict[str, Any] | Non
             }
         )
         require(bool(review_photo_ids), f"associated review has no photo evidence: {unmatched_id}")
+        review_photo_evidence = build_review_photo_evidence(
+            [dict(photo) for photo in review.get("photos") or [] if str(photo.get("id") or "")]
+        )
+        require(
+            len(review_photo_evidence) == len(review_photo_ids),
+            f"associated review photo evidence is ambiguous: {unmatched_id}",
+        )
         target = _target_snapshot(session, team_id, expected_target)
         return {
             "unmatched_id": unmatched_id,
@@ -301,6 +420,8 @@ def associated_snapshot(team_id: str, unmatched_id: str) -> dict[str, Any] | Non
             "has_existing_group": True,
             "review_photo_ids": review_photo_ids,
             "review_photo_count": len(review_photo_ids),
+            "review_photo_evidence": review_photo_evidence,
+            "unique_review_photo_source_count": unique_review_photo_source_count(review_photo_evidence),
             "target_before": target,
         }
 
@@ -317,6 +438,7 @@ def verify_associated_in_session(
     unmatched_id = str(snapshot["unmatched_id"])
     target_group_id = str(snapshot["target_group_id"])
     review_photo_ids = list(snapshot["review_photo_ids"])
+    review_photo_evidence = list(snapshot["review_photo_evidence"])
     require(bool(review_photo_ids), f"review has no photo evidence: {unmatched_id}")
 
     record = session.scalar(
@@ -358,7 +480,7 @@ def verify_associated_in_session(
             )
         ).all()
     )
-    migrated_fingerprints = collect_migrated_photo_ids(active_photos)
+    migrated_fingerprints = matched_review_photo_ids(active_photos, review_photo_evidence)
     require(
         set(review_photo_ids).issubset(migrated_fingerprints),
         "not all review photo evidence migrated",
@@ -422,7 +544,8 @@ def verify_associated_in_session(
         "expected_version": int(snapshot["expected_version"]),
         "review_photo_ids": review_photo_ids,
         "migrated_review_photo_count": len(review_photo_ids),
-        "migrated_photo_evidence_ids": sorted(set(review_photo_ids) & migrated_fingerprints),
+        "migrated_photo_evidence_ids": sorted(migrated_fingerprints),
+        "unique_review_photo_source_count": int(snapshot["unique_review_photo_source_count"]),
         "target_photo_count_before": int(snapshot["target_before"]["photo_count"]),
         "target_photo_count_after": int(target_after["photo_count"]),
         "audit_id": str(audit.id),
