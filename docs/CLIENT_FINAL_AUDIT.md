@@ -36,7 +36,7 @@
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-结果：不沿用历史测试计数；本轮发布校验测试结果写入 `ops/releases/V3.0.80.md`。
+结果：不沿用历史测试计数；本轮发布校验测试结果写入 `ops/releases/V3.0.81.md`。
 
 ```powershell
 .\scripts\run-client-demo.ps1 -NoOpen
