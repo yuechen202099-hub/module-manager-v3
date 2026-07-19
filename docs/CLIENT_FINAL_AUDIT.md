@@ -1,8 +1,8 @@
-# V3.0.80 甲方最终审计
+# V3.0.82 甲方最终审计
 
 ## 审计结论
 
-当前文档记录 V3.0.80 待发布服务器包的客户侧审计准备：具备登录、角色入口、项目看板、任务领取、审阅工作台、临时审阅、演示自检、服务器发布包和部署准备材料。该状态不代表 V3.0.80 已部署或已在生产环境运行。
+V3.0.82 已于 2026-07-19 完成生产部署和线上验收。客户侧功能、发布包、生产备份、数据修复、独立复审和健康检查证据统一记录在 `ops/releases/V3.0.82.md`。
 
 最终打款前仍建议由项目负责人在浏览器里按演示脚本走一遍真实视觉确认，重点看页面高级感、现场数据展示和甲方关注的业务口径。
 
@@ -22,7 +22,7 @@
 | 甲方签收清单 | `docs/CLIENT_SIGNOFF_CHECKLIST.md`，列出可现场确认并签字的验收项 | 已完成 |
 | 页面高级感 | 登录页重做，主页面固定导航清理，统一工作台视觉语言 | 已完成，需人眼最终确认 |
 | 服务器部署准备 | `docs/SERVER_DEPLOYMENT_PREP.md`、Nginx 配置、systemd 服务、生产账号注意事项 | 已完成 |
-| 发布包 | `build/server-release/module-manager-v2-server-3.0.82.zip` | 待发布 |
+| 发布包 | `build/server-release/module-manager-v2-server-3.0.82.zip` | 已发布并验包 |
 
 ## 已运行验证
 
@@ -30,13 +30,14 @@
 .\scripts\run-client-acceptance-gate.ps1 -Version 3.0.82
 ```
 
-结果：部署前按 V3.0.82 机器版本源执行；最终结果写入 `ops/releases/V3.0.82.md`。该记录在生产执行完成前保持待发布，不填写虚构的上线证据。
+结果：最终发布门禁、生产部署和线上验收结果见 `ops/releases/V3.0.82.md`。
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
+cd .\v2-api
+..\.venv\Scripts\python.exe -m pytest tests\test_local_simulation.py tests\test_state_repository.py ..\.superpowers\sdd\test_production_v3081_reconcile.py -q
 ```
 
-结果：不沿用历史测试计数；本轮发布校验测试结果写入 `ops/releases/V3.0.82.md`。
+结果：本轮维护脚本及相关仓储回归 `298 passed, 1 warning`，独立复审 `Critical=0`、`Important=0`。
 
 ```powershell
 .\scripts\run-client-demo.ps1 -NoOpen
@@ -60,7 +61,7 @@
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.0.82.zip
 ```
 
-结果：待发布包生成后执行；当前不填写发布包存在、验包或部署完成的虚假证据。
+结果：通过；发布包大小 `1,440,750` bytes，SHA256 为 `73BE7B187529CF5C88A16E3020716C0A2BEA3194E306BDA30A7DD66509E2AC2C`。
 
 ## 发布包
 
@@ -77,11 +78,11 @@ build/server-release/module-manager-v2-server-3.0.82.zip
 5. 进入 `/project-board` 的扫码未匹配清单，打开一条记录完成临时审阅、修正、重新识别和人工确认。
 6. 管理员确认候选终端后完成匹配，才生成或并入正式资料组；审阅员不执行最终匹配。
 7. 打开 `/sync-config`，说明供应商 API 不可用，第一版以表格导入为准。
-8. 展示 `docs/SERVER_DEPLOYMENT_PREP.md`，说明下一步服务器部署准备。
+8. 展示 `ops/releases/V3.0.82.md`，核对生产备份、发布目录、回滚目录和线上健康检查。
 
 ## 剩余风险
 
-- 当前是本地演示交付版，不等同于公网生产部署版。
-- 生产环境必须更换真实账号、密钥、HTTPS、数据库备份策略。
-- 人工补图生产部署建议接 OSS/S3，避免长期依赖本地静态目录。
+- V3.0.82 当前已是公网生产部署版；本地演示脚本仅作为验收辅助，不代表另一套生产基线。
+- 生产账号、密钥、HTTPS 和数据库备份已纳入生产配置与安全审计，后续变更必须按生产 SOP 执行。
+- 人工补图长期存储仍建议接 OSS/S3，减少对本地静态目录的依赖。
 - 页面视觉高级感已做代码层打磨，但最终仍应以负责人现场浏览器观感为准。

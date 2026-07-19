@@ -2,10 +2,13 @@
 
 ## Package
 
-- Package: pending
-- Name: pending
+- Package: `build/server-release/module-manager-v2-server-3.0.82.zip`
+- Name: `module-manager-v2-server-3.0.82.zip`
 - Version: 3.0.82
-- Generated at: pending
+- Generated at: 2026-07-19 13:22:21 +08:00
+- Size: 1,440,750 bytes
+- SHA256: `73BE7B187529CF5C88A16E3020716C0A2BEA3194E306BDA30A7DD66509E2AC2C`
+- 记录口径：当前工作树文件为部署后发布账本；ZIP 内副本为打包时清单，不包含压缩包自身哈希。
 
 ## Included
 
