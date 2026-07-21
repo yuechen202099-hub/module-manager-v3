@@ -8,6 +8,7 @@ import {
   downloadConstructionPriorityTemplate,
   previewConstructionPriorityImport,
 } from '@/api/services'
+import { createConstructionPriorityImportSession } from '@/api/constructionPriorityImportState.mjs'
 import type { ConstructionPriorityImportResult } from '@/api/types'
 
 const props = defineProps<{ modelValue: boolean }>()
@@ -24,6 +25,7 @@ const errorMessage = ref('')
 const previewing = ref(false)
 const confirming = ref(false)
 const downloadingTemplate = ref(false)
+const requestSession = createConstructionPriorityImportSession()
 
 const items = computed(() => preview.value?.items || [])
 const totalPages = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)))
@@ -46,6 +48,7 @@ function statusLabel(status: string) {
 }
 
 function reset() {
+  requestSession.invalidate()
   selectedFile.value = null
   preview.value = null
   currentPage.value = 1
@@ -55,10 +58,12 @@ function reset() {
 }
 
 function closeDialog() {
+  reset()
   emit('update:modelValue', false)
 }
 
 function selectFile(file: UploadFile) {
+  requestSession.invalidate()
   selectedFile.value = file.raw || null
   preview.value = null
   currentPage.value = 1
@@ -80,36 +85,44 @@ async function downloadTemplate() {
 
 async function previewImport() {
   if (!selectedFile.value || previewing.value || confirming.value) return
+  const requestToken = requestSession.begin()
   previewing.value = true
   errorMessage.value = ''
   try {
-    preview.value = await previewConstructionPriorityImport(selectedFile.value)
+    const result = await previewConstructionPriorityImport(selectedFile.value)
+    if (!requestSession.isCurrent(requestToken)) return
+    preview.value = result
     currentPage.value = 1
   } catch (error) {
+    if (!requestSession.isCurrent(requestToken)) return
     errorMessage.value = error instanceof Error ? error.message : '预览失败'
   } finally {
+    if (!requestSession.isCurrent(requestToken)) return
     previewing.value = false
   }
 }
 
 async function confirmImport() {
   if (!selectedFile.value || !canConfirm.value) return
+  const requestToken = requestSession.begin()
   confirming.value = true
   errorMessage.value = ''
   try {
     const result = await confirmConstructionPriorityImport(selectedFile.value)
-    if (result.confirmed) emit('imported')
+    if (requestSession.isCurrent(requestToken) && result.confirmed) emit('imported')
   } catch (error) {
+    if (!requestSession.isCurrent(requestToken)) return
     errorMessage.value = error instanceof Error ? error.message : '确认导入失败'
   } finally {
+    if (!requestSession.isCurrent(requestToken)) return
     confirming.value = false
   }
 }
 
 watch(
   () => props.modelValue,
-  (visible) => {
-    if (!visible) reset()
+  () => {
+    reset()
   },
 )
 

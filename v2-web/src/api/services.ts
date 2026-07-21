@@ -1,5 +1,6 @@
 import { mockProjects, mockTasks, mockUser } from './mock'
 import { priorityRequestBody } from './claimTasksState.mjs'
+import { parseContentDispositionFilename } from './constructionPriorityImportState.mjs'
 import type {
   AuthConfig,
   ConstructionExceptionOrder,
@@ -2371,8 +2372,7 @@ type DeliveryExportProgress = {
 }
 
 function filenameFromDisposition(disposition: string, fallbackName: string) {
-  const match = disposition.match(/filename="?([^"]+)"?/)
-  return match?.[1] || fallbackName
+  return parseContentDispositionFilename(disposition, fallbackName)
 }
 
 function triggerBrowserDownload(blob: Blob, filename: string) {
