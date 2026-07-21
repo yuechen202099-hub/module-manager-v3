@@ -17,8 +17,11 @@ import type {
   RegionScanRequest,
   RegionScanResult,
   ReplacementRecord,
+  ReviewGroupPage,
+  ReviewGroupQuery,
   ReviewPhoto,
   ReviewTask,
+  TaskSnapshot,
   TaskStatusSummary,
   TaskStatus,
   UnmatchedMatchCandidate,
@@ -125,6 +128,18 @@ type BackendTask = {
   installer_distribution?: Array<{ installer?: string; group_count?: number; share?: number }>
 }
 
+type BackendTaskSnapshot = {
+  team_id?: string
+  items?: BackendTask[]
+  version?: string
+  generated_at?: string
+  cache?: {
+    source?: string
+    stale?: boolean
+    refresh_interval_seconds?: number
+  }
+}
+
 type BackendTaskStatusSummary = {
   version?: string
   generated_at?: string
@@ -210,6 +225,14 @@ type BackendGroup = {
   photo_category_total_count?: number
   photo_category_complete?: boolean
   photos?: BackendPhoto[]
+}
+
+type BackendReviewGroupPage = {
+  total?: number
+  items?: BackendGroup[]
+  status_counts?: Partial<Record<ReviewGroupQuery['status'], number>>
+  limit?: number
+  offset?: number
 }
 
 type BackendConstructionExceptionOrder = {
@@ -1105,6 +1128,22 @@ export async function fetchTasks(options: { summary?: boolean } = {}): Promise<R
   return (data.items || []).map(mapTask)
 }
 
+export async function fetchTaskSnapshot(force = false): Promise<TaskSnapshot> {
+  const suffix = force ? '?refresh=true' : ''
+  const data = await api<BackendTaskSnapshot>(`/local-test/tasks/snapshot${suffix}`)
+  return {
+    teamId: data.team_id || '',
+    items: (data.items || []).map(mapTask),
+    version: data.version || '',
+    generatedAt: data.generated_at || '',
+    cache: {
+      source: data.cache?.source || '',
+      stale: Boolean(data.cache?.stale),
+      refreshIntervalSeconds: Number(data.cache?.refresh_interval_seconds || 0),
+    },
+  }
+}
+
 export async function fetchTaskStatus(): Promise<TaskStatusSummary> {
   const data = await api<BackendTaskStatusSummary>('/local-test/tasks/status')
   return mapTaskStatusSummary(data || {})
@@ -1147,6 +1186,34 @@ export async function fetchTaskGroups(taskId = '1'): Promise<MaterialGroup[]> {
     `/local-test/tasks/${encodeURIComponent(taskId)}/groups?limit=1000&scan_only=false&summary=true`,
   )
   return (data.items || []).map(mapGroup)
+}
+
+export async function fetchReviewTaskGroups(
+  taskId: string,
+  options: ReviewGroupQuery,
+): Promise<ReviewGroupPage> {
+  const params = new URLSearchParams({
+    limit: '20',
+    offset: String(options.offset),
+    review_status: options.status,
+    query: options.query,
+  })
+  const data = await api<BackendReviewGroupPage>(
+    `/local-test/tasks/${encodeURIComponent(taskId)}/review-groups?${params}`,
+  )
+  return {
+    total: Number(data.total || 0),
+    items: (data.items || []).map(mapGroup),
+    statusCounts: {
+      all: Number(data.status_counts?.all || 0),
+      reviewable: Number(data.status_counts?.reviewable || 0),
+      exception: Number(data.status_counts?.exception || 0),
+      archived: Number(data.status_counts?.archived || 0),
+      unconstructed: Number(data.status_counts?.unconstructed || 0),
+    },
+    limit: Number(data.limit || 20),
+    offset: Number(data.offset || 0),
+  }
 }
 
 export async function searchGroups(options: { query?: string; terminal?: string; limit?: number; offset?: number }): Promise<GroupSearchResult> {

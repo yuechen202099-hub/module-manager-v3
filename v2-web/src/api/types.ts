@@ -134,6 +134,18 @@ export type ReviewTask = {
   installerDistribution?: Array<{ installer: string; groupCount: number; share: number }>
 }
 
+export type TaskSnapshot = {
+  teamId: string
+  items: ReviewTask[]
+  version: string
+  generatedAt: string
+  cache: {
+    source: string
+    stale: boolean
+    refreshIntervalSeconds: number
+  }
+}
+
 export type TaskStatusSummary = {
   version: string
   generatedAt: string
@@ -215,6 +227,22 @@ export type MaterialGroup = {
   photoCategoryTotalCount?: number
   photoCategoryComplete?: boolean
   photos?: ReviewPhoto[]
+}
+
+export type ReviewGroupStatus = 'all' | 'reviewable' | 'exception' | 'archived' | 'unconstructed'
+
+export type ReviewGroupQuery = {
+  offset: number
+  status: ReviewGroupStatus
+  query: string
+}
+
+export type ReviewGroupPage = {
+  total: number
+  items: MaterialGroup[]
+  statusCounts: Record<ReviewGroupStatus, number>
+  limit: number
+  offset: number
 }
 
 export type GroupSearchResult = {
