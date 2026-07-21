@@ -68,6 +68,7 @@ assertContains(hallRegionScan, 'regionScanLoading.value', 'task hall region scan
 assertContains(hallRegionScan, 'requestSerial !== regionScanSerial', 'task hall region scan must reject stale responses')
 assertContains(hallRegionScan, 'activeGroup.value?.id !== groupId', 'task hall region scan must bind the current group')
 assertContains(hallRegionScan, 'selectedPhotoId.value !== photoId', 'task hall region scan must bind the current photo')
+assertContains(hallRegionScan, 'regionScanDialogActive = true', 'recognized candidates must activate one confirmation cycle')
 assertContains(hallRegionScan, 'finally', 'task hall region scan must restore inspector state in finally')
 assertContains(hallRegionScan, 'finishSubmission()', 'task hall region scan must finish inspector submission')
 for (const forbidden of ['saveReview(', 'rescanSelectedPhotoBarcode(', 'confirmSelectedPhotoBarcode(', 'archiveSelectedPhoto(']) {
@@ -75,7 +76,18 @@ for (const forbidden of ['saveReview(', 'rescanSelectedPhotoBarcode(', 'confirmS
 }
 const hallRegionReplace = section(hall, 'function replaceRegionScanDraft()', 'function closeRegionScanDialog')
 assertContains(hallRegionReplace, 'metadataDraft[field] =', 'replacement must update only the mapped task hall draft field')
+assertContains(hallRegionReplace, 'closeRegionScanDialog()', 'replacement must close through the serial-invalidating path')
 assertNotContains(hallRegionReplace, 'barcodeCheckStatus', 'replacement must not modify barcode scan status')
+assertContains(hall, 'let regionScanDialogActive = false', 'task hall confirmation needs an active-cycle guard')
+const hallRegionClose = section(hall, 'function closeRegionScanDialog()', 'function invalidateRegionScan')
+assertContains(hallRegionClose, 'if (!regionScanDialogActive) return', 'duplicate closed events must be side-effect free')
+assertContains(hallRegionClose, 'regionScanDialogActive = false', 'closing must consume the active confirmation cycle')
+assertContains(hallRegionClose, 'regionScanSerial += 1', 'closing must invalidate the captured scan serial')
+const hallRegionInvalidate = section(hall, 'function invalidateRegionScan()', 'function selectPhoto')
+assertContains(hallRegionInvalidate, 'regionScanDialogActive = false', 'context invalidation must consume the active confirmation cycle')
+assertNotContains(hallRegionInvalidate, 'closeRegionScanDialog()', 'context invalidation must not trigger duplicate close side effects')
+assertContains(hall, '@click="closeRegionScanDialog">取消', 'cancel must use the serial-invalidating close path')
+assertContains(hall, '@closed="closeRegionScanDialog"', 'system close must use the serial-invalidating close path')
 if (/barcodeCheckStatus\s*=(?!=)/.test(hall)) throw new Error('task hall must not assign barcode scan status')
 
 console.log('Task hall region scan verification passed.')

@@ -158,6 +158,7 @@ function resetSelection() {
   selectionStart.value = null
   selectionEnd.value = null
   selectedRegion.value = null
+  barcodeType.value = null
   mode.value = 'view'
 }
 
@@ -237,6 +238,7 @@ function requestScan() {
 }
 
 function finishSubmission() {
+  barcodeType.value = null
   if (mode.value === 'submitting' && selectedRegion.value) mode.value = 'ready'
 }
 

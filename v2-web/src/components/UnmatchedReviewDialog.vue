@@ -54,6 +54,7 @@ let imageRequestSerial = 0
 let candidateRequestSerial = 0
 let mutationSessionSerial = 0
 let regionScanSerial = 0
+let regionScanDialogActive = false
 let candidateAbortController: AbortController | null = null
 let loadedUnmatchedId = ''
 
@@ -288,6 +289,7 @@ async function handleRegionScan(request: RegionScanRequest) {
     regionScanDialog.values = values
     regionScanDialog.selectedValue = values.length === 1 ? values[0] : ''
     regionScanDialog.method = result.method
+    regionScanDialogActive = true
     regionScanDialog.open = true
   } catch (error) {
     if (
@@ -312,6 +314,9 @@ function replaceRegionScanDraft() {
 }
 
 function closeRegionScanDialog() {
+  if (!regionScanDialogActive) return
+  regionScanDialogActive = false
+  regionScanSerial += 1
   regionScanDialog.open = false
   regionScanDialog.values = []
   regionScanDialog.selectedValue = ''
@@ -320,7 +325,11 @@ function closeRegionScanDialog() {
 
 function invalidateRegionScan() {
   regionScanSerial += 1
-  closeRegionScanDialog()
+  regionScanDialogActive = false
+  regionScanDialog.open = false
+  regionScanDialog.values = []
+  regionScanDialog.selectedValue = ''
+  unmatchedRegionInspector.value?.resetSelection()
 }
 
 function openImagePreview() {

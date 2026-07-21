@@ -113,6 +113,7 @@ let lastInteractionAt = Date.now()
 let groupRequestSeq = 0
 let imageRequestSeq = 0
 let regionScanSerial = 0
+let regionScanDialogActive = false
 const BACKGROUND_REFRESH_INTERVAL_MS = 60_000
 
 const metadataDraft = reactive({
@@ -1007,6 +1008,7 @@ async function handleRegionScan(request: RegionScanRequest) {
     regionScanDialog.values = values
     regionScanDialog.selectedValue = values.length === 1 ? values[0] : ''
     regionScanDialog.method = result.method
+    regionScanDialogActive = true
     regionScanDialog.open = true
   } catch (error) {
     if (
@@ -1030,6 +1032,9 @@ function replaceRegionScanDraft() {
 }
 
 function closeRegionScanDialog() {
+  if (!regionScanDialogActive) return
+  regionScanDialogActive = false
+  regionScanSerial += 1
   regionScanDialog.open = false
   regionScanDialog.values = []
   regionScanDialog.selectedValue = ''
@@ -1038,7 +1043,11 @@ function closeRegionScanDialog() {
 
 function invalidateRegionScan() {
   regionScanSerial += 1
-  closeRegionScanDialog()
+  regionScanDialogActive = false
+  regionScanDialog.open = false
+  regionScanDialog.values = []
+  regionScanDialog.selectedValue = ''
+  regionInspector.value?.resetSelection()
 }
 
 function selectPhoto(photo: ReviewPhoto | null) {
