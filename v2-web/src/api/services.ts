@@ -3,6 +3,7 @@ import { priorityRequestBody } from './claimTasksState.mjs'
 import type {
   AuthConfig,
   ConstructionExceptionOrder,
+  ConstructionPriorityImportResult,
   ConstructionUploadPayload,
   CurrentUser,
   GroupSearchResult,
@@ -1460,6 +1461,39 @@ export async function setConstructionTaskPriority(taskId: string, priority: bool
     body: JSON.stringify(priorityRequestBody(priority)),
   })
   return mapTask(task)
+}
+
+export async function downloadConstructionPriorityTemplate(): Promise<void> {
+  const response = await fetchWithAuth('/local-test/construction/priority-template', { headers: authHeaders() })
+  if (!response.ok) throw new Error(response.statusText || '下载模板失败')
+  const blob = await response.blob()
+  triggerBrowserDownload(
+    blob,
+    filenameFromDisposition(response.headers.get('Content-Disposition') || '', '终端优先施工导入模板.xlsx'),
+  )
+}
+
+async function submitConstructionPriorityImport(file: File, confirm: boolean): Promise<ConstructionPriorityImportResult> {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await fetchWithAuth(`/local-test/construction/priority-import?confirm=${confirm ? 'true' : 'false'}`, {
+    method: 'POST',
+    headers: formHeaders(),
+    body: form,
+  })
+  const payload = (await response.json()) as ApiEnvelope<ConstructionPriorityImportResult>
+  if (!response.ok || payload.error) throw createApiRequestError(response, payload)
+  if (!payload.data) throw new Error('导入响应为空')
+  if (confirm) emitDataMutated('form:/local-test/construction/priority-import')
+  return payload.data
+}
+
+export function previewConstructionPriorityImport(file: File): Promise<ConstructionPriorityImportResult> {
+  return submitConstructionPriorityImport(file, false)
+}
+
+export function confirmConstructionPriorityImport(file: File): Promise<ConstructionPriorityImportResult> {
+  return submitConstructionPriorityImport(file, true)
 }
 
 export async function assignConstructionTask(

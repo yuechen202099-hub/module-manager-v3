@@ -154,6 +154,32 @@ export type TaskStatusSummary = {
   groups: number
 }
 
+export type ConstructionPriorityImportStatus =
+  | 'valid'
+  | 'duplicate'
+  | 'conflict'
+  | 'unknown'
+  | 'completed'
+  | 'unchanged'
+  | 'malformed'
+
+export type ConstructionPriorityImportCounts = Record<ConstructionPriorityImportStatus, number>
+
+export type ConstructionPriorityImportItem = {
+  row_number: number
+  terminal: string
+  priority: boolean | null
+  status: ConstructionPriorityImportStatus
+  reason?: string
+  task_id?: string | number
+}
+
+export type ConstructionPriorityImportResult = {
+  counts: ConstructionPriorityImportCounts
+  items: ConstructionPriorityImportItem[]
+  confirmed: boolean
+}
+
 export type MaterialGroup = {
   id: string
   taskId: string | number

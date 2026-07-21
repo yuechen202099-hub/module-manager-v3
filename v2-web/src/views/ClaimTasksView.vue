@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { MoreFilled, Refresh, Search, Unlock } from '@element-plus/icons-vue'
+import { MoreFilled, Refresh, Search, Unlock, Upload } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
@@ -24,6 +24,7 @@ import {
   hydrateClaimTasksCache,
   replaceTaskById,
 } from '@/api/claimTasksState.mjs'
+import ConstructionPriorityImportDialog from '@/components/ConstructionPriorityImportDialog.vue'
 import type { ReviewTask, TaskStatusSummary, UserAccount } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
@@ -36,6 +37,7 @@ const assignmentTargetTask = ref<ReviewTask | null>(null)
 const assignmentConstructor = ref('')
 const assignmentSubmitting = ref(false)
 const priorityUpdatingTaskId = ref('')
+const constructionPriorityImportVisible = ref(false)
 const tasks = ref<ReviewTask[]>([])
 const accountUsers = ref<UserAccount[]>([])
 const loadingAccounts = ref(false)
@@ -367,6 +369,14 @@ function refreshTasks() {
   void loadTasks({ force: true })
 }
 
+function handleConstructionPriorityImported() {
+  constructionPriorityImportVisible.value = false
+  taskRequestEpoch.invalidate()
+  taskStatusVersion.value = ''
+  if (typeof window !== 'undefined') sessionStorage.removeItem(claimTasksCacheKey())
+  void loadTasks({ force: true })
+}
+
 async function loadAccounts() {
   if (!isAdmin.value || loadingAccounts.value) return
   loadingAccounts.value = true
@@ -601,6 +611,9 @@ onUnmounted(() => {
         <ElButton v-if="isAdmin" :icon="Unlock" type="warning" plain :loading="releasingAll" @click="releaseAll">
           收回全部
         </ElButton>
+        <ElButton v-if="isAdmin" :icon="Upload" type="primary" plain @click="constructionPriorityImportVisible = true">
+          批量标记
+        </ElButton>
       </div>
     </div>
 
@@ -809,5 +822,7 @@ onUnmounted(() => {
         <ElButton type="primary" :loading="assignmentSubmitting" @click="submitAssignment">确认指派</ElButton>
       </template>
     </ElDialog>
+
+    <ConstructionPriorityImportDialog v-if="isAdmin" v-model="constructionPriorityImportVisible" @imported="handleConstructionPriorityImported" />
   </section>
 </template>
