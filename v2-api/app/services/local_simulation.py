@@ -5489,7 +5489,7 @@ def task_installer_distribution(task_groups: list[dict[str, Any]]) -> list[dict[
     ]
 
 
-def list_tasks() -> list[dict[str, Any]]:
+def list_tasks(*, include_installer_distribution: bool = True) -> list[dict[str, Any]]:
     state = get_state()
     groups_by_task: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for group in state["groups"]:
@@ -5506,7 +5506,9 @@ def list_tasks() -> list[dict[str, Any]]:
         task["address"] = first_task_address(task_groups)
         task["address_search_text"] = task_address_search_text(task_groups)
         task["meter_search_text"] = task_meter_search_text(task_groups)
-        task["installer_distribution"] = task_installer_distribution(task_groups)
+        task["installer_distribution"] = (
+            task_installer_distribution(task_groups) if include_installer_distribution else []
+        )
     tasks = [construction_task_response(task) for task in state["tasks"]]
     return sorted(
         tasks,

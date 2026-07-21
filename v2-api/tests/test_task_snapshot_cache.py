@@ -100,3 +100,36 @@ def test_failed_refresh_keeps_previous_snapshot(tmp_path) -> None:
     result = cache.get("team-a", lambda team_id: snapshot(team_id, 2))
     assert result["version"] == "1"
 
+
+def test_force_refresh_waits_when_background_snapshot_is_invalidated(tmp_path) -> None:
+    cache = TaskSnapshotCache(cache_root=tmp_path, interval_seconds=60, enabled=True)
+    cache.refresh("team-a", lambda team_id: snapshot(team_id, 1))
+    started = threading.Event()
+    release = threading.Event()
+
+    def background_builder(team_id: str) -> dict:
+        started.set()
+        release.wait(timeout=2)
+        return snapshot(team_id, 2)
+
+    cache.refresh_async("team-a", background_builder)
+    assert started.wait(timeout=1)
+    cache.invalidate("team-a")
+    outcome: dict[str, object] = {}
+
+    def force_refresh() -> None:
+        try:
+            outcome["result"] = cache.refresh("team-a", lambda team_id: snapshot(team_id, 3))
+        except Exception as exc:  # pragma: no cover - asserted below
+            outcome["error"] = exc
+
+    waiter = threading.Thread(target=force_refresh)
+    waiter.start()
+    release.set()
+    waiter.join(timeout=2)
+
+    assert "error" not in outcome
+    result = outcome["result"]
+    assert isinstance(result, dict)
+    assert result["team_id"] == "team-a"
+    assert result["version"] in {"2", "3"}

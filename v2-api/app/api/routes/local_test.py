@@ -44,6 +44,7 @@ from app.services.ops_status import build_system_status
 from app.services.construction_priority_import import PriorityImportError, build_priority_template, parse_priority_workbook
 from app.services.account_store import get_user
 from app.services.project_board_cache import project_board_summary_cache
+from app.services.task_snapshot_cache import build_task_snapshot, task_snapshot_cache
 from app.services.photo_storage import (
     is_blocked_remote_image_address,
     normalize_suffix,
@@ -2360,6 +2361,17 @@ def audit_log(
 @router.get("/tasks")
 def tasks(request: Request, summary: bool = Query(default=False)):
     return ok(request, {"items": state_repository().list_tasks(summary_only=summary)})
+
+
+@router.get("/tasks/snapshot")
+def task_snapshot(request: Request, refresh: bool = Query(default=False)):
+    forbid_constructor_project_board(request)
+    team_id = current_team_id()
+    builder = lambda snapshot_team_id: build_task_snapshot(snapshot_team_id, state_repository)
+    return ok(
+        request,
+        task_snapshot_cache.get(team_id, builder, force_refresh=refresh),
+    )
 
 
 @router.get("/tasks/status")

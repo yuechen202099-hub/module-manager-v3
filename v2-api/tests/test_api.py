@@ -2987,6 +2987,36 @@ def test_project_summary_route_reuses_server_snapshot_until_forced(monkeypatch, 
     assert calls == 2
 
 
+def test_task_snapshot_route_reuses_cache_and_forced_refreshes(monkeypatch, tmp_path) -> None:
+    from app.services.task_snapshot_cache import TaskSnapshotCache
+
+    calls = 0
+
+    class FakeRepository:
+        def list_tasks(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            assert kwargs == {"include_installer_distribution": False}
+            return [{"id": str(calls), "terminal": "T-1"}]
+
+    monkeypatch.setattr(
+        local_test,
+        "task_snapshot_cache",
+        TaskSnapshotCache(cache_root=tmp_path, interval_seconds=60, enabled=True),
+        raising=False,
+    )
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+
+    first = client.get("/local-test/tasks/snapshot")
+    second = client.get("/local-test/tasks/snapshot")
+    forced = client.get("/local-test/tasks/snapshot?refresh=true")
+
+    assert first.status_code == second.status_code == forced.status_code == 200
+    assert first.json()["data"]["version"] == second.json()["data"]["version"]
+    assert forced.json()["data"]["version"] != first.json()["data"]["version"]
+    assert calls == 2
+
+
 def test_photo_barcode_review_groups_are_paginated_and_include_archived_groups() -> None:
     headers = demo_admin_headers()
     seeded = seed_photo_barcode_review_groups(count=3)

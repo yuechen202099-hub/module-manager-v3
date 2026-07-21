@@ -950,7 +950,11 @@ def test_postgres_active_photo_statistics_match_payload_and_status_priority(
 def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository.settings, "state_backend", "json")
     monkeypatch.setattr(repository.local_simulation, "get_state", lambda: {"summary": {"groups": 2}, "paths": {}})
-    monkeypatch.setattr(repository.local_simulation, "list_tasks", lambda: [{"id": 7, "terminal": "T-007"}])
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "list_tasks",
+        lambda **_kwargs: [{"id": 7, "terminal": "T-007"}],
+    )
     monkeypatch.setattr(
         repository.local_simulation,
         "list_unmatched_records",
@@ -4517,8 +4521,16 @@ def test_postgres_list_tasks_board_view_omits_large_search_text() -> None:
         def _session(self):
             return FakeSession()
 
-        def _task_stats_map(self, session, team_id: str, *, include_search_text: bool = True):
+        def _task_stats_map(
+            self,
+            session,
+            team_id: str,
+            *,
+            include_search_text: bool = True,
+            include_installer_distribution: bool = True,
+        ):
             assert include_search_text is False
+            assert include_installer_distribution is True
             return {
                 7: {
                     "total_groups": 4,
@@ -4539,6 +4551,49 @@ def test_postgres_list_tasks_board_view_omits_large_search_text() -> None:
     assert rows[0]["address_search_text"] == ""
     assert rows[0]["meter_search_text"] == ""
     assert rows[0]["installer_distribution"][0]["installer"] == "张三"
+
+
+def test_postgres_list_tasks_can_skip_installer_distribution() -> None:
+    task = SimpleNamespace(
+        id="task-uuid",
+        legacy_id=7,
+        terminal="T-007",
+        title="终端 T-007",
+        status=repository.TaskStatus.PUBLISHED,
+        review_claimed_by="",
+        claimed_at=None,
+        released_at=None,
+        construction_enabled=True,
+        construction_claimed_by="",
+        construction_claimed_at=None,
+    )
+    calls: list[dict] = []
+
+    class FakeScalars:
+        def all(self):
+            return [task]
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalars(self, _statement):
+            return FakeScalars()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+        def _task_stats_map(self, _session, _team_id: str, **kwargs):
+            calls.append(kwargs)
+            return {}
+
+    TestPostgresRepository().list_tasks(include_installer_distribution=False)
+
+    assert calls == [{"include_search_text": True, "include_installer_distribution": False}]
 
 
 def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:

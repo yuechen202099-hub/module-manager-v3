@@ -760,6 +760,31 @@ def test_task_installer_distribution_ignores_inactive_photo_creator_before_fallb
     assert distribution == [{"installer": "raw-installer", "group_count": 1, "share": 1.0}]
 
 
+def test_list_tasks_can_skip_installer_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = {
+        "tasks": [
+            {
+                "id": 7,
+                "terminal": "T-007",
+                "title": "终端 T-007",
+                "status": "published",
+                "construction_enabled": True,
+            }
+        ],
+        "groups": [],
+    }
+    monkeypatch.setattr(local_simulation, "get_state", lambda: state)
+    monkeypatch.setattr(
+        local_simulation,
+        "task_installer_distribution",
+        lambda _groups: pytest.fail("installer distribution should be skipped"),
+    )
+
+    rows = local_simulation.list_tasks(include_installer_distribution=False)
+
+    assert rows[0]["terminal"] == "T-007"
+
+
 def test_task_installer_distribution_does_not_use_replacement_by_as_installer() -> None:
     distribution = local_simulation.task_installer_distribution(
         [

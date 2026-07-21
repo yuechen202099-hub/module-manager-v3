@@ -148,6 +148,7 @@ class TaskSnapshotCache:
             if normalized_team_id in self._refreshing:
                 return
             self._refreshing.add(normalized_team_id)
+            self._refresh_events[normalized_team_id] = threading.Event()
 
         def runner() -> None:
             try:
@@ -282,6 +283,32 @@ class TaskSnapshotCache:
 
 
 task_snapshot_cache = TaskSnapshotCache()
+
+
+def build_task_snapshot(
+    team_id: str,
+    repository_factory: Callable[[], Any] | None = None,
+) -> dict[str, Any]:
+    from app.services.local_simulation import reset_current_team, set_current_team
+    from app.services.state_repository import get_state_repository
+
+    token = set_current_team(team_id)
+    try:
+        repository = (repository_factory or get_state_repository)()
+        items = repository.list_tasks(include_installer_distribution=False)
+    finally:
+        reset_current_team(token)
+    canonical = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return {
+        "team_id": team_id,
+        "items": items,
+        "version": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "generated_at": _utc_now().isoformat(),
+    }
+
+
+def start_task_snapshot_cache() -> None:
+    task_snapshot_cache.start(build_task_snapshot, (settings.admin_team_id,))
 
 
 def stop_task_snapshot_cache() -> None:

@@ -27,6 +27,7 @@ from app.services.project_board_cache import (
     start_project_board_summary_cache,
     stop_project_board_summary_cache,
 )
+from app.services.task_snapshot_cache import start_task_snapshot_cache, stop_task_snapshot_cache
 
 
 LEGACY_UNMATCHED_ADMIN_SUFFIXES = (
@@ -43,9 +44,11 @@ LEGACY_UNMATCHED_ADMIN_SUFFIXES = (
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_project_board_summary_cache()
+    start_task_snapshot_cache()
     try:
         yield
     finally:
+        stop_task_snapshot_cache()
         stop_project_board_summary_cache()
         sync_manager.stop_periodic()
 

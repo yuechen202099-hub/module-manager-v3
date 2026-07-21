@@ -1475,7 +1475,12 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_tasks(self, *, summary_only: bool = False) -> list[dict[str, Any]]:
+    def list_tasks(
+        self,
+        *,
+        summary_only: bool = False,
+        include_installer_distribution: bool = True,
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     def task_status(self) -> dict[str, Any]:
@@ -2062,8 +2067,15 @@ class JsonStateRepository(StateRepository):
         state = local_simulation.get_state()
         return {"summary": state["summary"], "paths": state["paths"]}
 
-    def list_tasks(self, *, summary_only: bool = False) -> list[dict[str, Any]]:
-        tasks = local_simulation.list_tasks()
+    def list_tasks(
+        self,
+        *,
+        summary_only: bool = False,
+        include_installer_distribution: bool = True,
+    ) -> list[dict[str, Any]]:
+        tasks = local_simulation.list_tasks(
+            include_installer_distribution=include_installer_distribution,
+        )
         if not summary_only:
             return tasks
         return [_task_board_payload(task) for task in tasks]
@@ -3387,7 +3399,12 @@ class PostgresStateRepository(StateRepository):
             "unreviewed_count": int(row.unreviewed_count or 0),
         }
 
-    def list_tasks(self, *, summary_only: bool = False) -> list[dict[str, Any]]:
+    def list_tasks(
+        self,
+        *,
+        summary_only: bool = False,
+        include_installer_distribution: bool = True,
+    ) -> list[dict[str, Any]]:
         with self._session() as session:
             team_id = local_simulation.current_team_id()
             tasks = session.scalars(
@@ -3395,7 +3412,12 @@ class PostgresStateRepository(StateRepository):
                 .where(Task.team_id == team_id)
                 .order_by(Task.terminal, Task.legacy_id)
             ).all()
-            stats_by_task = self._task_stats_map(session, team_id, include_search_text=not summary_only)
+            stats_by_task = self._task_stats_map(
+                session,
+                team_id,
+                include_search_text=not summary_only,
+                include_installer_distribution=include_installer_distribution,
+            )
             payloads = [
                 _task_payload(task, stats_by_task.get(int(task.legacy_id or 0), _empty_task_stats()))
                 for task in tasks
