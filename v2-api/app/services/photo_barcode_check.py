@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import shutil
 import subprocess
@@ -9,7 +10,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from threading import BoundedSemaphore
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
 
@@ -43,6 +44,8 @@ BARCODE_RESCUE_TARGET_LONG_SIDE = 1800
 BARCODE_RESCUE_MAX_WORK_LONG_SIDE = 2200
 BARCODE_RESCUE_MAX_CANDIDATES = 40
 BARCODE_SLOW_RESCAN_MAX_CANDIDATES = 12
+REGION_BARCODE_TYPES = frozenset({"meter", "module", "collector"})
+REGION_MIN_SIDE_PIXELS = 24
 OCR_RESCUE_ROTATION_ANGLES = (0, 5, -5)
 
 
@@ -397,7 +400,7 @@ def list_group_barcode_review_items(
 
 def default_barcode_scanner(photo: dict[str, Any]) -> list[str]:
     try:
-        import zxingcpp  # type: ignore
+        import zxingcpp  # type: ignore # noqa: F401
     except Exception:
         return []
 
@@ -405,13 +408,27 @@ def default_barcode_scanner(photo: dict[str, Any]) -> list[str]:
     if image is None:
         return []
     try:
+        return _scan_barcode_image(image, candidate_limit=_scan_candidate_limit(photo))
+    finally:
+        try:
+            image.close()
+        except Exception:
+            pass
+
+
+def _scan_barcode_image(image, *, candidate_limit: int) -> list[str]:
+    try:
+        import zxingcpp  # type: ignore
+    except Exception:
+        return []
+
+    try:
         values: list[str] = []
-        max_candidates = _scan_candidate_limit(photo)
+        remaining_candidates = max(0, candidate_limit)
         for candidate in _barcode_scan_candidates(image):
-            if max_candidates > 0 and len(values) == 0:
-                max_candidates -= 1
-            elif max_candidates == 0:
+            if remaining_candidates == 0:
                 break
+            remaining_candidates -= 1
             try:
                 scanned_items = _read_zxing_barcodes(zxingcpp, candidate)
                 scanned: list[str] = []
@@ -427,11 +444,65 @@ def default_barcode_scanner(photo: dict[str, Any]) -> list[str]:
         return values
     except Exception:
         return []
+
+
+def scan_photo_region(
+    photo: dict[str, Any],
+    barcode_type: str,
+    region: Mapping[str, float],
+) -> dict[str, Any]:
+    from PIL import ImageOps
+
+    normalized_region = _validated_normalized_region(region)
+    if barcode_type not in REGION_BARCODE_TYPES:
+        raise ValueError("Unsupported barcode type")
+    image = _photo_image(photo)
+    if image is None:
+        raise ValueError("Photo image is unavailable")
+    try:
+        oriented = ImageOps.exif_transpose(image)
+        left = round(normalized_region["x"] * oriented.width)
+        top = round(normalized_region["y"] * oriented.height)
+        right = round((normalized_region["x"] + normalized_region["width"]) * oriented.width)
+        bottom = round((normalized_region["y"] + normalized_region["height"]) * oriented.height)
+        if right - left < REGION_MIN_SIDE_PIXELS or bottom - top < REGION_MIN_SIDE_PIXELS:
+            raise ValueError("Selected region is too small")
+        crop = oriented.crop((left, top, right, bottom))
+        values = _scan_barcode_image(crop, candidate_limit=_scan_candidate_limit(photo))
+        method = "barcode" if values else ""
+        if not values:
+            if OCR_RESCUE_SEMAPHORE.acquire(blocking=False):
+                try:
+                    values = _scan_ocr_image(crop, expected_values=[])
+                finally:
+                    OCR_RESCUE_SEMAPHORE.release()
+            method = "ocr" if values else "none"
+        normalized_values = _normalized_values(values)
+        return {
+            "barcode_type": barcode_type,
+            "values": _unique_values(values),
+            "normalized_values": _unique_values(normalized_values),
+            "method": method,
+            "region": normalized_region,
+        }
     finally:
-        try:
-            image.close()
-        except Exception:
-            pass
+        image.close()
+
+
+def _validated_normalized_region(region: Mapping[str, float]) -> dict[str, float]:
+    try:
+        normalized = {name: float(region[name]) for name in ("x", "y", "width", "height")}
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Invalid region") from None
+    if (
+        not all(math.isfinite(value) and 0 <= value <= 1 for value in normalized.values())
+        or normalized["width"] <= 0
+        or normalized["height"] <= 0
+        or normalized["x"] + normalized["width"] > 1
+        or normalized["y"] + normalized["height"] > 1
+    ):
+        raise ValueError("Invalid region")
+    return normalized
 
 
 def _scan_candidate_limit(photo: dict[str, Any]) -> int:
@@ -499,6 +570,17 @@ def default_ocr_reader(photo: dict[str, Any], expected_values: list[str]) -> lis
         OCR_RESCUE_SEMAPHORE.release()
         return []
     try:
+        return _scan_ocr_image(image, expected_values=expected_values)
+    finally:
+        try:
+            image.close()
+        except Exception:
+            pass
+        OCR_RESCUE_SEMAPHORE.release()
+
+
+def _scan_ocr_image(image, *, expected_values: list[str]) -> list[str]:
+    try:
         values: list[str] = []
         for candidate in _ocr_scan_candidates(image):
             text = _run_tesseract(candidate)
@@ -509,12 +591,6 @@ def default_ocr_reader(photo: dict[str, Any], expected_values: list[str]) -> lis
         return values
     except Exception:
         return []
-    finally:
-        try:
-            image.close()
-        except Exception:
-            pass
-        OCR_RESCUE_SEMAPHORE.release()
 
 
 def _ocr_scan_candidates(image):

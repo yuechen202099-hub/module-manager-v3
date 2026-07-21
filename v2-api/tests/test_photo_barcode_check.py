@@ -884,3 +884,83 @@ def test_remote_barcode_download_blocks_redirect_before_fetch(monkeypatch) -> No
     assert automatic_redirect_requests == []
     assert no_redirect_requests == ["https://cdn.example.test/photo.jpg"]
     assert validated_urls == ["https://cdn.example.test/photo.jpg", "http://127.0.0.1/private.jpg"]
+
+
+def test_scan_photo_region_crops_exif_corrected_image_and_prefers_barcode(monkeypatch) -> None:
+    source = Image.new("RGB", (200, 100), "white")
+    source.getexif()[274] = 6
+    source.info["exif"] = source.getexif().tobytes()
+    observed: dict[str, tuple[int, int]] = {}
+    monkeypatch.setattr(photo_barcode_check, "_photo_image", lambda _photo: source.copy())
+
+    def barcode_reader(image, *, candidate_limit: int):
+        observed["size"] = image.size
+        assert candidate_limit > 0
+        return [" 3130001122100009124734 "]
+
+    monkeypatch.setattr(photo_barcode_check, "_scan_barcode_image", barcode_reader)
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "_scan_ocr_image",
+        lambda _image, *, expected_values: pytest.fail("OCR must not run after barcode success"),
+    )
+
+    result = photo_barcode_check.scan_photo_region(
+        {"id": "photo-1"},
+        "module",
+        {"x": 0.25, "y": 0.20, "width": 0.50, "height": 0.40},
+    )
+
+    assert observed["size"] == (50, 80)
+    assert result == {
+        "barcode_type": "module",
+        "values": ["3130001122100009124734"],
+        "normalized_values": ["3130001122100009124734"],
+        "method": "barcode",
+        "region": {"x": 0.25, "y": 0.2, "width": 0.5, "height": 0.4},
+    }
+
+
+@pytest.mark.parametrize(
+    ("barcode_type", "region"),
+    [
+        ("automatic", {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5}),
+        ("meter", {"x": -0.1, "y": 0.1, "width": 0.5, "height": 0.5}),
+        ("meter", {"x": 0.8, "y": 0.1, "width": 0.3, "height": 0.5}),
+        ("meter", {"x": float("nan"), "y": 0.1, "width": 0.5, "height": 0.5}),
+        ("meter", {"x": 0.1, "y": 0.1, "width": 0.0, "height": 0.5}),
+    ],
+)
+def test_scan_photo_region_rejects_invalid_category_or_geometry(barcode_type, region) -> None:
+    with pytest.raises(ValueError):
+        photo_barcode_check.scan_photo_region({"id": "photo-1"}, barcode_type, region)
+
+
+def test_scan_photo_region_uses_ocr_only_when_barcode_has_no_candidate(monkeypatch) -> None:
+    monkeypatch.setattr(photo_barcode_check, "_photo_image", lambda _photo: Image.new("RGB", (120, 80)))
+    monkeypatch.setattr(photo_barcode_check, "_scan_barcode_image", lambda _image, *, candidate_limit: [])
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "_scan_ocr_image",
+        lambda _image, *, expected_values: ["120000912473", "120000912473"],
+    )
+
+    result = photo_barcode_check.scan_photo_region(
+        {"id": "photo-1"},
+        "meter",
+        {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+    )
+
+    assert result["values"] == ["120000912473"]
+    assert result["method"] == "ocr"
+
+
+def test_scan_photo_region_rejects_tiny_pixel_crop(monkeypatch) -> None:
+    monkeypatch.setattr(photo_barcode_check, "_photo_image", lambda _photo: Image.new("RGB", (100, 100)))
+
+    with pytest.raises(ValueError, match="too small"):
+        photo_barcode_check.scan_photo_region(
+            {"id": "photo-1"},
+            "collector",
+            {"x": 0.0, "y": 0.0, "width": 0.1, "height": 0.1},
+        )
