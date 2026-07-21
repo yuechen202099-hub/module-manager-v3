@@ -102,6 +102,32 @@ def test_postgres_priority_update_locks_task_and_is_idempotent(monkeypatch: pyte
     assert task.construction_priority_updated_by == "admin-c"
 
 
+def test_postgres_task_stats_query_is_scoped_to_target_task() -> None:
+    task = SimpleNamespace(legacy_id=7, team_id="priority-team")
+
+    class Result:
+        def one(self):
+            return SimpleNamespace(total_groups=2, uploaded_count=1, reviewed_count=0, unreviewed_count=1)
+
+    class CapturingSession:
+        def __init__(self) -> None:
+            self.statements = []
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return Result()
+
+    session = CapturingSession()
+    stats = repository.PostgresStateRepository()._task_stats(session, task)
+    sql = str(session.statements[0].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    assert stats == {"total_groups": 2, "uploaded_count": 1, "reviewed_count": 0, "unreviewed_count": 1}
+    assert len(session.statements) == 1
+    assert "material_groups.legacy_task_id = 7" in sql
+    assert "string_agg" not in sql.lower()
+    assert "photos.is_active IS true" in sql
+
+
 def test_postgres_priority_rejects_completed_and_zero_group_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
     task = SimpleNamespace(
         id="task-uuid",
@@ -171,6 +197,8 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
         display_meter_no="M-PRIORITY",
         meter_match_key="M-PRIORITY",
         installation_address="Priority road",
+        photo_count=0,
+        photos=[],
         raw_data={},
     )
 
@@ -180,6 +208,8 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
             self.staged = []
             self.priority_before = task.construction_priority
             self.raw_before = deepcopy(group.raw_data)
+            self.photo_count_before = group.photo_count
+            self.photos_before = deepcopy(group.photos)
             self.rollbacks = 0
 
         def __enter__(self):
@@ -207,6 +237,8 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
             self.rollbacks += 1
             task.construction_priority = self.priority_before
             group.raw_data = deepcopy(self.raw_before)
+            group.photo_count = self.photo_count_before
+            group.photos = deepcopy(self.photos_before)
             self.staged.clear()
 
         def refresh(self, _value) -> None:
@@ -230,6 +262,8 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
         def _add_photo_records_to_group(self, checked_session, checked_group, **_kwargs):
             assert checked_session is self.session
             assert checked_group is group
+            group.photo_count += len(_kwargs["photos"])
+            group.photos.extend(deepcopy(_kwargs["photos"]))
             self.stats["uploaded_count"] = 2
             return {"added": 4, "skipped_duplicates": 0}
 
@@ -267,6 +301,8 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
     assert "construction_priority_auto_cleared" in [event.action for event in successful_session.staged]
 
     task.construction_priority = True
+    group.photo_count = 0
+    group.photos = []
     failing_session = FakeSession(fail_commit=True)
     with pytest.raises(RuntimeError, match="injected upload commit failure"):
         TestPostgresRepository(failing_session).upload_construction_group_batch(
@@ -280,6 +316,8 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
 
     assert failing_session.rollbacks == 1
     assert task.construction_priority is True
+    assert group.photo_count == 0
+    assert group.photos == []
     assert failing_session.staged == []
 
 

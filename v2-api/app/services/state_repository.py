@@ -2651,16 +2651,31 @@ class JsonStateRepository(StateRepository):
         creator: str = "",
         client_completed_at: str = "",
     ) -> dict[str, Any]:
-        return local_simulation.upload_construction_group_batch(
-            group_id,
-            actor=actor,
-            client_batch_id=client_batch_id,
-            collector=collector,
-            module_asset_no=module_asset_no,
-            photos=photos,
-            creator=creator,
-            client_completed_at=client_completed_at,
-        )
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            result = local_simulation.upload_construction_group_batch(
+                group_id,
+                actor=actor,
+                client_batch_id=client_batch_id,
+                collector=collector,
+                module_asset_no=module_asset_no,
+                photos=photos,
+                creator=creator,
+                client_completed_at=client_completed_at,
+            )
+        except BaseException:
+            if owns_transaction:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        if owns_transaction:
+            local_simulation.finish_authoritative_json_write(transaction, token)
+        return result
 
     def build_task_detail_export(self, task_id: int) -> bytes:
         return local_simulation.build_task_detail_export(task_id)
@@ -3180,10 +3195,50 @@ class PostgresStateRepository(StateRepository):
     def _task_stats(self, session: Session, task: Task) -> dict[str, Any]:
         if task.legacy_id is None:
             return _empty_task_stats()
-        return self._task_stats_map(session, task.team_id or local_simulation.current_team_id()).get(
-            int(task.legacy_id),
-            _empty_task_stats(),
+        active_photo_exists = (
+            select(Photo.id)
+            .where(
+                Photo.group_id == MaterialGroup.id,
+                Photo.team_id == MaterialGroup.team_id,
+                Photo.is_active.is_(True),
+            )
+            .exists()
         )
+        uploaded_group_condition = or_(MaterialGroup.photo_count > 0, active_photo_exists)
+        row = session.execute(
+            select(
+                func.count(MaterialGroup.id).label("total_groups"),
+                func.coalesce(func.sum(case((uploaded_group_condition, 1), else_=0)), 0).label("uploaded_count"),
+                func.coalesce(
+                    func.sum(case((MaterialGroup.status == GroupStatus.APPROVED, 1), else_=0)),
+                    0,
+                ).label("reviewed_count"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    MaterialGroup.status == GroupStatus.UNREVIEWED,
+                                    uploaded_group_condition,
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("unreviewed_count"),
+            ).where(
+                MaterialGroup.team_id == (task.team_id or local_simulation.current_team_id()),
+                MaterialGroup.legacy_task_id == int(task.legacy_id),
+            )
+        ).one()
+        return {
+            "total_groups": int(row.total_groups or 0),
+            "uploaded_count": int(row.uploaded_count or 0),
+            "reviewed_count": int(row.reviewed_count or 0),
+            "unreviewed_count": int(row.unreviewed_count or 0),
+        }
 
     def list_tasks(self, *, summary_only: bool = False) -> list[dict[str, Any]]:
         with self._session() as session:

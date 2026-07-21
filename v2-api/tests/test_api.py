@@ -16,7 +16,7 @@ import pytest
 
 import app.main as main_module
 from app.main import create_app
-from app.api.routes import auth, local_test
+from app.api.routes import auth, local_test, miniprogram
 from app.core.config import settings
 from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
@@ -3542,6 +3542,77 @@ def test_json_final_construction_upload_auto_clears_priority_and_records_audit()
     assert reset["group"]["photo_count"] == 0
     assert result["task"]["construction_priority"] is False
     assert "construction_priority_auto_cleared" in actions
+
+
+def test_miniprogram_upload_refresh_failure_rolls_back_json_state(monkeypatch) -> None:
+    team_id = f"priority-miniprogram-rollback-{uuid4()}"
+    admin_token = security.create_access_token(
+        {"sub": "admin-a", "username": "admin-a", "roles": ["admin"], "team_id": team_id}
+    )
+    constructor_token = security.create_access_token(
+        {"sub": "constructor-a", "username": "constructor-a", "roles": ["constructor"], "team_id": team_id}
+    )
+    admin_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {admin_token}"}
+    constructor_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {constructor_token}"}
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    client.post("/local-test/scan/clear", headers=admin_headers)
+    task = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][0]
+
+    team_token = local_simulation.set_current_team(team_id)
+    try:
+        state = local_simulation.get_state()
+        group = next(item for item in state["groups"] if item["task_id"] == task["id"])
+        live_task = next(item for item in state["tasks"] if item["id"] == task["id"])
+        live_task["construction_enabled"] = True
+        live_task["construction_claimed_by"] = "constructor-a"
+        local_simulation.refresh_summary()
+        before_group = deepcopy(group)
+        before_task = deepcopy(live_task)
+        before_audits = deepcopy(state["audit_events"])
+    finally:
+        local_simulation.reset_current_team(team_token)
+
+    enabled = client.patch(
+        f"/local-test/construction/tasks/{task['id']}/priority",
+        headers=admin_headers,
+        json={"priority": True},
+    )
+    assert enabled.status_code == 200
+    team_token = local_simulation.set_current_team(team_id)
+    try:
+        priority_task = deepcopy(next(item for item in local_simulation.get_state()["tasks"] if item["id"] == task["id"]))
+        before_audits = deepcopy(local_simulation.get_state()["audit_events"])
+    finally:
+        local_simulation.reset_current_team(team_token)
+    monkeypatch.setattr(local_simulation, "refresh_summary", lambda: (_ for _ in ()).throw(RuntimeError("refresh failed")))
+    monkeypatch.setattr(local_simulation, "validate_construction_upload_required_slots", lambda _group, _photos: None)
+
+    data = {
+        "client_batch_id": "miniprogram-rollback",
+        "collector": "collector-a",
+        "module_asset_no": "module-a",
+    }
+    with pytest.raises(RuntimeError, match="refresh failed"):
+        client.post(
+            f"/miniprogram/groups/{group['id']}/upload-batch",
+            headers=constructor_headers,
+            data=data,
+            files=[("files", ("photo.jpg", tiny_jpeg_bytes(), "image/jpeg"))],
+        )
+
+    team_token = local_simulation.set_current_team(team_id)
+    try:
+        state = local_simulation.get_state()
+        after_group = next(item for item in state["groups"] if item["id"] == group["id"])
+        after_task = next(item for item in state["tasks"] if item["id"] == task["id"])
+        after_audits = state["audit_events"]
+    finally:
+        local_simulation.reset_current_team(team_token)
+
+    assert after_group == before_group
+    assert after_task["construction_priority"] is True
+    assert after_task["construction_priority_updated_by"] == priority_task["construction_priority_updated_by"]
+    assert after_audits == before_audits
 
 
 def test_photo_barcode_rescan_route_updates_photo_with_ocr(monkeypatch) -> None:
