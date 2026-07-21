@@ -30,7 +30,7 @@ def test_priority_template_uses_exact_chinese_headers_and_text_validation() -> N
     sheet = workbook.active
 
     assert [sheet.cell(1, 1).value, sheet.cell(1, 2).value] == ["终端号", "优先施工"]
-    assert sheet["A2"].number_format == "@"
+    assert [sheet[cell].number_format for cell in ("A2", "A3", "A5001")] == ["@", "@", "@"]
     assert any("是,否" in str(rule.formula1) for rule in sheet.data_validations.dataValidation)
 
 

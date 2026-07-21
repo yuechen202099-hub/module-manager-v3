@@ -13,6 +13,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
 from app.services import state_repository as repository
+from app.services.construction_priority_import import PriorityImportRow
 
 
 def test_json_repository_sets_construction_priority_through_simulation(
@@ -34,6 +35,257 @@ def test_json_repository_sets_construction_priority_through_simulation(
 
     assert result == {"id": 7}
     assert calls == [(7, "admin-a", True)]
+
+
+def test_json_priority_import_preview_uses_non_mutating_task_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dirty_completed_task = {
+        "id": 7,
+        "terminal": "T-007",
+        "construction_priority": True,
+        "total_groups": 1,
+        "uploaded_count": 1,
+        "construction_available": False,
+    }
+    state = {"tasks": [dirty_completed_task], "groups": [], "audit_log": []}
+
+    monkeypatch.setattr(repository.local_simulation, "get_state", lambda: state)
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "calculate_task_metrics",
+        lambda _groups: {"renovation_count": 1, "uploaded_count": 1},
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "list_tasks",
+        lambda: pytest.fail("priority import preview must not refresh live tasks"),
+    )
+
+    result = repository.JsonStateRepository().import_construction_priorities(
+        [PriorityImportRow(2, "T-007", True, "valid")],
+        actor="admin-a",
+        confirm=False,
+    )
+
+    assert result["counts"]["completed"] == 1
+    assert dirty_completed_task["construction_priority"] is True
+    assert state["audit_log"] == []
+
+
+def test_postgres_priority_import_availability_stats_are_set_scoped() -> None:
+    class Result:
+        def all(self):
+            return []
+
+    class CapturingSession:
+        def __init__(self) -> None:
+            self.statements = []
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return Result()
+
+    session = CapturingSession()
+    repository.PostgresStateRepository()._construction_priority_stats_map(
+        session,
+        "priority-team",
+        [7, 8, 9],
+    )
+
+    assert len(session.statements) == 1
+    sql = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).lower()
+    assert "material_groups.team_id = 'priority-team'" in sql
+    assert "material_groups.legacy_task_id in (7, 8, 9)" in sql
+    assert "string_agg" not in sql
+    assert "installer" not in sql
+
+
+def test_json_priority_import_confirmation_aborts_all_priorities_and_audits_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"priority-import-atomic-{uuid4()}"
+    team_token = repository.local_simulation.set_current_team(team_id)
+    try:
+        state = repository.local_simulation.get_state()
+        state["tasks"] = [
+            {"id": 7, "terminal": "T-007", "construction_priority": False},
+            {"id": 8, "terminal": "T-008", "construction_priority": False},
+        ]
+        state["groups"] = []
+        state["audit_log"] = []
+        monkeypatch.setattr(
+            repository.local_simulation,
+            "calculate_task_metrics",
+            lambda _groups: {"renovation_count": 1, "uploaded_count": 0},
+        )
+
+        def set_priority(task_id: int, *, actor: str, priority: bool):
+            current = repository.local_simulation.get_state()
+            if task_id == 8:
+                raise ValueError("second row rejected")
+            task = next(task for task in current["tasks"] if task["id"] == task_id)
+            task["construction_priority"] = priority
+            current["audit_log"].append({"action": "construction_priority_updated", "actor": actor})
+            return task
+
+        monkeypatch.setattr(repository.local_simulation, "set_construction_task_priority", set_priority)
+
+        with pytest.raises(ValueError, match="second row rejected"):
+            repository.JsonStateRepository().import_construction_priorities(
+                [
+                    PriorityImportRow(2, "T-007", True, "valid"),
+                    PriorityImportRow(3, "T-008", True, "valid"),
+                ],
+                actor="admin-a",
+                confirm=True,
+            )
+
+        assert [task["construction_priority"] for task in state["tasks"]] == [False, False]
+        assert state["audit_log"] == []
+    finally:
+        repository.local_simulation.reset_current_team(team_token)
+
+
+def test_dual_priority_import_confirmation_rejects_before_json_or_mirror_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repository.JsonStateRepository,
+        "import_construction_priorities",
+        lambda *_args, **_kwargs: pytest.fail("dual confirmation must not mutate JSON first"),
+    )
+
+    with pytest.raises(ValueError, match="unavailable in dual backend mode"):
+        repository.DualWriteStateRepository().import_construction_priorities(
+            [PriorityImportRow(2, "T-007", True, "valid")],
+            actor="admin-a",
+            confirm=True,
+        )
+
+
+def test_postgres_priority_import_rejects_zero_group_true_before_auditing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = SimpleNamespace(
+        id="task-7",
+        legacy_id=7,
+        team_id="priority-team",
+        terminal="T-007",
+        construction_priority=False,
+    )
+
+    class ScalarResult:
+        def all(self):
+            return [task]
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.staged = []
+            self.commits = 0
+            self.scalar_calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalars(self, statement):
+            self.scalar_calls.append(statement)
+            return ScalarResult()
+
+        def add(self, value):
+            self.staged.append(value)
+
+        def commit(self):
+            self.commits += 1
+
+    session = FakeSession()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _construction_priority_stats_map(self, _session, _team_id, _task_ids):
+            return {7: {"total_groups": 0, "uploaded_count": 0, "reviewed_count": 0, "unreviewed_count": 0}}
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "priority-team")
+
+    with pytest.raises(ValueError, match="only available"):
+        TestPostgresRepository().import_construction_priorities(
+            [PriorityImportRow(2, "T-007", True, "valid")],
+            actor="admin-a",
+            confirm=True,
+        )
+
+    assert session.commits == 0
+    assert session.staged == []
+
+
+def test_postgres_priority_import_locks_initially_completed_and_unchanged_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unchanged = SimpleNamespace(id="task-7", legacy_id=7, team_id="priority-team", terminal="T-007", construction_priority=False)
+    completed = SimpleNamespace(id="task-8", legacy_id=8, team_id="priority-team", terminal="T-008", construction_priority=False)
+
+    class ScalarResult:
+        def all(self):
+            return [unchanged, completed]
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.statements = []
+            self.staged = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalars(self, statement):
+            self.statements.append(statement)
+            return ScalarResult()
+
+        def add(self, value):
+            self.staged.append(value)
+
+        def commit(self):
+            return None
+
+    session = FakeSession()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _construction_priority_stats_map(self, _session, _team_id, _task_ids):
+            return {
+                7: {"total_groups": 1, "uploaded_count": 0, "reviewed_count": 0, "unreviewed_count": 0},
+                8: {"total_groups": 1, "uploaded_count": 1, "reviewed_count": 0, "unreviewed_count": 1},
+            }
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "priority-team")
+    result = TestPostgresRepository().import_construction_priorities(
+        [
+            PriorityImportRow(2, "T-007", False, "valid"),
+            PriorityImportRow(3, "T-008", False, "valid"),
+        ],
+        actor="admin-a",
+        confirm=True,
+    )
+
+    assert len(session.statements) == 1
+    locked_sql = str(session.statements[0].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    assert result["counts"] == {"valid": 0, "duplicate": 0, "conflict": 0, "unknown": 0, "completed": 1, "unchanged": 1, "malformed": 0}
+    assert "FOR UPDATE" in locked_sql
+    assert "tasks.terminal IN ('T-007', 'T-008')" in locked_sql
 
 
 def test_postgres_priority_update_locks_task_and_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:

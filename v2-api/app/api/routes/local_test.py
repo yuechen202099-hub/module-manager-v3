@@ -2496,7 +2496,7 @@ async def construction_priority_import(
 ):
     if not (file.filename or "").lower().endswith(".xlsx"):
         raise HTTPException(status_code=422, detail="Only .xlsx files are supported")
-    content = await file.read()
+    content = await file.read(2 * 1024 * 1024 + 1)
     if len(content) > 2 * 1024 * 1024:
         raise HTTPException(status_code=422, detail="Workbook exceeds 2 MiB")
     try:

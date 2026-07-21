@@ -3442,6 +3442,86 @@ def test_construction_priority_import_template_preview_confirm_and_admin_guard()
     assert confirmed.json()["data"]["confirmed"] is True
 
 
+def test_construction_priority_import_isolated_classified_and_rejects_invalid_files_without_writes() -> None:
+    team_a = f"priority-import-review-a-{uuid4()}"
+    team_b = f"priority-import-review-b-{uuid4()}"
+    token_a = security.create_access_token({"sub": "admin-a", "username": "admin-a", "roles": ["admin"], "team_id": team_a})
+    token_b = security.create_access_token({"sub": "admin-b", "username": "admin-b", "roles": ["admin"], "team_id": team_b})
+    headers_a = {"X-Team-Id": team_a, "Authorization": f"bearer {token_a}"}
+    headers_b = {"X-Team-Id": team_b, "Authorization": f"bearer {token_b}"}
+    for headers in (headers_a, headers_b):
+        client.post("/local-test/bootstrap", headers=headers)
+        client.post("/local-test/scan/clear", headers=headers)
+    task_a = client.get("/local-test/tasks", headers=headers_a).json()["data"]["items"][0]
+    task_b = client.get("/local-test/tasks", headers=headers_b).json()["data"]["items"][0]
+    assert task_a["terminal"] == task_b["terminal"]
+
+    enabled = client.post(
+        "/local-test/construction/priority-import?confirm=true",
+        headers=headers_a,
+        files={"file": ("priority.xlsx", build_api_workbook([["终端号", "优先施工"], [task_a["terminal"], "是"]]))},
+    )
+    task_b_after = client.get("/local-test/tasks", headers=headers_b).json()["data"]["items"][0]
+    assert enabled.status_code == 200
+    assert task_b_after["construction_priority"] is False
+
+    unchanged = client.post(
+        "/local-test/construction/priority-import?confirm=true",
+        headers=headers_a,
+        files={"file": ("priority.xlsx", build_api_workbook([["终端号", "优先施工"], [task_a["terminal"], "是"]]))},
+    )
+    assert unchanged.status_code == 200
+    assert unchanged.json()["data"]["counts"]["unchanged"] == 1
+
+    team_token = local_simulation.set_current_team(team_a)
+    try:
+        state = local_simulation.get_state()
+        for group in state["groups"]:
+            if int(group.get("task_id") or 0) == int(task_a["id"]):
+                group["photo_count"] = 1
+                group["status"] = "unreviewed"
+    finally:
+        local_simulation.reset_current_team(team_token)
+    completed = client.post(
+        "/local-test/construction/priority-import?confirm=true",
+        headers=headers_a,
+        files={"file": ("priority.xlsx", build_api_workbook([["终端号", "优先施工"], [task_a["terminal"], "否"]]))},
+    )
+    audits_before_invalid = client.get("/local-test/audit-log?limit=100", headers=headers_a).json()["data"]["items"]
+    conflict = client.post(
+        "/local-test/construction/priority-import?confirm=true",
+        headers=headers_a,
+        files={"file": ("priority.xlsx", build_api_workbook([["终端号", "优先施工"], [task_a["terminal"], "是"], [task_a["terminal"], "否"]]))},
+    )
+    malformed = client.post(
+        "/local-test/construction/priority-import?confirm=true",
+        headers=headers_a,
+        files={"file": ("priority.xlsx", build_api_workbook([["终端号", "优先施工"], ["", "是"]]))},
+    )
+    non_xlsx = client.post(
+        "/local-test/construction/priority-import",
+        headers=headers_a,
+        files={"file": ("priority.csv", b"terminal,priority")},
+    )
+    oversized = client.post(
+        "/local-test/construction/priority-import",
+        headers=headers_a,
+        files={"file": ("priority.xlsx", b"x" * (2 * 1024 * 1024 + 1))},
+    )
+    audits_after_invalid = client.get("/local-test/audit-log?limit=100", headers=headers_a).json()["data"]["items"]
+
+    assert completed.status_code == 200
+    assert completed.json()["data"]["counts"]["completed"] == 1
+    assert conflict.status_code == 422
+    assert malformed.status_code == 422
+    assert non_xlsx.status_code == 422
+    assert oversized.status_code == 422
+    assert audits_after_invalid == audits_before_invalid
+    actions = [audit["action"] for audit in audits_after_invalid]
+    assert actions.count("construction_priority_updated") == 1
+    assert actions.count("construction_priority_imported") == 3
+
+
 def test_construction_priority_route_is_team_isolated_and_rejects_completed_or_missing_tasks() -> None:
     team_a = f"priority-isolation-a-{uuid4()}"
     team_b = f"priority-isolation-b-{uuid4()}"

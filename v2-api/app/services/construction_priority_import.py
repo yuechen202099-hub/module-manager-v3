@@ -29,7 +29,8 @@ def build_priority_template() -> bytes:
     sheet = workbook.active
     sheet.title = "优先施工"
     sheet.append(list(PRIORITY_HEADERS))
-    sheet["A2"].number_format = "@"
+    for row_number in range(2, MAX_PRIORITY_IMPORT_ROWS + 2):
+        sheet.cell(row_number, 1).number_format = "@"
     validation = DataValidation(type="list", formula1='"是,否"', allow_blank=False)
     sheet.add_data_validation(validation)
     validation.add("B2:B5001")

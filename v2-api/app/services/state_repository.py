@@ -44,6 +44,11 @@ def construction_task_availability(stats: Mapping[str, Any]) -> tuple[bool, bool
     return total > 0 and uploaded < total, uploaded > 0 and unreviewed > 0
 
 
+def _construction_priority_import_counts(items: list[dict[str, Any]]) -> dict[str, int]:
+    statuses = ("valid", "duplicate", "conflict", "unknown", "completed", "unchanged", "malformed")
+    return {status: sum(1 for item in items if item["status"] == status) for status in statuses}
+
+
 from app.services import local_simulation, photo_barcode_check, unmatched_review
 
 
@@ -2427,32 +2432,56 @@ class JsonStateRepository(StateRepository):
         return local_simulation.set_construction_task_priority(task_id, actor=actor, priority=priority)
 
     def import_construction_priorities(self, rows: list[Any], *, actor: str, confirm: bool) -> dict[str, Any]:
-        tasks = {str(item.get("terminal") or ""): item for item in local_simulation.list_tasks()}
-        items = []
-        for row in rows:
-            item = {"row_number": row.row_number, "terminal": row.terminal, "priority": row.priority, "status": row.status}
-            task = tasks.get(row.terminal)
-            if item["status"] in {"conflict", "malformed", "duplicate"}:
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction and confirm:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            state = local_simulation.get_state()
+            groups_by_task: dict[int, list[dict[str, Any]]] = defaultdict(list)
+            for group in deepcopy(state.get("groups") or []):
+                groups_by_task[int(group.get("task_id") or 0)].append(group)
+            tasks: dict[str, dict[str, Any]] = {}
+            for task in deepcopy(state.get("tasks") or []):
+                metrics = local_simulation.calculate_task_metrics(groups_by_task.get(int(task.get("id") or 0), []))
+                task["total_groups"] = metrics["renovation_count"]
+                task.update(metrics)
+                tasks[str(task.get("terminal") or "")] = task
+            items = []
+            for row in rows:
+                item = {"row_number": row.row_number, "terminal": row.terminal, "priority": row.priority, "status": row.status}
+                task = tasks.get(row.terminal)
+                if item["status"] in {"conflict", "malformed", "duplicate"}:
+                    items.append(item)
+                    continue
+                if task is None:
+                    item["status"] = "unknown"
+                elif int(task.get("total_groups") or 0) > 0 and int(task.get("uploaded_count") or 0) >= int(task.get("total_groups") or 0):
+                    item["status"] = "completed"
+                elif bool(task.get("construction_priority")) == bool(row.priority):
+                    item["status"] = "unchanged"
+                else:
+                    item["task_id"] = task["id"]
                 items.append(item)
-                continue
-            if task is None:
-                item["status"] = "unknown"
-            elif int(task.get("total_groups") or 0) > 0 and int(task.get("uploaded_count") or 0) >= int(task.get("total_groups") or 0):
-                item["status"] = "completed"
-            elif bool(task.get("construction_priority")) == bool(row.priority):
-                item["status"] = "unchanged"
-            else:
-                item["task_id"] = task["id"]
-            items.append(item)
-        counts = {status: sum(1 for item in items if item["status"] == status) for status in ("valid", "duplicate", "conflict", "unknown", "completed", "unchanged", "malformed")}
-        if confirm:
+            counts = {status: sum(1 for item in items if item["status"] == status) for status in ("valid", "duplicate", "conflict", "unknown", "completed", "unchanged", "malformed")}
+            if not confirm:
+                return {"counts": counts, "items": items, "confirmed": False}
             if counts["conflict"] or counts["malformed"]:
                 raise ValueError("Priority import contains conflict or malformed rows")
             for item in items:
                 if item["status"] == "valid":
                     local_simulation.set_construction_task_priority(item["task_id"], actor=actor, priority=bool(item["priority"]))
             local_simulation.append_audit_event("construction_priority_imported", actor, {"counts": counts})
-        return {"counts": counts, "items": items, "confirmed": confirm}
+        except BaseException:
+            if owns_transaction:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        if owns_transaction:
+            local_simulation.finish_authoritative_json_write(transaction, token)
+        return {"counts": counts, "items": items, "confirmed": True}
 
     def assign_construction_task(
         self,
@@ -3238,6 +3267,68 @@ class PostgresStateRepository(StateRepository):
             task.team_id or local_simulation.current_team_id(),
             legacy_task_id=task_id,
         ).get(task_id, _empty_task_stats())
+
+    def _construction_priority_stats_map(
+        self,
+        session: Session,
+        team_id: str,
+        legacy_task_ids: list[int],
+    ) -> dict[int, dict[str, int]]:
+        task_ids = sorted({int(task_id) for task_id in legacy_task_ids})
+        stats_by_task = {task_id: _empty_task_stats() for task_id in task_ids}
+        if not task_ids:
+            return stats_by_task
+        active_photo_exists = (
+            select(Photo.id)
+            .where(
+                Photo.group_id == MaterialGroup.id,
+                Photo.team_id == MaterialGroup.team_id,
+                Photo.is_active.is_(True),
+            )
+            .exists()
+        )
+        uploaded_group_condition = or_(MaterialGroup.photo_count > 0, active_photo_exists)
+        rows = session.execute(
+            select(
+                MaterialGroup.legacy_task_id,
+                func.count(MaterialGroup.id).label("total_groups"),
+                func.coalesce(func.sum(case((uploaded_group_condition, 1), else_=0)), 0).label("uploaded_count"),
+                func.coalesce(
+                    func.sum(case((MaterialGroup.status == GroupStatus.APPROVED, 1), else_=0)),
+                    0,
+                ).label("reviewed_count"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    MaterialGroup.status == GroupStatus.UNREVIEWED,
+                                    uploaded_group_condition,
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("unreviewed_count"),
+            )
+            .where(
+                MaterialGroup.team_id == team_id,
+                MaterialGroup.legacy_task_id.in_(task_ids),
+            )
+            .group_by(MaterialGroup.legacy_task_id)
+        ).all()
+        for row in rows:
+            if row.legacy_task_id is None:
+                continue
+            stats_by_task[int(row.legacy_task_id)] = {
+                "total_groups": int(row.total_groups or 0),
+                "uploaded_count": int(row.uploaded_count or 0),
+                "reviewed_count": int(row.reviewed_count or 0),
+                "unreviewed_count": int(row.unreviewed_count or 0),
+            }
+        return stats_by_task
 
     def _task_stats(self, session: Session, task: Task) -> dict[str, Any]:
         if task.legacy_id is None:
@@ -5409,53 +5500,78 @@ class PostgresStateRepository(StateRepository):
         team_id = local_simulation.current_team_id()
         terminals = sorted({str(row.terminal or "") for row in rows if str(row.terminal or "")})
         with self._session() as session:
-            task_by_terminal = {
-                str(task.terminal or ""): task
-                for task in session.scalars(select(Task).where(Task.team_id == team_id, Task.terminal.in_(terminals))).all()
-            }
-            items = []
-            for row in rows:
-                item = {"row_number": row.row_number, "terminal": row.terminal, "priority": row.priority, "status": row.status}
-                task = task_by_terminal.get(row.terminal)
-                if item["status"] in {"conflict", "malformed", "duplicate"}:
-                    items.append(item)
-                    continue
-                if task is None:
-                    item["status"] = "unknown"
-                else:
-                    stats = self._task_stats(session, task)
-                    if int(stats["total_groups"] or 0) > 0 and int(stats["uploaded_count"] or 0) >= int(stats["total_groups"] or 0):
-                        item["status"] = "completed"
-                    elif bool(task.construction_priority) == bool(row.priority):
-                        item["status"] = "unchanged"
-                    else:
-                        item["task_id"] = task.legacy_id
-                items.append(item)
-            counts = {status: sum(1 for item in items if item["status"] == status) for status in ("valid", "duplicate", "conflict", "unknown", "completed", "unchanged", "malformed")}
             if not confirm:
+                task_by_terminal = {
+                    str(task.terminal or ""): task
+                    for task in session.scalars(select(Task).where(Task.team_id == team_id, Task.terminal.in_(terminals))).all()
+                }
+                task_ids = [int(task.legacy_id) for task in task_by_terminal.values() if task.legacy_id is not None]
+                stats_by_task = self._construction_priority_stats_map(session, team_id, task_ids)
+                items = self._classify_construction_priority_import_rows(rows, task_by_terminal, stats_by_task)
+                counts = _construction_priority_import_counts(items)
                 return {"counts": counts, "items": items, "confirmed": False}
-            if counts["conflict"] or counts["malformed"]:
+            if any(row.status in {"conflict", "malformed"} for row in rows):
                 raise ValueError("Priority import contains conflict or malformed rows")
+            locked_tasks = session.scalars(
+                select(Task)
+                .where(Task.team_id == team_id, Task.terminal.in_(terminals))
+                .order_by(Task.terminal, Task.legacy_id)
+                .with_for_update()
+            ).all()
+            locked_by_terminal = {str(task.terminal or ""): task for task in locked_tasks}
+            locked_task_ids = [int(task.legacy_id) for task in locked_tasks if task.legacy_id is not None]
+            locked_stats_by_task = self._construction_priority_stats_map(session, team_id, locked_task_ids)
+            items = self._classify_construction_priority_import_rows(rows, locked_by_terminal, locked_stats_by_task)
+            for item in items:
+                if item["status"] != "valid" or not bool(item["priority"]):
+                    continue
+                task = locked_by_terminal[item["terminal"]]
+                construction_available, _review_available = construction_task_availability(
+                    locked_stats_by_task.get(int(task.legacy_id or 0), _empty_task_stats())
+                )
+                if not construction_available:
+                    raise ValueError("Construction priority is only available while construction remains available")
             for item in items:
                 if item["status"] != "valid":
                     continue
-                task = self._task_by_legacy_id(session, int(item["task_id"]), lock=True)
-                stats = self._task_stats(session, task)
-                if int(stats["total_groups"] or 0) > 0 and int(stats["uploaded_count"] or 0) >= int(stats["total_groups"] or 0):
-                    item["status"] = "completed"
-                    continue
-                if bool(task.construction_priority) == bool(item["priority"]):
-                    item["status"] = "unchanged"
-                    continue
+                task = locked_by_terminal[item["terminal"]]
                 before = bool(task.construction_priority)
                 task.construction_priority = bool(item["priority"])
                 task.construction_priority_updated_by = actor
                 task.construction_priority_updated_at = datetime.now(UTC)
                 _stage_transactional_audit(session, team_id=team_id, actor=actor, action="construction_priority_updated", entity_type="task", entity_id=task.id, before_data={"construction_priority": before}, after_data={"construction_priority": bool(item["priority"]), "source": "import"}, payload={"task_id": task.legacy_id, "terminal": task.terminal or ""})
-            counts = {status: sum(1 for item in items if item["status"] == status) for status in counts}
+            counts = _construction_priority_import_counts(items)
             _stage_transactional_audit(session, team_id=team_id, actor=actor, action="construction_priority_imported", entity_type="construction_priority_import", payload={"counts": counts})
             session.commit()
             return {"counts": counts, "items": items, "confirmed": True}
+
+    @staticmethod
+    def _classify_construction_priority_import_rows(
+        rows: list[Any],
+        task_by_terminal: dict[str, Task],
+        stats_by_task: Mapping[int, Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        items = []
+        for row in rows:
+            item = {"row_number": row.row_number, "terminal": row.terminal, "priority": row.priority, "status": row.status}
+            task = task_by_terminal.get(row.terminal)
+            if item["status"] in {"conflict", "malformed", "duplicate"}:
+                items.append(item)
+                continue
+            if task is None:
+                item["status"] = "unknown"
+            else:
+                stats = stats_by_task.get(int(task.legacy_id or 0), _empty_task_stats())
+                total = int(stats.get("total_groups") or 0)
+                uploaded = int(stats.get("uploaded_count") or 0)
+                if total > 0 and uploaded >= total:
+                    item["status"] = "completed"
+                elif bool(task.construction_priority) == bool(row.priority):
+                    item["status"] = "unchanged"
+                else:
+                    item["task_id"] = task.legacy_id
+            items.append(item)
+        return items
 
     def close_construction_task(self, task_id: int, actor: str) -> dict[str, Any]:
         with self._session() as session:
@@ -7232,9 +7348,9 @@ class DualWriteStateRepository(JsonStateRepository):
         return result
 
     def import_construction_priorities(self, rows: list[Any], *, actor: str, confirm: bool) -> dict[str, Any]:
-        result = super().import_construction_priorities(rows, actor=actor, confirm=confirm)
         if confirm:
-            self._mirror_write("import_construction_priorities", rows, actor=actor, confirm=confirm)
+            raise ValueError("Construction priority import confirmation is unavailable in dual backend mode")
+        result = super().import_construction_priorities(rows, actor=actor, confirm=confirm)
         return result
 
     def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:
