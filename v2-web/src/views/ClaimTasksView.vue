@@ -16,6 +16,12 @@ import {
   releaseTask as releaseTaskApi,
   setConstructionTaskPriority,
 } from '@/api/services'
+import {
+  createTaskRequestEpoch,
+  filterClaimTasks,
+  hydrateClaimTasksCache,
+  replaceTaskById,
+} from '@/api/claimTasksState.mjs'
 import type { ReviewTask, TaskStatusSummary, UserAccount } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
@@ -39,10 +45,12 @@ const exportProgressPercent = ref(0)
 const exportScopeByTask = ref<Record<string, 'reviewed' | 'all'>>({})
 const taskStatus = ref<TaskStatusSummary | null>(null)
 const taskStatusVersion = ref('')
-const CLAIM_TASK_CACHE_PREFIX = 'module-manager:claim-tasks:v3'
+const CLAIM_TASK_CACHE_PREFIX = 'module-manager:claim-tasks:v4'
+const LEGACY_CLAIM_TASK_CACHE_PREFIX = 'module-manager:claim-tasks:v3'
 const TASK_STATUS_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 let refreshInterval = 0
 let refreshTimer = 0
+const taskRequestEpoch = createTaskRequestEpoch()
 
 type TaskFilter = 'all' | 'priority' | 'construction' | 'review'
 type TaskMoreAction = 'scope-reviewed' | 'scope-all' | 'export-terminal' | 'export-detail' | 'assign' | 'release' | 'set-priority' | 'clear-priority'
@@ -62,9 +70,7 @@ const baseVisibleTasks = computed(() =>
 const visibleTasks = computed(() => {
   const query = normalizeSearch(searchQuery.value)
   let items = query ? baseVisibleTasks.value.filter((task) => taskMatchesSearch(task, query)) : [...baseVisibleTasks.value]
-  if (taskFilter.value === 'priority') items = items.filter((task) => task.constructionPriority)
-  if (taskFilter.value === 'construction') items = items.filter((task) => task.constructionAvailable)
-  if (taskFilter.value === 'review') items = items.filter((task) => task.reviewAvailable)
+  items = filterClaimTasks(items, taskFilter.value)
   return items.sort((left, right) => {
     if (taskFilter.value === 'all' || taskFilter.value === 'construction') {
       const priorityDiff = Number(right.constructionPriority) - Number(left.constructionPriority)
@@ -271,6 +277,10 @@ function claimTasksCacheKey() {
   return `${CLAIM_TASK_CACHE_PREFIX}:${currentTeamId()}:${actor.value}:${isAdmin.value ? 'admin' : 'reviewer'}`
 }
 
+function legacyClaimTasksCacheKey() {
+  return `${LEGACY_CLAIM_TASK_CACHE_PREFIX}:${currentTeamId()}:${actor.value}:${isAdmin.value ? 'admin' : 'reviewer'}`
+}
+
 function primeExportScopes(items: ReviewTask[]) {
   for (const task of items) {
     if (!exportScopeByTask.value[task.id]) exportScopeByTask.value[task.id] = 'reviewed'
@@ -279,11 +289,9 @@ function primeExportScopes(items: ReviewTask[]) {
 
 function restoreCachedTasks() {
   if (typeof window === 'undefined') return
+  const cached = hydrateClaimTasksCache(sessionStorage, claimTasksCacheKey(), legacyClaimTasksCacheKey())
+  if (!cached) return
   try {
-    const cached = JSON.parse(sessionStorage.getItem(claimTasksCacheKey()) || 'null') as
-      | { version?: string; tasks?: ReviewTask[] }
-      | null
-    if (!cached?.tasks?.length) return
     tasks.value = cached.tasks
     taskStatusVersion.value = cached.version || ''
     primeExportScopes(cached.tasks)
@@ -310,23 +318,28 @@ function rememberCachedTasks(version = taskStatusVersion.value) {
 
 async function loadTasks(options: LoadTasksOptions = {}) {
   const showLoading = !options.silent
+  const requestEpoch = taskRequestEpoch.begin()
   if (showLoading) loading.value = true
   errorMessage.value = ''
   try {
     const status = await fetchTaskStatus()
+    if (!taskRequestEpoch.isCurrent(requestEpoch)) return
     taskStatus.value = status
     if (!options.force && tasks.value.length && status.version && status.version === taskStatusVersion.value) {
       return
     }
     const result = await fetchTasks()
+    if (!taskRequestEpoch.isCurrent(requestEpoch)) return
     tasks.value = result
     taskStatusVersion.value = status.version
     primeExportScopes(result)
     rememberCachedTasks(status.version)
   } catch (error) {
+    if (!taskRequestEpoch.isCurrent(requestEpoch)) return
     if (!tasks.value.length || options.force) {
       try {
         const result = await fetchTasks()
+        if (!taskRequestEpoch.isCurrent(requestEpoch)) return
         tasks.value = result
         taskStatusVersion.value = ''
         primeExportScopes(result)
@@ -339,7 +352,7 @@ async function loadTasks(options: LoadTasksOptions = {}) {
     }
     errorMessage.value = error instanceof Error ? error.message : '任务状态加载失败'
   } finally {
-    if (showLoading) loading.value = false
+    if (showLoading && taskRequestEpoch.isCurrent(requestEpoch)) loading.value = false
   }
 }
 
@@ -495,7 +508,8 @@ async function updateConstructionPriority(task: ReviewTask, priority: boolean) {
   errorMessage.value = ''
   try {
     const updated = await setConstructionTaskPriority(task.id, priority)
-    tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
+    taskRequestEpoch.invalidate()
+    tasks.value = replaceTaskById(tasks.value, updated)
     taskStatusVersion.value = ''
     rememberCachedTasks('')
     ElMessage.success(priority ? '已设为优先施工' : '已取消优先施工')

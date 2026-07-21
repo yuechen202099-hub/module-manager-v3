@@ -1,4 +1,5 @@
 import { mockProjects, mockTasks, mockUser } from './mock'
+import { priorityRequestBody } from './claimTasksState.mjs'
 import type {
   AuthConfig,
   ConstructionExceptionOrder,
@@ -1456,7 +1457,7 @@ export async function closeConstructionTask(taskId: string): Promise<ReviewTask>
 export async function setConstructionTaskPriority(taskId: string, priority: boolean): Promise<ReviewTask> {
   const task = await api<BackendTask>(`/local-test/construction/tasks/${encodeURIComponent(taskId)}/priority`, {
     method: 'PATCH',
-    body: JSON.stringify({ priority }),
+    body: JSON.stringify(priorityRequestBody(priority)),
   })
   return mapTask(task)
 }
