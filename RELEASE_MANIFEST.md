@@ -5,9 +5,9 @@
 - Package: `build/server-release/module-manager-v2-server-3.0.84.zip`
 - Name: `module-manager-v2-server-3.0.84.zip`
 - Version: 3.0.84
-- Generated at: pending
-- Size: pending
-- SHA256: pending
+- Generated at: 2026-07-22 00:40:16 +08:00
+- Size: 1507805 bytes (1.44 MiB)
+- SHA256: `FFDFC966683334DB29ECC60CE722882BE688581290C5DA448A87783480302F9A`
 - 记录口径：当前工作树文件为部署后发布账本；ZIP 内副本为打包时清单，不包含压缩包自身哈希。
 
 ## Included
