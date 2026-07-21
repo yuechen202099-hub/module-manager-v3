@@ -9,7 +9,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 from sqlalchemy import String, and_, case, cast, func, literal, or_, select
@@ -35,6 +35,15 @@ from app.models import (
     UnmatchedRecord,
 )
 from app.services import account_store
+
+
+def construction_task_availability(stats: Mapping[str, Any]) -> tuple[bool, bool]:
+    total = max(0, int(stats.get("total_groups") or 0))
+    uploaded = max(0, int(stats.get("uploaded_count") or 0))
+    unreviewed = max(0, int(stats.get("unreviewed_count") or 0))
+    return total > 0 and uploaded < total, uploaded > 0 and unreviewed > 0
+
+
 from app.services import local_simulation, photo_barcode_check, unmatched_review
 
 
@@ -681,6 +690,10 @@ def _task_payload(task: Task, stats: dict[str, Any] | None = None) -> dict[str, 
     review_rate = reviewed_count / renovation_count if renovation_count else 0
     can_claim = uploaded_count > 0
     claimed_by = task.review_claimed_by or None
+    construction_available, review_available = construction_task_availability(resolved_stats)
+    construction_priority = bool(
+        getattr(task, "construction_priority", False) and construction_available
+    )
     return {
         "id": task.legacy_id if task.legacy_id is not None else str(task.id),
         "terminal": task.terminal or "",
@@ -695,6 +708,15 @@ def _task_payload(task: Task, stats: dict[str, Any] | None = None) -> dict[str, 
         "construction_enabled": task.construction_enabled,
         "construction_claimed_by": task.construction_claimed_by,
         "construction_claimed_at": task.construction_claimed_at.isoformat() if task.construction_claimed_at else None,
+        "construction_priority": construction_priority,
+        "construction_priority_updated_by": getattr(task, "construction_priority_updated_by", None) or "",
+        "construction_priority_updated_at": (
+            getattr(task, "construction_priority_updated_at", None).isoformat()
+            if getattr(task, "construction_priority_updated_at", None)
+            else ""
+        ),
+        "construction_available": construction_available,
+        "review_available": review_available,
         "can_claim": can_claim,
         "has_scan_info": can_claim,
         "claim_block_reason": "" if can_claim else "Task has no scan information",
@@ -3154,6 +3176,7 @@ class PostgresStateRepository(StateRepository):
                     Task.terminal,
                     Task.review_claimed_by,
                     Task.construction_claimed_by,
+                    Task.construction_priority,
                 )
                 .where(Task.team_id == team_id)
                 .order_by(Task.terminal, Task.legacy_id)
@@ -3200,12 +3223,16 @@ class PostgresStateRepository(StateRepository):
             task_rows = []
             for row in task_rows_raw:
                 stats = stats_by_task.get(int(row.legacy_id or 0), _empty_task_stats())
+                construction_available, _ = construction_task_availability(stats)
                 task_rows.append(
                     {
                         "id": row.legacy_id if row.legacy_id is not None else str(row.id),
                         "terminal": row.terminal or "",
                         "claimed_by": row.review_claimed_by or "",
                         "construction_assigned_to": row.construction_claimed_by or "",
+                        "construction_priority": bool(
+                            row.construction_priority and construction_available
+                        ),
                         "total_groups": stats.get("total_groups", 0),
                         "uploaded_count": stats.get("uploaded_count", 0),
                         "reviewed_count": stats.get("reviewed_count", 0),

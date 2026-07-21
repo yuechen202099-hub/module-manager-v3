@@ -567,6 +567,51 @@ def test_tasks_are_split_by_terminal_and_require_scan_info(synthetic_state: dict
         claim_task(tasks[2]["id"], reviewer="alice")
 
 
+def test_json_construction_priority_defaults_and_list_payloads_share_availability(
+    synthetic_state: dict,
+) -> None:
+    defaults = local_simulation.ensure_construction_task_fields({})
+    assert defaults["construction_priority"] is False
+    assert defaults["construction_priority_updated_by"] == ""
+    assert defaults["construction_priority_updated_at"] == ""
+
+    task = synthetic_state["tasks"][0]
+    uploaded_group = next(group for group in synthetic_state["groups"] if group["task_id"] == task["id"])
+    uploaded_group["status"] = "pending"
+    pending_group = deepcopy(uploaded_group)
+    pending_group.update(
+        {
+            "id": "priority-pending-group",
+            "photo_count": 0,
+            "photos": [],
+            "status": "unconstructed",
+        }
+    )
+    synthetic_state["groups"].append(pending_group)
+    task["construction_priority"] = True
+    task["construction_priority_updated_by"] = "dispatcher-a"
+    task["construction_priority_updated_at"] = "2026-07-21T09:30:00"
+
+    local_simulation.refresh_task_summary(task["id"])
+    task_payload = next(item for item in list_tasks() if item["id"] == task["id"])
+    construction_payload = next(
+        item
+        for item in local_simulation.list_construction_tasks(include_closed=True)
+        if item["id"] == task["id"]
+    )
+
+    assert task_payload["construction_priority"] is True
+    assert task_payload["construction_available"] is True
+    assert task_payload["review_available"] is True
+    assert {
+        key: task_payload[key]
+        for key in ("construction_priority", "construction_available", "review_available")
+    } == {
+        key: construction_payload[key]
+        for key in ("construction_priority", "construction_available", "review_available")
+    }
+
+
 def test_summary_reports_installer_group_share(synthetic_state: dict) -> None:
     summary = synthetic_state["summary"]
     distribution = {item["installer"]: item for item in summary["installer_distribution"]}

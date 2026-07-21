@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
 import logging
@@ -12,6 +13,128 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
 from app.services import state_repository as repository
+
+
+@pytest.mark.parametrize(
+    ("stats", "expected"),
+    [
+        ({"total_groups": 4, "uploaded_count": 0, "unreviewed_count": 4}, (True, False)),
+        ({"total_groups": 4, "uploaded_count": 2, "unreviewed_count": 2}, (True, True)),
+        ({"total_groups": 4, "uploaded_count": 4, "unreviewed_count": 2}, (False, True)),
+        ({"total_groups": 4, "uploaded_count": 2, "unreviewed_count": 0}, (True, False)),
+        ({"total_groups": 0, "uploaded_count": 0, "unreviewed_count": 0}, (False, False)),
+    ],
+)
+def test_construction_task_availability_matrix(stats, expected) -> None:
+    assert repository.construction_task_availability(stats) == expected
+
+
+def test_construction_priority_payload_is_defensive_and_shared_by_both_lists() -> None:
+    task = SimpleNamespace(
+        id="task-1",
+        legacy_id=1,
+        terminal="T-001",
+        title="Terminal T-001",
+        status="open",
+        review_claimed_by=None,
+        claimed_at=None,
+        released_at=None,
+        construction_enabled=False,
+        construction_claimed_by=None,
+        construction_claimed_at=None,
+        construction_released_at=None,
+        construction_opened_by=None,
+        construction_opened_at=None,
+        construction_closed_at=None,
+        construction_priority=True,
+        construction_priority_updated_by="dispatcher-a",
+        construction_priority_updated_at=datetime(2026, 7, 21, 9, 30),
+        raw_data={},
+    )
+    complete_stats = {
+        "total_groups": 4,
+        "uploaded_count": 4,
+        "reviewed_count": 2,
+        "unreviewed_count": 2,
+    }
+    partial_stats = {
+        "total_groups": 4,
+        "uploaded_count": 2,
+        "reviewed_count": 0,
+        "unreviewed_count": 2,
+    }
+
+    complete_payload = repository._task_payload(task, complete_stats)
+    complete_construction_payload = repository._construction_task_payload(task, complete_stats)
+    partial_payload = repository._task_payload(task, partial_stats)
+    partial_construction_payload = repository._construction_task_payload(task, partial_stats)
+
+    assert complete_payload["construction_priority"] is False
+    assert complete_payload["construction_available"] is False
+    assert complete_payload["review_available"] is True
+    assert complete_construction_payload["construction_priority"] is False
+    assert complete_construction_payload["construction_available"] is False
+    assert complete_construction_payload["review_available"] is True
+    assert partial_payload["construction_priority"] is True
+    assert partial_payload["construction_available"] is True
+    assert partial_payload["review_available"] is True
+    assert {
+        key: partial_payload[key]
+        for key in ("construction_priority", "construction_available", "review_available")
+    } == {
+        key: partial_construction_payload[key]
+        for key in ("construction_priority", "construction_available", "review_available")
+    }
+    assert partial_payload["construction_priority_updated_by"] == "dispatcher-a"
+    assert partial_payload["construction_priority_updated_at"] == "2026-07-21T09:30:00"
+
+
+def test_postgres_task_status_version_changes_for_effective_construction_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = SimpleNamespace(
+        id="task-1",
+        legacy_id=1,
+        terminal="T-001",
+        review_claimed_by=None,
+        construction_claimed_by=None,
+        construction_priority=False,
+    )
+    group_stats = SimpleNamespace(
+        legacy_task_id=1,
+        total_groups=4,
+        uploaded_count=2,
+        reviewed_count=0,
+        unreviewed_count=2,
+    )
+
+    class Result:
+        def __init__(self, rows) -> None:
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class Session:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+
+        def execute(self, statement):
+            self.execute_calls += 1
+            return Result([task] if self.execute_calls % 2 else [group_stats])
+
+        def scalar(self, statement):
+            return 4
+
+    postgres = repository.PostgresStateRepository()
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "default-team")
+    monkeypatch.setattr(postgres, "_session", lambda: nullcontext(Session()))
+
+    version_without_priority = postgres.task_status()["version"]
+    task.construction_priority = True
+    version_with_priority = postgres.task_status()["version"]
+
+    assert version_with_priority != version_without_priority
 
 
 def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytest.MonkeyPatch) -> None:

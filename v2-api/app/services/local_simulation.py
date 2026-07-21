@@ -2646,7 +2646,11 @@ def associate_unmatched_record(
     return {"group": group, "import_result": result}
 
 
-def ensure_construction_task_fields(task: dict[str, Any]) -> dict[str, Any]:
+def ensure_construction_task_fields(
+    task: dict[str, Any], stats: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    from app.services.state_repository import construction_task_availability
+
     task.setdefault("construction_enabled", False)
     task.setdefault("construction_claimed_by", None)
     task.setdefault("construction_claimed_at", None)
@@ -2654,6 +2658,14 @@ def ensure_construction_task_fields(task: dict[str, Any]) -> dict[str, Any]:
     task.setdefault("construction_opened_by", None)
     task.setdefault("construction_opened_at", None)
     task.setdefault("construction_closed_at", None)
+    task.setdefault("construction_priority", False)
+    task.setdefault("construction_priority_updated_by", "")
+    task.setdefault("construction_priority_updated_at", "")
+    availability_stats = stats or task
+    construction_available, review_available = construction_task_availability(availability_stats)
+    task["construction_available"] = construction_available
+    task["review_available"] = review_available
+    task["construction_priority"] = bool(task["construction_priority"] and construction_available)
     task["assigned_constructor"] = task.get("construction_claimed_by")
     task["assigned_at"] = task.get("construction_claimed_at")
     if task.get("construction_enabled"):
@@ -4414,7 +4426,6 @@ def group_summary_counts(group: dict[str, Any]) -> dict[str, int]:
 def refresh_task_summary(task_id: int) -> None:
     state = get_state()
     task = find_task(task_id)
-    ensure_construction_task_fields(task)
     task_groups = [group for group in state["groups"] if group["task_id"] == task_id]
     metrics = calculate_task_metrics(task_groups)
     task["address"] = first_task_address(task_groups)
@@ -4441,6 +4452,10 @@ def refresh_task_summary(task_id: int) -> None:
     task["claim_block_reason"] = "" if task["can_claim"] else "该终端暂无扫码信息，不能领取"
     task["progress"] = calculate_progress(task_groups)
     task["completeness_rate"] = metrics["upload_rate"]
+    ensure_construction_task_fields(
+        task,
+        {"total_groups": len(task_groups), **metrics},
+    )
 
 
 def refresh_after_photo_classification(
@@ -5467,8 +5482,14 @@ def list_tasks() -> list[dict[str, Any]]:
     for group in state["groups"]:
         groups_by_task[int(group.get("task_id") or 0)].append(group)
     for task in state["tasks"]:
-        ensure_construction_task_fields(task)
         task_groups = groups_by_task.get(int(task.get("id") or 0), [])
+        metrics = calculate_task_metrics(task_groups)
+        task["total_groups"] = metrics["renovation_count"]
+        task.update(metrics)
+        ensure_construction_task_fields(
+            task,
+            {"total_groups": metrics["renovation_count"], **metrics},
+        )
         task["address"] = first_task_address(task_groups)
         task["address_search_text"] = task_address_search_text(task_groups)
         task["meter_search_text"] = task_meter_search_text(task_groups)
@@ -5568,9 +5589,12 @@ def task_status_summary() -> dict[str, Any]:
         groups_by_task[int(group.get("task_id") or 0)].append(group)
     rows: list[dict[str, Any]] = []
     for task in state["tasks"]:
-        ensure_construction_task_fields(task)
         task_groups = groups_by_task.get(int(task.get("id") or 0), [])
         metrics = calculate_task_metrics(task_groups)
+        ensure_construction_task_fields(
+            task,
+            {"total_groups": metrics["renovation_count"], **metrics},
+        )
         rows.append(
             {
                 "id": task.get("id"),
@@ -5578,6 +5602,7 @@ def task_status_summary() -> dict[str, Any]:
                 "claimed_by": task.get("claimed_by"),
                 "construction_assigned_to": task.get("assigned_constructor")
                 or task.get("construction_claimed_by"),
+                "construction_priority": task.get("construction_priority", False),
                 "total_groups": metrics["renovation_count"],
                 "uploaded_count": metrics["uploaded_count"],
                 "reviewed_count": metrics["reviewed_count"],
