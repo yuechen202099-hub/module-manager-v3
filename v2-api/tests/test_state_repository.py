@@ -15,6 +15,274 @@ from sqlalchemy.exc import IntegrityError
 from app.services import state_repository as repository
 
 
+def test_json_repository_sets_construction_priority_through_simulation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "set_construction_task_priority",
+        lambda task_id, *, actor, priority: calls.append((task_id, actor, priority)) or {"id": task_id},
+        raising=False,
+    )
+
+    result = repository.JsonStateRepository().set_construction_task_priority(
+        7,
+        actor="admin-a",
+        priority=True,
+    )
+
+    assert result == {"id": 7}
+    assert calls == [(7, "admin-a", True)]
+
+
+def test_postgres_priority_update_locks_task_and_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    task = SimpleNamespace(
+        id="task-uuid",
+        legacy_id=7,
+        team_id="priority-team",
+        terminal="T-PRIORITY",
+        construction_priority=False,
+        construction_priority_updated_by="",
+        construction_priority_updated_at=None,
+    )
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.staged = []
+            self.commits = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def add(self, value) -> None:
+            self.staged.append(value)
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def refresh(self, _value) -> None:
+            return None
+
+    session = FakeSession()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _task_by_legacy_id(self, checked_session, task_id: int, *, lock: bool = False):
+            assert checked_session is session
+            assert task_id == 7
+            assert lock is True
+            return task
+
+        def _task_stats(self, checked_session, checked_task):
+            assert checked_session is session
+            assert checked_task is task
+            return {"total_groups": 2, "uploaded_count": 1, "reviewed_count": 0, "unreviewed_count": 1}
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "priority-team")
+    monkeypatch.setattr(repository, "_construction_task_payload", lambda checked_task, stats: {"priority": checked_task.construction_priority, **stats})
+    repo = TestPostgresRepository()
+
+    first = repo.set_construction_task_priority(7, actor="admin-a", priority=True)
+    repeated = repo.set_construction_task_priority(7, actor="admin-b", priority=True)
+    cleared = repo.set_construction_task_priority(7, actor="admin-c", priority=False)
+    cleared_again = repo.set_construction_task_priority(7, actor="admin-d", priority=False)
+
+    assert first["priority"] is True
+    assert repeated["priority"] is True
+    assert cleared["priority"] is False
+    assert cleared_again["priority"] is False
+    assert session.commits == 4
+    assert [event.action for event in session.staged].count("construction_priority_updated") == 2
+    assert task.construction_priority_updated_by == "admin-c"
+
+
+def test_postgres_priority_rejects_completed_and_zero_group_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
+    task = SimpleNamespace(
+        id="task-uuid",
+        legacy_id=8,
+        team_id="priority-team",
+        terminal="T-PRIORITY",
+        construction_priority=False,
+        construction_priority_updated_by="",
+        construction_priority_updated_at=None,
+    )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def add(self, _value) -> None:
+            pytest.fail("invalid priority update must not audit")
+
+        def commit(self) -> None:
+            pytest.fail("invalid priority update must not commit")
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+        def _task_by_legacy_id(self, _session, task_id: int, *, lock: bool = False):
+            assert task_id == 8
+            assert lock is True
+            return task
+
+        def _task_stats(self, _session, _task):
+            return self.stats
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "priority-team")
+    repo = TestPostgresRepository()
+    for stats in (
+        {"total_groups": 2, "uploaded_count": 2, "reviewed_count": 0, "unreviewed_count": 2},
+        {"total_groups": 0, "uploaded_count": 0, "reviewed_count": 0, "unreviewed_count": 0},
+    ):
+        repo.stats = stats
+        with pytest.raises(ValueError, match="available"):
+            repo.set_construction_task_priority(8, actor="admin-a", priority=True)
+
+
+def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = SimpleNamespace(
+        id="task-uuid",
+        legacy_id=9,
+        team_id="priority-team",
+        terminal="T-UPLOAD",
+        construction_claimed_by="constructor-a",
+        construction_priority=True,
+        construction_priority_updated_by="admin-a",
+        construction_priority_updated_at=None,
+    )
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-priority",
+        legacy_task_id=9,
+        task_id=task.id,
+        team_id="priority-team",
+        display_meter_no="M-PRIORITY",
+        meter_match_key="M-PRIORITY",
+        installation_address="Priority road",
+        raw_data={},
+    )
+
+    class FakeSession:
+        def __init__(self, *, fail_commit: bool) -> None:
+            self.fail_commit = fail_commit
+            self.staged = []
+            self.priority_before = task.construction_priority
+            self.raw_before = deepcopy(group.raw_data)
+            self.rollbacks = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if exc_type is not None:
+                self.rollback()
+            return False
+
+        def scalar(self, _statement):
+            return task
+
+        def add(self, value) -> None:
+            self.staged.append(value)
+
+        def flush(self) -> None:
+            return None
+
+        def commit(self) -> None:
+            if self.fail_commit:
+                raise RuntimeError("injected upload commit failure")
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+            task.construction_priority = self.priority_before
+            group.raw_data = deepcopy(self.raw_before)
+            self.staged.clear()
+
+        def refresh(self, _value) -> None:
+            return None
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def __init__(self, session) -> None:
+            super().__init__()
+            self.session = session
+            self.stats = {"total_groups": 2, "uploaded_count": 1, "reviewed_count": 0, "unreviewed_count": 1}
+
+        def _session(self):
+            return self.session
+
+        def _group_by_legacy_id(self, checked_session, group_id: str, *, lock: bool = False):
+            assert checked_session is self.session
+            assert group_id == "g-priority"
+            assert lock is True
+            return group
+
+        def _add_photo_records_to_group(self, checked_session, checked_group, **_kwargs):
+            assert checked_session is self.session
+            assert checked_group is group
+            self.stats["uploaded_count"] = 2
+            return {"added": 4, "skipped_duplicates": 0}
+
+        def _task_stats(self, checked_session, checked_task):
+            assert checked_session is self.session
+            assert checked_task is task
+            return dict(self.stats)
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "priority-team")
+    monkeypatch.setattr(repository.local_simulation, "assert_not_placeholder_construction_group", lambda **_kwargs: None)
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, checked_group: {"id": checked_group.legacy_id})
+    monkeypatch.setattr(
+        repository,
+        "_construction_task_payload",
+        lambda checked_task, stats: {
+            "construction_priority": checked_task.construction_priority,
+            "construction_available": repository.construction_task_availability(stats)[0],
+            **stats,
+        },
+    )
+
+    successful_session = FakeSession(fail_commit=False)
+    result = TestPostgresRepository(successful_session).upload_construction_group_batch(
+        "g-priority",
+        actor="constructor-a",
+        client_batch_id="priority-final-upload",
+        collector="collector-a",
+        module_asset_no="module-a",
+        photos=[{"url": "https://example.test/photo.jpg"}],
+    )
+
+    assert task.construction_priority is False
+    assert result["task"]["construction_available"] is False
+    assert result["task"]["construction_priority"] is False
+    assert "construction_priority_auto_cleared" in [event.action for event in successful_session.staged]
+
+    task.construction_priority = True
+    failing_session = FakeSession(fail_commit=True)
+    with pytest.raises(RuntimeError, match="injected upload commit failure"):
+        TestPostgresRepository(failing_session).upload_construction_group_batch(
+            "g-priority",
+            actor="constructor-a",
+            client_batch_id="priority-final-upload-failure",
+            collector="collector-a",
+            module_asset_no="module-a",
+            photos=[{"url": "https://example.test/photo.jpg"}],
+        )
+
+    assert failing_session.rollbacks == 1
+    assert task.construction_priority is True
+    assert failing_session.staged == []
+
+
 @pytest.mark.parametrize(
     ("stats", "expected"),
     [

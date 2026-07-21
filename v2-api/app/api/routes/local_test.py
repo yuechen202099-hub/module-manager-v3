@@ -1042,6 +1042,12 @@ class ConstructionActorRequest(BaseModel):
     actor: str = "constructor"
 
 
+class ConstructionPriorityRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    priority: bool
+
+
 class ConstructionHeartbeatRequest(BaseModel):
     actor: str = "constructor"
     task_id: str | int | None = None
@@ -2449,6 +2455,24 @@ def construction_task_close(task_id: int, payload: ConstructionActorRequest, req
         task = state_repository().close_construction_task(task_id, payload.actor)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
+    return ok(request, task)
+
+
+@router.patch("/construction/tasks/{task_id}/priority")
+def construction_task_priority(task_id: int, payload: ConstructionPriorityRequest, request: Request):
+    require_production_admin_payload(request)
+    if not request_is_admin(request):
+        raise HTTPException(status_code=403, detail="Only administrators can set construction priority")
+    try:
+        task = state_repository().set_construction_task_priority(
+            task_id,
+            actor=request_actor(request, "admin"),
+            priority=payload.priority,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Task not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, task)
 
 

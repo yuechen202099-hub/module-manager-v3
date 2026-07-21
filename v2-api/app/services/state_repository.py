@@ -1773,6 +1773,16 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def set_construction_task_priority(
+        self,
+        task_id: int,
+        *,
+        actor: str,
+        priority: bool,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def assign_construction_task(
         self,
         task_id: int,
@@ -2402,6 +2412,15 @@ class JsonStateRepository(StateRepository):
 
     def close_construction_task(self, task_id: int, actor: str) -> dict[str, Any]:
         return local_simulation.close_construction_task(task_id, actor)
+
+    def set_construction_task_priority(
+        self,
+        task_id: int,
+        *,
+        actor: str,
+        priority: bool,
+    ) -> dict[str, Any]:
+        return local_simulation.set_construction_task_priority(task_id, actor=actor, priority=priority)
 
     def assign_construction_task(
         self,
@@ -5293,6 +5312,47 @@ class PostgresStateRepository(StateRepository):
             session.refresh(task)
             return _construction_task_payload(task, self._task_stats(session, task))
 
+    def set_construction_task_priority(
+        self,
+        task_id: int,
+        *,
+        actor: str,
+        priority: bool,
+    ) -> dict[str, Any]:
+        actor = actor.strip() or "admin"
+        priority = bool(priority)
+        with self._session() as session:
+            task = self._task_by_legacy_id(session, task_id, lock=True)
+            stats = self._task_stats(session, task)
+            construction_available, _review_available = construction_task_availability(stats)
+            if priority and not construction_available:
+                raise ValueError("Construction priority is only available while construction remains available")
+            before = bool(task.construction_priority)
+            if before != priority:
+                now = datetime.now(UTC)
+                task.construction_priority = priority
+                task.construction_priority_updated_by = actor
+                task.construction_priority_updated_at = now
+                _stage_transactional_audit(
+                    session,
+                    team_id=task.team_id or local_simulation.current_team_id(),
+                    actor=actor,
+                    action="construction_priority_updated",
+                    entity_type="task",
+                    entity_id=task.id,
+                    before_data={"construction_priority": before},
+                    after_data={"construction_priority": priority},
+                    payload={
+                        "task_id": task.legacy_id if task.legacy_id is not None else str(task.id),
+                        "terminal": task.terminal or "",
+                        "before": before,
+                        "after": priority,
+                    },
+                )
+            session.commit()
+            session.refresh(task)
+            return _construction_task_payload(task, self._task_stats(session, task))
+
     def assign_construction_task(
         self,
         task_id: int,
@@ -6506,6 +6566,29 @@ class PostgresStateRepository(StateRepository):
                 source="construction",
                 client_batch_id=client_batch_id,
             )
+            session.flush()
+            task_stats = self._task_stats(session, task)
+            construction_available, _review_available = construction_task_availability(task_stats)
+            if task.construction_priority and not construction_available:
+                task.construction_priority = False
+                task.construction_priority_updated_by = actor
+                task.construction_priority_updated_at = datetime.now(UTC)
+                _stage_transactional_audit(
+                    session,
+                    team_id=task.team_id or local_simulation.current_team_id(),
+                    actor=actor,
+                    action="construction_priority_auto_cleared",
+                    entity_type="task",
+                    entity_id=task.id,
+                    before_data={"construction_priority": True},
+                    after_data={"construction_priority": False},
+                    payload={
+                        "task_id": task.legacy_id if task.legacy_id is not None else str(task.id),
+                        "terminal": task.terminal or "",
+                        "uploaded_count": int(task_stats.get("uploaded_count") or 0),
+                        "total_groups": int(task_stats.get("total_groups") or 0),
+                    },
+                )
             raw = dict(group.raw_data or {})
             raw["construction_collector"] = collector
             raw["construction_module_asset_no"] = module_asset_no
@@ -6525,7 +6608,12 @@ class PostgresStateRepository(StateRepository):
             )
             session.commit()
             session.refresh(group)
-            return {"group": _group_payload(session, group), **result}
+            session.refresh(task)
+            return {
+                "group": _group_payload(session, group),
+                "task": _construction_task_payload(task, self._task_stats(session, task)),
+                **result,
+            }
 
     def build_task_detail_export(self, task_id: int) -> bytes:
         with self._session() as session:
@@ -6970,6 +7058,17 @@ class DualWriteStateRepository(JsonStateRepository):
     def release_task(self, task_id: int, reviewer: str, *, force: bool = False) -> dict[str, Any]:
         result = super().release_task(task_id, reviewer, force=force)
         self._mirror_write("release_task", task_id, reviewer, force=force)
+        return result
+
+    def set_construction_task_priority(
+        self,
+        task_id: int,
+        *,
+        actor: str,
+        priority: bool,
+    ) -> dict[str, Any]:
+        result = super().set_construction_task_priority(task_id, actor=actor, priority=priority)
+        self._mirror_write("set_construction_task_priority", task_id, actor=actor, priority=priority)
         return result
 
     def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:

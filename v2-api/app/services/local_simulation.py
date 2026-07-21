@@ -5697,6 +5697,30 @@ def close_construction_task(task_id: int, actor: str) -> dict[str, Any]:
     return task
 
 
+def set_construction_task_priority(task_id: int, *, actor: str, priority: bool) -> dict[str, Any]:
+    task = find_task(task_id)
+    refresh_task_summary(task_id)
+    if priority and not task.get("construction_available"):
+        raise ValueError("Construction priority is only available while construction remains available")
+    priority = bool(priority)
+    before = bool(task.get("construction_priority"))
+    if before != priority:
+        task["construction_priority"] = priority
+        task["construction_priority_updated_by"] = actor.strip() or "admin"
+        task["construction_priority_updated_at"] = now_iso()
+        append_audit_event(
+            "construction_priority_updated",
+            task["construction_priority_updated_by"],
+            {
+                "task_id": task_id,
+                "terminal": task.get("terminal", ""),
+                "before": before,
+                "after": priority,
+            },
+        )
+    return ensure_construction_task_fields(task)
+
+
 def active_construction_tasks_for(actor: str, excluding_task_id: int | None = None) -> list[dict[str, Any]]:
     actor = actor.strip()
     if not actor:
@@ -5892,6 +5916,7 @@ def upload_construction_group_batch(
         address=group.get("address"),
     )
     task = ensure_construction_task_fields(find_task(group["task_id"]))
+    had_construction_priority = bool(task.get("construction_priority"))
     if task.get("construction_claimed_by") != actor:
         raise ValueError("Construction task must be claimed by the current constructor before upload")
     validate_construction_upload_required_slots(group, photos)
@@ -6006,6 +6031,20 @@ def upload_construction_group_batch(
         payload={"added": added, "confirmed_non_idle": bool(_datetime_from_value(client_completed_at) and added > 0)},
     )
     refresh_summary()
+    if had_construction_priority and not task.get("construction_available"):
+        task["construction_priority"] = False
+        task["construction_priority_updated_by"] = actor
+        task["construction_priority_updated_at"] = now_iso()
+        append_audit_event(
+            "construction_priority_auto_cleared",
+            actor,
+            {
+                "task_id": task.get("id"),
+                "terminal": task.get("terminal", ""),
+                "uploaded_count": int(task.get("uploaded_count") or 0),
+                "total_groups": int(task.get("total_groups") or 0),
+            },
+        )
     return {"group": group, "task": task, "added": added, "skipped_duplicates": skipped_duplicates}
 
 

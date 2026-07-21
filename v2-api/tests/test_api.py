@@ -3378,6 +3378,172 @@ def test_construction_claim_rejects_body_actor_spoofing() -> None:
     assert response.status_code == 403
 
 
+def test_construction_priority_route_enforces_admin_idempotence_and_forbidden_body_fields() -> None:
+    team_id = f"priority-route-{uuid4()}"
+    admin_token = security.create_access_token(
+        {"sub": "admin-a", "username": "admin-a", "roles": ["admin"], "team_id": team_id}
+    )
+    reviewer_token = security.create_access_token(
+        {"sub": "reviewer-a", "username": "reviewer-a", "roles": ["reviewer"], "team_id": team_id}
+    )
+    constructor_token = security.create_access_token(
+        {"sub": "constructor-a", "username": "constructor-a", "roles": ["constructor"], "team_id": team_id}
+    )
+    admin_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {admin_token}"}
+    reviewer_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {reviewer_token}"}
+    constructor_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {constructor_token}"}
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    client.post("/local-test/scan/clear", headers=admin_headers)
+    task = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][0]
+    url = f"/local-test/construction/tasks/{task['id']}/priority"
+
+    reviewer = client.patch(url, headers=reviewer_headers, json={"priority": True})
+    constructor = client.patch(url, headers=constructor_headers, json={"priority": True})
+    forbidden = client.patch(url, headers=admin_headers, json={"priority": True, "actor": "spoofed"})
+    first = client.patch(url, headers=admin_headers, json={"priority": True})
+    repeated = client.patch(url, headers=admin_headers, json={"priority": True})
+    disabled = client.patch(url, headers=admin_headers, json={"priority": False})
+    disabled_again = client.patch(url, headers=admin_headers, json={"priority": False})
+    audits = client.get("/local-test/audit-log?limit=20", headers=admin_headers).json()["data"]["items"]
+
+    assert reviewer.status_code == 403
+    assert constructor.status_code == 403
+    assert forbidden.status_code == 422
+    assert first.status_code == 200
+    assert repeated.status_code == 200
+    assert disabled.status_code == 200
+    assert disabled_again.status_code == 200
+    assert first.json()["data"]["construction_priority"] is True
+    assert disabled_again.json()["data"]["construction_priority"] is False
+    assert [item["action"] for item in audits].count("construction_priority_updated") == 2
+
+
+def test_construction_priority_route_is_team_isolated_and_rejects_completed_or_missing_tasks() -> None:
+    team_a = f"priority-isolation-a-{uuid4()}"
+    team_b = f"priority-isolation-b-{uuid4()}"
+    admin_a = security.create_access_token(
+        {"sub": "admin-a", "username": "admin-a", "roles": ["admin"], "team_id": team_a}
+    )
+    admin_b = security.create_access_token(
+        {"sub": "admin-b", "username": "admin-b", "roles": ["admin"], "team_id": team_b}
+    )
+    headers_a = {"X-Team-Id": team_a, "Authorization": f"bearer {admin_a}"}
+    headers_b = {"X-Team-Id": team_b, "Authorization": f"bearer {admin_b}"}
+    client.post("/local-test/bootstrap", headers=headers_a)
+    client.post("/local-test/bootstrap", headers=headers_b)
+    client.post("/local-test/scan/clear", headers=headers_a)
+    client.post("/local-test/scan/clear", headers=headers_b)
+    task_a = client.get("/local-test/tasks", headers=headers_a).json()["data"]["items"][0]
+    task_b = client.get("/local-test/tasks", headers=headers_b).json()["data"]["items"][0]
+    assert task_a["terminal"] == task_b["terminal"]
+
+    enabled_a = client.patch(
+        f"/local-test/construction/tasks/{task_a['id']}/priority",
+        headers=headers_a,
+        json={"priority": True},
+    )
+    task_b_after = next(
+        item
+        for item in client.get("/local-test/tasks", headers=headers_b).json()["data"]["items"]
+        if item["id"] == task_b["id"]
+    )
+    missing = client.patch(
+        "/local-test/construction/tasks/999999/priority",
+        headers=headers_b,
+        json={"priority": False},
+    )
+
+    team_token = local_simulation.set_current_team(team_a)
+    try:
+        state = local_simulation.get_state()
+        for group in state["groups"]:
+            if group["task_id"] == task_a["id"]:
+                group["photo_count"] = max(int(group.get("photo_count") or 0), 1)
+                group["status"] = "pending"
+        local_simulation.refresh_summary()
+    finally:
+        local_simulation.reset_current_team(team_token)
+    completed = client.patch(
+        f"/local-test/construction/tasks/{task_a['id']}/priority",
+        headers=headers_a,
+        json={"priority": True},
+    )
+
+    assert enabled_a.status_code == 200
+    assert task_b_after["construction_priority"] is False
+    assert missing.status_code == 404
+    assert completed.status_code == 400
+
+
+def test_json_final_construction_upload_auto_clears_priority_and_records_audit() -> None:
+    team_id = f"priority-json-upload-{uuid4()}"
+    admin_token = security.create_access_token(
+        {"sub": "admin-a", "username": "admin-a", "roles": ["admin"], "team_id": team_id}
+    )
+    admin_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {admin_token}"}
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    client.post("/local-test/scan/clear", headers=admin_headers)
+    task = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][0]
+
+    team_token = local_simulation.set_current_team(team_id)
+    try:
+        state = local_simulation.get_state()
+        final_group = next(group for group in state["groups"] if group["task_id"] == task["id"])
+        state["groups"] = [
+            group
+            for group in state["groups"]
+            if group["task_id"] != task["id"] or group["id"] == final_group["id"]
+        ]
+        live_task = next(item for item in state["tasks"] if item["id"] == task["id"])
+        live_task["construction_enabled"] = True
+        live_task["construction_claimed_by"] = "constructor-a"
+        local_simulation.refresh_summary()
+    finally:
+        local_simulation.reset_current_team(team_token)
+
+    enabled = client.patch(
+        f"/local-test/construction/tasks/{task['id']}/priority",
+        headers=admin_headers,
+        json={"priority": True},
+    )
+
+    team_token = local_simulation.set_current_team(team_id)
+    try:
+        entered = local_simulation.claim_construction_task(task["id"], "constructor-a")
+        released = local_simulation.release_construction_task(task["id"], "constructor-a")
+        reassigned = local_simulation.assign_construction_task(task["id"], "admin-a", "constructor-a")
+        assert entered["construction_priority"] is True
+        assert released["construction_priority"] is True
+        assert reassigned["construction_priority"] is True
+        result = local_simulation.upload_construction_group_batch(
+            final_group["id"],
+            actor="constructor-a",
+            client_batch_id="priority-json-final",
+            collector="collector-a",
+            module_asset_no="module-a",
+            photos=[
+                {"url": f"https://example.test/{slot}.jpg", "sha256": f"{index:064x}", "client_photo_id": slot, "slot": slot}
+                for index, slot in enumerate(("before_box", "after_box", "module_meter", "collector_barcode"), start=1)
+            ],
+        )
+        completed_task = dict(result["task"])
+        reset = local_simulation.reset_group_to_unconstructed(
+            final_group["id"],
+            actor="admin-a",
+            force=True,
+        )
+        actions = [item["action"] for item in local_simulation.list_audit_events(limit=50)["items"]]
+    finally:
+        local_simulation.reset_current_team(team_token)
+
+    assert enabled.status_code == 200
+    assert completed_task["construction_available"] is False
+    assert completed_task["construction_priority"] is False
+    assert reset["group"]["photo_count"] == 0
+    assert result["task"]["construction_priority"] is False
+    assert "construction_priority_auto_cleared" in actions
+
+
 def test_photo_barcode_rescan_route_updates_photo_with_ocr(monkeypatch) -> None:
     headers = {"X-Team-Id": "rescan-route-test"}
     client.post("/local-test/bootstrap", headers=headers)
