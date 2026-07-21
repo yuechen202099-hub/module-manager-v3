@@ -1,0 +1,22 @@
+{
+  "ok": true,
+  "failures": [],
+  "measurements": {
+    "task_snapshot_ms": 15.101,
+    "review_groups_ms": 32.021,
+    "review_group_count": 20,
+    "task_builds_in_60_seconds": 1
+  },
+  "thresholds": {
+    "task_snapshot_ms": 300,
+    "review_groups_ms": 1500,
+    "review_group_count": 20,
+    "task_builds_in_60_seconds": 1
+  },
+  "checked_at": "2026-07-21T16:37:13.325789+00:00",
+  "base_url": "http://127.0.0.1:8010",
+  "task_id": "1",
+  "first_task_snapshot_ms": 34.842,
+  "snapshot_version_reused": true,
+  "snapshot_generation_reused": true
+}

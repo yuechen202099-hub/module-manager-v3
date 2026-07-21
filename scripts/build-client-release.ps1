@@ -1,12 +1,12 @@
 param(
-    [string]$Version = "3.0.83",
+    [string]$Version = "3.0.84",
     [switch]$SkipSmoke
 )
 
 $ErrorActionPreference = "Stop"
 
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
-    throw "Release Version must be a semantic version such as 3.0.83."
+    throw "Release Version must be a semantic version such as 3.0.84."
 }
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -139,6 +139,7 @@ Copy-ReleaseItem "scripts\verify_project_board_data_center_photos.js" "scripts\v
 Copy-ReleaseItem "scripts\verify_project_board_unmatched_review.js" "scripts\verify_project_board_unmatched_review.js"
 Copy-ReleaseItem "scripts\verify_review_image_inspector.js" "scripts\verify_review_image_inspector.js"
 Copy-ReleaseItem "scripts\verify_task_hall_region_scan.js" "scripts\verify_task_hall_region_scan.js"
+Copy-ReleaseItem "scripts\verify_task_hall_pagination.js" "scripts\verify_task_hall_pagination.js"
 Copy-ReleaseItem "scripts\verify_dialog_information_integration.js" "scripts\verify_dialog_information_integration.js"
 Copy-ReleaseItem "scripts\production_backup.sh" "scripts\production_backup.sh"
 Copy-ReleaseItem "scripts\cleanup_old_releases.sh" "scripts\cleanup_old_releases.sh"

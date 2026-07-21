@@ -3,8 +3,8 @@
 ## Production SOP Override
 
 - Deployed production baseline: `V3.0.83`.
-- Release candidate: `V3.0.83`.
-- Release-candidate maintenance branch: `production/V3/3.0.83`.
+- Release candidate: `V3.0.84`.
+- Release-candidate maintenance branch: `production/V3/3.0.84`.
 - Production SOP entrypoint: `docs/sop/README.md`.
 - Production release records: `ops/releases/`.
 - P0 incident records: `ops/incidents/`.
@@ -24,9 +24,9 @@
 ## 当前基线
 
 - 当前已部署生产版本：`V3.0.83`。
-- 当前发布候选版本：`V3.0.83`。
-- 当前候选维护分支：`production/V3/3.0.83`。
-- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.83`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
+- 当前发布候选版本：`V3.0.84`。
+- 当前候选维护分支：`production/V3/3.0.84`。
+- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.0.84`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 文档和协作规则使用独立规则版本，不自动修改应用版本。
 - 详细生产 SOP 见 `docs/sop/README.md`。
 

@@ -29,6 +29,7 @@ build/
 *.zip
 *.tar
 *.tar.gz
+outputs/performance/local-*
 
 # Logs and OS files
 logs/

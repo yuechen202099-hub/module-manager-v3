@@ -12,6 +12,16 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.0.84',
+    date: '2026-07-22',
+    type: '小更新',
+    title: '任务与审阅性能优化',
+    items: [
+      '优化任务领取和审阅工作台加载速度：任务列表使用服务器定时快照，审阅资料组改为每页20条并减少后台全量刷新。',
+      '审阅工作台的状态统计和搜索覆盖完整任务数据，筛选、搜索和翻页期间不会被较早请求覆盖。',
+    ],
+  },
+  {
     version: 'V3.0.83',
     date: '2026-07-21',
     type: '小更新',

@@ -5,7 +5,7 @@
 ## 交付包
 
 ```text
-build/server-release/module-manager-v2-server-3.0.83.zip
+build/server-release/module-manager-v2-server-3.0.84.zip
 ```
 
 ## 演示入口
@@ -45,7 +45,7 @@ build/server-release/module-manager-v2-server-3.0.83.zip
 
 最近一次门禁结果：
 
-- V3.0.83 发布校验测试：结果以 `ops/releases/V3.0.83.md` 中本轮记录为准；不沿用历史测试计数。
+- V3.0.84 发布校验测试：结果以 `ops/releases/V3.0.84.md` 中本轮记录为准；不沿用历史测试计数。
 - 静态页面校验：通过
 - 部署样例校验：通过
 - 演示 smoke：通过

@@ -221,7 +221,7 @@ def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.0.83"' in build_script
+    assert '[string]$Version = "3.0.84"' in build_script
 
 
 def test_v3083_feature_verifiers_are_packaged_and_required() -> None:
@@ -238,6 +238,18 @@ def test_v3083_feature_verifiers_are_packaged_and_required() -> None:
     for verifier_path in feature_verifiers:
         windows_path = verifier_path.replace("/", "\\")
         assert f'Copy-ReleaseItem "{windows_path}" "{windows_path}"' in build_script
+
+
+def test_v3084_performance_verifiers_are_packaged_and_required() -> None:
+    verifier = load_verifier()
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+
+    assert "scripts/verify_task_hall_pagination.js" in verifier.REQUIRED_FILES
+    assert "v2-api/scripts/verify_task_review_performance.py" in verifier.REQUIRED_FILES
+    assert (
+        'Copy-ReleaseItem "scripts\\verify_task_hall_pagination.js" '
+        '"scripts\\verify_task_hall_pagination.js"'
+    ) in build_script
 
 
 def test_release_builder_stops_when_smoke_check_fails() -> None:
@@ -299,7 +311,7 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.0.83")
+        verifier.verify_release_markdown_text(document_path, content, "3.0.84")
 
 
 @pytest.mark.parametrize(
