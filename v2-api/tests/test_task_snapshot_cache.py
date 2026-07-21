@@ -133,6 +133,7 @@ def test_force_refresh_waits_when_background_snapshot_is_invalidated(tmp_path) -
     assert isinstance(result, dict)
     assert result["team_id"] == "team-a"
     assert result["version"] == "3"
+    assert result["cache"]["build_count"] == 3
 
 
 def test_concurrent_file_load_cannot_replace_newer_memory_snapshot(tmp_path, monkeypatch) -> None:
@@ -164,3 +165,16 @@ def test_concurrent_file_load_cannot_replace_newer_memory_snapshot(tmp_path, mon
 
     assert refreshed["version"] == "2"
     assert cache.get("team-a", lambda team_id: snapshot(team_id, 3))["version"] == "2"
+
+
+def test_cache_restart_keeps_count_and_changes_instance_id(tmp_path) -> None:
+    first = TaskSnapshotCache(cache_root=tmp_path, interval_seconds=60, enabled=True)
+    first_result = first.refresh("team-a", lambda team_id: snapshot(team_id, 1))
+
+    restarted = TaskSnapshotCache(cache_root=tmp_path, interval_seconds=60, enabled=True)
+    loaded_result = restarted.get("team-a", lambda team_id: snapshot(team_id, 2))
+    refreshed_result = restarted.refresh("team-a", lambda team_id: snapshot(team_id, 3))
+
+    assert loaded_result["cache"]["build_count"] == 1
+    assert refreshed_result["cache"]["build_count"] == 2
+    assert first_result["cache"]["instance_id"] != loaded_result["cache"]["instance_id"]

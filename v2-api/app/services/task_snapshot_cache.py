@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import threading
+from uuid import uuid4
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,6 +66,7 @@ class TaskSnapshotCache:
         self.interval_seconds = max(30, int(configured))
         self.enabled = settings.task_snapshot_cache_enabled if enabled is None else bool(enabled)
         self.cache_root = cache_root or default_task_snapshot_cache_root()
+        self.instance_id = uuid4().hex
         self._lock = threading.RLock()
         self._memory: dict[str, dict[str, Any]] = {}
         self._generations: dict[str, int] = {}
@@ -128,6 +130,7 @@ class TaskSnapshotCache:
         assert owner_event is not None
         retry = False
         try:
+            build_count = self._record_build_attempt(normalized_team_id)
             payload = builder(normalized_team_id)
             if _normalize_team_id(str(payload.get("team_id") or "")) != normalized_team_id:
                 raise ValueError("task snapshot team does not match requested team")
@@ -135,6 +138,8 @@ class TaskSnapshotCache:
                 "generated_at": _utc_now().isoformat(),
                 "payload": deepcopy(payload),
                 "source": source,
+                "build_count": build_count,
+                "cache_instance_id": self.instance_id,
             }
             if not self._store_snapshot(
                 normalized_team_id,
@@ -164,6 +169,7 @@ class TaskSnapshotCache:
 
         def runner() -> None:
             try:
+                build_count = self._record_build_attempt(normalized_team_id)
                 payload = builder(normalized_team_id)
                 if _normalize_team_id(str(payload.get("team_id") or "")) != normalized_team_id:
                     raise ValueError("task snapshot team does not match requested team")
@@ -173,6 +179,8 @@ class TaskSnapshotCache:
                         "generated_at": _utc_now().isoformat(),
                         "payload": deepcopy(payload),
                         "source": "background",
+                        "build_count": build_count,
+                        "cache_instance_id": self.instance_id,
                     },
                     expected_generation=refresh_generation,
                 )
@@ -263,6 +271,7 @@ class TaskSnapshotCache:
         if not isinstance(data, dict) or not isinstance(data.get("payload"), dict):
             return None
         data["source"] = "file"
+        data["cache_instance_id"] = self.instance_id
         return data
 
     def _snapshot_matches_team(self, snapshot: dict[str, Any], team_id: str) -> bool:
@@ -293,8 +302,12 @@ class TaskSnapshotCache:
                 and self._generations.get(team_id, 0) != expected_generation
             ):
                 return False
-            build_count = self._build_counts.get(team_id, 0) + 1
+            build_count = max(
+                self._build_counts.get(team_id, 0),
+                int(snapshot.get("build_count") or 0),
+            )
             snapshot["build_count"] = build_count
+            snapshot["cache_instance_id"] = self.instance_id
             self.cache_root.mkdir(parents=True, exist_ok=True)
             path = self._cache_file(team_id)
             tmp_path = path.with_suffix(f".{threading.get_ident()}.tmp")
@@ -306,6 +319,16 @@ class TaskSnapshotCache:
             self._build_counts[team_id] = build_count
             self._memory[team_id] = snapshot
             return True
+
+    def _record_build_attempt(self, team_id: str) -> int:
+        with self._lock:
+            build_count = self._build_counts.get(team_id, 0) + 1
+            self._build_counts[team_id] = build_count
+            current = self._memory.get(team_id)
+            if current is not None:
+                current["build_count"] = build_count
+                current["cache_instance_id"] = self.instance_id
+            return build_count
 
     def _is_stale(self, snapshot: dict[str, Any]) -> bool:
         generated_at = _parse_iso_datetime(str(snapshot.get("generated_at") or ""))
@@ -322,6 +345,7 @@ class TaskSnapshotCache:
             "stale": stale,
             "refresh_interval_seconds": self.interval_seconds,
             "build_count": int(snapshot.get("build_count") or 0),
+            "instance_id": str(snapshot.get("cache_instance_id") or self.instance_id),
         }
         return payload
 

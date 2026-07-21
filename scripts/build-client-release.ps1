@@ -58,6 +58,18 @@ if (-not $SkipSmoke) {
     }
 }
 
+$sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
+    throw "Unable to resolve the full Git source commit for this release."
+}
+$worktreeChanges = @(git status --porcelain --untracked-files=all)
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to verify Git worktree state before packaging."
+}
+if ($worktreeChanges.Count -ne 0) {
+    throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
+}
+
 $releaseRoot = Join-Path $root "build\server-release"
 $packageName = "module-manager-v2-server-$Version"
 $staging = Join-Path $releaseRoot $packageName
@@ -79,6 +91,10 @@ if (Test-Path $zipPath) {
 }
 
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
+
+$sourceCommitPath = Join-Path $staging "SOURCE_COMMIT"
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText($sourceCommitPath, $sourceCommit + [Environment]::NewLine, $utf8NoBom)
 
 function Copy-ReleaseItem {
     param(
@@ -185,7 +201,6 @@ Get-ChildItem -LiteralPath $staging -Recurse -File -Force |
     Remove-Item -Force
 
 # Normalize server shell scripts to LF so Linux bash can execute release helpers.
-$utf8NoBom = New-Object System.Text.UTF8Encoding $false
 Get-ChildItem -LiteralPath $staging -Recurse -File -Filter "*.sh" -Force |
     ForEach-Object {
         $content = [System.IO.File]::ReadAllText($_.FullName)

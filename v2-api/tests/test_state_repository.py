@@ -4672,7 +4672,17 @@ def test_postgres_review_queue_search_includes_reviewer() -> None:
         )
     )
 
-    assert "material_groups.reviewer ILIKE" in compiled
+    for expected in (
+        "material_groups.reviewer ILIKE",
+        "CAST(material_groups.status AS VARCHAR) ILIKE",
+        "material_groups.raw_data ->> 'status'",
+        "material_groups.raw_data ->> 'installer'",
+        "material_groups.raw_data ->> 'creator'",
+        "photos.creator ILIKE",
+        "photos.original_filename ILIKE",
+        "photos.source_file_id ILIKE",
+    ):
+        assert expected in compiled
 
 
 def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:

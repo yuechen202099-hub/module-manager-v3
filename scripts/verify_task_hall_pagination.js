@@ -17,5 +17,9 @@ assertNotContains(/limit=1000/, 'TaskHallView must not request 1000 review group
 assertNotContains(/fetchTaskGroups\(currentTaskId\)/, 'TaskHallView background refresh must not fetch every group')
 assertContains(/items\.slice\(0, 4\)/, 'TaskHallView may preload at most four thumbnails')
 assertNotContains(/items\.slice\(0, 8\)/, 'TaskHallView must not preload eight thumbnails')
+assertContains(
+  /warmupFirstReviewGroup\(taskId:\s*string,\s*requestEpoch:\s*number\)[\s\S]*reviewQueueEpoch\.isCurrent\(requestEpoch\)/,
+  'TaskHallView thumbnail warmup must remain bound to the current review queue request',
+)
 
 console.log('task hall pagination checks passed')

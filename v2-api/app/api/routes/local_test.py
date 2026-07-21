@@ -2270,6 +2270,7 @@ def finalize_unmatched_match(unmatched_id: str, payload: UnmatchedFinalizeMatchR
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, safe_finalization_response(result))
 
 
@@ -2306,6 +2307,7 @@ def associate_unmatched(unmatched_id: str, payload: UnmatchedAssociateRequest, r
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, response_payload(result))
 
 
@@ -2326,6 +2328,7 @@ def create_group_from_unmatched(unmatched_id: str, payload: UnmatchedCreateGroup
         raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, response_payload(result))
 
 
@@ -2810,6 +2813,7 @@ async def construction_group_upload_batch(
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, {**response_payload(result), "uploaded_urls": [item["url"] for item in records]})
 
 
@@ -2839,6 +2843,7 @@ def create_empty_group(payload: EmptyGroupRequest, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, response_payload(result))
 
 
@@ -2853,6 +2858,7 @@ def change_group_terminal(group_id: str, payload: GroupTerminalRequest, request:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, response_payload(result))
 
 
@@ -2880,6 +2886,7 @@ def change_group_metadata(group_id: str, payload: GroupMetadataRequest, request:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, response_payload(result))
 
 
@@ -2897,6 +2904,7 @@ def import_group_photo_urls(group_id: str, payload: AddGroupPhotosRequest, reque
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
+    invalidate_task_snapshot()
     return ok(request, response_payload(result))
 
 
@@ -2955,6 +2963,7 @@ async def upload_group_photo_images(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
+    invalidate_task_snapshot()
     return ok(request, {**response_payload(result), "uploaded_urls": saved_urls})
 
 
@@ -2973,6 +2982,7 @@ def save_review(group_id: str, payload: ReviewRequest, request: Request):
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, resolve_group_for_response(group))
 
 
@@ -2985,6 +2995,7 @@ def mark_exception(group_id: str, payload: ExceptionNoteRequest, request: Reques
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, resolve_group_for_response(group))
 
 
@@ -3002,6 +3013,7 @@ def reset_group_unconstructed(group_id: str, payload: GroupResetRequest, request
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, response_payload(result))
 
 
@@ -3020,6 +3032,7 @@ def return_group_exception_order(group_id: str, payload: GroupExceptionOrderRequ
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, response_payload(result))
 
 
@@ -3036,6 +3049,7 @@ def save_photo_category(
         repo = state_repository()
         photo = repo.classify_photo(group_id, photo_id, payload.category, reviewer)
         invalidate_project_board_summary_cache()
+        invalidate_task_snapshot()
         if include_group:
             group = repo.get_group(group_id)
             return ok(
@@ -3062,6 +3076,7 @@ def rescan_photo_barcode(
         reviewer = bound_review_actor(request, payload.reviewer)
         photo = repo.rescan_photo_barcode(group_id, photo_id, reviewer, payload.category)
         invalidate_project_board_summary_cache()
+        invalidate_task_snapshot()
         if include_group:
             group = repo.get_group(group_id)
             return ok(
@@ -3109,6 +3124,7 @@ def confirm_group_barcode_manually(
         actor = bound_review_actor(request, payload.actor)
         result = state_repository().confirm_group_barcode_manually(group_id, actor=actor)
         invalidate_project_board_summary_cache()
+        invalidate_task_snapshot()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
@@ -3125,4 +3141,5 @@ def delete_photo(group_id: str, photo_id: str, payload: PhotoDeleteRequest, requ
         raise HTTPException(status_code=404, detail="Photo or group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, response_payload(result))

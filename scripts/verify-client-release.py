@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 
 REQUIRED_FILES = {
+    "SOURCE_COMMIT",
     "README.md",
     "AGENTS.md",
     ".gitattributes",
@@ -161,6 +162,7 @@ ENTRY_ATTESTATION_PATTERN = re.compile(
     rb'"\};\n'
 )
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+SOURCE_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 RELEASE_MARKDOWN_STALE_PATTERNS = (
     ("legacy final-delivery-ready release name", re.compile(r"final-delivery-ready", re.IGNORECASE)),
     ("legacy client-release package path", re.compile(r"build[\\/]client-release", re.IGNORECASE)),
@@ -425,7 +427,7 @@ def verify_vue_asset_manifest(
             fail(f"Vue asset manifest SHA-256 mismatch: {path}")
 
 
-def verify_package(zip_path: Path) -> None:
+def verify_package(zip_path: Path, *, expected_source_commit: str | None = None) -> None:
     if not zip_path.exists():
         fail(f"Release zip not found: {zip_path}")
     if zip_path.stat().st_size <= 0:
@@ -436,6 +438,18 @@ def verify_package(zip_path: Path) -> None:
         missing = sorted(REQUIRED_FILES - names)
         if missing:
             fail("Missing required release files: " + ", ".join(missing))
+        source_commit = archive.read("SOURCE_COMMIT").decode("ascii").strip().lower()
+        if SOURCE_COMMIT_PATTERN.fullmatch(source_commit) is None:
+            fail("SOURCE_COMMIT must contain exactly one lowercase 40-character Git commit")
+        if expected_source_commit is not None:
+            normalized_expected_commit = expected_source_commit.strip().lower()
+            if SOURCE_COMMIT_PATTERN.fullmatch(normalized_expected_commit) is None:
+                fail("Expected source commit must be a 40-character Git commit")
+            if source_commit != normalized_expected_commit:
+                fail(
+                    f"Packaged SOURCE_COMMIT {source_commit} does not match expected commit "
+                    f"{normalized_expected_commit}"
+                )
         manifest = archive.read("RELEASE_MANIFEST.md").decode("utf-8") if "RELEASE_MANIFEST.md" in names else ""
         manifest_versions = [match.group("version") for match in MANIFEST_VERSION_LINE_PATTERN.finditer(manifest)]
         if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
@@ -535,6 +549,7 @@ def verify_package(zip_path: Path) -> None:
     print(f"[OK] release zip exists: {zip_path}")
     print(f"[OK] release zip size: {zip_path.stat().st_size} bytes")
     print(f"[OK] required files: {len(REQUIRED_FILES)}")
+    print(f"[OK] source commit: {source_commit}")
     print("[OK] release manifest contains production safety notes")
     print("[OK] no forbidden local/cache files")
 
@@ -555,8 +570,15 @@ def default_latest_zip() -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify a Module Manager V2 client release zip.")
     parser.add_argument("zip", nargs="?", type=Path, help="Release zip path. Defaults to the newest client release zip.")
+    parser.add_argument(
+        "--expected-source-commit",
+        help="Require SOURCE_COMMIT in the archive to match this full Git commit.",
+    )
     args = parser.parse_args()
-    verify_package(args.zip or default_latest_zip())
+    verify_package(
+        args.zip or default_latest_zip(),
+        expected_source_commit=args.expected_source_commit,
+    )
     return 0
 
 

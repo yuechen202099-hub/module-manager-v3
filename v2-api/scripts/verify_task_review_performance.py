@@ -97,8 +97,22 @@ def cache_build_count(snapshot: dict[str, Any]) -> int:
     return max(0, int(cache.get("build_count") or 0))
 
 
-def observed_build_count(start_count: int, end_count: int) -> int:
-    return max(0, int(end_count) - int(start_count))
+def cache_instance_id(snapshot: dict[str, Any]) -> str:
+    cache = snapshot.get("cache") if isinstance(snapshot.get("cache"), dict) else {}
+    return str(cache.get("instance_id") or "").strip()
+
+
+def observed_build_count(
+    start_count: int,
+    end_count: int,
+    start_instance_id: str,
+    end_instance_id: str,
+) -> int:
+    if not start_instance_id or start_instance_id != end_instance_id:
+        raise ValueError("task snapshot cache restarted during the build sample")
+    if int(end_count) < int(start_count):
+        raise ValueError("task snapshot build counter moved backwards")
+    return int(end_count) - int(start_count)
 
 
 def run_verification(base_url: str, token: str) -> dict[str, Any]:
@@ -114,9 +128,17 @@ def run_verification(base_url: str, token: str) -> dict[str, Any]:
     review_page, review_groups_ms = timed_get(base_url, review_path, token)
     review_items = review_page.get("items") if isinstance(review_page.get("items"), list) else []
     start_build_count = cache_build_count(second_snapshot)
+    start_instance_id = cache_instance_id(second_snapshot)
     sleep(BUILD_SAMPLE_SECONDS)
     sampled_snapshot, _sampled_snapshot_ms = timed_get(base_url, "/local-test/tasks/snapshot", token)
-    task_builds_in_sample = observed_build_count(start_build_count, cache_build_count(sampled_snapshot))
+    end_build_count = cache_build_count(sampled_snapshot)
+    end_instance_id = cache_instance_id(sampled_snapshot)
+    task_builds_in_sample = observed_build_count(
+        start_build_count,
+        end_build_count,
+        start_instance_id,
+        end_instance_id,
+    )
     report = verify_measurements(
         task_snapshot_ms=warm_snapshot_ms,
         review_groups_ms=review_groups_ms,
@@ -133,7 +155,8 @@ def run_verification(base_url: str, token: str) -> dict[str, Any]:
             "snapshot_generation_reused": cache_generation(first_snapshot) == cache_generation(second_snapshot),
             "build_sample_seconds": BUILD_SAMPLE_SECONDS,
             "start_build_count": start_build_count,
-            "end_build_count": cache_build_count(sampled_snapshot),
+            "end_build_count": end_build_count,
+            "cache_instance_id": start_instance_id,
         }
     )
     return report

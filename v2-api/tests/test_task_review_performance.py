@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from scripts import verify_task_review_performance as performance_verifier
 
 verify_measurements = performance_verifier.verify_measurements
@@ -47,6 +49,9 @@ def test_performance_verifier_rejects_oversized_review_page() -> None:
 
 
 def test_observed_build_count_uses_monotonic_cache_counters() -> None:
-    assert performance_verifier.observed_build_count(4, 5) == 1
-    assert performance_verifier.observed_build_count(5, 5) == 0
-    assert performance_verifier.observed_build_count(5, 3) == 0
+    assert performance_verifier.observed_build_count(4, 5, "instance-a", "instance-a") == 1
+    assert performance_verifier.observed_build_count(5, 5, "instance-a", "instance-a") == 0
+    with pytest.raises(ValueError, match="counter moved backwards"):
+        performance_verifier.observed_build_count(5, 3, "instance-a", "instance-a")
+    with pytest.raises(ValueError, match="cache restarted"):
+        performance_verifier.observed_build_count(5, 6, "instance-a", "instance-b")

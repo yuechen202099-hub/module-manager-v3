@@ -19,6 +19,7 @@ V3081_RELEASE_RECORD = "ops/releases/V3.0.81.md"
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
 VALID_SHA256 = "a" * 64
+VALID_SOURCE_COMMIT = "b" * 40
 SAFETY_NOTES = (
     "Production mode disables demo accounts by default",
     "Production mode disables /docs, /redoc, and /openapi.json by default",
@@ -118,6 +119,7 @@ def write_release_archive(
     unrelated_index_text: str = "",
     agents: str = VALID_AGENTS,
     release_record: str = PENDING_RELEASE_RECORD,
+    source_commit: str = VALID_SOURCE_COMMIT,
     omitted: set[str] | None = None,
     content_overrides: dict[str, str] | None = None,
 ) -> None:
@@ -138,6 +140,7 @@ def write_release_archive(
         f"const unrelatedReleaseNote = '{unrelated_static_version}';\n"
     )
     contents = {
+        "SOURCE_COMMIT": source_commit,
         "RELEASE_MANIFEST.md": manifest,
         "AGENTS.md": agents,
         V3080_RELEASE_RECORD: deployed_release_record(
@@ -222,6 +225,32 @@ def test_release_builder_default_version_is_candidate_semantic_version() -> None
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
     assert '[string]$Version = "3.0.84"' in build_script
+
+
+def test_release_builder_embeds_the_current_source_commit() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+
+    assert "git rev-parse HEAD" in build_script
+    assert "git status --porcelain --untracked-files=all" in build_script
+    assert 'Join-Path $staging "SOURCE_COMMIT"' in build_script
+
+
+def test_archive_rejects_missing_source_commit(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "missing-source-commit.zip"
+    write_release_archive(verifier, archive_path, omitted={"SOURCE_COMMIT"})
+
+    with pytest.raises(AssertionError, match="SOURCE_COMMIT"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_a_different_expected_source_commit(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "mismatched-source-commit.zip"
+    write_release_archive(verifier, archive_path)
+
+    with pytest.raises(AssertionError, match="does not match expected commit"):
+        verifier.verify_package(archive_path, expected_source_commit="c" * 40)
 
 
 def test_v3083_feature_verifiers_are_packaged_and_required() -> None:

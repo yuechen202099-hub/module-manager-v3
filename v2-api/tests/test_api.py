@@ -1,5 +1,6 @@
 import html
 import importlib.util
+import inspect
 import json
 import time
 from copy import deepcopy
@@ -3078,6 +3079,36 @@ def test_task_mutation_routes_invalidate_the_current_team_snapshot(monkeypatch) 
 
     assert all(response.status_code == 200 for response in responses)
     assert invalidated == ["default-team"] * len(responses)
+
+
+def test_group_mutation_routes_invalidate_the_current_team_snapshot() -> None:
+    mutation_functions = [
+        local_test.finalize_unmatched_match,
+        local_test.associate_unmatched,
+        local_test.create_group_from_unmatched,
+        local_test.construction_group_upload_batch,
+        local_test.create_empty_group,
+        local_test.change_group_terminal,
+        local_test.change_group_metadata,
+        local_test.import_group_photo_urls,
+        local_test.upload_group_photo_images,
+        local_test.save_review,
+        local_test.mark_exception,
+        local_test.reset_group_unconstructed,
+        local_test.return_group_exception_order,
+        local_test.save_photo_category,
+        local_test.rescan_photo_barcode,
+        local_test.confirm_group_barcode_manually,
+        local_test.delete_photo,
+    ]
+
+    invalid_counts = [
+        (function.__name__, inspect.getsource(function).count("invalidate_task_snapshot()"))
+        for function in mutation_functions
+        if inspect.getsource(function).count("invalidate_task_snapshot()") != 1
+    ]
+
+    assert invalid_counts == []
 
 
 def test_review_groups_route_caps_page_at_twenty(monkeypatch) -> None:

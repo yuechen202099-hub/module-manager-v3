@@ -553,12 +553,21 @@ function firstReviewWarmupGroup() {
   )
 }
 
-async function warmupFirstReviewGroup(taskId: string) {
+async function warmupFirstReviewGroup(taskId: string, requestEpoch: number) {
   const group = firstReviewWarmupGroup()
-  if (!group || activeTaskMode.value !== 'terminal' || selectedTaskId.value !== taskId) return
+  if (
+    !group ||
+    !reviewQueueEpoch.isCurrent(requestEpoch) ||
+    activeTaskMode.value !== 'terminal' ||
+    selectedTaskId.value !== taskId
+  ) return
   try {
     const detail = await fetchGroupDetailCached(group.id)
-    if (activeTaskMode.value !== 'terminal' || selectedTaskId.value !== taskId) return
+    if (
+      !reviewQueueEpoch.isCurrent(requestEpoch) ||
+      activeTaskMode.value !== 'terminal' ||
+      selectedTaskId.value !== taskId
+    ) return
     syncGroupEntry(detail.group)
     preloadGroupImages(detail.group.id, detail.photos)
   } catch {
@@ -784,7 +793,7 @@ async function loadGroups(taskId: string, options: LoadGroupsOptions = {}) {
       resetImageState()
     }
     if (options.autoOpen === false) {
-      void warmupFirstReviewGroup(taskId)
+      void warmupFirstReviewGroup(taskId, requestEpoch)
       return
     }
     const first = firstReviewWarmupGroup()
