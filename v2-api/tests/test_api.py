@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
 from app.services.ezcodes_scheduler import sync_manager
-from app.services import account_store, local_simulation, photo_storage, state_repository, unmatched_review
+from app.services import account_store, local_simulation, photo_barcode_check, photo_storage, state_repository, unmatched_review
 from app.services.photo_storage import resolve_photo_for_response
 
 
@@ -744,6 +744,139 @@ class FakeLegacyUnmatchedRepository:
 
     def delete_unmatched_record(self, unmatched_id: str, *, actor: str, expected_version: int | None = None, **payload) -> dict:
         return self._mutate("delete", actor=actor, expected_version=expected_version, **payload)
+
+
+def test_group_region_scan_resolves_trusted_photo_without_mutating_state(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class TrustedGroupRepository:
+        def __init__(self) -> None:
+            self.group = {
+                "id": "group-1",
+                "photos": [{"id": "photo-1", "source_url": "https://server.example/photo.jpg"}],
+            }
+
+        def get_group(self, group_id: str):
+            return self.group if group_id == self.group["id"] else None
+
+    repository = TrustedGroupRepository()
+    before = deepcopy(repository.group)
+    scanned_photos = []
+
+    def scan(photo, barcode_type, region):
+        scanned_photos.append(photo)
+        return {
+            "barcode_type": barcode_type,
+            "values": ["3130001122100009124734"],
+            "normalized_values": ["3130001122100009124734"],
+            "method": "barcode",
+            "region": region,
+            "photo_id": photo["id"],
+        }
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    monkeypatch.setattr(photo_barcode_check, "scan_photo_region", scan)
+
+    body = {
+        "barcode_type": "module",
+        "region": {"x": 0.25, "y": 0.3, "width": 0.4, "height": 0.18},
+    }
+    response = production_client.post(
+        "/local-test/groups/group-1/photos/photo-1/region-scan",
+        headers=headers["reviewer"],
+        json=body,
+    )
+    untrusted_source = production_client.post(
+        "/local-test/groups/group-1/photos/photo-1/region-scan",
+        headers=headers["reviewer"],
+        json={**body, "url": "http://127.0.0.1/private"},
+    )
+    missing = production_client.post(
+        "/local-test/groups/other-team-group/photos/photo-1/region-scan",
+        headers=headers["admin"],
+        json=body,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["photo_id"] == "photo-1"
+    assert scanned_photos == [repository.group["photos"][0]]
+    assert repository.group == before
+    assert untrusted_source.status_code == 422
+    assert missing.status_code == 404
+
+
+def test_unmatched_region_scan_rejects_worker_and_unknown_photo(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    repository = FakeUnmatchedReviewRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "scan_photo_region",
+        lambda photo, barcode_type, region: {"photo_id": photo["id"], "barcode_type": barcode_type, "region": region},
+    )
+    body = {
+        "barcode_type": "meter",
+        "region": {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5},
+    }
+
+    denied = production_client.post(
+        "/local-test/unmatched/unmatched-1/photos/photo-1/region-scan",
+        headers=headers["constructor"],
+        json=body,
+    )
+    missing = production_client.post(
+        "/local-test/unmatched/unmatched-1/photos/not-present/region-scan",
+        headers=headers["admin"],
+        json=body,
+    )
+
+    assert denied.status_code == 403
+    assert missing.status_code == 404
+    assert repository.calls == [{"method": "get", "unmatched_id": "unmatched-1"}]
+
+
+def test_region_scan_rejects_invalid_payloads_and_hides_image_source(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class TrustedGroupRepository:
+        group = {"id": "group-1", "photos": [{"id": "photo-1"}]}
+
+        def get_group(self, group_id: str):
+            return self.group if group_id == self.group["id"] else None
+
+    monkeypatch.setattr(local_test, "state_repository", TrustedGroupRepository)
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "scan_photo_region",
+        lambda _photo, _barcode_type, _region: (_ for _ in ()).throw(
+            ValueError("Photo image is unavailable at C:\\private\\photo.jpg")
+        ),
+    )
+    base = {"barcode_type": "meter", "region": {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5}}
+    invalid_bodies = [
+        {**base, "barcode_type": "invalid"},
+        {**base, "region": {"x": "NaN", "y": 0.1, "width": 0.5, "height": 0.5}},
+        {**base, "region": {"x": 0.8, "y": 0.1, "width": 0.3, "height": 0.5}},
+        {**base, "region": {"x": 0.1, "y": 0.1, "width": 0.001, "height": 0.001}},
+    ]
+
+    for body in invalid_bodies:
+        response = production_client.post(
+            "/local-test/groups/group-1/photos/photo-1/region-scan",
+            headers=headers["admin"],
+            json=body,
+        )
+        assert response.status_code == 422
+
+    unavailable = production_client.post(
+        "/local-test/groups/group-1/photos/photo-1/region-scan",
+        headers=headers["admin"],
+        json=base,
+    )
+
+    assert unavailable.status_code == 422
+    assert unavailable.json()["detail"] == "Image recognition unavailable"
+    assert "private" not in unavailable.text
 
 
 def legacy_unmatched_mutation_cases():

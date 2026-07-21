@@ -63,7 +63,7 @@ from app.services.photo_storage import (
     validate_remote_image_url,
 )
 from app.services.state_repository import StateBackendNotReady, _unmatched_duplicate_keys, get_state_repository
-from app.services import unmatched_review
+from app.services import photo_barcode_check, unmatched_review
 from app.services.local_simulation import (
     add_photo_urls_to_group,
     assign_construction_task,
@@ -1115,6 +1115,22 @@ class PhotoBarcodeRescanRequest(BaseModel):
     category: str = ""
 
 
+class NormalizedRegionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+class PhotoRegionScanRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    barcode_type: str
+    region: NormalizedRegionRequest
+
+
 class GroupBarcodeManualConfirmRequest(BaseModel):
     actor: str = "local-reviewer"
 
@@ -2138,6 +2154,26 @@ def unmatched_review_photo_content(unmatched_id: str, photo_id: str, request: Re
     return _photo_content_response_from_source(photo.get("source_url", ""), request=request, variant="original")
 
 
+@router.post("/unmatched/{unmatched_id}/photos/{photo_id}/region-scan")
+def scan_unmatched_review_photo_region(
+    unmatched_id: str,
+    photo_id: str,
+    payload: PhotoRegionScanRequest,
+    request: Request,
+):
+    bound_review_actor(request, "")
+    try:
+        review = state_repository().get_unmatched_review(unmatched_id)["review"]
+        photo = unmatched_review.find_review_photo(review, photo_id)
+        result = photo_barcode_check.scan_photo_region(photo, payload.barcode_type, payload.region.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched photo not found") from exc
+    except ValueError as exc:
+        detail = "Image recognition unavailable" if "unavailable" in str(exc).lower() else str(exc)
+        raise HTTPException(status_code=422, detail=detail) from exc
+    return ok(request, result)
+
+
 @router.post("/unmatched/{unmatched_id}/photos/{photo_id}/rescan")
 def rescan_unmatched_review_photo(
     unmatched_id: str,
@@ -2926,6 +2962,30 @@ def rescan_photo_barcode(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, resolve_photo_for_response(photo))
+
+
+@router.post("/groups/{group_id}/photos/{photo_id}/region-scan")
+def scan_group_photo_region(
+    group_id: str,
+    photo_id: str,
+    payload: PhotoRegionScanRequest,
+    request: Request,
+):
+    bound_review_actor(request, "")
+    try:
+        group = state_repository().get_group(group_id)
+        if group is None:
+            raise KeyError(group_id)
+        photo = next((item for item in group.get("photos") or [] if str(item.get("id") or "") == str(photo_id)), None)
+        if photo is None:
+            raise KeyError(photo_id)
+        result = photo_barcode_check.scan_photo_region(photo, payload.barcode_type, payload.region.model_dump())
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Photo or group not found") from exc
+    except ValueError as exc:
+        detail = "Image recognition unavailable" if "unavailable" in str(exc).lower() else str(exc)
+        raise HTTPException(status_code=422, detail=detail) from exc
+    return ok(request, result)
 
 
 @router.post("/groups/{group_id}/barcode-manual-confirm")
