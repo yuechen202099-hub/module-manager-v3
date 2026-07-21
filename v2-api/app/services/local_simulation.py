@@ -4384,7 +4384,6 @@ def refresh_summary() -> None:
     if state["projects"]:
         state["projects"][0]["summary"] = summary
     for task in state["tasks"]:
-        ensure_construction_task_fields(task)
         task_groups = [group for group in state["groups"] if group["task_id"] == task["id"]]
         metrics = calculate_task_metrics(task_groups)
         task["address"] = first_task_address(task_groups)
@@ -4411,6 +4410,10 @@ def refresh_summary() -> None:
         task["claim_block_reason"] = "" if task["can_claim"] else "该终端暂无扫码信息，不能领取"
         task["progress"] = calculate_progress(task_groups)
         task["completeness_rate"] = metrics["upload_rate"]
+        ensure_construction_task_fields(
+            task,
+            {"total_groups": len(task_groups), **metrics},
+        )
 
 
 def group_summary_counts(group: dict[str, Any]) -> dict[str, int]:

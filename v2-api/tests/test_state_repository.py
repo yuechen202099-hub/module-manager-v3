@@ -103,6 +103,9 @@ def test_postgres_task_status_version_changes_for_effective_construction_priorit
     group_stats = SimpleNamespace(
         legacy_task_id=1,
         total_groups=4,
+        address="",
+        address_search_text="",
+        meter_search_text="",
         uploaded_count=2,
         reviewed_count=0,
         unreviewed_count=2,
@@ -135,6 +138,132 @@ def test_postgres_task_status_version_changes_for_effective_construction_priorit
     version_with_priority = postgres.task_status()["version"]
 
     assert version_with_priority != version_without_priority
+
+
+def test_postgres_task_stats_count_only_uploaded_unreviewed_groups() -> None:
+    class Result:
+        def all(self):
+            return []
+
+    class CapturingSession:
+        def __init__(self) -> None:
+            self.statements = []
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return Result()
+
+    session = CapturingSession()
+    repository.PostgresStateRepository()._task_stats_map(
+        session,
+        "default-team",
+        include_search_text=False,
+    )
+
+    sql = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).replace("\n", " ")
+
+    assert (
+        "material_groups.status = 'unreviewed' AND "
+        "(material_groups.photo_count > 0 OR (EXISTS"
+    ) in sql
+
+
+def test_postgres_active_photo_statistics_match_payload_and_status_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = SimpleNamespace(
+        id="task-1",
+        legacy_id=1,
+        terminal="T-001",
+        title="Terminal T-001",
+        status=repository.TaskStatus.PUBLISHED,
+        review_claimed_by=None,
+        claimed_at=None,
+        released_at=None,
+        construction_enabled=False,
+        construction_claimed_by=None,
+        construction_claimed_at=None,
+        construction_priority=True,
+    )
+    active_photo_stats = {
+        "total_groups": 1,
+        "uploaded_count": 1,
+        "reviewed_count": 0,
+        "unreviewed_count": 1,
+    }
+    stale_photo_count_stats = SimpleNamespace(
+        legacy_task_id=1,
+        total_groups=1,
+        uploaded_count=0,
+        reviewed_count=0,
+        unreviewed_count=0,
+    )
+
+    class Result:
+        def __init__(self, rows) -> None:
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class Session:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+
+        def execute(self, statement):
+            self.execute_calls += 1
+            return Result([task] if self.execute_calls == 1 else [stale_photo_count_stats])
+
+        def scalar(self, statement):
+            return 1
+
+    class ActivePhotoRepository(repository.PostgresStateRepository):
+        def _task_stats_map(
+            self,
+            session,
+            team_id: str,
+            *,
+            include_search_text: bool = True,
+            include_installer_distribution: bool = True,
+        ):
+            return {1: active_photo_stats}
+
+    postgres = ActivePhotoRepository()
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "default-team")
+    monkeypatch.setattr(postgres, "_session", lambda: nullcontext(Session()))
+
+    payload = repository._task_payload(task, active_photo_stats)
+    status = postgres.task_status()
+    expected_status = repository._build_task_status_summary(
+        [
+            {
+                "id": 1,
+                "terminal": "T-001",
+                "claimed_by": "",
+                "construction_assigned_to": "",
+                "construction_priority": False,
+                **active_photo_stats,
+            }
+        ],
+        {
+            "total_catalog_rows": 1,
+            "groups": 1,
+            "photo_rows_linked": 1,
+            "approved_groups": 0,
+            "reviewed_groups": 0,
+            "unreviewed_groups": 1,
+        },
+    )
+
+    assert payload["construction_priority"] is False
+    assert payload["construction_available"] is False
+    assert payload["review_available"] is True
+    assert status["version"] == expected_status["version"]
 
 
 def test_json_state_repository_delegates_core_task_operations(monkeypatch: pytest.MonkeyPatch) -> None:

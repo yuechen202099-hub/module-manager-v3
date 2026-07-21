@@ -3004,7 +3004,14 @@ class PostgresStateRepository(StateRepository):
         if task is None or task.review_claimed_by != actor:
             raise ValueError("Task must be claimed by the current reviewer before review or classification")
 
-    def _task_stats_map(self, session: Session, team_id: str, *, include_search_text: bool = True) -> dict[int, dict[str, Any]]:
+    def _task_stats_map(
+        self,
+        session: Session,
+        team_id: str,
+        *,
+        include_search_text: bool = True,
+        include_installer_distribution: bool = True,
+    ) -> dict[int, dict[str, Any]]:
         installer_expr = func.coalesce(
             func.nullif(func.trim(MaterialGroup.raw_data.op("->>")("installer")), ""),
             func.nullif(func.trim(MaterialGroup.raw_data.op("->>")("constructor")), ""),
@@ -3053,7 +3060,18 @@ class PostgresStateRepository(StateRepository):
                     0,
                 ).label("reviewed_count"),
                 func.coalesce(
-                    func.sum(case((MaterialGroup.status == GroupStatus.UNREVIEWED, 1), else_=0)),
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    MaterialGroup.status == GroupStatus.UNREVIEWED,
+                                    uploaded_group_condition,
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
                     0,
                 ).label("unreviewed_count"),
             )
@@ -3073,6 +3091,8 @@ class PostgresStateRepository(StateRepository):
             for row in rows
             if row.legacy_task_id is not None
         }
+        if not include_installer_distribution:
+            return stats_by_task
         installer_rows = session.execute(
             select(
                 MaterialGroup.legacy_task_id,
@@ -3181,45 +3201,12 @@ class PostgresStateRepository(StateRepository):
                 .where(Task.team_id == team_id)
                 .order_by(Task.terminal, Task.legacy_id)
             ).all()
-            group_rows = session.execute(
-                select(
-                    MaterialGroup.legacy_task_id,
-                    func.count(MaterialGroup.id).label("total_groups"),
-                    func.coalesce(
-                        func.sum(case((MaterialGroup.photo_count > 0, 1), else_=0)),
-                        0,
-                    ).label("uploaded_count"),
-                    func.coalesce(
-                        func.sum(case((MaterialGroup.status == GroupStatus.APPROVED, 1), else_=0)),
-                        0,
-                    ).label("reviewed_count"),
-                    func.coalesce(
-                        func.sum(
-                            case(
-                                (
-                                    (MaterialGroup.status == GroupStatus.UNREVIEWED)
-                                    & (MaterialGroup.photo_count > 0),
-                                    1,
-                                ),
-                                else_=0,
-                            )
-                        ),
-                        0,
-                    ).label("unreviewed_count"),
-                )
-                .where(MaterialGroup.team_id == team_id, MaterialGroup.legacy_task_id.is_not(None))
-                .group_by(MaterialGroup.legacy_task_id)
-            ).all()
-            stats_by_task = {
-                int(row.legacy_task_id): {
-                    "total_groups": int(row.total_groups or 0),
-                    "uploaded_count": int(row.uploaded_count or 0),
-                    "reviewed_count": int(row.reviewed_count or 0),
-                    "unreviewed_count": int(row.unreviewed_count or 0),
-                }
-                for row in group_rows
-                if row.legacy_task_id is not None
-            }
+            stats_by_task = self._task_stats_map(
+                session,
+                team_id,
+                include_search_text=False,
+                include_installer_distribution=False,
+            )
             task_rows = []
             for row in task_rows_raw:
                 stats = stats_by_task.get(int(row.legacy_id or 0), _empty_task_stats())

@@ -612,6 +612,44 @@ def test_json_construction_priority_defaults_and_list_payloads_share_availabilit
     }
 
 
+def test_refresh_summary_rederives_construction_availability_and_status_version(
+    synthetic_state: dict,
+) -> None:
+    task = synthetic_state["tasks"][0]
+    uploaded_group = next(group for group in synthetic_state["groups"] if group["task_id"] == task["id"])
+    uploaded_group["status"] = "pending"
+    pending_group = deepcopy(uploaded_group)
+    pending_group.update(
+        {
+            "id": "priority-refresh-pending-group",
+            "photo_count": 0,
+            "photos": [],
+            "status": "unconstructed",
+        }
+    )
+    synthetic_state["groups"].append(pending_group)
+    partial_stats = {"total_groups": 2, "uploaded_count": 1, "unreviewed_count": 1}
+    task.update({"construction_priority": True, **partial_stats})
+    local_simulation.ensure_construction_task_fields(task, partial_stats)
+
+    priority_version = local_simulation.task_status_summary()["version"]
+    task["construction_priority"] = False
+    no_priority_version = local_simulation.task_status_summary()["version"]
+    assert priority_version != no_priority_version
+
+    task["construction_priority"] = True
+    local_simulation.ensure_construction_task_fields(task, partial_stats)
+    pending_group["photo_count"] = uploaded_group["photo_count"]
+    pending_group["photos"] = deepcopy(uploaded_group["photos"])
+    pending_group["status"] = "pending"
+
+    local_simulation.refresh_summary()
+
+    assert task["uploaded_count"] == 2
+    assert task["construction_priority"] is False
+    assert task["construction_available"] is False
+
+
 def test_summary_reports_installer_group_share(synthetic_state: dict) -> None:
     summary = synthetic_state["summary"]
     distribution = {item["installer"]: item for item in summary["installer_distribution"]}
