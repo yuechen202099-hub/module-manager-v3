@@ -55,6 +55,7 @@ function reset() {
   errorMessage.value = ''
   previewing.value = false
   confirming.value = false
+  downloadingTemplate.value = false
 }
 
 function closeDialog() {
@@ -72,13 +73,16 @@ function selectFile(file: UploadFile) {
 
 async function downloadTemplate() {
   if (downloadingTemplate.value) return
+  const requestToken = requestSession.capture()
   downloadingTemplate.value = true
   errorMessage.value = ''
   try {
     await downloadConstructionPriorityTemplate()
   } catch (error) {
+    if (!requestSession.isCurrent(requestToken)) return
     errorMessage.value = error instanceof Error ? error.message : '下载模板失败'
   } finally {
+    if (!requestSession.isCurrent(requestToken)) return
     downloadingTemplate.value = false
   }
 }

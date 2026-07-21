@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 
 import {
   createConstructionPriorityImportSession,
@@ -19,6 +20,7 @@ function createDialogHarness() {
   const session = createConstructionPriorityImportSession()
   const state = {
     confirming: false,
+    downloading: false,
     error: '',
     imported: 0,
     preview: null,
@@ -28,6 +30,7 @@ function createDialogHarness() {
   function reset() {
     session.invalidate()
     state.confirming = false
+    state.downloading = false
     state.error = ''
     state.preview = null
     state.previewing = false
@@ -47,6 +50,19 @@ function createDialogHarness() {
     }
   }
 
+  async function downloadRequest(request) {
+    const token = session.capture()
+    state.downloading = true
+    state.error = ''
+    try {
+      await request
+    } catch (error) {
+      if (session.isCurrent(token)) state.error = error instanceof Error ? error.message : String(error)
+    } finally {
+      if (session.isCurrent(token)) state.downloading = false
+    }
+  }
+
   async function confirmRequest(request) {
     const token = session.begin()
     state.confirming = true
@@ -61,7 +77,7 @@ function createDialogHarness() {
     }
   }
 
-  return { confirmRequest, previewRequest, reset, state }
+  return { confirmRequest, downloadRequest, previewRequest, reset, state }
 }
 
 const previewRace = createDialogHarness()
@@ -125,6 +141,37 @@ assert.equal(loadingRace.state.error, '')
 currentPreview.resolve({ source: 'current' })
 await currentPreviewPromise
 assert.equal(loadingRace.state.previewing, false)
+
+const rejectedDownload = createDialogHarness()
+const slowDownloadReject = deferred()
+const slowDownloadRejectPromise = rejectedDownload.downloadRequest(slowDownloadReject.promise)
+assert.equal(rejectedDownload.state.downloading, true)
+rejectedDownload.reset()
+assert.equal(rejectedDownload.state.downloading, false)
+rejectedDownload.state.error = 'new session error'
+slowDownloadReject.reject(new Error('stale download failed'))
+await slowDownloadRejectPromise
+assert.equal(rejectedDownload.state.error, 'new session error')
+assert.equal(rejectedDownload.state.downloading, false)
+
+const resolvedDownload = createDialogHarness()
+const slowDownloadResolve = deferred()
+const currentDownload = deferred()
+const slowDownloadResolvePromise = resolvedDownload.downloadRequest(slowDownloadResolve.promise)
+resolvedDownload.reset()
+const currentDownloadPromise = resolvedDownload.downloadRequest(currentDownload.promise)
+assert.equal(resolvedDownload.state.downloading, true)
+slowDownloadResolve.resolve()
+await slowDownloadResolvePromise
+assert.equal(resolvedDownload.state.downloading, true)
+currentDownload.resolve()
+await currentDownloadPromise
+assert.equal(resolvedDownload.state.downloading, false)
+
+const dialogSource = fs.readFileSync('v2-web/src/components/ConstructionPriorityImportDialog.vue', 'utf8')
+assert.match(dialogSource, /async function downloadTemplate\(\) \{(?:(?!\nasync function)[\s\S])*?const requestToken = requestSession\.capture\(\)/)
+assert.match(dialogSource, /async function downloadTemplate\(\) \{(?:(?!\nasync function)[\s\S])*?requestSession\.isCurrent\(requestToken\)/)
+assert.match(dialogSource, /function reset\(\) \{(?:(?!\nfunction closeDialog)[\s\S])*?downloadingTemplate\.value = false/)
 
 assert.equal(
   parseContentDispositionFilename(
