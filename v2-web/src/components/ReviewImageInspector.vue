@@ -36,6 +36,7 @@ const selectionEnd = ref<Point | null>(null)
 const selectedRegion = ref<NormalizedRegion | null>(null)
 const barcodeType = ref<BarcodeType | null>(null)
 const mode = ref<'view' | 'selecting' | 'ready' | 'submitting'>('view')
+const isInteractionBlocked = computed(() => props.loading || props.disabled || mode.value === 'submitting')
 
 let resizeObserver: ResizeObserver | null = null
 
@@ -86,7 +87,7 @@ const magnifierStyle = computed(() => {
 })
 
 const canScan = computed(() => Boolean(
-  !props.disabled &&
+  !isInteractionBlocked.value &&
   mode.value === 'ready' &&
   barcodeType.value &&
   selectedRegion.value,
@@ -161,7 +162,7 @@ function resetSelection() {
 }
 
 function beginSelection() {
-  if (props.disabled || mode.value === 'submitting') return
+  if (isInteractionBlocked.value) return
   resetSelection()
   mode.value = 'selecting'
 }
@@ -171,6 +172,10 @@ function cancelSelection() {
 }
 
 function handlePointerMove(event: PointerEvent) {
+  if (isInteractionBlocked.value) {
+    pointer.value = null
+    return
+  }
   if (mode.value === 'selecting' && selectionStart.value) {
     selectionEnd.value = clampedContentPoint(event)
     return
@@ -179,7 +184,7 @@ function handlePointerMove(event: PointerEvent) {
 }
 
 function handlePointerDown(event: PointerEvent) {
-  if (props.disabled || mode.value !== 'selecting') return
+  if (isInteractionBlocked.value || mode.value !== 'selecting') return
   const point = pointInContent(event)
   if (!point) return
   const target = event.currentTarget
@@ -191,6 +196,12 @@ function handlePointerDown(event: PointerEvent) {
 }
 
 function handlePointerUp(event: PointerEvent) {
+  if (isInteractionBlocked.value) {
+    pointer.value = null
+    selectionStart.value = null
+    selectionEnd.value = null
+    return
+  }
   const start = selectionStart.value
   const end = clampedContentPoint(event)
   const target = event.currentTarget
@@ -225,14 +236,33 @@ function requestScan() {
   emit('scan', { barcodeType: barcodeType.value, region: selectedRegion.value })
 }
 
+function finishSubmission() {
+  if (mode.value === 'submitting' && selectedRegion.value) mode.value = 'ready'
+}
+
 watch(() => props.src, () => {
   naturalSize.value = { width: 0, height: 0 }
   resetSelection()
   nextTick(updateContentRect)
 })
 
+watch(() => props.loading, (loading, previousLoading) => {
+  if (loading) {
+    pointer.value = null
+    selectionStart.value = null
+    selectionEnd.value = null
+    if (mode.value === 'selecting') mode.value = 'view'
+    return
+  }
+  if (previousLoading && !loading && mode.value === 'submitting') finishSubmission()
+})
+
 watch(() => props.disabled, (disabled) => {
-  if (!disabled && mode.value === 'submitting' && selectedRegion.value) mode.value = 'ready'
+  if (!disabled) return
+  pointer.value = null
+  selectionStart.value = null
+  selectionEnd.value = null
+  if (mode.value === 'selecting') mode.value = 'view'
 })
 
 onMounted(() => {
@@ -246,16 +276,16 @@ onBeforeUnmount(() => {
   resetSelection()
 })
 
-defineExpose({ resetSelection })
+defineExpose({ resetSelection, finishSubmission })
 </script>
 
 <template>
   <section class="review-image-inspector" :class="{ 'is-loading': loading, 'is-disabled': disabled }">
     <div class="review-image-inspector__toolbar">
       <el-tooltip content="框选扫码" placement="top">
-        <el-button circle :icon="Crop" :disabled="disabled || mode === 'selecting' || mode === 'submitting'" @click="beginSelection" />
+        <el-button circle :icon="Crop" :disabled="isInteractionBlocked || mode === 'selecting'" @click="beginSelection" />
       </el-tooltip>
-      <el-radio-group v-model="barcodeType" :disabled="disabled || mode === 'submitting'" aria-label="barcode type">
+      <el-radio-group v-model="barcodeType" :disabled="isInteractionBlocked" aria-label="barcode type">
         <el-tooltip content="表计" placement="top"><el-radio-button value="meter"><el-icon><Odometer /></el-icon></el-radio-button></el-tooltip>
         <el-tooltip content="模块" placement="top"><el-radio-button value="module"><el-icon><Grid /></el-icon></el-radio-button></el-tooltip>
         <el-tooltip content="采集器" placement="top"><el-radio-button value="collector"><el-icon><Connection /></el-icon></el-radio-button></el-tooltip>
@@ -264,7 +294,7 @@ defineExpose({ resetSelection })
         <el-button circle type="primary" :icon="Search" :disabled="!canScan" @click="requestScan" />
       </el-tooltip>
       <el-tooltip content="取消框选" placement="top">
-        <el-button circle :icon="Close" :disabled="disabled || mode === 'view' || mode === 'submitting'" @click="cancelSelection" />
+        <el-button circle :icon="Close" :disabled="isInteractionBlocked || mode === 'view'" @click="cancelSelection" />
       </el-tooltip>
     </div>
 
@@ -290,7 +320,7 @@ defineExpose({ resetSelection })
       >
       <div v-if="mode === 'selecting' && draftingSelectionStyle" class="review-image-inspector__selection is-drafting" :style="draftingSelectionStyle" />
       <div v-if="selectionStyle" class="review-image-inspector__selection" :style="selectionStyle" />
-      <div v-if="mode === 'view' && pointer" class="review-image-inspector__magnifier" :style="magnifierStyle" />
+      <div v-if="!isInteractionBlocked && mode === 'view' && pointer" class="review-image-inspector__magnifier" :style="magnifierStyle" />
     </div>
   </section>
 </template>
