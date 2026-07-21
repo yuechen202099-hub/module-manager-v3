@@ -8,8 +8,7 @@ import {
   currentActor,
   currentTeamId,
   exportTaskDetail,
-  fetchTaskStatus,
-  fetchTasks,
+  fetchTaskSnapshot,
   fetchUserAccounts,
   claimTask as claimTaskApi,
   releaseAllClaimedTasks,
@@ -25,7 +24,7 @@ import {
   replaceTaskById,
 } from '@/api/claimTasksState.mjs'
 import ConstructionPriorityImportDialog from '@/components/ConstructionPriorityImportDialog.vue'
-import type { ReviewTask, TaskStatusSummary, UserAccount } from '@/api/types'
+import type { ReviewTask, UserAccount } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -47,7 +46,6 @@ const exportingTaskId = ref('')
 const exportProgressText = ref('')
 const exportProgressPercent = ref(0)
 const exportScopeByTask = ref<Record<string, 'reviewed' | 'all'>>({})
-const taskStatus = ref<TaskStatusSummary | null>(null)
 const taskStatusVersion = ref('')
 const CLAIM_TASK_CACHE_PREFIX = 'module-manager:claim-tasks:v4'
 const LEGACY_CLAIM_TASK_CACHE_PREFIX = 'module-manager:claim-tasks:v3'
@@ -328,35 +326,18 @@ async function loadTasks(options: LoadTasksOptions = {}) {
   if (showLoading) loading.value = visibleLoadTracker.isLoading()
   errorMessage.value = ''
   try {
-    const status = await fetchTaskStatus()
+    const snapshot = await fetchTaskSnapshot(Boolean(options.force))
     if (!taskRequestEpoch.isCurrent(requestEpoch)) return
-    taskStatus.value = status
-    if (!options.force && tasks.value.length && status.version && status.version === taskStatusVersion.value) {
+    if (tasks.value.length && snapshot.version && snapshot.version === taskStatusVersion.value) {
       return
     }
-    const result = await fetchTasks()
-    if (!taskRequestEpoch.isCurrent(requestEpoch)) return
-    tasks.value = result
-    taskStatusVersion.value = status.version
-    primeExportScopes(result)
-    rememberCachedTasks(status.version)
+    tasks.value = snapshot.items
+    taskStatusVersion.value = snapshot.version
+    primeExportScopes(snapshot.items)
+    rememberCachedTasks(snapshot.version)
   } catch (error) {
     if (!taskRequestEpoch.isCurrent(requestEpoch)) return
-    if (!tasks.value.length || options.force) {
-      try {
-        const result = await fetchTasks()
-        if (!taskRequestEpoch.isCurrent(requestEpoch)) return
-        tasks.value = result
-        taskStatusVersion.value = ''
-        primeExportScopes(result)
-        rememberCachedTasks('')
-        return
-      } catch (fallbackError) {
-        errorMessage.value = fallbackError instanceof Error ? fallbackError.message : '任务加载失败'
-        return
-      }
-    }
-    errorMessage.value = error instanceof Error ? error.message : '任务状态加载失败'
+    errorMessage.value = error instanceof Error ? error.message : '任务加载失败'
   } finally {
     if (releaseVisibleLoad) {
       releaseVisibleLoad()
@@ -408,9 +389,10 @@ async function claim(task: ReviewTask) {
   errorMessage.value = ''
   try {
     const updated = await claimTaskApi(task.id)
+    taskRequestEpoch.invalidate()
     tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
-    taskStatusVersion.value = ''
-    rememberCachedTasks('')
+    rememberCachedTasks()
+    scheduleRefresh()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '领取失败'
   }
@@ -421,9 +403,10 @@ async function release(task: ReviewTask) {
   errorMessage.value = ''
   try {
     const updated = await releaseTaskApi(task.id)
+    taskRequestEpoch.invalidate()
     tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
-    taskStatusVersion.value = ''
-    rememberCachedTasks('')
+    rememberCachedTasks()
+    scheduleRefresh()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '释放失败'
   }
@@ -466,9 +449,10 @@ async function submitAssignment() {
   errorMessage.value = ''
   try {
     const updated = await assignConstructionTask(task.id, constructor)
+    taskRequestEpoch.invalidate()
     tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
-    taskStatusVersion.value = ''
-    rememberCachedTasks('')
+    rememberCachedTasks()
+    scheduleRefresh()
     assignmentDialogVisible.value = false
     ElMessage.success(`已指派给 ${userDisplayLabel(constructor)}`)
   } catch (error) {
@@ -528,8 +512,8 @@ async function updateConstructionPriority(task: ReviewTask, priority: boolean) {
       epoch: taskRequestEpoch,
       onSuccess(updated) {
         tasks.value = replaceTaskById(tasks.value, updated)
-        taskStatusVersion.value = ''
-        rememberCachedTasks('')
+        rememberCachedTasks()
+        scheduleRefresh()
       },
       priority,
       request: setConstructionTaskPriority,

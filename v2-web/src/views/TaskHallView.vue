@@ -17,8 +17,8 @@ import {
   fetchGroupPhotoObjectUrl,
   fetchGroup,
   fetchAllUnmatchedRecords,
-  fetchTaskGroups,
-  fetchTasks,
+  fetchReviewTaskGroups,
+  fetchTaskSnapshot,
   groupPhotoContentUrl,
   markUnmatchedOutsideProject,
   resetGroupToUnconstructed,
@@ -31,6 +31,7 @@ import {
   updateGroupMetadata,
   uploadGroupImages,
 } from '@/api/services'
+import { createReviewQueueRequestEpoch, nextReviewQueuePageAfterMutation } from '@/api/reviewQueueState.mjs'
 import type { BarcodeType, ConstructionExceptionOrder, MaterialGroup, RegionScanRequest, RegionScanResult, ReviewPhoto, ReviewTask, UnmatchedRecord } from '@/api/types'
 import ReviewImageInspector from '@/components/ReviewImageInspector.vue'
 import UnmatchedReviewDialog from '@/components/UnmatchedReviewDialog.vue'
@@ -58,6 +59,7 @@ type GroupFilter = 'reviewable' | 'exception' | 'unconstructed' | 'archived' | '
 type ReviewTaskMode = 'terminal' | 'exception' | 'unmatched'
 type LoadGroupsOptions = {
   autoOpen?: boolean
+  resetPage?: boolean
 }
 type GroupDetail = {
   group: MaterialGroup
@@ -89,6 +91,17 @@ const photos = ref<ReviewPhoto[]>([])
 const errorMessage = ref('')
 const groupFilter = ref<GroupFilter>('all')
 const groupQuery = ref('')
+const REVIEW_GROUP_PAGE_SIZE = 20
+const groupPage = ref(1)
+const groupTotal = ref(0)
+const groupStatusCounts = ref<Record<GroupFilter, number>>({
+  all: 0,
+  reviewable: 0,
+  exception: 0,
+  archived: 0,
+  unconstructed: 0,
+})
+const reviewQueueEpoch = createReviewQueueRequestEpoch()
 const groupListRef = ref<HTMLElement | null>(null)
 const photoFileInput = ref<HTMLInputElement | null>(null)
 const imageFailed = ref(false)
@@ -111,6 +124,9 @@ let fieldTasksLoaded = false
 let fieldTasksRequest: Promise<void> | null = null
 let lastInteractionAt = Date.now()
 let groupRequestSeq = 0
+let taskRequestSeq = 0
+let taskSnapshotVersion = ''
+let groupSearchTimer = 0
 let imageRequestSeq = 0
 let regionScanSerial = 0
 let regionScanDialogActive = false
@@ -175,27 +191,12 @@ const selectedPhotoPosition = computed(() => {
   if (!selectedPhoto.value) return '未选择'
   return `${selectedPhotoIndex.value + 1}/${photos.value.length}`
 })
-const visibleGroups = computed(() =>
-  groups.value
-    .filter((group) => {
-      if (!groupMatchesQuery(group)) return false
-      const status = reviewGroupStatus(group)
-      if (groupFilter.value !== 'all' && status !== groupFilter.value) return false
-      return Boolean(groupQuery.value.trim()) || groupFilter.value !== 'all' || status !== 'unconstructed'
-    })
-    .sort((left, right) => {
-      const leftRank = groupRank(left)
-      const rightRank = groupRank(right)
-      if (leftRank !== rightRank) return leftRank - rightRank
-      return String(left.address || left.meterNo).localeCompare(String(right.address || right.meterNo), 'zh-Hans-CN', {
-        numeric: true,
-      })
-    }),
-)
+const visibleGroups = computed(() => groups.value)
 const progress = computed(() => {
-  const reviewable = groups.value.filter((group) => Number(group.photoCount || 0) > 0)
-  const done = reviewable.filter(isGroupDone).length
-  return { total: reviewable.length, done, rate: reviewable.length ? Math.round((done / reviewable.length) * 100) : 0 }
+  const task = selectedTask.value
+  const total = Number(task?.uploadedCount || task?.renovationCount || task?.totalGroups || 0)
+  const done = Math.min(total, Number(task?.reviewedCount || 0))
+  return { total, done, rate: total ? Math.round((done / total) * 100) : 0 }
 })
 const fieldTaskCards = computed(() => {
   const unmatched = unmatchedRecords.value.map((record) => ({
@@ -238,31 +239,15 @@ const selectedFieldModeEmpty = computed(() => {
   if (activeTaskMode.value === 'exception') return '暂无异常任务'
   return ''
 })
-const statusCounts = computed<Record<GroupFilter, number>>(() => {
-  const counts: Record<GroupFilter, number> = { all: 0, reviewable: 0, exception: 0, unconstructed: 0, archived: 0 }
-  groups.value.filter(groupMatchesQuery).forEach((group) => {
-    const status = reviewGroupStatus(group)
-    counts.all += 1
-    counts[status] += 1
-  })
-  return counts
-})
 const reviewFilterTabs = computed(() =>
   filterOptions.map((item) => ({
     ...item,
-    count: statusCounts.value[item.value],
+    count: groupStatusCounts.value[item.value],
   })),
 )
-const foldedUnconstructedCount = computed(() => {
-  if (groupQuery.value.trim() || groupFilter.value !== 'all') return 0
-  return groups.value.filter((group) => reviewGroupStatus(group) === 'unconstructed').length
-})
-const visibleGroupCountLabel = computed(() =>
-  groupQuery.value.trim() || foldedUnconstructedCount.value ? `${visibleGroups.value.length}/${groups.value.length}` : `${groups.value.length}`,
-)
+const visibleGroupCountLabel = computed(() => `${groupTotal.value}`)
 const groupEmptyDescription = computed(() => {
   if (groupQuery.value.trim()) return '没有匹配的资料组'
-  if (groupFilter.value === 'all' && foldedUnconstructedCount.value) return '未施工资料组已折叠，可通过搜索打开'
   return '当前筛选暂无资料组'
 })
 const mainImageUrl = computed(() => {
@@ -274,25 +259,6 @@ const lightboxStyle = computed(() => ({
   transform: `translate(${lightbox.x}px, ${lightbox.y}px) scale(${lightbox.scale})`,
 }))
 const lightboxScaleLabel = computed(() => (lightbox.scale <= 1 ? '适屏' : `${Math.round(lightbox.scale * 100)}%`))
-function groupSearchText(group: MaterialGroup) {
-  return [
-    group.meterNo,
-    group.address,
-    group.terminal,
-    group.reviewer,
-    group.constructionCollector,
-    group.constructionModuleAssetNo,
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
-}
-
-function groupMatchesQuery(group: MaterialGroup) {
-  const keyword = groupQuery.value.trim().toLowerCase()
-  return !keyword || groupSearchText(group).includes(keyword)
-}
-
 function reviewGroupStatus(group: MaterialGroup): GroupFilter {
   if (isExceptionGroup(group)) return 'exception'
   if (isGroupDone(group)) return 'archived'
@@ -339,14 +305,6 @@ function isUnfinishedReviewGroup(group: MaterialGroup) {
   if (isExceptionGroup(group) || isGroupDone(group)) return false
   if (['approved', 'complete', 'exception', 'unmatched'].includes(String(group.status))) return false
   return Number(group.photoCount || group.photos?.length || 0) > 0
-}
-
-function groupRank(group: MaterialGroup) {
-  const status = reviewGroupStatus(group)
-  if (status === 'reviewable') return 0
-  if (status === 'exception') return 1
-  if (status === 'archived') return 2
-  return 3
 }
 
 function groupStatusLabel(group: MaterialGroup) {
@@ -576,7 +534,7 @@ async function fetchGroupDetailCached(groupId: string) {
 }
 
 function preloadGroupImages(groupId: string, items: ReviewPhoto[]) {
-  items.slice(0, 8).forEach((photo) => {
+  items.slice(0, 4).forEach((photo) => {
     if (!hasReadablePhotoSource(photo)) return
     const direct = photoDirectThumbnailUrl(photo)
     const url = direct || groupPhotoContentUrl(groupId, photo.id, 'thumbnail')
@@ -590,10 +548,8 @@ function preloadGroupImages(groupId: string, items: ReviewPhoto[]) {
 }
 
 function firstReviewWarmupGroup() {
-  return (
-    visibleGroups.value.find((group) => Number(group.photoCount || 0) > 0 && !isGroupDone(group)) ||
-    visibleGroups.value.find((group) => Number(group.photoCount || 0) > 0) ||
-    groups.value.find((group) => Number(group.photoCount || 0) > 0)
+  return visibleGroups.value.find(
+    (group) => reviewGroupStatus(group) === 'reviewable' && Number(group.photoCount || 0) > 0,
   )
 }
 
@@ -697,11 +653,22 @@ function endPan() {
   clampLightboxPan()
 }
 
-async function loadTasks() {
+type LoadTasksOptions = {
+  force?: boolean
+  reloadGroups?: boolean
+}
+
+async function loadTasks(options: LoadTasksOptions = {}) {
+  const requestSeq = ++taskRequestSeq
   loadingTasks.value = true
   errorMessage.value = ''
   try {
-    tasks.value = await fetchTasks()
+    const snapshot = await fetchTaskSnapshot(Boolean(options.force))
+    if (requestSeq !== taskRequestSeq) return
+    if (!tasks.value.length || !snapshot.version || snapshot.version !== taskSnapshotVersion) {
+      tasks.value = snapshot.items
+      taskSnapshotVersion = snapshot.version
+    }
     if (activeTaskMode.value === 'terminal') {
       scheduleFieldTasksWarmup()
     } else {
@@ -715,20 +682,27 @@ async function loadTasks() {
       resetImageState()
       return
     }
-    if (!myTasks.value.some((task) => task.id === selectedTaskId.value)) {
+    const previousTaskId = selectedTaskId.value
+    if (!myTasks.value.some((task) => task.id === previousTaskId)) {
       selectedTaskId.value = myTasks.value[0]?.id || ''
     }
-    if (selectedTaskId.value) {
-      await loadGroups(selectedTaskId.value, { autoOpen: false })
+    const taskChanged = selectedTaskId.value !== previousTaskId
+    if (selectedTaskId.value && (taskChanged || options.reloadGroups)) {
+      await loadGroups(selectedTaskId.value, { autoOpen: false, resetPage: taskChanged })
     } else {
-      groups.value = []
-      activeGroup.value = null
-      photos.value = []
+      if (!selectedTaskId.value) {
+        groups.value = []
+        groupTotal.value = 0
+        activeGroup.value = null
+        photos.value = []
+      }
     }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '任务加载失败'
+    if (requestSeq === taskRequestSeq) {
+      errorMessage.value = error instanceof Error ? error.message : '任务加载失败'
+    }
   } finally {
-    loadingTasks.value = false
+    if (requestSeq === taskRequestSeq) loadingTasks.value = false
   }
 }
 
@@ -764,31 +738,65 @@ async function loadFieldTasks(force = false) {
 }
 
 async function loadGroups(taskId: string, options: LoadGroupsOptions = {}) {
+  const taskChanged = activeTaskMode.value !== 'terminal' || selectedTaskId.value !== taskId
   activeTaskMode.value = 'terminal'
   selectedTaskId.value = taskId
+  if (taskChanged || options.resetPage) groupPage.value = 1
+  const requestedPage = groupPage.value
+  const requestEpoch = reviewQueueEpoch.begin()
   loadingGroups.value = true
-  selectedGroupId.value = ''
-  activeGroup.value = null
-  photos.value = []
-  resetImageState()
-  groupRequestSeq += 1
-  try {
+  if (taskChanged) {
+    selectedGroupId.value = ''
+    activeGroup.value = null
+    photos.value = []
+    resetImageState()
+    groupRequestSeq += 1
     groupDetailCache.clear()
     groupDetailRequests.clear()
-    groups.value = await fetchTaskGroups(taskId)
+  }
+  try {
+    const result = await fetchReviewTaskGroups(taskId, {
+      offset: (requestedPage - 1) * REVIEW_GROUP_PAGE_SIZE,
+      status: groupFilter.value,
+      query: groupQuery.value.trim(),
+    })
+    if (!reviewQueueEpoch.isCurrent(requestEpoch) || selectedTaskId.value !== taskId) return
+    const fallbackPage = nextReviewQueuePageAfterMutation({
+      page: requestedPage,
+      pageSize: REVIEW_GROUP_PAGE_SIZE,
+      total: result.total,
+      remainingOnPage: result.items.length,
+    })
+    if (!result.items.length && fallbackPage !== requestedPage) {
+      groupPage.value = fallbackPage
+      await loadGroups(taskId, { ...options, resetPage: false })
+      return
+    }
+    groupTotal.value = result.total
+    groupStatusCounts.value = result.statusCounts
+    groups.value = result.items.map((group) =>
+      group.id === activeGroup.value?.id ? { ...group, photos: photos.value } : group,
+    )
+    if (selectedGroupId.value && !groups.value.some((group) => group.id === selectedGroupId.value)) {
+      selectedGroupId.value = ''
+      activeGroup.value = null
+      photos.value = []
+      resetImageState()
+    }
     if (options.autoOpen === false) {
       void warmupFirstReviewGroup(taskId)
       return
     }
-    const first =
-      visibleGroups.value.find((group) => Number(group.photoCount || 0) > 0 && !isGroupDone(group)) || visibleGroups.value[0]
+    const first = firstReviewWarmupGroup()
     if (first) {
       await loadGroup(first.id)
     }
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '资料组加载失败'
+    if (reviewQueueEpoch.isCurrent(requestEpoch)) {
+      errorMessage.value = error instanceof Error ? error.message : '资料组加载失败'
+    }
   } finally {
-    loadingGroups.value = false
+    if (reviewQueueEpoch.isCurrent(requestEpoch)) loadingGroups.value = false
   }
 }
 
@@ -843,6 +851,7 @@ function syncDraftsFromGroup() {
 
 async function selectFieldTaskMode(mode: Exclude<ReviewTaskMode, 'terminal'>) {
   invalidateRegionScan()
+  reviewQueueEpoch.invalidate()
   activeTaskMode.value = mode
   selectedTaskId.value = ''
   selectedGroupId.value = ''
@@ -874,14 +883,10 @@ function syncGroupEntry(group: MaterialGroup) {
   }
 }
 
-function makeGroupVisible(group: MaterialGroup) {
-  const status = reviewGroupStatus(group)
-  const hiddenByFilter = groupFilter.value !== 'all' && groupFilter.value !== status
-  const hiddenBySearch = Boolean(groupQuery.value.trim()) && !groupMatchesQuery(group)
-  if (hiddenByFilter || hiddenBySearch) {
-    groupFilter.value = 'all'
-    groupQuery.value = ''
-  }
+function handleGroupPageChange(page: number) {
+  if (!selectedTaskId.value || page === groupPage.value) return
+  groupPage.value = page
+  void loadGroups(selectedTaskId.value, { autoOpen: false, resetPage: false })
 }
 
 function applyPhotoUpdate(photo: ReviewPhoto) {
@@ -908,6 +913,7 @@ async function rescanSelectedPhotoBarcode() {
     const updatedPhoto = { ...result.photo, category: result.photo.category || category }
     applyPhotoUpdate(updatedPhoto)
     if (result.group) syncGroupEntry({ ...result.group, photos: photos.value })
+    await refreshGroupsSilently()
     const label = barcodeStatusLabel(updatedPhoto)
     if (updatedPhoto.barcodeCheckStatus === 'matched') {
       ElMessage.success(`${label}${barcodeMethodLabel(updatedPhoto) ? `（${barcodeMethodLabel(updatedPhoto)}）` : ''}`)
@@ -950,6 +956,7 @@ async function confirmSelectedGroupBarcodeManually() {
       photos.value = nextGroup.photos || photos.value
       syncGroupEntry(nextGroup)
     }
+    await refreshGroupsSilently()
     ElMessage.success('已人工确认扫码通过')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '人工确认失败')
@@ -1120,25 +1127,22 @@ function shouldDeferBackgroundRefresh() {
 async function refreshGroupsSilently() {
   if (!selectedTaskId.value) return
   const currentTaskId = selectedTaskId.value
-  const currentActiveGroupId = activeGroup.value?.id
-  const refreshed = await fetchTaskGroups(currentTaskId)
-  if (selectedTaskId.value !== currentTaskId) return
-  groups.value = refreshed.map((group) => {
-    if (currentActiveGroupId && group.id === currentActiveGroupId && activeGroup.value) {
-      return { ...group, photos: photos.value }
-    }
-    return group
-  })
+  await loadGroups(currentTaskId, { autoOpen: false, resetPage: false })
 }
 
 async function refreshTasksSilently() {
   const currentTaskId = selectedTaskId.value
-  const refreshed = await fetchTasks()
-  tasks.value = refreshed
+  const requestSeq = ++taskRequestSeq
+  const snapshot = await fetchTaskSnapshot(false)
+  if (requestSeq !== taskRequestSeq) return
+  if (!tasks.value.length || !snapshot.version || snapshot.version !== taskSnapshotVersion) {
+    tasks.value = snapshot.items
+    taskSnapshotVersion = snapshot.version
+  }
   if (activeTaskMode.value !== 'terminal') return
   if (currentTaskId && !myTasks.value.some((task) => task.id === currentTaskId)) {
     selectedTaskId.value = myTasks.value[0]?.id || ''
-    if (selectedTaskId.value) await loadGroups(selectedTaskId.value, { autoOpen: false })
+    if (selectedTaskId.value) await loadGroups(selectedTaskId.value, { autoOpen: false, resetPage: true })
   }
 }
 
@@ -1154,10 +1158,8 @@ async function externalRefresh() {
 }
 
 function firstUnfinishedGroup(excludeGroupId = '') {
-  if (groupFilter.value !== 'all') groupFilter.value = 'all'
-  if (groupQuery.value.trim()) groupQuery.value = ''
   const isSelectable = (group: MaterialGroup) => group.id !== excludeGroupId && isUnfinishedReviewGroup(group)
-  return visibleGroups.value.find(isSelectable) || groups.value.find(isSelectable)
+  return visibleGroups.value.find(isSelectable)
 }
 
 function enqueueArchiveRequest(job: {
@@ -1220,7 +1222,6 @@ async function archiveCurrentPhoto() {
   } else {
     const nextGroup = firstUnfinishedGroup(groupId)
     if (nextGroup) {
-      makeGroupVisible(nextGroup)
       void loadGroup(nextGroup.id)
     }
   }
@@ -1272,6 +1273,7 @@ async function saveCurrentGroup() {
     activeGroup.value = { ...activeGroup.value, ...updated, photos: photos.value }
     syncGroupEntry(activeGroup.value)
     await completeGroupIfReady()
+    await refreshGroupsSilently()
     ElMessage.success('资料组已保存')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '保存失败')
@@ -1431,6 +1433,7 @@ async function uploadPhotos(event: Event) {
       await loadGroup(activeGroup.value.id)
     }
     resetImageState()
+    await refreshGroupsSilently()
     ElMessage.success(`已补图 ${result.uploadedUrls.length} 张`)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '补图失败')
@@ -1623,7 +1626,6 @@ async function selectNextUnfinishedGroup(completedGroupId = '') {
   await loadGroups(selectedTaskId.value, { autoOpen: false })
   const next = firstUnfinishedGroup(completedGroupId)
   if (next) {
-    makeGroupVisible(next)
     await loadGroup(next.id)
   }
 }
@@ -1704,13 +1706,31 @@ watch(
   { flush: 'post' },
 )
 
+watch(groupFilter, () => {
+  if (activeTaskMode.value !== 'terminal' || !selectedTaskId.value) return
+  groupPage.value = 1
+  reviewQueueEpoch.invalidate()
+  void loadGroups(selectedTaskId.value, { autoOpen: false, resetPage: false })
+})
+
+watch(groupQuery, () => {
+  if (groupSearchTimer) window.clearTimeout(groupSearchTimer)
+  groupPage.value = 1
+  reviewQueueEpoch.invalidate()
+  if (activeTaskMode.value !== 'terminal' || !selectedTaskId.value) return
+  groupSearchTimer = window.setTimeout(() => {
+    groupSearchTimer = 0
+    void loadGroups(selectedTaskId.value, { autoOpen: false, resetPage: false })
+  }, 300)
+})
+
 onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('message', handleExternalRefresh)
   backgroundRefreshTimer = window.setInterval(() => {
     void externalRefresh()
   }, BACKGROUND_REFRESH_INTERVAL_MS)
-  void loadTasks()
+  void loadTasks({ reloadGroups: true })
 })
 
 onUnmounted(() => {
@@ -1727,6 +1747,10 @@ onUnmounted(() => {
     window.clearTimeout(fieldTasksWarmupTimer)
     fieldTasksWarmupTimer = 0
   }
+  if (groupSearchTimer) {
+    window.clearTimeout(groupSearchTimer)
+    groupSearchTimer = 0
+  }
 })
 </script>
 
@@ -1741,7 +1765,7 @@ onUnmounted(() => {
           <h3>任务</h3>
           <p class="muted">仅显示我已领取的终端</p>
         </div>
-        <ElButton :icon="Refresh" circle :loading="loadingTasks" @click="loadTasks" />
+        <ElButton :icon="Refresh" circle :loading="loadingTasks" @click="loadTasks({ force: true, reloadGroups: true })" />
       </div>
       <div class="review-progress">
         <span>{{ progress.done }}/{{ progress.total }}</span>
@@ -1831,9 +1855,6 @@ onUnmounted(() => {
       </div>
       <ElSkeleton v-if="loadingGroups" :rows="8" animated />
       <div v-else ref="groupListRef" class="review-group-list">
-        <div v-if="foldedUnconstructedCount" class="folded-note">
-          已折叠 {{ foldedUnconstructedCount }} 个未施工资料组。如需人工补完施工，可搜索表号、终端、地址、采集器或模块号打开。
-        </div>
         <button
           v-for="group in visibleGroups"
           :key="group.id"
@@ -1871,6 +1892,15 @@ onUnmounted(() => {
         </button>
         <ElEmpty v-if="!visibleGroups.length" :description="groupEmptyDescription" />
       </div>
+      <ElPagination
+        v-if="groupTotal > REVIEW_GROUP_PAGE_SIZE"
+        class="review-group-pagination"
+        layout="prev, pager, next, total"
+        :current-page="groupPage"
+        :page-size="20"
+        :total="groupTotal"
+        @current-change="handleGroupPageChange"
+      />
       </template>
     </aside>
 
@@ -2759,6 +2789,13 @@ onUnmounted(() => {
 .review-group-list {
   gap: 9px;
   padding: 12px;
+}
+
+.review-group-pagination {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  padding: 10px 8px 4px;
 }
 
 .review-list-card {

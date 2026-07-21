@@ -18,6 +18,14 @@ function assertNotContains(source, pattern, message) {
 
 const claimTasks = read('v2-web/src/views/ClaimTasksView.vue')
 
+assertContains(claimTasks, 'fetchTaskSnapshot', 'ClaimTasksView must load the server task snapshot')
+assertNotContains(claimTasks, 'fetchTaskStatus', 'ClaimTasksView must not issue the legacy task status request')
+assertNotContains(
+  claimTasks,
+  'await fetchTaskStatus()\n    if (!taskRequestEpoch.isCurrent(requestEpoch)) return\n    taskStatus.value = status',
+  'ClaimTasksView must not serially load task status before tasks',
+)
+
 assertContains(claimTasks, 'function isTaskReviewComplete(task: ReviewTask)', 'ClaimTasksView must define review completion detection')
 assertContains(claimTasks, "if (isTaskReviewComplete(task)) return '已审阅'", 'review-complete tasks must display 已审阅 before claimed state')
 assertContains(claimTasks, '(Number(task.reviewRate) || 0) >= 1', 'review completion must use the raw 100% review rate')
