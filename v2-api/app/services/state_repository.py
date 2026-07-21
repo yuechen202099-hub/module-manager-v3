@@ -1783,6 +1783,10 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def import_construction_priorities(self, rows: list[Any], *, actor: str, confirm: bool) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def assign_construction_task(
         self,
         task_id: int,
@@ -2421,6 +2425,34 @@ class JsonStateRepository(StateRepository):
         priority: bool,
     ) -> dict[str, Any]:
         return local_simulation.set_construction_task_priority(task_id, actor=actor, priority=priority)
+
+    def import_construction_priorities(self, rows: list[Any], *, actor: str, confirm: bool) -> dict[str, Any]:
+        tasks = {str(item.get("terminal") or ""): item for item in local_simulation.list_tasks()}
+        items = []
+        for row in rows:
+            item = {"row_number": row.row_number, "terminal": row.terminal, "priority": row.priority, "status": row.status}
+            task = tasks.get(row.terminal)
+            if item["status"] in {"conflict", "malformed", "duplicate"}:
+                items.append(item)
+                continue
+            if task is None:
+                item["status"] = "unknown"
+            elif int(task.get("total_groups") or 0) > 0 and int(task.get("uploaded_count") or 0) >= int(task.get("total_groups") or 0):
+                item["status"] = "completed"
+            elif bool(task.get("construction_priority")) == bool(row.priority):
+                item["status"] = "unchanged"
+            else:
+                item["task_id"] = task["id"]
+            items.append(item)
+        counts = {status: sum(1 for item in items if item["status"] == status) for status in ("valid", "duplicate", "conflict", "unknown", "completed", "unchanged", "malformed")}
+        if confirm:
+            if counts["conflict"] or counts["malformed"]:
+                raise ValueError("Priority import contains conflict or malformed rows")
+            for item in items:
+                if item["status"] == "valid":
+                    local_simulation.set_construction_task_priority(item["task_id"], actor=actor, priority=bool(item["priority"]))
+            local_simulation.append_audit_event("construction_priority_imported", actor, {"counts": counts})
+        return {"counts": counts, "items": items, "confirmed": confirm}
 
     def assign_construction_task(
         self,
@@ -5373,6 +5405,58 @@ class PostgresStateRepository(StateRepository):
             session.refresh(task)
             return _construction_task_payload(task, self._task_payload_stats(session, task))
 
+    def import_construction_priorities(self, rows: list[Any], *, actor: str, confirm: bool) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        terminals = sorted({str(row.terminal or "") for row in rows if str(row.terminal or "")})
+        with self._session() as session:
+            task_by_terminal = {
+                str(task.terminal or ""): task
+                for task in session.scalars(select(Task).where(Task.team_id == team_id, Task.terminal.in_(terminals))).all()
+            }
+            items = []
+            for row in rows:
+                item = {"row_number": row.row_number, "terminal": row.terminal, "priority": row.priority, "status": row.status}
+                task = task_by_terminal.get(row.terminal)
+                if item["status"] in {"conflict", "malformed", "duplicate"}:
+                    items.append(item)
+                    continue
+                if task is None:
+                    item["status"] = "unknown"
+                else:
+                    stats = self._task_stats(session, task)
+                    if int(stats["total_groups"] or 0) > 0 and int(stats["uploaded_count"] or 0) >= int(stats["total_groups"] or 0):
+                        item["status"] = "completed"
+                    elif bool(task.construction_priority) == bool(row.priority):
+                        item["status"] = "unchanged"
+                    else:
+                        item["task_id"] = task.legacy_id
+                items.append(item)
+            counts = {status: sum(1 for item in items if item["status"] == status) for status in ("valid", "duplicate", "conflict", "unknown", "completed", "unchanged", "malformed")}
+            if not confirm:
+                return {"counts": counts, "items": items, "confirmed": False}
+            if counts["conflict"] or counts["malformed"]:
+                raise ValueError("Priority import contains conflict or malformed rows")
+            for item in items:
+                if item["status"] != "valid":
+                    continue
+                task = self._task_by_legacy_id(session, int(item["task_id"]), lock=True)
+                stats = self._task_stats(session, task)
+                if int(stats["total_groups"] or 0) > 0 and int(stats["uploaded_count"] or 0) >= int(stats["total_groups"] or 0):
+                    item["status"] = "completed"
+                    continue
+                if bool(task.construction_priority) == bool(item["priority"]):
+                    item["status"] = "unchanged"
+                    continue
+                before = bool(task.construction_priority)
+                task.construction_priority = bool(item["priority"])
+                task.construction_priority_updated_by = actor
+                task.construction_priority_updated_at = datetime.now(UTC)
+                _stage_transactional_audit(session, team_id=team_id, actor=actor, action="construction_priority_updated", entity_type="task", entity_id=task.id, before_data={"construction_priority": before}, after_data={"construction_priority": bool(item["priority"]), "source": "import"}, payload={"task_id": task.legacy_id, "terminal": task.terminal or ""})
+            counts = {status: sum(1 for item in items if item["status"] == status) for status in counts}
+            _stage_transactional_audit(session, team_id=team_id, actor=actor, action="construction_priority_imported", entity_type="construction_priority_import", payload={"counts": counts})
+            session.commit()
+            return {"counts": counts, "items": items, "confirmed": True}
+
     def close_construction_task(self, task_id: int, actor: str) -> dict[str, Any]:
         with self._session() as session:
             task = self._task_by_legacy_id(session, task_id, lock=True)
@@ -7145,6 +7229,12 @@ class DualWriteStateRepository(JsonStateRepository):
     ) -> dict[str, Any]:
         result = super().set_construction_task_priority(task_id, actor=actor, priority=priority)
         self._mirror_write("set_construction_task_priority", task_id, actor=actor, priority=priority)
+        return result
+
+    def import_construction_priorities(self, rows: list[Any], *, actor: str, confirm: bool) -> dict[str, Any]:
+        result = super().import_construction_priorities(rows, actor=actor, confirm=confirm)
+        if confirm:
+            self._mirror_write("import_construction_priorities", rows, actor=actor, confirm=confirm)
         return result
 
     def dedupe_unmatched_records(self, *, actor: str) -> dict[str, Any]:

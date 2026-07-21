@@ -41,6 +41,7 @@ from app.models import (
     UnmatchedRecord,
 )
 from app.services.ops_status import build_system_status
+from app.services.construction_priority_import import PriorityImportError, build_priority_template, parse_priority_workbook
 from app.services.account_store import get_user
 from app.services.project_board_cache import project_board_summary_cache
 from app.services.photo_storage import (
@@ -2474,6 +2475,38 @@ def construction_task_priority(task_id: int, payload: ConstructionPriorityReques
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ok(request, task)
+
+
+@router.get("/construction/priority-template")
+def construction_priority_template(request: Request, _admin: dict = Depends(require_admin)):
+    filename = "终端优先施工导入模板.xlsx"
+    return StreamingResponse(
+        BytesIO(build_priority_template()),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=priority-template.xlsx; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+@router.post("/construction/priority-import")
+async def construction_priority_import(
+    request: Request,
+    file: UploadFile = File(...),
+    confirm: bool = Query(default=False),
+    _admin: dict = Depends(require_admin),
+):
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(status_code=422, detail="Only .xlsx files are supported")
+    content = await file.read()
+    if len(content) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="Workbook exceeds 2 MiB")
+    try:
+        rows = parse_priority_workbook(content)
+        result = state_repository().import_construction_priorities(rows, actor=request_actor(request, "admin"), confirm=confirm)
+    except PriorityImportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ok(request, result)
 
 
 @router.patch("/construction/tasks/{task_id}/assign")

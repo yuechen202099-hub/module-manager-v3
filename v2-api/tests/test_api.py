@@ -3418,6 +3418,30 @@ def test_construction_priority_route_enforces_admin_idempotence_and_forbidden_bo
     assert [item["action"] for item in audits].count("construction_priority_updated") == 2
 
 
+def test_construction_priority_import_template_preview_confirm_and_admin_guard() -> None:
+    team_id = f"priority-import-{uuid4()}"
+    admin_token = security.create_access_token({"sub": "admin-a", "username": "admin-a", "roles": ["admin"], "team_id": team_id})
+    reviewer_token = security.create_access_token({"sub": "reviewer-a", "username": "reviewer-a", "roles": ["reviewer"], "team_id": team_id})
+    admin_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {admin_token}"}
+    reviewer_headers = {"X-Team-Id": team_id, "Authorization": f"bearer {reviewer_token}"}
+    client.post("/local-test/bootstrap", headers=admin_headers)
+    client.post("/local-test/scan/clear", headers=admin_headers)
+    task = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"][0]
+    workbook = build_api_workbook([["终端号", "优先施工"], [task["terminal"], "是"], ["unknown-terminal", "否"]])
+    template = client.get("/local-test/construction/priority-template", headers=admin_headers)
+    forbidden = client.post("/local-test/construction/priority-import", headers=reviewer_headers, files={"file": ("priority.xlsx", workbook)})
+    preview = client.post("/local-test/construction/priority-import?confirm=false", headers=admin_headers, files={"file": ("priority.xlsx", workbook)})
+    confirmed = client.post("/local-test/construction/priority-import?confirm=true", headers=admin_headers, files={"file": ("priority.xlsx", workbook)})
+
+    assert template.status_code == 200
+    assert "filename*=" in template.headers["content-disposition"]
+    assert forbidden.status_code == 403
+    assert preview.status_code == 200
+    assert preview.json()["data"]["counts"]["unknown"] == 1
+    assert confirmed.status_code == 200
+    assert confirmed.json()["data"]["confirmed"] is True
+
+
 def test_construction_priority_route_is_team_isolated_and_rejects_completed_or_missing_tasks() -> None:
     team_a = f"priority-isolation-a-{uuid4()}"
     team_b = f"priority-isolation-b-{uuid4()}"
