@@ -921,6 +921,106 @@ def test_task_groups_can_be_limited_to_scanned_groups(synthetic_state: dict) -> 
     assert all_groups["total"] == 1
 
 
+def test_review_task_groups_filter_before_paging_and_count_full_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    groups = [
+        {
+            "id": f"group-{index:02d}",
+            "task_id": 1,
+            "terminal": "T-001",
+            "meter_no": f"M-{index:03d}",
+            "meter_match_key": f"KEY-{index:03d}",
+            "address": f"ROOM {index:03d}",
+            "status": "pending",
+            "photo_count": 4,
+            "photos": [],
+        }
+        for index in range(45)
+    ]
+    monkeypatch.setattr(local_simulation, "find_task", lambda _task_id: {"id": 1})
+    monkeypatch.setattr(local_simulation, "get_state", lambda: {"groups": groups})
+
+    result = local_simulation.list_review_task_groups(
+        1,
+        limit=20,
+        offset=20,
+        review_status="reviewable",
+        query="ROOM",
+    )
+
+    assert result["limit"] == 20
+    assert result["offset"] == 20
+    assert len(result["items"]) == 20
+    assert result["total"] == result["status_counts"]["reviewable"] == 45
+    assert all("ROOM" in item["address"] for item in result["items"])
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["TERM-SEARCH", "METER-SEARCH", "ADDRESS-SEARCH", "MODULE-SEARCH", "COLLECTOR-SEARCH"],
+)
+def test_review_task_groups_searches_all_review_identity_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    query: str,
+) -> None:
+    groups = [
+        {
+            "id": "reviewable",
+            "task_id": 1,
+            "terminal": "TERM-SEARCH",
+            "meter_no": "METER-SEARCH",
+            "meter_match_key": "MATCH-SEARCH",
+            "address": "ADDRESS-SEARCH",
+            "module_asset_no": "MODULE-SEARCH",
+            "collector": "COLLECTOR-SEARCH",
+            "status": "pending",
+            "photo_count": 4,
+            "photos": [],
+        },
+        {"id": "exception", "task_id": 1, "status": "exception", "photo_count": 4, "photos": []},
+        {"id": "archived", "task_id": 1, "status": "approved", "photo_count": 4, "photos": []},
+        {"id": "unconstructed", "task_id": 1, "status": "pending", "photo_count": 0, "photos": []},
+    ]
+    monkeypatch.setattr(local_simulation, "find_task", lambda _task_id: {"id": 1})
+    monkeypatch.setattr(local_simulation, "get_state", lambda: {"groups": groups})
+
+    result = local_simulation.list_review_task_groups(1, query=query)
+
+    assert result["total"] == 1
+    assert result["items"][0]["id"] == "reviewable"
+    assert result["status_counts"] == {
+        "all": 1,
+        "reviewable": 1,
+        "exception": 0,
+        "archived": 0,
+        "unconstructed": 0,
+    }
+
+
+def test_review_task_groups_reports_all_status_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    groups = [
+        {"id": "reviewable", "task_id": 1, "meter_no": "10000001", "status": "pending", "photo_count": 4, "photos": []},
+        {"id": "exception", "task_id": 1, "meter_no": "10000002", "status": "exception", "photo_count": 4, "photos": []},
+        {"id": "archived", "task_id": 1, "meter_no": "10000003", "status": "approved", "photo_count": 4, "photos": []},
+        {"id": "unconstructed", "task_id": 1, "meter_no": "10000004", "status": "pending", "photo_count": 0, "photos": []},
+    ]
+    monkeypatch.setattr(local_simulation, "find_task", lambda _task_id: {"id": 1})
+    monkeypatch.setattr(local_simulation, "get_state", lambda: {"groups": groups})
+
+    result = local_simulation.list_review_task_groups(1, review_status="exception")
+
+    assert result["total"] == 1
+    assert result["items"][0]["id"] == "exception"
+    assert result["status_counts"] == {
+        "all": 4,
+        "reviewable": 1,
+        "exception": 1,
+        "archived": 1,
+        "unconstructed": 1,
+    }
+
+
 def test_task_groups_can_return_lightweight_summaries(synthetic_state: dict) -> None:
     result = list_task_groups(1, limit=1, summary_only=True)
 

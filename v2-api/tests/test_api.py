@@ -3017,6 +3017,36 @@ def test_task_snapshot_route_reuses_cache_and_forced_refreshes(monkeypatch, tmp_
     assert calls == 2
 
 
+def test_review_groups_route_caps_page_at_twenty(monkeypatch) -> None:
+    class FakeRepository:
+        def list_review_task_groups(self, task_id: int, **kwargs):
+            assert task_id == 1
+            assert kwargs["limit"] == 20
+            return {
+                "total": 1,
+                "items": [{"id": "group-1"}],
+                "status_counts": {
+                    "all": 1,
+                    "reviewable": 1,
+                    "exception": 0,
+                    "archived": 0,
+                    "unconstructed": 0,
+                },
+                "limit": 20,
+                "offset": 0,
+            }
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+
+    oversized = client.get("/local-test/tasks/1/review-groups?limit=100&offset=0&review_status=all")
+    response = client.get("/local-test/tasks/1/review-groups?limit=20&offset=0&review_status=all")
+
+    assert oversized.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["data"]["limit"] == 20
+    assert len(response.json()["data"]["items"]) <= 20
+
+
 def test_photo_barcode_review_groups_are_paginated_and_include_archived_groups() -> None:
     headers = demo_admin_headers()
     seeded = seed_photo_barcode_review_groups(count=3)

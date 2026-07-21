@@ -4988,6 +4988,64 @@ def review_queue_rank(group: dict[str, Any]) -> int:
     return 0
 
 
+REVIEW_QUEUE_STATUSES = ("all", "reviewable", "exception", "archived", "unconstructed")
+
+
+def review_queue_status(group: dict[str, Any]) -> str:
+    if group.get("status") == "approved":
+        return "archived"
+    if group.get("status") == "exception" or group.get("has_archive_blocker"):
+        return "exception"
+    if int(group.get("photo_count") or 0) == 0 and group.get("status") != "unmatched":
+        return "unconstructed"
+    return "reviewable"
+
+
+def list_review_task_groups(
+    task_id: int,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    review_status: str = "all",
+    query: str = "",
+) -> dict[str, Any]:
+    if review_status not in REVIEW_QUEUE_STATUSES:
+        raise ValueError("Unsupported review status")
+    if not 1 <= int(limit) <= 20:
+        raise ValueError("Review queue limit must be between 1 and 20")
+    if int(offset) < 0:
+        raise ValueError("Review queue offset must be non-negative")
+    find_task(task_id)
+    groups = [item for item in get_state()["groups"] if int(item.get("task_id") or 0) == task_id]
+    terms = [item for item in re.split(r"\s+", query.strip().lower()) if item]
+    if terms:
+        groups = [item for item in groups if all(term in group_target_text(item) for term in terms)]
+    status_counts = {name: 0 for name in REVIEW_QUEUE_STATUSES}
+    status_counts["all"] = len(groups)
+    for group in groups:
+        status_counts[review_queue_status(group)] += 1
+    filtered = groups if review_status == "all" else [
+        group for group in groups if review_queue_status(group) == review_status
+    ]
+    filtered.sort(
+        key=lambda group: (
+            {"reviewable": 0, "exception": 1, "unconstructed": 2, "archived": 3}[
+                review_queue_status(group)
+            ],
+            str(group.get("meter_no") or ""),
+            str(group.get("id") or ""),
+        )
+    )
+    page = filtered[offset : offset + limit]
+    return {
+        "total": len(filtered),
+        "items": [group_target_summary(group) for group in page],
+        "status_counts": status_counts,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 def search_group_targets(query: str = "", terminal: str = "", limit: int = 30, offset: int = 0) -> dict[str, Any]:
     groups = list(get_state()["groups"])
     if terminal:

@@ -4596,6 +4596,72 @@ def test_postgres_list_tasks_can_skip_installer_distribution() -> None:
     assert calls == [{"include_search_text": True, "include_installer_distribution": False}]
 
 
+def test_postgres_review_queue_limits_before_payload_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    groups = [SimpleNamespace(id=f"model-{index}", legacy_id=f"group-{index}") for index in range(45)]
+    built: list[str] = []
+
+    class AggregateResult:
+        def one(self):
+            return SimpleNamespace(
+                all_count=45,
+                reviewable_count=45,
+                exception_count=0,
+                archived_count=0,
+                unconstructed_count=0,
+            )
+
+    class PhotoResult:
+        def all(self):
+            return []
+
+    class PageScalars:
+        def all(self):
+            return groups[:20]
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.execute_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, _statement):
+            self.execute_calls += 1
+            return AggregateResult() if self.execute_calls == 1 else PhotoResult()
+
+        def scalars(self, _statement):
+            return PageScalars()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+        def _task_by_legacy_id(self, _session, _task_id):
+            return SimpleNamespace(id="task-model")
+
+    def minimal_group(_session, group, include_photos=False):
+        assert include_photos is False
+        built.append(str(group.id))
+        return {
+            "id": group.legacy_id,
+            "task_id": 1,
+            "meter_no": "10000001",
+            "status": "pending",
+            "photo_count": 4,
+            "photos": [],
+        }
+
+    monkeypatch.setattr(repository, "_group_payload", minimal_group)
+
+    result = TestPostgresRepository().list_review_task_groups(1, limit=20, offset=0)
+
+    assert len(result["items"]) == 20
+    assert len(built) == 20
+
+
 def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository.settings, "state_backend", "json")
     monkeypatch.setattr(

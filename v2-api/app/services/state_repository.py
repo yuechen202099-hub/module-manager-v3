@@ -1286,6 +1286,70 @@ def _review_queue_rank(group: dict[str, Any]) -> int:
     return 0
 
 
+def _review_queue_status_expression():
+    raw_status = func.nullif(func.trim(MaterialGroup.raw_data["status"].astext), "")
+    legacy_status = case(
+        (
+            raw_status.in_(("pending", "incomplete", "approved", "exception", "unmatched", "unreviewed")),
+            raw_status,
+        ),
+        (MaterialGroup.status == GroupStatus.UNREVIEWED, literal("pending")),
+        (MaterialGroup.status == GroupStatus.REJECTED, literal("exception")),
+        else_=cast(MaterialGroup.status, String),
+    )
+    return case(
+        (legacy_status == "approved", literal("archived")),
+        (
+            or_(legacy_status == "exception", MaterialGroup.has_archive_blocker.is_(True)),
+            literal("exception"),
+        ),
+        (
+            and_(MaterialGroup.photo_count == 0, legacy_status != "unmatched"),
+            literal("unconstructed"),
+        ),
+        else_=literal("reviewable"),
+    )
+
+
+def _review_queue_search_conditions(team_id: str, query: str) -> list[Any]:
+    conditions: list[Any] = []
+    for term in [item for item in re.split(r"\s+", query.strip()) if item]:
+        pattern = f"%{term}%"
+        photo_match = (
+            select(Photo.id)
+            .where(
+                Photo.team_id == team_id,
+                Photo.group_id == MaterialGroup.id,
+                Photo.is_active.is_(True),
+                or_(
+                    Photo.barcode.ilike(pattern),
+                    Photo.collector.ilike(pattern),
+                    Photo.asset_no.ilike(pattern),
+                    Photo.raw_data["module_asset_no"].astext.ilike(pattern),
+                    Photo.raw_data["asset_no"].astext.ilike(pattern),
+                    Photo.raw_data["collector"].astext.ilike(pattern),
+                ),
+            )
+            .exists()
+        )
+        conditions.append(
+            or_(
+                MaterialGroup.legacy_id.ilike(pattern),
+                MaterialGroup.terminal.ilike(pattern),
+                MaterialGroup.display_meter_no.ilike(pattern),
+                MaterialGroup.meter_match_key.ilike(pattern),
+                MaterialGroup.installation_address.ilike(pattern),
+                MaterialGroup.raw_data["module_asset_no"].astext.ilike(pattern),
+                MaterialGroup.raw_data["asset_no"].astext.ilike(pattern),
+                MaterialGroup.raw_data["collector"].astext.ilike(pattern),
+                MaterialGroup.raw_data["construction_module_asset_no"].astext.ilike(pattern),
+                MaterialGroup.raw_data["construction_collector"].astext.ilike(pattern),
+                photo_match,
+            )
+        )
+    return conditions
+
+
 def _group_target_text(group: dict[str, Any]) -> str:
     values = [
         group.get("id"),
@@ -1601,6 +1665,18 @@ class StateRepository(ABC):
         limit: int = 100,
         offset: int = 0,
         assigned_to: str = "",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_review_task_groups(
+        self,
+        task_id: int,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        review_status: str = "all",
+        query: str = "",
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -2194,6 +2270,23 @@ class JsonStateRepository(StateRepository):
             status=status,
             scan_only=scan_only,
             summary_only=summary_only,
+        )
+
+    def list_review_task_groups(
+        self,
+        task_id: int,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        review_status: str = "all",
+        query: str = "",
+    ) -> dict[str, Any]:
+        return local_simulation.list_review_task_groups(
+            task_id,
+            limit=limit,
+            offset=offset,
+            review_status=review_status,
+            query=query,
         )
 
     def get_group(self, group_id: str) -> dict[str, Any] | None:
@@ -4067,6 +4160,114 @@ class PostgresStateRepository(StateRepository):
             return {
                 "total": len(group_payloads),
                 "items": [_apply_construction_status(group) for group in page],
+            }
+
+    def list_review_task_groups(
+        self,
+        task_id: int,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        review_status: str = "all",
+        query: str = "",
+    ) -> dict[str, Any]:
+        if review_status not in local_simulation.REVIEW_QUEUE_STATUSES:
+            raise ValueError("Unsupported review status")
+        if not 1 <= int(limit) <= 20:
+            raise ValueError("Review queue limit must be between 1 and 20")
+        if int(offset) < 0:
+            raise ValueError("Review queue offset must be non-negative")
+        with self._session() as session:
+            self._task_by_legacy_id(session, task_id)
+            team_id = local_simulation.current_team_id()
+            queue_status = _review_queue_status_expression()
+            filters = [
+                MaterialGroup.team_id == team_id,
+                MaterialGroup.legacy_task_id == task_id,
+                *_review_queue_search_conditions(team_id, query),
+            ]
+            status_rows = select(queue_status.label("queue_status")).where(*filters).subquery()
+            counts = session.execute(
+                select(
+                    func.count().label("all_count"),
+                    func.coalesce(
+                        func.sum(case((status_rows.c.queue_status == "reviewable", 1), else_=0)),
+                        0,
+                    ).label("reviewable_count"),
+                    func.coalesce(
+                        func.sum(case((status_rows.c.queue_status == "exception", 1), else_=0)),
+                        0,
+                    ).label("exception_count"),
+                    func.coalesce(
+                        func.sum(case((status_rows.c.queue_status == "archived", 1), else_=0)),
+                        0,
+                    ).label("archived_count"),
+                    func.coalesce(
+                        func.sum(case((status_rows.c.queue_status == "unconstructed", 1), else_=0)),
+                        0,
+                    ).label("unconstructed_count"),
+                ).select_from(status_rows)
+            ).one()
+            status_counts = {
+                "all": int(_row_value(counts, "all_count", 0) or 0),
+                "reviewable": int(_row_value(counts, "reviewable_count", 0) or 0),
+                "exception": int(_row_value(counts, "exception_count", 0) or 0),
+                "archived": int(_row_value(counts, "archived_count", 0) or 0),
+                "unconstructed": int(_row_value(counts, "unconstructed_count", 0) or 0),
+            }
+            page_statement = select(MaterialGroup).where(*filters)
+            if review_status != "all":
+                page_statement = page_statement.where(queue_status == review_status)
+            queue_rank = case(
+                (queue_status == "reviewable", 0),
+                (queue_status == "exception", 1),
+                (queue_status == "unconstructed", 2),
+                else_=3,
+            )
+            groups = list(
+                session.scalars(
+                    page_statement.order_by(
+                        queue_rank,
+                        func.coalesce(MaterialGroup.display_meter_no, ""),
+                        func.coalesce(MaterialGroup.legacy_id, cast(MaterialGroup.id, String)),
+                    )
+                    .offset(offset)
+                    .limit(limit)
+                ).all()
+            )
+            payloads = [_group_payload(session, group, include_photos=False) for group in groups]
+            photos_by_group_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            group_ids = [group.id for group in groups]
+            if group_ids:
+                photo_rows = session.execute(
+                    select(
+                        Photo.group_id,
+                        Photo.id.label("photo_id"),
+                        Photo.legacy_id,
+                        Photo.category,
+                        Photo.barcode,
+                        Photo.collector,
+                        Photo.asset_no,
+                        Photo.raw_data,
+                    )
+                    .where(
+                        Photo.team_id == team_id,
+                        Photo.group_id.in_(group_ids),
+                        Photo.is_active.is_(True),
+                    )
+                    .order_by(Photo.group_id, Photo.sort_order, Photo.created_at, Photo.legacy_id)
+                ).all()
+                for row in photo_rows:
+                    photos_by_group_id[str(row.group_id)].append(_photo_barcode_payload_from_row(row))
+            for group, payload in zip(groups, payloads, strict=True):
+                payload["photos"] = photos_by_group_id.get(str(group.id), [])
+            total = status_counts["all"] if review_status == "all" else status_counts[review_status]
+            return {
+                "total": total,
+                "items": [_group_target_summary(payload) for payload in payloads],
+                "status_counts": status_counts,
+                "limit": limit,
+                "offset": offset,
             }
 
     def get_group(self, group_id: str) -> dict[str, Any] | None:

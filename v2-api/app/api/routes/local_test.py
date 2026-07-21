@@ -2404,6 +2404,31 @@ def task_groups(
     return ok(request, resolve_group_collection_for_response(result))
 
 
+@router.get("/tasks/{task_id}/review-groups")
+def review_task_groups(
+    task_id: int,
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=20),
+    offset: int = Query(default=0, ge=0),
+    review_status: str = Query(default="all"),
+    query: str = Query(default=""),
+):
+    forbid_constructor_project_board(request)
+    try:
+        result = state_repository().list_review_task_groups(
+            task_id,
+            limit=limit,
+            offset=offset,
+            review_status=review_status,
+            query=query,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Task not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ok(request, result)
+
+
 @router.get("/tasks/{task_id}/progress")
 def task_progress(task_id: int, request: Request):
     try:
