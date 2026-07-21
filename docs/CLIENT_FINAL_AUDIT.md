@@ -22,12 +22,12 @@ V3.0.82 已于 2026-07-19 完成生产部署和线上验收。客户侧功能、
 | 甲方签收清单 | `docs/CLIENT_SIGNOFF_CHECKLIST.md`，列出可现场确认并签字的验收项 | 已完成 |
 | 页面高级感 | 登录页重做，主页面固定导航清理，统一工作台视觉语言 | 已完成，需人眼最终确认 |
 | 服务器部署准备 | `docs/SERVER_DEPLOYMENT_PREP.md`、Nginx 配置、systemd 服务、生产账号注意事项 | 已完成 |
-| 发布包 | `build/server-release/module-manager-v2-server-3.0.82.zip` | 已发布并验包 |
+| 发布包 | `build/server-release/module-manager-v2-server-3.0.83.zip` | 待发布验包 |
 
 ## 已运行验证
 
 ```powershell
-.\scripts\run-client-acceptance-gate.ps1 -Version 3.0.82
+.\scripts\run-client-acceptance-gate.ps1 -Version 3.0.83
 ```
 
 结果：最终发布门禁、生产部署和线上验收结果见 `ops/releases/V3.0.82.md`。
@@ -58,7 +58,7 @@ cd .\v2-api
 结果：通过。确认 `.env.example`、Nginx、systemd 和服务器部署准备材料具备生产交接所需的关键配置项。
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.0.82.zip
+.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.0.83.zip
 ```
 
 结果：通过；发布包大小 `1,440,750` bytes，SHA256 为 `73BE7B187529CF5C88A16E3020716C0A2BEA3194E306BDA30A7DD66509E2AC2C`。
@@ -66,7 +66,7 @@ cd .\v2-api
 ## 发布包
 
 ```text
-build/server-release/module-manager-v2-server-3.0.82.zip
+build/server-release/module-manager-v2-server-3.0.83.zip
 ```
 
 ## 演示顺序

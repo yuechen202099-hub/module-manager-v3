@@ -29,13 +29,13 @@ def test_parses_current_deployed_baseline_and_release_candidate_markers() -> Non
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
     assert verifier.deployed_production_baseline(agents) == "V3.0.82"
-    assert verifier.release_candidate(agents) == "V3.0.82"
+    assert verifier.release_candidate(agents) == "V3.0.83"
 
 
 def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
-        "production/V3/3.0.82", "production/V3/3.0.81"
+        "production/V3/3.0.83", "production/V3/3.0.81"
     )
 
     with pytest.raises(AssertionError, match="maintenance branch"):
@@ -45,7 +45,7 @@ def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
 def test_rejects_inconsistent_release_candidate_maintenance_branch_markers() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
-        "- Release-candidate maintenance branch: `production/V3/3.0.82`.",
+        "- Release-candidate maintenance branch: `production/V3/3.0.83`.",
         "- Release-candidate maintenance branch: `production/V3/3.0.81`.",
         1,
     )
@@ -181,28 +181,34 @@ def test_candidate_lifecycle_uses_the_deployed_baseline_after_task5() -> None:
     verifier.release_record_matches_lifecycle_state(record, "V3.0.81", "V3.0.81", "V3.0.82")
 
 
-def test_post_task5_candidate_uses_the_deployed_baseline_as_its_rollback_target() -> None:
+def test_v3083_candidate_uses_the_deployed_baseline_as_its_rollback_target() -> None:
     verifier = load_verifier()
-    record = """# V3.0.82 Production Release Record
+    record = """# V3.0.83 Production Release Record
 
 - Status: pending
 - Local Verification: not run
 - Package: pending
 - Production Deployment: pending
 - Production Reconciliation: pending
-- Rollback target: V3.0.81
+- Rollback target: V3.0.82
 """
 
-    verifier.release_record_matches_lifecycle_state(record, "V3.0.82", "V3.0.81", "V3.0.82")
+    verifier.release_record_matches_lifecycle_state(record, "V3.0.83", "V3.0.82", "V3.0.83")
 
 
-def test_v3082_manifest_records_the_verified_production_package() -> None:
+def test_v3083_release_record_contains_required_chinese_feature_titles() -> None:
+    record = (ROOT / "ops" / "releases" / "V3.0.83.md").read_text(encoding="utf-8")
+
+    assert "审阅图片框选识别" in record
+    assert "终端优先施工" in record
+
+
+def test_v3083_manifest_records_the_release_candidate_package() -> None:
     manifest = (ROOT / "RELEASE_MANIFEST.md").read_text(encoding="utf-8")
 
-    assert "- Package: `build/server-release/module-manager-v2-server-3.0.82.zip`" in manifest
-    assert "- Name: `module-manager-v2-server-3.0.82.zip`" in manifest
-    assert "- Generated at: 2026-07-19 13:22:21 +08:00" in manifest
-    assert "73BE7B187529CF5C88A16E3020716C0A2BEA3194E306BDA30A7DD66509E2AC2C" in manifest
+    assert "- Package: `build/server-release/module-manager-v2-server-3.0.83.zip`" in manifest
+    assert "- Name: `module-manager-v2-server-3.0.83.zip`" in manifest
+    assert "- Version: 3.0.83" in manifest
 
 
 def test_v3082_release_record_passes_the_deployed_baseline_gate() -> None:
@@ -221,8 +227,8 @@ def test_v3082_release_record_passes_the_deployed_baseline_gate() -> None:
             "deployed_production_baseline",
         ),
         (
-            "- Release candidate: `V3.0.82`.",
             "- Release candidate: `V3.0.83`.",
+            "- Release candidate: `V3.0.84`.",
             "release_candidate",
         ),
     ],
@@ -900,7 +906,7 @@ def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> No
     vite_config = (ROOT / "v2-web" / "vite.config.ts").read_text(encoding="utf-8")
 
     assert source_path.is_file()
-    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.0.82"}
+    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.0.83"}
     assert not legacy_source_path.exists()
     assert "from '../version.json'" in release_notes
     assert "APP_VERSION = versionArtifact.version" in release_notes

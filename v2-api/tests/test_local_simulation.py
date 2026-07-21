@@ -612,7 +612,7 @@ def test_json_construction_priority_defaults_and_list_payloads_share_availabilit
     }
 
 
-def test_refresh_summary_rederives_construction_availability_and_status_version(
+def test_refresh_summary_rederives_availability_without_clearing_persisted_priority(
     synthetic_state: dict,
 ) -> None:
     task = synthetic_state["tasks"][0]
@@ -646,8 +646,10 @@ def test_refresh_summary_rederives_construction_availability_and_status_version(
     local_simulation.refresh_summary()
 
     assert task["uploaded_count"] == 2
-    assert task["construction_priority"] is False
+    assert task["construction_priority"] is True
     assert task["construction_available"] is False
+    payload = next(item for item in local_simulation.list_tasks() if item["id"] == task["id"])
+    assert payload["construction_priority"] is False
 
 
 def test_summary_reports_installer_group_share(synthetic_state: dict) -> None:

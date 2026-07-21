@@ -1,12 +1,12 @@
 param(
-    [string]$Version = "3.0.82",
+    [string]$Version = "3.0.83",
     [switch]$SkipSmoke
 )
 
 $ErrorActionPreference = "Stop"
 
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
-    throw "Release Version must be a semantic version such as 3.0.82."
+    throw "Release Version must be a semantic version such as 3.0.83."
 }
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -127,14 +127,18 @@ Copy-ReleaseItem "scripts\audit_production_security.py" "scripts\audit_productio
 Copy-ReleaseItem "scripts\verify_security_hardening.py" "scripts\verify_security_hardening.py"
 Copy-ReleaseItem "scripts\verify_frontend_auth_expiry.js" "scripts\verify_frontend_auth_expiry.js"
 Copy-ReleaseItem "scripts\verify_claim_tasks_completion_status.js" "scripts\verify_claim_tasks_completion_status.js"
+Copy-ReleaseItem "scripts\verify_claim_tasks_construction_priority.js" "scripts\verify_claim_tasks_construction_priority.js"
 Copy-ReleaseItem "scripts\verify_construction_one_click_upload.js" "scripts\verify_construction_one_click_upload.js"
 Copy-ReleaseItem "scripts\verify_construction_draft_photo_cache.js" "scripts\verify_construction_draft_photo_cache.js"
+Copy-ReleaseItem "scripts\verify_construction_priority_import_dialog.js" "scripts\verify_construction_priority_import_dialog.js"
 Copy-ReleaseItem "scripts\verify_installer_workload_completion_visibility.js" "scripts\verify_installer_workload_completion_visibility.js"
 Copy-ReleaseItem "scripts\verify_release_sop.py" "scripts\verify_release_sop.py"
 Copy-ReleaseItem "scripts\verify_release_retention_policy.py" "scripts\verify_release_retention_policy.py"
 Copy-ReleaseItem "scripts\verify_project_board_photo_dialog.js" "scripts\verify_project_board_photo_dialog.js"
 Copy-ReleaseItem "scripts\verify_project_board_data_center_photos.js" "scripts\verify_project_board_data_center_photos.js"
 Copy-ReleaseItem "scripts\verify_project_board_unmatched_review.js" "scripts\verify_project_board_unmatched_review.js"
+Copy-ReleaseItem "scripts\verify_review_image_inspector.js" "scripts\verify_review_image_inspector.js"
+Copy-ReleaseItem "scripts\verify_task_hall_region_scan.js" "scripts\verify_task_hall_region_scan.js"
 Copy-ReleaseItem "scripts\verify_dialog_information_integration.js" "scripts\verify_dialog_information_integration.js"
 Copy-ReleaseItem "scripts\production_backup.sh" "scripts\production_backup.sh"
 Copy-ReleaseItem "scripts\cleanup_old_releases.sh" "scripts\cleanup_old_releases.sh"

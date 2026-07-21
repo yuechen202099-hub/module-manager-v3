@@ -2665,7 +2665,7 @@ def ensure_construction_task_fields(
     construction_available, review_available = construction_task_availability(availability_stats)
     task["construction_available"] = construction_available
     task["review_available"] = review_available
-    task["construction_priority"] = bool(task["construction_priority"] and construction_available)
+    task["construction_priority"] = bool(task["construction_priority"])
     task["assigned_constructor"] = task.get("construction_claimed_by")
     task["assigned_at"] = task.get("construction_claimed_at")
     if task.get("construction_enabled"):
@@ -2673,6 +2673,16 @@ def ensure_construction_task_fields(
     else:
         task["construction_status"] = "closed"
     return task
+
+
+def construction_task_response(
+    task: dict[str, Any], stats: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    payload = ensure_construction_task_fields(dict(task), stats)
+    payload["construction_priority"] = bool(
+        payload.get("construction_priority") and payload.get("construction_available")
+    )
+    return payload
 
 
 def construction_defaults() -> dict[str, Any]:
@@ -5497,8 +5507,9 @@ def list_tasks() -> list[dict[str, Any]]:
         task["address_search_text"] = task_address_search_text(task_groups)
         task["meter_search_text"] = task_meter_search_text(task_groups)
         task["installer_distribution"] = task_installer_distribution(task_groups)
+    tasks = [construction_task_response(task) for task in state["tasks"]]
     return sorted(
-        state["tasks"],
+        tasks,
         key=lambda task: (
             not task.get("can_claim", False),
             str(task.get("terminal", "")),
@@ -5594,18 +5605,18 @@ def task_status_summary() -> dict[str, Any]:
     for task in state["tasks"]:
         task_groups = groups_by_task.get(int(task.get("id") or 0), [])
         metrics = calculate_task_metrics(task_groups)
-        ensure_construction_task_fields(
+        payload = construction_task_response(
             task,
             {"total_groups": metrics["renovation_count"], **metrics},
         )
         rows.append(
             {
-                "id": task.get("id"),
-                "terminal": task.get("terminal"),
-                "claimed_by": task.get("claimed_by"),
-                "construction_assigned_to": task.get("assigned_constructor")
-                or task.get("construction_claimed_by"),
-                "construction_priority": task.get("construction_priority", False),
+                "id": payload.get("id"),
+                "terminal": payload.get("terminal"),
+                "claimed_by": payload.get("claimed_by"),
+                "construction_assigned_to": payload.get("assigned_constructor")
+                or payload.get("construction_claimed_by"),
+                "construction_priority": payload.get("construction_priority", False),
                 "total_groups": metrics["renovation_count"],
                 "uploaded_count": metrics["uploaded_count"],
                 "reviewed_count": metrics["reviewed_count"],

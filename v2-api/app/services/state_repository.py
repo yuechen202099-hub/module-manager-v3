@@ -2452,19 +2452,28 @@ class JsonStateRepository(StateRepository):
                 tasks[str(task.get("terminal") or "")] = task
             items = []
             for row in rows:
-                item = {"row_number": row.row_number, "terminal": row.terminal, "priority": row.priority, "status": row.status}
+                item = {
+                    "row_number": row.row_number,
+                    "terminal": row.terminal,
+                    "priority": row.priority,
+                    "status": row.status,
+                    "reason": row.message,
+                }
                 task = tasks.get(row.terminal)
                 if item["status"] in {"conflict", "malformed", "duplicate"}:
                     items.append(item)
                     continue
                 if task is None:
                     item["status"] = "unknown"
-                elif int(task.get("total_groups") or 0) > 0 and int(task.get("uploaded_count") or 0) >= int(task.get("total_groups") or 0):
-                    item["status"] = "completed"
-                elif bool(task.get("construction_priority")) == bool(row.priority):
-                    item["status"] = "unchanged"
                 else:
-                    item["task_id"] = task["id"]
+                    total = int(task.get("total_groups") or 0)
+                    uploaded = int(task.get("uploaded_count") or 0)
+                    if total <= 0 or uploaded >= total:
+                        item["status"] = "completed"
+                    elif bool(task.get("construction_priority")) == bool(row.priority):
+                        item["status"] = "unchanged"
+                    else:
+                        item["task_id"] = task["id"]
                 items.append(item)
             counts = {status: sum(1 for item in items if item["status"] == status) for status in ("valid", "duplicate", "conflict", "unknown", "completed", "unchanged", "malformed")}
             if not confirm:
@@ -5553,7 +5562,13 @@ class PostgresStateRepository(StateRepository):
     ) -> list[dict[str, Any]]:
         items = []
         for row in rows:
-            item = {"row_number": row.row_number, "terminal": row.terminal, "priority": row.priority, "status": row.status}
+            item = {
+                "row_number": row.row_number,
+                "terminal": row.terminal,
+                "priority": row.priority,
+                "status": row.status,
+                "reason": row.message,
+            }
             task = task_by_terminal.get(row.terminal)
             if item["status"] in {"conflict", "malformed", "duplicate"}:
                 items.append(item)
@@ -5564,7 +5579,7 @@ class PostgresStateRepository(StateRepository):
                 stats = stats_by_task.get(int(task.legacy_id or 0), _empty_task_stats())
                 total = int(stats.get("total_groups") or 0)
                 uploaded = int(stats.get("uploaded_count") or 0)
-                if total > 0 and uploaded >= total:
+                if total <= 0 or uploaded >= total:
                     item["status"] = "completed"
                 elif bool(task.construction_priority) == bool(row.priority):
                     item["status"] = "unchanged"

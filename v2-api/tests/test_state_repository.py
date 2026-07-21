@@ -37,6 +37,26 @@ def test_json_repository_sets_construction_priority_through_simulation(
     assert calls == [(7, "admin-a", True)]
 
 
+def test_json_task_reads_mask_stale_priority_without_mutating_persisted_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = {
+        "id": 7,
+        "terminal": "T-007",
+        "construction_priority": True,
+    }
+    state = {"tasks": [task], "groups": [], "summary": {}}
+
+    monkeypatch.setattr(repository.local_simulation, "get_state", lambda: state)
+
+    listed = repository.local_simulation.list_tasks()
+    repository.local_simulation.task_status_summary()
+
+    assert listed[0] is not task
+    assert listed[0]["construction_priority"] is False
+    assert task["construction_priority"] is True
+
+
 def test_json_priority_import_preview_uses_non_mutating_task_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,7 +189,7 @@ def test_dual_priority_import_confirmation_rejects_before_json_or_mirror_write(
         )
 
 
-def test_postgres_priority_import_rejects_zero_group_true_before_auditing(
+def test_postgres_priority_import_skips_zero_group_true_without_aborting_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     task = SimpleNamespace(
@@ -217,15 +237,40 @@ def test_postgres_priority_import_rejects_zero_group_true_before_auditing(
 
     monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "priority-team")
 
-    with pytest.raises(ValueError, match="only available"):
-        TestPostgresRepository().import_construction_priorities(
-            [PriorityImportRow(2, "T-007", True, "valid")],
-            actor="admin-a",
-            confirm=True,
-        )
+    result = TestPostgresRepository().import_construction_priorities(
+        [PriorityImportRow(2, "T-007", True, "valid")],
+        actor="admin-a",
+        confirm=True,
+    )
 
-    assert session.commits == 0
-    assert session.staged == []
+    assert result["confirmed"] is True
+    assert result["counts"]["completed"] == 1
+    assert result["counts"]["valid"] == 0
+    assert task.construction_priority is False
+    assert session.commits == 1
+    assert [event.action for event in session.staged] == ["construction_priority_imported"]
+
+
+def test_priority_import_preserves_parser_reason_for_json_and_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = PriorityImportRow(2, "", None, "malformed", "Terminal is required")
+    state = {"tasks": [], "groups": [], "audit_log": []}
+    monkeypatch.setattr(repository.local_simulation, "get_state", lambda: state)
+
+    json_result = repository.JsonStateRepository().import_construction_priorities(
+        [row],
+        actor="admin-a",
+        confirm=False,
+    )
+    postgres_items = repository.PostgresStateRepository._classify_construction_priority_import_rows(
+        [row],
+        {},
+        {},
+    )
+
+    assert json_result["items"][0]["reason"] == "Terminal is required"
+    assert postgres_items[0]["reason"] == "Terminal is required"
 
 
 def test_postgres_priority_import_exposes_task_change_values_in_public_audit(
