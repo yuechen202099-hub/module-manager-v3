@@ -121,6 +121,9 @@ export type ReviewTask = {
   uploadRate?: number
   reviewRate?: number
   constructionEnabled?: boolean
+  constructionPriority?: boolean
+  constructionAvailable?: boolean
+  reviewAvailable?: boolean
   constructionClaimedBy?: string
   constructionClaimedByName?: string
   assignedConstructor?: string

@@ -14,6 +14,7 @@ import {
   claimTask as claimTaskApi,
   releaseAllClaimedTasks,
   releaseTask as releaseTaskApi,
+  setConstructionTaskPriority,
 } from '@/api/services'
 import type { ReviewTask, TaskStatusSummary, UserAccount } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
@@ -26,6 +27,7 @@ const assignmentDialogVisible = ref(false)
 const assignmentTargetTask = ref<ReviewTask | null>(null)
 const assignmentConstructor = ref('')
 const assignmentSubmitting = ref(false)
+const priorityUpdatingTaskId = ref('')
 const tasks = ref<ReviewTask[]>([])
 const accountUsers = ref<UserAccount[]>([])
 const loadingAccounts = ref(false)
@@ -42,7 +44,8 @@ const TASK_STATUS_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 let refreshInterval = 0
 let refreshTimer = 0
 
-type TaskMoreAction = 'scope-reviewed' | 'scope-all' | 'export-terminal' | 'export-detail' | 'assign' | 'release'
+type TaskFilter = 'all' | 'priority' | 'construction' | 'review'
+type TaskMoreAction = 'scope-reviewed' | 'scope-all' | 'export-terminal' | 'export-detail' | 'assign' | 'release' | 'set-priority' | 'clear-priority'
 type TaskMoreCommand = {
   action: TaskMoreAction
   taskId: string
@@ -50,6 +53,7 @@ type TaskMoreCommand = {
 
 const actor = computed(() => auth.user?.username || auth.user?.id || currentActor())
 const isAdmin = computed(() => auth.user?.role === 'admin' || auth.user?.roles?.includes('admin'))
+const taskFilter = ref<TaskFilter>('all')
 const baseVisibleTasks = computed(() =>
   isAdmin.value
     ? [...tasks.value]
@@ -57,8 +61,15 @@ const baseVisibleTasks = computed(() =>
 )
 const visibleTasks = computed(() => {
   const query = normalizeSearch(searchQuery.value)
-  const items = query ? baseVisibleTasks.value.filter((task) => taskMatchesSearch(task, query)) : [...baseVisibleTasks.value]
+  let items = query ? baseVisibleTasks.value.filter((task) => taskMatchesSearch(task, query)) : [...baseVisibleTasks.value]
+  if (taskFilter.value === 'priority') items = items.filter((task) => task.constructionPriority)
+  if (taskFilter.value === 'construction') items = items.filter((task) => task.constructionAvailable)
+  if (taskFilter.value === 'review') items = items.filter((task) => task.reviewAvailable)
   return items.sort((left, right) => {
+    if (taskFilter.value === 'all' || taskFilter.value === 'construction') {
+      const priorityDiff = Number(right.constructionPriority) - Number(left.constructionPriority)
+      if (priorityDiff) return priorityDiff
+    }
     if (!isAdmin.value) {
       const myDiff = Number(right.claimedBy === actor.value) - Number(left.claimedBy === actor.value)
       if (myDiff) return myDiff
@@ -228,6 +239,10 @@ function constructionActionLabel(task: ReviewTask) {
 
 function isConstructionActionDisabled(task: ReviewTask) {
   return isTaskConstructionComplete(task)
+}
+
+function canManageConstructionPriority(task: ReviewTask) {
+  return isAdmin.value && task.constructionAvailable && !isTaskConstructionComplete(task)
 }
 
 function statusLabel(task: ReviewTask) {
@@ -474,6 +489,23 @@ async function exportTerminalPackage(task: ReviewTask) {
   }
 }
 
+async function updateConstructionPriority(task: ReviewTask, priority: boolean) {
+  if (!canManageConstructionPriority(task)) return
+  priorityUpdatingTaskId.value = task.id
+  errorMessage.value = ''
+  try {
+    const updated = await setConstructionTaskPriority(task.id, priority)
+    tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
+    taskStatusVersion.value = ''
+    rememberCachedTasks('')
+    ElMessage.success(priority ? '已设为优先施工' : '已取消优先施工')
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '施工优先级更新失败'
+  } finally {
+    priorityUpdatingTaskId.value = ''
+  }
+}
+
 async function handleTaskMoreCommand(command: string | number | TaskMoreCommand) {
   if (typeof command !== 'object' || command === null) return
   const task = tasks.value.find((item) => item.id === command.taskId)
@@ -499,6 +531,14 @@ async function handleTaskMoreCommand(command: string | number | TaskMoreCommand)
   if (command.action === 'assign') {
     if (isTaskConstructionComplete(task)) return
     await openAssignDialog(task)
+    return
+  }
+  if (command.action === 'set-priority') {
+    await updateConstructionPriority(task, true)
+    return
+  }
+  if (command.action === 'clear-priority') {
+    await updateConstructionPriority(task, false)
     return
   }
   if (command.action === 'release') {
@@ -588,6 +628,12 @@ onUnmounted(() => {
           aria-label="搜索终端号或地址"
         />
       </div>
+      <ElRadioGroup v-model="taskFilter" class="claim-task-filters" size="small">
+        <ElRadioButton value="all">全部</ElRadioButton>
+        <ElRadioButton value="priority">优先施工</ElRadioButton>
+        <ElRadioButton value="construction">可施工</ElRadioButton>
+        <ElRadioButton value="review">可领取审阅</ElRadioButton>
+      </ElRadioGroup>
 
       <ElSkeleton v-if="loading && !tasks.length" :rows="6" animated />
       <ElEmpty
@@ -632,6 +678,12 @@ onUnmounted(() => {
             <div><span>改造数</span><b>{{ task.renovationCount || task.totalGroups || 0 }}</b></div>
             <div><span>已上传</span><b>{{ task.uploadedCount || 0 }}</b></div>
             <div><span>已归档</span><b>{{ task.reviewedCount || task.completedGroups || 0 }}</b></div>
+          </div>
+
+          <div class="task-availability-tags">
+            <ElTag v-if="task.constructionPriority" size="small" type="danger" effect="plain">优先施工</ElTag>
+            <ElTag v-if="task.constructionAvailable" size="small" type="warning" effect="plain">可施工</ElTag>
+            <ElTag v-if="task.reviewAvailable" size="small" type="success" effect="plain">可领取审阅</ElTag>
           </div>
 
           <ElProgress :percentage="taskReviewPercent(task)" :stroke-width="8" :show-text="false" />
@@ -680,6 +732,14 @@ onUnmounted(() => {
                   <ElDropdownItem :command="{ action: 'export-detail', taskId: task.id }">导出明细</ElDropdownItem>
                   <ElDropdownItem divided :command="{ action: 'assign', taskId: task.id }" :disabled="isConstructionActionDisabled(task)">
                     {{ constructionActionLabel(task) }}
+                  </ElDropdownItem>
+                  <ElDropdownItem
+                    v-if="canManageConstructionPriority(task)"
+                    divided
+                    :command="{ action: task.constructionPriority ? 'clear-priority' : 'set-priority', taskId: task.id }"
+                    :disabled="priorityUpdatingTaskId === task.id"
+                  >
+                    {{ task.constructionPriority ? '取消优先施工' : '设为优先施工' }}
                   </ElDropdownItem>
                   <ElDropdownItem :command="{ action: 'release', taskId: task.id }" :disabled="isTaskReviewComplete(task) || (!task.claimedBy && !isAdmin)">暂存释放</ElDropdownItem>
                   <ElDropdownItem divided :command="{ action: 'scope-reviewed', taskId: task.id }">导出范围：已归档</ElDropdownItem>

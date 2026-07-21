@@ -109,6 +109,9 @@ type BackendTask = {
   exception_groups?: number
   review_rate?: number
   construction_enabled?: boolean
+  construction_priority?: boolean
+  construction_available?: boolean
+  review_available?: boolean
   construction_claimed_by?: string
   construction_claimed_by_name?: string
   assigned_constructor?: string
@@ -714,6 +717,9 @@ function mapTask(raw: BackendTask): ReviewTask {
     uploadRate: Number(raw.upload_rate || (renovationCount ? uploadedCount / renovationCount : 0)),
     reviewRate: Number(raw.review_rate || (renovationCount ? reviewedCount / renovationCount : 0)),
     constructionEnabled: Boolean(raw.construction_enabled),
+    constructionPriority: Boolean(raw.construction_priority),
+    constructionAvailable: Boolean(raw.construction_available),
+    reviewAvailable: Boolean(raw.review_available),
     constructionClaimedBy: raw.construction_claimed_by || '',
     constructionClaimedByName: raw.construction_claimed_by_name || '',
     assignedConstructor: raw.assigned_constructor || raw.construction_claimed_by || '',
@@ -1443,6 +1449,14 @@ export async function closeConstructionTask(taskId: string): Promise<ReviewTask>
   const task = await api<BackendTask>(`/local-test/construction/tasks/${encodeURIComponent(taskId)}/close`, {
     method: 'PATCH',
     body: JSON.stringify({ actor: currentActor() }),
+  })
+  return mapTask(task)
+}
+
+export async function setConstructionTaskPriority(taskId: string, priority: boolean): Promise<ReviewTask> {
+  const task = await api<BackendTask>(`/local-test/construction/tasks/${encodeURIComponent(taskId)}/priority`, {
+    method: 'PATCH',
+    body: JSON.stringify({ priority }),
   })
   return mapTask(task)
 }
