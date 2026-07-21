@@ -22,20 +22,16 @@ assertContains(
   'TaskHallView thumbnail warmup must remain bound to the current review queue request',
 )
 assertContains(
-  /fetchGroupDetailCached\(\s*groupId:\s*string,\s*cacheGuard:[\s\S]*if \(cacheGuard\(\)\) groupDetailCache\.set/,
+  /fetchGroupDetailCached\(\s*groupId:\s*string,\s*cacheGuard:[\s\S]*cacheGuard\(\)[\s\S]*groupDetailCache\.set/,
   'TaskHallView detail cache writes must support a request-epoch guard',
 )
 assertContains(
-  /groupDetailRequests\s*=\s*new Map<string,\s*\{[\s\S]*requestEpoch:\s*number[\s\S]*request:\s*Promise<GroupDetail>/,
-  'TaskHallView in-flight group details must record the review request epoch',
+  /groupDetailRequests\s*=\s*new Map<[\s\S]*cacheEpoch:\s*number[\s\S]*requestEpoch:\s*number[\s\S]*request:\s*Promise<GroupDetail>/,
+  'TaskHallView in-flight group details must record the cache and review request epochs',
 )
 assertContains(
-  /if \(existing && existing\.requestEpoch === requestEpoch\) return existing\.request/,
-  'TaskHallView must not reuse a group-detail promise from an older review request epoch',
-)
-assertContains(
-  /groupDetailRequests\.set\(groupId,\s*\{ requestEpoch, request \}\)/,
-  'TaskHallView must store each in-flight detail request with its request epoch',
+  /groupDetailRequests\.set\(groupId,\s*\{ cacheEpoch, requestEpoch, request \}\)/,
+  'TaskHallView must store each in-flight detail request with its cache and review epochs',
 )
 assertContains(
   /groupDetailRequests\.get\(groupId\)\?\.request === request/,
@@ -44,6 +40,30 @@ assertContains(
 assertContains(
   /fetchGroupDetailCached\(\s*group\.id,\s*\(\) =>[\s\S]*reviewQueueEpoch\.isCurrent\(requestEpoch\)[\s\S]*,\s*requestEpoch,\s*\)/,
   'TaskHallView warmup must guard detail-cache writes with the current request epoch',
+)
+assertContains(
+  /function invalidateGroupDetailCache\(\)[\s\S]*groupDetailCacheEpoch \+= 1[\s\S]*groupRequestSeq \+= 1[\s\S]*groupDetailCache\.clear\(\)[\s\S]*groupDetailRequests\.clear\(\)/,
+  'TaskHallView must invalidate cached and in-flight group details as one generation',
+)
+assertContains(
+  /const cacheEpoch = groupDetailCacheEpoch[\s\S]*cacheEpoch === groupDetailCacheEpoch && cacheGuard\(\)[\s\S]*groupDetailCache\.set/,
+  'TaskHallView must reject detail-cache writes from an invalidated cache generation',
+)
+assertContains(
+  /if \(existing && existing\.cacheEpoch === cacheEpoch && existing\.requestEpoch === requestEpoch\) return existing\.request/,
+  'TaskHallView must not reuse an in-flight group detail from an invalidated cache generation',
+)
+assertContains(
+  /if \(taskChanged \|\| options\.invalidateDetails\) invalidateGroupDetailCache\(\)/,
+  'TaskHallView must invalidate group details when the same task is explicitly refreshed',
+)
+assertContains(
+  /loadGroups\(selectedTaskId\.value,[\s\S]*invalidateDetails: Boolean\(options\.force\)[\s\S]*if \(options\.force && activeGroupId && selectedGroupId\.value === activeGroupId\)[\s\S]*await loadGroup\(activeGroupId\)/,
+  'TaskHallView manual refresh must reload the currently open group detail',
+)
+assertContains(
+  /async function refreshGroupsSilently\(\)[\s\S]*loadGroups\(currentTaskId, \{[\s\S]*invalidateDetails: true/,
+  'TaskHallView silent and external refreshes must invalidate same-task group details',
 )
 assertContains(
   /async function refreshTaskAndGroupsSilently\(\)[\s\S]*await refreshTasksSilently\(\)[\s\S]*await refreshGroupsSilently\(\)/,

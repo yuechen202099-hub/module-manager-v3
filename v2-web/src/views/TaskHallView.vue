@@ -60,6 +60,7 @@ type ReviewTaskMode = 'terminal' | 'exception' | 'unmatched'
 type LoadGroupsOptions = {
   autoOpen?: boolean
   resetPage?: boolean
+  invalidateDetails?: boolean
 }
 type GroupDetail = {
   group: MaterialGroup
@@ -116,7 +117,10 @@ const pendingArchivePhotoIds = ref<Set<string>>(new Set())
 const failedThumbnailPhotoIds = ref<Set<string>>(new Set())
 const imagePreloadCache = new Set<string>()
 const groupDetailCache = new Map<string, GroupDetail>()
-const groupDetailRequests = new Map<string, { requestEpoch: number; request: Promise<GroupDetail> }>()
+const groupDetailRequests = new Map<
+  string,
+  { cacheEpoch: number; requestEpoch: number; request: Promise<GroupDetail> }
+>()
 let archiveQueue = Promise.resolve()
 let backgroundRefreshTimer: number | null = null
 let fieldTasksWarmupTimer = 0
@@ -124,6 +128,7 @@ let fieldTasksLoaded = false
 let fieldTasksRequest: Promise<void> | null = null
 let lastInteractionAt = Date.now()
 let groupRequestSeq = 0
+let groupDetailCacheEpoch = 0
 let taskRequestSeq = 0
 let taskSnapshotVersion = ''
 let groupSearchTimer = 0
@@ -516,6 +521,13 @@ function preloadImages(items: ReviewPhoto[]) {
   })
 }
 
+function invalidateGroupDetailCache() {
+  groupDetailCacheEpoch += 1
+  groupRequestSeq += 1
+  groupDetailCache.clear()
+  groupDetailRequests.clear()
+}
+
 async function fetchGroupDetailCached(
   groupId: string,
   cacheGuard: () => boolean = () => true,
@@ -523,11 +535,12 @@ async function fetchGroupDetailCached(
 ) {
   const cached = groupDetailCache.get(groupId)
   if (cached) return cached
+  const cacheEpoch = groupDetailCacheEpoch
   const existing = groupDetailRequests.get(groupId)
-  if (existing && existing.requestEpoch === requestEpoch) return existing.request
+  if (existing && existing.cacheEpoch === cacheEpoch && existing.requestEpoch === requestEpoch) return existing.request
   const request = fetchGroup(groupId)
     .then((detail) => {
-      if (cacheGuard()) groupDetailCache.set(groupId, detail)
+      if (cacheEpoch === groupDetailCacheEpoch && cacheGuard()) groupDetailCache.set(groupId, detail)
       return detail
     })
     .finally(() => {
@@ -535,7 +548,7 @@ async function fetchGroupDetailCached(
         groupDetailRequests.delete(groupId)
       }
     })
-  groupDetailRequests.set(groupId, { requestEpoch, request })
+  groupDetailRequests.set(groupId, { cacheEpoch, requestEpoch, request })
   return request
 }
 
@@ -682,6 +695,7 @@ type LoadTasksOptions = {
 
 async function loadTasks(options: LoadTasksOptions = {}) {
   const requestSeq = ++taskRequestSeq
+  const activeGroupId = options.force ? selectedGroupId.value : ''
   loadingTasks.value = true
   errorMessage.value = ''
   try {
@@ -710,7 +724,14 @@ async function loadTasks(options: LoadTasksOptions = {}) {
     }
     const taskChanged = selectedTaskId.value !== previousTaskId
     if (selectedTaskId.value && (taskChanged || options.reloadGroups)) {
-      await loadGroups(selectedTaskId.value, { autoOpen: false, resetPage: taskChanged })
+      await loadGroups(selectedTaskId.value, {
+        autoOpen: false,
+        resetPage: taskChanged,
+        invalidateDetails: Boolean(options.force),
+      })
+      if (options.force && activeGroupId && selectedGroupId.value === activeGroupId) {
+        await loadGroup(activeGroupId)
+      }
     } else {
       if (!selectedTaskId.value) {
         groups.value = []
@@ -772,10 +793,8 @@ async function loadGroups(taskId: string, options: LoadGroupsOptions = {}) {
     activeGroup.value = null
     photos.value = []
     resetImageState()
-    groupRequestSeq += 1
-    groupDetailCache.clear()
-    groupDetailRequests.clear()
   }
+  if (taskChanged || options.invalidateDetails) invalidateGroupDetailCache()
   try {
     const result = await fetchReviewTaskGroups(taskId, {
       offset: (requestedPage - 1) * REVIEW_GROUP_PAGE_SIZE,
@@ -1149,7 +1168,11 @@ function shouldDeferBackgroundRefresh() {
 async function refreshGroupsSilently() {
   if (!selectedTaskId.value) return
   const currentTaskId = selectedTaskId.value
-  await loadGroups(currentTaskId, { autoOpen: false, resetPage: false })
+  await loadGroups(currentTaskId, {
+    autoOpen: false,
+    resetPage: false,
+    invalidateDetails: true,
+  })
 }
 
 async function refreshTasksSilently() {
