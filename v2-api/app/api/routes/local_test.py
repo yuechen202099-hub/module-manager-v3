@@ -282,6 +282,10 @@ def invalidate_project_board_summary_cache() -> None:
     project_board_summary_cache.invalidate(current_team_id())
 
 
+def invalidate_task_snapshot(team_id: str | None = None) -> None:
+    task_snapshot_cache.invalidate(team_id or current_team_id())
+
+
 def validate_construction_upload_group_before_file_save(group_id: str) -> None:
     group = state_repository().get_group(group_id)
     if group is None:
@@ -989,6 +993,7 @@ def run_scan_import_job(job_id: str, team_id: str, content: bytes, filename: str
             store_scan_import_job(job_id, {"progress": progress})
 
         result = import_scan_template_xlsx_for_active_backend(content, progress_callback=update_progress)
+        invalidate_task_snapshot(team_id)
         result["filename"] = filename
         oss_report = state_repository().sync_photos_to_oss(team_id=team_id, progress_callback=update_progress)
         result["oss_sync"] = oss_report
@@ -1271,12 +1276,15 @@ def bootstrap(request: Request):
 @router.post("/scan/clear")
 def clear_scan(request: Request):
     require_request_roles(request, {"admin"}, detail="Administrator role required")
-    return ok(request, state_repository().clear_scan_data())
+    result = state_repository().clear_scan_data()
+    invalidate_task_snapshot()
+    return ok(request, result)
 
 
 @router.post("/scan/import-url-rows")
 def import_url_rows(payload: UrlImportRequest, request: Request):
     result = import_url_scan_rows_for_active_backend(payload.rows)
+    invalidate_task_snapshot()
     result["oss_sync"] = state_repository().sync_photos_to_oss(team_id=current_request_team(request))
     return ok(request, result)
 
@@ -1285,6 +1293,7 @@ def import_url_rows(payload: UrlImportRequest, request: Request):
 async def import_template_xlsx(request: Request, file: UploadFile = File(...)):
     content = await file.read()
     result = import_scan_template_xlsx_for_active_backend(content)
+    invalidate_task_snapshot()
     result["filename"] = file.filename
     result["oss_sync"] = state_repository().sync_photos_to_oss(team_id=current_request_team(request))
     return ok(request, result)
@@ -1322,6 +1331,7 @@ def get_import_template_xlsx_job(job_id: str, request: Request):
 async def import_total_catalog(request: Request, file: UploadFile = File(...)):
     content = await file.read()
     result = import_total_catalog_xlsx_for_active_backend(content)
+    invalidate_task_snapshot()
     result["filename"] = file.filename
     return ok(request, result)
 
@@ -2375,10 +2385,6 @@ def task_snapshot(request: Request, refresh: bool = Query(default=False)):
         request,
         task_snapshot_cache.get(team_id, builder, force_refresh=refresh),
     )
-
-
-def invalidate_task_snapshot() -> None:
-    task_snapshot_cache.invalidate(current_team_id())
 
 
 @router.get("/tasks/status")

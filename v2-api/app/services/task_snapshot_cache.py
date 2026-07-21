@@ -87,8 +87,15 @@ class TaskSnapshotCache:
         normalized_team_id = _normalize_team_id(team_id)
         with self._lock:
             self._known_teams.add(normalized_team_id)
-        if not self.enabled or force_refresh:
+        if not self.enabled:
             return self.refresh(normalized_team_id, builder, source="refresh")
+        if force_refresh:
+            return self.refresh(
+                normalized_team_id,
+                builder,
+                source="refresh",
+                wait_for_existing=True,
+            )
         snapshot = self._snapshot_for_team(normalized_team_id)
         if snapshot is None:
             return self.refresh(normalized_team_id, builder, source="cold")
@@ -103,13 +110,14 @@ class TaskSnapshotCache:
         builder: TaskSnapshotBuilder,
         *,
         source: str = "refresh",
+        wait_for_existing: bool = False,
     ) -> dict[str, Any]:
         normalized_team_id = _normalize_team_id(team_id)
         with self._lock:
             self._known_teams.add(normalized_team_id)
             if normalized_team_id in self._refreshing:
                 snapshot = self._snapshot_for_team(normalized_team_id)
-                if snapshot is not None:
+                if snapshot is not None and not wait_for_existing:
                     return self._payload_with_cache_meta(snapshot, stale=True)
                 wait_event = self._refresh_events[normalized_team_id]
                 owner_event = None
@@ -122,6 +130,13 @@ class TaskSnapshotCache:
 
         if wait_event is not None:
             wait_event.wait()
+            if wait_for_existing:
+                return self.refresh(
+                    normalized_team_id,
+                    builder,
+                    source=source,
+                    wait_for_existing=True,
+                )
             snapshot = self._snapshot_for_team(normalized_team_id)
             if snapshot is not None:
                 return self._payload_with_cache_meta(snapshot, stale=self._is_stale(snapshot))

@@ -107,13 +107,18 @@ Invoke-Step "Verify task and review performance" {
 }
 
 if (-not $NoBuild) {
+    $sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+    if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
+        throw "Unable to resolve the full Git source commit for package acceptance."
+    }
+
     Invoke-Step "Build client release package" {
         powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version $Version
     }
 
     $zipPath = Join-Path $root "build\server-release\module-manager-v2-server-$Version.zip"
     Invoke-Step "Verify release package" {
-        .\.venv\Scripts\python.exe .\scripts\verify-client-release.py $zipPath
+        .\.venv\Scripts\python.exe .\scripts\verify-client-release.py $zipPath --expected-source-commit $sourceCommit
     }
 }
 

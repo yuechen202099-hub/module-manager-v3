@@ -1006,6 +1006,40 @@ def test_review_task_groups_searches_all_review_identity_fields(
     }
 
 
+def test_group_target_text_includes_parallel_installer_and_photo_source_fields() -> None:
+    text = local_simulation.group_target_text(
+        {
+            "id": "group-search-contract",
+            "installer": "installer-a",
+            "constructor": "constructor-b",
+            "creator": "creator-c",
+            "replacement_by": "replacement-d",
+            "photos": [
+                {
+                    "creator": "photo-creator",
+                    "source_file": "source-file.xlsx",
+                    "original_filename": "original-photo.jpg",
+                    "source_file_id": "source-id-123",
+                    "source": "scan-import",
+                }
+            ],
+        }
+    )
+
+    for expected in (
+        "installer-a",
+        "constructor-b",
+        "creator-c",
+        "replacement-d",
+        "photo-creator",
+        "source-file.xlsx",
+        "original-photo.jpg",
+        "source-id-123",
+        "scan-import",
+    ):
+        assert expected in text
+
+
 def test_review_task_groups_reports_all_status_counts(monkeypatch: pytest.MonkeyPatch) -> None:
     groups = [
         {"id": "reviewable", "task_id": 1, "meter_no": "10000001", "status": "pending", "photo_count": 4, "photos": []},

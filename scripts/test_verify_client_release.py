@@ -230,9 +230,11 @@ def test_release_builder_default_version_is_candidate_semantic_version() -> None
 def test_release_builder_embeds_the_current_source_commit() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert "git rev-parse HEAD" in build_script
+    assert build_script.count("git rev-parse HEAD") >= 2
     assert "git status --porcelain --untracked-files=all" in build_script
     assert 'Join-Path $staging "SOURCE_COMMIT"' in build_script
+    assert "source commit or worktree changed during packaging" in build_script
+    assert "verify-client-release.py $zipPath --expected-source-commit $sourceCommit" in build_script
 
 
 def test_archive_rejects_missing_source_commit(tmp_path: Path) -> None:
@@ -282,6 +284,8 @@ def test_v3084_performance_verifiers_are_packaged_and_required() -> None:
     ) in build_script
     assert "node .\\scripts\\verify_task_hall_pagination.js" in acceptance_script
     assert "v2-api\\scripts\\verify_task_review_performance.py" in acceptance_script
+    assert "$sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()" in acceptance_script
+    assert "verify-client-release.py $zipPath --expected-source-commit $sourceCommit" in acceptance_script
 
 
 def test_release_builder_stops_when_smoke_check_fails() -> None:

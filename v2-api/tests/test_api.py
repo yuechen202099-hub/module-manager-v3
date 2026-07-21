@@ -3111,6 +3111,24 @@ def test_group_mutation_routes_invalidate_the_current_team_snapshot() -> None:
     assert invalid_counts == []
 
 
+def test_catalog_and_scan_mutations_invalidate_the_current_team_snapshot() -> None:
+    mutation_functions = [
+        local_test.clear_scan,
+        local_test.import_url_rows,
+        local_test.import_template_xlsx,
+        local_test.run_scan_import_job,
+        local_test.import_total_catalog,
+    ]
+
+    invalid_counts = [
+        (function.__name__, inspect.getsource(function).count("invalidate_task_snapshot("))
+        for function in mutation_functions
+        if inspect.getsource(function).count("invalidate_task_snapshot(") != 1
+    ]
+
+    assert invalid_counts == []
+
+
 def test_review_groups_route_caps_page_at_twenty(monkeypatch) -> None:
     class FakeRepository:
         def list_review_task_groups(self, task_id: int, **kwargs):

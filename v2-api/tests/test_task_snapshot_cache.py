@@ -136,6 +136,49 @@ def test_force_refresh_waits_when_background_snapshot_is_invalidated(tmp_path) -
     assert result["cache"]["build_count"] == 3
 
 
+def test_force_refresh_waits_for_background_refresh_then_builds_again(tmp_path) -> None:
+    cache = TaskSnapshotCache(cache_root=tmp_path, interval_seconds=60, enabled=True)
+    cache.refresh("team-a", lambda team_id: snapshot(team_id, 1))
+    background_started = threading.Event()
+    release_background = threading.Event()
+    force_builder_started = threading.Event()
+    force_returned = threading.Event()
+
+    def background_builder(team_id: str) -> dict:
+        background_started.set()
+        release_background.wait(timeout=2)
+        return snapshot(team_id, 2)
+
+    def force_builder(team_id: str) -> dict:
+        force_builder_started.set()
+        return snapshot(team_id, 3)
+
+    cache.refresh_async("team-a", background_builder)
+    assert background_started.wait(timeout=1)
+    outcome: dict[str, object] = {}
+
+    def force_refresh() -> None:
+        try:
+            outcome["result"] = cache.get("team-a", force_builder, force_refresh=True)
+        finally:
+            force_returned.set()
+
+    waiter = threading.Thread(target=force_refresh)
+    waiter.start()
+
+    assert force_returned.wait(timeout=0.1) is False
+    assert force_builder_started.is_set() is False
+    release_background.set()
+    waiter.join(timeout=2)
+
+    assert force_returned.is_set()
+    assert force_builder_started.is_set()
+    result = outcome["result"]
+    assert isinstance(result, dict)
+    assert result["version"] == "3"
+    assert result["cache"]["build_count"] == 3
+
+
 def test_concurrent_file_load_cannot_replace_newer_memory_snapshot(tmp_path, monkeypatch) -> None:
     cache = TaskSnapshotCache(cache_root=tmp_path, interval_seconds=60, enabled=True)
     cache.refresh("team-a", lambda team_id: snapshot(team_id, 1))

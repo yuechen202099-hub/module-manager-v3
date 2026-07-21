@@ -4885,8 +4885,11 @@ def group_target_text(group: dict[str, Any]) -> str:
         group.get("address"),
         group.get("status"),
         group.get("reviewer"),
-        group_target_installer(group),
+        group.get("installer"),
+        group.get("constructor"),
         group.get("creator"),
+        group.get("replacement_by"),
+        group_target_installer(group),
         group.get("collector"),
         group.get("module_asset_no"),
         group.get("construction_collector"),
@@ -4898,8 +4901,12 @@ def group_target_text(group: dict[str, Any]) -> str:
                 photo.get("barcode"),
                 photo.get("collector"),
                 photo.get("asset_no"),
+                photo.get("module_asset_no"),
                 photo.get("creator"),
                 photo.get("source_file"),
+                photo.get("original_filename"),
+                photo.get("source_file_id"),
+                photo.get("source"),
             ]
         )
     return " ".join(str(value or "") for value in values).lower()

@@ -301,6 +301,23 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to create release zip."
 }
 
+$finalSourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+$finalWorktreeChanges = @(git status --porcelain --untracked-files=all)
+if (
+    $LASTEXITCODE -ne 0 -or
+    $finalSourceCommit -ne $sourceCommit -or
+    $finalWorktreeChanges.Count -ne 0
+) {
+    Remove-Item -Force -LiteralPath $zipPath -ErrorAction SilentlyContinue
+    throw "Release source commit or worktree changed during packaging."
+}
+
+& .\.venv\Scripts\python.exe .\scripts\verify-client-release.py $zipPath --expected-source-commit $sourceCommit
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item -Force -LiteralPath $zipPath -ErrorAction SilentlyContinue
+    throw "Release package verification failed."
+}
+
 Write-Host ""
 Write-Host "Server release package created:"
 Write-Host "  Folder: $staging"

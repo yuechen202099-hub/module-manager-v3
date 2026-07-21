@@ -516,18 +516,20 @@ function preloadImages(items: ReviewPhoto[]) {
   })
 }
 
-async function fetchGroupDetailCached(groupId: string) {
+async function fetchGroupDetailCached(groupId: string, cacheGuard: () => boolean = () => true) {
   const cached = groupDetailCache.get(groupId)
   if (cached) return cached
   const existing = groupDetailRequests.get(groupId)
   if (existing) return existing
   const request = fetchGroup(groupId)
     .then((detail) => {
-      groupDetailCache.set(groupId, detail)
+      if (cacheGuard()) groupDetailCache.set(groupId, detail)
       return detail
     })
     .finally(() => {
-      groupDetailRequests.delete(groupId)
+      if (groupDetailRequests.get(groupId) === request) {
+        groupDetailRequests.delete(groupId)
+      }
     })
   groupDetailRequests.set(groupId, request)
   return request
@@ -562,7 +564,13 @@ async function warmupFirstReviewGroup(taskId: string, requestEpoch: number) {
     selectedTaskId.value !== taskId
   ) return
   try {
-    const detail = await fetchGroupDetailCached(group.id)
+    const detail = await fetchGroupDetailCached(
+      group.id,
+      () =>
+        reviewQueueEpoch.isCurrent(requestEpoch) &&
+        activeTaskMode.value === 'terminal' &&
+        selectedTaskId.value === taskId,
+    )
     if (
       !reviewQueueEpoch.isCurrent(requestEpoch) ||
       activeTaskMode.value !== 'terminal' ||
@@ -1155,6 +1163,13 @@ async function refreshTasksSilently() {
   }
 }
 
+async function refreshTaskAndGroupsSilently() {
+  await refreshTasksSilently()
+  if (activeTaskMode.value === 'terminal' && selectedTaskId.value) {
+    await refreshGroupsSilently()
+  }
+}
+
 async function externalRefresh() {
   if (shouldDeferBackgroundRefresh()) return
   try {
@@ -1193,7 +1208,7 @@ function enqueueArchiveRequest(job: {
           activeGroup.value = { ...activeGroup.value, ...updated, photos: photos.value }
         }
         syncGroupEntry({ ...(updated as MaterialGroup), photos: activeGroup.value?.id === job.groupId ? photos.value : updated.photos })
-        await refreshGroupsSilently()
+        await refreshTaskAndGroupsSilently()
       }
     } catch (error) {
       if (activeGroup.value?.id === job.groupId) {
@@ -1253,6 +1268,7 @@ async function archiveGroup() {
       if (result.group) syncGroupEntry(result.group)
     }
     await completeGroupIfReady()
+    await refreshTasksSilently()
     ElMessage.success(activeGroup.value.hasArchiveBlocker ? '资料组已存在异常，处理后再归档' : '当前资料组已归档')
     await selectNextUnfinishedGroup(activeGroup.value.id)
   } catch (error) {
@@ -1282,7 +1298,7 @@ async function saveCurrentGroup() {
     activeGroup.value = { ...activeGroup.value, ...updated, photos: photos.value }
     syncGroupEntry(activeGroup.value)
     await completeGroupIfReady()
-    await refreshGroupsSilently()
+    await refreshTaskAndGroupsSilently()
     ElMessage.success('资料组已保存')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '保存失败')
@@ -1442,7 +1458,7 @@ async function uploadPhotos(event: Event) {
       await loadGroup(activeGroup.value.id)
     }
     resetImageState()
-    await refreshGroupsSilently()
+    await refreshTaskAndGroupsSilently()
     ElMessage.success(`已补图 ${result.uploadedUrls.length} 张`)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '补图失败')
