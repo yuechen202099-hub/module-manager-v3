@@ -4685,6 +4685,21 @@ def test_postgres_review_queue_search_includes_reviewer() -> None:
         assert expected in compiled
 
 
+def test_postgres_review_queue_search_includes_task_level_installer() -> None:
+    conditions = repository._review_queue_search_conditions("team-a", "installer-alice")
+
+    compiled = str(
+        conditions[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "tasks.construction_claimed_by ILIKE" in compiled
+    assert "tasks.id = material_groups.task_id" in compiled
+    assert "tasks.team_id = 'team-a'" in compiled
+
+
 def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository.settings, "state_backend", "json")
     monkeypatch.setattr(

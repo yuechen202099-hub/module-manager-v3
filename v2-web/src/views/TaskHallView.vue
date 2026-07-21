@@ -116,7 +116,7 @@ const pendingArchivePhotoIds = ref<Set<string>>(new Set())
 const failedThumbnailPhotoIds = ref<Set<string>>(new Set())
 const imagePreloadCache = new Set<string>()
 const groupDetailCache = new Map<string, GroupDetail>()
-const groupDetailRequests = new Map<string, Promise<GroupDetail>>()
+const groupDetailRequests = new Map<string, { requestEpoch: number; request: Promise<GroupDetail> }>()
 let archiveQueue = Promise.resolve()
 let backgroundRefreshTimer: number | null = null
 let fieldTasksWarmupTimer = 0
@@ -516,22 +516,26 @@ function preloadImages(items: ReviewPhoto[]) {
   })
 }
 
-async function fetchGroupDetailCached(groupId: string, cacheGuard: () => boolean = () => true) {
+async function fetchGroupDetailCached(
+  groupId: string,
+  cacheGuard: () => boolean = () => true,
+  requestEpoch: number = -1,
+) {
   const cached = groupDetailCache.get(groupId)
   if (cached) return cached
   const existing = groupDetailRequests.get(groupId)
-  if (existing) return existing
+  if (existing && existing.requestEpoch === requestEpoch) return existing.request
   const request = fetchGroup(groupId)
     .then((detail) => {
       if (cacheGuard()) groupDetailCache.set(groupId, detail)
       return detail
     })
     .finally(() => {
-      if (groupDetailRequests.get(groupId) === request) {
+      if (groupDetailRequests.get(groupId)?.request === request) {
         groupDetailRequests.delete(groupId)
       }
     })
-  groupDetailRequests.set(groupId, request)
+  groupDetailRequests.set(groupId, { requestEpoch, request })
   return request
 }
 
@@ -570,6 +574,7 @@ async function warmupFirstReviewGroup(taskId: string, requestEpoch: number) {
         reviewQueueEpoch.isCurrent(requestEpoch) &&
         activeTaskMode.value === 'terminal' &&
         selectedTaskId.value === taskId,
+      requestEpoch,
     )
     if (
       !reviewQueueEpoch.isCurrent(requestEpoch) ||

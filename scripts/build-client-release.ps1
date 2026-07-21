@@ -12,6 +12,26 @@ if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+$releaseRoot = Join-Path $root "build\server-release"
+$packageName = "module-manager-v2-server-$Version"
+$staging = Join-Path $releaseRoot $packageName
+$zipPath = Join-Path $releaseRoot "$packageName.zip"
+
+New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+
+$resolvedReleaseRoot = [System.IO.Path]::GetFullPath($releaseRoot)
+$resolvedStaging = [System.IO.Path]::GetFullPath($staging)
+if (-not $resolvedStaging.StartsWith($resolvedReleaseRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to clean staging path outside release root: $resolvedStaging"
+}
+
+if (Test-Path $staging) {
+    Remove-Item -Recurse -Force -LiteralPath $staging
+}
+if (Test-Path $zipPath) {
+    Remove-Item -Force -LiteralPath $zipPath
+}
+
 if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
     python -m venv .venv
 }
@@ -68,26 +88,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 if ($worktreeChanges.Count -ne 0) {
     throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
-}
-
-$releaseRoot = Join-Path $root "build\server-release"
-$packageName = "module-manager-v2-server-$Version"
-$staging = Join-Path $releaseRoot $packageName
-$zipPath = Join-Path $releaseRoot "$packageName.zip"
-
-New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
-
-$resolvedReleaseRoot = [System.IO.Path]::GetFullPath($releaseRoot)
-$resolvedStaging = [System.IO.Path]::GetFullPath($staging)
-if (-not $resolvedStaging.StartsWith($resolvedReleaseRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Refusing to clean staging path outside release root: $resolvedStaging"
-}
-
-if (Test-Path $staging) {
-    Remove-Item -Recurse -Force -LiteralPath $staging
-}
-if (Test-Path $zipPath) {
-    Remove-Item -Force -LiteralPath $zipPath
 }
 
 New-Item -ItemType Directory -Force -Path $staging | Out-Null

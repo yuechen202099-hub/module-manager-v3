@@ -1,3 +1,4 @@
+import asyncio
 import html
 import importlib.util
 import inspect
@@ -12,12 +13,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
+from fastapi import UploadFile
 from fastapi.testclient import TestClient
 import pytest
+from starlette.requests import Request
 
 import app.main as main_module
 from app.main import create_app
-from app.api.routes import auth, local_test, miniprogram
+from app.api.routes import auth, groups as group_routes, local_test, miniprogram
 from app.core.config import settings
 from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
@@ -3127,6 +3130,126 @@ def test_catalog_and_scan_mutations_invalidate_the_current_team_snapshot() -> No
     ]
 
     assert invalid_counts == []
+
+
+def test_production_group_mutations_invalidate_the_admin_team_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRepository:
+        def bulk_archive_groups(self, group_ids, *, actor, reason):
+            return {"items": [], "group_ids": group_ids, "actor": actor, "reason": reason}
+
+        def update_group_metadata(self, group_id, *, actor, updates, audit_action):
+            return {"group": {"id": group_id}, "actor": actor, "updates": updates, "audit_action": audit_action}
+
+        def reset_group_to_unconstructed(self, group_id, *, actor, reason, force):
+            return {"group": {"id": group_id}, "actor": actor, "reason": reason, "force": force}
+
+        def reset_group_to_unreviewed(self, group_id, *, actor, reason, force):
+            return {"group": {"id": group_id}, "actor": actor, "reason": reason, "force": force}
+
+    invalidated: list[str] = []
+    monkeypatch.setattr(group_routes, "state_repository", lambda: FakeRepository())
+    monkeypatch.setattr(
+        group_routes,
+        "invalidate_task_snapshot_for_team",
+        invalidated.append,
+        raising=False,
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/groups", "headers": []})
+    request.state.request_id = "group-mutation-test"
+    admin_payload = {"team_id": "team-formal", "username": "admin-a"}
+
+    group_routes.bulk_archive_groups(
+        group_routes.GroupBulkArchiveRequest(group_ids=["group-1"], reason="archive"),
+        request,
+        admin_payload,
+    )
+    group_routes.update_group_metadata(
+        "group-1",
+        group_routes.GroupMetadataUpdateRequest(updates={"address": "new address"}),
+        request,
+        admin_payload,
+    )
+    group_routes.reset_group_unconstructed(
+        "group-1",
+        group_routes.GroupResetRequest(reason="reset construction"),
+        request,
+        admin_payload,
+    )
+    group_routes.reset_group_unreviewed(
+        "group-1",
+        group_routes.GroupResetRequest(reason="reset review"),
+        request,
+        admin_payload,
+    )
+
+    assert invalidated == ["team-formal"] * 4
+
+
+def test_miniprogram_committed_uploads_invalidate_the_current_team_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRepository:
+        def upload_construction_group_batch(self, group_id, **_kwargs):
+            return {"group": {"id": group_id, "photos": []}}
+
+    stored_photo = {
+        "url": "/static/uploads/construction/photo.jpg",
+        "sha256": "a" * 64,
+        "storage_type": "local",
+        "storage_key": "construction/photo.jpg",
+        "storage_bucket": "",
+        "storage_source": "local",
+    }
+    invalidated: list[str] = []
+    monkeypatch.setattr(miniprogram, "require_constructor_payload", lambda _request: {"sub": "constructor-a"})
+    monkeypatch.setattr(miniprogram, "validate_construction_upload_group_before_file_save", lambda _group_id: None)
+    monkeypatch.setattr(miniprogram, "current_request_team", lambda _request: "team-mini")
+    monkeypatch.setattr(miniprogram, "display_name_for_actor", lambda _request, _actor: "Installer A")
+    monkeypatch.setattr(miniprogram, "save_image_bytes", lambda **_kwargs: stored_photo)
+    monkeypatch.setattr(miniprogram, "state_repository", lambda: FakeRepository())
+    monkeypatch.setattr(
+        miniprogram,
+        "invalidate_task_snapshot_for_team",
+        invalidated.append,
+        raising=False,
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/miniprogram/groups/group-1", "headers": []})
+    request.state.request_id = "miniprogram-upload-test"
+
+    asyncio.run(
+        miniprogram.upload_group_batch(
+            "group-1",
+            request,
+            client_batch_id="batch-one",
+            client_completed_at="2026-07-22T01:00:00+08:00",
+            collector="collector-1",
+            module_asset_no="module-1",
+            exception_note="",
+            photo_slots=["before_box"],
+            client_photo_ids=["photo-one"],
+            files=[UploadFile(filename="one.jpg", file=BytesIO(b"image-one"))],
+        )
+    )
+    miniprogram._pending_upload_batches.clear()
+    asyncio.run(
+        miniprogram.upload_group_file(
+            "group-1",
+            request,
+            client_batch_id="batch-two",
+            client_completed_at="2026-07-22T01:05:00+08:00",
+            collector="collector-1",
+            module_asset_no="module-1",
+            photo_slot="after_box",
+            client_photo_id="photo-two",
+            expected_count=1,
+            commit=True,
+            file=UploadFile(filename="two.jpg", file=BytesIO(b"image-two")),
+        )
+    )
+
+    assert invalidated == ["team-mini", "team-mini"]
 
 
 def test_review_groups_route_caps_page_at_twenty(monkeypatch) -> None:

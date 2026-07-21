@@ -9,6 +9,7 @@ from app.schemas.review import ExceptionCreate, GroupReviewUpdate
 from app.services import local_simulation
 from app.services.photo_storage import resolve_group_collection_for_response
 from app.services.state_repository import StateBackendNotReady, get_state_repository
+from app.services.task_snapshot_cache import invalidate_task_snapshot_for_team
 
 router = APIRouter(prefix="/groups")
 
@@ -66,6 +67,7 @@ def bulk_archive_groups(
             actor=_admin_actor(admin_payload),
             reason=payload.reason,
         )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -77,9 +79,12 @@ def _admin_actor(admin_payload: dict) -> str:
     return str(admin_payload.get("username") or admin_payload.get("sub") or "admin").strip() or "admin"
 
 
+def _admin_team_id(admin_payload: dict) -> str:
+    return str(admin_payload.get("team_id") or "").strip()
+
+
 def _with_admin_team(admin_payload: dict):
-    team_id = str(admin_payload.get("team_id") or "").strip()
-    return local_simulation.set_current_team(team_id)
+    return local_simulation.set_current_team(_admin_team_id(admin_payload))
 
 
 @router.patch("/{group_id}/metadata")
@@ -97,6 +102,7 @@ def update_group_metadata(
             updates=payload.updates,
             audit_action="admin_group_metadata_update",
         )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
@@ -121,6 +127,7 @@ def reset_group_unconstructed(
             reason=payload.reason,
             force=True,
         )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
@@ -145,6 +152,7 @@ def reset_group_unreviewed(
             reason=payload.reason,
             force=True,
         )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:

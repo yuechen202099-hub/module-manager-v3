@@ -26,6 +26,7 @@ from app.core.responses import error_response, ok
 from app.core.security import create_access_token
 from app.services.account_store import authenticate_user, get_user, normalize_team_id, public_user
 from app.services.photo_storage import normalize_suffix, save_image_bytes
+from app.services.task_snapshot_cache import invalidate_task_snapshot_for_team
 from app.services.wechat_binding_store import bind_code_to_user, get_binding_for_code
 
 router = APIRouter(prefix="/miniprogram", dependencies=[Depends(use_team_context)])
@@ -351,6 +352,7 @@ async def upload_group_batch(
             creator=display_name_for_actor(request, actor),
             client_completed_at=client_completed_at,
         )
+        invalidate_task_snapshot_for_team(current_request_team(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
@@ -435,6 +437,7 @@ async def upload_group_file(
             creator=display_name_for_actor(request, actor),
             client_completed_at=client_completed_at,
         )
+        invalidate_task_snapshot_for_team(current_request_team(request))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:

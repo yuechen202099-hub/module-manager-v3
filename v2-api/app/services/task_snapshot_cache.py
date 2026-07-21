@@ -368,6 +368,10 @@ class TaskSnapshotCache:
 task_snapshot_cache = TaskSnapshotCache()
 
 
+def invalidate_task_snapshot_for_team(team_id: str) -> None:
+    task_snapshot_cache.invalidate(team_id)
+
+
 def build_task_snapshot(
     team_id: str,
     repository_factory: Callable[[], Any] | None = None,

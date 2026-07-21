@@ -7,6 +7,7 @@ import importlib.util
 import json
 import re
 import stat
+import subprocess
 import sys
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -220,6 +221,24 @@ def load_release_truth_parser():
 
 def fail(message: str) -> None:
     raise AssertionError(message)
+
+
+def verify_archive_members_are_tracked(names: set[str], source_commit: str) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", source_commit],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode != 0:
+        fail(f"Unable to inspect SOURCE_COMMIT {source_commit}: {result.stderr.strip()}")
+    tracked_names = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    unexpected = sorted(names - tracked_names - {"SOURCE_COMMIT"})
+    if unexpected:
+        fail("Release archive members not tracked by SOURCE_COMMIT: " + ", ".join(unexpected[:20]))
 
 
 def canonical_zip_member_name(info: zipfile.ZipInfo) -> str:
@@ -450,6 +469,7 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
                     f"Packaged SOURCE_COMMIT {source_commit} does not match expected commit "
                     f"{normalized_expected_commit}"
                 )
+            verify_archive_members_are_tracked(names, normalized_expected_commit)
         manifest = archive.read("RELEASE_MANIFEST.md").decode("utf-8") if "RELEASE_MANIFEST.md" in names else ""
         manifest_versions = [match.group("version") for match in MANIFEST_VERSION_LINE_PATTERN.finditer(manifest)]
         if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:

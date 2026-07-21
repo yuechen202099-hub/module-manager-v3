@@ -237,6 +237,36 @@ def test_release_builder_embeds_the_current_source_commit() -> None:
     assert "verify-client-release.py $zipPath --expected-source-commit $sourceCommit" in build_script
 
 
+def test_release_builder_removes_same_version_output_before_any_validation() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+
+    remove_archive = build_script.index("Remove-Item -Force -LiteralPath $zipPath")
+    first_validation = build_script.index('Write-Host "Verifying administrator release notes..."')
+
+    assert remove_archive < first_validation
+
+
+def test_archive_members_must_be_tracked_by_the_expected_source_commit() -> None:
+    verifier = load_verifier()
+    verify_members = getattr(verifier, "verify_archive_members_are_tracked", None)
+    assert callable(verify_members), "release verifier must validate every archive member against SOURCE_COMMIT"
+    source_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+
+    verify_members({"SOURCE_COMMIT", "README.md"}, source_commit)
+    with pytest.raises(AssertionError, match="not tracked by SOURCE_COMMIT"):
+        verify_members(
+            {"SOURCE_COMMIT", "README.md", "v2-api/app/ignored-debug.log"},
+            source_commit,
+        )
+
+
 def test_archive_rejects_missing_source_commit(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "missing-source-commit.zip"

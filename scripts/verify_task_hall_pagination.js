@@ -22,15 +22,27 @@ assertContains(
   'TaskHallView thumbnail warmup must remain bound to the current review queue request',
 )
 assertContains(
-  /fetchGroupDetailCached\(groupId:\s*string,\s*cacheGuard:[\s\S]*if \(cacheGuard\(\)\) groupDetailCache\.set/,
+  /fetchGroupDetailCached\(\s*groupId:\s*string,\s*cacheGuard:[\s\S]*if \(cacheGuard\(\)\) groupDetailCache\.set/,
   'TaskHallView detail cache writes must support a request-epoch guard',
 )
 assertContains(
-  /groupDetailRequests\.get\(groupId\) === request/,
+  /groupDetailRequests\s*=\s*new Map<string,\s*\{[\s\S]*requestEpoch:\s*number[\s\S]*request:\s*Promise<GroupDetail>/,
+  'TaskHallView in-flight group details must record the review request epoch',
+)
+assertContains(
+  /if \(existing && existing\.requestEpoch === requestEpoch\) return existing\.request/,
+  'TaskHallView must not reuse a group-detail promise from an older review request epoch',
+)
+assertContains(
+  /groupDetailRequests\.set\(groupId,\s*\{ requestEpoch, request \}\)/,
+  'TaskHallView must store each in-flight detail request with its request epoch',
+)
+assertContains(
+  /groupDetailRequests\.get\(groupId\)\?\.request === request/,
   'TaskHallView must only clear the matching in-flight detail request',
 )
 assertContains(
-  /fetchGroupDetailCached\(\s*group\.id,\s*\(\) =>[\s\S]*reviewQueueEpoch\.isCurrent\(requestEpoch\)/,
+  /fetchGroupDetailCached\(\s*group\.id,\s*\(\) =>[\s\S]*reviewQueueEpoch\.isCurrent\(requestEpoch\)[\s\S]*,\s*requestEpoch,\s*\)/,
   'TaskHallView warmup must guard detail-cache writes with the current request epoch',
 )
 assertContains(

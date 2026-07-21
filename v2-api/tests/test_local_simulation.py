@@ -761,6 +761,7 @@ def test_task_installer_distribution_ignores_inactive_photo_creator_before_fallb
 
 
 def test_list_tasks_can_skip_installer_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    persisted_distribution = [{"installer": "Existing Installer", "group_count": 1, "share": 1.0}]
     state = {
         "tasks": [
             {
@@ -769,6 +770,7 @@ def test_list_tasks_can_skip_installer_distribution(monkeypatch: pytest.MonkeyPa
                 "title": "终端 T-007",
                 "status": "published",
                 "construction_enabled": True,
+                "installer_distribution": persisted_distribution,
             }
         ],
         "groups": [],
@@ -783,6 +785,8 @@ def test_list_tasks_can_skip_installer_distribution(monkeypatch: pytest.MonkeyPa
     rows = local_simulation.list_tasks(include_installer_distribution=False)
 
     assert rows[0]["terminal"] == "T-007"
+    assert rows[0]["installer_distribution"] == []
+    assert state["tasks"][0]["installer_distribution"] is persisted_distribution
 
 
 def test_task_installer_distribution_does_not_use_replacement_by_as_installer() -> None:

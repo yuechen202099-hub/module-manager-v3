@@ -5572,10 +5572,12 @@ def list_tasks(*, include_installer_distribution: bool = True) -> list[dict[str,
         task["address"] = first_task_address(task_groups)
         task["address_search_text"] = task_address_search_text(task_groups)
         task["meter_search_text"] = task_meter_search_text(task_groups)
-        task["installer_distribution"] = (
-            task_installer_distribution(task_groups) if include_installer_distribution else []
-        )
+        if include_installer_distribution:
+            task["installer_distribution"] = task_installer_distribution(task_groups)
     tasks = [construction_task_response(task) for task in state["tasks"]]
+    if not include_installer_distribution:
+        for task in tasks:
+            task["installer_distribution"] = []
     return sorted(
         tasks,
         key=lambda task: (

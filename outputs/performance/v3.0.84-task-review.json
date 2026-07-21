@@ -2,8 +2,8 @@
   "ok": true,
   "failures": [],
   "measurements": {
-    "task_snapshot_ms": 14.706,
-    "review_groups_ms": 53.488,
+    "task_snapshot_ms": 13.995,
+    "review_groups_ms": 57.562,
     "review_group_count": 20,
     "task_builds_in_60_seconds": 1
   },
@@ -13,14 +13,14 @@
     "review_group_count": 20,
     "task_builds_in_60_seconds": 1
   },
-  "checked_at": "2026-07-21T18:27:47.598009+00:00",
+  "checked_at": "2026-07-21T18:56:41.222478+00:00",
   "base_url": "http://127.0.0.1:8010",
   "task_id": "1",
-  "first_task_snapshot_ms": 67.38,
+  "first_task_snapshot_ms": 68.391,
   "snapshot_version_reused": true,
   "snapshot_generation_reused": true,
   "build_sample_seconds": 60,
   "start_build_count": 1,
   "end_build_count": 2,
-  "cache_instance_id": "773c19a71ceb4cfba5a384722df1a7ba"
+  "cache_instance_id": "ef9c0e8b9a7b4f1d96c7c4c983743384"
 }

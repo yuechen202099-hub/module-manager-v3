@@ -1338,6 +1338,15 @@ def _review_queue_search_conditions(team_id: str, query: str) -> list[Any]:
             )
             .exists()
         )
+        task_installer_match = (
+            select(Task.id)
+            .where(
+                Task.team_id == team_id,
+                Task.id == MaterialGroup.task_id,
+                Task.construction_claimed_by.ilike(pattern),
+            )
+            .exists()
+        )
         conditions.append(
             or_(
                 MaterialGroup.legacy_id.ilike(pattern),
@@ -1357,6 +1366,7 @@ def _review_queue_search_conditions(team_id: str, query: str) -> list[Any]:
                 MaterialGroup.raw_data["collector"].astext.ilike(pattern),
                 MaterialGroup.raw_data["construction_module_asset_no"].astext.ilike(pattern),
                 MaterialGroup.raw_data["construction_collector"].astext.ilike(pattern),
+                task_installer_match,
                 photo_match,
             )
         )
