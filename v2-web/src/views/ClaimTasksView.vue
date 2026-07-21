@@ -17,7 +17,9 @@ import {
   setConstructionTaskPriority,
 } from '@/api/services'
 import {
+  applyTaskMutation,
   createTaskRequestEpoch,
+  createVisibleLoadTracker,
   filterClaimTasks,
   hydrateClaimTasksCache,
   replaceTaskById,
@@ -51,6 +53,7 @@ const TASK_STATUS_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 let refreshInterval = 0
 let refreshTimer = 0
 const taskRequestEpoch = createTaskRequestEpoch()
+const visibleLoadTracker = createVisibleLoadTracker()
 
 type TaskFilter = 'all' | 'priority' | 'construction' | 'review'
 type TaskMoreAction = 'scope-reviewed' | 'scope-all' | 'export-terminal' | 'export-detail' | 'assign' | 'release' | 'set-priority' | 'clear-priority'
@@ -319,7 +322,8 @@ function rememberCachedTasks(version = taskStatusVersion.value) {
 async function loadTasks(options: LoadTasksOptions = {}) {
   const showLoading = !options.silent
   const requestEpoch = taskRequestEpoch.begin()
-  if (showLoading) loading.value = true
+  const releaseVisibleLoad = showLoading ? visibleLoadTracker.acquire() : null
+  if (showLoading) loading.value = visibleLoadTracker.isLoading()
   errorMessage.value = ''
   try {
     const status = await fetchTaskStatus()
@@ -352,7 +356,10 @@ async function loadTasks(options: LoadTasksOptions = {}) {
     }
     errorMessage.value = error instanceof Error ? error.message : '任务状态加载失败'
   } finally {
-    if (showLoading && taskRequestEpoch.isCurrent(requestEpoch)) loading.value = false
+    if (releaseVisibleLoad) {
+      releaseVisibleLoad()
+      loading.value = visibleLoadTracker.isLoading()
+    }
   }
 }
 
@@ -507,11 +514,17 @@ async function updateConstructionPriority(task: ReviewTask, priority: boolean) {
   priorityUpdatingTaskId.value = task.id
   errorMessage.value = ''
   try {
-    const updated = await setConstructionTaskPriority(task.id, priority)
-    taskRequestEpoch.invalidate()
-    tasks.value = replaceTaskById(tasks.value, updated)
-    taskStatusVersion.value = ''
-    rememberCachedTasks('')
+    await applyTaskMutation({
+      epoch: taskRequestEpoch,
+      onSuccess(updated) {
+        tasks.value = replaceTaskById(tasks.value, updated)
+        taskStatusVersion.value = ''
+        rememberCachedTasks('')
+      },
+      priority,
+      request: setConstructionTaskPriority,
+      taskId: task.id,
+    })
     ElMessage.success(priority ? '已设为优先施工' : '已取消优先施工')
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '施工优先级更新失败'

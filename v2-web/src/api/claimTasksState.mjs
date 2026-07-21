@@ -49,10 +49,37 @@ export function createTaskRequestEpoch() {
   }
 }
 
+export function createVisibleLoadTracker() {
+  let activeLoads = 0
+  return {
+    acquire() {
+      activeLoads += 1
+      let released = false
+      return () => {
+        if (!released) {
+          released = true
+          activeLoads -= 1
+        }
+        return activeLoads
+      }
+    },
+    isLoading() {
+      return activeLoads > 0
+    },
+  }
+}
+
 export function priorityRequestBody(priority) {
   return { priority: Boolean(priority) }
 }
 
 export function replaceTaskById(tasks, updated) {
   return tasks.map((task) => (task.id === updated.id ? updated : task))
+}
+
+export async function applyTaskMutation({ epoch, onSuccess, priority, request, taskId }) {
+  const updated = await request(taskId, priority)
+  epoch.invalidate()
+  onSuccess(updated)
+  return updated
 }
