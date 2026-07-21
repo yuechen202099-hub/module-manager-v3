@@ -751,8 +751,8 @@ onUnmounted(() => {
 .unmatched-review-loading { min-height: 340px; padding: 24px; }
 .unmatched-review-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(340px, .9fr); gap: 24px; }
 .unmatched-photo-panel, .unmatched-review-form { min-width: 0; }
-.unmatched-photo-stage { display: grid; height: clamp(420px, 58vh, 620px); min-height: 420px; place-items: center; overflow: hidden; border: 1px solid var(--el-border-color); background: var(--el-fill-color-lighter); }
-.unmatched-photo-stage :deep(.review-image-inspector) { width: 100%; min-width: 0; height: 100%; grid-template-rows: auto minmax(0, 1fr); }
+.unmatched-photo-stage { display: grid; grid-template-rows: minmax(0, 1fr); height: clamp(420px, 58vh, 620px); min-height: 420px; place-items: stretch; overflow: hidden; border: 1px solid var(--el-border-color); background: var(--el-fill-color-lighter); }
+.unmatched-photo-stage :deep(.review-image-inspector) { width: 100%; min-width: 0; min-height: 0; height: 100%; grid-template-rows: auto minmax(0, 1fr); }
 .unmatched-photo-stage :deep(.review-image-inspector__stage) { min-height: 0; }
 .unmatched-photo-stage :deep(.el-image) { display: block; width: 100%; height: 100%; }
 .unmatched-photo-stage :deep(.el-image__inner) { display: block; width: 100%; height: 100%; object-fit: contain; }

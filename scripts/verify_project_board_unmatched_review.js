@@ -140,6 +140,19 @@ assertContains(dialog, '<el-image', 'dialog must expose the verified object URL 
 assertContains(elementPlus, "import { ElImage } from 'element-plus/es/components/image/index'", 'ElImage must be imported for global registration')
 assertContains(elementPlus, '  ElImage,', 'ElImage must be installed with the other Element Plus components')
 assertContains(dialog, '.unmatched-photo-stage :deep(.el-image)', 'the ElImage host must have stable preview dimensions')
+const unmatchedPhotoLayout = section(dialog, '.unmatched-photo-stage {', '.unmatched-preview-trigger')
+assertContains(
+  unmatchedPhotoLayout,
+  'grid-template-rows: minmax(0, 1fr);',
+  'unmatched photo stage must use one bounded stretch grid track',
+)
+assertContains(unmatchedPhotoLayout, 'place-items: stretch;', 'unmatched photo stage must stretch its bounded grid track')
+const unmatchedInspectorLayout = section(dialog, '.unmatched-photo-stage :deep(.review-image-inspector)', '.unmatched-photo-stage :deep(.review-image-inspector__stage)')
+assertContains(
+  unmatchedInspectorLayout,
+  'min-height: 0;',
+  'unmatched image inspector must be allowed to shrink inside the bounded track',
+)
 assertNotContains(types, 'targetGroupId: string', 'candidate DTO must not expose internal group ids')
 assertNotContains(candidateContract, 'target_group_id?: string', 'candidate backend DTO must not receive internal group ids')
 assertNotContains(dialog, 'prop="targetGroupId"', 'candidate table must not render internal group ids')
