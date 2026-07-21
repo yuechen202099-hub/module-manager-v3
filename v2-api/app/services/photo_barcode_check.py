@@ -459,6 +459,8 @@ def scan_photo_region(
     image = _photo_image(photo)
     if image is None:
         raise ValueError("Photo image is unavailable")
+    oriented = image
+    crop = None
     try:
         oriented = ImageOps.exif_transpose(image)
         left = round(normalized_region["x"] * oriented.width)
@@ -471,7 +473,7 @@ def scan_photo_region(
         values = _scan_barcode_image(crop, candidate_limit=_scan_candidate_limit(photo))
         method = "barcode" if values else ""
         if not values:
-            if OCR_RESCUE_SEMAPHORE.acquire(blocking=False):
+            if shutil.which("tesseract") and OCR_RESCUE_SEMAPHORE.acquire(blocking=False):
                 try:
                     values = _scan_ocr_image(crop, expected_values=[])
                 finally:
@@ -486,7 +488,20 @@ def scan_photo_region(
             "region": normalized_region,
         }
     finally:
-        image.close()
+        if crop is not None:
+            try:
+                crop.close()
+            except Exception:
+                pass
+        if oriented is not image:
+            try:
+                oriented.close()
+            except Exception:
+                pass
+        try:
+            image.close()
+        except Exception:
+            pass
 
 
 def _validated_normalized_region(region: Mapping[str, float]) -> dict[str, float]:

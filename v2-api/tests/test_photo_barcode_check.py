@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageOps
 
 from app.services import photo_barcode_check
 from app.services.photo_barcode_check import (
@@ -964,3 +964,82 @@ def test_scan_photo_region_rejects_tiny_pixel_crop(monkeypatch) -> None:
             "collector",
             {"x": 0.0, "y": 0.0, "width": 0.1, "height": 0.1},
         )
+
+
+def test_scan_photo_region_skips_ocr_when_tesseract_is_unavailable(monkeypatch) -> None:
+    class UnusedSemaphore:
+        def acquire(self, *, blocking: bool) -> bool:
+            pytest.fail("OCR semaphore must not be acquired without tesseract")
+
+    monkeypatch.setattr(photo_barcode_check, "_photo_image", lambda _photo: Image.new("RGB", (100, 100)))
+    monkeypatch.setattr(photo_barcode_check, "_scan_barcode_image", lambda _image, *, candidate_limit: [])
+    monkeypatch.setattr(photo_barcode_check, "_scan_ocr_image", lambda *_args, **_kwargs: pytest.fail("OCR must not run"))
+    monkeypatch.setattr(photo_barcode_check.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(photo_barcode_check, "OCR_RESCUE_SEMAPHORE", UnusedSemaphore())
+
+    result = photo_barcode_check.scan_photo_region(
+        {"id": "photo-1"},
+        "meter",
+        {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+    )
+
+    assert result["method"] == "none"
+
+
+@pytest.mark.parametrize(
+    ("raise_from_barcode", "oriented_is_source"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_scan_photo_region_closes_owned_images_on_success_and_exception(
+    monkeypatch,
+    raise_from_barcode: bool,
+    oriented_is_source: bool,
+) -> None:
+    class TrackingImage:
+        width = 100
+        height = 100
+
+        def __init__(self, crop_image=None) -> None:
+            self.close_calls = 0
+            self.crop_image = crop_image
+
+        def crop(self, _box):
+            return self.crop_image
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    crop = TrackingImage()
+    source = TrackingImage(crop)
+    oriented = source if oriented_is_source else TrackingImage(crop)
+    monkeypatch.setattr(photo_barcode_check, "_photo_image", lambda _photo: source)
+    monkeypatch.setattr(ImageOps, "exif_transpose", lambda _image: oriented)
+
+    if raise_from_barcode:
+        def barcode_reader(_image, *, candidate_limit: int):
+            raise RuntimeError("barcode failure")
+    else:
+        def barcode_reader(_image, *, candidate_limit: int):
+            return ["3130001122100009124734"]
+
+    monkeypatch.setattr(photo_barcode_check, "_scan_barcode_image", barcode_reader)
+
+    if raise_from_barcode:
+        with pytest.raises(RuntimeError, match="barcode failure"):
+            photo_barcode_check.scan_photo_region(
+                {"id": "photo-1"},
+                "module",
+                {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+            )
+    else:
+        result = photo_barcode_check.scan_photo_region(
+            {"id": "photo-1"},
+            "module",
+            {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0},
+        )
+        assert result["method"] == "barcode"
+
+    assert source.close_calls == 1
+    assert crop.close_calls == 1
+    if oriented is not source:
+        assert oriented.close_calls == 1
