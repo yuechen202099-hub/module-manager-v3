@@ -5539,7 +5539,7 @@ class PostgresStateRepository(StateRepository):
                 task.construction_priority = bool(item["priority"])
                 task.construction_priority_updated_by = actor
                 task.construction_priority_updated_at = datetime.now(UTC)
-                _stage_transactional_audit(session, team_id=team_id, actor=actor, action="construction_priority_updated", entity_type="task", entity_id=task.id, before_data={"construction_priority": before}, after_data={"construction_priority": bool(item["priority"]), "source": "import"}, payload={"task_id": task.legacy_id, "terminal": task.terminal or ""})
+                _stage_transactional_audit(session, team_id=team_id, actor=actor, action="construction_priority_updated", entity_type="task", entity_id=task.id, before_data={"construction_priority": before}, after_data={"construction_priority": bool(item["priority"]), "source": "import"}, payload={"task_id": task.legacy_id, "terminal": task.terminal or "", "before": before, "after": bool(item["priority"])})
             counts = _construction_priority_import_counts(items)
             _stage_transactional_audit(session, team_id=team_id, actor=actor, action="construction_priority_imported", entity_type="construction_priority_import", payload={"counts": counts})
             session.commit()

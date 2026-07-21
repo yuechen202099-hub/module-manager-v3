@@ -228,6 +228,78 @@ def test_postgres_priority_import_rejects_zero_group_true_before_auditing(
     assert session.staged == []
 
 
+def test_postgres_priority_import_exposes_task_change_values_in_public_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = SimpleNamespace(
+        id="task-7",
+        legacy_id=7,
+        team_id="priority-team",
+        terminal="T-007",
+        construction_priority=False,
+        construction_priority_updated_by="",
+        construction_priority_updated_at=None,
+    )
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.staged = []
+            self.audit_mode = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, _statement):
+            return len(self.staged)
+
+        def scalars(self, _statement):
+            if self.audit_mode:
+                return Result(list(reversed(self.staged)))
+            return Result([task])
+
+        def add(self, value):
+            self.staged.append(value)
+
+        def commit(self):
+            return None
+
+    session = FakeSession()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _construction_priority_stats_map(self, _session, _team_id, _task_ids):
+            return {7: {"total_groups": 1, "uploaded_count": 0, "reviewed_count": 0, "unreviewed_count": 0}}
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "priority-team")
+    repo = TestPostgresRepository()
+    repo.import_construction_priorities(
+        [PriorityImportRow(2, "T-007", True, "valid")],
+        actor="admin-a",
+        confirm=True,
+    )
+    session.audit_mode = True
+    audit = next(item for item in repo.list_audit_events()["items"] if item["action"] == "construction_priority_updated")
+
+    assert audit["payload"] == {
+        "task_id": 7,
+        "terminal": "T-007",
+        "before": False,
+        "after": True,
+    }
+
+
 def test_postgres_priority_import_locks_initially_completed_and_unchanged_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
