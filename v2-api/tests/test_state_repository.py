@@ -84,6 +84,9 @@ def test_postgres_priority_update_locks_task_and_is_idempotent(monkeypatch: pyte
             assert checked_task is task
             return {"total_groups": 2, "uploaded_count": 1, "reviewed_count": 0, "unreviewed_count": 1}
 
+        def _task_payload_stats(self, checked_session, checked_task):
+            return self._task_stats(checked_session, checked_task)
+
     monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "priority-team")
     monkeypatch.setattr(repository, "_construction_task_payload", lambda checked_task, stats: {"priority": checked_task.construction_priority, **stats})
     repo = TestPostgresRepository()
@@ -271,6 +274,9 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
             assert checked_session is self.session
             assert checked_task is task
             return dict(self.stats)
+
+        def _task_payload_stats(self, checked_session, checked_task):
+            return self._task_stats(checked_session, checked_task)
 
     monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "priority-team")
     monkeypatch.setattr(repository.local_simulation, "assert_not_placeholder_construction_group", lambda **_kwargs: None)
@@ -1233,6 +1239,9 @@ def test_postgres_exact_group_creation_uses_unique_stable_formal_group_ids(
 
         def _task_stats(self, session, checked_task):
             return {}
+
+        def _task_payload_stats(self, session, checked_task):
+            return self._task_stats(session, checked_task)
 
     monkeypatch.setattr(repository, "_construction_task_payload", lambda checked_task, stats: {"id": checked_task.legacy_id})
     repo = TestPostgresRepository()

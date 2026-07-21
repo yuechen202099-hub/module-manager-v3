@@ -3045,6 +3045,7 @@ class PostgresStateRepository(StateRepository):
         *,
         include_search_text: bool = True,
         include_installer_distribution: bool = True,
+        legacy_task_id: int | None = None,
     ) -> dict[int, dict[str, Any]]:
         installer_expr = func.coalesce(
             func.nullif(func.trim(MaterialGroup.raw_data.op("->>")("installer")), ""),
@@ -3062,6 +3063,9 @@ class PostgresStateRepository(StateRepository):
             .exists()
         )
         uploaded_group_condition = or_(MaterialGroup.photo_count > 0, active_photo_exists)
+        group_filters = [MaterialGroup.team_id == team_id]
+        if legacy_task_id is not None:
+            group_filters.append(MaterialGroup.legacy_task_id == legacy_task_id)
         address_search_expr = (
             func.string_agg(MaterialGroup.installation_address.distinct(), " ")
             if include_search_text
@@ -3109,7 +3113,7 @@ class PostgresStateRepository(StateRepository):
                     0,
                 ).label("unreviewed_count"),
             )
-            .where(MaterialGroup.team_id == team_id)
+            .where(*group_filters)
             .group_by(MaterialGroup.legacy_task_id)
         ).all()
         stats_by_task = {
@@ -3142,7 +3146,7 @@ class PostgresStateRepository(StateRepository):
                 ),
             )
             .where(
-                MaterialGroup.team_id == team_id,
+                *group_filters,
                 MaterialGroup.legacy_task_id.is_not(None),
                 photo_installer_expr.is_not(None),
             )
@@ -3155,6 +3159,7 @@ class PostgresStateRepository(StateRepository):
                 Photo.is_active.is_(True),
                 Photo.group_id.is_not(None),
                 photo_installer_expr.is_not(None),
+                Photo.group_id.in_(select(MaterialGroup.id).where(*group_filters)),
             )
             .distinct()
             .subquery()
@@ -3166,7 +3171,7 @@ class PostgresStateRepository(StateRepository):
                 func.count(MaterialGroup.id).label("group_count"),
             )
             .where(
-                MaterialGroup.team_id == team_id,
+                *group_filters,
                 MaterialGroup.legacy_task_id.is_not(None),
                 uploaded_group_condition,
                 installer_expr.is_not(None),
@@ -3191,6 +3196,16 @@ class PostgresStateRepository(StateRepository):
                 name_cache=installer_name_cache,
             )
         return stats_by_task
+
+    def _task_payload_stats(self, session: Session, task: Task) -> dict[str, Any]:
+        if task.legacy_id is None:
+            return _empty_task_stats()
+        task_id = int(task.legacy_id)
+        return self._task_stats_map(
+            session,
+            task.team_id or local_simulation.current_team_id(),
+            legacy_task_id=task_id,
+        ).get(task_id, _empty_task_stats())
 
     def _task_stats(self, session: Session, task: Task) -> dict[str, Any]:
         if task.legacy_id is None:
@@ -5177,7 +5192,7 @@ class PostgresStateRepository(StateRepository):
             task.released_at = None
             session.commit()
             session.refresh(task)
-            return _task_payload(task, self._task_stats(session, task))
+            return _task_payload(task, self._task_payload_stats(session, task))
 
     def release_task(self, task_id: int, reviewer: str, *, force: bool = False) -> dict[str, Any]:
         with self._session() as session:
@@ -5189,7 +5204,7 @@ class PostgresStateRepository(StateRepository):
             task.released_at = datetime.now(UTC)
             session.commit()
             session.refresh(task)
-            return _task_payload(task, self._task_stats(session, task))
+            return _task_payload(task, self._task_payload_stats(session, task))
 
     def get_task_progress(self, task_id: int) -> dict[str, Any]:
         with self._session() as session:
@@ -5356,7 +5371,7 @@ class PostgresStateRepository(StateRepository):
             task.construction_closed_at = None
             session.commit()
             session.refresh(task)
-            return _construction_task_payload(task, self._task_stats(session, task))
+            return _construction_task_payload(task, self._task_payload_stats(session, task))
 
     def close_construction_task(self, task_id: int, actor: str) -> dict[str, Any]:
         with self._session() as session:
@@ -5365,7 +5380,7 @@ class PostgresStateRepository(StateRepository):
             task.construction_closed_at = datetime.now(UTC)
             session.commit()
             session.refresh(task)
-            return _construction_task_payload(task, self._task_stats(session, task))
+            return _construction_task_payload(task, self._task_payload_stats(session, task))
 
     def set_construction_task_priority(
         self,
@@ -5406,7 +5421,7 @@ class PostgresStateRepository(StateRepository):
                 )
             session.commit()
             session.refresh(task)
-            return _construction_task_payload(task, self._task_stats(session, task))
+            return _construction_task_payload(task, self._task_payload_stats(session, task))
 
     def assign_construction_task(
         self,
@@ -5442,7 +5457,7 @@ class PostgresStateRepository(StateRepository):
             task.construction_opened_at = task.construction_opened_at or now
             session.commit()
             session.refresh(task)
-            return _construction_task_payload(task, self._task_stats(session, task))
+            return _construction_task_payload(task, self._task_payload_stats(session, task))
 
     def unassign_construction_task(self, task_id: int, *, actor: str, reason: str = "") -> dict[str, Any]:
         with self._session() as session:
@@ -5456,7 +5471,7 @@ class PostgresStateRepository(StateRepository):
             task.construction_released_at = datetime.now(UTC)
             session.commit()
             session.refresh(task)
-            return _construction_task_payload(task, self._task_stats(session, task))
+            return _construction_task_payload(task, self._task_payload_stats(session, task))
 
     def claim_construction_task(self, task_id: int, actor: str) -> dict[str, Any]:
         actor = actor.strip() or "constructor"
@@ -5466,7 +5481,7 @@ class PostgresStateRepository(StateRepository):
                 raise ValueError("该终端尚未开放施工")
             if task.construction_claimed_by != actor:
                 raise ValueError("Construction task must be assigned by an administrator before entry")
-            return _construction_task_payload(task, self._task_stats(session, task))
+            return _construction_task_payload(task, self._task_payload_stats(session, task))
 
     def release_construction_task(self, task_id: int, actor: str, *, force: bool = False) -> dict[str, Any]:
         actor = actor.strip() or "constructor"
@@ -5478,7 +5493,7 @@ class PostgresStateRepository(StateRepository):
             task.construction_released_at = datetime.now(UTC)
             session.commit()
             session.refresh(task)
-            return _construction_task_payload(task, self._task_stats(session, task))
+            return _construction_task_payload(task, self._task_payload_stats(session, task))
 
     def list_construction_task_groups(
         self,
@@ -6341,7 +6356,10 @@ class PostgresStateRepository(StateRepository):
             session.commit()
             session.refresh(group)
             session.refresh(task)
-            return {"group": _group_payload(session, group), "task": _construction_task_payload(task, self._task_stats(session, task))}
+            return {
+                "group": _group_payload(session, group),
+                "task": _construction_task_payload(task, self._task_payload_stats(session, task)),
+            }
 
     def update_group_terminal(self, group_id: str, *, terminal: str, actor: str) -> dict[str, Any]:
         terminal_value = local_simulation.validate_real_formal_identity_value(terminal, "terminal")
@@ -6360,7 +6378,10 @@ class PostgresStateRepository(StateRepository):
             session.commit()
             session.refresh(group)
             session.refresh(task)
-            return {"group": _group_payload(session, group), "task": _construction_task_payload(task, self._task_stats(session, task))}
+            return {
+                "group": _group_payload(session, group),
+                "task": _construction_task_payload(task, self._task_payload_stats(session, task)),
+            }
 
     def save_exception_note(self, group_id: str, *, reviewer: str, note: str) -> dict[str, Any]:
         return self.review_group(group_id, status="exception", reviewer=reviewer, exception_note=note)
@@ -6666,7 +6687,7 @@ class PostgresStateRepository(StateRepository):
             session.refresh(task)
             return {
                 "group": _group_payload(session, group),
-                "task": _construction_task_payload(task, self._task_stats(session, task)),
+                "task": _construction_task_payload(task, self._task_payload_stats(session, task)),
                 **result,
             }
 

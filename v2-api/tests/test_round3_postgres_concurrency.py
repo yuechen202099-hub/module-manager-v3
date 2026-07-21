@@ -15,6 +15,7 @@ from app.models import (
     AuditLog,
     GroupStatus,
     MaterialGroup,
+    Photo,
     Project,
     Task,
     TaskStatus,
@@ -194,18 +195,11 @@ def test_concurrent_postgres_finalization_for_same_terminal_reuses_one_task(
     assert {group.task_id for group in groups} == {tasks[0].id}
 
 
-@pytest.mark.parametrize(
-    ("order", "setter_priority"),
-    [
-        ("setter_before_upload", True),
-        ("upload_before_setter", False),
-    ],
-)
+@pytest.mark.parametrize("order", ["setter_before_upload", "upload_before_setter"])
 def test_concurrent_postgres_priority_setter_and_final_upload_settle_closed_task(
     isolated_postgres,
     monkeypatch: pytest.MonkeyPatch,
     order: str,
-    setter_priority: bool,
 ) -> None:
     session_factory = isolated_postgres
     team_id = f"round3-priority-team-{uuid4().hex[:12]}"
@@ -235,6 +229,38 @@ def test_concurrent_postgres_priority_setter_and_final_upload_settle_closed_task
         )
         session.add(task)
         session.flush()
+        uploaded_group = MaterialGroup(
+            team_id=team_id,
+            legacy_id=f"round3-priority-uploaded-{uuid4().hex[:12]}",
+            legacy_task_id=task_id,
+            terminal=task.terminal,
+            project_id=project.id,
+            task_id=task.id,
+            meter_match_key=f"round3-priority-uploaded-meter-{uuid4().hex[:12]}",
+            display_meter_no="120000912482",
+            installation_address="Round 3 priority completed road",
+            status=GroupStatus.UNREVIEWED,
+            photo_count=1,
+            raw_data={},
+        )
+        session.add(uploaded_group)
+        session.flush()
+        session.add(
+            Photo(
+                team_id=team_id,
+                group_id=uploaded_group.id,
+                legacy_id=f"round3-priority-photo-{uuid4().hex[:12]}",
+                source="construction",
+                barcode=uploaded_group.display_meter_no,
+                creator="installer-round3",
+                image_url="https://example.test/round3/seed.jpg",
+                source_url="https://example.test/round3/seed.jpg",
+                sha256="e" * 64,
+                object_key="round3/seed.jpg",
+                category="before_box",
+                raw_data={},
+            )
+        )
         session.add(
             MaterialGroup(
                 team_id=team_id,
@@ -282,15 +308,21 @@ def test_concurrent_postgres_priority_setter_and_final_upload_settle_closed_task
             gate_setter_before_task_lock,
         )
 
-    def set_priority() -> dict:
+    def set_priority() -> dict | ValueError:
         start.wait(timeout=5)
-        result = state_repo.set_construction_task_priority(
-            task_id,
-            actor="dispatcher-round3",
-            priority=setter_priority,
-        )
+        try:
+            result = state_repo.set_construction_task_priority(
+                task_id,
+                actor="dispatcher-round3",
+                priority=True,
+            )
+        except ValueError as error:
+            return error
         first_operation_finished.set()
-        return result
+        return {
+            "payload": result,
+            "list_payload": next(item for item in state_repo.list_tasks() if item["id"] == task_id),
+        }
 
     def final_upload() -> dict:
         start.wait(timeout=5)
@@ -358,15 +390,31 @@ def test_concurrent_postgres_priority_setter_and_final_upload_settle_closed_task
                 AuditLog.action == "construction_priority_auto_cleared",
             )
         )
+        priority_update_count = session.scalar(
+            select(func.count(AuditLog.id)).where(
+                AuditLog.team_id == team_id,
+                AuditLog.action == "construction_priority_updated",
+            )
+        )
+
+    final_list_payload = next(item for item in state_repo.list_tasks() if item["id"] == task_id)
 
     assert task is not None
     assert task.construction_priority is False
     assert upload_result["task"]["construction_priority"] is False
     assert upload_result["task"]["construction_available"] is False
     assert auto_clear_count == 1
+    assert priority_update_count == 0
+    for key in ("address", "address_search_text", "meter_search_text", "installer_distribution"):
+        assert upload_result["task"][key]
+        assert upload_result["task"][key] == final_list_payload[key]
     if order == "setter_before_upload":
-        assert setter_result["construction_priority"] is True
-        assert setter_result["construction_available"] is True
+        assert not isinstance(setter_result, ValueError)
+        assert setter_result["payload"]["construction_priority"] is True
+        assert setter_result["payload"]["construction_available"] is True
+        for key in ("address", "address_search_text", "meter_search_text", "installer_distribution"):
+            assert setter_result["payload"][key]
+            assert setter_result["payload"][key] == setter_result["list_payload"][key]
     else:
-        assert setter_result["construction_priority"] is False
-        assert setter_result["construction_available"] is False
+        assert isinstance(setter_result, ValueError)
+        assert str(setter_result) == "Construction priority is only available while construction remains available"
