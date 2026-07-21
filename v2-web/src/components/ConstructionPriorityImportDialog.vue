@@ -25,7 +25,8 @@ const errorMessage = ref('')
 const previewing = ref(false)
 const confirming = ref(false)
 const downloadingTemplate = ref(false)
-const requestSession = createConstructionPriorityImportSession()
+const importRequestSession = createConstructionPriorityImportSession()
+const downloadRequestSession = createConstructionPriorityImportSession()
 
 const items = computed(() => preview.value?.items || [])
 const totalPages = computed(() => Math.max(1, Math.ceil(items.value.length / pageSize)))
@@ -48,7 +49,8 @@ function statusLabel(status: string) {
 }
 
 function reset() {
-  requestSession.invalidate()
+  importRequestSession.invalidate()
+  downloadRequestSession.invalidate()
   selectedFile.value = null
   preview.value = null
   currentPage.value = 1
@@ -64,7 +66,7 @@ function closeDialog() {
 }
 
 function selectFile(file: UploadFile) {
-  requestSession.invalidate()
+  importRequestSession.invalidate()
   selectedFile.value = file.raw || null
   preview.value = null
   currentPage.value = 1
@@ -73,52 +75,52 @@ function selectFile(file: UploadFile) {
 
 async function downloadTemplate() {
   if (downloadingTemplate.value) return
-  const requestToken = requestSession.capture()
+  const requestToken = downloadRequestSession.begin()
   downloadingTemplate.value = true
   errorMessage.value = ''
   try {
     await downloadConstructionPriorityTemplate()
   } catch (error) {
-    if (!requestSession.isCurrent(requestToken)) return
+    if (!downloadRequestSession.isCurrent(requestToken)) return
     errorMessage.value = error instanceof Error ? error.message : '下载模板失败'
   } finally {
-    if (!requestSession.isCurrent(requestToken)) return
+    if (!downloadRequestSession.isCurrent(requestToken)) return
     downloadingTemplate.value = false
   }
 }
 
 async function previewImport() {
   if (!selectedFile.value || previewing.value || confirming.value) return
-  const requestToken = requestSession.begin()
+  const requestToken = importRequestSession.begin()
   previewing.value = true
   errorMessage.value = ''
   try {
     const result = await previewConstructionPriorityImport(selectedFile.value)
-    if (!requestSession.isCurrent(requestToken)) return
+    if (!importRequestSession.isCurrent(requestToken)) return
     preview.value = result
     currentPage.value = 1
   } catch (error) {
-    if (!requestSession.isCurrent(requestToken)) return
+    if (!importRequestSession.isCurrent(requestToken)) return
     errorMessage.value = error instanceof Error ? error.message : '预览失败'
   } finally {
-    if (!requestSession.isCurrent(requestToken)) return
+    if (!importRequestSession.isCurrent(requestToken)) return
     previewing.value = false
   }
 }
 
 async function confirmImport() {
   if (!selectedFile.value || !canConfirm.value) return
-  const requestToken = requestSession.begin()
+  const requestToken = importRequestSession.begin()
   confirming.value = true
   errorMessage.value = ''
   try {
     const result = await confirmConstructionPriorityImport(selectedFile.value)
-    if (requestSession.isCurrent(requestToken) && result.confirmed) emit('imported')
+    if (importRequestSession.isCurrent(requestToken) && result.confirmed) emit('imported')
   } catch (error) {
-    if (!requestSession.isCurrent(requestToken)) return
+    if (!importRequestSession.isCurrent(requestToken)) return
     errorMessage.value = error instanceof Error ? error.message : '确认导入失败'
   } finally {
-    if (!requestSession.isCurrent(requestToken)) return
+    if (!importRequestSession.isCurrent(requestToken)) return
     confirming.value = false
   }
 }

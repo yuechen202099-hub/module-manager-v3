@@ -17,7 +17,8 @@ function deferred() {
 }
 
 function createDialogHarness() {
-  const session = createConstructionPriorityImportSession()
+  const importSession = createConstructionPriorityImportSession()
+  const downloadSession = createConstructionPriorityImportSession()
   const state = {
     confirming: false,
     downloading: false,
@@ -28,7 +29,8 @@ function createDialogHarness() {
   }
 
   function reset() {
-    session.invalidate()
+    importSession.invalidate()
+    downloadSession.invalidate()
     state.confirming = false
     state.downloading = false
     state.error = ''
@@ -37,47 +39,51 @@ function createDialogHarness() {
   }
 
   async function previewRequest(request) {
-    const token = session.begin()
+    const token = importSession.begin()
     state.error = ''
     state.previewing = true
     try {
       const result = await request
-      if (session.isCurrent(token)) state.preview = result
+      if (importSession.isCurrent(token)) state.preview = result
     } catch (error) {
-      if (session.isCurrent(token)) state.error = error instanceof Error ? error.message : String(error)
+      if (importSession.isCurrent(token)) state.error = error instanceof Error ? error.message : String(error)
     } finally {
-      if (session.isCurrent(token)) state.previewing = false
+      if (importSession.isCurrent(token)) state.previewing = false
     }
   }
 
   async function downloadRequest(request) {
-    const token = session.capture()
+    const token = downloadSession.begin()
     state.downloading = true
     state.error = ''
     try {
       await request
     } catch (error) {
-      if (session.isCurrent(token)) state.error = error instanceof Error ? error.message : String(error)
+      if (downloadSession.isCurrent(token)) state.error = error instanceof Error ? error.message : String(error)
     } finally {
-      if (session.isCurrent(token)) state.downloading = false
+      if (downloadSession.isCurrent(token)) state.downloading = false
     }
   }
 
   async function confirmRequest(request) {
-    const token = session.begin()
+    const token = importSession.begin()
     state.confirming = true
     state.error = ''
     try {
       const result = await request
-      if (session.isCurrent(token) && result.confirmed) state.imported += 1
+      if (importSession.isCurrent(token) && result.confirmed) state.imported += 1
     } catch (error) {
-      if (session.isCurrent(token)) state.error = error instanceof Error ? error.message : String(error)
+      if (importSession.isCurrent(token)) state.error = error instanceof Error ? error.message : String(error)
     } finally {
-      if (session.isCurrent(token)) state.confirming = false
+      if (importSession.isCurrent(token)) state.confirming = false
     }
   }
 
-  return { confirmRequest, downloadRequest, previewRequest, reset, state }
+  function selectFile() {
+    importSession.invalidate()
+  }
+
+  return { confirmRequest, downloadRequest, previewRequest, reset, selectFile, state }
 }
 
 const previewRace = createDialogHarness()
@@ -142,6 +148,37 @@ currentPreview.resolve({ source: 'current' })
 await currentPreviewPromise
 assert.equal(loadingRace.state.previewing, false)
 
+const fileChangeDownload = createDialogHarness()
+const fileChangeRequest = deferred()
+const fileChangeDownloadPromise = fileChangeDownload.downloadRequest(fileChangeRequest.promise)
+fileChangeDownload.selectFile()
+fileChangeRequest.resolve()
+await fileChangeDownloadPromise
+assert.equal(fileChangeDownload.state.downloading, false)
+
+const previewChangeDownload = createDialogHarness()
+const previewChangeRequest = deferred()
+const previewChangeImport = deferred()
+const previewChangeDownloadPromise = previewChangeDownload.downloadRequest(previewChangeRequest.promise)
+const previewChangeImportPromise = previewChangeDownload.previewRequest(previewChangeImport.promise)
+previewChangeRequest.reject(new Error('download failed in current dialog'))
+await previewChangeDownloadPromise
+assert.equal(previewChangeDownload.state.downloading, false)
+assert.equal(previewChangeDownload.state.error, 'download failed in current dialog')
+previewChangeImport.resolve({ source: 'preview' })
+await previewChangeImportPromise
+
+const confirmChangeDownload = createDialogHarness()
+const confirmChangeRequest = deferred()
+const confirmChangeImport = deferred()
+const confirmChangeDownloadPromise = confirmChangeDownload.downloadRequest(confirmChangeRequest.promise)
+const confirmChangeImportPromise = confirmChangeDownload.confirmRequest(confirmChangeImport.promise)
+confirmChangeRequest.resolve()
+await confirmChangeDownloadPromise
+assert.equal(confirmChangeDownload.state.downloading, false)
+confirmChangeImport.resolve({ confirmed: false })
+await confirmChangeImportPromise
+
 const rejectedDownload = createDialogHarness()
 const slowDownloadReject = deferred()
 const slowDownloadRejectPromise = rejectedDownload.downloadRequest(slowDownloadReject.promise)
@@ -169,9 +206,11 @@ await currentDownloadPromise
 assert.equal(resolvedDownload.state.downloading, false)
 
 const dialogSource = fs.readFileSync('v2-web/src/components/ConstructionPriorityImportDialog.vue', 'utf8')
-assert.match(dialogSource, /async function downloadTemplate\(\) \{(?:(?!\nasync function)[\s\S])*?const requestToken = requestSession\.capture\(\)/)
-assert.match(dialogSource, /async function downloadTemplate\(\) \{(?:(?!\nasync function)[\s\S])*?requestSession\.isCurrent\(requestToken\)/)
-assert.match(dialogSource, /function reset\(\) \{(?:(?!\nfunction closeDialog)[\s\S])*?downloadingTemplate\.value = false/)
+assert.match(dialogSource, /const importRequestSession = createConstructionPriorityImportSession\(\)/)
+assert.match(dialogSource, /const downloadRequestSession = createConstructionPriorityImportSession\(\)/)
+assert.match(dialogSource, /async function downloadTemplate\(\) \{(?:(?!\nasync function)[\s\S])*?downloadRequestSession\.begin\(\)/)
+assert.match(dialogSource, /async function downloadTemplate\(\) \{(?:(?!\nasync function)[\s\S])*?downloadRequestSession\.isCurrent\(requestToken\)/)
+assert.match(dialogSource, /function reset\(\) \{(?:(?!\nfunction closeDialog)[\s\S])*?importRequestSession\.invalidate\(\)[\s\S]*?downloadRequestSession\.invalidate\(\)[\s\S]*?downloadingTemplate\.value = false/)
 
 assert.equal(
   parseContentDispositionFilename(

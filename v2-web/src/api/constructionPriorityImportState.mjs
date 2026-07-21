@@ -6,9 +6,6 @@ export function createConstructionPriorityImportSession() {
       generation += 1
       return generation
     },
-    capture() {
-      return generation
-    },
     invalidate() {
       generation += 1
     },
