@@ -4662,6 +4662,19 @@ def test_postgres_review_queue_limits_before_payload_build(monkeypatch: pytest.M
     assert len(built) == 20
 
 
+def test_postgres_review_queue_search_includes_reviewer() -> None:
+    conditions = repository._review_queue_search_conditions("team-a", "reviewer-alice")
+
+    compiled = str(
+        conditions[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "material_groups.reviewer ILIKE" in compiled
+
+
 def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository.settings, "state_backend", "json")
     monkeypatch.setattr(

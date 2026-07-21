@@ -6,7 +6,7 @@ import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -18,6 +18,7 @@ THRESHOLDS = {
     "review_group_count": 20,
     "task_builds_in_60_seconds": 1,
 }
+BUILD_SAMPLE_SECONDS = 60
 
 
 def verify_measurements(
@@ -91,6 +92,15 @@ def cache_generation(snapshot: dict[str, Any]) -> str:
     return generated_at or str(cache.get("generated_at") or "")
 
 
+def cache_build_count(snapshot: dict[str, Any]) -> int:
+    cache = snapshot.get("cache") if isinstance(snapshot.get("cache"), dict) else {}
+    return max(0, int(cache.get("build_count") or 0))
+
+
+def observed_build_count(start_count: int, end_count: int) -> int:
+    return max(0, int(end_count) - int(start_count))
+
+
 def run_verification(base_url: str, token: str) -> dict[str, Any]:
     first_snapshot, first_snapshot_ms = timed_get(base_url, "/local-test/tasks/snapshot", token)
     second_snapshot, warm_snapshot_ms = timed_get(base_url, "/local-test/tasks/snapshot", token)
@@ -103,12 +113,15 @@ def run_verification(base_url: str, token: str) -> dict[str, Any]:
     review_path = f"/local-test/tasks/{quote(task_id, safe='')}/review-groups?limit=20&offset=0&review_status=all&query="
     review_page, review_groups_ms = timed_get(base_url, review_path, token)
     review_items = review_page.get("items") if isinstance(review_page.get("items"), list) else []
-    generations = {value for value in (cache_generation(first_snapshot), cache_generation(second_snapshot)) if value}
+    start_build_count = cache_build_count(second_snapshot)
+    sleep(BUILD_SAMPLE_SECONDS)
+    sampled_snapshot, _sampled_snapshot_ms = timed_get(base_url, "/local-test/tasks/snapshot", token)
+    task_builds_in_sample = observed_build_count(start_build_count, cache_build_count(sampled_snapshot))
     report = verify_measurements(
         task_snapshot_ms=warm_snapshot_ms,
         review_groups_ms=review_groups_ms,
         review_group_count=len(review_items),
-        task_builds_in_60_seconds=len(generations),
+        task_builds_in_60_seconds=task_builds_in_sample,
     )
     report.update(
         {
@@ -118,6 +131,9 @@ def run_verification(base_url: str, token: str) -> dict[str, Any]:
             "first_task_snapshot_ms": first_snapshot_ms,
             "snapshot_version_reused": first_snapshot.get("version") == second_snapshot.get("version"),
             "snapshot_generation_reused": cache_generation(first_snapshot) == cache_generation(second_snapshot),
+            "build_sample_seconds": BUILD_SAMPLE_SECONDS,
+            "start_build_count": start_build_count,
+            "end_build_count": cache_build_count(sampled_snapshot),
         }
     )
     return report

@@ -4884,6 +4884,7 @@ def group_target_text(group: dict[str, Any]) -> str:
         group.get("meter_match_key"),
         group.get("address"),
         group.get("status"),
+        group.get("reviewer"),
         group_target_installer(group),
         group.get("creator"),
         group.get("collector"),

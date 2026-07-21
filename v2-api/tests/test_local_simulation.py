@@ -958,7 +958,14 @@ def test_review_task_groups_filter_before_paging_and_count_full_result(
 
 @pytest.mark.parametrize(
     "query",
-    ["TERM-SEARCH", "METER-SEARCH", "ADDRESS-SEARCH", "MODULE-SEARCH", "COLLECTOR-SEARCH"],
+    [
+        "TERM-SEARCH",
+        "METER-SEARCH",
+        "ADDRESS-SEARCH",
+        "MODULE-SEARCH",
+        "COLLECTOR-SEARCH",
+        "reviewer-alice",
+    ],
 )
 def test_review_task_groups_searches_all_review_identity_fields(
     monkeypatch: pytest.MonkeyPatch,
@@ -974,6 +981,7 @@ def test_review_task_groups_searches_all_review_identity_fields(
             "address": "ADDRESS-SEARCH",
             "module_asset_no": "MODULE-SEARCH",
             "collector": "COLLECTOR-SEARCH",
+            "reviewer": "reviewer-alice",
             "status": "pending",
             "photo_count": 4,
             "photos": [],

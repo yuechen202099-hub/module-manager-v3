@@ -67,6 +67,8 @@ class TaskSnapshotCache:
         self.cache_root = cache_root or default_task_snapshot_cache_root()
         self._lock = threading.RLock()
         self._memory: dict[str, dict[str, Any]] = {}
+        self._generations: dict[str, int] = {}
+        self._build_counts: dict[str, int] = {}
         self._refreshing: set[str] = set()
         self._refresh_events: dict[str, threading.Event] = {}
         self._known_teams: set[str] = set()
@@ -113,6 +115,7 @@ class TaskSnapshotCache:
                 owner_event = threading.Event()
                 self._refresh_events[normalized_team_id] = owner_event
                 self._refreshing.add(normalized_team_id)
+                owner_generation = self._generations.get(normalized_team_id, 0)
                 wait_event = None
 
         if wait_event is not None:
@@ -123,6 +126,7 @@ class TaskSnapshotCache:
             return self.refresh(normalized_team_id, builder, source=source)
 
         assert owner_event is not None
+        retry = False
         try:
             payload = builder(normalized_team_id)
             if _normalize_team_id(str(payload.get("team_id") or "")) != normalized_team_id:
@@ -132,14 +136,21 @@ class TaskSnapshotCache:
                 "payload": deepcopy(payload),
                 "source": source,
             }
-            self._store_snapshot(normalized_team_id, snapshot)
-            return self._payload_with_cache_meta(snapshot, stale=False)
+            if not self._store_snapshot(
+                normalized_team_id,
+                snapshot,
+                expected_generation=owner_generation,
+            ):
+                retry = True
         finally:
             with self._lock:
                 self._refreshing.discard(normalized_team_id)
                 if self._refresh_events.get(normalized_team_id) is owner_event:
                     self._refresh_events.pop(normalized_team_id, None)
             owner_event.set()
+        if retry:
+            return self.refresh(normalized_team_id, builder, source=source)
+        return self._payload_with_cache_meta(snapshot, stale=False)
 
     def refresh_async(self, team_id: str, builder: TaskSnapshotBuilder) -> None:
         normalized_team_id = _normalize_team_id(team_id)
@@ -149,6 +160,7 @@ class TaskSnapshotCache:
                 return
             self._refreshing.add(normalized_team_id)
             self._refresh_events[normalized_team_id] = threading.Event()
+            refresh_generation = self._generations.get(normalized_team_id, 0)
 
         def runner() -> None:
             try:
@@ -162,6 +174,7 @@ class TaskSnapshotCache:
                         "payload": deepcopy(payload),
                         "source": "background",
                     },
+                    expected_generation=refresh_generation,
                 )
             except Exception:
                 logger.exception("Task snapshot background refresh failed for team %s", normalized_team_id)
@@ -215,11 +228,22 @@ class TaskSnapshotCache:
     def _snapshot_for_team(self, team_id: str) -> dict[str, Any] | None:
         with self._lock:
             snapshot = self._memory.get(team_id)
+            load_generation = self._generations.get(team_id, 0)
         if snapshot is None:
-            snapshot = self._load_from_file(team_id)
-            if snapshot is not None:
-                with self._lock:
+            loaded = self._load_from_file(team_id)
+            with self._lock:
+                snapshot = self._memory.get(team_id)
+                if (
+                    snapshot is None
+                    and loaded is not None
+                    and self._generations.get(team_id, 0) == load_generation
+                ):
+                    snapshot = loaded
                     self._memory[team_id] = snapshot
+                    self._build_counts[team_id] = max(
+                        self._build_counts.get(team_id, 0),
+                        int(snapshot.get("build_count") or 0),
+                    )
         if snapshot is not None and not self._snapshot_matches_team(snapshot, team_id):
             self._discard_snapshot(team_id)
             return None
@@ -249,20 +273,39 @@ class TaskSnapshotCache:
 
     def _discard_snapshot(self, team_id: str) -> None:
         with self._lock:
+            self._generations[team_id] = self._generations.get(team_id, 0) + 1
             self._memory.pop(team_id, None)
-        try:
-            self._cache_file(team_id).unlink(missing_ok=True)
-        except OSError:
-            logger.exception("Failed to discard task snapshot cache for team %s", team_id)
+            try:
+                self._cache_file(team_id).unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed to discard task snapshot cache for team %s", team_id)
 
-    def _store_snapshot(self, team_id: str, snapshot: dict[str, Any]) -> None:
-        self.cache_root.mkdir(parents=True, exist_ok=True)
-        path = self._cache_file(team_id)
-        tmp_path = path.with_suffix(f".{threading.get_ident()}.tmp")
-        tmp_path.write_text(json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        tmp_path.replace(path)
+    def _store_snapshot(
+        self,
+        team_id: str,
+        snapshot: dict[str, Any],
+        *,
+        expected_generation: int | None = None,
+    ) -> bool:
         with self._lock:
+            if (
+                expected_generation is not None
+                and self._generations.get(team_id, 0) != expected_generation
+            ):
+                return False
+            build_count = self._build_counts.get(team_id, 0) + 1
+            snapshot["build_count"] = build_count
+            self.cache_root.mkdir(parents=True, exist_ok=True)
+            path = self._cache_file(team_id)
+            tmp_path = path.with_suffix(f".{threading.get_ident()}.tmp")
+            tmp_path.write_text(
+                json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            tmp_path.replace(path)
+            self._build_counts[team_id] = build_count
             self._memory[team_id] = snapshot
+            return True
 
     def _is_stale(self, snapshot: dict[str, Any]) -> bool:
         generated_at = _parse_iso_datetime(str(snapshot.get("generated_at") or ""))
@@ -278,6 +321,7 @@ class TaskSnapshotCache:
             "generated_at": snapshot.get("generated_at") or "",
             "stale": stale,
             "refresh_interval_seconds": self.interval_seconds,
+            "build_count": int(snapshot.get("build_count") or 0),
         }
         return payload
 

@@ -1339,6 +1339,7 @@ def _review_queue_search_conditions(team_id: str, query: str) -> list[Any]:
                 MaterialGroup.display_meter_no.ilike(pattern),
                 MaterialGroup.meter_match_key.ilike(pattern),
                 MaterialGroup.installation_address.ilike(pattern),
+                MaterialGroup.reviewer.ilike(pattern),
                 MaterialGroup.raw_data["module_asset_no"].astext.ilike(pattern),
                 MaterialGroup.raw_data["asset_no"].astext.ilike(pattern),
                 MaterialGroup.raw_data["collector"].astext.ilike(pattern),

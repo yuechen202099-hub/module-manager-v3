@@ -3017,6 +3017,69 @@ def test_task_snapshot_route_reuses_cache_and_forced_refreshes(monkeypatch, tmp_
     assert calls == 2
 
 
+def test_task_mutation_routes_invalidate_the_current_team_snapshot(monkeypatch) -> None:
+    invalidated: list[str] = []
+
+    class FakeCache:
+        def invalidate(self, team_id: str) -> None:
+            invalidated.append(team_id)
+
+    class FakeRepository:
+        def claim_task(self, task_id, reviewer):
+            return {"id": str(task_id), "claimed_by": reviewer}
+
+        def release_task(self, task_id, reviewer, force=False):
+            return {"id": str(task_id), "claimed_by": "", "force": force}
+
+        def release_all_claimed_tasks(self, reviewer):
+            return {"released": 1, "reviewer": reviewer}
+
+        def open_construction_task(self, task_id, actor):
+            return {"id": str(task_id), "actor": actor}
+
+        def close_construction_task(self, task_id, actor):
+            return {"id": str(task_id), "actor": actor}
+
+        def set_construction_task_priority(self, task_id, actor, priority):
+            return {"id": str(task_id), "actor": actor, "construction_priority": priority}
+
+        def assign_construction_task(self, task_id, **kwargs):
+            return {"id": str(task_id), **kwargs}
+
+        def unassign_construction_task(self, task_id, actor):
+            return {"id": str(task_id), "actor": actor}
+
+        def claim_construction_task(self, task_id, actor):
+            return {"id": str(task_id), "actor": actor}
+
+        def release_construction_task(self, task_id, actor, force=False):
+            return {"id": str(task_id), "actor": actor, "force": force}
+
+    monkeypatch.setattr(local_test, "task_snapshot_cache", FakeCache())
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+    monkeypatch.setattr(local_test, "request_is_admin", lambda _request: True)
+    monkeypatch.setattr(local_test, "require_production_admin_payload", lambda _request: None)
+
+    responses = [
+        client.post("/local-test/tasks/1/claim", json={"reviewer": "reviewer-a"}),
+        client.post("/local-test/tasks/1/release", json={"reviewer": "reviewer-a"}),
+        client.post("/local-test/tasks/release-all", json={"reviewer": "admin"}),
+        client.patch("/local-test/construction/tasks/1/open", json={"actor": "admin"}),
+        client.patch("/local-test/construction/tasks/1/close", json={"actor": "admin"}),
+        client.patch("/local-test/construction/tasks/1/priority", json={"priority": True}),
+        client.patch(
+            "/local-test/construction/tasks/1/assign",
+            json={"actor": "admin", "constructor": "constructor-a"},
+        ),
+        client.patch("/local-test/construction/tasks/1/unassign", json={"actor": "admin"}),
+        client.post("/local-test/construction/tasks/1/claim", json={"actor": "constructor-a"}),
+        client.post("/local-test/construction/tasks/1/release", json={"actor": "constructor-a"}),
+    ]
+
+    assert all(response.status_code == 200 for response in responses)
+    assert invalidated == ["default-team"] * len(responses)
+
+
 def test_review_groups_route_caps_page_at_twenty(monkeypatch) -> None:
     class FakeRepository:
         def list_review_task_groups(self, task_id: int, **kwargs):

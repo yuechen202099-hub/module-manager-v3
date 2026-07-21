@@ -2374,6 +2374,10 @@ def task_snapshot(request: Request, refresh: bool = Query(default=False)):
     )
 
 
+def invalidate_task_snapshot() -> None:
+    task_snapshot_cache.invalidate(current_team_id())
+
+
 @router.get("/tasks/status")
 def task_status(request: Request):
     forbid_constructor_project_board(request)
@@ -2445,6 +2449,7 @@ def claim(task_id: int, payload: ClaimRequest, request: Request):
         task = state_repository().claim_task(task_id, reviewer)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, task)
 
 
@@ -2455,6 +2460,7 @@ def release(task_id: int, payload: ClaimRequest, request: Request):
         task = state_repository().release_task(task_id, reviewer, force=request_is_admin(request))
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, task)
 
 
@@ -2462,7 +2468,9 @@ def release(task_id: int, payload: ClaimRequest, request: Request):
 def release_all(payload: ClaimRequest, request: Request):
     if not request_is_admin(request):
         raise HTTPException(status_code=403, detail="Only administrators can release all tasks")
-    return ok(request, state_repository().release_all_claimed_tasks(payload.reviewer))
+    result = state_repository().release_all_claimed_tasks(payload.reviewer)
+    invalidate_task_snapshot()
+    return ok(request, result)
 
 
 @router.get("/construction/tasks")
@@ -2482,6 +2490,7 @@ def construction_task_open(task_id: int, payload: ConstructionActorRequest, requ
         task = state_repository().open_construction_task(task_id, payload.actor)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
+    invalidate_task_snapshot()
     return ok(request, task)
 
 
@@ -2493,6 +2502,7 @@ def construction_task_close(task_id: int, payload: ConstructionActorRequest, req
         task = state_repository().close_construction_task(task_id, payload.actor)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
+    invalidate_task_snapshot()
     return ok(request, task)
 
 
@@ -2511,6 +2521,7 @@ def construction_task_priority(task_id: int, payload: ConstructionPriorityReques
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, task)
 
 
@@ -2543,6 +2554,8 @@ async def construction_priority_import(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if confirm:
+        invalidate_task_snapshot()
     return ok(request, result)
 
 
@@ -2562,6 +2575,7 @@ def construction_task_assign(task_id: int, payload: ConstructionAssignRequest, r
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, task)
 
 
@@ -2573,6 +2587,7 @@ def construction_task_unassign(task_id: int, payload: ConstructionActorRequest, 
         task = state_repository().unassign_construction_task(task_id, actor=payload.actor)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
+    invalidate_task_snapshot()
     return ok(request, task)
 
 
@@ -2590,6 +2605,7 @@ def construction_task_claim(task_id: int, payload: ConstructionActorRequest, req
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, task)
 
 
@@ -2664,6 +2680,7 @@ def construction_task_release(task_id: int, payload: ConstructionActorRequest, r
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    invalidate_task_snapshot()
     return ok(request, task)
 
 

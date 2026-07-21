@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from scripts.verify_task_review_performance import verify_measurements
+from scripts import verify_task_review_performance as performance_verifier
+
+verify_measurements = performance_verifier.verify_measurements
 
 
 def test_performance_verifier_accepts_values_at_every_threshold() -> None:
@@ -42,3 +44,9 @@ def test_performance_verifier_rejects_oversized_review_page() -> None:
 
     assert report["ok"] is False
     assert "review_group_count" in report["failures"]
+
+
+def test_observed_build_count_uses_monotonic_cache_counters() -> None:
+    assert performance_verifier.observed_build_count(4, 5) == 1
+    assert performance_verifier.observed_build_count(5, 5) == 0
+    assert performance_verifier.observed_build_count(5, 3) == 0

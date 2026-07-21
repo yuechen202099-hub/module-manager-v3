@@ -91,6 +91,21 @@ Invoke-Step "Run client demo smoke" {
     powershell -ExecutionPolicy Bypass -File .\scripts\run-client-demo.ps1 -Port $Port -NoOpen
 }
 
+Invoke-Step "Verify task claim completion state" {
+    node .\scripts\verify_claim_tasks_completion_status.js
+}
+
+Invoke-Step "Verify task hall pagination" {
+    node .\scripts\verify_task_hall_pagination.js
+}
+
+$performanceOutput = Join-Path $root "outputs\performance\v$Version-task-review.json"
+Invoke-Step "Verify task and review performance" {
+    .\.venv\Scripts\python.exe .\v2-api\scripts\verify_task_review_performance.py `
+        --base-url "http://127.0.0.1:$Port" `
+        --output $performanceOutput
+}
+
 if (-not $NoBuild) {
     Invoke-Step "Build client release package" {
         powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version $Version

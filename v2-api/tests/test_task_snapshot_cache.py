@@ -132,4 +132,35 @@ def test_force_refresh_waits_when_background_snapshot_is_invalidated(tmp_path) -
     result = outcome["result"]
     assert isinstance(result, dict)
     assert result["team_id"] == "team-a"
-    assert result["version"] in {"2", "3"}
+    assert result["version"] == "3"
+
+
+def test_concurrent_file_load_cannot_replace_newer_memory_snapshot(tmp_path, monkeypatch) -> None:
+    cache = TaskSnapshotCache(cache_root=tmp_path, interval_seconds=60, enabled=True)
+    cache.refresh("team-a", lambda team_id: snapshot(team_id, 1))
+    cache._memory.clear()
+    loaded_old_file = threading.Event()
+    release_old_file = threading.Event()
+    original_load = cache._load_from_file
+
+    def delayed_load(team_id: str):
+        loaded = original_load(team_id)
+        loaded_old_file.set()
+        release_old_file.wait(timeout=2)
+        return loaded
+
+    monkeypatch.setattr(cache, "_load_from_file", delayed_load)
+    outcome: dict[str, object] = {}
+
+    def read_snapshot() -> None:
+        outcome["loaded"] = cache._snapshot_for_team("team-a")
+
+    reader = threading.Thread(target=read_snapshot)
+    reader.start()
+    assert loaded_old_file.wait(timeout=1)
+    refreshed = cache.refresh("team-a", lambda team_id: snapshot(team_id, 2))
+    release_old_file.set()
+    reader.join(timeout=2)
+
+    assert refreshed["version"] == "2"
+    assert cache.get("team-a", lambda team_id: snapshot(team_id, 3))["version"] == "2"
