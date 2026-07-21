@@ -15,5 +15,7 @@ assertContains(/<ElPagination/, 'TaskHallView must render review queue paginatio
 assertContains(/:page-size="20"/, 'TaskHallView review queue page size must be 20')
 assertNotContains(/limit=1000/, 'TaskHallView must not request 1000 review groups')
 assertNotContains(/fetchTaskGroups\(currentTaskId\)/, 'TaskHallView background refresh must not fetch every group')
+assertContains(/items\.slice\(0, 4\)/, 'TaskHallView may preload at most four thumbnails')
+assertNotContains(/items\.slice\(0, 8\)/, 'TaskHallView must not preload eight thumbnails')
 
 console.log('task hall pagination checks passed')

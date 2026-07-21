@@ -505,7 +505,7 @@ async function loadSelectedPhotoImage() {
 }
 
 function preloadImages(items: ReviewPhoto[]) {
-  items.slice(0, 8).forEach((photo) => {
+  items.slice(0, 4).forEach((photo) => {
     const url = photoThumbUrl(photo)
     if (!url || imagePreloadCache.has(url)) return
     imagePreloadCache.add(url)
