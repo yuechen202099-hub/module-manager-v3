@@ -16,6 +16,17 @@ export type ApiErrorEnvelope = {
 
 export type UserRole = 'admin' | 'reviewer' | 'constructor'
 
+export type BarcodeType = 'meter' | 'module' | 'collector'
+export type NormalizedRegion = { x: number; y: number; width: number; height: number }
+export type RegionScanRequest = { barcodeType: BarcodeType; region: NormalizedRegion }
+export type RegionScanResult = {
+  barcodeType: BarcodeType
+  values: string[]
+  normalizedValues: string[]
+  method: 'barcode' | 'ocr' | 'none'
+  region: NormalizedRegion
+}
+
 export type UserAccount = {
   username: string
   name: string

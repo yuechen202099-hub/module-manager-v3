@@ -258,4 +258,43 @@ assertNotContains(
   'loading candidates must never auto-finalize a match',
 )
 
+for (const token of [
+  'ReviewImageInspector',
+  'scanUnmatchedPhotoRegion',
+  'let regionScanSerial = 0',
+  'draft.meterNo',
+  'draft.moduleAssetNo',
+  'draft.collector',
+  '原值',
+  '识别值',
+  '识别方式',
+  '替换',
+  '当前选区未识别到可用内容',
+  'finishSubmission()',
+  'resetSelection()',
+]) {
+  assertContains(dialog, token, `unmatched region review missing ${token}`)
+}
+assertContains(services, 'export async function scanUnmatchedPhotoRegion', 'missing unmatched region scan client')
+assertContains(
+  services,
+  'unmatched/${encodeURIComponent(unmatchedId)}/photos/${encodeURIComponent(photoId)}/region-scan',
+  'unmatched region scan must use record and photo ids',
+)
+const unmatchedRegionScan = section(dialog, 'async function handleRegionScan(', 'function replaceRegionScanDraft')
+assertContains(unmatchedRegionScan, 'regionScanLoading.value', 'unmatched region scan must enforce one in-flight request')
+assertContains(unmatchedRegionScan, 'requestSerial !== regionScanSerial', 'unmatched region scan must reject stale responses')
+assertContains(unmatchedRegionScan, 'props.unmatchedId !== unmatchedId', 'unmatched region scan must bind the current record')
+assertContains(unmatchedRegionScan, 'selectedPhotoId.value !== photoId', 'unmatched region scan must bind the current photo')
+assertContains(unmatchedRegionScan, 'finally', 'unmatched region scan must restore inspector state in finally')
+assertContains(unmatchedRegionScan, 'finishSubmission()', 'unmatched region scan must finish inspector submission')
+assertNotContains(unmatchedRegionScan, 'saveUnmatchedReview(', 'region scan must not save the unmatched review')
+assertNotContains(unmatchedRegionScan, 'rescanUnmatchedReviewPhoto(', 'region scan must not trigger full-photo rescan')
+assertNotContains(unmatchedRegionScan, 'confirmUnmatchedReview(', 'region scan must not confirm the review')
+const unmatchedRegionReplace = section(dialog, 'function replaceRegionScanDraft()', 'function closeRegionScanDialog')
+assertContains(unmatchedRegionReplace, 'draft[field] =', 'replacement must update only the mapped unmatched draft field')
+assertNotContains(unmatchedRegionReplace, 'saveUnmatchedReview(', 'replacement must not save the unmatched review')
+assertNotContains(unmatchedRegionReplace, 'rescanUnmatchedReviewPhoto(', 'replacement must not trigger full-photo rescan')
+assertNotContains(unmatchedRegionReplace, 'confirmUnmatchedReview(', 'replacement must not confirm the review')
+
 console.log('project board unmatched review checks passed')

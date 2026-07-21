@@ -12,8 +12,10 @@ import {
   getApiErrorStatus,
   rescanUnmatchedReviewPhoto,
   saveUnmatchedReview,
+  scanUnmatchedPhotoRegion,
 } from '@/api/services'
-import type { UnmatchedMatchCandidate, UnmatchedReviewDetail } from '@/api/types'
+import type { BarcodeType, RegionScanRequest, RegionScanResult, UnmatchedMatchCandidate, UnmatchedReviewDetail } from '@/api/types'
+import ReviewImageInspector from '@/components/ReviewImageInspector.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const props = defineProps<{ modelValue: boolean; unmatchedId: string }>()
@@ -36,6 +38,9 @@ const draft = reactive({ meterNo: '', collector: '', moduleAssetNo: '' })
 const photoCategories = reactive<Record<string, string>>({})
 const loading = ref(false)
 const imageLoading = ref(false)
+const regionScanLoading = ref(false)
+const unmatchedRegionInspector = ref<{ resetSelection: () => void; finishSubmission: () => void } | null>(null)
+const unmatchedPreviewImage = ref<HTMLElement | null>(null)
 const saving = ref(false)
 const rescanning = ref(false)
 const confirming = ref(false)
@@ -48,6 +53,7 @@ let detailRequestSerial = 0
 let imageRequestSerial = 0
 let candidateRequestSerial = 0
 let mutationSessionSerial = 0
+let regionScanSerial = 0
 let candidateAbortController: AbortController | null = null
 let loadedUnmatchedId = ''
 
@@ -65,6 +71,22 @@ const categoryOptions = [
   { value: 'collector_barcode', label: '采集器条码' },
   { value: 'module_meter', label: '模块表号' },
 ]
+
+const draftFieldByBarcodeType = {
+  meter: 'meterNo',
+  module: 'moduleAssetNo',
+  collector: 'collector',
+} as const
+const barcodeTypeLabels: Record<BarcodeType, string> = { meter: '表计', module: '模块', collector: '采集器' }
+const regionScanDialog = reactive({
+  open: false,
+  barcodeType: 'meter' as BarcodeType,
+  values: [] as string[],
+  selectedValue: '',
+  method: 'none' as RegionScanResult['method'],
+})
+const regionScanOriginalValue = computed(() => draft[draftFieldByBarcodeType[regionScanDialog.barcodeType]])
+const regionScanMethodLabel = computed(() => ({ barcode: '条码', ocr: 'OCR', none: '未识别' })[regionScanDialog.method])
 
 function replaceImageObjectUrl(next = '') {
   if (imageObjectUrl.value) URL.revokeObjectURL(imageObjectUrl.value)
@@ -86,6 +108,7 @@ function applyDetail(next: UnmatchedReviewDetail, preserveDraft = false) {
     ? selectedPhotoId.value
     : next.photos[0]?.id || ''
   if (nextPhotoId !== selectedPhotoId.value) {
+    invalidateRegionScan()
     selectedPhotoId.value = nextPhotoId
     void loadSelectedPhoto()
   }
@@ -116,6 +139,7 @@ function isCurrentMutation(mutationSession: number, unmatchedId: string) {
 }
 
 function resetReviewContent() {
+  invalidateRegionScan()
   detail.value = null
   draft.meterNo = ''
   draft.collector = ''
@@ -229,8 +253,83 @@ async function loadSelectedPhoto() {
   }
 }
 
+async function handleRegionScan(request: RegionScanRequest) {
+  const inspector = unmatchedRegionInspector.value
+  if (regionScanLoading.value) {
+    inspector?.finishSubmission()
+    return
+  }
+  const unmatchedId = props.unmatchedId
+  const photoId = selectedPhotoId.value
+  if (!unmatchedId || !photoId || !props.modelValue) {
+    inspector?.finishSubmission()
+    return
+  }
+  const requestSerial = ++regionScanSerial
+  regionScanLoading.value = true
+  errorMessage.value = ''
+  try {
+    const result = await scanUnmatchedPhotoRegion(unmatchedId, photoId, request)
+    if (
+      requestSerial !== regionScanSerial ||
+      !props.modelValue ||
+      props.unmatchedId !== unmatchedId ||
+      selectedPhotoId.value !== photoId
+    ) {
+      inspector?.resetSelection()
+      return
+    }
+    const values = [...new Set((result.normalizedValues.length ? result.normalizedValues : result.values).filter(Boolean))]
+    if (!values.length) {
+      ElMessage.warning('当前选区未识别到可用内容')
+      return
+    }
+    regionScanDialog.barcodeType = result.barcodeType
+    regionScanDialog.values = values
+    regionScanDialog.selectedValue = values.length === 1 ? values[0] : ''
+    regionScanDialog.method = result.method
+    regionScanDialog.open = true
+  } catch (error) {
+    if (
+      requestSerial === regionScanSerial &&
+      props.modelValue &&
+      props.unmatchedId === unmatchedId &&
+      selectedPhotoId.value === photoId
+    ) {
+      errorMessage.value = error instanceof Error ? error.message : '选区识别失败'
+    }
+  } finally {
+    regionScanLoading.value = false
+    inspector?.finishSubmission()
+  }
+}
+
+function replaceRegionScanDraft() {
+  if (!regionScanDialog.selectedValue) return
+  const field = draftFieldByBarcodeType[regionScanDialog.barcodeType]
+  draft[field] = regionScanDialog.selectedValue
+  closeRegionScanDialog()
+}
+
+function closeRegionScanDialog() {
+  regionScanDialog.open = false
+  regionScanDialog.values = []
+  regionScanDialog.selectedValue = ''
+  unmatchedRegionInspector.value?.resetSelection()
+}
+
+function invalidateRegionScan() {
+  regionScanSerial += 1
+  closeRegionScanDialog()
+}
+
+function openImagePreview() {
+  unmatchedPreviewImage.value?.querySelector<HTMLElement>('.el-image__inner')?.click()
+}
+
 function selectPhoto(photoId: string) {
   if (selectedPhotoId.value === photoId) return
+  invalidateRegionScan()
   selectedPhotoId.value = photoId
   void loadSelectedPhoto()
 }
@@ -465,6 +564,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  invalidateRegionScan()
   detailRequestSerial += 1
   imageRequestSerial += 1
   invalidateMutationSession()
@@ -499,16 +599,27 @@ onUnmounted(() => {
       <div class="unmatched-review-grid">
         <section class="unmatched-photo-panel">
           <div class="unmatched-photo-stage" :class="{ loading: imageLoading }">
-            <el-image
+            <ReviewImageInspector
               v-if="imageObjectUrl"
+              ref="unmatchedRegionInspector"
               :src="imageObjectUrl"
-              :preview-src-list="[imageObjectUrl]"
-              preview-teleported
-              hide-on-click-modal
-              fit="contain"
               alt="未匹配照片"
+              :loading="imageLoading || regionScanLoading"
+              :disabled="saving || rescanning || confirming || finalizing"
+              @scan="handleRegionScan"
+              @open="openImagePreview"
             />
             <span v-else>{{ detail.photos.length ? '图片加载中' : '暂无照片' }}</span>
+            <div v-if="imageObjectUrl" ref="unmatchedPreviewImage" class="unmatched-preview-trigger">
+              <el-image
+                :src="imageObjectUrl"
+                :preview-src-list="[imageObjectUrl]"
+                preview-teleported
+                hide-on-click-modal
+                fit="contain"
+                alt="未匹配照片大图"
+              />
+            </div>
           </div>
           <div class="unmatched-photo-indexes">
             <button
@@ -598,6 +709,24 @@ onUnmounted(() => {
       <el-button @click="closeDialog">关闭</el-button>
     </template>
   </el-dialog>
+
+  <el-dialog v-model="regionScanDialog.open" title="识别结果确认" width="480px" append-to-body @closed="closeRegionScanDialog">
+    <el-descriptions :column="1" border>
+      <el-descriptions-item label="类别">{{ barcodeTypeLabels[regionScanDialog.barcodeType] }}</el-descriptions-item>
+      <el-descriptions-item label="原值">{{ regionScanOriginalValue || '-' }}</el-descriptions-item>
+      <el-descriptions-item label="识别值">
+        <el-radio-group v-if="regionScanDialog.values.length > 1" v-model="regionScanDialog.selectedValue">
+          <el-radio v-for="value in regionScanDialog.values" :key="value" :value="value">{{ value }}</el-radio>
+        </el-radio-group>
+        <span v-else>{{ regionScanDialog.selectedValue }}</span>
+      </el-descriptions-item>
+      <el-descriptions-item label="识别方式">{{ regionScanMethodLabel }}</el-descriptions-item>
+    </el-descriptions>
+    <template #footer>
+      <el-button @click="closeRegionScanDialog">取消</el-button>
+      <el-button type="primary" :disabled="!regionScanDialog.selectedValue" @click="replaceRegionScanDraft">替换</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -614,8 +743,11 @@ onUnmounted(() => {
 .unmatched-review-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(340px, .9fr); gap: 24px; }
 .unmatched-photo-panel, .unmatched-review-form { min-width: 0; }
 .unmatched-photo-stage { display: grid; height: clamp(420px, 58vh, 620px); min-height: 420px; place-items: center; overflow: hidden; border: 1px solid var(--el-border-color); background: var(--el-fill-color-lighter); }
+.unmatched-photo-stage :deep(.review-image-inspector) { width: 100%; min-width: 0; height: 100%; grid-template-rows: auto minmax(0, 1fr); }
+.unmatched-photo-stage :deep(.review-image-inspector__stage) { min-height: 0; }
 .unmatched-photo-stage :deep(.el-image) { display: block; width: 100%; height: 100%; }
 .unmatched-photo-stage :deep(.el-image__inner) { display: block; width: 100%; height: 100%; object-fit: contain; }
+.unmatched-preview-trigger { display: none; }
 .unmatched-photo-stage span { color: var(--el-text-color-secondary); }
 .unmatched-photo-indexes { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; }
 .unmatched-photo-index { width: 34px; height: 34px; border: 1px solid var(--el-border-color); border-radius: 4px; background: var(--el-bg-color); color: var(--el-text-color-regular); cursor: pointer; }

@@ -25,12 +25,14 @@ import {
   rescanPhotoBarcode,
   returnGroupToException,
   saveReview,
+  scanGroupPhotoRegion,
   unassignConstructionExceptionOrder,
   unassignUnmatchedRecord,
   updateGroupMetadata,
   uploadGroupImages,
 } from '@/api/services'
-import type { ConstructionExceptionOrder, MaterialGroup, ReviewPhoto, ReviewTask, UnmatchedRecord } from '@/api/types'
+import type { BarcodeType, ConstructionExceptionOrder, MaterialGroup, RegionScanRequest, RegionScanResult, ReviewPhoto, ReviewTask, UnmatchedRecord } from '@/api/types'
+import ReviewImageInspector from '@/components/ReviewImageInspector.vue'
 import UnmatchedReviewDialog from '@/components/UnmatchedReviewDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 
@@ -93,6 +95,8 @@ const imageFailed = ref(false)
 const imageUseDirectFallback = ref(false)
 const mainImageObjectUrl = ref('')
 const imageLoading = ref(false)
+const regionScanLoading = ref(false)
+const regionInspector = ref<{ resetSelection: () => void; finishSubmission: () => void } | null>(null)
 const imageLoadError = ref(false)
 const imageVersion = ref(0)
 const pendingArchivePhotoIds = ref<Set<string>>(new Set())
@@ -108,12 +112,26 @@ let fieldTasksRequest: Promise<void> | null = null
 let lastInteractionAt = Date.now()
 let groupRequestSeq = 0
 let imageRequestSeq = 0
+let regionScanSerial = 0
 const BACKGROUND_REFRESH_INTERVAL_MS = 60_000
 
 const metadataDraft = reactive({
   meterNo: '',
   collector: '',
   moduleAssetNo: '',
+})
+const draftFieldByBarcodeType = {
+  meter: 'meterNo',
+  module: 'moduleAssetNo',
+  collector: 'collector',
+} as const
+const barcodeTypeLabels: Record<BarcodeType, string> = { meter: '表计', module: '模块', collector: '采集器' }
+const regionScanDialog = reactive({
+  open: false,
+  barcodeType: 'meter' as BarcodeType,
+  values: [] as string[],
+  selectedValue: '',
+  method: 'none' as RegionScanResult['method'],
 })
 const defaultExceptionCategory = exceptionCategories[0]?.value || 'other'
 const exceptionDraft = reactive({
@@ -149,6 +167,8 @@ const isAdmin = computed(() => {
 })
 const selectedTask = computed(() => myTasks.value.find((task) => task.id === selectedTaskId.value) || null)
 const selectedPhoto = computed(() => photos.value.find((photo) => photo.id === selectedPhotoId.value) || null)
+const regionScanOriginalValue = computed(() => metadataDraft[draftFieldByBarcodeType[regionScanDialog.barcodeType]])
+const regionScanMethodLabel = computed(() => ({ barcode: '条码', ocr: 'OCR', none: '未识别' })[regionScanDialog.method])
 const selectedPhotoIndex = computed(() => photos.value.findIndex((photo) => photo.id === selectedPhotoId.value))
 const selectedPhotoPosition = computed(() => {
   if (!selectedPhoto.value) return '未选择'
@@ -772,6 +792,7 @@ async function loadGroups(taskId: string, options: LoadGroupsOptions = {}) {
 }
 
 async function loadGroup(groupId: string, preferredPhotoId = '') {
+  invalidateRegionScan()
   const requestSeq = ++groupRequestSeq
   const cachedGroup = groups.value.find((group) => String(group.id) === String(groupId))
   const cachedDetail = groupDetailCache.get(groupId)
@@ -820,6 +841,7 @@ function syncDraftsFromGroup() {
 }
 
 async function selectFieldTaskMode(mode: Exclude<ReviewTaskMode, 'terminal'>) {
+  invalidateRegionScan()
   activeTaskMode.value = mode
   selectedTaskId.value = ''
   selectedGroupId.value = ''
@@ -951,7 +973,76 @@ function optimisticArchivedPhoto(photo: ReviewPhoto, category: string): ReviewPh
   }
 }
 
+async function handleRegionScan(request: RegionScanRequest) {
+  const inspector = regionInspector.value
+  if (regionScanLoading.value) {
+    inspector?.finishSubmission()
+    return
+  }
+  const groupId = activeGroup.value?.id || ''
+  const photoId = selectedPhotoId.value
+  if (!groupId || !photoId) {
+    inspector?.finishSubmission()
+    return
+  }
+  const requestSerial = ++regionScanSerial
+  regionScanLoading.value = true
+  errorMessage.value = ''
+  try {
+    const result = await scanGroupPhotoRegion(groupId, photoId, request)
+    if (
+      requestSerial !== regionScanSerial ||
+      activeGroup.value?.id !== groupId ||
+      selectedPhotoId.value !== photoId
+    ) {
+      inspector?.resetSelection()
+      return
+    }
+    const values = [...new Set((result.normalizedValues.length ? result.normalizedValues : result.values).filter(Boolean))]
+    if (!values.length) {
+      ElMessage.warning('当前选区未识别到可用内容')
+      return
+    }
+    regionScanDialog.barcodeType = result.barcodeType
+    regionScanDialog.values = values
+    regionScanDialog.selectedValue = values.length === 1 ? values[0] : ''
+    regionScanDialog.method = result.method
+    regionScanDialog.open = true
+  } catch (error) {
+    if (
+      requestSerial === regionScanSerial &&
+      activeGroup.value?.id === groupId &&
+      selectedPhotoId.value === photoId
+    ) {
+      errorMessage.value = error instanceof Error ? error.message : '选区识别失败'
+    }
+  } finally {
+    regionScanLoading.value = false
+    inspector?.finishSubmission()
+  }
+}
+
+function replaceRegionScanDraft() {
+  if (!regionScanDialog.selectedValue) return
+  const field = draftFieldByBarcodeType[regionScanDialog.barcodeType]
+  metadataDraft[field] = regionScanDialog.selectedValue
+  closeRegionScanDialog()
+}
+
+function closeRegionScanDialog() {
+  regionScanDialog.open = false
+  regionScanDialog.values = []
+  regionScanDialog.selectedValue = ''
+  regionInspector.value?.resetSelection()
+}
+
+function invalidateRegionScan() {
+  regionScanSerial += 1
+  closeRegionScanDialog()
+}
+
 function selectPhoto(photo: ReviewPhoto | null) {
+  if (selectedPhotoId.value !== (photo?.id || '')) invalidateRegionScan()
   selectedPhotoId.value = photo?.id || ''
   selectedCategory.value = photo?.category && photo.category !== 'unclassified' ? photo.category : categories[0].key
   resetImageState()
@@ -1614,6 +1705,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  invalidateRegionScan()
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('message', handleExternalRefresh)
   imageRequestSeq += 1
@@ -1797,18 +1889,19 @@ onUnmounted(() => {
           v-if="selectedPhoto"
           class="review-image-box review-image-viewer"
           :class="{ loading: imageLoading, error: imageLoadError }"
-          @dblclick="openLightbox"
         >
-          <img
+          <ReviewImageInspector
             v-if="mainImageUrl"
+            ref="regionInspector"
             :key="mainImageUrl"
             :src="mainImageUrl"
             alt="审阅图片"
-            loading="eager"
-            decoding="async"
-            fetchpriority="high"
-            @load="handleMainImageLoad"
-            @error="handleMainImageError"
+            :loading="imageLoading || regionScanLoading"
+            :disabled="busy || rescanningBarcode || confirmingBarcode"
+            @scan="handleRegionScan"
+            @image-load="handleMainImageLoad"
+            @image-error="handleMainImageError"
+            @open="openLightbox"
           />
           <div v-else-if="imageLoading" class="image-placeholder">图片加载中，请稍候</div>
           <div v-else class="image-placeholder">当前图片没有可用地址</div>
@@ -1957,6 +2050,24 @@ onUnmounted(() => {
       @updated="handleUnmatchedReviewChanged"
       @matched="handleUnmatchedReviewChanged"
     />
+
+    <ElDialog v-model="regionScanDialog.open" title="识别结果确认" width="480px" append-to-body @closed="closeRegionScanDialog">
+      <ElDescriptions :column="1" border>
+        <ElDescriptionsItem label="类别">{{ barcodeTypeLabels[regionScanDialog.barcodeType] }}</ElDescriptionsItem>
+        <ElDescriptionsItem label="原值">{{ regionScanOriginalValue || '-' }}</ElDescriptionsItem>
+        <ElDescriptionsItem label="识别值">
+          <ElRadioGroup v-if="regionScanDialog.values.length > 1" v-model="regionScanDialog.selectedValue">
+            <el-radio v-for="value in regionScanDialog.values" :key="value" :value="value">{{ value }}</el-radio>
+          </ElRadioGroup>
+          <span v-else>{{ regionScanDialog.selectedValue }}</span>
+        </ElDescriptionsItem>
+        <ElDescriptionsItem label="识别方式">{{ regionScanMethodLabel }}</ElDescriptionsItem>
+      </ElDescriptions>
+      <template #footer>
+        <ElButton @click="closeRegionScanDialog">取消</ElButton>
+        <ElButton type="primary" :disabled="!regionScanDialog.selectedValue" @click="replaceRegionScanDraft">替换</ElButton>
+      </template>
+    </ElDialog>
 
     <Teleport to="body">
       <div v-if="lightbox.open && selectedPhoto" class="review-lightbox" @click.self="closeLightbox">
@@ -2925,6 +3036,17 @@ onUnmounted(() => {
 
 .review-image-viewer {
   min-height: 420px;
+}
+
+.review-image-viewer :deep(.review-image-inspector) {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.review-image-viewer :deep(.review-image-inspector__stage) {
+  min-height: 0;
 }
 
 .review-image-viewer img,

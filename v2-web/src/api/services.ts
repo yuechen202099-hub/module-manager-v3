@@ -11,6 +11,8 @@ import type {
   PhotoBarcodeReviewGroup,
   Project,
   ProjectSummary,
+  RegionScanRequest,
+  RegionScanResult,
   ReplacementRecord,
   ReviewPhoto,
   ReviewTask,
@@ -24,6 +26,31 @@ import type {
   UserAccount,
   UserRole,
 } from './types'
+
+type BackendRegionScanResult = {
+  barcode_type: RegionScanResult['barcodeType']
+  values: string[]
+  normalized_values: string[]
+  method: RegionScanResult['method']
+  region: RegionScanResult['region']
+}
+
+function regionScanRequestBody(request: RegionScanRequest) {
+  return {
+    barcode_type: request.barcodeType,
+    region: request.region,
+  }
+}
+
+function mapRegionScanResult(raw: BackendRegionScanResult): RegionScanResult {
+  return {
+    barcodeType: raw.barcode_type,
+    values: raw.values.map(String),
+    normalizedValues: raw.normalized_values.map(String),
+    method: raw.method,
+    region: { ...raw.region },
+  }
+}
 
 type ApiEnvelope<T> = {
   data?: T
@@ -1877,6 +1904,36 @@ export async function fetchUnmatchedReview(unmatchedId: string): Promise<Unmatch
     `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/review`,
   )
   return mapUnmatchedReview(data)
+}
+
+export async function scanGroupPhotoRegion(
+  groupId: string,
+  photoId: string,
+  request: RegionScanRequest,
+): Promise<RegionScanResult> {
+  const data = await api<BackendRegionScanResult>(
+    `/local-test/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/region-scan`,
+    {
+      method: 'POST',
+      body: JSON.stringify(regionScanRequestBody(request)),
+    },
+  )
+  return mapRegionScanResult(data)
+}
+
+export async function scanUnmatchedPhotoRegion(
+  unmatchedId: string,
+  photoId: string,
+  request: RegionScanRequest,
+): Promise<RegionScanResult> {
+  const data = await api<BackendRegionScanResult>(
+    `/local-test/unmatched/${encodeURIComponent(unmatchedId)}/photos/${encodeURIComponent(photoId)}/region-scan`,
+    {
+      method: 'POST',
+      body: JSON.stringify(regionScanRequestBody(request)),
+    },
+  )
+  return mapRegionScanResult(data)
 }
 
 export async function saveUnmatchedReview(
