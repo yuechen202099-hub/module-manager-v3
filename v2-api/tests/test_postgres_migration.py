@@ -171,3 +171,17 @@ def test_source_fingerprint_ignores_temporary_url_tokens() -> None:
 
     assert first == second
     assert first.startswith("url:")
+
+
+def test_construction_priority_migration_has_safe_defaults_and_backfill() -> None:
+    root = Path(__file__).resolve().parents[1]
+    migration = (root / "alembic" / "versions" / "0005_add_construction_priority.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'revision = "20260721_0005"' in migration
+    assert 'down_revision = "20260622_0004"' in migration
+    assert '"construction_priority"' in migration
+    assert "server_default=sa.false()" in migration
+    assert '"construction_priority_updated_by"' in migration
+    assert '"construction_priority_updated_at"' in migration
+    assert "UPDATE tasks SET construction_priority = FALSE" in migration

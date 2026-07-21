@@ -262,6 +262,11 @@ class Task(Base, TimestampMixin):
     construction_opened_by: Mapped[str | None] = mapped_column(String(64))
     construction_opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     construction_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    construction_priority: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    construction_priority_updated_by: Mapped[str | None] = mapped_column(String(64))
+    construction_priority_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     raw_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
 
