@@ -814,6 +814,7 @@ def _process_json_delivery_job(job: MaintenanceJob) -> None:
                     "delivery_cache_path",
                     "delivery_cache_version",
                     "delivery_cache_status",
+                    "delivery_cache_content_sha256",
                     "delivery_cache_content_type",
                     "delivery_cache_built_at",
                     "delivery_cache_error",
@@ -884,6 +885,7 @@ def _process_delivery_job(job: MaintenanceJob) -> None:
                 "delivery_cache_path",
                 "delivery_cache_version",
                 "delivery_cache_status",
+                "delivery_cache_content_sha256",
                 "delivery_cache_content_type",
                 "delivery_cache_built_at",
                 "delivery_cache_error",
@@ -1007,8 +1009,10 @@ def run_worker_batch(
     processed = 0
     failed = 0
     try:
+        if not allowed() or loaded():
+            return {"processed": 0, "failed": 0, "status": "complete"}
         if claim_next is None:
-            reconcile_delivery_cache_jobs()
+            reconcile_delivery_cache_jobs(limit=limit)
         while processed < limit:
             if not allowed() or loaded():
                 break
@@ -1238,11 +1242,6 @@ def _load_env(path: str) -> None:
             os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 
-def _env_flag(name: str, *, default: bool = False) -> bool:
-    value = str(os.getenv(name, "true" if default else "false")).strip().lower()
-    return value in {"1", "true", "yes", "on"}
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run durable low-load barcode maintenance work.")
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -1262,8 +1261,6 @@ def main(argv: list[str] | None = None) -> int:
         report = enqueue_verification_jobs(actor=WORKER_ACTOR)
         print(report)
         return 0
-    if _env_flag("BARCODE_MAINTENANCE_START_PAUSED"):
-        set_maintenance_paused(True, WORKER_ACTOR)
     while True:
         report = run_worker_batch(
             batch_size=min(DEFAULT_BATCH_SIZE, max(0, int(args.batch_size))),

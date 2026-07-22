@@ -1033,18 +1033,25 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
     }
     for key in (
         *unmatched_review.PHOTO_EVIDENCE_FIELDS,
+        "sha256_source",
         "temporary_review_manual_confirmed",
         "temporary_review_reviewer",
         "temporary_review_reviewed_at",
         "delivery_cache_path",
         "delivery_cache_version",
         "delivery_cache_status",
+        "delivery_cache_content_sha256",
         "delivery_cache_content_type",
         "delivery_cache_built_at",
         "delivery_cache_error",
     ):
         if key in raw:
             payload[key] = raw[key]
+    if not payload.get("sha256_source"):
+        if str(raw.get("sha256") or "").strip():
+            payload["sha256_source"] = "declared"
+        elif image_url and photo.sha256 == hashlib.sha256(image_url.encode("utf-8")).hexdigest():
+            payload["sha256_source"] = "image_url"
     return payload
 
 
@@ -1691,6 +1698,7 @@ def _delivery_photo_manifest(group: dict[str, Any], photo: dict[str, Any], index
         "storage_key": photo.get("storage_key", ""),
         "storage_bucket": photo.get("storage_bucket", ""),
         "sha256": photo.get("sha256", ""),
+        "delivery_cache_content_sha256": photo.get("delivery_cache_content_sha256", ""),
         "source_file": photo.get("source_file", ""),
         "delivery_cache_url": local_simulation.delivery_cache_url_for_photo(group, photo),
         "delivery_cache_status": photo.get("delivery_cache_status", "none"),
@@ -7608,7 +7616,8 @@ class PostgresStateRepository(StateRepository):
                 continue
             storage_type = str(item.get("storage_type") or "").strip()
             storage_key = str(item.get("storage_key") or "").strip()
-            sha256 = str(item.get("sha256") or "").strip() or hashlib.sha256(image_url.encode("utf-8")).hexdigest()
+            declared_sha256 = str(item.get("sha256") or "").strip()
+            sha256 = declared_sha256 or hashlib.sha256(image_url.encode("utf-8")).hexdigest()
             source_url = str(item.get("source_url") or image_url)
             normalized_source_url = local_simulation.normalized_photo_source_url(source_url)
             source_url_hash = hashlib.sha256(normalized_source_url.encode("utf-8")).hexdigest()
@@ -7656,6 +7665,7 @@ class PostgresStateRepository(StateRepository):
             legacy_id = str(item.get("id") or f"p-{group.legacy_id or group.id}-{uuid4().hex[:12]}")
             category = str(item.get("category") or "unclassified")
             raw_payload = dict(item)
+            raw_payload.setdefault("sha256_source", "declared" if declared_sha256 else "image_url")
             if source == "construction":
                 raw_payload.setdefault("upload_source", "construction-mobile")
                 slot = local_simulation.normalize_construction_slot(item.get("slot") or item.get("category"))

@@ -24,10 +24,6 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-if [ "$MODE" = "--serve" ]; then
-  export BARCODE_MAINTENANCE_START_PAUSED=true
-fi
-
 cd "$CURRENT/v2-api"
 WORKER_ARGS=(
   -m app.services.barcode_maintenance_worker

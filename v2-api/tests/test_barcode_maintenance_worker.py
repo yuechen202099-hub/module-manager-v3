@@ -156,7 +156,7 @@ def test_worker_does_not_claim_when_paused_or_loaded_and_finishes_current_job() 
             MaintenanceJob(kind="verification", team_id="team-a", group_id="group-2"),
         ]
     )
-    load_checks = iter([False, True])
+    load_checks = iter([False, False, True])
     loaded_report = run_worker_batch(
         claim_next=lambda: jobs.popleft() if jobs else None,
         process_job=lambda job: processed.append(job.group_id),
@@ -403,9 +403,79 @@ def test_delivery_cache_accepts_real_default_fetcher_contract(
     assert cached.read_bytes() == content
 
 
+def test_delivery_cache_uses_real_content_sha_for_legacy_url_fingerprint(tmp_path: Path) -> None:
+    from app.services.delivery_cache import cache_group_photos
+
+    content = b"legacy-url-hash-content"
+    group = eligible_group("legacy-url-hash")
+    group["status"] = "approved"
+    group["photos"] = [group["photos"][0]]
+    photo = group["photos"][0]
+    legacy_sha = hashlib.sha256(photo["image_url"].encode("utf-8")).hexdigest()
+    content_sha = hashlib.sha256(content).hexdigest()
+    photo["sha256"] = legacy_sha
+
+    result = cache_group_photos(
+        group,
+        cache_root=tmp_path,
+        fetch_photo=lambda _photo: (content, ".jpg", "image/jpeg"),
+    )
+
+    assert result["status"] == "ready"
+    assert photo["sha256"] == legacy_sha
+    assert photo["delivery_cache_content_sha256"] == content_sha
+    assert content_sha in photo["delivery_cache_path"]
+    assert (tmp_path / photo["delivery_cache_path"]).read_bytes() == content
+
+
+def test_delivery_cache_rejects_mismatched_genuine_content_sha(tmp_path: Path) -> None:
+    from app.services.delivery_cache import cache_group_photos
+
+    group = eligible_group("genuine-hash-mismatch")
+    group["status"] = "approved"
+    group["photos"] = [group["photos"][0]]
+    photo = group["photos"][0]
+    declared_sha = hashlib.sha256(b"declared-content").hexdigest()
+    photo["sha256"] = declared_sha
+
+    result = cache_group_photos(
+        group,
+        cache_root=tmp_path,
+        fetch_photo=lambda _photo: (b"wrong-content", ".jpg", "image/jpeg"),
+    )
+
+    assert result["status"] == "failed"
+    assert result["retryable"] is True
+    assert "SHA256 mismatch" in photo["delivery_cache_error"]
+    assert "delivery_cache_content_sha256" not in photo
+    assert not list((tmp_path / "objects").rglob("*")) if (tmp_path / "objects").exists() else True
+
+
+def test_declared_hash_stays_strict_when_it_matches_the_image_url_fingerprint(tmp_path: Path) -> None:
+    from app.services.delivery_cache import cache_group_photos
+
+    group = eligible_group("declared-url-shaped-hash")
+    group["status"] = "approved"
+    group["photos"] = [group["photos"][0]]
+    photo = group["photos"][0]
+    photo["sha256"] = hashlib.sha256(photo["image_url"].encode("utf-8")).hexdigest()
+    photo["sha256_source"] = "declared"
+
+    result = cache_group_photos(
+        group,
+        cache_root=tmp_path,
+        fetch_photo=lambda _photo: (b"not-the-declared-content", ".jpg", "image/jpeg"),
+    )
+
+    assert result["status"] == "failed"
+    assert "SHA256 mismatch" in photo["delivery_cache_error"]
+
+
+@pytest.mark.parametrize("legacy_url_hash", [False, True])
 def test_json_repository_delivery_cache_job_builds_readable_manifest_and_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    legacy_url_hash: bool,
 ) -> None:
     from app.services import barcode_maintenance_worker as worker
     from app.services.delivery_cache import enqueue_json_delivery_cache_job
@@ -415,7 +485,14 @@ def test_json_repository_delivery_cache_job_builds_readable_manifest_and_path(
     group = eligible_group("json-cache-e2e")
     group.update({"status": "approved", "reviewer": "reviewer-a"})
     group["photos"] = [group["photos"][0]]
-    group["photos"][0]["sha256"] = hashlib.sha256(content).hexdigest()
+    photo = group["photos"][0]
+    content_sha = hashlib.sha256(content).hexdigest()
+    photo["sha256"] = (
+        hashlib.sha256(photo["image_url"].encode("utf-8")).hexdigest()
+        if legacy_url_hash
+        else content_sha
+    )
+    original_sha = photo["sha256"]
     team_id = install_json_queue(monkeypatch, [group])
     monkeypatch.setattr(worker.settings, "state_backend", "json")
     monkeypatch.setattr(local_simulation.settings, "delivery_cache_path", str(tmp_path))
@@ -435,6 +512,8 @@ def test_json_repository_delivery_cache_job_builds_readable_manifest_and_path(
     manifest_photo = manifest["groups"][0]["photos"][0]
     cached_path = repository.get_delivery_cached_photo_path(group["id"], group["photos"][0]["id"])
     assert manifest_photo["delivery_cache_url"].startswith("/local-test/delivery-cache/")
+    assert manifest_photo["sha256"] == original_sha
+    assert manifest_photo["delivery_cache_content_sha256"] == content_sha
     assert cached_path.read_bytes() == content
 
 
@@ -519,7 +598,7 @@ def test_worker_and_daily_enqueue_paths_run_delivery_cache_reconciliation(
     monkeypatch.setattr(
         worker,
         "reconcile_delivery_cache_jobs",
-        lambda: reconciliations.append("reconcile") or {"enqueued": 0},
+        lambda *, limit=20: reconciliations.append(f"reconcile:{limit}") or {"enqueued": 0},
     )
     monkeypatch.setattr(worker, "_claim_next_work", lambda _worker_id: None)
     monkeypatch.setattr(worker, "_maintenance_can_claim", lambda: True)
@@ -528,32 +607,169 @@ def test_worker_and_daily_enqueue_paths_run_delivery_cache_reconciliation(
     worker.run_worker_batch(sleeper=lambda _seconds: None)
     worker.enqueue_verification_jobs([])
 
-    assert reconciliations == ["reconcile", "reconcile"]
+    assert reconciliations == ["reconcile:20", "reconcile:20"]
 
 
-def test_serve_startup_forces_persisted_control_back_to_paused(
+def test_worker_gates_reconciliation_before_pause_or_load_can_do_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.services import barcode_maintenance_worker as worker
 
-    events: list[tuple[str, object]] = []
-    monkeypatch.setenv("BARCODE_MAINTENANCE_START_PAUSED", "true")
+    install_json_queue(monkeypatch, [])
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    reconciliations: list[int] = []
     monkeypatch.setattr(
         worker,
-        "set_maintenance_paused",
-        lambda paused, actor: events.append(("paused", paused)) or {"paused": paused},
+        "reconcile_delivery_cache_jobs",
+        lambda *, limit: reconciliations.append(limit) or {"enqueued": 0},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_claim_next_work",
+        lambda _worker_id: pytest.fail("gated worker must not claim work"),
     )
 
+    paused = worker.run_worker_batch(
+        can_claim=lambda: False,
+        load_too_high=lambda: False,
+        sleeper=lambda _seconds: None,
+    )
+    loaded = worker.run_worker_batch(
+        can_claim=lambda: True,
+        load_too_high=lambda: True,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert paused["processed"] == 0
+    assert loaded["processed"] == 0
+    assert reconciliations == []
+
+
+def test_json_delivery_cache_reconciliation_is_bounded_and_eventually_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
+    groups = [eligible_group(f"reconcile-bounded-{index}") for index in range(25)]
+    for group in groups:
+        group.update({"status": "approved", "reviewer": "reviewer-a"})
+    team_id = install_json_queue(monkeypatch, groups)
+    monkeypatch.setattr(delivery_cache.settings, "state_backend", "json")
+
+    first = delivery_cache.reconcile_delivery_cache_jobs(limit=20)
+    assert first["enqueued"] == 20
+    assert first["scanned"] <= 20
+    assert len(local_simulation._team_states[team_id]["delivery_cache_jobs"]) == 20
+
+    second = delivery_cache.reconcile_delivery_cache_jobs(limit=20)
+    assert second["enqueued"] == 5
+    assert second["scanned"] <= 20
+    assert len(local_simulation._team_states[team_id]["delivery_cache_jobs"]) == 25
+
+
+def test_postgres_delivery_cache_reconciliation_query_is_bounded_anti_join() -> None:
+    from app.services.delivery_cache import build_postgres_reconciliation_statement
+
+    statement = build_postgres_reconciliation_statement(team_id="team-reconcile", limit=20)
+    sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    assert "LEFT OUTER JOIN delivery_cache_jobs" in sql
+    assert "delivery_cache_jobs.id IS NULL" in sql
+    assert "LIMIT 20" in sql
+    assert "FOR UPDATE OF material_groups SKIP LOCKED" in sql
+
+
+def test_postgres_delivery_cache_reconciliation_uses_one_query_per_bounded_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import DeliveryCacheJob
+    from app.services import delivery_cache
+
+    groups = [
+        SimpleNamespace(
+            id=uuid4(),
+            team_id="team-reconcile",
+            reviewer="reviewer-a",
+            raw_data={"delivery_cache_status": "retry_pending"},
+        )
+        for _index in range(25)
+    ]
+    batches = [groups[:20], groups[20:]]
+    sessions = []
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return [(group, None) for group in self.values]
+
+    class Session:
+        def __init__(self, values):
+            self.values = values
+            self.execute_calls = 0
+            self.committed = False
+
+        def __enter__(self):
+            sessions.append(self)
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, _statement):
+            self.execute_calls += 1
+            return Rows(self.values)
+
+        def scalar(self, _statement):
+            pytest.fail("reconciliation must not issue an N+1 job query")
+
+        def add(self, value):
+            if isinstance(value, DeliveryCacheJob) and value.id is None:
+                value.id = uuid4()
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(delivery_cache, "SessionLocal", lambda: Session(batches.pop(0)))
+
+    first = delivery_cache._reconcile_postgres_delivery_cache_jobs("team-reconcile", limit=20)
+    second = delivery_cache._reconcile_postgres_delivery_cache_jobs("team-reconcile", limit=20)
+
+    assert [first["enqueued"], second["enqueued"]] == [20, 5]
+    assert [session.execute_calls for session in sessions] == [1, 1]
+    assert all(session.committed for session in sessions)
+
+
+def test_serve_restart_preserves_persisted_admin_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    install_json_queue(monkeypatch, [], paused=True)
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    monkeypatch.setenv("BARCODE_MAINTENANCE_START_PAUSED", "true")
+    observed_pause_states: list[bool] = []
+
     def stop_after_start(**_kwargs):
-        events.append(("batch", None))
+        observed_pause_states.append(bool(worker.maintenance_status()["paused"]))
         raise RuntimeError("stop test worker")
 
     monkeypatch.setattr(worker, "run_worker_batch", stop_after_start)
 
     with pytest.raises(RuntimeError, match="stop test worker"):
         worker.main(["--serve"])
+    worker.set_maintenance_paused(False, "admin-a")
+    with pytest.raises(RuntimeError, match="stop test worker"):
+        worker.main(["--serve"])
 
-    assert events == [("paused", True), ("batch", None)]
+    assert observed_pause_states == [True, False]
 
 
 def test_runner_executes_with_flock_and_fixed_batch_limits_despite_hostile_env(tmp_path: Path) -> None:
@@ -616,7 +832,7 @@ def test_runner_executes_with_flock_and_fixed_batch_limits_despite_hostile_env(t
     assert completed.returncode == 0, completed.stderr
     args = args_file.read_text(encoding="utf-8").splitlines()
     assert lock_file.read_text(encoding="utf-8").strip() == "called"
-    assert paused_file.read_text(encoding="utf-8").strip() == "true"
+    assert paused_file.read_text(encoding="utf-8").strip() == "false"
     assert args[-4:] == ["--batch-size", "20", "--batch-pause-seconds", "5"]
 
 
@@ -765,7 +981,8 @@ def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
     assert "Type=simple" in worker_unit
     assert "BARCODE_MAINTENANCE_BATCH_SIZE=20" in worker_unit
     assert "BARCODE_MAINTENANCE_BATCH_PAUSE_SECONDS=5" in worker_unit
-    assert "BARCODE_MAINTENANCE_START_PAUSED=true" in worker_unit
+    assert "BARCODE_MAINTENANCE_START_PAUSED" not in worker_unit
+    assert "BARCODE_MAINTENANCE_START_PAUSED" not in runner
     assert "Nice=19" in worker_unit
     assert "IOSchedulingClass=idle" in worker_unit
     assert "CPUQuota=20%" in worker_unit

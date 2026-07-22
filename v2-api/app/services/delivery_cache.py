@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -20,6 +20,8 @@ from app.services import local_simulation
 
 MAX_DELIVERY_CACHE_ATTEMPTS = 3
 DEFAULT_LEASE_SECONDS = 300
+MAX_RECONCILIATION_BATCH_SIZE = 20
+_EXISTING_JOB_NOT_PROVIDED = object()
 
 
 @dataclass(frozen=True)
@@ -109,15 +111,18 @@ def enqueue_postgres_delivery_cache_job(
     *,
     actor: str = "system",
     reason: str = "review_completed",
+    existing_job: DeliveryCacheJob | None | object = _EXISTING_JOB_NOT_PROVIDED,
 ) -> dict[str, Any]:
-    job = session.scalar(
-        select(DeliveryCacheJob)
-        .where(
-            DeliveryCacheJob.team_id == group.team_id,
-            DeliveryCacheJob.group_id == group.id,
+    job = existing_job
+    if job is _EXISTING_JOB_NOT_PROVIDED:
+        job = session.scalar(
+            select(DeliveryCacheJob)
+            .where(
+                DeliveryCacheJob.team_id == group.team_id,
+                DeliveryCacheJob.group_id == group.id,
+            )
+            .with_for_update()
         )
-        .with_for_update()
-    )
     if job is None:
         job = DeliveryCacheJob(team_id=group.team_id, group_id=group.id)
         session.add(job)
@@ -283,6 +288,19 @@ def _verified_existing_object(root: Path, sha256: str) -> Path | None:
     return verified
 
 
+def _is_url_fingerprint_sha(photo: Mapping[str, Any], sha256: str) -> bool:
+    sha256_source = str(photo.get("sha256_source") or "").strip().lower()
+    if sha256_source == "declared":
+        return False
+    if sha256_source == "image_url":
+        return True
+    for key in ("image_url", "url", "source_url"):
+        value = str(photo.get(key) or "").strip()
+        if value and hashlib.sha256(value.encode("utf-8")).hexdigest() == sha256:
+            return True
+    return False
+
+
 def cache_group_photos(
     group: dict[str, Any],
     *,
@@ -306,29 +324,38 @@ def cache_group_photos(
     group["delivery_cache_status"] = "building"
     group["delivery_cache_error"] = ""
     for photo in photos:
-        sha256 = str(photo.get("sha256") or "").strip().lower()
-        if len(sha256) != 64:
+        declared_sha256 = str(photo.get("sha256") or "").strip().lower()
+        if len(declared_sha256) != 64:
             failures.append({"photo_id": str(photo.get("id") or ""), "error": "missing sha256"})
             continue
-        target = _verified_existing_object(root, sha256)
+        synthetic_sha256 = _is_url_fingerprint_sha(photo, declared_sha256)
+        cached_content_sha256 = str(photo.get("delivery_cache_content_sha256") or "").strip().lower()
+        object_sha256 = cached_content_sha256 if synthetic_sha256 and len(cached_content_sha256) == 64 else declared_sha256
+        target = _verified_existing_object(root, object_sha256)
         content_type = str(photo.get("content_type") or "image/jpeg")
         try:
             if target is None or not target.is_file():
                 content, suffix, content_type = _normalized_fetch_result(photo, fetcher(photo))
-                if hashlib.sha256(content).hexdigest() != sha256:
+                content_sha256 = hashlib.sha256(content).hexdigest()
+                if not synthetic_sha256 and content_sha256 != declared_sha256:
                     raise ValueError("Downloaded delivery cache content SHA256 mismatch")
-                target = root / "objects" / sha256[:2] / f"{sha256}{suffix}"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                temporary = target.with_suffix(f"{target.suffix}.tmp-{uuid4().hex}")
-                try:
-                    with temporary.open("xb") as output:
-                        output.write(content)
-                        output.flush()
-                        os.fsync(output.fileno())
-                    temporary.replace(target)
-                finally:
-                    temporary.unlink(missing_ok=True)
-                built += 1
+                object_sha256 = content_sha256
+                target = _verified_existing_object(root, object_sha256)
+                if target is None:
+                    target = root / "objects" / object_sha256[:2] / f"{object_sha256}{suffix}"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = target.with_suffix(f"{target.suffix}.tmp-{uuid4().hex}")
+                    try:
+                        with temporary.open("xb") as output:
+                            output.write(content)
+                            output.flush()
+                            os.fsync(output.fileno())
+                        temporary.replace(target)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                    built += 1
+                else:
+                    reused += 1
             else:
                 content_type = mimetypes.guess_type(target.name)[0] or content_type
                 reused += 1
@@ -336,6 +363,7 @@ def cache_group_photos(
             photo["delivery_cache_path"] = str(relative).replace("\\", "/")
             photo["delivery_cache_version"] = local_simulation.delivery_photo_cache_version(photo)
             photo["delivery_cache_status"] = "ready"
+            photo["delivery_cache_content_sha256"] = object_sha256
             photo["delivery_cache_content_type"] = content_type
             photo["delivery_cache_built_at"] = _now_iso()
             photo["delivery_cache_error"] = ""
@@ -366,7 +394,12 @@ def cache_group_photos(
     }
 
 
-def _reconcile_json_delivery_cache_jobs(team_id: str) -> dict[str, Any]:
+def _reconciliation_limit(limit: int) -> int:
+    return min(MAX_RECONCILIATION_BATCH_SIZE, max(0, int(limit)))
+
+
+def _reconcile_json_delivery_cache_jobs(team_id: str, *, limit: int) -> dict[str, Any]:
+    bounded = _reconciliation_limit(limit)
     transaction = local_simulation.begin_authoritative_json_write(team_id)
     token = local_simulation.activate_authoritative_json_write(transaction)
     try:
@@ -378,27 +411,40 @@ def _reconcile_json_delivery_cache_jobs(team_id: str) -> dict[str, Any]:
         }
         enqueued = 0
         scanned = 0
-        for group in state.get("groups", []):
+        if bounded == 0:
+            local_simulation.abort_authoritative_json_write(transaction, token)
+            return {"backend": "json", "scanned": 0, "enqueued": 0}
+        groups = state.get("groups", [])
+        if not groups:
+            local_simulation.abort_authoritative_json_write(transaction, token)
+            return {"backend": "json", "scanned": 0, "enqueued": 0}
+        previous_cursor = int(state.get("delivery_cache_reconcile_cursor") or 0) % len(groups)
+        next_cursor = previous_cursor
+        for offset in range(min(bounded, len(groups))):
+            group = groups[(previous_cursor + offset) % len(groups)]
+            scanned += 1
+            next_cursor = (previous_cursor + offset + 1) % len(groups)
             if not isinstance(group, dict) or not local_simulation.is_reviewed_group(group):
                 continue
-            scanned += 1
             group_id = str(group.get("id") or "")
             if not group_id:
                 continue
             retry_pending = str(group.get("delivery_cache_status") or "") == "retry_pending"
             if group_id in jobs_by_group and not retry_pending:
                 continue
-            enqueue_json_delivery_cache_job(
+            job = enqueue_json_delivery_cache_job(
                 group_id,
                 team_id=team_id,
                 actor=str(group.get("reviewer") or "system"),
                 reason="reconciliation",
             )
-            jobs_by_group[group_id] = next(
-                job for job in state["delivery_cache_jobs"] if str(job.get("group_id") or "") == group_id
-            )
+            jobs_by_group[group_id] = job
             enqueued += 1
-        if enqueued:
+            if enqueued >= bounded:
+                break
+        cursor_changed = next_cursor != previous_cursor or "delivery_cache_reconcile_cursor" not in state
+        state["delivery_cache_reconcile_cursor"] = next_cursor
+        if enqueued or cursor_changed:
             local_simulation.finish_authoritative_json_write(transaction, token)
         else:
             local_simulation.abort_authoritative_json_write(transaction, token)
@@ -409,53 +455,63 @@ def _reconcile_json_delivery_cache_jobs(team_id: str) -> dict[str, Any]:
         raise
 
 
-def _reconcile_postgres_delivery_cache_jobs(team_id: str) -> dict[str, Any]:
+def build_postgres_reconciliation_statement(*, team_id: str, limit: int):
+    bounded = _reconciliation_limit(limit)
+    return (
+        select(MaterialGroup, DeliveryCacheJob)
+        .outerjoin(
+            DeliveryCacheJob,
+            and_(
+                DeliveryCacheJob.team_id == MaterialGroup.team_id,
+                DeliveryCacheJob.group_id == MaterialGroup.id,
+            ),
+        )
+        .where(
+            MaterialGroup.team_id == team_id,
+            MaterialGroup.status == GroupStatus.APPROVED,
+            or_(
+                DeliveryCacheJob.id.is_(None),
+                MaterialGroup.raw_data["delivery_cache_status"].as_string() == "retry_pending",
+            ),
+        )
+        .order_by(MaterialGroup.id)
+        .limit(bounded)
+        .with_for_update(of=MaterialGroup, skip_locked=True)
+    )
+
+
+def _reconcile_postgres_delivery_cache_jobs(team_id: str, *, limit: int) -> dict[str, Any]:
     with SessionLocal() as session:
-        groups = list(
-            session.scalars(
-                select(MaterialGroup)
-                .where(
-                    MaterialGroup.team_id == team_id,
-                    MaterialGroup.status == GroupStatus.APPROVED,
-                )
-                .order_by(MaterialGroup.id)
-                .with_for_update(skip_locked=True)
+        rows = list(
+            session.execute(
+                build_postgres_reconciliation_statement(team_id=team_id, limit=limit)
             ).all()
         )
         enqueued = 0
-        for group in groups:
-            job = session.scalar(
-                select(DeliveryCacheJob)
-                .where(
-                    DeliveryCacheJob.team_id == team_id,
-                    DeliveryCacheJob.group_id == group.id,
-                )
-                .with_for_update()
-            )
-            retry_pending = str((group.raw_data or {}).get("delivery_cache_status") or "") == "retry_pending"
-            if job is not None and not retry_pending:
-                continue
+        for group, job in rows:
             enqueue_postgres_delivery_cache_job(
                 session,
                 group,
                 actor=str(group.reviewer or "system"),
                 reason="reconciliation",
+                existing_job=job,
             )
             enqueued += 1
         if enqueued:
             session.commit()
         else:
             session.rollback()
-        return {"backend": "postgres", "scanned": len(groups), "enqueued": enqueued}
+        return {"backend": "postgres", "scanned": len(rows), "enqueued": enqueued}
 
 
-def reconcile_delivery_cache_jobs() -> dict[str, Any]:
+def reconcile_delivery_cache_jobs(*, limit: int = MAX_RECONCILIATION_BATCH_SIZE) -> dict[str, Any]:
+    bounded = _reconciliation_limit(limit)
     backend = settings.state_backend.lower().strip()
     team_id = local_simulation.current_team_id()
     if backend == "json":
-        return _reconcile_json_delivery_cache_jobs(team_id)
+        return _reconcile_json_delivery_cache_jobs(team_id, limit=bounded)
     if backend == "postgres":
-        return _reconcile_postgres_delivery_cache_jobs(team_id)
+        return _reconcile_postgres_delivery_cache_jobs(team_id, limit=bounded)
     from app.services.state_repository import StateBackendNotReady
 
     raise StateBackendNotReady("Dual delivery-cache reconciliation is disabled until one backend is authoritative")

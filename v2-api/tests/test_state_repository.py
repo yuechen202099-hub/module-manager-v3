@@ -803,14 +803,18 @@ def test_postgres_review_cache_enqueue_failure_preserves_review_and_records_retr
     assert events == ["begin", "commit", "refresh", "begin", "begin", "commit"]
 
 
+@pytest.mark.parametrize("legacy_url_hash", [False, True])
 def test_postgres_repository_manifest_and_path_read_completed_durable_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    legacy_url_hash: bool,
 ) -> None:
     from app.services.delivery_cache import cache_group_photos
 
     content = b"postgres-durable-cache"
-    sha256 = hashlib.sha256(content).hexdigest()
+    content_sha = hashlib.sha256(content).hexdigest()
+    image_url = "oss://bucket/postgres-photo-cache.jpg"
+    sha256 = hashlib.sha256(image_url.encode("utf-8")).hexdigest() if legacy_url_hash else content_sha
     group_payload = {
         "id": "postgres-cache-e2e",
         "task_id": 17,
@@ -821,7 +825,7 @@ def test_postgres_repository_manifest_and_path_read_completed_durable_cache(
         "photos": [
             {
                 "id": "postgres-photo-cache",
-                "image_url": "oss://bucket/postgres-photo-cache.jpg",
+                "image_url": image_url,
                 "storage_type": "oss",
                 "storage_bucket": "bucket",
                 "storage_key": "postgres-photo-cache.jpg",
@@ -885,6 +889,8 @@ def test_postgres_repository_manifest_and_path_read_completed_durable_cache(
     assert manifest["groups"][0]["photos"][0]["delivery_cache_url"].startswith(
         "/local-test/delivery-cache/"
     )
+    assert manifest["groups"][0]["photos"][0]["sha256"] == sha256
+    assert manifest["groups"][0]["photos"][0]["delivery_cache_content_sha256"] == content_sha
     assert cached_path.read_bytes() == content
 
 
@@ -4152,6 +4158,7 @@ def test_postgres_migrated_photo_uses_same_backend_independent_id_as_json(
     assert result["added"] == 1
     assert len(photos) == 1
     assert rows[0]["id"] == photos[0].legacy_id
+    assert photos[0].raw_data["sha256_source"] == "image_url"
     assert photos[0].legacy_id == repository.unmatched_review.migrated_formal_photo_id(
         review["unmatched_id"],
         review["photos"][0]["id"],

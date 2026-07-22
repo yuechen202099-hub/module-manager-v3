@@ -7,7 +7,6 @@ Type=simple
 WorkingDirectory=/opt/module-manager-v2/current
 Environment=BARCODE_MAINTENANCE_BATCH_SIZE=20
 Environment=BARCODE_MAINTENANCE_BATCH_PAUSE_SECONDS=5
-Environment=BARCODE_MAINTENANCE_START_PAUSED=true
 Nice=19
 IOSchedulingClass=idle
 IOSchedulingPriority=7
