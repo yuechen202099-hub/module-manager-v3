@@ -536,6 +536,91 @@ def test_package_is_reserved_before_build_lock_releases_to_cleanup(
         package.release()
 
 
+def test_fresh_package_validation_and_lease_are_atomic_with_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    original = get_or_build_delivery_package(
+        "fresh-reserve-gap",
+        "a" * 64,
+        groups=[delivery_group()],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now,
+    )
+    original.release()
+    reserve = final_delivery_export.reserve_delivery_cache_path
+
+    def cleanup_before_reserve(path: Path | str) -> str:
+        cleanup_delivery_cache(
+            tmp_path,
+            max_object_bytes=0,
+            groups=[],
+            now=now + timedelta(days=8),
+        )
+        return reserve(path)
+
+    monkeypatch.setattr(final_delivery_export, "reserve_delivery_cache_path", cleanup_before_reserve)
+
+    package = get_or_build_delivery_package(
+        "fresh-reserve-gap",
+        "a" * 64,
+        groups=[delivery_group()],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now + timedelta(hours=1),
+        package_builder=lambda _groups, _reader: pytest.fail("fresh package must be reused"),
+    )
+    try:
+        assert package.path.is_file()
+    finally:
+        package.release()
+
+
+def test_replacement_and_new_lease_are_atomic_with_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    original = get_or_build_delivery_package(
+        "replacement-reserve-gap",
+        "b" * 64,
+        groups=[delivery_group()],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now,
+    )
+    original.release()
+    reserve = final_delivery_export.reserve_delivery_cache_path
+
+    def cleanup_before_reserve(path: Path | str) -> str:
+        cleanup_delivery_cache(
+            tmp_path,
+            max_object_bytes=0,
+            groups=[],
+            now=now + timedelta(days=16),
+        )
+        return reserve(path)
+
+    monkeypatch.setattr(final_delivery_export, "reserve_delivery_cache_path", cleanup_before_reserve)
+
+    package = get_or_build_delivery_package(
+        "replacement-reserve-gap",
+        "b" * 64,
+        groups=[delivery_group()],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now + timedelta(days=8),
+        package_builder=lambda _groups, _reader: b"replacement-package",
+    )
+    try:
+        assert package.path.is_file()
+        assert package.path.read_bytes() == b"replacement-package"
+    finally:
+        package.release()
+
+
 def test_package_is_reserved_before_build_lock_releases_to_expired_rebuild(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

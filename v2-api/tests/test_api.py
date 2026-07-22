@@ -6138,6 +6138,82 @@ def test_final_delivery_export_releases_exact_lease_when_response_construction_f
     assert releases == [package_path]
 
 
+def _direct_asgi_scope() -> dict:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/exports/final-delivery",
+        "raw_path": b"/exports/final-delivery",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("test", 1234),
+        "server": ("testserver", 80),
+    }
+
+
+def _leased_export_response(
+    monkeypatch: pytest.MonkeyPatch,
+    package_path: Path,
+    releases: list[Path],
+):
+    class Package:
+        path = package_path
+
+        def release(self):
+            releases.append(self.path)
+
+    class Repository:
+        def build_final_delivery_export(self, **_kwargs):
+            return Package()
+
+    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
+    return export_routes.export_final_delivery(
+        export_routes.FinalDeliveryExportRequest(task_id=17),
+        SimpleNamespace(),
+    )
+
+
+@pytest.mark.parametrize("exit_kind", ["normal", "send_error", "cancelled", "missing_file"])
+def test_final_delivery_asgi_response_releases_exact_lease_on_every_exit(
+    exit_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "direct-asgi.zip"
+    package_path.write_bytes(b"zip-content")
+    releases: list[Path] = []
+    response = _leased_export_response(monkeypatch, package_path, releases)
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+        if exit_kind == "send_error" and message["type"] == "http.response.body":
+            raise RuntimeError("injected send failure")
+        if exit_kind == "cancelled" and message["type"] == "http.response.body":
+            raise asyncio.CancelledError()
+
+    if exit_kind == "missing_file":
+        package_path.unlink()
+
+    if exit_kind == "normal":
+        asyncio.run(response(_direct_asgi_scope(), receive, send))
+    else:
+        expected = asyncio.CancelledError if exit_kind == "cancelled" else RuntimeError
+        with pytest.raises(expected):
+            asyncio.run(response(_direct_asgi_scope(), receive, send))
+
+    assert releases == [package_path]
+    if exit_kind == "normal":
+        assert sent[-1]["type"] == "http.response.body"
+
+
 def test_final_delivery_export_returns_structured_group_errors(monkeypatch) -> None:
     from app.services.final_delivery_export import DeliveryPackageValidationError
 

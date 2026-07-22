@@ -41,7 +41,7 @@ def test_barcode_maintenance_control_is_scoped_to_one_team() -> None:
 
     assert table.name == "barcode_maintenance_controls"
     assert table.c.team_id.primary_key is True
-    assert {"paused", "last_batch_id", "last_batch_progress"} <= set(table.c.keys())
+    assert {"paused", "last_batch_id", "last_batch_progress", "delivery_cache_reconcile_cursor"} <= set(table.c.keys())
     assert table.c.paused.default.arg is True
     assert str(table.c.paused.server_default.arg) == "true"
 
@@ -67,3 +67,5 @@ def test_delivery_cache_job_is_durable_retryable_and_group_idempotent() -> None:
     assert indexes["ix_delivery_cache_jobs_lease"] == ("team_id", "lease_expires_at")
     assert table.c.attempt_count.server_default.arg.text == "0"
     assert table.c.lease_token.type.length == 128
+    assert {"evidence_fingerprint", "evidence_version"} <= set(table.c.keys())
+    assert any("not_eligible" in constraint for constraint in check_constraints)

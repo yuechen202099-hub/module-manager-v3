@@ -506,14 +506,14 @@ def test_json_repository_delivery_cache_job_builds_readable_manifest_and_path(
     content = b"json-durable-cache"
     group = eligible_group("json-cache-e2e")
     group.update({"status": "approved", "reviewer": "reviewer-a"})
-    group["photos"] = [group["photos"][0]]
     photo = group["photos"][0]
     content_sha = hashlib.sha256(content).hexdigest()
-    photo["sha256"] = (
-        hashlib.sha256(photo["image_url"].encode("utf-8")).hexdigest()
-        if legacy_url_hash
-        else content_sha
-    )
+    for current_photo in group["photos"]:
+        current_photo["sha256"] = (
+            hashlib.sha256(current_photo["image_url"].encode("utf-8")).hexdigest()
+            if legacy_url_hash
+            else content_sha
+        )
     original_sha = photo["sha256"]
     team_id = install_json_queue(monkeypatch, [group])
     monkeypatch.setattr(worker.settings, "state_backend", "json")
@@ -805,6 +805,7 @@ def test_postgres_delivery_cache_reconciliation_uses_bounded_group_first_bulk_lo
     from app.services import delivery_cache
 
     statements: list[str] = []
+    control = SimpleNamespace(delivery_cache_reconcile_cursor=None)
 
     class Rows:
         def all(self):
@@ -820,14 +821,16 @@ def test_postgres_delivery_cache_reconciliation_uses_bounded_group_first_bulk_lo
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, statement):
+        def scalars(self, statement):
             statements.append(
                 str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
             )
             return Rows()
 
-        def scalar(self, _statement):
-            pytest.fail("reconciliation must not issue per-group queries")
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            assert "FROM barcode_maintenance_controls" in sql
+            return control
 
         def rollback(self):
             return None
@@ -837,25 +840,19 @@ def test_postgres_delivery_cache_reconciliation_uses_bounded_group_first_bulk_lo
     report = delivery_cache._reconcile_postgres_delivery_cache_jobs("team-reconcile", limit=20)
 
     assert report["enqueued"] == 0
-    assert len(statements) == 2
-    existing_group_sql, missing_sql = statements
+    assert len(statements) == 1
+    group_sql = statements[0]
     existing_job_sql = str(
         delivery_cache.build_postgres_delivery_job_lock_statement(
             team_id="team-reconcile",
             group_ids=[uuid4()],
         ).compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
     )
-    assert "LEFT OUTER JOIN" not in existing_group_sql
-    assert "JOIN delivery_cache_jobs" in existing_group_sql
-    assert "LIMIT 20" in existing_group_sql
-    assert "FOR UPDATE OF material_groups SKIP LOCKED" in existing_group_sql
-    assert "delivery_cache_jobs.lease_expires_at <" in existing_group_sql
-    assert "delivery_cache_jobs.attempt_count < 3" in existing_group_sql
+    assert "JOIN delivery_cache_jobs" not in group_sql
+    assert "LIMIT 20" in group_sql
+    assert "FOR UPDATE OF material_groups SKIP LOCKED" in group_sql
     assert "ORDER BY delivery_cache_jobs.group_id, delivery_cache_jobs.id" in existing_job_sql
     assert "FOR UPDATE OF delivery_cache_jobs SKIP LOCKED" in existing_job_sql
-    assert "NOT (EXISTS" in missing_sql
-    assert "LIMIT 20" in missing_sql
-    assert "FOR UPDATE OF material_groups SKIP LOCKED" in missing_sql
 
 
 def test_postgres_delivery_cache_reconciliation_uses_bounded_bulk_queries_per_iteration(
@@ -876,6 +873,7 @@ def test_postgres_delivery_cache_reconciliation_uses_bounded_bulk_queries_per_it
     ]
     batches = [groups[:20], groups[20:]]
     sessions = []
+    control = SimpleNamespace(delivery_cache_reconcile_cursor=None)
 
     class Rows:
         def __init__(self, values):
@@ -900,19 +898,21 @@ def test_postgres_delivery_cache_reconciliation_uses_bounded_bulk_queries_per_it
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, statement):
+        def scalars(self, statement):
             self.execute_calls += 1
-            if self.execute_calls == 1:
-                return Rows([])
             sql = str(statement.compile(dialect=postgresql.dialect()))
-            if "NOT (EXISTS" in sql:
-                return Rows([(group, None) for group in self.values])
+            if "FROM material_groups" in sql:
+                return Rows([] if "material_groups.id <=" in sql else self.values)
+            if "FROM delivery_cache_jobs" in sql:
+                return Rows([])
             if "FROM photos" in sql:
                 return Rows([photo for group in self.values for photo in postgres_eligible_photos(group)])
             pytest.fail(f"unexpected reconciliation statement: {sql}")
 
-        def scalar(self, _statement):
-            pytest.fail("reconciliation must not issue an N+1 job query")
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            assert "FROM barcode_maintenance_controls" in sql
+            return control
 
         def add(self, value):
             if isinstance(value, DeliveryCacheJob) and value.id is None:
@@ -933,7 +933,111 @@ def test_postgres_delivery_cache_reconciliation_uses_bounded_bulk_queries_per_it
     second = delivery_cache._reconcile_postgres_delivery_cache_jobs("team-reconcile", limit=20)
 
     assert [first["enqueued"], second["enqueued"]] == [20, 5]
-    assert [session.execute_calls for session in sessions] == [3, 3]
+    assert [session.execute_calls for session in sessions] == [3, 4]
+    assert all(session.committed for session in sessions)
+
+
+def test_postgres_reconciliation_cursor_advances_wraps_and_survives_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import BarcodeMaintenanceControl, DeliveryCacheJob, GroupStatus
+    from app.services import delivery_cache
+
+    team_id = "team-durable-reconcile-cursor"
+    groups = [
+        SimpleNamespace(
+            id=uuid4(),
+            team_id=team_id,
+            status=GroupStatus.APPROVED,
+            reviewer="reviewer-a",
+            raw_data={"delivery_cache_status": "retry_pending"},
+        )
+        for _index in range(21)
+    ]
+    groups.sort(key=lambda group: group.id)
+    photos_by_group = {group.id: postgres_eligible_photos(group) for group in groups}
+    for group in groups[:20]:
+        photos_by_group[group.id][1].category = "before_box"
+        photos_by_group[group.id][1].raw_data = {"construction_slot": "before_box"}
+    control = SimpleNamespace(team_id=team_id, delivery_cache_reconcile_cursor=None)
+    jobs: dict = {}
+    sessions = []
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Session:
+        def __init__(self):
+            self.committed = False
+
+        def __enter__(self):
+            sessions.append(self)
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "FROM barcode_maintenance_controls" in sql:
+                return control
+            pytest.fail(f"unexpected scalar reconciliation statement: {sql}")
+
+        def scalars(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            limit = int(getattr(statement._limit_clause, "value", 20) or 20)
+            if "FROM material_groups" in sql:
+                if "material_groups.id >" in sql:
+                    values = [group for group in groups if group.id > control.delivery_cache_reconcile_cursor]
+                elif "material_groups.id <=" in sql:
+                    values = [group for group in groups if group.id <= control.delivery_cache_reconcile_cursor]
+                else:
+                    values = groups
+                return Rows(values[:limit])
+            if "FROM delivery_cache_jobs" in sql:
+                return Rows(list(jobs.values()))
+            if "FROM photos" in sql:
+                return Rows([photo for values in photos_by_group.values() for photo in values])
+            pytest.fail(f"unexpected bulk reconciliation statement: {sql}")
+
+        def execute(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            pytest.fail(f"reconciliation must use the durable cursor bulk path: {sql}")
+
+        def add(self, value):
+            if isinstance(value, BarcodeMaintenanceControl):
+                pytest.fail("existing durable control must be reused across sessions")
+            if isinstance(value, DeliveryCacheJob):
+                value.id = value.id or uuid4()
+                jobs[value.group_id] = value
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(delivery_cache, "SessionLocal", Session)
+
+    first = delivery_cache._reconcile_postgres_delivery_cache_jobs(team_id, limit=20)
+    first_cursor = control.delivery_cache_reconcile_cursor
+    second = delivery_cache._reconcile_postgres_delivery_cache_jobs(team_id, limit=20)
+    second_cursor = control.delivery_cache_reconcile_cursor
+    photos_by_group[groups[19].id] = postgres_eligible_photos(groups[19])
+    third = delivery_cache._reconcile_postgres_delivery_cache_jobs(team_id, limit=20)
+
+    assert [first["enqueued"], second["enqueued"], third["enqueued"]] == [0, 1, 1]
+    assert first_cursor == groups[19].id
+    assert second_cursor == groups[18].id
+    assert control.delivery_cache_reconcile_cursor == groups[17].id
+    assert set(jobs) == {groups[19].id, groups[20].id}
     assert all(session.committed for session in sessions)
 
 
@@ -999,6 +1103,7 @@ def test_postgres_reconciliation_matches_json_eligibility_and_recovers_after_evi
         completed_at=None,
     )
     phase = {"eligible": False}
+    control = SimpleNamespace(delivery_cache_reconcile_cursor=None)
 
     class Rows:
         def __init__(self, values):
@@ -1020,18 +1125,23 @@ def test_postgres_reconciliation_matches_json_eligibility_and_recovers_after_evi
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, statement):
+        def scalars(self, statement):
             self.calls += 1
             sql = str(statement.compile(dialect=postgresql.dialect()))
             if "FROM photos" in sql:
                 return Rows(photos)
             if "FOR UPDATE OF delivery_cache_jobs" in sql:
                 return Rows([job])
-            if "NOT (EXISTS" in sql:
-                return Rows([] if phase["eligible"] else [(group, None)])
-            if "JOIN delivery_cache_jobs" in sql:
-                return Rows([group] if phase["eligible"] else [])
+            if "FROM material_groups" in sql:
+                if "material_groups.id >" in sql:
+                    return Rows([])
+                return Rows([group])
             pytest.fail(f"unexpected reconciliation statement: {sql}")
+
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            assert "FROM barcode_maintenance_controls" in sql
+            return control
 
         def add(self, value):
             assert isinstance(value, DeliveryCacheJob)
@@ -1084,6 +1194,7 @@ def test_postgres_missing_job_reconciliation_recovers_review_commit_crash_gap(
     )
     photos = postgres_eligible_photos(group)
     created_jobs = []
+    control = SimpleNamespace(delivery_cache_reconcile_cursor=None)
 
     class Rows:
         def __init__(self, values):
@@ -1102,15 +1213,20 @@ def test_postgres_missing_job_reconciliation_recovers_review_commit_crash_gap(
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, statement):
+        def scalars(self, statement):
             sql = str(statement.compile(dialect=postgresql.dialect()))
-            if "JOIN delivery_cache_jobs" in sql:
+            if "FROM material_groups" in sql:
+                return Rows([group])
+            if "FROM delivery_cache_jobs" in sql:
                 return Rows([])
-            if "NOT (EXISTS" in sql:
-                return Rows([(group, None)])
             if "FROM photos" in sql:
                 return Rows(photos)
             pytest.fail(f"unexpected reconciliation statement: {sql}")
+
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            assert "FROM barcode_maintenance_controls" in sql
+            return control
 
         def add(self, value):
             assert isinstance(value, DeliveryCacheJob)
@@ -1164,6 +1280,7 @@ def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
         completed_at=None,
     )
     statements: list[str] = []
+    control = SimpleNamespace(delivery_cache_reconcile_cursor=None)
 
     class Rows:
         def __init__(self, values):
@@ -1185,19 +1302,22 @@ def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, statement):
+        def scalars(self, statement):
             self.execute_calls += 1
             statements.append(str(statement.compile(dialect=postgresql.dialect())))
-            if self.execute_calls == 1:
+            sql = statements[-1]
+            if "FROM material_groups" in sql:
                 return Rows([group])
-            if self.execute_calls == 2:
+            if "FROM delivery_cache_jobs" in sql:
                 return Rows([live_job])
-            if "FROM photos" in str(statement.compile(dialect=postgresql.dialect())):
+            if "FROM photos" in sql:
                 return Rows(postgres_eligible_photos(group))
             return Rows([])
 
-        def scalar(self, _statement):
-            pytest.fail("reconciliation must not issue per-group queries")
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            assert "FROM barcode_maintenance_controls" in sql
+            return control
 
         def flush(self):
             return None
@@ -1219,7 +1339,7 @@ def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
     assert live_job.lease_token == "live-token"
     assert live_job.lease_expires_at == live_lease_expires_at
     assert group.raw_data["delivery_cache_status"] == "retry_pending"
-    assert len(statements) == 4
+    assert len(statements) == 3
 
 
 def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_limit(
@@ -1249,6 +1369,7 @@ def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_l
         last_error="",
         completed_at=None,
     )
+    control = SimpleNamespace(delivery_cache_reconcile_cursor=None)
 
     class Rows:
         def __init__(self, values):
@@ -1270,18 +1391,21 @@ def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_l
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, statement):
+        def scalars(self, statement):
             self.execute_calls += 1
-            if self.execute_calls == 1:
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "FROM material_groups" in sql:
                 return Rows([group])
-            if self.execute_calls == 2:
+            if "FROM delivery_cache_jobs" in sql:
                 return Rows([expired_job])
-            if "FROM photos" in str(statement.compile(dialect=postgresql.dialect())):
+            if "FROM photos" in sql:
                 return Rows(postgres_eligible_photos(group))
             return Rows([])
 
-        def scalar(self, _statement):
-            pytest.fail("reconciliation must not issue per-group queries")
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            assert "FROM barcode_maintenance_controls" in sql
+            return control
 
         def flush(self):
             return None
@@ -1341,6 +1465,7 @@ def test_postgres_reconciliation_and_expired_worker_completion_lock_group_before
     )
     reconciliation_locks: list[str] = []
     completion_locks: list[str] = []
+    control = SimpleNamespace(delivery_cache_reconcile_cursor=None)
 
     class Rows:
         def __init__(self, values):
@@ -1359,20 +1484,22 @@ def test_postgres_reconciliation_and_expired_worker_completion_lock_group_before
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, statement):
+        def scalars(self, statement):
             sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
             if "FOR UPDATE OF material_groups" in sql:
                 reconciliation_locks.append("material_groups")
-                return Rows([] if "NOT (EXISTS" in sql else [group])
+                return Rows([group])
             if "FOR UPDATE OF delivery_cache_jobs" in sql:
                 reconciliation_locks.append("delivery_cache_jobs")
-                return Rows([(group, expired_job)] if "JOIN material_groups" in sql else [expired_job])
+                return Rows([expired_job])
             if "FROM photos" in sql:
                 return Rows(postgres_eligible_photos(group))
             pytest.fail(f"unexpected reconciliation statement: {sql}")
 
-        def scalar(self, _statement):
-            pytest.fail("reconciliation must not issue per-group queries")
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            assert "FROM barcode_maintenance_controls" in sql
+            return control
 
         def flush(self):
             return None
@@ -1655,6 +1782,207 @@ def test_expired_json_delivery_cache_lease_stops_at_retry_limit(
     assert durable_job["manual_review_required"] is True
     assert durable_job["lease_owner"] is None
     assert state["groups"][0]["delivery_cache_status"] == "manual_required"
+
+
+def test_json_invalidation_neutralizes_live_delivery_job_and_reconciliation_reactivates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+    from app.services import delivery_cache, state_repository
+
+    group = eligible_group("json-live-invalidation")
+    group.update({"status": "approved", "reviewer": "reviewer-a"})
+    team_id = install_json_queue(monkeypatch, [group])
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    delivery_cache.enqueue_json_delivery_cache_job(group["id"], team_id=team_id)
+    claim = worker.claim_next_delivery_cache_job(worker_id="live-worker")
+    assert claim is not None
+
+    group = local_simulation._team_states[team_id]["groups"][0]
+    group["photos"][1]["category"] = "before_box"
+    state_repository.invalidate_verification_for_group(None, group, "reviewer-a", "photo_category_changed")
+    job = local_simulation._team_states[team_id]["delivery_cache_jobs"][0]
+    assert job["status"] == "not_eligible"
+    assert job["lease_owner"] is None
+    assert job["lease_token"] is None
+    assert worker.claim_next_delivery_cache_job(worker_id="must-not-claim") is None
+
+    monkeypatch.setattr(
+        worker,
+        "cache_group_photos",
+        lambda _snapshot: {"status": "ready", "retryable": False},
+    )
+    worker._process_json_delivery_job(claim)
+    committed = local_simulation._team_states[team_id]
+    group = committed["groups"][0]
+    job = committed["delivery_cache_jobs"][0]
+    assert group["delivery_cache_status"] != "ready"
+    assert job["status"] == "not_eligible"
+
+    group["photos"][1]["category"] = "collector_barcode"
+    state_repository.invalidate_verification_for_group(None, group, "reviewer-a", "photo_category_repaired")
+    job = local_simulation._team_states[team_id]["delivery_cache_jobs"][0]
+    assert job["status"] == "pending"
+    reconciled = delivery_cache._reconcile_json_delivery_cache_jobs(team_id, limit=20)
+
+    job = local_simulation._team_states[team_id]["delivery_cache_jobs"][0]
+    assert reconciled["enqueued"] == 0
+    assert job["status"] == "pending"
+    assert worker.claim_next_delivery_cache_job(worker_id="repaired-worker") is not None
+
+
+def test_postgres_delivery_job_eligibility_transition_matches_json() -> None:
+    from app.services import delivery_cache
+
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="team-postgres-neutralize",
+        reviewer="reviewer-a",
+        raw_data={"delivery_cache_status": "processing"},
+    )
+    job = SimpleNamespace(
+        id=uuid4(),
+        team_id=group.team_id,
+        group_id=group.id,
+        status="processing",
+        attempt_count=1,
+        lease_owner="live-worker",
+        lease_token="live-token",
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        requested_by="reviewer-a",
+        request_reason="review_completed",
+        last_error=None,
+        completed_at=None,
+        evidence_fingerprint="a" * 64,
+        evidence_version=3,
+    )
+
+    class Session:
+        def scalar(self, _statement):
+            return job
+
+        def flush(self):
+            return None
+
+    ineligible = eligible_group("postgres-neutralize")
+    ineligible.update({"status": "approved", "reviewer": "reviewer-a"})
+    ineligible["photos"][1]["category"] = "before_box"
+
+    delivery_cache.sync_postgres_delivery_cache_job_for_group(
+        Session(),
+        group,
+        group_payload=ineligible,
+        actor="reviewer-a",
+        reason="photo_category_changed",
+    )
+
+    assert job.status == "not_eligible"
+    assert job.lease_owner is None
+    assert job.lease_token is None
+    invalidated_version = job.evidence_version
+
+    repaired = eligible_group("postgres-neutralize")
+    repaired.update({"status": "approved", "reviewer": "reviewer-a"})
+    delivery_cache.sync_postgres_delivery_cache_job_for_group(
+        Session(),
+        group,
+        group_payload=repaired,
+        actor="reviewer-a",
+        reason="photo_category_repaired",
+    )
+
+    assert job.status == "pending"
+    assert job.evidence_version > invalidated_version
+
+
+def test_postgres_claim_neutralizes_ineligible_job_before_returning_eligible_job() -> None:
+    from app.models import GroupStatus
+    from app.services import delivery_cache
+
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    groups = [
+        SimpleNamespace(
+            id=uuid4(),
+            team_id="team-claim-eligibility",
+            status=GroupStatus.APPROVED,
+            reviewer="reviewer-a",
+            raw_data={"delivery_cache_status": "pending"},
+        )
+        for _index in range(2)
+    ]
+    jobs = {
+        group.id: SimpleNamespace(
+            id=uuid4(),
+            team_id=group.team_id,
+            group_id=group.id,
+            status="pending",
+            attempt_count=0,
+            lease_owner=None,
+            lease_token=None,
+            lease_expires_at=None,
+            requested_by="reviewer-a",
+            request_reason="review_completed",
+            last_error=None,
+            completed_at=None,
+            evidence_fingerprint=None,
+            evidence_version=0,
+        )
+        for group in groups
+    }
+    photos = {group.id: postgres_eligible_photos(group) for group in groups}
+    photos[groups[0].id][1].category = "before_box"
+    photos[groups[0].id][1].raw_data = {"construction_slot": "before_box"}
+    lock_order = []
+    selected_group = None
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Session:
+        def scalars(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "attempt_count >=" in sql:
+                return Rows([])
+            if "FROM photos" in sql:
+                return Rows(photos[selected_group.id])
+            pytest.fail(f"unexpected claim bulk statement: {sql}")
+
+        def scalar(self, statement):
+            nonlocal selected_group
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "FROM material_groups JOIN delivery_cache_jobs" in sql:
+                selected_group = next((group for group in groups if jobs[group.id].status == "pending"), None)
+                if selected_group is not None:
+                    lock_order.append("material_groups")
+                return selected_group
+            if "FROM delivery_cache_jobs" in sql:
+                lock_order.append("delivery_cache_jobs")
+                return jobs[selected_group.id]
+            pytest.fail(f"unexpected claim scalar statement: {sql}")
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            return None
+
+    claim = delivery_cache.claim_postgres_delivery_cache_job(
+        Session(),
+        team_id=groups[0].team_id,
+        worker_id="claim-worker",
+        now=now,
+    )
+
+    assert claim is not None
+    assert claim.group_id == str(groups[1].id)
+    assert claim.evidence_fingerprint
+    assert jobs[groups[0].id].status == "not_eligible"
+    assert jobs[groups[1].id].status == "processing"
+    assert lock_order == ["material_groups", "delivery_cache_jobs", "material_groups", "delivery_cache_jobs"]
 
 
 def test_postgres_delivery_claim_locks_control_before_job_claim(

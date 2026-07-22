@@ -428,6 +428,7 @@ class BarcodeMaintenanceControl(Base, TimestampMixin):
     paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     last_batch_id: Mapped[str | None] = mapped_column(String(128))
     last_batch_progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    delivery_cache_reconcile_cursor: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
 
 class DeliveryCacheJob(Base, TimestampMixin):
@@ -435,7 +436,7 @@ class DeliveryCacheJob(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("team_id", "group_id", name="uq_delivery_cache_jobs_team_group"),
         CheckConstraint(
-            "status IN ('pending', 'processing', 'ready', 'failed')",
+            "status IN ('pending', 'processing', 'ready', 'failed', 'not_eligible')",
             name="ck_delivery_cache_jobs_status",
         ),
         Index("ix_delivery_cache_jobs_pending", "team_id", "status", "updated_at"),
@@ -450,6 +451,8 @@ class DeliveryCacheJob(Base, TimestampMixin):
     lease_owner: Mapped[str | None] = mapped_column(String(128))
     lease_token: Mapped[str | None] = mapped_column(String(128))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    evidence_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    evidence_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     requested_by: Mapped[str | None] = mapped_column(String(64))
     request_reason: Mapped[str | None] = mapped_column(String(128))
     last_error: Mapped[str | None] = mapped_column(Text)

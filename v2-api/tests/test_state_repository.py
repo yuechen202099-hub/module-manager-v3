@@ -6,6 +6,7 @@ from copy import deepcopy
 import hashlib
 import inspect
 import logging
+from typing import get_type_hints
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from app.models import AuditLog, GroupBarcodeVerification
 from app.services import state_repository as repository
 from app.services.construction_priority_import import PriorityImportRow
 from app.services.group_barcode_verification import GroupScanResult, evaluate_group_eligibility
+from app.services.final_delivery_export import LeasedDeliveryPackage
 
 
 def group_scan_result(*, status: str = "partial", passed_count: int = 2) -> GroupScanResult:
@@ -35,6 +37,20 @@ def group_scan_result(*, status: str = "partial", passed_count: int = 2) -> Grou
         matched_ocr_candidates=["MOD-VERIFY-001"],
         unmatched_ocr_candidates=[],
     )
+
+
+@pytest.mark.parametrize(
+    "repository_type",
+    [
+        repository.StateRepository,
+        repository.JsonStateRepository,
+        repository.PostgresStateRepository,
+        repository.DualWriteStateRepository,
+    ],
+)
+def test_final_delivery_export_public_return_type_is_leased_package(repository_type) -> None:
+    annotation = get_type_hints(repository_type.build_final_delivery_export)["return"]
+    assert annotation is LeasedDeliveryPackage
 
 
 def test_json_repository_sets_construction_priority_through_simulation(
@@ -122,8 +138,12 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
             self.staged = [previous_audit]
 
         def scalar(self, statement):
-            assert "group_barcode_verifications" in str(statement)
-            return verification
+            sql = str(statement)
+            if "group_barcode_verifications" in sql:
+                return verification
+            if "delivery_cache_jobs" in sql:
+                return None
+            raise AssertionError(sql)
 
         def scalars(self, statement):
             assert "FROM photos" in str(statement)
@@ -3399,6 +3419,8 @@ class FinalizeFakeSession:
         if "FROM material_groups" in sql:
             return None
         if "FROM group_barcode_verifications" in sql:
+            return None
+        if "FROM delivery_cache_jobs" in sql:
             return None
         return 0
 

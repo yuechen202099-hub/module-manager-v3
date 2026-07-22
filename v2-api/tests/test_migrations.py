@@ -81,3 +81,19 @@ def test_delivery_cache_job_migration_is_reversible_and_chained() -> None:
     assert "CREATE INDEX ix_delivery_cache_jobs_pending" in upgrade
     assert "CREATE INDEX ix_delivery_cache_jobs_lease" in upgrade
     assert "DROP TABLE delivery_cache_jobs" in downgrade
+
+
+def test_delivery_cache_fix3_migration_adds_cursor_evidence_and_not_eligible_status() -> None:
+    migration = load_migration_module("0009_delivery_cache_fix3.py")
+    upgrade = render_postgresql_ddl("upgrade", "0009_delivery_cache_fix3.py")
+    downgrade = render_postgresql_ddl("downgrade", "0009_delivery_cache_fix3.py")
+
+    assert migration.revision == "20260722_0009"
+    assert migration.down_revision == "20260722_0008"
+    assert "ADD COLUMN delivery_cache_reconcile_cursor UUID" in upgrade
+    assert "ADD COLUMN evidence_fingerprint VARCHAR(64)" in upgrade
+    assert "ADD COLUMN evidence_version INTEGER DEFAULT '0' NOT NULL" in upgrade
+    assert "not_eligible" in upgrade
+    assert "DROP COLUMN delivery_cache_reconcile_cursor" in downgrade
+    assert "DROP COLUMN evidence_fingerprint" in downgrade
+    assert "DROP COLUMN evidence_version" in downgrade

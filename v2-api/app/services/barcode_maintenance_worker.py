@@ -28,7 +28,10 @@ from app.services.delivery_cache import (
     MAX_DELIVERY_CACHE_ATTEMPTS,
     cache_group_photos,
     claim_postgres_delivery_cache_job,
+    delivery_cache_evidence_fingerprint,
+    postgres_delivery_group_payload,
     reconcile_delivery_cache_jobs,
+    sync_json_delivery_cache_job_for_group,
 )
 from app.services.group_barcode_verification import (
     evaluate_group_eligibility,
@@ -660,7 +663,41 @@ def _claim_json_delivery(*, worker_id: str, team_id: str, now: datetime) -> Main
                     group["delivery_cache_retryable"] = False
                 terminalized += 1
                 continue
-            if status == "pending" or (status == "failed" and attempts < MAX_DELIVERY_CACHE_ATTEMPTS) or (status == "processing" and expired):
+            claimable = (
+                status == "pending"
+                or (status == "failed" and attempts < MAX_DELIVERY_CACHE_ATTEMPTS)
+                or (status == "processing" and expired)
+            )
+            if claimable:
+                group = next(
+                    (
+                        item
+                        for item in state.get("groups", [])
+                        if str(item.get("id") or "") == str(job.get("group_id") or "")
+                    ),
+                    None,
+                )
+                if group is None or not local_simulation.delivery_cache_group_is_eligible(group):
+                    if group is not None:
+                        sync_json_delivery_cache_job_for_group(
+                            group,
+                            team_id=team_id,
+                            actor=WORKER_ACTOR,
+                            reason="delivery cache evidence is temporarily ineligible",
+                        )
+                    else:
+                        job.update(
+                            {
+                                "status": "not_eligible",
+                                "lease_owner": None,
+                                "lease_token": None,
+                                "lease_expires_at": None,
+                                "last_error": "delivery cache group is missing",
+                                "updated_at": now.isoformat(),
+                            }
+                        )
+                    terminalized += 1
+                    continue
                 candidates.append(job)
         if not candidates:
             if terminalized:
@@ -669,6 +706,15 @@ def _claim_json_delivery(*, worker_id: str, team_id: str, now: datetime) -> Main
                 local_simulation.abort_authoritative_json_write(transaction, token)
             return None
         job = sorted(candidates, key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")))[0]
+        group = next(
+            item
+            for item in state.get("groups", [])
+            if str(item.get("id") or "") == str(job.get("group_id") or "")
+        )
+        fingerprint = delivery_cache_evidence_fingerprint(group)
+        if str(job.get("evidence_fingerprint") or "") != fingerprint:
+            job["evidence_version"] = int(job.get("evidence_version") or 0) + 1
+            job["evidence_fingerprint"] = fingerprint
         lease_token = str(uuid4())
         job.update(
             {
@@ -686,6 +732,8 @@ def _claim_json_delivery(*, worker_id: str, team_id: str, now: datetime) -> Main
             group_id=str(job.get("group_id") or ""),
             lease_owner=worker_id,
             lease_token=lease_token,
+            evidence_fingerprint=str(job.get("evidence_fingerprint") or ""),
+            evidence_version=int(job.get("evidence_version") or 0),
             attempt_count=int(job.get("attempt_count") or 0),
         )
         local_simulation.finish_authoritative_json_write(transaction, token)
@@ -728,6 +776,8 @@ def claim_next_delivery_cache_job(*, worker_id: str, now: datetime | None = None
             group_id=claim.group_id,
             lease_owner=claim.lease_owner,
             lease_token=claim.lease_token,
+            evidence_fingerprint=claim.evidence_fingerprint,
+            evidence_version=claim.evidence_version,
             attempt_count=claim.attempt_count,
         )
 
@@ -805,6 +855,29 @@ def _process_json_delivery_job(job: MaintenanceJob) -> None:
             if durable_job.get("lease_owner") != job.lease_owner or durable_job.get("lease_token") != job.lease_token:
                 local_simulation.abort_authoritative_json_write(transaction, transaction_token)
                 return
+            current_fingerprint = delivery_cache_evidence_fingerprint(current)
+            if not local_simulation.delivery_cache_group_is_eligible(current):
+                sync_json_delivery_cache_job_for_group(
+                    current,
+                    team_id=job.team_id,
+                    actor=WORKER_ACTOR,
+                    reason="delivery cache evidence changed while processing",
+                )
+                local_simulation.finish_authoritative_json_write(transaction, transaction_token)
+                return
+            if (
+                str(durable_job.get("evidence_fingerprint") or "") != job.evidence_fingerprint
+                or int(durable_job.get("evidence_version") or 0) != job.evidence_version
+                or current_fingerprint != job.evidence_fingerprint
+            ):
+                sync_json_delivery_cache_job_for_group(
+                    current,
+                    team_id=job.team_id,
+                    actor=WORKER_ACTOR,
+                    reason="delivery cache evidence changed while processing",
+                )
+                local_simulation.finish_authoritative_json_write(transaction, transaction_token)
+                return
             snapshot_by_id = {str(photo.get("id") or ""): photo for photo in snapshot.get("photos", [])}
             for photo in current.get("photos", []):
                 cached = snapshot_by_id.get(str(photo.get("id") or ""))
@@ -875,6 +948,27 @@ def _process_delivery_job(job: MaintenanceJob) -> None:
             session.rollback()
             return
         photos = list(session.scalars(select(Photo).where(Photo.group_id == group.id, Photo.is_active.is_(True)).with_for_update()).all())
+        current_payload = postgres_delivery_group_payload(group, photos)
+        current_fingerprint = delivery_cache_evidence_fingerprint(current_payload)
+        current_eligible = local_simulation.delivery_cache_group_is_eligible(current_payload)
+        if (
+            not current_eligible
+            or str(getattr(durable_job, "evidence_fingerprint", None) or "") != job.evidence_fingerprint
+            or int(getattr(durable_job, "evidence_version", 0) or 0) != job.evidence_version
+            or current_fingerprint != job.evidence_fingerprint
+        ):
+            from app.services.delivery_cache import sync_postgres_delivery_cache_job_for_group
+
+            sync_postgres_delivery_cache_job_for_group(
+                session,
+                group,
+                group_payload=current_payload,
+                actor=WORKER_ACTOR,
+                reason="delivery cache evidence changed while processing",
+                existing_job=durable_job,
+            )
+            session.commit()
+            return
         cached_by_id = {str(photo.get("id") or ""): photo for photo in snapshot.get("photos", [])}
         for photo in photos:
             cached = cached_by_id.get(str(photo.legacy_id or photo.id))

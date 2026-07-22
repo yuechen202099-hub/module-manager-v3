@@ -509,8 +509,12 @@ def _cache_path_key(path: Path | str) -> str:
 def reserve_delivery_cache_path(path: Path | str) -> str:
     key = _cache_path_key(path)
     with _CACHE_PATH_CONDITION:
-        _ACTIVE_CACHE_PATHS[key] = _ACTIVE_CACHE_PATHS.get(key, 0) + 1
+        _reserve_delivery_cache_key_locked(key)
     return key
+
+
+def _reserve_delivery_cache_key_locked(key: str) -> None:
+    _ACTIVE_CACHE_PATHS[key] = _ACTIVE_CACHE_PATHS.get(key, 0) + 1
 
 
 def release_delivery_cache_path(lease: Path | str) -> None:
@@ -634,10 +638,13 @@ def get_or_build_delivery_package(
     target = package_dir / f"{fingerprint}.zip"
     lock_key = str(target).lower()
     with _package_lock(lock_key):
-        if target.is_file():
-            modified = datetime.fromtimestamp(target.stat().st_mtime, tz=UTC)
-            if current.astimezone(UTC) - modified <= PACKAGE_TTL:
-                return LeasedDeliveryPackage(target, reserve_delivery_cache_path(target))
+        target_key = _cache_path_key(target)
+        with _CACHE_PATH_CONDITION:
+            if target.is_file():
+                modified = datetime.fromtimestamp(target.stat().st_mtime, tz=UTC)
+                if current.astimezone(UTC) - modified <= PACKAGE_TTL:
+                    _reserve_delivery_cache_key_locked(target_key)
+                    return LeasedDeliveryPackage(target, target_key)
         content = package_builder(validated_groups, photo_reader)
         package_dir.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(f".zip.tmp-{uuid4().hex}")
@@ -647,11 +654,11 @@ def get_or_build_delivery_package(
                 output.flush()
                 os.fsync(output.fileno())
             os.utime(temporary, (current.timestamp(), current.timestamp()))
-            target_key = _cache_path_key(target)
             with _CACHE_PATH_CONDITION:
                 while _cache_path_is_reserved(target_key):
                     _CACHE_PATH_CONDITION.wait()
                 temporary.replace(target)
+                _reserve_delivery_cache_key_locked(target_key)
+                return LeasedDeliveryPackage(target, target_key)
         finally:
             temporary.unlink(missing_ok=True)
-        return LeasedDeliveryPackage(target, reserve_delivery_cache_path(target))

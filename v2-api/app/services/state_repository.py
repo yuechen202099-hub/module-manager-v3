@@ -37,6 +37,7 @@ from app.models import (
     UnmatchedRecord,
 )
 from app.services import account_store
+from app.services.final_delivery_export import LeasedDeliveryPackage
 from app.services.matching import build_total_catalog_match_key
 
 
@@ -563,6 +564,14 @@ def invalidate_verification_for_group(
         group["barcode_verification"] = result
         _clear_legacy_verification_flags(group)
         local_simulation.mark_delivery_cache_stale(group, reason)
+        from app.services.delivery_cache import sync_json_delivery_cache_job_for_group
+
+        sync_json_delivery_cache_job_for_group(
+            group,
+            team_id=local_simulation.current_team_id(),
+            actor=actor,
+            reason=reason,
+        )
         local_simulation.append_audit_event(
             "group_barcode_verification_invalidated",
             actor,
@@ -645,6 +654,19 @@ def invalidate_verification_for_group(
         if photo_raw.get("delivery_cache_path"):
             photo_raw["delivery_cache_status"] = "stale"
             photo.raw_data = photo_raw
+    from app.services.delivery_cache import (
+        postgres_delivery_group_payload,
+        sync_postgres_delivery_cache_job_for_group,
+    )
+
+    sync_postgres_delivery_cache_job_for_group(
+        session,
+        group,
+        group_payload=postgres_delivery_group_payload(group, cached_photos),
+        actor=actor,
+        reason=reason,
+        mark_retry_without_job=False,
+    )
     _stage_transactional_audit(
         session,
         team_id=group.team_id,
@@ -2390,7 +2412,7 @@ class StateRepository(ABC):
         task_id: int | None = None,
         terminal: str = "",
         review_scope: str = "reviewed",
-    ) -> Path:
+    ) -> LeasedDeliveryPackage:
         raise NotImplementedError
 
     @abstractmethod
@@ -3335,7 +3357,7 @@ class JsonStateRepository(StateRepository):
         task_id: int | None = None,
         terminal: str = "",
         review_scope: str = "reviewed",
-    ) -> Path:
+    ) -> LeasedDeliveryPackage:
         return local_simulation.build_final_delivery_export(
             task_id=task_id,
             terminal=terminal,
@@ -6725,24 +6747,23 @@ class PostgresStateRepository(StateRepository):
         reason: str,
         require_eligible: bool = False,
     ) -> None:
-        from app.services.delivery_cache import enqueue_postgres_delivery_cache_job
+        from app.services.delivery_cache import (
+            enqueue_postgres_delivery_cache_job,
+            sync_postgres_delivery_cache_job_for_group,
+        )
 
         try:
             with self._session() as session:
                 group = self._group_by_legacy_id(session, group_id, lock=True)
-                if require_eligible and not local_simulation.delivery_cache_group_is_eligible(
-                    _group_payload(session, group)
-                ):
-                    raw_data = dict(group.raw_data or {})
-                    raw_data.update(
-                        {
-                            "delivery_cache_status": "retry_pending",
-                            "delivery_cache_error": "delivery cache evidence is temporarily ineligible",
-                            "delivery_cache_retryable": True,
-                            "delivery_cache_retry_requested_at": datetime.now(UTC).isoformat(),
-                        }
+                group_payload = _group_payload(session, group)
+                if require_eligible:
+                    sync_postgres_delivery_cache_job_for_group(
+                        session,
+                        group,
+                        group_payload=group_payload,
+                        actor=actor,
+                        reason=reason,
                     )
-                    group.raw_data = raw_data
                     session.commit()
                     return
                 enqueue_postgres_delivery_cache_job(
@@ -8077,7 +8098,7 @@ class PostgresStateRepository(StateRepository):
         task_id: int | None = None,
         terminal: str = "",
         review_scope: str = "reviewed",
-    ) -> Path:
+    ) -> LeasedDeliveryPackage:
         terminal = terminal.strip()
         if task_id is None and not terminal:
             raise ValueError("Final delivery export must be scoped to one terminal")
@@ -8487,7 +8508,7 @@ class DualWriteStateRepository(JsonStateRepository):
         task_id: int | None = None,
         terminal: str = "",
         review_scope: str = "reviewed",
-    ):
+    ) -> LeasedDeliveryPackage:
         raise StateBackendNotReady(
             "Dual formal delivery export requires one authoritative delivery-cache repair backend"
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.database import SessionLocal
-from app.models import DeliveryCacheJob, GroupStatus, MaterialGroup, Photo
+from app.models import BarcodeMaintenanceControl, DeliveryCacheJob, GroupStatus, MaterialGroup, Photo
 from app.services import local_simulation
 
 
@@ -31,6 +32,8 @@ class DeliveryCacheClaim:
     lease_owner: str
     lease_token: str
     attempt_count: int
+    evidence_fingerprint: str = ""
+    evidence_version: int = 0
 
 
 def _now_iso(now: datetime | None = None) -> str:
@@ -47,11 +50,63 @@ def _job_payload(job: DeliveryCacheJob) -> dict[str, Any]:
         "lease_owner": job.lease_owner,
         "lease_token": job.lease_token,
         "lease_expires_at": job.lease_expires_at.isoformat() if job.lease_expires_at else None,
+        "evidence_fingerprint": getattr(job, "evidence_fingerprint", None) or "",
+        "evidence_version": int(getattr(job, "evidence_version", 0) or 0),
         "requested_by": job.requested_by or "",
         "request_reason": job.request_reason or "",
         "last_error": job.last_error or "",
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
     }
+
+
+def delivery_cache_evidence_fingerprint(group: Mapping[str, Any]) -> str:
+    photos = [
+        {
+            "id": str(photo.get("id") or ""),
+            "category": str(photo.get("category") or ""),
+            "construction_slot": str(photo.get("construction_slot") or ""),
+            "image_url": str(photo.get("image_url") or photo.get("source_url") or ""),
+            "storage_type": str(photo.get("storage_type") or ""),
+            "storage_bucket": str(photo.get("storage_bucket") or ""),
+            "storage_key": str(photo.get("storage_key") or ""),
+            "sha256": str(photo.get("sha256") or ""),
+            "is_active": photo.get("is_active", True) is not False,
+            "upload_status": str(photo.get("upload_status") or ""),
+        }
+        for photo in group.get("photos", []) or []
+        if isinstance(photo, Mapping) and photo.get("is_active", True) is not False
+    ]
+    payload = {
+        "id": str(group.get("id") or ""),
+        "terminal": str(group.get("terminal") or ""),
+        "meter_no": str(group.get("meter_no") or group.get("display_meter_no") or ""),
+        "module_asset_no": str(
+            group.get("construction_module_asset_no")
+            or group.get("module_asset_no")
+            or group.get("asset_no")
+            or ""
+        ),
+        "collector": str(group.get("construction_collector") or group.get("collector") or ""),
+        "address": str(group.get("address") or group.get("installation_address") or ""),
+        "status": str(group.get("status") or ""),
+        "photos": sorted(photos, key=lambda photo: (photo["id"], photo["category"])),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _next_evidence_version(job: Any, fingerprint: str, status: str) -> int:
+    current_version = int(getattr(job, "evidence_version", 0) or 0) if not isinstance(job, dict) else int(job.get("evidence_version") or 0)
+    current_fingerprint = (
+        str(getattr(job, "evidence_fingerprint", None) or "")
+        if not isinstance(job, dict)
+        else str(job.get("evidence_fingerprint") or "")
+    )
+    current_status = str(getattr(job, "status", "") or "") if not isinstance(job, dict) else str(job.get("status") or "")
+    if current_version > 0 and current_fingerprint == fingerprint and current_status == status:
+        return current_version
+    return current_version + 1
 
 
 def enqueue_json_delivery_cache_job(
@@ -69,6 +124,7 @@ def enqueue_json_delivery_cache_job(
     jobs = state.setdefault("delivery_cache_jobs", [])
     job = next((item for item in jobs if str(item.get("group_id") or "") == group_id), None)
     now = _now_iso()
+    fingerprint = delivery_cache_evidence_fingerprint(group)
     if job is None:
         job = {
             "id": str(uuid4()),
@@ -79,6 +135,8 @@ def enqueue_json_delivery_cache_job(
             "lease_owner": None,
             "lease_token": None,
             "lease_expires_at": None,
+            "evidence_fingerprint": fingerprint,
+            "evidence_version": 1,
             "requested_by": actor,
             "request_reason": reason,
             "last_error": "",
@@ -87,12 +145,15 @@ def enqueue_json_delivery_cache_job(
         }
         jobs.append(job)
     else:
+        evidence_version = _next_evidence_version(job, fingerprint, "pending")
         job.update(
             {
                 "status": "pending",
                 "lease_owner": None,
                 "lease_token": None,
                 "lease_expires_at": None,
+                "evidence_fingerprint": fingerprint,
+                "evidence_version": evidence_version,
                 "requested_by": actor,
                 "request_reason": reason,
                 "last_error": "",
@@ -112,6 +173,7 @@ def enqueue_postgres_delivery_cache_job(
     actor: str = "system",
     reason: str = "review_completed",
     existing_job: DeliveryCacheJob | None | object = _EXISTING_JOB_NOT_PROVIDED,
+    evidence_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     job = existing_job
     if job is _EXISTING_JOB_NOT_PROVIDED:
@@ -126,6 +188,9 @@ def enqueue_postgres_delivery_cache_job(
     if job is None:
         job = DeliveryCacheJob(team_id=group.team_id, group_id=group.id)
         session.add(job)
+    fingerprint = str(evidence_fingerprint or getattr(job, "evidence_fingerprint", None) or "")
+    job.evidence_version = _next_evidence_version(job, fingerprint, "pending")
+    job.evidence_fingerprint = fingerprint or None
     job.status = "pending"
     job.lease_owner = None
     job.lease_token = None
@@ -140,6 +205,121 @@ def enqueue_postgres_delivery_cache_job(
     group.raw_data = raw
     session.flush()
     return _job_payload(job)
+
+
+def _mark_json_delivery_job_not_eligible(
+    group: dict[str, Any],
+    job: dict[str, Any] | None,
+    *,
+    reason: str,
+) -> None:
+    now = _now_iso()
+    fingerprint = delivery_cache_evidence_fingerprint(group)
+    if job is not None:
+        job.update(
+            {
+                "status": "not_eligible",
+                "lease_owner": None,
+                "lease_token": None,
+                "lease_expires_at": None,
+                "evidence_fingerprint": fingerprint,
+                "evidence_version": _next_evidence_version(job, fingerprint, "not_eligible"),
+                "last_error": reason,
+                "completed_at": None,
+                "updated_at": now,
+            }
+        )
+    group.update(
+        {
+            "delivery_cache_status": "retry_pending",
+            "delivery_cache_error": "delivery cache evidence is temporarily ineligible",
+            "delivery_cache_retryable": True,
+            "delivery_cache_retry_requested_at": now,
+        }
+    )
+
+
+def sync_json_delivery_cache_job_for_group(
+    group: dict[str, Any],
+    *,
+    team_id: str,
+    actor: str,
+    reason: str,
+) -> dict[str, Any] | None:
+    state = local_simulation.state_for_team(team_id)
+    job = next(
+        (
+            item
+            for item in state.setdefault("delivery_cache_jobs", [])
+            if isinstance(item, dict) and str(item.get("group_id") or "") == str(group.get("id") or "")
+        ),
+        None,
+    )
+    if not local_simulation.delivery_cache_group_is_eligible(group):
+        if job is not None:
+            _mark_json_delivery_job_not_eligible(group, job, reason=reason)
+        return job
+    return enqueue_json_delivery_cache_job(
+        str(group.get("id") or ""),
+        team_id=team_id,
+        actor=actor,
+        reason=reason,
+    )
+
+
+def sync_postgres_delivery_cache_job_for_group(
+    session: Session,
+    group: MaterialGroup,
+    *,
+    group_payload: dict[str, Any],
+    actor: str,
+    reason: str,
+    existing_job: DeliveryCacheJob | None | object = _EXISTING_JOB_NOT_PROVIDED,
+    mark_retry_without_job: bool = True,
+) -> DeliveryCacheJob | None:
+    job = existing_job
+    if job is _EXISTING_JOB_NOT_PROVIDED:
+        job = session.scalar(
+            select(DeliveryCacheJob)
+            .where(
+                DeliveryCacheJob.team_id == group.team_id,
+                DeliveryCacheJob.group_id == group.id,
+            )
+            .with_for_update()
+        )
+    fingerprint = delivery_cache_evidence_fingerprint(group_payload)
+    if local_simulation.delivery_cache_group_is_eligible(group_payload):
+        enqueue_postgres_delivery_cache_job(
+            session,
+            group,
+            actor=actor,
+            reason=reason,
+            existing_job=job,
+            evidence_fingerprint=fingerprint,
+        )
+        return job
+    if job is not None:
+        job.evidence_version = _next_evidence_version(job, fingerprint, "not_eligible")
+        job.evidence_fingerprint = fingerprint
+        job.status = "not_eligible"
+        job.lease_owner = None
+        job.lease_token = None
+        job.lease_expires_at = None
+        job.last_error = reason
+        job.completed_at = None
+    if job is not None or mark_retry_without_job:
+        raw = dict(group.raw_data or {})
+        raw.update(
+            {
+                "delivery_cache_status": "retry_pending",
+                "delivery_cache_error": "delivery cache evidence is temporarily ineligible",
+                "delivery_cache_retryable": True,
+                "delivery_cache_retry_requested_at": _now_iso(),
+            }
+        )
+        group.raw_data = raw
+    session.flush()
+    return job
 
 
 def build_postgres_delivery_claim_statement(*, team_id: str, now: datetime):
@@ -159,6 +339,44 @@ def build_postgres_delivery_claim_statement(*, team_id: str, now: datetime):
         .order_by(DeliveryCacheJob.updated_at, DeliveryCacheJob.id)
         .limit(1)
         .with_for_update(skip_locked=True)
+    )
+
+
+def build_postgres_delivery_claim_group_statement(*, team_id: str, now: datetime):
+    return (
+        select(MaterialGroup)
+        .join(
+            DeliveryCacheJob,
+            and_(
+                DeliveryCacheJob.team_id == MaterialGroup.team_id,
+                DeliveryCacheJob.group_id == MaterialGroup.id,
+            ),
+        )
+        .where(
+            MaterialGroup.team_id == team_id,
+            or_(
+                DeliveryCacheJob.status == "pending",
+                (DeliveryCacheJob.status == "failed")
+                & (DeliveryCacheJob.attempt_count < MAX_DELIVERY_CACHE_ATTEMPTS),
+                (DeliveryCacheJob.status == "processing")
+                & (DeliveryCacheJob.attempt_count < MAX_DELIVERY_CACHE_ATTEMPTS)
+                & (DeliveryCacheJob.lease_expires_at < now),
+            ),
+        )
+        .order_by(DeliveryCacheJob.updated_at, DeliveryCacheJob.id, MaterialGroup.id)
+        .limit(1)
+        .with_for_update(of=MaterialGroup, skip_locked=True)
+    )
+
+
+def build_postgres_delivery_job_for_group_statement(*, team_id: str, group_id: Any):
+    return (
+        select(DeliveryCacheJob)
+        .where(
+            DeliveryCacheJob.team_id == team_id,
+            DeliveryCacheJob.group_id == group_id,
+        )
+        .with_for_update(of=DeliveryCacheJob)
     )
 
 
@@ -252,25 +470,65 @@ def claim_postgres_delivery_cache_job(
         team_id=team_id,
         now=claimed_at,
     )
-    job = session.scalar(build_postgres_delivery_claim_statement(team_id=team_id, now=claimed_at))
-    if job is None:
-        if terminalized:
-            session.commit()
-        return None
-    token = str(uuid4())
-    job.status = "processing"
-    job.attempt_count = int(job.attempt_count or 0) + 1
-    job.lease_owner = worker_id
-    job.lease_token = token
-    job.lease_expires_at = claimed_at + timedelta(seconds=max(1, int(lease_seconds)))
-    session.commit()
-    return DeliveryCacheClaim(
-        team_id=team_id,
-        group_id=str(job.group_id),
-        lease_owner=worker_id,
-        lease_token=token,
-        attempt_count=job.attempt_count,
-    )
+    changed = bool(terminalized)
+    for _index in range(MAX_RECONCILIATION_BATCH_SIZE):
+        group = session.scalar(build_postgres_delivery_claim_group_statement(team_id=team_id, now=claimed_at))
+        if group is None:
+            if changed:
+                session.commit()
+            return None
+        job = session.scalar(
+            build_postgres_delivery_job_for_group_statement(
+                team_id=team_id,
+                group_id=group.id,
+            )
+        )
+        if job is None:
+            changed = True
+            continue
+        photos = list(
+            session.scalars(
+                build_postgres_reconciliation_photo_statement(
+                    team_id=team_id,
+                    group_ids=[group.id],
+                )
+            ).all()
+        )
+        payload = postgres_delivery_group_payload(group, photos)
+        if not _group_is_reconciliation_eligible(group, photos):
+            sync_postgres_delivery_cache_job_for_group(
+                session,
+                group,
+                group_payload=payload,
+                actor=worker_id,
+                reason="delivery cache evidence is temporarily ineligible",
+                existing_job=job,
+            )
+            changed = True
+            continue
+        fingerprint = delivery_cache_evidence_fingerprint(payload)
+        if str(getattr(job, "evidence_fingerprint", None) or "") != fingerprint:
+            job.evidence_version = int(getattr(job, "evidence_version", 0) or 0) + 1
+            job.evidence_fingerprint = fingerprint
+        token = str(uuid4())
+        job.status = "processing"
+        job.attempt_count = int(job.attempt_count or 0) + 1
+        job.lease_owner = worker_id
+        job.lease_token = token
+        job.lease_expires_at = claimed_at + timedelta(seconds=max(1, int(lease_seconds)))
+        session.commit()
+        return DeliveryCacheClaim(
+            team_id=team_id,
+            group_id=str(job.group_id),
+            lease_owner=worker_id,
+            lease_token=token,
+            attempt_count=job.attempt_count,
+            evidence_fingerprint=str(job.evidence_fingerprint or ""),
+            evidence_version=int(job.evidence_version or 0),
+        )
+    if changed:
+        session.commit()
+    return None
 
 
 def _cache_suffix(photo: Mapping[str, Any], content_type: str) -> str:
@@ -577,6 +835,36 @@ def build_postgres_missing_reconciliation_statement(*, team_id: str, limit: int)
     )
 
 
+def build_postgres_reconciliation_control_statement(*, team_id: str):
+    return (
+        select(BarcodeMaintenanceControl)
+        .where(BarcodeMaintenanceControl.team_id == team_id)
+        .with_for_update()
+    )
+
+
+def build_postgres_reconciliation_group_statement(
+    *,
+    team_id: str,
+    limit: int,
+    after_group_id: Any | None = None,
+    through_group_id: Any | None = None,
+):
+    statement = select(MaterialGroup).where(
+        MaterialGroup.team_id == team_id,
+        MaterialGroup.status == GroupStatus.APPROVED,
+    )
+    if after_group_id is not None:
+        statement = statement.where(MaterialGroup.id > after_group_id)
+    if through_group_id is not None:
+        statement = statement.where(MaterialGroup.id <= through_group_id)
+    return (
+        statement.order_by(MaterialGroup.id)
+        .limit(_reconciliation_limit(limit))
+        .with_for_update(of=MaterialGroup, skip_locked=True)
+    )
+
+
 def build_postgres_reconciliation_photo_statement(*, team_id: str, group_ids: list[Any]):
     return (
         select(Photo)
@@ -642,6 +930,23 @@ def _postgres_reconciliation_photo_payload(photo: Photo) -> dict[str, Any]:
     }
 
 
+def postgres_delivery_group_payload(group: MaterialGroup, photos: list[Photo]) -> dict[str, Any]:
+    raw = dict(getattr(group, "raw_data", {}) or {})
+    status = str(getattr(getattr(group, "status", None), "value", getattr(group, "status", "")) or "")
+    return {
+        "id": str(group.id),
+        "status": status,
+        "terminal": str(getattr(group, "terminal", None) or raw.get("terminal") or ""),
+        "meter_no": str(getattr(group, "display_meter_no", None) or raw.get("meter_no") or ""),
+        "module_asset_no": str(
+            raw.get("construction_module_asset_no") or raw.get("module_asset_no") or raw.get("asset_no") or ""
+        ),
+        "collector": str(raw.get("construction_collector") or raw.get("collector") or ""),
+        "address": str(getattr(group, "installation_address", None) or raw.get("address") or ""),
+        "photos": [_postgres_reconciliation_photo_payload(photo) for photo in photos],
+    }
+
+
 def _group_is_reconciliation_eligible(group: MaterialGroup, photos: list[Photo]) -> bool:
     status = str(getattr(group.status, "value", group.status) or "")
     return (
@@ -665,102 +970,101 @@ def _reconcile_postgres_delivery_cache_jobs(
     reconciled_at = now or datetime.now(UTC)
     bounded = _reconciliation_limit(limit)
     with SessionLocal() as session:
-        existing_groups = list(
-            session.execute(
-                build_postgres_existing_reconciliation_statement(
+        if bounded == 0:
+            session.rollback()
+            return {"backend": "postgres", "scanned": 0, "enqueued": 0, "skipped_live": 0}
+        control = session.scalar(build_postgres_reconciliation_control_statement(team_id=team_id))
+        if control is None:
+            control = BarcodeMaintenanceControl(team_id=team_id)
+            session.add(control)
+            session.flush()
+        cursor = control.delivery_cache_reconcile_cursor
+        candidate_groups = list(
+            session.scalars(
+                build_postgres_reconciliation_group_statement(
                     team_id=team_id,
                     limit=bounded,
-                    now=reconciled_at,
+                    after_group_id=cursor,
                 )
-            ).scalars().all()
+            ).all()
         )
-        groups_by_id = {group.id: group for group in existing_groups}
-        existing_jobs = []
-        if groups_by_id:
-            existing_jobs = list(
-                session.execute(
+        if cursor is not None and len(candidate_groups) < bounded:
+            candidate_groups.extend(
+                session.scalars(
+                    build_postgres_reconciliation_group_statement(
+                        team_id=team_id,
+                        limit=bounded - len(candidate_groups),
+                        through_group_id=cursor,
+                    )
+                ).all()
+            )
+        groups_by_id = {group.id: group for group in candidate_groups}
+        existing_jobs = (
+            list(
+                session.scalars(
                     build_postgres_delivery_job_lock_statement(
                         team_id=team_id,
                         group_ids=list(groups_by_id),
                     )
-                ).scalars().all()
-            )
-        enqueued = 0
-        skipped_live = 0
-        retry_state_changed = False
-        remaining = max(0, bounded - len(existing_groups))
-        missing_rows = []
-        if remaining:
-            missing_rows = list(
-                session.execute(
-                    build_postgres_missing_reconciliation_statement(
-                        team_id=team_id,
-                        limit=remaining,
-                    )
                 ).all()
             )
-        candidate_groups = [*existing_groups, *(group for group, _missing_job in missing_rows)]
+            if groups_by_id
+            else []
+        )
+        jobs_by_group = {job.group_id: job for job in existing_jobs}
+        enqueued = 0
+        skipped_live = 0
         photos_by_group: dict[Any, list[Photo]] = {group.id: [] for group in candidate_groups}
         if photos_by_group:
-            photos = session.execute(
+            photos = session.scalars(
                 build_postgres_reconciliation_photo_statement(
                     team_id=team_id,
                     group_ids=list(photos_by_group),
                 )
-            ).scalars().all()
+            ).all()
             for photo in photos:
                 if photo.group_id in photos_by_group:
                     photos_by_group[photo.group_id].append(photo)
-        for job in existing_jobs:
-            group = groups_by_id.get(job.group_id)
-            if group is None or not _group_is_reconciliation_eligible(
-                group,
-                photos_by_group.get(group.id, []),
-            ):
+        for group in candidate_groups:
+            job = jobs_by_group.get(group.id)
+            payload = postgres_delivery_group_payload(group, photos_by_group.get(group.id, []))
+            eligible = _group_is_reconciliation_eligible(group, photos_by_group.get(group.id, []))
+            raw_status = str((group.raw_data or {}).get("delivery_cache_status") or "")
+            if not eligible:
+                sync_postgres_delivery_cache_job_for_group(
+                    session,
+                    group,
+                    group_payload=payload,
+                    actor=str(group.reviewer or "system"),
+                    reason="delivery cache evidence is temporarily ineligible",
+                    existing_job=job,
+                )
                 continue
-            if _delivery_job_has_live_lease(job, now=reconciled_at):
+            needs_reconciliation = job is None or str(job.status or "") == "not_eligible" or raw_status == "retry_pending"
+            if not needs_reconciliation:
+                continue
+            if job is not None and _delivery_job_has_live_lease(job, now=reconciled_at):
                 skipped_live += 1
                 continue
-            if not _delivery_job_is_reconciliation_eligible(job, now=reconciled_at):
+            if job is not None and not _delivery_job_is_reconciliation_eligible(job, now=reconciled_at) and str(job.status or "") != "not_eligible":
                 continue
-            enqueue_postgres_delivery_cache_job(
+            sync_postgres_delivery_cache_job_for_group(
                 session,
                 group,
+                group_payload=payload,
                 actor=str(group.reviewer or "system"),
                 reason="reconciliation",
                 existing_job=job,
             )
             enqueued += 1
-        for group, _missing_job in missing_rows:
-            if not _group_is_reconciliation_eligible(group, photos_by_group.get(group.id, [])):
-                raw = dict(group.raw_data or {})
-                if str(raw.get("delivery_cache_status") or "") != "retry_pending":
-                    raw.update(
-                        {
-                            "delivery_cache_status": "retry_pending",
-                            "delivery_cache_error": "delivery cache evidence is temporarily ineligible",
-                            "delivery_cache_retryable": True,
-                            "delivery_cache_retry_requested_at": reconciled_at.isoformat(),
-                        }
-                    )
-                    group.raw_data = raw
-                    retry_state_changed = True
-                continue
-            enqueue_postgres_delivery_cache_job(
-                session,
-                group,
-                actor=str(group.reviewer or "system"),
-                reason="reconciliation",
-                existing_job=None,
-            )
-            enqueued += 1
-        if enqueued or retry_state_changed:
+        if candidate_groups:
+            control.delivery_cache_reconcile_cursor = candidate_groups[-1].id
             session.commit()
         else:
             session.rollback()
         return {
             "backend": "postgres",
-            "scanned": len(existing_groups) + len(missing_rows),
+            "scanned": len(candidate_groups),
             "enqueued": enqueued,
             "skipped_live": skipped_live,
         }

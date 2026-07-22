@@ -1,7 +1,7 @@
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, Response
 
 from app.core.security import decode_access_token
@@ -9,6 +9,7 @@ from app.schemas.export import ExceptionMetersExportRequest, FinalDeliveryExport
 from app.services.state_repository import get_state_repository
 from app.services.final_delivery_export import (
     DeliveryPackageValidationError,
+    LeasedDeliveryPackage,
 )
 from app.services.local_simulation import (
     reset_current_team,
@@ -37,6 +38,22 @@ async def use_team_context(request: Request):
 
 
 router = APIRouter(prefix="/exports", dependencies=[Depends(use_team_context)])
+
+
+class LeasedFileResponse(Response):
+    def __init__(self, response: FileResponse, package: LeasedDeliveryPackage):
+        self.response = response
+        self.package = package
+        self.status_code = response.status_code
+        self.media_type = response.media_type
+        self.background = response.background
+        self.raw_headers = response.raw_headers
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        try:
+            await self.response(scope, receive, send)
+        finally:
+            self.package.release()
 
 
 @router.post("/task-detail")
@@ -69,11 +86,13 @@ def export_final_delivery(payload: FinalDeliveryExportRequest, request: Request)
     scope = payload.task_id or payload.terminal or "terminal"
     filename = f"V3.1.0-final-delivery-{scope}-{datetime.now().strftime('%Y%m%d%H%M%S')}.zip"
     try:
-        return FileResponse(
-            package.path,
-            media_type="application/zip",
-            filename=filename,
-            background=BackgroundTask(package.release),
+        return LeasedFileResponse(
+            FileResponse(
+                package.path,
+                media_type="application/zip",
+                filename=filename,
+            ),
+            package,
         )
     except BaseException:
         package.release()
