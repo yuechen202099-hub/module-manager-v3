@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+from copy import deepcopy
+
+import pytest
+
+from app.services.group_barcode_verification import (
+    evaluate_group_eligibility,
+    invalidate_group_verification,
+)
+
+
+def eligible_group() -> dict:
+    return {
+        "terminal": "T-001",
+        "meter_no": "M-001",
+        "module_asset_no": "MOD-001",
+        "collector": "COL-001",
+        "photos": [
+            {"id": "p-meter", "sha256": "a" * 64, "category": "meter_barcode"},
+            {"id": "p-collector", "sha256": "b" * 64, "category": "collector_barcode"},
+            {"id": "p-module-meter", "sha256": "c" * 64, "category": "module_meter"},
+            {"id": "p-module-barcode", "sha256": "d" * 64, "category": "module_barcode"},
+        ],
+    }
+
+
+def test_eligible_group_with_exactly_four_unique_categories_is_pending() -> None:
+    result = evaluate_group_eligibility(eligible_group())
+
+    assert result.status == "pending"
+    assert result.reason is None
+    assert result.evidence_fingerprint
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda group: group["photos"].pop(),
+        lambda group: group["photos"].append(
+            {"id": "p-extra", "sha256": "e" * 64, "category": "extra"}
+        ),
+        lambda group: group["photos"].__setitem__(3, {"id": "p-duplicate", "sha256": "e" * 64, "category": "meter_barcode"}),
+        lambda group: group.__setitem__("terminal", ""),
+        lambda group: group.__setitem__("meter_no", "未关联终端"),
+    ],
+    ids=["too_few", "too_many", "duplicate_category", "missing_identity", "placeholder_identity"],
+)
+def test_ineligible_photo_or_identity_sets_are_not_eligible(mutate) -> None:
+    group = eligible_group()
+    mutate(group)
+
+    assert evaluate_group_eligibility(group).status == "not_eligible"
+
+
+def test_missing_required_photo_category_is_not_eligible() -> None:
+    group = eligible_group()
+    group["photos"][3]["category"] = "overview"
+
+    result = evaluate_group_eligibility(group)
+
+    assert result.status == "not_eligible"
+    assert result.reason == "missing_required_photo_category"
+
+
+def test_evidence_fingerprint_is_category_sorted_and_detects_photo_changes() -> None:
+    group = eligible_group()
+    reversed_group = deepcopy(group)
+    reversed_group["photos"].reverse()
+    changed_group = deepcopy(group)
+    changed_group["photos"][0]["sha256"] = "f" * 64
+
+    assert evaluate_group_eligibility(group).evidence_fingerprint == evaluate_group_eligibility(
+        reversed_group
+    ).evidence_fingerprint
+    assert evaluate_group_eligibility(group).evidence_fingerprint != evaluate_group_eligibility(
+        changed_group
+    ).evidence_fingerprint
+
+
+def test_invalidation_with_new_evidence_resets_to_pending_and_records_actor() -> None:
+    verification = {
+        "status": "passed",
+        "evidence_fingerprint": "old-fingerprint",
+        "evidence_version": 3,
+        "attempt_count": 2,
+    }
+
+    result = invalidate_group_verification(
+        verification,
+        reason="photo_reclassified",
+        actor="reviewer-a",
+        evidence_fingerprint="new-fingerprint",
+    )
+
+    assert result["status"] == "pending"
+    assert result["evidence_fingerprint"] == "new-fingerprint"
+    assert result["evidence_version"] == 4
+    assert result["attempt_count"] == 0
+    assert result["invalidation_reason"] == "photo_reclassified"
+    assert result["invalidated_by"] == "reviewer-a"
+    assert result["should_enqueue"] is True
+
+
+def test_invalidation_with_unchanged_pending_fingerprint_does_not_requeue() -> None:
+    verification = {
+        "status": "pending",
+        "evidence_fingerprint": "same-fingerprint",
+        "evidence_version": 3,
+        "attempt_count": 1,
+    }
+
+    result = invalidate_group_verification(
+        verification,
+        reason="duplicate_event",
+        actor="reviewer-a",
+        evidence_fingerprint="same-fingerprint",
+    )
+
+    assert result["status"] == "pending"
+    assert result["evidence_version"] == 3
+    assert result["attempt_count"] == 1
+    assert result["should_enqueue"] is False

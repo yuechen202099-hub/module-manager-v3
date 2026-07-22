@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum as SAEnum,
     ForeignKey,
@@ -383,6 +384,49 @@ class Photo(Base, TimestampMixin):
     delete_reason: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     raw_data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class GroupBarcodeVerification(Base, TimestampMixin):
+    __tablename__ = "group_barcode_verifications"
+    __table_args__ = (
+        UniqueConstraint("team_id", "group_id", name="uq_group_barcode_verifications_team_group"),
+        CheckConstraint(
+            "status IN ('not_eligible', 'pending', 'processing', 'passed', 'partial', "
+            "'unreadable', 'mismatch', 'manual_confirmed', 'failed')",
+            name="ck_group_barcode_verifications_status",
+        ),
+        Index("ix_group_barcode_verifications_pending", "team_id", "status", "updated_at"),
+        Index("ix_group_barcode_verifications_lease", "team_id", "lease_expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("material_groups.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", server_default=text("'pending'"))
+    evidence_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    evidence_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default=text("1"))
+    meter_matched: Mapped[bool | None] = mapped_column(Boolean)
+    module_matched: Mapped[bool | None] = mapped_column(Boolean)
+    collector_matched: Mapped[bool | None] = mapped_column(Boolean)
+    recognition_source: Mapped[str | None] = mapped_column(String(64))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invalidation_reason: Mapped[str | None] = mapped_column(String(128))
+    invalidated_by: Mapped[str | None] = mapped_column(String(64))
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    auto_archive_status: Mapped[str | None] = mapped_column(String(32))
+    auto_archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    auto_archive_error: Mapped[str | None] = mapped_column(Text)
+
+
+class BarcodeMaintenanceControl(Base, TimestampMixin):
+    __tablename__ = "barcode_maintenance_controls"
+
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True)
+    paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    last_batch_id: Mapped[str | None] = mapped_column(String(128))
+    last_batch_progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
 class TaskGroup(Base, TimestampMixin):
