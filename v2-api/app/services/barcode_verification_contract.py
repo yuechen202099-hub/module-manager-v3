@@ -56,7 +56,9 @@ def _timestamp(value: Any) -> str | None:
 
 
 def normalize_legacy_evidence_value(value: Any) -> str:
-    return str(value or "").strip(LEGACY_EVIDENCE_WHITESPACE)
+    if not isinstance(value, str):
+        return ""
+    return value.strip(LEGACY_EVIDENCE_WHITESPACE)
 
 
 def _same_evidence(source: Any, raw: Mapping[str, Any]) -> bool:

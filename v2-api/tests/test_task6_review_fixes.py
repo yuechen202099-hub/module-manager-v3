@@ -26,6 +26,7 @@ from app.models import (
 from app.services import photo_barcode_check
 from app.services import local_simulation
 from app.services import state_repository as repository
+from app.services.barcode_verification_contract import LEGACY_EVIDENCE_WHITESPACE
 
 
 TERMINAL_STATUSES = ("passed", "manual_confirmed", "partial", "unreadable", "mismatch", "failed")
@@ -1421,11 +1422,16 @@ def test_postgres_review_uses_explicit_legacy_evidence_whitespace_semantics(
     session_factory = isolated_task6_postgres
     team_id = f"task6-round4-whitespace-{uuid4().hex[:12]}"
     monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
-    whitespace_values = (
-        ("tab", "\t"),
-        ("lf", "\n"),
-        ("cr", "\r"),
-        ("nbsp", "\u00a0"),
+    python_whitespace = {
+        chr(codepoint)
+        for codepoint in range(0x110000)
+        if chr(codepoint).isspace()
+    }
+    assert len(LEGACY_EVIDENCE_WHITESPACE) == 29
+    assert set(LEGACY_EVIDENCE_WHITESPACE) == python_whitespace
+    whitespace_values = tuple(
+        (f"u{ord(whitespace):04x}", whitespace)
+        for whitespace in LEGACY_EVIDENCE_WHITESPACE
     )
 
     with session_factory.begin() as session:
@@ -1508,3 +1514,119 @@ def test_postgres_review_uses_explicit_legacy_evidence_whitespace_semantics(
         assert {item["status"] for item in result["items"]} <= expected_statuses[status]
         assert item_ids == expected_ids[status]
         assert set(_exported_postgres_group_ids(monkeypatch, postgres_repository, status=status)) == item_ids
+
+
+def test_postgres_review_ignores_non_string_legacy_evidence_elements(
+    isolated_task6_postgres,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = isolated_task6_postgres
+    team_id = f"task6-round5-types-{uuid4().hex[:12]}"
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+    non_string_values = (
+        ("false", False),
+        ("zero", 0),
+        ("null", None),
+        ("true", True),
+        ("one", 1),
+        ("object", {"nested": "value"}),
+        ("array", ["nested"]),
+    )
+
+    with session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Task 6 round 5 evidence type test"))
+        session.flush()
+        project = Project(team_id=team_id, code=f"T6R5-T-{uuid4().hex[:10]}", name="Task 6 round 5")
+        session.add(project)
+        session.flush()
+
+        for name, value in non_string_values:
+            machine_photos = [{} for _category in REQUIRED_CATEGORIES]
+            machine_photos[0] = {"machine_barcode_values": [value]}
+            machine_photos[1] = {"ocr_candidate_values": [f"REAL-OCR-{name}"]}
+            _add_legacy_postgres_group(
+                session,
+                team_id=team_id,
+                project_id=project.id,
+                name=f"machine-non-string-{name}",
+                photo_raw_data=machine_photos,
+            )
+
+            ocr_photos = [{} for _category in REQUIRED_CATEGORIES]
+            ocr_photos[0] = {"ocr_candidate_values": [value]}
+            _add_legacy_postgres_group(
+                session,
+                team_id=team_id,
+                project_id=project.id,
+                name=f"ocr-non-string-{name}",
+                photo_raw_data=ocr_photos,
+            )
+
+        relation_groups = {
+            "relation-mismatch": "mismatch",
+            "relation-unreadable": "unreadable",
+        }
+        for name, status in relation_groups.items():
+            group = _add_legacy_postgres_group(
+                session,
+                team_id=team_id,
+                project_id=project.id,
+                name=name,
+            )
+            session.add(
+                GroupBarcodeVerification(
+                    team_id=team_id,
+                    group_id=group.id,
+                    status=status,
+                    evidence_fingerprint=uuid4().hex * 2,
+                    evidence_version=1,
+                    recognition_source="machine_barcode",
+                )
+            )
+
+    expected_ids = {
+        "matched": {f"ocr-non-string-{name}" for name, _value in non_string_values},
+        "mismatched": {
+            *(f"machine-non-string-{name}" for name, _value in non_string_values),
+            "relation-mismatch",
+        },
+        "unreadable": {"relation-unreadable"},
+    }
+    expected_ids["all"] = set().union(*expected_ids.values())
+    expected_statuses = {
+        "matched": {"matched"},
+        "mismatched": {"mismatched"},
+        "unreadable": {"unreadable"},
+        "all": {"matched", "mismatched", "unreadable"},
+    }
+    postgres_repository = repository.PostgresStateRepository()
+    results = {}
+
+    for status in ("matched", "mismatched", "unreadable", "all"):
+        result = postgres_repository.list_photo_barcode_review_groups(
+            status=status,
+            query="",
+            limit=100,
+            offset=0,
+        )
+        results[status] = result
+        item_ids = {item["group_id"] for item in result["items"]}
+        assert result["total"] == len(result["items"])
+        assert {item["status"] for item in result["items"]} <= expected_statuses[status]
+        assert item_ids == expected_ids[status]
+        assert set(_exported_postgres_group_ids(monkeypatch, postgres_repository, status=status)) == item_ids
+
+    items_by_id = {item["group_id"]: item for item in results["all"]["items"]}
+    for name, _value in non_string_values:
+        machine_photo = next(
+            photo
+            for photo in items_by_id[f"machine-non-string-{name}"]["photos"]
+            if photo["id"].endswith("-photo-0")
+        )
+        ocr_photo = next(
+            photo
+            for photo in items_by_id[f"ocr-non-string-{name}"]["photos"]
+            if photo["id"].endswith("-photo-0")
+        )
+        assert machine_photo["machine_barcode_values"] == []
+        assert ocr_photo["ocr_candidate_values"] == []

@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import UUID, uuid4
 
-from sqlalchemy import String, and_, case, cast, func, literal, or_, select
+from sqlalchemy import String, Text, and_, case, cast, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import JSONB, array
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
@@ -1348,11 +1349,16 @@ def _postgres_review_verification_status_expression():
 
     def has_array_values(key: str):
         value = legacy_photo.raw_data[key]
-        elements = func.jsonb_array_elements_text(value).table_valued("value")
+        elements = func.jsonb_array_elements(value).table_valued("value")
+        element = cast(elements.c.value, JSONB)
+        element_text = element.op("#>>")(array([], type_=Text))
         non_empty_element_count = (
             select(func.count())
             .select_from(elements)
-            .where(func.btrim(elements.c.value, LEGACY_EVIDENCE_WHITESPACE) != "")
+            .where(
+                func.jsonb_typeof(element) == "string",
+                func.btrim(element_text, LEGACY_EVIDENCE_WHITESPACE) != "",
+            )
             .scalar_subquery()
         )
         return case(
