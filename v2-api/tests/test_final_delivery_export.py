@@ -536,6 +536,84 @@ def test_package_is_reserved_before_build_lock_releases_to_cleanup(
         package.release()
 
 
+def _install_atomic_cleanup_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    cleanup_now: datetime,
+):
+    original_reserve = final_delivery_export._reserve_delivery_cache_key_locked
+    probe = {
+        "hook_ran": Event(),
+        "cleanup_attempted": Event(),
+        "first_pass_done": Event(),
+        "cleanup_completed": Event(),
+        "reports": [],
+        "errors": [],
+        "worker": None,
+        "target_key": None,
+    }
+
+    def cleanup_worker() -> None:
+        try:
+            probe["cleanup_attempted"].set()
+            probe["reports"].append(
+                cleanup_delivery_cache(
+                    tmp_path,
+                    max_object_bytes=0,
+                    groups=[],
+                    now=cleanup_now,
+                )
+            )
+            with final_delivery_export._CACHE_PATH_CONDITION:
+                probe["first_pass_done"].set()
+                released = final_delivery_export._CACHE_PATH_CONDITION.wait_for(
+                    lambda: not final_delivery_export._cache_path_is_reserved(probe["target_key"]),
+                    timeout=5,
+                )
+            if not released:
+                raise AssertionError("package lease was not released")
+            probe["reports"].append(
+                cleanup_delivery_cache(
+                    tmp_path,
+                    max_object_bytes=0,
+                    groups=[],
+                    now=cleanup_now,
+                )
+            )
+        except BaseException as exc:
+            probe["errors"].append(exc)
+        finally:
+            probe["first_pass_done"].set()
+            probe["cleanup_completed"].set()
+
+    def reserve_with_cleanup_attempt(key: str) -> None:
+        probe["hook_ran"].set()
+        probe["target_key"] = key
+        worker = Thread(target=cleanup_worker, daemon=True)
+        probe["worker"] = worker
+        worker.start()
+        assert probe["cleanup_attempted"].wait(5)
+        assert not probe["first_pass_done"].wait(0.1)
+        original_reserve(key)
+
+    monkeypatch.setattr(
+        final_delivery_export,
+        "_reserve_delivery_cache_key_locked",
+        reserve_with_cleanup_attempt,
+    )
+    return probe
+
+
+def _finish_atomic_cleanup_probe(probe, package) -> None:
+    if package is not None:
+        package.release()
+    worker = probe["worker"]
+    if worker is not None:
+        worker.join(5)
+        assert not worker.is_alive()
+
+
 def test_fresh_package_validation_and_lease_are_atomic_with_cleanup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -550,32 +628,34 @@ def test_fresh_package_validation_and_lease_are_atomic_with_cleanup(
         now=now,
     )
     original.release()
-    reserve = final_delivery_export.reserve_delivery_cache_path
-
-    def cleanup_before_reserve(path: Path | str) -> str:
-        cleanup_delivery_cache(
-            tmp_path,
-            max_object_bytes=0,
-            groups=[],
-            now=now + timedelta(days=8),
-        )
-        return reserve(path)
-
-    monkeypatch.setattr(final_delivery_export, "reserve_delivery_cache_path", cleanup_before_reserve)
-
-    package = get_or_build_delivery_package(
-        "fresh-reserve-gap",
-        "a" * 64,
-        groups=[delivery_group()],
-        photo_reader=read_photo,
-        cache_root=tmp_path,
-        now=now + timedelta(hours=1),
-        package_builder=lambda _groups, _reader: pytest.fail("fresh package must be reused"),
+    probe = _install_atomic_cleanup_probe(
+        monkeypatch,
+        tmp_path,
+        cleanup_now=now + timedelta(days=8),
     )
+    package = None
     try:
+        package = get_or_build_delivery_package(
+            "fresh-reserve-gap",
+            "a" * 64,
+            groups=[delivery_group()],
+            photo_reader=read_photo,
+            cache_root=tmp_path,
+            now=now + timedelta(hours=1),
+            package_builder=lambda _groups, _reader: pytest.fail("fresh package must be reused"),
+        )
+        assert probe["hook_ran"].is_set()
+        assert probe["cleanup_attempted"].is_set()
+        assert probe["first_pass_done"].wait(5)
+        assert probe["reports"][0]["deleted_packages"] == 0
+        assert not probe["cleanup_completed"].is_set()
         assert package.path.is_file()
     finally:
-        package.release()
+        _finish_atomic_cleanup_probe(probe, package)
+    assert probe["cleanup_completed"].is_set()
+    assert probe["errors"] == []
+    assert probe["reports"][1]["deleted_packages"] == 1
+    assert not package.path.exists()
 
 
 def test_replacement_and_new_lease_are_atomic_with_cleanup(
@@ -592,33 +672,35 @@ def test_replacement_and_new_lease_are_atomic_with_cleanup(
         now=now,
     )
     original.release()
-    reserve = final_delivery_export.reserve_delivery_cache_path
-
-    def cleanup_before_reserve(path: Path | str) -> str:
-        cleanup_delivery_cache(
-            tmp_path,
-            max_object_bytes=0,
-            groups=[],
-            now=now + timedelta(days=16),
-        )
-        return reserve(path)
-
-    monkeypatch.setattr(final_delivery_export, "reserve_delivery_cache_path", cleanup_before_reserve)
-
-    package = get_or_build_delivery_package(
-        "replacement-reserve-gap",
-        "b" * 64,
-        groups=[delivery_group()],
-        photo_reader=read_photo,
-        cache_root=tmp_path,
-        now=now + timedelta(days=8),
-        package_builder=lambda _groups, _reader: b"replacement-package",
+    probe = _install_atomic_cleanup_probe(
+        monkeypatch,
+        tmp_path,
+        cleanup_now=now + timedelta(days=16),
     )
+    package = None
     try:
+        package = get_or_build_delivery_package(
+            "replacement-reserve-gap",
+            "b" * 64,
+            groups=[delivery_group()],
+            photo_reader=read_photo,
+            cache_root=tmp_path,
+            now=now + timedelta(days=8),
+            package_builder=lambda _groups, _reader: b"replacement-package",
+        )
+        assert probe["hook_ran"].is_set()
+        assert probe["cleanup_attempted"].is_set()
+        assert probe["first_pass_done"].wait(5)
+        assert probe["reports"][0]["deleted_packages"] == 0
+        assert not probe["cleanup_completed"].is_set()
         assert package.path.is_file()
         assert package.path.read_bytes() == b"replacement-package"
     finally:
-        package.release()
+        _finish_atomic_cleanup_probe(probe, package)
+    assert probe["cleanup_completed"].is_set()
+    assert probe["errors"] == []
+    assert probe["reports"][1]["deleted_packages"] == 1
+    assert not package.path.exists()
 
 
 def test_package_is_reserved_before_build_lock_releases_to_expired_rebuild(

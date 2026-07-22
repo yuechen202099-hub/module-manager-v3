@@ -799,6 +799,38 @@ def test_json_delivery_cache_reconciliation_is_bounded_and_eventually_recovers(
     assert len(local_simulation._team_states[team_id]["delivery_cache_jobs"]) == 25
 
 
+def test_json_missing_job_reconciliation_checks_eligibility_and_advances_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
+    blocked = eligible_group("json-missing-ineligible")
+    blocked.update({"status": "approved", "reviewer": "reviewer-a"})
+    blocked["photos"][1]["category"] = "before_box"
+    later = eligible_group("json-missing-later")
+    later.update({"status": "approved", "reviewer": "reviewer-a"})
+    team_id = install_json_queue(monkeypatch, [blocked, later])
+
+    first = delivery_cache._reconcile_json_delivery_cache_jobs(team_id, limit=1)
+    state = local_simulation._team_states[team_id]
+    assert first == {"backend": "json", "scanned": 1, "enqueued": 0}
+    assert state["delivery_cache_jobs"] == []
+    assert state["delivery_cache_reconcile_cursor"] == 1
+
+    second = delivery_cache._reconcile_json_delivery_cache_jobs(team_id, limit=1)
+    state = local_simulation._team_states[team_id]
+    assert second == {"backend": "json", "scanned": 1, "enqueued": 1}
+    assert [job["group_id"] for job in state["delivery_cache_jobs"]] == [later["id"]]
+
+    state["groups"][0]["photos"][1]["category"] = "collector_barcode"
+    repaired = delivery_cache._reconcile_json_delivery_cache_jobs(team_id, limit=1)
+    state = local_simulation._team_states[team_id]
+    assert repaired == {"backend": "json", "scanned": 1, "enqueued": 1}
+    assert sorted(job["group_id"] for job in state["delivery_cache_jobs"]) == sorted(
+        [blocked["id"], later["id"]]
+    )
+
+
 def test_postgres_delivery_cache_reconciliation_uses_bounded_group_first_bulk_lock_queries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1088,21 +1120,7 @@ def test_postgres_reconciliation_matches_json_eligibility_and_recovers_after_evi
             photo.storage_type = ""
             photo.storage_key = ""
 
-    job = SimpleNamespace(
-        id=uuid4(),
-        team_id=group.team_id,
-        group_id=group.id,
-        status="failed",
-        attempt_count=1,
-        lease_owner=None,
-        lease_token=None,
-        lease_expires_at=None,
-        requested_by="reviewer-a",
-        request_reason="review_completed",
-        last_error="old failure",
-        completed_at=None,
-    )
-    phase = {"eligible": False}
+    jobs = []
     control = SimpleNamespace(delivery_cache_reconcile_cursor=None)
 
     class Rows:
@@ -1131,7 +1149,7 @@ def test_postgres_reconciliation_matches_json_eligibility_and_recovers_after_evi
             if "FROM photos" in sql:
                 return Rows(photos)
             if "FOR UPDATE OF delivery_cache_jobs" in sql:
-                return Rows([job])
+                return Rows(jobs)
             if "FROM material_groups" in sql:
                 if "material_groups.id >" in sql:
                     return Rows([])
@@ -1145,6 +1163,7 @@ def test_postgres_reconciliation_matches_json_eligibility_and_recovers_after_evi
 
         def add(self, value):
             assert isinstance(value, DeliveryCacheJob)
+            jobs.append(value)
 
         def flush(self):
             return None
@@ -1160,6 +1179,7 @@ def test_postgres_reconciliation_matches_json_eligibility_and_recovers_after_evi
     blocked = delivery_cache._reconcile_postgres_delivery_cache_jobs(group.team_id, limit=20)
 
     assert blocked["enqueued"] == 0
+    assert jobs == []
     assert group.raw_data["delivery_cache_status"] == "retry_pending"
 
     for index, photo in enumerate(photos):
@@ -1170,12 +1190,11 @@ def test_postgres_reconciliation_matches_json_eligibility_and_recovers_after_evi
         photo.source_url = photo.image_url
         photo.storage_type = "oss"
         photo.storage_key = f"parity-{index}.jpg"
-    phase["eligible"] = True
-
     recovered = delivery_cache._reconcile_postgres_delivery_cache_jobs(group.team_id, limit=20)
 
     assert recovered["enqueued"] == 1
-    assert job.status == "pending"
+    assert len(jobs) == 1
+    assert jobs[0].status == "pending"
     assert group.raw_data["delivery_cache_status"] == "pending"
 
 
