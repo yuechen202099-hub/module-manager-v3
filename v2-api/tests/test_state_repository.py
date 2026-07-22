@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
+import inspect
 import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -524,6 +526,153 @@ def test_dual_manual_confirmation_restores_json_when_postgres_confirmation_fails
         )
 
     assert repository.local_simulation._team_states[team_id] == before
+
+
+def _prepare_json_review_cache_state(monkeypatch: pytest.MonkeyPatch, team_id: str) -> dict:
+    state = _json_barcode_state(team_id)
+    monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+    monkeypatch.setattr(repository.local_simulation, "photo_can_build_delivery_cache", lambda _photo: True)
+    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_inflight", set())
+    return state
+
+
+def test_json_review_group_submits_cache_only_after_authoritative_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"json-review-cache-{uuid4()}"
+    _prepare_json_review_cache_state(monkeypatch, team_id)
+    events: list[str] = []
+
+    class CapturingExecutor:
+        def submit(self, _callback, *_args):
+            events.append("submit")
+
+    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_executor", CapturingExecutor())
+    monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: events.append("persist"))
+
+    reviewed = repository.JsonStateRepository().review_group(
+        "group-json-barcode",
+        "approved",
+        "reviewer-a",
+        "ready",
+    )
+
+    assert reviewed["status"] == "approved"
+    assert events == ["persist", "submit"]
+
+
+def test_json_review_group_persistence_failure_submits_no_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"json-review-rollback-{uuid4()}"
+    state = _prepare_json_review_cache_state(monkeypatch, team_id)
+    before = deepcopy(state)
+    submitted: list[str] = []
+
+    class CapturingExecutor:
+        def submit(self, _callback, *_args):
+            submitted.append("submit")
+
+    def fail_persistence() -> None:
+        raise RuntimeError("injected JSON review persistence failure")
+
+    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_executor", CapturingExecutor())
+    monkeypatch.setattr(repository.local_simulation, "save_all_team_states", fail_persistence)
+
+    with pytest.raises(RuntimeError, match="injected JSON review persistence failure"):
+        repository.JsonStateRepository().review_group(
+            "group-json-barcode",
+            "approved",
+            "reviewer-a",
+            "ready",
+        )
+
+    assert submitted == []
+    assert repository.local_simulation._team_states[team_id] == before
+
+
+def test_dual_review_group_mirror_failure_rolls_back_json_and_submits_no_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"dual-review-rollback-{uuid4()}"
+    state = _prepare_json_review_cache_state(monkeypatch, team_id)
+    before = deepcopy(state)
+    submitted: list[str] = []
+
+    class CapturingExecutor:
+        def submit(self, _callback, *_args):
+            submitted.append("submit")
+
+    class BrokenMirrorRepository:
+        def review_group(self, *_args, **_kwargs):
+            raise RuntimeError("injected PostgreSQL review failure")
+
+    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_executor", CapturingExecutor())
+    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", BrokenMirrorRepository)
+
+    with pytest.raises(RuntimeError, match="injected PostgreSQL review failure"):
+        repository.DualWriteStateRepository().review_group(
+            "group-json-barcode",
+            "approved",
+            "reviewer-a",
+            "ready",
+        )
+
+    assert submitted == []
+    assert repository.local_simulation._team_states[team_id] == before
+
+
+def test_json_review_group_keeps_committed_review_when_cache_submission_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"json-review-retry-{uuid4()}"
+    _prepare_json_review_cache_state(monkeypatch, team_id)
+    persistence_calls: list[str] = []
+
+    class BrokenExecutor:
+        def submit(self, _callback, *_args):
+            raise RuntimeError("executor unavailable")
+
+    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_executor", BrokenExecutor())
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "save_all_team_states",
+        lambda: persistence_calls.append("persist"),
+    )
+
+    reviewed = repository.JsonStateRepository().review_group(
+        "group-json-barcode",
+        "approved",
+        "reviewer-a",
+        "ready",
+    )
+
+    committed_state = repository.local_simulation._team_states[team_id]
+    committed_group = committed_state["groups"][0]
+    assert reviewed["status"] == "approved"
+    assert committed_group["status"] == "approved"
+    assert committed_group["delivery_cache_status"] == "retry_pending"
+    assert committed_group["delivery_cache_retryable"] is True
+    assert committed_group["delivery_cache_error"] == "delivery cache submission failed"
+    assert any(
+        event["action"] == "delivery_cache_submission_failed"
+        and event["payload"]["retryable"] is True
+        for event in committed_state["audit_events"]
+    )
+    assert len(persistence_calls) == 2
+
+
+def test_group_barcode_rescan_audit_payload_has_unique_keys() -> None:
+    tree = ast.parse(inspect.getsource(repository.local_simulation.rescan_photo_barcode))
+    duplicate_keys = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = [key.value for key in node.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)]
+        duplicate_keys.extend(key for key in keys if keys.count(key) > 1)
+
+    assert duplicate_keys == []
 
 
 def _postgres_manual_confirmation_fixture():

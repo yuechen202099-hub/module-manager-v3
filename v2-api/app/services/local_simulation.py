@@ -4,6 +4,7 @@ import html
 import hashlib
 import json
 import copy
+import logging
 import mimetypes
 import os
 import re
@@ -33,6 +34,9 @@ from app.services.photo_storage import (
     static_upload_root,
     validate_image_content,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_TOTAL_CATALOG = Path("C:/Users/Administrator/Desktop/\u603b\u4f53\u6570\u636e.xlsx")
@@ -1262,6 +1266,40 @@ def build_delivery_cache_for_group(group_id: str, force: bool = False) -> dict[s
     return {"status": group["delivery_cache_status"], "built": built, "reused": reused, "failed": failed, "group_id": group_id}
 
 
+def _record_delivery_cache_submission_failure(group_id: str, team: str, exc: Exception) -> None:
+    team_token = set_current_team(team)
+    transaction = None
+    try:
+        transaction = begin_authoritative_json_write(team)
+        token = activate_authoritative_json_write(transaction)
+        failed_group = get_group(group_id)
+        if failed_group is None:
+            abort_authoritative_json_write(transaction, token)
+            transaction = None
+            return
+        failed_group["delivery_cache_status"] = "retry_pending"
+        failed_group["delivery_cache_error"] = "delivery cache submission failed"
+        failed_group["delivery_cache_retryable"] = True
+        failed_group["delivery_cache_retry_requested_at"] = now_iso()
+        append_audit_event(
+            "delivery_cache_submission_failed",
+            "system",
+            {
+                "group_id": group_id,
+                "retryable": True,
+                "error_type": type(exc).__name__,
+            },
+        )
+        finish_authoritative_json_write(transaction, token)
+        transaction = None
+    except Exception:
+        if transaction is not None:
+            abort_authoritative_json_write(transaction)
+        logger.exception("Failed to persist delivery-cache retry state for group %s", group_id)
+    finally:
+        reset_current_team(team_token)
+
+
 def schedule_delivery_cache_build(group_id: str, team_id: str | None = None, force: bool = False) -> None:
     team = normalize_team_id(team_id or current_team_id())
     group = get_group(group_id)
@@ -1303,6 +1341,10 @@ def schedule_delivery_cache_build(group_id: str, team_id: str | None = None, for
             _delivery_cache_inflight.add(key)
         try:
             _delivery_cache_executor.submit(worker)
+        except Exception as exc:
+            with _delivery_cache_lock:
+                _delivery_cache_inflight.discard(key)
+            _record_delivery_cache_submission_failure(group_id, team, exc)
         except BaseException:
             with _delivery_cache_lock:
                 _delivery_cache_inflight.discard(key)
@@ -6748,7 +6790,6 @@ def rescan_photo_barcode(group_id: str, photo_id: str, reviewer: str, category: 
         reviewer,
         {
             "group_id": group_id,
-            "photo_id": photo_id,
             "photo_id": photo_id,
             "status": verification.get("status", "pending"),
             "should_enqueue": bool(verification.get("should_enqueue")),

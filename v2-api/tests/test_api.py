@@ -3674,6 +3674,40 @@ def test_validation_error_uses_contract_shape() -> None:
     assert isinstance(payload["request_id"], str)
 
 
+def test_review_api_submits_delivery_cache_only_after_json_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client.post("/local-test/bootstrap")
+    tasks = client.get("/local-test/tasks").json()["data"]["items"]
+    task = next(item for item in tasks if item["can_claim"])
+    claimed = client.post(
+        f"/local-test/tasks/{task['id']}/claim",
+        json={"reviewer": "api-cache-reviewer"},
+    )
+    assert claimed.status_code == 200
+    group = client.get(f"/local-test/tasks/{task['id']}/groups?limit=1").json()["data"]["items"][0]
+    events: list[str] = []
+
+    class CapturingExecutor:
+        def submit(self, _callback, *_args):
+            events.append("submit")
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: state_repository.JsonStateRepository())
+    monkeypatch.setattr(local_simulation, "photo_can_build_delivery_cache", lambda _photo: True)
+    monkeypatch.setattr(local_simulation, "_delivery_cache_executor", CapturingExecutor())
+    monkeypatch.setattr(local_simulation, "_delivery_cache_inflight", set())
+    monkeypatch.setattr(main_module, "save_all_team_states", lambda: events.append("persist"))
+
+    response = client.patch(
+        f"/local-test/groups/{group['id']}/review",
+        json={"status": "approved", "reviewer": "api-cache-reviewer", "note": "ready"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "approved"
+    assert events == ["persist", "submit"]
+
+
 def test_local_test_task_and_review_flow() -> None:
     client.post("/local-test/bootstrap")
 

@@ -2972,7 +2972,22 @@ class JsonStateRepository(StateRepository):
         note: str = "",
         exception_note: str = "",
     ) -> dict[str, Any]:
-        return local_simulation.review_group(group_id, status, reviewer, note, exception_note)
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            result = local_simulation.review_group(group_id, status, reviewer, note, exception_note)
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        return result
 
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
         return local_simulation.classify_photo(group_id, photo_id, category, reviewer)
@@ -8344,8 +8359,23 @@ class DualWriteStateRepository(JsonStateRepository):
         note: str = "",
         exception_note: str = "",
     ) -> dict[str, Any]:
-        result = super().review_group(group_id, status, reviewer, note, exception_note)
-        self._mirror_write("review_group", group_id, status, reviewer, note, exception_note)
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            result = super().review_group(group_id, status, reviewer, note, exception_note)
+            mirror = self.postgres_repository_factory()
+            mirror.review_group(group_id, status, reviewer, note, exception_note)
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
         return result
 
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
