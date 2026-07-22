@@ -354,16 +354,33 @@ def bound_review_actor(request: Request, reviewer: str, fallback: str = "local-r
         {"reviewer", "admin"},
         detail="Reviewer or administrator role required",
     )
+    clean_reviewer = str(reviewer or "").strip()
+    if request_is_admin(request):
+        return clean_reviewer or request_actor(request, fallback)
+    payload = request_auth_payload(request)
+    subject = str(payload.get("sub") or payload.get("username") or "").strip()
+    if not subject:
+        if settings.app_env.lower() in {"prod", "production"}:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        return clean_reviewer or fallback
+    if clean_reviewer and clean_reviewer != subject:
+        raise HTTPException(status_code=403, detail="Reviewer must match the signed-in user")
+    return subject
+
+
+def bound_sensitive_barcode_actor(request: Request, requested_actor: str, fallback: str = "local-reviewer") -> str:
+    require_request_roles(
+        request,
+        {"reviewer", "admin"},
+        detail="Reviewer or administrator role required",
+    )
     payload = request_auth_payload(request)
     subject = str(payload.get("sub") or payload.get("username") or "").strip()
     if subject:
-        requested = str(reviewer or "").strip()
-        if requested and requested != subject:
-            raise HTTPException(status_code=403, detail="Reviewer must match the signed-in user")
         return subject
     if settings.app_env.lower() in {"prod", "production"}:
         raise HTTPException(status_code=401, detail="Authentication required")
-    return str(reviewer or "").strip() or fallback
+    return str(requested_actor or "").strip() or fallback
 
 
 def request_is_constructor(request: Request) -> bool:
@@ -3108,7 +3125,7 @@ def rescan_photo_barcode(
 ):
     try:
         repo = state_repository()
-        reviewer = bound_review_actor(request, payload.reviewer)
+        reviewer = bound_sensitive_barcode_actor(request, payload.reviewer)
         photo = repo.rescan_photo_barcode(group_id, photo_id, reviewer, payload.category)
         invalidate_project_board_summary_cache()
         invalidate_task_snapshot()
@@ -3156,7 +3173,7 @@ def confirm_group_barcode_manually(
     request: Request,
 ):
     try:
-        actor = bound_review_actor(request, payload.actor)
+        actor = bound_sensitive_barcode_actor(request, payload.actor)
         result = state_repository().confirm_group_barcode_manually(
             group_id,
             actor=actor,

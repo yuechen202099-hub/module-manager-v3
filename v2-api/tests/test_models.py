@@ -29,6 +29,11 @@ def test_group_barcode_verification_schema_uses_string_status_and_queue_indexes(
     assert any("manual_confirmed" in constraint for constraint in check_constraints)
     assert indexes["ix_group_barcode_verifications_pending"] == ("team_id", "status", "updated_at")
     assert indexes["ix_group_barcode_verifications_lease"] == ("team_id", "lease_expires_at")
+    assert table.c.lease_token.type.__class__.__name__ == "String"
+    assert table.c.lease_token.type.length == 128
+    assert table.c.lease_token.nullable is True
+    assert table.c.lease_token.default is None
+    assert table.c.lease_token.server_default is None
 
 
 def test_barcode_maintenance_control_is_scoped_to_one_team() -> None:

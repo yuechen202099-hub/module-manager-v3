@@ -23,8 +23,15 @@ from app.services.photo_storage import (
     validate_remote_image_url,
 )
 
-BarcodeScanner = Callable[[dict[str, Any]], Iterable[str]]
+BarcodeScanner = Callable[[dict[str, Any]], Iterable[str] | Mapping[str, Iterable[str]]]
 OcrReader = Callable[[dict[str, Any], list[str]], Iterable[str]]
+
+
+class MachineCodeValues(list[str]):
+    def __init__(self, barcode_values: Iterable[str], qr_values: Iterable[str]) -> None:
+        self.barcode_values = _unique_values(barcode_values)
+        self.qr_values = _unique_values(qr_values)
+        super().__init__(_unique_values([*self.barcode_values, *self.qr_values]))
 
 BARCODE_REQUIRED_CATEGORY_TYPES = {
     "meter_barcode": "meter",
@@ -74,6 +81,12 @@ BARCODE_CHECK_FIELDS = (
     "barcode_checked_at",
     "barcode_check_error",
     "barcode_check_method",
+    "machine_barcode_values",
+    "machine_barcode_normalized_values",
+    "machine_qr_values",
+    "machine_qr_normalized_values",
+    "ocr_candidate_values",
+    "ocr_candidate_normalized_values",
 )
 
 
@@ -130,11 +143,13 @@ def check_photo_barcode(
     if expected_type == "none":
         scanned_values: list[str] = []
         normalized_scanned_values: list[str] = []
-        barcode_values: list[str] = []
+        machine_barcode_values: list[str] = []
+        machine_qr_values: list[str] = []
         if collect_group_evidence:
-            barcode_values = _scan_values(photo, scanner=scanner)
-            ocr_values = _ocr_values(photo, [], ocr_reader=ocr_reader) if use_ocr and not barcode_values else []
-            scanned_values = _unique_values([*barcode_values, *ocr_values])
+            machine_barcode_values, machine_qr_values = _scan_machine_values(photo, scanner=scanner)
+            machine_values = _unique_values([*machine_barcode_values, *machine_qr_values])
+            ocr_values = _ocr_values(photo, [], ocr_reader=ocr_reader) if use_ocr and not machine_values else []
+            scanned_values = _unique_values([*machine_values, *ocr_values])
             normalized_scanned_values = _normalized_values(scanned_values)
         else:
             ocr_values = []
@@ -149,18 +164,20 @@ def check_photo_barcode(
             "barcode_check_matched_value": "",
             "barcode_checked_at": checked_at,
             "barcode_check_error": "",
-            "barcode_check_method": "ocr" if ocr_values and not barcode_values else "barcode" if barcode_values else "none",
+            "barcode_check_method": "ocr" if ocr_values and not machine_barcode_values and not machine_qr_values else "barcode" if machine_barcode_values or machine_qr_values else "none",
+            **_separated_recognition_fields(machine_barcode_values, machine_qr_values, ocr_values),
         }
 
-    scanned_values = _scan_values(photo, scanner=scanner)
-    normalized_scanned_values = _normalized_values(scanned_values)
+    machine_barcode_values, machine_qr_values = _scan_machine_values(photo, scanner=scanner)
+    machine_values = _unique_values([*machine_barcode_values, *machine_qr_values])
+    normalized_machine_values = _normalized_values(machine_values)
     expected_context = dict(photo)
     expected_context.update({key: value for key, value in group.items() if value})
     expected_values = expected_values_for_group(expected_context, expected_type)
-    barcode_matched = _matched_expected_value(normalized_scanned_values, expected_values, expected_type)
-    ocr_values = _ocr_values(photo, expected_values, ocr_reader=ocr_reader) if use_ocr and not barcode_matched else []
+    machine_matched = _matched_expected_value(normalized_machine_values, expected_values, expected_type)
+    ocr_values = _ocr_values(photo, expected_values, ocr_reader=ocr_reader) if use_ocr and not machine_matched else []
     normalized_ocr_values = _normalized_values(ocr_values)
-    combined_values = _unique_values([*scanned_values, *ocr_values])
+    combined_values = _unique_values([*machine_values, *ocr_values])
     normalized_combined_values = _normalized_values(combined_values)
 
     if not normalized_combined_values:
@@ -176,6 +193,7 @@ def check_photo_barcode(
             "barcode_checked_at": checked_at,
             "barcode_check_error": "no_barcode_or_ocr_detected" if use_ocr else "no_barcode_detected",
             "barcode_check_method": "none",
+            **_separated_recognition_fields([], [], []),
         }
 
     matched = _matched_expected_value(normalized_combined_values, expected_values, expected_type)
@@ -190,7 +208,26 @@ def check_photo_barcode(
         "barcode_check_matched_value": matched,
         "barcode_checked_at": checked_at,
         "barcode_check_error": "",
-        "barcode_check_method": _barcode_check_method(barcode_matched, ocr_values, matched),
+        "barcode_check_method": _barcode_check_method(machine_matched, ocr_values, matched),
+        **_separated_recognition_fields(machine_barcode_values, machine_qr_values, ocr_values),
+    }
+
+
+def _separated_recognition_fields(
+    machine_barcode_values: Iterable[Any],
+    machine_qr_values: Iterable[Any],
+    ocr_candidate_values: Iterable[Any],
+) -> dict[str, list[str]]:
+    barcodes = _unique_values(str(value or "").strip() for value in machine_barcode_values)
+    qrs = _unique_values(str(value or "").strip() for value in machine_qr_values)
+    ocr = _unique_values(str(value or "").strip() for value in ocr_candidate_values)
+    return {
+        "machine_barcode_values": barcodes,
+        "machine_barcode_normalized_values": _normalized_values(barcodes),
+        "machine_qr_values": qrs,
+        "machine_qr_normalized_values": _normalized_values(qrs),
+        "ocr_candidate_values": ocr,
+        "ocr_candidate_normalized_values": _normalized_values(ocr),
     }
 
 
@@ -399,16 +436,21 @@ def list_group_barcode_review_items(
 
 
 def default_barcode_scanner(photo: dict[str, Any]) -> list[str]:
+    channels = default_machine_code_scanner(photo)
+    return MachineCodeValues(channels["barcode"], channels["qr"])
+
+
+def default_machine_code_scanner(photo: dict[str, Any]) -> dict[str, list[str]]:
     try:
         import zxingcpp  # type: ignore # noqa: F401
     except Exception:
-        return []
+        return {"barcode": [], "qr": []}
 
     image = _photo_image(photo)
     if image is None:
-        return []
+        return {"barcode": [], "qr": []}
     try:
-        return _scan_barcode_image(image, candidate_limit=_scan_candidate_limit(photo))
+        return _scan_barcode_image_channels(image, candidate_limit=_scan_candidate_limit(photo))
     finally:
         try:
             image.close()
@@ -417,13 +459,19 @@ def default_barcode_scanner(photo: dict[str, Any]) -> list[str]:
 
 
 def _scan_barcode_image(image, *, candidate_limit: int) -> list[str]:
+    channels = _scan_barcode_image_channels(image, candidate_limit=candidate_limit)
+    return _unique_values([*channels["barcode"], *channels["qr"]])
+
+
+def _scan_barcode_image_channels(image, *, candidate_limit: int) -> dict[str, list[str]]:
     try:
         import zxingcpp  # type: ignore
     except Exception:
-        return []
+        return {"barcode": [], "qr": []}
 
     try:
-        values: list[str] = []
+        barcodes: list[str] = []
+        qrs: list[str] = []
         remaining_candidates = max(0, candidate_limit)
         for candidate in _barcode_scan_candidates(image):
             if remaining_candidates == 0:
@@ -431,19 +479,21 @@ def _scan_barcode_image(image, *, candidate_limit: int) -> list[str]:
             remaining_candidates -= 1
             try:
                 scanned_items = _read_zxing_barcodes(zxingcpp, candidate)
-                scanned: list[str] = []
                 for item in scanned_items:
                     for value in _scan_text_candidates(getattr(item, "text", "")):
-                        _append_unique(scanned, value)
+                        target = qrs if _is_qr_result(item) else barcodes
+                        _append_unique(target, value)
             except Exception:
-                scanned = []
-            for value in scanned:
-                _append_unique(values, value)
-            if values:
-                return values
-        return values
+                continue
+            if barcodes or qrs:
+                return {"barcode": barcodes, "qr": qrs}
+        return {"barcode": barcodes, "qr": qrs}
     except Exception:
-        return []
+        return {"barcode": [], "qr": []}
+
+
+def _is_qr_result(item: Any) -> bool:
+    return "qr" in str(getattr(item, "format", "")).replace("_", "").lower()
 
 
 def scan_photo_region(
@@ -803,14 +853,26 @@ def _lanczos_resampling():
     return getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
 
-def _scan_values(photo: dict[str, Any], *, scanner: BarcodeScanner | None) -> list[str]:
+def _scan_machine_values(
+    photo: dict[str, Any],
+    *,
+    scanner: BarcodeScanner | None,
+) -> tuple[list[str], list[str]]:
     scan = scanner or default_barcode_scanner
     try:
         values = scan(photo)
     except Exception:
-        values = []
-    cleaned = [str(item or "").strip() for item in values]
-    return list(dict.fromkeys(item for item in cleaned if item))
+        values = {"barcode": [], "qr": []}
+    if isinstance(values, Mapping):
+        barcode_values = values.get("barcode") or []
+        qr_values = values.get("qr") or []
+    elif isinstance(values, MachineCodeValues):
+        barcode_values = values.barcode_values
+        qr_values = values.qr_values
+    else:
+        barcode_values = values
+        qr_values = []
+    return _unique_values(barcode_values), _unique_values(qr_values)
 
 
 def _ocr_values(
@@ -1068,6 +1130,12 @@ def _group_review_photo_payload(group: dict[str, Any], photo: dict[str, Any]) ->
         "barcode_check_ocr_values": list(photo.get("barcode_check_ocr_values") or []),
         "barcode_check_ocr_normalized_values": _normalized_values(photo.get("barcode_check_ocr_values") or []),
         "barcode_check_method": str(photo.get("barcode_check_method") or ""),
+        "machine_barcode_values": list(photo.get("machine_barcode_values") or []),
+        "machine_barcode_normalized_values": list(photo.get("machine_barcode_normalized_values") or []),
+        "machine_qr_values": list(photo.get("machine_qr_values") or []),
+        "machine_qr_normalized_values": list(photo.get("machine_qr_normalized_values") or []),
+        "ocr_candidate_values": list(photo.get("ocr_candidate_values") or []),
+        "ocr_candidate_normalized_values": list(photo.get("ocr_candidate_normalized_values") or []),
     }
 
 

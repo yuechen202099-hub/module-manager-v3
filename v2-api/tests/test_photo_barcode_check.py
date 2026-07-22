@@ -117,6 +117,37 @@ def test_ocr_runs_after_mismatched_barcode_and_can_correct_result() -> None:
     assert result["barcode_check_values"] == ["COLLECTOR-999", "COLLECTOR-001"]
 
 
+def test_new_photo_scan_persists_machine_barcode_qr_and_ocr_channels_separately() -> None:
+    result = check_photo_barcode(
+        photo={"category": "module_meter", "image_url": "https://example.test/module.jpg"},
+        group={"module_asset_no": "MOD-001"},
+        scanner=lambda _photo: {"barcode": ["BAR-999"], "qr": ["QR-888"]},
+        ocr_reader=ocr_reader(["MOD-001"]),
+        use_ocr=True,
+    )
+
+    assert result["machine_barcode_values"] == ["BAR-999"]
+    assert result["machine_barcode_normalized_values"] == ["BAR999"]
+    assert result["machine_qr_values"] == ["QR-888"]
+    assert result["machine_qr_normalized_values"] == ["QR888"]
+    assert result["ocr_candidate_values"] == ["MOD-001"]
+    assert result["ocr_candidate_normalized_values"] == ["MOD001"]
+    assert result["barcode_check_values"] == ["BAR-999", "QR-888", "MOD-001"]
+
+
+def test_legacy_barcode_response_fields_remain_available_with_separated_channels() -> None:
+    result = check_photo_barcode(
+        photo={"category": "collector_barcode", "image_url": "https://example.test/collector.jpg"},
+        group={"collector": "COLLECTOR-001"},
+        scanner=lambda _photo: {"barcode": ["COLLECTOR-001"], "qr": []},
+    )
+
+    assert result["barcode_check_status"] == "matched"
+    assert result["barcode_check_method"] == "barcode"
+    assert result["barcode_check_values"] == ["COLLECTOR-001"]
+    assert result["barcode_check_normalized_values"] == ["COLLECTOR001"]
+
+
 def test_ocr_candidate_unique_suffix_completes_expected_long_value() -> None:
     values = photo_barcode_check._extract_ocr_candidates(
         "93820300014798766",
@@ -685,6 +716,8 @@ def test_default_barcode_scanner_decodes_local_image_before_zxing(tmp_path, monk
     values = default_barcode_scanner({"local_path": str(image_path)})
 
     assert values == ["ABC123"]
+    assert values.barcode_values == ["ABC123"]
+    assert values.qr_values == []
 
 
 def test_default_barcode_scanner_reads_qr_payload_candidates(tmp_path, monkeypatch) -> None:
@@ -697,7 +730,7 @@ def test_default_barcode_scanner_reads_qr_payload_candidates(tmp_path, monkeypat
 
     def read_barcodes(_image, formats=None):
         observed_formats.append(formats)
-        return [SimpleNamespace(text="https://sgcc.online/q?module=3130054512250026172609")]
+        return [SimpleNamespace(text="https://sgcc.online/q?module=3130054512250026172609", format="QRCode")]
 
     monkeypatch.setitem(
         sys.modules,
@@ -709,6 +742,8 @@ def test_default_barcode_scanner_reads_qr_payload_candidates(tmp_path, monkeypat
 
     assert observed_formats == ["any-format"]
     assert "3130054512250026172609" in values
+    assert values.barcode_values == []
+    assert "3130054512250026172609" in values.qr_values
 
 
 def test_default_barcode_scanner_rescues_enhanced_rotated_image(tmp_path, monkeypatch) -> None:

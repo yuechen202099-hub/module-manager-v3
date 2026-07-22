@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 import hashlib
 import logging
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -15,7 +15,22 @@ from sqlalchemy.exc import IntegrityError
 from app.models import AuditLog, GroupBarcodeVerification
 from app.services import state_repository as repository
 from app.services.construction_priority_import import PriorityImportRow
-from app.services.group_barcode_verification import evaluate_group_eligibility
+from app.services.group_barcode_verification import GroupScanResult, evaluate_group_eligibility
+
+
+def group_scan_result(*, status: str = "partial", passed_count: int = 2) -> GroupScanResult:
+    return GroupScanResult(
+        status=status,
+        passed_count=passed_count,
+        machine_barcode_values=["M-VERIFY-001", "C-VERIFY-001"],
+        machine_qr_values=[],
+        ocr_candidates=["MOD-VERIFY-001"],
+        matched_fields=["meter", "collector"] if passed_count == 2 else ["meter"],
+        missing_fields=["module"] if passed_count == 2 else ["module", "collector"],
+        unmatched_machine_values=[],
+        matched_ocr_candidates=["MOD-VERIFY-001"],
+        unmatched_ocr_candidates=[],
+    )
 
 
 def test_json_repository_sets_construction_priority_through_simulation(
@@ -194,6 +209,659 @@ def test_json_and_postgres_verification_payloads_ignore_historical_non_evidence_
     assert evaluate_group_eligibility(
         repository._verification_group_payload(FakeSession(), postgres_group)
     ).status == "pending"
+
+
+def _postgres_barcode_claim_fixture():
+    group_id = uuid4()
+    group = SimpleNamespace(
+        id=group_id,
+        legacy_id="group-claim",
+        team_id="claim-team",
+        terminal="T-VERIFY-001",
+        display_meter_no="M-VERIFY-001",
+        raw_data={"collector": "C-VERIFY-001", "module_asset_no": "MOD-VERIFY-001"},
+    )
+    categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
+    photos = [
+        SimpleNamespace(
+            id=uuid4(),
+            legacy_id=f"claim-photo-{index}",
+            team_id="claim-team",
+            group_id=group_id,
+            sha256=f"{index + 1:x}" * 64,
+            category=category,
+            is_active=True,
+            upload_status="uploaded",
+        )
+        for index, category in enumerate(categories)
+    ]
+    payload = repository._verification_group_payload(
+        SimpleNamespace(scalars=lambda _statement: SimpleNamespace(all=lambda: photos)),
+        group,
+    )
+    fingerprint = evaluate_group_eligibility(payload).evidence_fingerprint
+    assert fingerprint
+    verification = SimpleNamespace(
+        status="processing",
+        evidence_fingerprint=fingerprint,
+        evidence_version=7,
+        meter_matched=None,
+        module_matched=None,
+        collector_matched=None,
+        recognition_source=None,
+        attempt_count=1,
+        lease_owner="worker-new",
+        lease_token="lease-new",
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        invalidation_reason=None,
+        invalidated_by=None,
+        invalidated_at=None,
+    )
+    return group, photos, verification, fingerprint
+
+
+def test_postgres_apply_group_scan_result_rejects_stale_claim_under_row_lock() -> None:
+    group, photos, verification, fingerprint = _postgres_barcode_claim_fixture()
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.verification_locked = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalar(self, statement):
+            self.verification_locked = getattr(statement, "_for_update_arg", None) is not None
+            return verification
+
+        def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: photos)
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def refresh(self, _value) -> None:
+            return None
+
+    session = FakeSession()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert group_id == "group-claim"
+            assert lock is True
+            return group
+
+    before = deepcopy(vars(verification))
+    applied = TestRepository().apply_group_scan_result(
+        "group-claim",
+        group_scan_result(),
+        claimed_evidence_fingerprint=fingerprint,
+        claimed_evidence_version=6,
+        lease_owner="worker-old",
+        lease_token="lease-old",
+        actor="barcode-worker",
+    )
+
+    assert applied["applied"] is False
+    assert vars(verification) == before
+    assert session.verification_locked is True
+    assert session.commits == 0
+
+
+def test_postgres_apply_group_scan_result_persists_only_the_locked_matching_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group, photos, verification, fingerprint = _postgres_barcode_claim_fixture()
+    staged_audits = []
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.commits = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalar(self, statement):
+            assert getattr(statement, "_for_update_arg", None) is not None
+            return verification
+
+        def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: photos)
+
+        def add(self, _value) -> None:
+            return None
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def refresh(self, _value) -> None:
+            return None
+
+    session = FakeSession()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, _session, _group_id: str, *, lock: bool = False):
+            assert lock is True
+            return group
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "claim-team")
+    monkeypatch.setattr(repository, "_stage_transactional_audit", lambda *_args, **kwargs: staged_audits.append(kwargs))
+
+    applied = TestRepository().apply_group_scan_result(
+        "group-claim",
+        group_scan_result(),
+        claimed_evidence_fingerprint=fingerprint,
+        claimed_evidence_version=7,
+        lease_owner="worker-new",
+        lease_token="lease-new",
+        actor="barcode-worker",
+    )
+
+    assert applied["applied"] is True
+    assert verification.status == "partial"
+    assert verification.evidence_version == 7
+    assert verification.meter_matched is True
+    assert verification.module_matched is False
+    assert verification.collector_matched is True
+    assert verification.lease_owner is None
+    assert verification.lease_token is None
+    assert verification.lease_expires_at is None
+    assert group.raw_data["barcode_verification"]["result"]["passed_count"] == 2
+    assert session.commits == 1
+    assert staged_audits[0]["before_data"]["verification"]["status"] == "processing"
+    assert staged_audits[0]["after_data"]["verification"]["status"] == "partial"
+
+
+def _json_barcode_state(team_id: str) -> dict:
+    categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
+    group = {
+        "id": "group-json-barcode",
+        "task_id": 17,
+        "terminal": "T-VERIFY-001",
+        "meter_no": "M-VERIFY-001",
+        "collector": "C-VERIFY-001",
+        "module_asset_no": "MOD-VERIFY-001",
+        "photo_count": 4,
+        "status": "pending",
+        "reviewer": None,
+        "review_note": "",
+        "exception_note": "",
+        "has_archive_blocker": False,
+        "exception_reasons": [],
+        "photos": [
+            {
+                "id": f"json-photo-{index}",
+                "sha256": f"{index + 1:x}" * 64,
+                "category": category,
+                "is_active": True,
+            }
+            for index, category in enumerate(categories)
+        ],
+    }
+    fingerprint = evaluate_group_eligibility(group).evidence_fingerprint
+    assert fingerprint
+    group["barcode_verification"] = {
+        "status": "processing",
+        "evidence_fingerprint": fingerprint,
+        "evidence_version": 7,
+        "lease_owner": "worker-json",
+        "lease_token": "lease-json",
+        "lease_expires_at": "2026-07-22T12:00:00+00:00",
+    }
+    state = repository.local_simulation.blank_state(team_id)
+    state.update(
+        {
+            "tasks": [{"id": 17, "terminal": "T-VERIFY-001", "claimed_by": "reviewer-a"}],
+            "groups": [group],
+            "audit_log": [],
+            "summary": repository.local_simulation.empty_summary(),
+        }
+    )
+    return state
+
+
+def test_json_apply_group_scan_result_compares_and_writes_inside_authoritative_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"json-cas-{uuid4()}"
+    state = _json_barcode_state(team_id)
+    monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+    original_begin = repository.local_simulation.begin_authoritative_json_write
+    original_finish = repository.local_simulation.finish_authoritative_json_write
+    calls = []
+
+    def tracked_begin(checked_team_id=None):
+        calls.append("begin")
+        return original_begin(checked_team_id)
+
+    def tracked_finish(transaction, token, **kwargs):
+        calls.append("finish")
+        return original_finish(transaction, token, **kwargs)
+
+    monkeypatch.setattr(repository.local_simulation, "begin_authoritative_json_write", tracked_begin)
+    monkeypatch.setattr(repository.local_simulation, "finish_authoritative_json_write", tracked_finish)
+    fingerprint = state["groups"][0]["barcode_verification"]["evidence_fingerprint"]
+
+    result = repository.JsonStateRepository().apply_group_scan_result(
+        "group-json-barcode",
+        group_scan_result(),
+        claimed_evidence_fingerprint=fingerprint,
+        claimed_evidence_version=7,
+        lease_owner="worker-json",
+        lease_token="lease-json",
+        actor="barcode-worker",
+    )
+
+    assert result["applied"] is True
+    assert repository.local_simulation._team_states[team_id]["groups"][0]["barcode_verification"]["status"] == "partial"
+    assert calls == ["begin", "finish"]
+
+
+def test_json_manual_confirmation_increments_version_and_invalidates_every_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"json-confirm-{uuid4()}"
+    state = _json_barcode_state(team_id)
+    monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+
+    repository.JsonStateRepository().confirm_group_barcode_manually(
+        "group-json-barcode",
+        actor="reviewer-a",
+        meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        reason="现场核验",
+        photo_ids=[f"json-photo-{index}" for index in range(4)],
+    )
+
+    verification = repository.local_simulation._team_states[team_id]["groups"][0]["barcode_verification"]
+    assert verification["status"] == "manual_confirmed"
+    assert verification["evidence_version"] == 8
+    assert verification["lease_owner"] is None
+    assert verification["lease_token"] is None
+    assert verification["lease_expires_at"] is None
+
+
+def test_dual_manual_confirmation_restores_json_when_postgres_confirmation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"dual-confirm-{uuid4()}"
+    state = _json_barcode_state(team_id)
+    before = deepcopy(state)
+    monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+
+    class BrokenMirrorRepository:
+        def confirm_group_barcode_manually(self, *_args, **_kwargs):
+            raise RuntimeError("injected postgres confirmation failure")
+
+    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", BrokenMirrorRepository)
+
+    with pytest.raises(RuntimeError, match="injected postgres confirmation failure"):
+        repository.DualWriteStateRepository().confirm_group_barcode_manually(
+            "group-json-barcode",
+            actor="reviewer-a",
+            meter_no="110000288056",
+            module_asset_no="MOD001",
+            collector="COLLECTOR001",
+            reason="现场核验",
+            photo_ids=[f"json-photo-{index}" for index in range(4)],
+        )
+
+    assert repository.local_simulation._team_states[team_id] == before
+
+
+def _postgres_manual_confirmation_fixture():
+    group_id = uuid4()
+    group = SimpleNamespace(
+        id=group_id,
+        legacy_id="group-manual-pg",
+        team_id="manual-team",
+        display_meter_no="110000288055",
+        meter_match_key="0000288055",
+        exception_reasons=["条码识别异常", "其他业务异常"],
+        has_archive_blocker=True,
+        raw_data={
+            "collector": "COLLECTOR-OLD",
+            "module_asset_no": "MOD-OLD",
+            "barcode_verification": {
+                "status": "partial",
+                "evidence_fingerprint": "fingerprint-before",
+                "evidence_version": 7,
+                "recognition_source": "machine",
+                "result": {
+                    "passed_count": 2,
+                    "machine_barcode_values": ["110000288055", "COLLECTOROLD"],
+                    "machine_qr_values": ["MOD-CANDIDATE"],
+                    "ocr_candidates": ["MOD001"],
+                    "missing_fields": ["module"],
+                    "unmatched_machine_values": ["MOD-CANDIDATE"],
+                    "matched_ocr_candidates": ["MOD001"],
+                    "unmatched_ocr_candidates": [],
+                },
+            },
+        },
+    )
+    categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
+    photos = [
+        SimpleNamespace(
+            id=uuid4(),
+            legacy_id=f"manual-pg-photo-{index}",
+            team_id="manual-team",
+            group_id=group_id,
+            is_active=True,
+            sha256=f"{index + 1:x}" * 64,
+            category=category,
+            upload_status="uploaded",
+            barcode="old-meter",
+            collector="old-collector",
+            asset_no="old-module",
+            raw_data={},
+        )
+        for index, category in enumerate(categories)
+    ]
+    verification = SimpleNamespace(
+        status="partial",
+        evidence_fingerprint="fingerprint-before",
+        evidence_version=7,
+        meter_matched=True,
+        module_matched=False,
+        collector_matched=True,
+        recognition_source="machine",
+        attempt_count=2,
+        lease_owner="worker-manual",
+        lease_token="lease-manual-secret",
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        invalidation_reason=None,
+        invalidated_by=None,
+        invalidated_at=None,
+    )
+    return group, photos, verification
+
+
+def _patch_postgres_manual_confirmation_helpers(monkeypatch, staged_audits):
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "manual-team")
+    monkeypatch.setattr(
+        repository,
+        "_photo_payload",
+        lambda photo: {
+            "id": photo.legacy_id,
+            "category": photo.category,
+            "sha256": photo.sha256,
+            "is_active": photo.is_active,
+            "upload_status": photo.upload_status,
+        },
+    )
+    monkeypatch.setattr(repository, "_stage_transactional_audit", lambda *_args, **kwargs: staged_audits.append(kwargs))
+    monkeypatch.setattr(
+        repository,
+        "_group_payload",
+        lambda _session, group, include_photos=True: {
+            "id": group.legacy_id,
+            "meter_no": group.display_meter_no,
+            "meter_match_key": group.meter_match_key,
+            **group.raw_data,
+        },
+    )
+    monkeypatch.setattr(repository, "_group_target_summary", lambda payload, include_photos=True: payload)
+
+
+def test_postgres_manual_confirmation_updates_formal_state_and_complete_redacted_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group, photos, verification = _postgres_manual_confirmation_fixture()
+    staged_audits = []
+    _patch_postgres_manual_confirmation_helpers(monkeypatch, staged_audits)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.commits = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalar(self, statement):
+            assert getattr(statement, "_for_update_arg", None) is not None
+            return verification
+
+        def scalars(self, statement):
+            assert "photos.team_id" in str(statement)
+            assert "photos.group_id" in str(statement)
+            return SimpleNamespace(all=lambda: photos)
+
+        def add(self, _value) -> None:
+            return None
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def refresh(self, _value) -> None:
+            return None
+
+    session = FakeSession()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert repository.local_simulation.current_team_id() == "manual-team"
+            assert group_id == "group-manual-pg"
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, _session, checked_group, actor: str) -> None:
+            assert checked_group is group
+            assert actor == "reviewer-a"
+
+    result = TestRepository().confirm_group_barcode_manually(
+        "group-manual-pg",
+        actor="reviewer-a",
+        meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        reason="现场核验",
+        photo_ids=[photo.legacy_id for photo in photos],
+    )
+
+    assert result["group"]["meter_no"] == "110000288056"
+    assert group.meter_match_key == "0000288056"
+    assert all(photo.barcode == "110000288056" for photo in photos)
+    assert all(photo.collector == "COLLECTOR001" for photo in photos)
+    assert all(photo.asset_no == "MOD001" for photo in photos)
+    assert group.exception_reasons == ["其他业务异常"]
+    assert verification.status == "manual_confirmed"
+    assert verification.evidence_version == 8
+    assert verification.lease_owner is None
+    assert verification.lease_token is None
+    assert verification.lease_expires_at is None
+    assert session.commits == 1
+
+    audit = staged_audits[0]
+    before = audit["before_data"]
+    after = audit["after_data"]
+    assert before["verification"]["matched_count"] == 2
+    assert before["verification"]["evidence_version"] == 7
+    assert before["verification"]["fingerprint"] == "fingerprint-before"
+    assert before["verification"]["machine_barcode_values"] == ["11***55", "CO***LD"]
+    assert before["verification"]["machine_qr_values"] == ["MO***TE"]
+    assert before["verification"]["ocr_candidates"] == ["MO***01"]
+    assert before["verification"]["lease"]["owner"] == "worker-manual"
+    assert before["verification"]["lease"]["token_present"] is True
+    assert after["verification"]["status"] == "manual_confirmed"
+    assert after["verification"]["matched_count"] == 3
+    assert after["verification"]["evidence_version"] == 8
+    assert after["verification"]["lease"] == {"owner": "", "token_present": False, "expires_at": ""}
+    assert after["manual"]["actor"] == "reviewer-a"
+    assert after["manual"]["reason"] == "现场核验"
+    assert after["manual"]["photo_ids"] == [photo.legacy_id for photo in photos]
+    assert "lease-manual-secret" not in str(audit)
+
+
+def test_postgres_manual_confirmation_rejects_invalid_evidence_and_wrong_team_without_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group, photos, verification = _postgres_manual_confirmation_fixture()
+    staged_audits = []
+    _patch_postgres_manual_confirmation_helpers(monkeypatch, staged_audits)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.commits = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalar(self, _statement):
+            return verification
+
+        def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: photos)
+
+        def commit(self) -> None:
+            self.commits += 1
+
+    session = FakeSession()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, _session, _group_id: str, *, lock: bool = False):
+            assert lock is True
+            if repository.local_simulation.current_team_id() != group.team_id:
+                raise KeyError("wrong-team")
+            return group
+
+        def _ensure_task_claimed_by(self, *_args):
+            return None
+
+    repo = TestRepository()
+    before = deepcopy(group.raw_data)
+    with pytest.raises(ValueError, match="照片证据无效"):
+        repo.confirm_group_barcode_manually(
+            "group-manual-pg",
+            actor="reviewer-a",
+            meter_no="110000288056",
+            module_asset_no="MOD001",
+            collector="COLLECTOR001",
+            reason="现场核验",
+            photo_ids=[photos[0].legacy_id, photos[0].legacy_id],
+        )
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "other-team")
+    with pytest.raises(KeyError, match="wrong-team"):
+        repo.confirm_group_barcode_manually(
+            "group-manual-pg",
+            actor="reviewer-a",
+            meter_no="110000288056",
+            module_asset_no="MOD001",
+            collector="COLLECTOR001",
+            reason="现场核验",
+            photo_ids=[photo.legacy_id for photo in photos],
+        )
+
+    assert group.raw_data == before
+    assert session.commits == 0
+    assert staged_audits == []
+
+
+def test_postgres_manual_confirmation_rolls_back_every_mutation_on_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group, photos, verification = _postgres_manual_confirmation_fixture()
+    staged_audits = []
+    _patch_postgres_manual_confirmation_helpers(monkeypatch, staged_audits)
+    group_before = deepcopy(vars(group))
+    photos_before = [deepcopy(vars(photo)) for photo in photos]
+    verification_before = deepcopy(vars(verification))
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.rollbacks = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, _exc, _tb):
+            if exc_type is not None:
+                self.rollback()
+            return False
+
+        def scalar(self, _statement):
+            return verification
+
+        def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: photos)
+
+        def add(self, _value) -> None:
+            return None
+
+        def commit(self) -> None:
+            raise RuntimeError("injected postgres commit failure")
+
+        def refresh(self, _value) -> None:
+            return None
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+            vars(group).clear()
+            vars(group).update(deepcopy(group_before))
+            for photo, before in zip(photos, photos_before, strict=True):
+                vars(photo).clear()
+                vars(photo).update(deepcopy(before))
+            vars(verification).clear()
+            vars(verification).update(deepcopy(verification_before))
+
+    session = FakeSession()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, _session, _group_id: str, *, lock: bool = False):
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, *_args):
+            return None
+
+    with pytest.raises(RuntimeError, match="injected postgres commit failure"):
+        TestRepository().confirm_group_barcode_manually(
+            "group-manual-pg",
+            actor="reviewer-a",
+            meter_no="110000288056",
+            module_asset_no="MOD001",
+            collector="COLLECTOR001",
+            reason="现场核验",
+            photo_ids=[photo.legacy_id for photo in photos],
+        )
+
+    assert session.rollbacks == 1
+    assert vars(group) == group_before
+    assert [vars(photo) for photo in photos] == photos_before
+    assert vars(verification) == verification_before
 
 
 def test_postgres_duplicate_construction_identity_change_invalidates_once_and_rolls_back_commit_failure(

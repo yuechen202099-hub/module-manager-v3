@@ -134,21 +134,23 @@ def apply_group_scan_result(
     result: GroupScanResult,
     *,
     claimed_evidence_fingerprint: str,
+    claimed_evidence_version: int,
+    lease_owner: str,
+    lease_token: str,
     actor: str,
 ) -> dict[str, Any]:
     """Apply a worker result only when the evidence claimed by that worker is current."""
 
     eligibility = evaluate_group_eligibility(group)
     current_fingerprint = eligibility.evidence_fingerprint
-    claim = verification.get("claim")
-    if isinstance(claim, Mapping):
-        claimed_fields = ("evidence_fingerprint", "evidence_version", "lease_owner", "lease_token")
-        claim_is_current = (
-            claimed_evidence_fingerprint == claim.get("evidence_fingerprint")
-            and all(verification.get(field) == claim.get(field) for field in claimed_fields)
-        )
-        if not claim_is_current:
-            return {"applied": False, "verification": dict(verification)}
+    claim_is_current = (
+        verification.get("evidence_fingerprint") == claimed_evidence_fingerprint
+        and int(verification.get("evidence_version") or 0) == int(claimed_evidence_version)
+        and verification.get("lease_owner") == lease_owner
+        and verification.get("lease_token") == lease_token
+    )
+    if not claim_is_current:
+        return {"applied": False, "verification": dict(verification)}
     if eligibility.status != "pending":
         invalidated = invalidate_group_verification(
             verification,
@@ -314,23 +316,30 @@ def _photo_evidence(photo: Any) -> dict[str, str] | None:
 def _photo_scan_evidence(photo: Mapping[str, Any]) -> dict[str, Any]:
     """Use persisted evidence when a worker has not injected a recognizer."""
 
-    # Legacy merged fields may include OCR and are candidates only, never machine evidence.
-    legacy_candidates = _first_persisted_values(
+    method = str(photo.get("barcode_check_method") or "").strip().lower()
+    legacy_combined_values = _first_persisted_values(
         photo,
         "barcode_check_normalized_values",
         "barcode_check_values",
-        "barcode_check_ocr_normalized_values",
-        "barcode_check_ocr_values",
         "barcode_ocr",
     )
+    legacy_ocr_values = _first_persisted_values(
+        photo,
+        "barcode_check_ocr_normalized_values",
+        "barcode_check_ocr_values",
+    )
+    legacy_machine_values = legacy_combined_values if method == "barcode" else []
     return {
-        "barcode": _first_persisted_values(
-            photo,
-            "machine_barcode_normalized_values",
-            "machine_barcode_values",
-            "barcode_machine_normalized_values",
-            "barcode_machine_values",
-        ),
+        "barcode": [
+            *_first_persisted_values(
+                photo,
+                "machine_barcode_normalized_values",
+                "machine_barcode_values",
+                "barcode_machine_normalized_values",
+                "barcode_machine_values",
+            ),
+            *legacy_machine_values,
+        ],
         "qr": _first_persisted_values(
             photo,
             "machine_qr_normalized_values",
@@ -340,7 +349,8 @@ def _photo_scan_evidence(photo: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "ocr": [
             *_first_persisted_values(photo, "ocr_candidate_normalized_values", "ocr_candidate_values"),
-            *legacy_candidates,
+            *legacy_ocr_values,
+            *(legacy_combined_values if method != "barcode" else []),
         ],
     }
 
@@ -365,14 +375,20 @@ def _exact_eligible_scan_photos(group: Mapping[str, Any], photos: list[Mapping[s
         for photo in (_group_value(group, "photos") or [])
         if (item := _photo_evidence(photo)) is not None
     }
-    supplied = {
-        (item["id"], item["sha256"], item["category"])
-        for photo in photos
-        if (item := _photo_evidence(photo)) is not None
-    }
-    if supplied != expected:
+    supplied_evidence = [item for photo in photos if (item := _photo_evidence(photo)) is not None]
+    supplied = {(item["id"], item["sha256"], item["category"]) for item in supplied_evidence}
+    supplied_ids = {item["id"] for item in supplied_evidence}
+    supplied_categories = {item["category"] for item in supplied_evidence}
+    if (
+        len(photos) != len(REQUIRED_CATEGORIES)
+        or len(supplied_evidence) != len(REQUIRED_CATEGORIES)
+        or len(supplied) != len(REQUIRED_CATEGORIES)
+        or len(supplied_ids) != len(REQUIRED_CATEGORIES)
+        or supplied_categories != REQUIRED_CATEGORIES
+        or supplied != expected
+    ):
         raise ValueError("scan photos must match the exact eligible evidence set")
-    return [photo for photo in photos if _photo_evidence(photo) is not None]
+    return list(photos)
 
 
 def _normalized_channel_values(values: Any) -> list[str]:

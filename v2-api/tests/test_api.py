@@ -1894,9 +1894,11 @@ def test_production_group_metadata_requires_reviewer_or_admin(monkeypatch, tmp_p
 
     class FakeRepository:
         update_calls = 0
+        actors = []
 
         def update_group_metadata(self, group_id, actor, updates):
             self.update_calls += 1
+            self.actors.append(actor)
             return {"id": group_id, "actor": actor, **updates}
 
     repository = FakeRepository()
@@ -1931,6 +1933,7 @@ def test_production_group_metadata_requires_reviewer_or_admin(monkeypatch, tmp_p
     )
     assert allowed.status_code == 200
     assert repository.update_calls == 1
+    assert repository.actors == ["admin-selected-reviewer"]
 
 
 @pytest.mark.parametrize(
@@ -1997,17 +2000,47 @@ def test_production_group_photo_url_import_requires_reviewer_or_admin(monkeypatc
 
     assert denied.status_code == 403
     assert spoofed.status_code == 403
-
-    admin_spoof_token = security.create_access_token(
-        {"username": "admin-intruder", "name": "Admin Intruder", "roles": ["admin"], "team_id": "rescan-route-test"}
-    )
-    admin_spoofed = client.post(
-        f"/local-test/groups/{photo_group['id']}/photos/{photo['id']}/barcode-rescan?include_group=true",
-        headers={**headers, "Authorization": f"bearer {admin_spoof_token}"},
-        json={"reviewer": "api-test", "category": "module_meter"},
-    )
-    assert admin_spoofed.status_code == 403
     assert repository.add_calls == 0
+
+
+def test_production_barcode_endpoints_bind_effective_actor_to_token_subject(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class FakeRepository:
+        calls = []
+
+        def rescan_photo_barcode(self, group_id, photo_id, reviewer, category):
+            self.calls.append(("rescan", reviewer))
+            return {"id": photo_id, "group_id": group_id, "category": category}
+
+        def confirm_group_barcode_manually(self, group_id, *, actor, **_kwargs):
+            self.calls.append(("confirm", actor))
+            return {"group": {"id": group_id}}
+
+    repository = FakeRepository()
+    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
+
+    rescan = production_client.post(
+        "/local-test/groups/group-1/photos/photo-1/barcode-rescan",
+        headers=headers["admin"],
+        json={"reviewer": "delegated-reviewer", "category": "module_meter"},
+    )
+    confirmed = production_client.post(
+        "/local-test/groups/group-1/barcode-manual-confirm",
+        headers=headers["reviewer"],
+        json={
+            "actor": "forged-admin",
+            "meter_no": "110000288056",
+            "collector": "COLLECTOR001",
+            "module_asset_no": "MOD001",
+            "reason": "现场核验",
+            "photo_ids": ["photo-1"],
+        },
+    )
+
+    assert rescan.status_code == 200
+    assert confirmed.status_code == 200
+    assert repository.calls == [("rescan", "root-admin"), ("confirm", "reviewer-a")]
 
 
 def test_production_group_image_upload_checks_role_before_storage(monkeypatch, tmp_path) -> None:
@@ -4154,7 +4187,8 @@ def test_photo_barcode_rescan_route_only_requeues_group_without_ocr(monkeypatch)
         headers={**headers, "Authorization": f"bearer {spoof_token}"},
         json={"reviewer": "api-test", "category": "module_meter"},
     )
-    assert spoofed.status_code == 403
+    assert spoofed.status_code == 400
+    assert "claimed by the current reviewer" in spoofed.json()["detail"]
 
 
 def test_group_barcode_manual_confirm_route_marks_summary_and_audits() -> None:

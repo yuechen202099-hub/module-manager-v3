@@ -6815,16 +6815,27 @@ def confirm_group_barcode_manually(
     group["group_barcode_manual_confirmation_reason"] = reason
     group["group_barcode_manual_confirmation_photo_ids"] = selected_ids
     verification = dict(group.get("barcode_verification") or {})
+    verification_result = dict(verification.get("result") or {})
+    verification_result.update(
+        {
+            "passed_count": 3,
+            "matched_fields": list(photo_barcode_check.GROUP_BARCODE_TYPES),
+            "missing_fields": [],
+        }
+    )
     verification.update(
         {
             "status": "manual_confirmed",
+            "evidence_version": int(verification.get("evidence_version") or 0) + 1,
             "meter_matched": True,
             "module_matched": True,
             "collector_matched": True,
             "recognition_source": "manual",
             "lease_owner": None,
+            "lease_token": None,
             "lease_expires_at": None,
             "should_enqueue": False,
+            "result": verification_result,
         }
     )
     group["barcode_verification"] = verification
@@ -6854,6 +6865,12 @@ def _mask_barcode_audit_value(value: str) -> str:
     return f"{value[:2]}***{value[-2:]}"
 
 
+def _mask_barcode_audit_values(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    return [_mask_barcode_audit_value(str(value or "")) for value in values if str(value or "")]
+
+
 def _manual_confirmation_evidence(photos: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     required_categories = {"before_box", "collector_barcode", "module_meter", "after_box"}
     valid = [
@@ -6881,19 +6898,62 @@ def _without_barcode_exception_reasons(reasons: list[Any]) -> list[str]:
 
 def _manual_confirmation_audit_snapshot(group: Mapping[str, Any], verification: Mapping[str, Any]) -> dict[str, Any]:
     result = verification.get("result") if isinstance(verification.get("result"), Mapping) else {}
+    passed_count = result.get("passed_count")
+    if passed_count is None:
+        matched_fields = result.get("matched_fields")
+        if isinstance(matched_fields, list):
+            passed_count = len(matched_fields)
+        else:
+            matched_flags = [
+                verification.get("meter_matched"),
+                verification.get("module_matched"),
+                verification.get("collector_matched"),
+            ]
+            passed_count = sum(value is True for value in matched_flags)
+
+    lease_expires_at = verification.get("lease_expires_at")
+    if isinstance(lease_expires_at, datetime):
+        lease_expires_at = lease_expires_at.isoformat()
+    manual = {
+        "confirmed": bool(group.get("group_barcode_manual_confirmed")),
+        "fields": list(group.get("group_barcode_manual_confirmed_fields") or []),
+        "actor": str(group.get("group_barcode_manual_confirmed_by") or ""),
+        "confirmed_at": str(group.get("group_barcode_manual_confirmed_at") or ""),
+        "reason": str(group.get("group_barcode_manual_confirmation_reason") or ""),
+        "photo_ids": list(group.get("group_barcode_manual_confirmation_photo_ids") or []),
+    }
     return {
         "formal_values": {
             field: _mask_barcode_audit_value(str(group.get(field) or ""))
             for field in ("meter_no", "module_asset_no", "collector")
         },
         "verification": {
+            "fingerprint": str(verification.get("evidence_fingerprint") or ""),
+            "evidence_version": int(verification.get("evidence_version") or 0),
             "status": str(verification.get("status") or ""),
             "recognition_source": str(verification.get("recognition_source") or ""),
-            "matched_count": int(result.get("passed_count") or 0),
+            "matched_count": int(passed_count or 0),
+            "machine_barcode_values": _mask_barcode_audit_values(result.get("machine_barcode_values")),
+            "machine_qr_values": _mask_barcode_audit_values(result.get("machine_qr_values")),
+            "ocr_candidates": _mask_barcode_audit_values(result.get("ocr_candidates")),
+            "matched_fields": list(result.get("matched_fields") or []),
+            "missing_fields": list(result.get("missing_fields") or []),
+            "unmatched_machine_values": _mask_barcode_audit_values(result.get("unmatched_machine_values")),
+            "matched_ocr_candidates": _mask_barcode_audit_values(result.get("matched_ocr_candidates")),
+            "unmatched_ocr_candidates": _mask_barcode_audit_values(result.get("unmatched_ocr_candidates")),
+            "lease": {
+                "owner": str(verification.get("lease_owner") or ""),
+                "token_present": bool(verification.get("lease_token")),
+                "expires_at": str(lease_expires_at or ""),
+            },
         },
-        "manual_confirmed": bool(group.get("group_barcode_manual_confirmed")),
-        "manual_fields": list(group.get("group_barcode_manual_confirmed_fields") or []),
-        "photo_ids": list(group.get("group_barcode_manual_confirmation_photo_ids") or []),
+        "manual": manual,
+        "manual_confirmed": manual["confirmed"],
+        "manual_fields": manual["fields"],
+        "actor": manual["actor"],
+        "confirmed_at": manual["confirmed_at"],
+        "reason": manual["reason"],
+        "photo_ids": manual["photo_ids"],
     }
 
 

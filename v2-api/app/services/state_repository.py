@@ -2210,6 +2210,20 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def apply_group_scan_result(
+        self,
+        group_id: str,
+        result: Any,
+        *,
+        claimed_evidence_fingerprint: str,
+        claimed_evidence_version: int,
+        lease_owner: str,
+        lease_token: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def rescan_photo_barcode(
         self,
         group_id: str,
@@ -2972,6 +2986,62 @@ class JsonStateRepository(StateRepository):
     ) -> dict[str, Any]:
         return local_simulation.rescan_photo_barcode(group_id, photo_id, reviewer, category)
 
+    def apply_group_scan_result(
+        self,
+        group_id: str,
+        result: Any,
+        *,
+        claimed_evidence_fingerprint: str,
+        claimed_evidence_version: int,
+        lease_owner: str,
+        lease_token: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        from app.services.group_barcode_verification import apply_group_scan_result
+
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            group = local_simulation.get_group(group_id)
+            if group is None:
+                raise KeyError(group_id)
+            current = dict(group.get("barcode_verification") or {})
+            applied = apply_group_scan_result(
+                current,
+                group,
+                result,
+                claimed_evidence_fingerprint=claimed_evidence_fingerprint,
+                claimed_evidence_version=claimed_evidence_version,
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+                actor=actor,
+            )
+            next_verification = dict(applied["verification"])
+            if next_verification != current:
+                group["barcode_verification"] = next_verification
+                local_simulation.append_audit_event(
+                    "group_barcode_scan_result_applied" if applied["applied"] else "group_barcode_scan_result_rejected",
+                    actor,
+                    {
+                        "group_id": group_id,
+                        "before": local_simulation._manual_confirmation_audit_snapshot(group, current),
+                        "after": local_simulation._manual_confirmation_audit_snapshot(group, next_verification),
+                    },
+                )
+                local_simulation.refresh_summary()
+        except BaseException:
+            if owns_transaction:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        if owns_transaction:
+            local_simulation.finish_authoritative_json_write(transaction, token)
+        return applied
+
     def confirm_group_barcode_manually(
         self,
         group_id: str,
@@ -2983,15 +3053,30 @@ class JsonStateRepository(StateRepository):
         reason: str,
         photo_ids: list[str],
     ) -> dict[str, Any]:
-        return local_simulation.confirm_group_barcode_manually(
-            group_id,
-            actor=actor,
-            meter_no=meter_no,
-            module_asset_no=module_asset_no,
-            collector=collector,
-            reason=reason,
-            photo_ids=photo_ids,
-        )
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            result = local_simulation.confirm_group_barcode_manually(
+                group_id,
+                actor=actor,
+                meter_no=meter_no,
+                module_asset_no=module_asset_no,
+                collector=collector,
+                reason=reason,
+                photo_ids=photo_ids,
+            )
+        except BaseException:
+            if owns_transaction:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        if owns_transaction:
+            local_simulation.finish_authoritative_json_write(transaction, token)
+        return result
 
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
         return local_simulation.delete_group_photo(group_id, photo_id, reviewer)
@@ -6674,6 +6759,124 @@ class PostgresStateRepository(StateRepository):
             session.refresh(photo)
             return _photo_payload(photo)
 
+    def apply_group_scan_result(
+        self,
+        group_id: str,
+        result: Any,
+        *,
+        claimed_evidence_fingerprint: str,
+        claimed_evidence_version: int,
+        lease_owner: str,
+        lease_token: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        from app.services.group_barcode_verification import apply_group_scan_result
+
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=True)
+            verification = session.scalar(
+                select(GroupBarcodeVerification)
+                .where(
+                    GroupBarcodeVerification.team_id == group.team_id,
+                    GroupBarcodeVerification.group_id == group.id,
+                )
+                .with_for_update()
+            )
+            if verification is None:
+                return {"applied": False, "verification": {}}
+
+            raw_data = dict(group.raw_data or {})
+            persisted = raw_data.get("barcode_verification")
+            persisted = dict(persisted) if isinstance(persisted, Mapping) else {}
+            current = {
+                **persisted,
+                "status": verification.status,
+                "evidence_fingerprint": verification.evidence_fingerprint,
+                "evidence_version": verification.evidence_version,
+                "meter_matched": verification.meter_matched,
+                "module_matched": verification.module_matched,
+                "collector_matched": verification.collector_matched,
+                "recognition_source": verification.recognition_source,
+                "attempt_count": verification.attempt_count,
+                "lease_owner": verification.lease_owner,
+                "lease_token": verification.lease_token,
+                "lease_expires_at": verification.lease_expires_at,
+            }
+            verification_group_payload = _verification_group_payload(session, group)
+            applied = apply_group_scan_result(
+                current,
+                verification_group_payload,
+                result,
+                claimed_evidence_fingerprint=claimed_evidence_fingerprint,
+                claimed_evidence_version=claimed_evidence_version,
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+                actor=actor,
+            )
+            next_verification = dict(applied["verification"])
+            if next_verification == current:
+                return applied
+
+            before_data = dict(current)
+            verification.status = str(next_verification.get("status") or verification.status)
+            verification.evidence_fingerprint = next_verification.get("evidence_fingerprint")
+            verification.evidence_version = int(next_verification.get("evidence_version") or 0)
+            verification.attempt_count = int(next_verification.get("attempt_count") or 0)
+            verification.lease_owner = next_verification.get("lease_owner")
+            verification.lease_token = next_verification.get("lease_token")
+            verification.lease_expires_at = next_verification.get("lease_expires_at")
+            if applied["applied"]:
+                scan_result = next_verification.get("result") or {}
+                matched_fields = set(scan_result.get("matched_fields") or [])
+                verification.meter_matched = "meter" in matched_fields
+                verification.module_matched = "module" in matched_fields
+                verification.collector_matched = "collector" in matched_fields
+                if scan_result.get("machine_barcode_values") or scan_result.get("machine_qr_values"):
+                    verification.recognition_source = "machine"
+                elif scan_result.get("ocr_candidates"):
+                    verification.recognition_source = "ocr_candidate"
+                else:
+                    verification.recognition_source = "none"
+                next_verification["meter_matched"] = verification.meter_matched
+                next_verification["module_matched"] = verification.module_matched
+                next_verification["collector_matched"] = verification.collector_matched
+                next_verification["recognition_source"] = verification.recognition_source
+            else:
+                verification.meter_matched = None
+                verification.module_matched = None
+                verification.collector_matched = None
+                verification.recognition_source = None
+                verification.invalidation_reason = next_verification.get("invalidation_reason")
+                verification.invalidated_by = next_verification.get("invalidated_by")
+                verification.invalidated_at = datetime.now(UTC)
+                next_verification.update(
+                    {
+                        "meter_matched": None,
+                        "module_matched": None,
+                        "collector_matched": None,
+                        "recognition_source": None,
+                        "invalidated_at": verification.invalidated_at.isoformat(),
+                    }
+                )
+            raw_data["barcode_verification"] = next_verification
+            group.raw_data = raw_data
+            audit_group = {**raw_data, **verification_group_payload}
+            _stage_transactional_audit(
+                session,
+                team_id=group.team_id,
+                actor=actor,
+                action="group_barcode_scan_result_applied" if applied["applied"] else "group_barcode_scan_result_rejected",
+                entity_type="material_group",
+                entity_id=group.id,
+                before_data=local_simulation._manual_confirmation_audit_snapshot(audit_group, before_data),
+                after_data=local_simulation._manual_confirmation_audit_snapshot(audit_group, next_verification),
+                payload={"group_id": group.legacy_id or str(group.id)},
+            )
+            session.commit()
+            session.refresh(group)
+            applied["verification"] = next_verification
+            return applied
+
     def confirm_group_barcode_manually(
         self,
         group_id: str,
@@ -6725,10 +6928,22 @@ class PostgresStateRepository(StateRepository):
                 )
                 .with_for_update()
             )
+            persisted_verification = raw_data.get("barcode_verification")
+            persisted_verification = (
+                dict(persisted_verification) if isinstance(persisted_verification, Mapping) else {}
+            )
             before_verification = {
-                "status": verification.status if verification else "",
-                "recognition_source": verification.recognition_source if verification else "",
-                "result": {"passed_count": 3 if verification and all((verification.meter_matched, verification.module_matched, verification.collector_matched)) else 0},
+                **persisted_verification,
+                "status": verification.status if verification else str(persisted_verification.get("status") or ""),
+                "evidence_fingerprint": verification.evidence_fingerprint if verification else persisted_verification.get("evidence_fingerprint"),
+                "evidence_version": verification.evidence_version if verification else int(persisted_verification.get("evidence_version") or 0),
+                "meter_matched": verification.meter_matched if verification else None,
+                "module_matched": verification.module_matched if verification else None,
+                "collector_matched": verification.collector_matched if verification else None,
+                "recognition_source": verification.recognition_source if verification else str(persisted_verification.get("recognition_source") or ""),
+                "lease_owner": verification.lease_owner if verification else None,
+                "lease_token": verification.lease_token if verification else None,
+                "lease_expires_at": verification.lease_expires_at if verification else None,
             }
             before_data = local_simulation._manual_confirmation_audit_snapshot(
                 {
@@ -6776,20 +6991,49 @@ class PostgresStateRepository(StateRepository):
                 photo.raw_data = photo_raw
             group.raw_data = raw_data
             if verification is None:
-                verification = GroupBarcodeVerification(team_id=group.team_id, group_id=group.id)
+                verification = GroupBarcodeVerification(
+                    team_id=group.team_id,
+                    group_id=group.id,
+                    evidence_version=0,
+                )
                 session.add(verification)
             verification.status = "manual_confirmed"
+            verification.evidence_version = int(verification.evidence_version or 0) + 1
             verification.meter_matched = True
             verification.module_matched = True
             verification.collector_matched = True
             verification.recognition_source = "manual"
             verification.lease_owner = None
+            verification.lease_token = None
             verification.lease_expires_at = None
+            next_result = dict(before_verification.get("result") or {})
+            next_result.update(
+                {
+                    "passed_count": 3,
+                    "matched_fields": list(photo_barcode_check.GROUP_BARCODE_TYPES),
+                    "missing_fields": [],
+                }
+            )
+            next_verification = {
+                **before_verification,
+                "status": "manual_confirmed",
+                "evidence_version": verification.evidence_version,
+                "meter_matched": True,
+                "module_matched": True,
+                "collector_matched": True,
+                "recognition_source": "manual",
+                "lease_owner": None,
+                "lease_token": None,
+                "lease_expires_at": None,
+                "should_enqueue": False,
+                "result": next_result,
+            }
+            raw_data["barcode_verification"] = next_verification
+            group.raw_data = raw_data
             after_data = local_simulation._manual_confirmation_audit_snapshot(
                 {**raw_data, "meter_no": formal_values["meter_no"]},
-                {"status": "manual_confirmed", "recognition_source": "manual", "result": {"passed_count": 3}},
+                next_verification,
             )
-            after_data.update({"actor": actor, "reason": reason, "photo_ids": selected_ids})
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),
@@ -8120,6 +8364,62 @@ class DualWriteStateRepository(JsonStateRepository):
         self._mirror_write("rescan_photo_barcode", group_id, photo_id, reviewer, category)
         return result
 
+    def apply_group_scan_result(
+        self,
+        group_id: str,
+        result: Any,
+        *,
+        claimed_evidence_fingerprint: str,
+        claimed_evidence_version: int,
+        lease_owner: str,
+        lease_token: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            applied = super().apply_group_scan_result(
+                group_id,
+                result,
+                claimed_evidence_fingerprint=claimed_evidence_fingerprint,
+                claimed_evidence_version=claimed_evidence_version,
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+                actor=actor,
+            )
+            mirror = self.postgres_repository_factory()
+            mirrored = mirror.apply_group_scan_result(
+                group_id,
+                result,
+                claimed_evidence_fingerprint=claimed_evidence_fingerprint,
+                claimed_evidence_version=claimed_evidence_version,
+                lease_owner=lease_owner,
+                lease_token=lease_token,
+                actor=actor,
+            )
+            json_verification = applied.get("verification") or {}
+            postgres_verification = mirrored.get("verification") or {}
+            if (
+                bool(mirrored.get("applied")) != bool(applied.get("applied"))
+                or str(postgres_verification.get("status") or "")
+                != str(json_verification.get("status") or "")
+                or int(postgres_verification.get("evidence_version") or 0)
+                != int(json_verification.get("evidence_version") or 0)
+            ):
+                raise StateBackendNotReady("Dual barcode scan CAS diverged; JSON write was aborted")
+        except BaseException:
+            if owns_transaction:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        if owns_transaction:
+            local_simulation.finish_authoritative_json_write(transaction, token)
+        return applied
+
     def confirm_group_barcode_manually(
         self,
         group_id: str,
@@ -8131,25 +8431,39 @@ class DualWriteStateRepository(JsonStateRepository):
         reason: str,
         photo_ids: list[str],
     ) -> dict[str, Any]:
-        result = super().confirm_group_barcode_manually(
-            group_id,
-            actor=actor,
-            meter_no=meter_no,
-            module_asset_no=module_asset_no,
-            collector=collector,
-            reason=reason,
-            photo_ids=photo_ids,
-        )
-        self._mirror_write(
-            "confirm_group_barcode_manually",
-            group_id,
-            actor=actor,
-            meter_no=meter_no,
-            module_asset_no=module_asset_no,
-            collector=collector,
-            reason=reason,
-            photo_ids=photo_ids,
-        )
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            result = super().confirm_group_barcode_manually(
+                group_id,
+                actor=actor,
+                meter_no=meter_no,
+                module_asset_no=module_asset_no,
+                collector=collector,
+                reason=reason,
+                photo_ids=photo_ids,
+            )
+            mirror = self.postgres_repository_factory()
+            mirror.confirm_group_barcode_manually(
+                group_id,
+                actor=actor,
+                meter_no=meter_no,
+                module_asset_no=module_asset_no,
+                collector=collector,
+                reason=reason,
+                photo_ids=photo_ids,
+            )
+        except BaseException:
+            if owns_transaction:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        if owns_transaction:
+            local_simulation.finish_authoritative_json_write(transaction, token)
         return result
 
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
