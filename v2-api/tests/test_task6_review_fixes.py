@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from io import BytesIO
 import os
 from types import SimpleNamespace
 from uuid import uuid4
@@ -12,7 +13,16 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import GroupBarcodeVerification, MaterialGroup, Photo, PhotoUploadStatus, Project, Team
+from app.models import (
+    GroupBarcodeVerification,
+    MaterialGroup,
+    Photo,
+    PhotoUploadStatus,
+    Project,
+    Task,
+    TaskStatus,
+    Team,
+)
 from app.services import photo_barcode_check
 from app.services import local_simulation
 from app.services import state_repository as repository
@@ -959,3 +969,308 @@ def _statement_group_ids(statement) -> list:
         if isinstance(value, (list, tuple, set)):
             return list(value)
     raise AssertionError("expected a bounded group_id IN predicate")
+
+
+def _add_legacy_postgres_group(
+    session,
+    *,
+    team_id: str,
+    project_id,
+    name: str,
+    legacy_status: str = "matched",
+    photo_raw_data: list[dict] | None = None,
+    task: Task | None = None,
+) -> MaterialGroup:
+    photo_rows = photo_raw_data or [{} for _category in REQUIRED_CATEGORIES]
+    assert len(photo_rows) == len(REQUIRED_CATEGORIES)
+    group = MaterialGroup(
+        team_id=team_id,
+        project_id=project_id,
+        task_id=task.id if task is not None else None,
+        legacy_task_id=task.legacy_id if task is not None else 1,
+        legacy_id=name,
+        terminal=f"TERMINAL-{name}",
+        meter_match_key=f"METER-{name}",
+        display_meter_no=f"METER-{name}",
+        installation_address=f"Address {name}",
+        status=repository.GroupStatus.UNREVIEWED,
+        photo_count=len(REQUIRED_CATEGORIES),
+        raw_data={
+            "collector": f"COLLECTOR-{name}",
+            "module_asset_no": f"MODULE-{name}",
+            "group_barcode_check_status": legacy_status,
+        },
+    )
+    session.add(group)
+    session.flush()
+    for index, (category, raw_data) in enumerate(zip(REQUIRED_CATEGORIES, photo_rows, strict=True)):
+        session.add(
+            Photo(
+                team_id=team_id,
+                group_id=group.id,
+                legacy_id=f"{name}-photo-{index}",
+                sha256=uuid4().hex * 2,
+                object_key=f"task6-review-round2/{name}/{index}.jpg",
+                category=category,
+                upload_status=PhotoUploadStatus.UPLOADED,
+                is_active=True,
+                sort_order=index,
+                raw_data=raw_data,
+            )
+        )
+    return group
+
+
+def _exported_postgres_group_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_repository: repository.PostgresStateRepository,
+    *,
+    status: str,
+) -> list[str]:
+    from app.api.routes import local_test as local_test_routes
+    from openpyxl import load_workbook
+
+    monkeypatch.setattr(local_test_routes, "state_repository", lambda: postgres_repository)
+    response = local_test_routes.export_photo_barcode_review_groups(
+        request=None,
+        status=status,
+        query="",
+        _admin={},
+    )
+    workbook = load_workbook(BytesIO(response.body), read_only=True)
+    rows = list(workbook.active.iter_rows(values_only=True))
+    group_id_index = list(rows[0]).index("资料组ID")
+    return [str(row[group_id_index]) for row in rows[1:]]
+
+
+def test_postgres_legacy_evidence_filters_and_export_use_one_semantics(
+    isolated_task6_postgres,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = isolated_task6_postgres
+    team_id = f"task6-round2-filter-{uuid4().hex[:12]}"
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+
+    with session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Task 6 round 2 filter test"))
+        session.flush()
+        project = Project(team_id=team_id, code=f"T6R2-F-{uuid4().hex[:10]}", name="Task 6 round 2")
+        session.add(project)
+        session.flush()
+
+        for name, machine_status in (
+            ("legacy-machine-empty-status", ""),
+            ("legacy-machine-mismatched-status", "mismatched"),
+        ):
+            photo_rows = [{} for _category in REQUIRED_CATEGORIES]
+            photo_rows[0] = {
+                "barcode_check_status": machine_status,
+                "barcode_check_method": "barcode",
+                "machine_barcode_values": [f"MACHINE-{name}"],
+            }
+            photo_rows[1] = {
+                "barcode_check_status": "matched",
+                "barcode_check_method": "ocr",
+                "barcode_check_ocr_values": [f"OCR-{name}"],
+            }
+            _add_legacy_postgres_group(
+                session,
+                team_id=team_id,
+                project_id=project.id,
+                name=name,
+                photo_raw_data=photo_rows,
+            )
+
+        ocr_rows = [{} for _category in REQUIRED_CATEGORIES]
+        ocr_rows[0] = {
+            "barcode_check_status": "matched",
+            "barcode_check_method": "ocr",
+            "barcode_check_ocr_values": ["OCR-ONLY"],
+        }
+        _add_legacy_postgres_group(
+            session,
+            team_id=team_id,
+            project_id=project.id,
+            name="legacy-ocr-only",
+            photo_raw_data=ocr_rows,
+        )
+        _add_legacy_postgres_group(
+            session,
+            team_id=team_id,
+            project_id=project.id,
+            name="legacy-mismatched",
+            legacy_status="mismatched",
+        )
+        _add_legacy_postgres_group(
+            session,
+            team_id=team_id,
+            project_id=project.id,
+            name="legacy-unreadable",
+            legacy_status="unreadable",
+        )
+
+    postgres_repository = repository.PostgresStateRepository()
+    expected_ids = {
+        "matched": {"legacy-machine-empty-status", "legacy-machine-mismatched-status"},
+        "mismatched": {"legacy-ocr-only", "legacy-mismatched"},
+        "unreadable": {"legacy-unreadable"},
+        "all": {
+            "legacy-machine-empty-status",
+            "legacy-machine-mismatched-status",
+            "legacy-ocr-only",
+            "legacy-mismatched",
+            "legacy-unreadable",
+        },
+    }
+    results = {}
+    for status in ("mismatched", "matched", "unreadable", "all"):
+        result = postgres_repository.list_photo_barcode_review_groups(
+            status=status,
+            query="",
+            limit=100,
+            offset=0,
+        )
+        results[status] = result
+        assert result["total"] == len(result["items"])
+        assert {item["group_id"] for item in result["items"]} == expected_ids[status]
+
+    for status in ("matched", "mismatched", "unreadable"):
+        assert set(_exported_postgres_group_ids(monkeypatch, postgres_repository, status=status)) == {
+            item["group_id"] for item in results[status]["items"]
+        }
+
+
+def test_postgres_ocr_only_legacy_fallback_waits_for_photos_in_review_and_summary_entries(
+    isolated_task6_postgres,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = isolated_task6_postgres
+    team_id = f"task6-round2-deferred-{uuid4().hex[:12]}"
+    task_id = 631002
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+
+    with session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Task 6 round 2 deferred fallback test"))
+        session.flush()
+        project = Project(team_id=team_id, code=f"T6R2-D-{uuid4().hex[:10]}", name="Task 6 round 2")
+        session.add(project)
+        session.flush()
+        task = Task(
+            team_id=team_id,
+            project_id=project.id,
+            legacy_id=task_id,
+            terminal="TERMINAL-OCR-DEFERRED",
+            title="Task 6 OCR deferred fallback",
+            status=TaskStatus.PUBLISHED,
+            raw_data={},
+        )
+        session.add(task)
+        session.flush()
+        photo_rows = [
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_method": "ocr",
+                "barcode_check_ocr_values": [f"OCR-DEFERRED-{index}"],
+            }
+            for index, _category in enumerate(REQUIRED_CATEGORIES)
+        ]
+        group = _add_legacy_postgres_group(
+            session,
+            team_id=team_id,
+            project_id=project.id,
+            name="legacy-ocr-deferred",
+            photo_raw_data=photo_rows,
+            task=task,
+        )
+        group.photo_count = 5
+        session.add(
+            Photo(
+                team_id=team_id,
+                group_id=group.id,
+                legacy_id="legacy-ocr-deferred-invalid-machine",
+                sha256=uuid4().hex * 2,
+                object_key="task6-review-round2/legacy-ocr-deferred/invalid-machine.jpg",
+                category="before_box",
+                upload_status=PhotoUploadStatus.INVALID,
+                is_active=True,
+                sort_order=5,
+                raw_data={
+                    "barcode_check_status": "matched",
+                    "barcode_check_method": "barcode",
+                    "machine_barcode_values": ["INVALID-MACHINE-EVIDENCE"],
+                },
+            )
+        )
+
+    postgres_repository = repository.PostgresStateRepository()
+    review_queue = postgres_repository.list_review_task_groups(
+        task_id,
+        limit=20,
+        offset=0,
+        review_status="all",
+        query="",
+    )
+    summary_only = postgres_repository.list_task_groups(
+        task_id,
+        limit=100,
+        offset=0,
+        summary_only=True,
+    )
+
+    for payload in (review_queue, summary_only):
+        item = next(row for row in payload["items"] if row["id"] == "legacy-ocr-deferred")
+        assert item["barcode_verification"]["status"] == "partial"
+        assert item["barcode_verification"]["status"] not in {"passed", "manual_confirmed"}
+
+
+def test_postgres_scalar_legacy_evidence_is_ignored_by_review_and_export(
+    isolated_task6_postgres,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = isolated_task6_postgres
+    team_id = f"task6-round2-scalar-{uuid4().hex[:12]}"
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+
+    with session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Task 6 round 2 scalar JSON test"))
+        session.flush()
+        project = Project(team_id=team_id, code=f"T6R2-S-{uuid4().hex[:10]}", name="Task 6 round 2")
+        session.add(project)
+        session.flush()
+        photo_rows = [{} for _category in REQUIRED_CATEGORIES]
+        photo_rows[0] = {
+            "barcode_check_status": "matched",
+            "machine_barcode_values": "SCALAR-BARCODE",
+            "machine_qr_values": "SCALAR-QR",
+            "ocr_candidate_values": "SCALAR-OCR",
+            "barcode_check_ocr_values": "SCALAR-LEGACY-OCR",
+            "barcode_check_values": "SCALAR-LEGACY-VALUE",
+        }
+        photo_rows[1] = {
+            "barcode_check_status": "matched",
+            "barcode_check_method": "ocr",
+            "barcode_check_ocr_values": ["REAL-OCR-EVIDENCE"],
+        }
+        _add_legacy_postgres_group(
+            session,
+            team_id=team_id,
+            project_id=project.id,
+            name="legacy-scalar-evidence",
+            photo_raw_data=photo_rows,
+        )
+
+    postgres_repository = repository.PostgresStateRepository()
+    result = postgres_repository.list_photo_barcode_review_groups(
+        status="mismatched",
+        query="",
+        limit=100,
+        offset=0,
+    )
+
+    assert result["total"] == 1
+    assert len(result["items"]) == 1
+    assert result["items"][0]["group_id"] == "legacy-scalar-evidence"
+    assert result["items"][0]["barcode_verification"]["status"] == "partial"
+    assert _exported_postgres_group_ids(monkeypatch, postgres_repository, status="mismatched") == [
+        "legacy-scalar-evidence"
+    ]

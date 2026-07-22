@@ -243,7 +243,9 @@ def resolve_persisted_barcode_verification(
     durable = normalize_barcode_verification(nested_payload)
     if durable:
         return durable
-    return normalize_barcode_verification(_legacy_verification(raw_payload, list(photos or [])))
+    if photos is None:
+        return None
+    return normalize_barcode_verification(_legacy_verification(raw_payload, list(photos)))
 
 
 def verification_compatibility_fields(verification: Mapping[str, Any] | None) -> dict[str, Any]:

@@ -1163,19 +1163,7 @@ def _photo_barcode_payload_from_row(row: Any) -> dict[str, Any]:
         "is_active": bool(_row_value(row, "is_active", True)),
         "upload_status": _status_value(_row_value(row, "upload_status", "uploaded")),
     }
-    for key in (
-        "barcode_check_status",
-        "barcode_check_expected_type",
-        "barcode_check_values",
-        "barcode_check_normalized_values",
-        "barcode_check_ocr_values",
-        "barcode_check_ocr_normalized_values",
-        "barcode_check_expected_values",
-        "barcode_check_matched_value",
-        "barcode_checked_at",
-        "barcode_check_error",
-        "barcode_check_method",
-    ):
+    for key in unmatched_review.PHOTO_EVIDENCE_FIELDS:
         if key in raw:
             payload[key] = raw[key]
     return payload
@@ -1353,12 +1341,17 @@ def _postgres_review_verification_status_expression():
     legacy_status = func.lower(
         func.coalesce(MaterialGroup.raw_data.op("->>")("group_barcode_check_status"), "")
     )
-    photo_status = func.lower(
-        func.coalesce(legacy_photo.raw_data.op("->>")("barcode_check_status"), "")
-    )
     photo_method = func.lower(
         func.coalesce(legacy_photo.raw_data.op("->>")("barcode_check_method"), "")
     )
+
+    def has_array_values(key: str):
+        value = legacy_photo.raw_data[key]
+        return case(
+            (func.jsonb_typeof(value) == "array", func.jsonb_array_length(value)),
+            else_=0,
+        ) > 0
+
     legacy_ocr_match = (
         select(legacy_photo.id)
         .where(
@@ -1366,8 +1359,11 @@ def _postgres_review_verification_status_expression():
             legacy_photo.group_id == MaterialGroup.id,
             legacy_photo.is_active.is_(True),
             legacy_photo.upload_status != PhotoUploadStatus.INVALID,
-            photo_status == "matched",
-            photo_method.in_(OCR_ONLY_METHODS),
+            or_(
+                photo_method.in_(OCR_ONLY_METHODS),
+                has_array_values("ocr_candidate_values"),
+                has_array_values("barcode_check_ocr_values"),
+            ),
         )
         .exists()
     )
@@ -1378,11 +1374,14 @@ def _postgres_review_verification_status_expression():
             legacy_photo.group_id == MaterialGroup.id,
             legacy_photo.is_active.is_(True),
             legacy_photo.upload_status != PhotoUploadStatus.INVALID,
-            photo_status == "matched",
             or_(
-                and_(photo_method != "", photo_method.notin_(OCR_ONLY_METHODS)),
-                func.jsonb_array_length(legacy_photo.raw_data["machine_barcode_values"]) > 0,
-                func.jsonb_array_length(legacy_photo.raw_data["machine_qr_values"]) > 0,
+                has_array_values("machine_barcode_values"),
+                has_array_values("machine_qr_values"),
+                and_(
+                    photo_method != "",
+                    photo_method.notin_(OCR_ONLY_METHODS),
+                    has_array_values("barcode_check_values"),
+                ),
             ),
         )
         .exists()
@@ -1570,7 +1569,11 @@ def _group_payload(
                 GroupBarcodeVerification.group_id == group.id,
             )
         )
-    durable_verification = resolve_persisted_barcode_verification(verification, raw, photos)
+    durable_verification = resolve_persisted_barcode_verification(
+        verification,
+        raw,
+        photos if include_photos else None,
+    )
     if durable_verification:
         payload["barcode_verification"] = durable_verification
         payload.update(verification_compatibility_fields(durable_verification))
@@ -1657,6 +1660,7 @@ def _installer_exception_group_payload(group: MaterialGroup, photo_count: int) -
 def _group_target_summary(group: dict[str, Any], *, include_photos: bool = False) -> dict[str, Any]:
     photo_count = int(group.get("photo_count") or 0)
     photos = group.get("photos", [])
+    barcode_group = _group_barcode_payload(group, photos)
 
     def first_photo_field(field: str) -> str:
         return next((str(photo.get(field) or "") for photo in photos if isinstance(photo, dict) and photo.get(field)), "")
@@ -1683,9 +1687,9 @@ def _group_target_summary(group: dict[str, Any], *, include_photos: bool = False
         "has_archive_blocker": group.get("has_archive_blocker", False),
         "exception_reasons": group.get("exception_reasons", []),
         **_group_photo_category_summary(photos),
-        **_group_barcode_status_summary(_group_barcode_payload(group, photos)),
+        **_group_barcode_status_summary(barcode_group),
     }
-    durable_verification = normalize_barcode_verification(group.get("barcode_verification"))
+    durable_verification = normalize_barcode_verification(barcode_group.get("barcode_verification"))
     if durable_verification:
         payload["barcode_verification"] = durable_verification
         payload.update(verification_compatibility_fields(durable_verification))
@@ -4734,8 +4738,10 @@ class PostgresStateRepository(StateRepository):
                 payload["barcode_verification"] = durable_verification
                 payload.update(verification_compatibility_fields(durable_verification))
             payloads.append(payload)
-        statuses = _group_barcode_review_statuses(status)
-        items = photo_barcode_check.list_group_barcode_review_items(payloads, statuses=statuses)
+        items = photo_barcode_check.list_group_barcode_review_items(
+            payloads,
+            statuses=_group_barcode_review_statuses("all"),
+        )
         return {
             "total": total,
             "limit": capped_limit,
@@ -4947,6 +4953,7 @@ class PostgresStateRepository(StateRepository):
                             Photo.barcode,
                             Photo.collector,
                             Photo.asset_no,
+                            Photo.upload_status,
                             Photo.raw_data,
                         )
                         .where(
@@ -5053,6 +5060,7 @@ class PostgresStateRepository(StateRepository):
                         Photo.barcode,
                         Photo.collector,
                         Photo.asset_no,
+                        Photo.upload_status,
                         Photo.raw_data,
                     )
                     .where(
