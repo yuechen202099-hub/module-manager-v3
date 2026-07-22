@@ -645,6 +645,116 @@ def test_worker_gates_reconciliation_before_pause_or_load_can_do_work(
     assert reconciliations == []
 
 
+@pytest.mark.parametrize(
+    ("paused", "overloaded", "expected_load_checks"),
+    [(True, False, 0), (False, True, 1)],
+)
+def test_real_json_worker_gate_is_control_only_and_constant_cost(
+    monkeypatch: pytest.MonkeyPatch,
+    paused: bool,
+    overloaded: bool,
+    expected_load_checks: int,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    class ScanForbidden(list):
+        def __iter__(self):
+            pytest.fail("background gate must not enumerate queue state")
+
+    team_id = install_json_queue(monkeypatch, [], paused=paused)
+    state = local_simulation._team_states[team_id]
+    state["groups"] = ScanForbidden([{"id": f"group-{index}"} for index in range(10_000)])
+    state["delivery_cache_jobs"] = ScanForbidden([{"id": f"job-{index}"} for index in range(10_000)])
+    load_checks: list[str] = []
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    monkeypatch.setattr(
+        worker,
+        "maintenance_status",
+        lambda: pytest.fail("background gate must not call the aggregate status path"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "maintenance_load_too_high",
+        lambda: load_checks.append("load") or overloaded,
+    )
+    monkeypatch.setattr(
+        worker,
+        "reconcile_delivery_cache_jobs",
+        lambda **_kwargs: pytest.fail("gated worker must not reconcile"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_claim_next_work",
+        lambda _worker_id: pytest.fail("gated worker must not claim"),
+    )
+    monkeypatch.setattr(
+        local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: pytest.fail("gated worker must not access OSS"),
+    )
+
+    report = worker.run_worker_batch(sleeper=lambda _seconds: None)
+
+    assert report["processed"] == 0
+    assert len(load_checks) == expected_load_checks
+
+
+def test_real_postgres_worker_gate_reads_only_control_and_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    statements: list[str] = []
+    load_checks: list[str] = []
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            statements.append(str(statement.compile(dialect=postgresql.dialect())))
+            return SimpleNamespace(paused=False)
+
+        def execute(self, _statement):
+            pytest.fail("background gate must not execute aggregate queue queries")
+
+    monkeypatch.setattr(worker.settings, "state_backend", "postgres")
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "team-control-only")
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+    monkeypatch.setattr(
+        worker,
+        "maintenance_status",
+        lambda: pytest.fail("background gate must not call the aggregate status path"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "maintenance_load_too_high",
+        lambda: load_checks.append("load") or True,
+    )
+    monkeypatch.setattr(
+        worker,
+        "reconcile_delivery_cache_jobs",
+        lambda **_kwargs: pytest.fail("overloaded worker must not reconcile"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_claim_next_work",
+        lambda _worker_id: pytest.fail("overloaded worker must not claim"),
+    )
+
+    report = worker.run_worker_batch(sleeper=lambda _seconds: None)
+
+    assert report["processed"] == 0
+    assert len(statements) == 1
+    assert "FROM barcode_maintenance_controls" in statements[0]
+    assert "group_barcode_verifications" not in statements[0]
+    assert "delivery_cache_jobs" not in statements[0]
+    assert load_checks == ["load"]
+
+
 def test_json_delivery_cache_reconciliation_is_bounded_and_eventually_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -667,19 +777,55 @@ def test_json_delivery_cache_reconciliation_is_bounded_and_eventually_recovers(
     assert len(local_simulation._team_states[team_id]["delivery_cache_jobs"]) == 25
 
 
-def test_postgres_delivery_cache_reconciliation_query_is_bounded_anti_join() -> None:
-    from app.services.delivery_cache import build_postgres_reconciliation_statement
+def test_postgres_delivery_cache_reconciliation_uses_two_bounded_bulk_lock_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
 
-    statement = build_postgres_reconciliation_statement(team_id="team-reconcile", limit=20)
-    sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    statements: list[str] = []
 
-    assert "LEFT OUTER JOIN delivery_cache_jobs" in sql
-    assert "delivery_cache_jobs.id IS NULL" in sql
-    assert "LIMIT 20" in sql
-    assert "FOR UPDATE OF material_groups SKIP LOCKED" in sql
+    class Rows:
+        def all(self):
+            return []
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement):
+            statements.append(
+                str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            )
+            return Rows()
+
+        def scalar(self, _statement):
+            pytest.fail("reconciliation must not issue per-group queries")
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(delivery_cache, "SessionLocal", Session)
+
+    report = delivery_cache._reconcile_postgres_delivery_cache_jobs("team-reconcile", limit=20)
+
+    assert report["enqueued"] == 0
+    assert len(statements) == 2
+    existing_sql, missing_sql = statements
+    assert "LEFT OUTER JOIN" not in existing_sql
+    assert "JOIN material_groups" in existing_sql
+    assert "LIMIT 20" in existing_sql
+    assert "FOR UPDATE OF delivery_cache_jobs SKIP LOCKED" in existing_sql
+    assert "delivery_cache_jobs.lease_expires_at <" in existing_sql
+    assert "delivery_cache_jobs.attempt_count < 3" in existing_sql
+    assert "NOT (EXISTS" in missing_sql
+    assert "LIMIT 20" in missing_sql
+    assert "FOR UPDATE OF material_groups SKIP LOCKED" in missing_sql
 
 
-def test_postgres_delivery_cache_reconciliation_uses_one_query_per_bounded_iteration(
+def test_postgres_delivery_cache_reconciliation_uses_two_queries_per_bounded_iteration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.models import DeliveryCacheJob
@@ -702,7 +848,7 @@ def test_postgres_delivery_cache_reconciliation_uses_one_query_per_bounded_itera
             self.values = values
 
         def all(self):
-            return [(group, None) for group in self.values]
+            return self.values
 
     class Session:
         def __init__(self, values):
@@ -719,7 +865,9 @@ def test_postgres_delivery_cache_reconciliation_uses_one_query_per_bounded_itera
 
         def execute(self, _statement):
             self.execute_calls += 1
-            return Rows(self.values)
+            if self.execute_calls == 1:
+                return Rows([])
+            return Rows([(group, None) for group in self.values])
 
         def scalar(self, _statement):
             pytest.fail("reconciliation must not issue an N+1 job query")
@@ -743,8 +891,164 @@ def test_postgres_delivery_cache_reconciliation_uses_one_query_per_bounded_itera
     second = delivery_cache._reconcile_postgres_delivery_cache_jobs("team-reconcile", limit=20)
 
     assert [first["enqueued"], second["enqueued"]] == [20, 5]
-    assert [session.execute_calls for session in sessions] == [1, 1]
+    assert [session.execute_calls for session in sessions] == [2, 2]
     assert all(session.committed for session in sessions)
+
+
+def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="team-live-lease",
+        reviewer="reviewer-a",
+        raw_data={"delivery_cache_status": "retry_pending"},
+    )
+    live_lease_expires_at = datetime(2099, 1, 1, tzinfo=UTC)
+    live_job = SimpleNamespace(
+        id=uuid4(),
+        team_id=group.team_id,
+        group_id=group.id,
+        status="processing",
+        attempt_count=1,
+        lease_owner="active-worker",
+        lease_token="live-token",
+        lease_expires_at=live_lease_expires_at,
+        requested_by="reviewer-a",
+        request_reason="review_completed",
+        last_error=None,
+        completed_at=None,
+    )
+    statements: list[str] = []
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Session:
+        def __init__(self):
+            self.execute_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement):
+            self.execute_calls += 1
+            statements.append(str(statement.compile(dialect=postgresql.dialect())))
+            if self.execute_calls == 1:
+                return Rows([(group, live_job)])
+            return Rows([])
+
+        def scalar(self, _statement):
+            pytest.fail("reconciliation must not issue per-group queries")
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(delivery_cache, "SessionLocal", Session)
+
+    report = delivery_cache._reconcile_postgres_delivery_cache_jobs("team-live-lease", limit=20)
+
+    assert report["enqueued"] == 0
+    assert report["skipped_live"] == 1
+    assert live_job.status == "processing"
+    assert live_job.lease_owner == "active-worker"
+    assert live_job.lease_token == "live-token"
+    assert live_job.lease_expires_at == live_lease_expires_at
+    assert group.raw_data["delivery_cache_status"] == "retry_pending"
+    assert len(statements) == 2
+
+
+def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="team-expired-lease",
+        reviewer="reviewer-a",
+        raw_data={"delivery_cache_status": "retry_pending"},
+    )
+    expired_job = SimpleNamespace(
+        id=uuid4(),
+        team_id=group.team_id,
+        group_id=group.id,
+        status="processing",
+        attempt_count=1,
+        lease_owner="dead-worker",
+        lease_token="expired-token",
+        lease_expires_at=now - timedelta(seconds=1),
+        requested_by="reviewer-a",
+        request_reason="review_completed",
+        last_error="",
+        completed_at=None,
+    )
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Session:
+        def __init__(self):
+            self.execute_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, _statement):
+            self.execute_calls += 1
+            return Rows([(group, expired_job)] if self.execute_calls == 1 else [])
+
+        def scalar(self, _statement):
+            pytest.fail("reconciliation must not issue per-group queries")
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(delivery_cache, "SessionLocal", Session)
+
+    report = delivery_cache._reconcile_postgres_delivery_cache_jobs(
+        "team-expired-lease",
+        limit=20,
+        now=now,
+    )
+
+    assert report["enqueued"] == 1
+    assert report["skipped_live"] == 0
+    assert expired_job.status == "pending"
+    assert expired_job.lease_owner is None
+    assert expired_job.lease_token is None
+    assert expired_job.lease_expires_at is None
+    assert expired_job.attempt_count == 1
+    assert group.raw_data["delivery_cache_status"] == "pending"
 
 
 def test_serve_restart_preserves_persisted_admin_resume(

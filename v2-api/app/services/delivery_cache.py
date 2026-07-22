@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, exists, literal, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -455,12 +455,18 @@ def _reconcile_json_delivery_cache_jobs(team_id: str, *, limit: int) -> dict[str
         raise
 
 
-def build_postgres_reconciliation_statement(*, team_id: str, limit: int):
+def build_postgres_existing_reconciliation_statement(
+    *,
+    team_id: str,
+    limit: int,
+    now: datetime,
+):
     bounded = _reconciliation_limit(limit)
     return (
         select(MaterialGroup, DeliveryCacheJob)
-        .outerjoin(
-            DeliveryCacheJob,
+        .select_from(DeliveryCacheJob)
+        .join(
+            MaterialGroup,
             and_(
                 DeliveryCacheJob.team_id == MaterialGroup.team_id,
                 DeliveryCacheJob.group_id == MaterialGroup.id,
@@ -469,10 +475,42 @@ def build_postgres_reconciliation_statement(*, team_id: str, limit: int):
         .where(
             MaterialGroup.team_id == team_id,
             MaterialGroup.status == GroupStatus.APPROVED,
+            MaterialGroup.raw_data["delivery_cache_status"].as_string() == "retry_pending",
             or_(
-                DeliveryCacheJob.id.is_(None),
-                MaterialGroup.raw_data["delivery_cache_status"].as_string() == "retry_pending",
+                DeliveryCacheJob.status == "pending",
+                DeliveryCacheJob.status == "ready",
+                and_(
+                    DeliveryCacheJob.status == "failed",
+                    DeliveryCacheJob.attempt_count < MAX_DELIVERY_CACHE_ATTEMPTS,
+                ),
+                and_(
+                    DeliveryCacheJob.status == "processing",
+                    DeliveryCacheJob.attempt_count < MAX_DELIVERY_CACHE_ATTEMPTS,
+                    DeliveryCacheJob.lease_expires_at.is_not(None),
+                    DeliveryCacheJob.lease_expires_at < now,
+                ),
             ),
+        )
+        .order_by(DeliveryCacheJob.group_id, DeliveryCacheJob.id)
+        .limit(bounded)
+        .with_for_update(of=DeliveryCacheJob, skip_locked=True)
+    )
+
+
+def build_postgres_missing_reconciliation_statement(*, team_id: str, limit: int):
+    bounded = _reconciliation_limit(limit)
+    job_exists = exists(
+        select(DeliveryCacheJob.id).where(
+            DeliveryCacheJob.team_id == MaterialGroup.team_id,
+            DeliveryCacheJob.group_id == MaterialGroup.id,
+        )
+    )
+    return (
+        select(MaterialGroup, literal(None).label("delivery_cache_job"))
+        .where(
+            MaterialGroup.team_id == team_id,
+            MaterialGroup.status == GroupStatus.APPROVED,
+            ~job_exists,
         )
         .order_by(MaterialGroup.id)
         .limit(bounded)
@@ -480,15 +518,41 @@ def build_postgres_reconciliation_statement(*, team_id: str, limit: int):
     )
 
 
-def _reconcile_postgres_delivery_cache_jobs(team_id: str, *, limit: int) -> dict[str, Any]:
+def _delivery_job_has_live_lease(job: DeliveryCacheJob, *, now: datetime) -> bool:
+    if str(job.status or "") != "processing":
+        return False
+    lease_expires_at = job.lease_expires_at
+    if lease_expires_at is None:
+        return True
+    if lease_expires_at.tzinfo is None:
+        lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+    return lease_expires_at >= now
+
+
+def _reconcile_postgres_delivery_cache_jobs(
+    team_id: str,
+    *,
+    limit: int,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    reconciled_at = now or datetime.now(UTC)
+    bounded = _reconciliation_limit(limit)
     with SessionLocal() as session:
-        rows = list(
+        existing_rows = list(
             session.execute(
-                build_postgres_reconciliation_statement(team_id=team_id, limit=limit)
+                build_postgres_existing_reconciliation_statement(
+                    team_id=team_id,
+                    limit=bounded,
+                    now=reconciled_at,
+                )
             ).all()
         )
         enqueued = 0
-        for group, job in rows:
+        skipped_live = 0
+        for group, job in existing_rows:
+            if _delivery_job_has_live_lease(job, now=reconciled_at):
+                skipped_live += 1
+                continue
             enqueue_postgres_delivery_cache_job(
                 session,
                 group,
@@ -497,11 +561,36 @@ def _reconcile_postgres_delivery_cache_jobs(team_id: str, *, limit: int) -> dict
                 existing_job=job,
             )
             enqueued += 1
+        remaining = max(0, bounded - len(existing_rows))
+        missing_rows = []
+        if remaining:
+            missing_rows = list(
+                session.execute(
+                    build_postgres_missing_reconciliation_statement(
+                        team_id=team_id,
+                        limit=remaining,
+                    )
+                ).all()
+            )
+        for group, _missing_job in missing_rows:
+            enqueue_postgres_delivery_cache_job(
+                session,
+                group,
+                actor=str(group.reviewer or "system"),
+                reason="reconciliation",
+                existing_job=None,
+            )
+            enqueued += 1
         if enqueued:
             session.commit()
         else:
             session.rollback()
-        return {"backend": "postgres", "scanned": len(rows), "enqueued": enqueued}
+        return {
+            "backend": "postgres",
+            "scanned": len(existing_rows) + len(missing_rows),
+            "enqueued": enqueued,
+            "skipped_live": skipped_live,
+        }
 
 
 def reconcile_delivery_cache_jobs(*, limit: int = MAX_RECONCILIATION_BATCH_SIZE) -> dict[str, Any]:

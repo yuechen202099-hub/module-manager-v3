@@ -982,8 +982,25 @@ def maintenance_load_too_high(max_ratio: float = DEFAULT_MAX_LOAD_RATIO) -> bool
     return one_minute / max(1, os.cpu_count() or 1) >= max(0.0, float(max_ratio))
 
 
+def _maintenance_control_allows_work() -> bool:
+    backend = _backend()
+    team_id = local_simulation.current_team_id()
+    if backend == "json":
+        control = local_simulation.state_for_team(team_id).get("barcode_maintenance_control")
+        return isinstance(control, dict) and not bool(control.get("paused", True))
+    if backend == "dual":
+        from app.services.state_repository import StateBackendNotReady
+
+        raise StateBackendNotReady("Dual maintenance control is disabled until queue cutover is complete")
+    with SessionLocal() as session:
+        control = session.scalar(
+            select(BarcodeMaintenanceControl).where(BarcodeMaintenanceControl.team_id == team_id)
+        )
+        return control is not None and not bool(control.paused)
+
+
 def _maintenance_can_claim() -> bool:
-    return not bool(maintenance_status().get("paused", True))
+    return _maintenance_control_allows_work() and not maintenance_load_too_high()
 
 
 def run_worker_batch(
@@ -1003,18 +1020,22 @@ def run_worker_batch(
     worker_id = f"{os.uname().nodename if hasattr(os, 'uname') else 'worker'}-{os.getpid()}"
     claim = claim_next or (lambda: _claim_next_work(worker_id))
     process = process_job or _process_job
-    allowed = can_claim or _maintenance_can_claim
-    loaded = load_too_high or maintenance_load_too_high
+    if can_claim is None and load_too_high is None:
+        can_continue = _maintenance_can_claim
+    else:
+        allowed = can_claim or _maintenance_control_allows_work
+        loaded = load_too_high or maintenance_load_too_high
+        can_continue = lambda: allowed() and not loaded()
     on_failure = fail_job or _fail_job
     processed = 0
     failed = 0
     try:
-        if not allowed() or loaded():
+        if not can_continue():
             return {"processed": 0, "failed": 0, "status": "complete"}
         if claim_next is None:
             reconcile_delivery_cache_jobs(limit=limit)
         while processed < limit:
-            if not allowed() or loaded():
+            if not can_continue():
                 break
             job = claim()
             if job is None:
