@@ -22,6 +22,7 @@ REQUIRED_FILES = [
     "docs/sop/08-business-acceptance-templates.md",
     "ops/releases/README.md",
     "ops/releases/V3.0.84.md",
+    "ops/releases/V3.1.0.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.81.md",
@@ -741,6 +742,11 @@ def main() -> int:
         fail("build-client-release.ps1 must copy scripts\\verify_dialog_information_integration.js")
     if "scripts/verify_dialog_information_integration.js" not in release_verifier:
         fail("verify-client-release.py must require scripts/verify_dialog_information_integration.js")
+    for path in ["v2-api/scripts/preview_v3_1_backfill.py", "v2-api/scripts/verify_v3_1_release.py"]:
+        if path not in release_verifier:
+            fail(f"verify-client-release.py must require {path}")
+        if path.replace("/", "\\") not in build_script:
+            fail(f"build-client-release.ps1 must copy {path}")
     for artifact in ["v2-api/app/static/vue/version.json", "v2-web/src/version.json"]:
         if artifact not in release_verifier:
             fail(f"verify-client-release.py must require {artifact}")

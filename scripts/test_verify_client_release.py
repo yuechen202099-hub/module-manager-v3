@@ -224,7 +224,7 @@ def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.0.84"' in build_script
+    assert '[string]$Version = "3.1.0"' in build_script
 
 
 def test_release_builder_embeds_the_current_source_commit() -> None:
@@ -377,7 +377,7 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.0.84")
+        verifier.verify_release_markdown_text(document_path, content, "3.1.0")
 
 
 @pytest.mark.parametrize(

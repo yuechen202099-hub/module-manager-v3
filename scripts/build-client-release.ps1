@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.0.84",
+    [string]$Version = "3.1.0",
     [switch]$SkipSmoke
 )
 
@@ -173,6 +173,8 @@ Copy-ReleaseItem "v2-api\requirements.txt" "v2-api\requirements.txt"
 Copy-ReleaseItem "v2-api\requirements-dev.txt" "v2-api\requirements-dev.txt"
 Copy-ReleaseItem "v2-api\tests" "v2-api\tests"
 Copy-ReleaseItem "v2-api\scripts" "v2-api\scripts"
+Copy-ReleaseItem "v2-api\scripts\preview_v3_1_backfill.py" "v2-api\scripts\preview_v3_1_backfill.py"
+Copy-ReleaseItem "v2-api\scripts\verify_v3_1_release.py" "v2-api\scripts\verify_v3_1_release.py"
 $webSource = Join-Path $root "v2-web"
 $webTarget = Join-Path $staging "v2-web"
 New-Item -ItemType Directory -Force -Path $webTarget | Out-Null
