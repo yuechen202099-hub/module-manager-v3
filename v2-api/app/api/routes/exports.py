@@ -5,12 +5,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 
 from app.core.security import decode_access_token
+from app.api.routes.auth import require_admin
 from app.schemas.export import ExceptionMetersExportRequest, FinalDeliveryExportRequest, TaskDetailExportRequest
 from app.services.state_repository import get_state_repository
 from app.services.final_delivery_export import (
     DeliveryPackageValidationError,
     LeasedDeliveryPackage,
 )
+from app.services.delivery_package_queue import DeliveryPackageNotReady
 from app.services.local_simulation import (
     reset_current_team,
     set_current_team,
@@ -67,13 +69,28 @@ def export_task_detail(payload: TaskDetailExportRequest, request: Request):
 
 
 @router.post("/final-delivery")
-def export_final_delivery(payload: FinalDeliveryExportRequest, request: Request):
+def export_final_delivery(
+    payload: FinalDeliveryExportRequest,
+    request: Request,
+    auth: dict = Depends(require_admin),
+):
     try:
-        package = get_state_repository().build_final_delivery_export(
+        package = get_state_repository().request_final_delivery_export(
             task_id=payload.task_id,
             terminal=payload.terminal,
             review_scope=payload.review_scope,
+            requested_by=str(auth.get("sub") or ""),
         )
+    except DeliveryPackageNotReady as exc:
+        raise HTTPException(
+            status_code=202,
+            detail={
+                "code": "formal_delivery_not_ready",
+                "message": "正式交付包正在后台生成，请稍后重试。",
+                "job_id": exc.job_id,
+                "status": exc.status,
+            },
+        ) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
     except DeliveryPackageValidationError as exc:

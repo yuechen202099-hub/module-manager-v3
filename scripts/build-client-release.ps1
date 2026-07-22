@@ -1,5 +1,6 @@
 param(
     [string]$Version = "3.1.0",
+    [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
 
@@ -22,6 +23,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 if ($worktreeChanges.Count -ne 0) {
     throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
+}
+if ([string]::IsNullOrWhiteSpace($PerformanceReport)) {
+    throw "Performance report is required for V3.1.0 packaging."
+}
+$performanceReportPath = if ([System.IO.Path]::IsPathRooted($PerformanceReport)) {
+    [System.IO.Path]::GetFullPath($PerformanceReport)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path $root $PerformanceReport))
+}
+if (-not (Test-Path -LiteralPath $performanceReportPath -PathType Leaf)) {
+    throw "Performance report is missing: $performanceReportPath"
 }
 
 $releaseRoot = Join-Path $root "build\server-release"
@@ -58,6 +71,15 @@ Write-Host "Checking Python dependencies..."
 & .\.venv\Scripts\python.exe -m pip install -r .\v2-api\requirements-dev.txt | Out-Null
 if ($LASTEXITCODE -ne 0) {
         throw "Dependency installation failed."
+}
+
+Write-Host "Verifying source-bound V3.1 performance evidence..."
+& .\.venv\Scripts\python.exe .\v2-api\scripts\verify_v3_1_release.py `
+    --repo-root $root `
+    --performance-report $performanceReportPath `
+    --expected-source-commit $sourceCommit
+if ($LASTEXITCODE -ne 0) {
+    throw "V3.1 release verification failed."
 }
 
 if (-not $SkipSmoke) {
@@ -257,6 +279,8 @@ $manifest = @"
 
 .\scripts\run-client-acceptance-gate.ps1
 
+.\scripts\build-client-release.ps1 -Version $Version -PerformanceReport .\outputs\performance\v$Version-task-review.json
+
 .\.venv\Scripts\python.exe .\scripts\smoke-client-demo.py
 
 .\.venv\Scripts\python.exe .\scripts\verify_vue_migration_gate.py --strict-native
@@ -272,6 +296,7 @@ $manifest = @"
 ## Verified During Packaging
 
 - Release smoke check passes unless -SkipSmoke was used
+- Source-bound V3.1 task/review performance evidence passes the release verifier
 - Demo admin and reviewer login are available only for local walkthrough when enabled
 - Reviewer task ownership uses the logged-in reviewer identity, not a local debug reviewer id
 - Vue strict-native production pages are required

@@ -25,14 +25,19 @@ from app.services.final_delivery_export import LeasedDeliveryPackage
 
 
 def group_scan_result(*, status: str = "partial", passed_count: int = 2) -> GroupScanResult:
+    matched_fields = {
+        3: ["meter", "module", "collector"],
+        2: ["meter", "collector"],
+        1: ["meter"],
+    }.get(passed_count, [])
     return GroupScanResult(
         status=status,
         passed_count=passed_count,
         machine_barcode_values=["M-VERIFY-001", "C-VERIFY-001"],
         machine_qr_values=[],
         ocr_candidates=["MOD-VERIFY-001"],
-        matched_fields=["meter", "collector"] if passed_count == 2 else ["meter"],
-        missing_fields=["module"] if passed_count == 2 else ["module", "collector"],
+        matched_fields=matched_fields,
+        missing_fields=[field for field in ("meter", "module", "collector") if field not in matched_fields],
         unmatched_machine_values=[],
         matched_ocr_candidates=["MOD-VERIFY-001"],
         unmatched_ocr_candidates=[],
@@ -542,6 +547,35 @@ def test_json_apply_group_scan_result_compares_and_writes_inside_authoritative_t
     assert calls == ["begin", "finish"]
 
 
+def test_json_pass_persists_archive_pending_before_worker_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"json-pass-{uuid4()}"
+    state = _json_barcode_state(team_id)
+    monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+    fingerprint = state["groups"][0]["barcode_verification"]["evidence_fingerprint"]
+
+    result = repository.JsonStateRepository().apply_group_scan_result(
+        "group-json-barcode",
+        group_scan_result(status="passed", passed_count=3),
+        claimed_evidence_fingerprint=fingerprint,
+        claimed_evidence_version=7,
+        lease_owner="worker-json",
+        lease_token="lease-json",
+        actor="barcode-worker",
+    )
+
+    verification = repository.local_simulation._team_states[team_id]["groups"][0]["barcode_verification"]
+    assert result["applied"] is True
+    assert verification["status"] == "passed"
+    assert verification["auto_archive_status"] == "pending"
+    assert verification["auto_archive_attempt_count"] == 0
+    assert verification["auto_archive_lease_owner"] is None
+    assert verification["auto_archive_lease_token"] is None
+    assert verification["auto_archive_lease_expires_at"] is None
+
+
 def test_json_manual_confirmation_increments_version_and_invalidates_every_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -566,9 +600,14 @@ def test_json_manual_confirmation_increments_version_and_invalidates_every_lease
     assert verification["lease_owner"] is None
     assert verification["lease_token"] is None
     assert verification["lease_expires_at"] is None
+    assert verification["auto_archive_status"] == "pending"
+    assert verification["auto_archive_attempt_count"] == 0
+    assert verification["auto_archive_lease_owner"] is None
+    assert verification["auto_archive_lease_token"] is None
+    assert verification["auto_archive_lease_expires_at"] is None
 
 
-def test_dual_manual_confirmation_restores_json_when_postgres_confirmation_fails(
+def test_dual_manual_confirmation_fails_before_either_backend_or_archive_queue_mutates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     team_id = f"dual-confirm-{uuid4()}"
@@ -577,13 +616,13 @@ def test_dual_manual_confirmation_restores_json_when_postgres_confirmation_fails
     monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
     monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
 
-    class BrokenMirrorRepository:
-        def confirm_group_barcode_manually(self, *_args, **_kwargs):
-            raise RuntimeError("injected postgres confirmation failure")
+    monkeypatch.setattr(
+        repository.DualWriteStateRepository,
+        "postgres_repository_factory",
+        staticmethod(lambda: pytest.fail("dual fail-closed must not construct the PostgreSQL writer")),
+    )
 
-    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", BrokenMirrorRepository)
-
-    with pytest.raises(RuntimeError, match="injected postgres confirmation failure"):
+    with pytest.raises(repository.StateBackendNotReady, match="before either backend mutated"):
         repository.DualWriteStateRepository().confirm_group_barcode_manually(
             "group-json-barcode",
             actor="reviewer-a",
@@ -684,25 +723,206 @@ def test_json_review_cache_enqueue_failure_preserves_review_and_records_retry(
     assert committed["delivery_cache_jobs"] == []
 
 
-def test_dual_review_group_mirror_failure_rolls_back_json_and_submits_no_cache(
+def test_dual_review_group_fails_before_either_backend_or_cache_queue_mutates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     team_id = f"dual-review-rollback-{uuid4()}"
     state = _prepare_json_review_cache_state(monkeypatch, team_id)
     before = deepcopy(state)
 
-    class BrokenMirrorRepository:
-        def review_group(self, *_args, **_kwargs):
-            raise RuntimeError("injected PostgreSQL review failure")
+    monkeypatch.setattr(
+        repository.DualWriteStateRepository,
+        "postgres_repository_factory",
+        staticmethod(lambda: pytest.fail("dual fail-closed must not construct the PostgreSQL writer")),
+    )
 
-    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", BrokenMirrorRepository)
-
-    with pytest.raises(RuntimeError, match="injected PostgreSQL review failure"):
+    with pytest.raises(repository.StateBackendNotReady, match="before either backend mutated"):
         repository.DualWriteStateRepository().review_group(
             "group-json-barcode",
             "approved",
             "reviewer-a",
             "ready",
+        )
+
+    assert repository.local_simulation._team_states[team_id] == before
+
+
+def test_postgres_nonapproved_review_invalidates_group_photo_and_cache_job_state() -> None:
+    from app.services import delivery_cache
+
+    assert hasattr(delivery_cache, "invalidate_postgres_delivery_cache_for_review")
+    group_id = uuid4()
+    group = SimpleNamespace(
+        id=group_id,
+        team_id="team-a",
+        legacy_id="group-legacy-a",
+        raw_data={"delivery_cache_status": "ready", "delivery_cache_error": ""},
+    )
+    photos = [
+        SimpleNamespace(
+            raw_data={
+                "delivery_cache_status": "ready",
+                "delivery_cache_path": f"objects/{index}.jpg",
+                "delivery_cache_error": "",
+            }
+        )
+        for index in range(2)
+    ]
+    job = SimpleNamespace(
+        status="ready",
+        lease_owner="worker-a",
+        lease_token="lease-a",
+        lease_expires_at=datetime(2026, 7, 23, tzinfo=UTC),
+        last_error=None,
+        completed_at=datetime(2026, 7, 22, tzinfo=UTC),
+    )
+    package_job = SimpleNamespace(
+        group_ids=[group.legacy_id],
+        status="ready",
+        lease_owner="package-worker",
+        lease_token="package-lease",
+        lease_expires_at=datetime(2026, 7, 23, tzinfo=UTC),
+        last_error=None,
+        completed_at=datetime(2026, 7, 22, tzinfo=UTC),
+    )
+
+    class ScalarRows:
+        def all(self):
+            return photos
+
+    class Session:
+        flush_count = 0
+        scalars_count = 0
+        scalar_statements = []
+
+        def scalars(self, statement):
+            self.scalars_count += 1
+            self.scalar_statements.append(statement)
+            if self.scalars_count == 1:
+                return ScalarRows()
+            return SimpleNamespace(all=lambda: [package_job])
+
+        def scalar(self, _statement):
+            return job
+
+        def flush(self):
+            self.flush_count += 1
+
+    session = Session()
+    delivery_cache.invalidate_postgres_delivery_cache_for_review(
+        session,
+        group,
+        actor="reviewer-a",
+        reason="review_rejected",
+    )
+
+    assert group.raw_data["delivery_cache_status"] == "stale"
+    assert all(photo.raw_data["delivery_cache_status"] == "stale" for photo in photos)
+    assert job.status == "not_eligible"
+    assert job.lease_owner is None
+    assert job.lease_token is None
+    assert job.lease_expires_at is None
+    assert job.completed_at is None
+    assert package_job.status == "stale"
+    assert package_job.lease_owner is None
+    assert package_job.lease_token is None
+    assert package_job.lease_expires_at is None
+    assert package_job.completed_at is None
+    assert session.flush_count == 1
+    package_query = session.scalar_statements[1].compile(dialect=postgresql.dialect())
+    assert [str(group_id)] in package_query.params.values()
+    assert [group.legacy_id] in package_query.params.values()
+
+
+def test_postgres_nonapproved_review_invalidates_delivery_cache_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import GroupStatus
+    from app.services import delivery_cache
+
+    events: list[str] = []
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="team-a",
+        legacy_id="group-a",
+        status=GroupStatus.APPROVED,
+        reviewer="reviewer-a",
+        review_note="",
+        exception_note="",
+        reviewed_at=None,
+        raw_data={"status": "approved", "delivery_cache_status": "ready"},
+    )
+
+    class Session:
+        def commit(self):
+            events.append("commit")
+
+        def refresh(self, _value):
+            return None
+
+    session = Session()
+
+    class ReviewRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(session)
+
+        def _group_by_legacy_id(self, checked_session, group_id: str, *, lock: bool = False):
+            assert checked_session is session
+            assert group_id == "group-a"
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, checked_session, checked_group, actor: str, *, force: bool = False):
+            assert checked_session is session
+            assert checked_group is group
+            assert actor == "reviewer-a"
+
+    def invalidate(checked_session, checked_group, *, actor: str, reason: str):
+        assert checked_session is session
+        assert checked_group is group
+        assert group.status == GroupStatus.REJECTED
+        assert events == []
+        assert actor == "reviewer-a"
+        assert reason == "review_rejected"
+        events.append("invalidate")
+
+    monkeypatch.setattr(delivery_cache, "invalidate_postgres_delivery_cache_for_review", invalidate)
+    monkeypatch.setattr(
+        repository,
+        "_group_payload",
+        lambda _session, checked_group: {"id": checked_group.legacy_id, "status": "rejected"},
+    )
+
+    result = ReviewRepository().review_group("group-a", "rejected", "reviewer-a")
+
+    assert result["status"] == "rejected"
+    assert events == ["invalidate", "commit"]
+
+
+def test_dual_scan_cas_fails_before_either_backend_or_archive_queue_mutates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"dual-scan-{uuid4()}"
+    state = _json_barcode_state(team_id)
+    before = deepcopy(state)
+    fingerprint = state["groups"][0]["barcode_verification"]["evidence_fingerprint"]
+    monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+    monkeypatch.setattr(
+        repository.DualWriteStateRepository,
+        "postgres_repository_factory",
+        staticmethod(lambda: pytest.fail("dual fail-closed must not construct the PostgreSQL writer")),
+    )
+
+    with pytest.raises(repository.StateBackendNotReady, match="before either backend mutated"):
+        repository.DualWriteStateRepository().apply_group_scan_result(
+            "group-json-barcode",
+            group_scan_result(status="passed", passed_count=3),
+            claimed_evidence_fingerprint=fingerprint,
+            claimed_evidence_version=7,
+            lease_owner="worker-json",
+            lease_token="lease-json",
+            actor="barcode-worker",
         )
 
     assert repository.local_simulation._team_states[team_id] == before
@@ -1140,6 +1360,222 @@ def test_json_repository_builds_formal_zip_only_from_completed_cache(
             assert len(archive.namelist()) == 5
     finally:
         package.release()
+
+
+def test_json_formal_request_only_enqueues_persistent_zip_work_until_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import delivery_package_queue
+
+    assert hasattr(repository.JsonStateRepository, "request_final_delivery_export")
+    group = _formal_delivery_group(tmp_path, "queued-package-group")
+    team_id = f"queued-package-{uuid4()}"
+    state = {
+        "team_id": team_id,
+        "groups": [deepcopy(group)],
+        "delivery_package_jobs": [],
+        "audit_events": [],
+    }
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+    monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: None)
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "build_final_delivery_package_from_groups",
+        lambda *_args, **_kwargs: pytest.fail("HTTP request must not build or compress the ZIP"),
+    )
+
+    repo = repository.JsonStateRepository()
+    for _ in range(2):
+        with pytest.raises(delivery_package_queue.DeliveryPackageNotReady) as captured:
+            repo.request_final_delivery_export(task_id=17, requested_by="admin-a")
+        assert captured.value.status == "pending"
+
+    jobs = repository.local_simulation._team_states[team_id]["delivery_package_jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["status"] == "pending"
+    package_path = tmp_path / "packages" / "ready.zip"
+    package_path.parent.mkdir(parents=True, exist_ok=True)
+    package_path.write_bytes(b"ready-package")
+    jobs[0].update({"status": "ready", "package_path": str(package_path)})
+
+    package = repo.request_final_delivery_export(task_id=17, requested_by="admin-a")
+    try:
+        assert package.path == package_path
+    finally:
+        package.release()
+
+
+def test_json_repeated_formal_request_preserves_live_processing_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import delivery_package_queue
+
+    group = _formal_delivery_group(tmp_path, "processing-package-group")
+    team_id = f"processing-package-{uuid4()}"
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setitem(
+        repository.local_simulation._team_states,
+        team_id,
+        {"team_id": team_id, "groups": [deepcopy(group)], "delivery_package_jobs": [], "audit_events": []},
+    )
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+    monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: None)
+    repo = repository.JsonStateRepository()
+
+    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady):
+        repo.request_final_delivery_export(task_id=17, requested_by="admin-a")
+    job = repository.local_simulation._team_states[team_id]["delivery_package_jobs"][0]
+    lease_expires_at = "2026-07-23T03:00:00+00:00"
+    job.update(
+        {
+            "status": "processing",
+            "attempt_count": 2,
+            "lease_owner": "package-worker-a",
+            "lease_token": "package-lease-a",
+            "lease_expires_at": lease_expires_at,
+        }
+    )
+
+    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady) as captured:
+        repo.request_final_delivery_export(task_id=17, requested_by="admin-b")
+
+    assert captured.value.status == "processing"
+    assert job["attempt_count"] == 2
+    assert job["lease_owner"] == "package-worker-a"
+    assert job["lease_token"] == "package-lease-a"
+    assert job["lease_expires_at"] == lease_expires_at
+
+
+def test_json_repeated_formal_request_does_not_reset_exhausted_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import delivery_package_queue
+
+    group = _formal_delivery_group(tmp_path, "failed-package-group")
+    team_id = f"failed-package-{uuid4()}"
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setitem(
+        repository.local_simulation._team_states,
+        team_id,
+        {"team_id": team_id, "groups": [deepcopy(group)], "delivery_package_jobs": [], "audit_events": []},
+    )
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+    monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: None)
+    repo = repository.JsonStateRepository()
+
+    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady):
+        repo.request_final_delivery_export(task_id=17, requested_by="admin-a")
+    job = repository.local_simulation._team_states[team_id]["delivery_package_jobs"][0]
+    job.update(
+        {
+            "status": "failed",
+            "attempt_count": delivery_package_queue.MAX_DELIVERY_PACKAGE_ATTEMPTS,
+            "last_error": "retry limit reached",
+        }
+    )
+
+    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady) as captured:
+        repo.request_final_delivery_export(task_id=17, requested_by="admin-b")
+
+    assert captured.value.status == "failed"
+    assert job["attempt_count"] == delivery_package_queue.MAX_DELIVERY_PACKAGE_ATTEMPTS
+    assert job["last_error"] == "retry limit reached"
+
+
+@pytest.mark.parametrize(
+    ("status", "attempt_count", "lease_owner", "lease_token", "expected_error"),
+    [
+        ("processing", 2, "package-worker-a", "package-lease-a", None),
+        ("failed", 3, None, None, "retry limit reached"),
+    ],
+)
+def test_postgres_repeated_formal_request_preserves_live_or_exhausted_job(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    attempt_count: int,
+    lease_owner: str | None,
+    lease_token: str | None,
+    expected_error: str | None,
+) -> None:
+    from app.services import delivery_package_queue
+
+    lease_expires_at = datetime(2026, 7, 23, 3, 0, tzinfo=UTC) if lease_owner else None
+    job = SimpleNamespace(
+        id=uuid4(),
+        status=status,
+        attempt_count=attempt_count,
+        lease_owner=lease_owner,
+        lease_token=lease_token,
+        lease_expires_at=lease_expires_at,
+        package_path=None,
+        content_sha256=None,
+        size_bytes=None,
+        requested_by="admin-a",
+        request_reason="formal_delivery_requested",
+        last_error=expected_error,
+        completed_at=None,
+        scope_payload={"task_id": 17, "terminal": "", "review_scope": "reviewed"},
+        group_ids=["legacy-group"],
+    )
+
+    class Session:
+        rolled_back = False
+
+        def scalar(self, _statement):
+            return job
+
+        def add(self, _job):
+            pytest.fail("matching persistent job must be reused")
+
+        def commit(self):
+            pytest.fail("live or exhausted jobs must not be mutated")
+
+        def rollback(self):
+            self.rolled_back = True
+
+    session = Session()
+    monkeypatch.setattr(
+        delivery_package_queue,
+        "prepare_delivery_request",
+        lambda *_args, **_kwargs: ([], "f" * 64, ["legacy-group"]),
+    )
+    monkeypatch.setattr(
+        delivery_package_queue,
+        "delivery_scope",
+        lambda *_args, **_kwargs: (
+            "team-a|task=17|terminal=|review_scope=reviewed",
+            "scope-hash",
+            {"task_id": 17, "terminal": "", "review_scope": "reviewed"},
+        ),
+    )
+
+    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady) as captured:
+        delivery_package_queue.request_postgres_delivery_package(
+            session,
+            groups=[],
+            team_id="team-a",
+            task_id=17,
+            terminal="",
+            review_scope="reviewed",
+            requested_by="admin-b",
+        )
+
+    assert captured.value.status == status
+    assert session.rolled_back is True
+    assert job.status == status
+    assert job.attempt_count == attempt_count
+    assert job.lease_owner == lease_owner
+    assert job.lease_token == lease_token
+    assert job.lease_expires_at == lease_expires_at
+    assert job.last_error == expected_error
 
 
 def test_json_formal_export_reports_missing_completed_cache_before_zip_build(

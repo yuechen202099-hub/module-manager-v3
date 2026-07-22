@@ -54,6 +54,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_delivery_cache_jobs_lease", table_name="delivery_cache_jobs")
-    op.drop_index("ix_delivery_cache_jobs_pending", table_name="delivery_cache_jobs")
-    op.drop_table("delivery_cache_jobs")
+    raise RuntimeError(
+        "V3.1 delivery cache migrations are production-irreversible; "
+        "restore a pre-upgrade backup instead of running downgrade DDL"
+    )

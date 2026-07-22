@@ -2548,30 +2548,6 @@ function looksLikeBlankOrPlaceholderImage(image: HTMLImageElement): boolean {
   }
 }
 
-type DeliveryPhotoManifest = {
-  id?: string | number
-  image_url?: string
-  preview_url?: string
-  delivery_cache_url?: string
-  category_label?: string
-  archive_filename?: string
-}
-
-type DeliveryGroupManifest = {
-  id?: string | number
-  terminal?: string
-  address?: string
-  meter_no?: string
-  status?: string
-  reviewer?: string
-  photo_count?: number
-  photos?: DeliveryPhotoManifest[]
-}
-
-type DeliveryManifest = {
-  groups?: DeliveryGroupManifest[]
-}
-
 type DeliveryExportProgress = {
   text: string
   percent: number
@@ -2629,305 +2605,51 @@ export async function exportProjectOutsideConstruction(): Promise<void> {
   await downloadExcel('/exports/project-outside', { team_id: currentTeamId() }, `project-outside-${Date.now()}.xlsx`)
 }
 
-const zipEncoder = new TextEncoder()
-const deliveryDownloadConcurrency = 6
-
-const crcTable = (() => {
-  const table = new Uint32Array(256)
-  for (let index = 0; index < 256; index += 1) {
-    let value = index
-    for (let bit = 0; bit < 8; bit += 1) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1
-    table[index] = value >>> 0
-  }
-  return table
-})()
-
-function bytesLE(value: number, length: number) {
-  const bytes = new Uint8Array(length)
-  let remaining = value >>> 0
-  for (let index = 0; index < length; index += 1) {
-    bytes[index] = remaining & 0xff
-    remaining = Math.floor(remaining / 256)
-  }
-  return bytes
-}
-
-function concatBytes(parts: Uint8Array[]) {
-  const total = parts.reduce((sum, part) => sum + part.length, 0)
-  const merged = new Uint8Array(total)
-  let offset = 0
-  for (const part of parts) {
-    merged.set(part, offset)
-    offset += part.length
-  }
-  return merged
-}
-
-function crc32(bytes: Uint8Array) {
-  let crc = 0xffffffff
-  for (const byte of bytes) crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8)
-  return (crc ^ 0xffffffff) >>> 0
-}
-
-function dosTimestamp(date = new Date()) {
-  const time = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2)
-  const dosDate = ((Math.max(1980, date.getFullYear()) - 1980) << 9) | ((date.getMonth() + 1) << 5) | Math.max(1, date.getDate())
-  return { time, date: dosDate }
-}
-
-async function zipEntryBytes(data: Blob | Uint8Array | string) {
-  if (data instanceof Uint8Array) return data
-  if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer())
-  return zipEncoder.encode(String(data ?? ''))
-}
-
-async function createZipBlob(entries: Array<{ name: string; data: Blob | Uint8Array | string }>) {
-  const localParts: Uint8Array[] = []
-  const centralParts: Uint8Array[] = []
-  const stamp = dosTimestamp()
-  let offset = 0
-  for (const entry of entries) {
-    const nameBytes = zipEncoder.encode(entry.name.replace(/\\/g, '/'))
-    const data = await zipEntryBytes(entry.data)
-    const checksum = crc32(data)
-    const size = data.length
-    if (offset + size > 0xffffffff) throw new Error('当前浏览器导出超过 4GB，请按终端分批导出。')
-    const localHeader = concatBytes([
-      bytesLE(0x04034b50, 4),
-      bytesLE(20, 2),
-      bytesLE(0x0800, 2),
-      bytesLE(0, 2),
-      bytesLE(stamp.time, 2),
-      bytesLE(stamp.date, 2),
-      bytesLE(checksum, 4),
-      bytesLE(size, 4),
-      bytesLE(size, 4),
-      bytesLE(nameBytes.length, 2),
-      bytesLE(0, 2),
-      nameBytes,
-      data,
-    ])
-    localParts.push(localHeader)
-    centralParts.push(
-      concatBytes([
-        bytesLE(0x02014b50, 4),
-        bytesLE(20, 2),
-        bytesLE(20, 2),
-        bytesLE(0x0800, 2),
-        bytesLE(0, 2),
-        bytesLE(stamp.time, 2),
-        bytesLE(stamp.date, 2),
-        bytesLE(checksum, 4),
-        bytesLE(size, 4),
-        bytesLE(size, 4),
-        bytesLE(nameBytes.length, 2),
-        bytesLE(0, 2),
-        bytesLE(0, 2),
-        bytesLE(0, 2),
-        bytesLE(0, 2),
-        bytesLE(0, 4),
-        bytesLE(offset, 4),
-        nameBytes,
-      ]),
-    )
-    offset += localHeader.length
-  }
-  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0)
-  const end = concatBytes([
-    bytesLE(0x06054b50, 4),
-    bytesLE(0, 2),
-    bytesLE(0, 2),
-    bytesLE(entries.length, 2),
-    bytesLE(entries.length, 2),
-    bytesLE(centralSize, 4),
-    bytesLE(offset, 4),
-    bytesLE(0, 2),
-  ])
-  const toBlobPart = (bytes: Uint8Array): ArrayBuffer => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
-  return new Blob([...localParts.map(toBlobPart), ...centralParts.map(toBlobPart), toBlobPart(end)], { type: 'application/zip' })
-}
-
-function safePathPart(value: unknown, fallback: string) {
-  const cleaned = String(value || fallback || '').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim()
-  return (cleaned || fallback || '未命名').slice(0, 96)
-}
-
-function csvCell(value: unknown) {
-  const text = String(value ?? '')
-  return `"${text.replace(/"/g, '""')}"`
-}
-
-function buildCsv(rows: unknown[][]) {
-  return `\ufeff${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}`
-}
-
-function photoExportUrl(photo: DeliveryPhotoManifest) {
-  return photo.delivery_cache_url || photo.preview_url || photo.image_url || ''
-}
-
-function imageExtension(photo: DeliveryPhotoManifest, blob: Blob) {
-  const typeMap: Record<string, string> = {
-    'image/jpeg': '.jpg',
-    'image/png': '.png',
-    'image/webp': '.webp',
-    'image/bmp': '.bmp',
-    'image/gif': '.gif',
-  }
-  const fromType = typeMap[String(blob.type || '').toLowerCase()]
-  if (fromType) return fromType
-  const path = String(photo.image_url || '').split('?', 1)[0].toLowerCase()
-  const match = path.match(/\.(jpg|jpeg|png|webp|bmp|gif)$/)
-  return match ? `.${match[1]}` : '.jpg'
-}
-
-async function fetchImageBlob(url: string) {
-  const requestUrl = new URL(url, window.location.origin)
-  const sameOrigin = requestUrl.origin === window.location.origin
-  try {
-    const response = sameOrigin
-      ? await fetchWithAuth(requestUrl.href, { headers: formHeaders() })
-      : await fetch(requestUrl.href)
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
-    return await response.blob()
-  } catch (directError) {
-    if (sameOrigin) throw directError
-    const proxyResponse = await fetchWithAuth(`/local-test/photo-proxy?url=${encodeURIComponent(requestUrl.href)}`, {
-      headers: formHeaders(),
-    })
-    if (!proxyResponse.ok) throw directError
-    return await proxyResponse.blob()
-  }
-}
-
-function uniqueName(folderNames: Set<string>, desiredName: string) {
-  const dotIndex = desiredName.lastIndexOf('.')
-  const base = dotIndex > 0 ? desiredName.slice(0, dotIndex) : desiredName
-  const suffix = dotIndex > 0 ? desiredName.slice(dotIndex) : ''
-  let candidate = desiredName
-  let counter = 2
-  while (folderNames.has(candidate)) {
-    candidate = `${base}-${counter}${suffix}`
-    counter += 1
-  }
-  folderNames.add(candidate)
-  return candidate
-}
-
-async function runConcurrentJobs(jobs: Array<() => Promise<void>>, limit: number) {
-  let cursor = 0
-  const workers = Array.from({ length: Math.min(limit, jobs.length) }, async () => {
-    while (cursor < jobs.length) {
-      const job = jobs[cursor]
-      cursor += 1
-      await job()
-    }
-  })
-  await Promise.all(workers)
-}
-
 export async function exportTerminalDeliveryPackage(options: {
   taskId: string
   terminal?: string
   reviewScope: 'reviewed' | 'all'
   onProgress?: (progress: DeliveryExportProgress) => void
-}): Promise<{ downloaded: number; failed: number; groups: number }> {
+}): Promise<{ filename: string }> {
   if (!options.taskId && !options.terminal) throw new Error('只支持单终端导出，请从终端任务行发起。')
-  options.onProgress?.({ text: '准备清单...', percent: 2 })
-  const params = new URLSearchParams()
-  if (options.taskId) params.set('task_id', options.taskId)
-  if (options.terminal) params.set('terminal', options.terminal)
-  params.set('review_scope', options.reviewScope || 'reviewed')
-  const manifest = await api<DeliveryManifest>(`/local-test/export-manifest/final-delivery?${params.toString()}`)
-  const groups = manifest.groups || []
-  if (!groups.length) {
-    throw new Error(options.reviewScope === 'reviewed' ? '当前终端还没有已归档完成的资料。' : '当前终端没有可导出的资料。')
+  options.onProgress?.({ text: '请求正式交付包...', percent: 10 })
+  const body: Record<string, unknown> = {
+    review_scope: options.reviewScope || 'reviewed',
   }
-
-  const entries: Array<{ name: string; data: Blob | Uint8Array | string }> = []
-  const csvRows: unknown[][] = [[
-    '终端',
-    '安装地址',
-    '表号',
-    '资料组ID',
-    '状态',
-    '审阅人',
-    '照片数',
-    '导出照片数',
-    '照片1分类',
-    '照片1URL',
-    '照片2分类',
-    '照片2URL',
-    '照片3分类',
-    '照片3URL',
-    '照片4分类',
-    '照片4URL',
-  ]]
-  const downloadJobs: Array<() => Promise<void>> = []
-  let downloaded = 0
-  let failed = 0
-
-  for (const group of groups) {
-    const photos = (group.photos || []).filter((photo) => photoExportUrl(photo)).slice(0, 4)
-    const row: unknown[] = [
-      group.terminal || '',
-      group.address || '',
-      group.meter_no || '',
-      group.id || '',
-      group.status || '',
-      group.reviewer || '',
-      group.photo_count || 0,
-      photos.length,
-    ]
-    for (let index = 0; index < 4; index += 1) {
-      row.push(photos[index]?.category_label || '')
-      row.push(photoExportUrl(photos[index] || {}) || '')
+  if (options.taskId) body.task_id = Number(options.taskId)
+  if (options.terminal) body.terminal = options.terminal
+  const response = await fetchWithAuth('/exports/final-delivery', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  })
+  if (response.status === 202 || response.status === 409) {
+    let message = '正式交付包正在后台生成，请稍后重试。'
+    try {
+      const payload = (await response.json()) as { detail?: { message?: string } | string }
+      if (typeof payload.detail === 'string' && payload.detail) message = payload.detail
+      if (typeof payload.detail === 'object' && payload.detail?.message) message = payload.detail.message
+    } catch {
+      // Stable fallback for a malformed not-ready response.
     }
-    csvRows.push(row)
-    if (!photos.length) continue
-    const terminal = safePathPart(group.terminal, '未关联终端')
-    const address = safePathPart(group.address || group.meter_no || group.id, '未填写地址')
-    const folder = `${terminal}/${address}`
-    const usedNames = new Set<string>()
-    for (const [photoIndex, photo] of photos.entries()) {
-      downloadJobs.push(async () => {
-        const url = new URL(photoExportUrl(photo), window.location.origin).href
-        try {
-          const blob = await fetchImageBlob(url)
-          const archiveName = safePathPart(photo.archive_filename || photo.category_label || `图片${photoIndex + 1}`, `图片${photoIndex + 1}`)
-          const extension = imageExtension(photo, blob)
-          const withoutExt = archiveName.replace(/\.(jpg|jpeg|png|webp|bmp|gif)$/i, '')
-          const filename = uniqueName(usedNames, `${String(photoIndex + 1).padStart(2, '0')}-${withoutExt}${extension}`)
-          entries.push({ name: `${folder}/${filename}`, data: blob })
-          downloaded += 1
-        } catch (error) {
-          const filename = uniqueName(usedNames, `${String(photoIndex + 1).padStart(2, '0')}-下载失败.txt`)
-          entries.push({
-            name: `${folder}/${filename}`,
-            data: `图片下载失败，请检查图片 URL 是否可访问。\r\n资料组：${group.id || ''}\r\n表号：${group.meter_no || ''}\r\nURL：${url}\r\n错误：${error instanceof Error ? error.message : String(error)}`,
-          })
-          failed += 1
-        }
-        const finished = downloaded + failed
-        options.onProgress?.({
-          text: `并发下载图片 ${finished}/${downloadJobs.length}`,
-          percent: downloadJobs.length ? Math.max(5, Math.round((finished / downloadJobs.length) * 90)) : 50,
-        })
-      })
+    throw new ApiRequestError(message, response.status)
+  }
+  if (!response.ok) {
+    let message = response.statusText || '正式交付包下载失败'
+    try {
+      const payload = (await response.json()) as { detail?: { message?: string } | string }
+      if (typeof payload.detail === 'string' && payload.detail) message = payload.detail
+      if (typeof payload.detail === 'object' && payload.detail?.message) message = payload.detail.message
+    } catch {
+      // Keep the HTTP status fallback.
     }
+    throw new ApiRequestError(message, response.status)
   }
-
-  if (downloadJobs.length) {
-    options.onProgress?.({ text: `并发下载图片 0/${downloadJobs.length}`, percent: 5 })
-    await runConcurrentJobs(downloadJobs, deliveryDownloadConcurrency)
-  }
-  entries.sort((left, right) => left.name.localeCompare(right.name, 'zh-Hans'))
-  entries.unshift({ name: '清单表格.csv', data: buildCsv(csvRows) })
-  options.onProgress?.({ text: '生成压缩包...', percent: 96 })
-  const zip = await createZipBlob(entries)
-  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
-  const scopeName = safePathPart(options.terminal || groups[0]?.terminal || `task-${options.taskId}`, '终端')
-  const scopeLabel = options.reviewScope === 'all' ? 'all' : 'reviewed'
-  triggerBrowserDownload(zip, `终端-${scopeName}-${scopeLabel}-${stamp}.zip`)
-  options.onProgress?.({ text: failed ? `压缩包已生成，${failed} 张图片下载失败` : `压缩包已生成，已下载 ${downloaded} 张图片`, percent: 100 })
-  return { downloaded, failed, groups: groups.length }
+  const blob = await response.blob()
+  if (!blob.size) throw new Error('正式交付包为空，请稍后重试。')
+  const fallbackName = `V3.1.0-final-delivery-${options.terminal || options.taskId}.zip`
+  const filename = filenameFromDisposition(response.headers.get('Content-Disposition') || '', fallbackName)
+  triggerBrowserDownload(blob, filename)
+  options.onProgress?.({ text: '正式交付包已下载', percent: 100 })
+  return { filename }
 }

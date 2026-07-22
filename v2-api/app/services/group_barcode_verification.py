@@ -23,6 +23,7 @@ VerificationStatus = Literal[
 ]
 InvalidationStatus = Literal["pending", "not_eligible"]
 INVALIDATION_STATUSES = frozenset({"pending", "not_eligible"})
+AUTO_ARCHIVE_ELIGIBLE_STATUSES = frozenset({"passed", "manual_confirmed"})
 
 REQUIRED_CATEGORIES = frozenset(
     {"before_box", "collector_barcode", "module_meter", "after_box"}
@@ -57,6 +58,38 @@ class GroupScanResult:
 
 
 PhotoRecognizer = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+
+
+def mark_auto_archive_pending(verification: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(verification)
+    if str(result.get("status") or "") not in AUTO_ARCHIVE_ELIGIBLE_STATUSES:
+        return clear_auto_archive_work(result)
+    result.update(
+        {
+            "auto_archive_status": "pending",
+            "auto_archive_attempt_count": 0,
+            "auto_archive_lease_owner": None,
+            "auto_archive_lease_token": None,
+            "auto_archive_lease_expires_at": None,
+            "auto_archive_error": "",
+        }
+    )
+    return result
+
+
+def clear_auto_archive_work(verification: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(verification)
+    result.update(
+        {
+            "auto_archive_status": None,
+            "auto_archive_attempt_count": 0,
+            "auto_archive_lease_owner": None,
+            "auto_archive_lease_token": None,
+            "auto_archive_lease_expires_at": None,
+            "auto_archive_error": "",
+        }
+    )
+    return result
 
 
 def scan_group_evidence(
@@ -271,6 +304,12 @@ def invalidate_group_verification(
             "invalidation_reason": reason,
             "invalidated_by": actor,
             "should_enqueue": resolved_status == "pending",
+            "auto_archive_status": None,
+            "auto_archive_attempt_count": 0,
+            "auto_archive_lease_owner": None,
+            "auto_archive_lease_token": None,
+            "auto_archive_lease_expires_at": None,
+            "auto_archive_error": "",
         }
     )
     return result

@@ -35,13 +35,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("UPDATE delivery_cache_jobs SET status = 'failed' WHERE status = 'not_eligible'")
-    op.drop_constraint("ck_delivery_cache_jobs_status", "delivery_cache_jobs", type_="check")
-    op.create_check_constraint(
-        "ck_delivery_cache_jobs_status",
-        "delivery_cache_jobs",
-        "status IN ('pending', 'processing', 'ready', 'failed')",
+    raise RuntimeError(
+        "V3.1 delivery cache migrations are production-irreversible; "
+        "restore a pre-upgrade backup instead of running downgrade DDL"
     )
-    op.drop_column("delivery_cache_jobs", "evidence_version")
-    op.drop_column("delivery_cache_jobs", "evidence_fingerprint")
-    op.drop_column("barcode_maintenance_controls", "delivery_cache_reconcile_cursor")

@@ -72,7 +72,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_table("barcode_maintenance_controls")
-    op.drop_index("ix_group_barcode_verifications_lease", table_name="group_barcode_verifications")
-    op.drop_index("ix_group_barcode_verifications_pending", table_name="group_barcode_verifications")
-    op.drop_table("group_barcode_verifications")
+    raise RuntimeError(
+        "V3.1 verification migrations are production-irreversible; "
+        "restore a pre-upgrade backup instead of running downgrade DDL"
+    )

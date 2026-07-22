@@ -30,7 +30,8 @@ def sample_group() -> dict[str, Any]:
     categories = ("before_box", "collector_barcode", "module_meter", "after_box")
     return {
         "id": "release-sample",
-        "status": "archived",
+        "status": "approved",
+        "archive_status": "archived",
         "terminal": "00123456",
         "meter_no": "000012345678",
         "module_asset_no": "000098765432",

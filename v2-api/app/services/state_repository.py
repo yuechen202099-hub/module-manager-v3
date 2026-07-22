@@ -9,7 +9,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NoReturn
 from uuid import UUID, uuid4
 
 from sqlalchemy import String, Text, and_, case, cast, func, literal, or_, select
@@ -626,6 +626,12 @@ def invalidate_verification_for_group(
         "lease_owner": verification.lease_owner,
         "lease_token": verification.lease_token,
         "lease_expires_at": verification.lease_expires_at,
+        "auto_archive_status": getattr(verification, "auto_archive_status", None),
+        "auto_archive_attempt_count": getattr(verification, "auto_archive_attempt_count", 0),
+        "auto_archive_lease_owner": getattr(verification, "auto_archive_lease_owner", None),
+        "auto_archive_lease_token": getattr(verification, "auto_archive_lease_token", None),
+        "auto_archive_lease_expires_at": getattr(verification, "auto_archive_lease_expires_at", None),
+        "auto_archive_error": getattr(verification, "auto_archive_error", None),
     }
     result = invalidate_group_verification(
         _force_completed_verification_transition(current, evaluation.evidence_fingerprint),
@@ -644,6 +650,12 @@ def invalidate_verification_for_group(
         "lease_expires_at",
         "invalidation_reason",
         "invalidated_by",
+        "auto_archive_status",
+        "auto_archive_attempt_count",
+        "auto_archive_lease_owner",
+        "auto_archive_lease_token",
+        "auto_archive_lease_expires_at",
+        "auto_archive_error",
     ):
         setattr(verification, field, result.get(field))
     verification.meter_matched = None
@@ -2614,6 +2626,17 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def request_final_delivery_export(
+        self,
+        *,
+        task_id: int | None = None,
+        terminal: str = "",
+        review_scope: str = "reviewed",
+        requested_by: str = "",
+    ) -> LeasedDeliveryPackage:
+        raise NotImplementedError
+
+    @abstractmethod
     def build_final_delivery_export(
         self,
         *,
@@ -3320,7 +3343,7 @@ class JsonStateRepository(StateRepository):
         lease_token: str,
         actor: str,
     ) -> dict[str, Any]:
-        from app.services.group_barcode_verification import apply_group_scan_result
+        from app.services.group_barcode_verification import apply_group_scan_result, mark_auto_archive_pending
 
         team_id = local_simulation.current_team_id()
         transaction = local_simulation.active_authoritative_json_write(team_id)
@@ -3364,6 +3387,8 @@ class JsonStateRepository(StateRepository):
                         ),
                     }
                 )
+                next_verification = mark_auto_archive_pending(next_verification)
+                applied["verification"] = next_verification
             if next_verification != current:
                 group["barcode_verification"] = next_verification
                 local_simulation.append_audit_event(
@@ -3558,6 +3583,29 @@ class JsonStateRepository(StateRepository):
 
     def build_task_detail_export(self, task_id: int) -> bytes:
         return local_simulation.build_task_detail_export(task_id)
+
+    def request_final_delivery_export(
+        self,
+        *,
+        task_id: int | None = None,
+        terminal: str = "",
+        review_scope: str = "reviewed",
+        requested_by: str = "",
+    ) -> LeasedDeliveryPackage:
+        from app.services.delivery_package_queue import request_json_delivery_package
+
+        groups = local_simulation.filter_delivery_groups(
+            task_id=task_id,
+            terminal=terminal,
+            review_scope="all",
+        )
+        return request_json_delivery_package(
+            groups=groups,
+            task_id=task_id,
+            terminal=terminal,
+            review_scope=review_scope,
+            requested_by=requested_by,
+        )
 
     def build_final_delivery_export(
         self,
@@ -7149,6 +7197,15 @@ class PostgresStateRepository(StateRepository):
             raw_data = dict(group.raw_data or {})
             raw_data.update({"status": status, "reviewer": reviewer, "review_note": note, "exception_note": exception_note})
             group.raw_data = raw_data
+            if status != "approved":
+                from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_review
+
+                invalidate_postgres_delivery_cache_for_review(
+                    session,
+                    group,
+                    actor=reviewer,
+                    reason=f"review_{status}",
+                )
             session.commit()
             session.refresh(group)
             result = _group_payload(session, group)
@@ -7316,7 +7373,7 @@ class PostgresStateRepository(StateRepository):
         lease_token: str,
         actor: str,
     ) -> dict[str, Any]:
-        from app.services.group_barcode_verification import apply_group_scan_result
+        from app.services.group_barcode_verification import apply_group_scan_result, mark_auto_archive_pending
 
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
@@ -7389,6 +7446,16 @@ class PostgresStateRepository(StateRepository):
                 next_verification["module_matched"] = verification.module_matched
                 next_verification["collector_matched"] = verification.collector_matched
                 next_verification["recognition_source"] = verification.recognition_source
+                next_verification = mark_auto_archive_pending(next_verification)
+                verification.auto_archive_status = next_verification.get("auto_archive_status")
+                verification.auto_archive_attempt_count = int(
+                    next_verification.get("auto_archive_attempt_count") or 0
+                )
+                verification.auto_archive_lease_owner = next_verification.get("auto_archive_lease_owner")
+                verification.auto_archive_lease_token = next_verification.get("auto_archive_lease_token")
+                verification.auto_archive_lease_expires_at = next_verification.get("auto_archive_lease_expires_at")
+                verification.auto_archive_error = next_verification.get("auto_archive_error") or None
+                applied["verification"] = next_verification
             else:
                 verification.meter_matched = None
                 verification.module_matched = None
@@ -7554,6 +7621,12 @@ class PostgresStateRepository(StateRepository):
             verification.lease_owner = None
             verification.lease_token = None
             verification.lease_expires_at = None
+            verification.auto_archive_status = "pending"
+            verification.auto_archive_attempt_count = 0
+            verification.auto_archive_lease_owner = None
+            verification.auto_archive_lease_token = None
+            verification.auto_archive_lease_expires_at = None
+            verification.auto_archive_error = None
             next_result = dict(before_verification.get("result") or {})
             next_result.update(
                 {
@@ -7574,6 +7647,12 @@ class PostgresStateRepository(StateRepository):
                 "lease_token": None,
                 "lease_expires_at": None,
                 "should_enqueue": False,
+                "auto_archive_status": "pending",
+                "auto_archive_attempt_count": 0,
+                "auto_archive_lease_owner": None,
+                "auto_archive_lease_token": None,
+                "auto_archive_lease_expires_at": None,
+                "auto_archive_error": "",
                 "result": next_result,
             }
             raw_data["barcode_verification"] = next_verification
@@ -8418,6 +8497,45 @@ class PostgresStateRepository(StateRepository):
                 session.rollback()
                 raise
 
+    def request_final_delivery_export(
+        self,
+        *,
+        task_id: int | None = None,
+        terminal: str = "",
+        review_scope: str = "reviewed",
+        requested_by: str = "",
+    ) -> LeasedDeliveryPackage:
+        from app.services.delivery_package_queue import request_postgres_delivery_package
+
+        terminal = terminal.strip()
+        if task_id is None and not terminal:
+            raise ValueError("Final delivery export must be scoped to one terminal")
+        if review_scope not in {"reviewed", "all"}:
+            raise ValueError("Unsupported delivery export scope")
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            statement = select(MaterialGroup).where(MaterialGroup.team_id == team_id)
+            if task_id is not None:
+                self._task_by_legacy_id(session, task_id)
+                statement = statement.where(MaterialGroup.legacy_task_id == task_id)
+            if terminal:
+                statement = statement.where(MaterialGroup.terminal == terminal)
+            groups = [
+                _group_payload(session, group, include_photos=True)
+                for group in session.scalars(
+                    statement.order_by(MaterialGroup.terminal, MaterialGroup.display_meter_no, MaterialGroup.legacy_id)
+                ).all()
+            ]
+            return request_postgres_delivery_package(
+                session,
+                groups=groups,
+                team_id=team_id,
+                task_id=task_id,
+                terminal=terminal,
+                review_scope=review_scope,
+                requested_by=requested_by,
+            )
+
     def build_final_delivery_export(
         self,
         *,
@@ -8828,6 +8946,18 @@ class DualWriteStateRepository(JsonStateRepository):
 
     postgres_repository_factory = PostgresStateRepository
 
+    def request_final_delivery_export(
+        self,
+        *,
+        task_id: int | None = None,
+        terminal: str = "",
+        review_scope: str = "reviewed",
+        requested_by: str = "",
+    ) -> LeasedDeliveryPackage:
+        raise StateBackendNotReady(
+            "Dual formal delivery export requires one authoritative delivery-package queue backend"
+        )
+
     def build_final_delivery_export(
         self,
         *,
@@ -8862,6 +8992,13 @@ class DualWriteStateRepository(JsonStateRepository):
         finally:
             if owns_transaction:
                 local_simulation.abort_authoritative_json_write(transaction, token)
+
+    @staticmethod
+    def _reject_uncoordinated_dual_write(operation: str) -> NoReturn:
+        raise StateBackendNotReady(
+            "Dual review/verification writes require durable cross-backend recovery; "
+            f"{operation} was rejected before either backend mutated"
+        )
 
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         result = super().claim_task(task_id, reviewer)
@@ -8982,24 +9119,7 @@ class DualWriteStateRepository(JsonStateRepository):
         note: str = "",
         exception_note: str = "",
     ) -> dict[str, Any]:
-        team_id = local_simulation.current_team_id()
-        transaction = local_simulation.active_authoritative_json_write(team_id)
-        owns_transaction = transaction is None
-        token = None
-        if owns_transaction:
-            transaction = local_simulation.begin_authoritative_json_write(team_id)
-            token = local_simulation.activate_authoritative_json_write(transaction)
-        try:
-            result = super().review_group(group_id, status, reviewer, note, exception_note)
-            mirror = self.postgres_repository_factory()
-            mirror.review_group(group_id, status, reviewer, note, exception_note)
-            if owns_transaction:
-                local_simulation.finish_authoritative_json_write(transaction, token)
-        except BaseException:
-            if owns_transaction:
-                local_simulation.abort_authoritative_json_write(transaction, token)
-            raise
-        return result
+        self._reject_uncoordinated_dual_write("review_group")
 
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
         result = super().classify_photo(group_id, photo_id, category, reviewer)
@@ -9028,50 +9148,7 @@ class DualWriteStateRepository(JsonStateRepository):
         lease_token: str,
         actor: str,
     ) -> dict[str, Any]:
-        team_id = local_simulation.current_team_id()
-        transaction = local_simulation.active_authoritative_json_write(team_id)
-        owns_transaction = transaction is None
-        token = None
-        if owns_transaction:
-            transaction = local_simulation.begin_authoritative_json_write(team_id)
-            token = local_simulation.activate_authoritative_json_write(transaction)
-        try:
-            applied = super().apply_group_scan_result(
-                group_id,
-                result,
-                claimed_evidence_fingerprint=claimed_evidence_fingerprint,
-                claimed_evidence_version=claimed_evidence_version,
-                lease_owner=lease_owner,
-                lease_token=lease_token,
-                actor=actor,
-            )
-            mirror = self.postgres_repository_factory()
-            mirrored = mirror.apply_group_scan_result(
-                group_id,
-                result,
-                claimed_evidence_fingerprint=claimed_evidence_fingerprint,
-                claimed_evidence_version=claimed_evidence_version,
-                lease_owner=lease_owner,
-                lease_token=lease_token,
-                actor=actor,
-            )
-            json_verification = applied.get("verification") or {}
-            postgres_verification = mirrored.get("verification") or {}
-            if (
-                bool(mirrored.get("applied")) != bool(applied.get("applied"))
-                or str(postgres_verification.get("status") or "")
-                != str(json_verification.get("status") or "")
-                or int(postgres_verification.get("evidence_version") or 0)
-                != int(json_verification.get("evidence_version") or 0)
-            ):
-                raise StateBackendNotReady("Dual barcode scan CAS diverged; JSON write was aborted")
-        except BaseException:
-            if owns_transaction:
-                local_simulation.abort_authoritative_json_write(transaction, token)
-            raise
-        if owns_transaction:
-            local_simulation.finish_authoritative_json_write(transaction, token)
-        return applied
+        self._reject_uncoordinated_dual_write("apply_group_scan_result")
 
     def confirm_group_barcode_manually(
         self,
@@ -9084,40 +9161,7 @@ class DualWriteStateRepository(JsonStateRepository):
         reason: str,
         photo_ids: list[str],
     ) -> dict[str, Any]:
-        team_id = local_simulation.current_team_id()
-        transaction = local_simulation.active_authoritative_json_write(team_id)
-        owns_transaction = transaction is None
-        token = None
-        if owns_transaction:
-            transaction = local_simulation.begin_authoritative_json_write(team_id)
-            token = local_simulation.activate_authoritative_json_write(transaction)
-        try:
-            result = super().confirm_group_barcode_manually(
-                group_id,
-                actor=actor,
-                meter_no=meter_no,
-                module_asset_no=module_asset_no,
-                collector=collector,
-                reason=reason,
-                photo_ids=photo_ids,
-            )
-            mirror = self.postgres_repository_factory()
-            mirror.confirm_group_barcode_manually(
-                group_id,
-                actor=actor,
-                meter_no=meter_no,
-                module_asset_no=module_asset_no,
-                collector=collector,
-                reason=reason,
-                photo_ids=photo_ids,
-            )
-        except BaseException:
-            if owns_transaction:
-                local_simulation.abort_authoritative_json_write(transaction, token)
-            raise
-        if owns_transaction:
-            local_simulation.finish_authoritative_json_write(transaction, token)
-        return result
+        self._reject_uncoordinated_dual_write("confirm_group_barcode_manually")
 
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
         result = super().delete_photo(group_id, photo_id, reviewer)

@@ -20,4 +20,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_column("group_barcode_verifications", "lease_token")
+    raise RuntimeError(
+        "V3.1 verification migrations are production-irreversible; "
+        "restore a pre-upgrade backup instead of running downgrade DDL"
+    )

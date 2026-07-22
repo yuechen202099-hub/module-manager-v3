@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
+import subprocess
+import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
@@ -11,6 +15,7 @@ from zipfile import ZipFile
 import pytest
 from openpyxl import load_workbook
 
+from app.api.routes import local_test
 from app.services import final_delivery_export
 from app.services.final_delivery_export import (
     DeliveryPackageValidationError,
@@ -67,7 +72,8 @@ def delivery_group(
         "collector": collector,
         "address": address,
         "client_completed_at": completed_at,
-        "status": "archived",
+        "status": "approved",
+        "archive_status": "archived",
         "photos": photos,
     }
 
@@ -191,7 +197,8 @@ def test_delivery_package_sanitizes_windows_paths_and_suffixes_sanitized_collisi
         (lambda group: group.update(client_completed_at="not-a-date"), "invalid_completed_at"),
         (lambda group: group["photos"].pop(), "invalid_photo_count"),
         (lambda group: group["photos"][1].update(category="before_box"), "invalid_photo_categories"),
-        (lambda group: group.update(status="approved"), "not_archived"),
+        (lambda group: group.update(archive_status=""), "not_archived"),
+        (lambda group: group.update(status="rejected"), "review_not_approved"),
         (lambda group: group.update(terminal="00000000"), "placeholder_identity"),
         (lambda group: group["photos"][0].update(delivery_cache_status="pending"), "delivery_cache_pending"),
     ],
@@ -915,6 +922,128 @@ def test_concurrent_same_key_builders_share_one_package_lock(tmp_path: Path) -> 
             second.join(5)
         for package in paths:
             package.release()
+
+
+def _cleanup_in_subprocess(cache_root: Path, now: datetime) -> dict[str, int]:
+    script = """
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+from app.services.final_delivery_export import cleanup_delivery_cache
+
+report = cleanup_delivery_cache(
+    Path(sys.argv[1]),
+    max_object_bytes=0,
+    groups=[],
+    now=datetime.fromisoformat(sys.argv[2]),
+)
+print(json.dumps(report, sort_keys=True))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(cache_root), now.isoformat()],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+def test_package_download_lease_blocks_cleanup_in_another_process(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    package = get_or_build_delivery_package(
+        "cross-process-download",
+        "d" * 64,
+        groups=[delivery_group()],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now,
+    )
+
+    first = _cleanup_in_subprocess(tmp_path, now + timedelta(days=8))
+    assert first["deleted_packages"] == 0
+    assert package.path.is_file()
+
+    package.release()
+    second = _cleanup_in_subprocess(tmp_path, now + timedelta(days=8))
+    assert second["deleted_packages"] == 1
+    assert not package.path.exists()
+
+
+def test_cached_photo_response_holds_cross_process_object_lease_until_send_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "objects" / "aa" / "cached-photo.jpg"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"cached-photo-content")
+
+    class Repository:
+        def get_delivery_cached_photo_path(self, group_id: str, photo_id: str) -> Path:
+            assert (group_id, photo_id) == ("group-1", "photo-1")
+            return target
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: Repository())
+    monkeypatch.setattr(local_test, "delivery_cache_root", lambda: tmp_path, raising=False)
+    response = local_test.delivery_cache_photo("group-1", "photo-1")
+
+    first = _cleanup_in_subprocess(tmp_path, datetime.now(UTC))
+    messages: list[dict] = []
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        messages.append(message)
+
+    if target.exists():
+        asyncio.run(
+            response(
+                {"type": "http", "method": "GET", "path": "/cached-photo", "headers": []},
+                receive,
+                send,
+            )
+        )
+
+    assert first["deleted_objects"] == 0
+    assert target.is_file()
+    assert b"".join(message.get("body", b"") for message in messages) == b"cached-photo-content"
+
+    second = _cleanup_in_subprocess(tmp_path, datetime.now(UTC))
+    assert second["deleted_objects"] == 1
+    assert not target.exists()
+
+
+def test_cleanup_scan_is_hard_bounded_per_cache_tree(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    for index in range(10):
+        object_path = tmp_path / "objects" / f"{index:02x}" / f"object-{index}.jpg"
+        package_path = tmp_path / "packages" / f"scope-{index}" / f"package-{index}.zip"
+        object_path.parent.mkdir(parents=True, exist_ok=True)
+        package_path.parent.mkdir(parents=True, exist_ok=True)
+        object_path.write_bytes(b"object")
+        package_path.write_bytes(b"package")
+        old = (now - timedelta(days=8)).timestamp()
+        import os
+
+        os.utime(object_path, (old, old))
+        os.utime(package_path, (old, old))
+
+    report = cleanup_delivery_cache(
+        tmp_path,
+        max_object_bytes=0,
+        groups=[],
+        now=now,
+        max_scan_entries=3,
+    )
+
+    assert report["scanned_object_entries"] <= 3
+    assert report["scanned_package_entries"] <= 3
+    assert len(list((tmp_path / "objects").rglob("*.jpg"))) >= 7
+    assert len(list((tmp_path / "packages").rglob("*.zip"))) >= 7
 
 
 def test_delivery_lru_keeps_referenced_and_active_paths(tmp_path: Path) -> None:

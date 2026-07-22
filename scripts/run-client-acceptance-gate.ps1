@@ -99,21 +99,29 @@ Invoke-Step "Verify task hall pagination" {
     node .\scripts\verify_task_hall_pagination.js
 }
 
+$sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
+    throw "Unable to resolve the full Git source commit for release acceptance."
+}
+
 $performanceOutput = Join-Path $root "outputs\performance\v$Version-task-review.json"
 Invoke-Step "Verify task and review performance" {
     .\.venv\Scripts\python.exe .\v2-api\scripts\verify_task_review_performance.py `
         --base-url "http://127.0.0.1:$Port" `
-        --output $performanceOutput
+        --output $performanceOutput `
+        --source-commit $sourceCommit
+}
+
+Invoke-Step "Verify V3.1 release candidate" {
+    .\.venv\Scripts\python.exe .\v2-api\scripts\verify_v3_1_release.py `
+        --repo-root $root `
+        --performance-report $performanceOutput `
+        --expected-source-commit $sourceCommit
 }
 
 if (-not $NoBuild) {
-    $sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
-    if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
-        throw "Unable to resolve the full Git source commit for package acceptance."
-    }
-
     Invoke-Step "Build client release package" {
-        powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version $Version
+        powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version $Version -PerformanceReport $performanceOutput
     }
 
     $zipPath = Join-Path $root "build\server-release\module-manager-v2-server-$Version.zip"

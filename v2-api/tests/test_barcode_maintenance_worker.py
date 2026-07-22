@@ -282,6 +282,253 @@ def test_postgres_claim_statement_uses_skip_locked_and_retryable_statuses() -> N
     assert "group_barcode_verifications.lease_expires_at" in sql
 
 
+@pytest.mark.parametrize("verification_status", ["passed", "manual_confirmed"])
+def test_json_archive_claim_recovers_committed_pass_after_restart_with_a_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    verification_status: str,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    assert hasattr(worker, "claim_next_archive_job"), "archive-pending work must have a durable worker claim path"
+    now = datetime(2026, 7, 22, 5, 30, tzinfo=UTC)
+    group = eligible_group(f"recover-{verification_status}", verification_status=verification_status)
+    group["barcode_verification"].pop("auto_archive_status", None)
+    team_id = install_json_queue(monkeypatch, [group])
+
+    first = worker.claim_next_archive_job(worker_id="restarted-worker", now=now, lease_seconds=60)
+    second = worker.claim_next_archive_job(worker_id="competing-worker", now=now, lease_seconds=60)
+
+    assert first is not None
+    assert first.kind == "auto_archive"
+    assert first.group_id == group["id"]
+    assert second is None
+    persisted = local_simulation._team_states[team_id]["groups"][0]["barcode_verification"]
+    assert persisted["status"] == verification_status
+    assert persisted["auto_archive_status"] == "processing"
+    assert persisted["auto_archive_attempt_count"] == 1
+    assert persisted["auto_archive_lease_owner"] == "restarted-worker"
+    assert persisted["auto_archive_lease_token"] == first.lease_token
+    assert persisted["auto_archive_lease_expires_at"] == (now + timedelta(seconds=60)).isoformat()
+    reconciled = [
+        event
+        for event in local_simulation._team_states[team_id]["audit_events"]
+        if event["action"] == "group_barcode_auto_archive_reconciled"
+    ]
+    assert len(reconciled) == 1
+
+
+def test_json_archive_failure_retries_then_requires_manual_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    assert hasattr(worker, "claim_next_archive_job")
+    assert hasattr(worker, "fail_archive_job")
+    group = eligible_group("archive-retry", verification_status="passed")
+    group["barcode_verification"]["auto_archive_status"] = "pending"
+    team_id = install_json_queue(monkeypatch, [group])
+    now = datetime(2026, 7, 22, 5, 45, tzinfo=UTC)
+
+    for attempt in range(1, worker.MAX_AUTO_ARCHIVE_ATTEMPTS + 1):
+        claim = worker.claim_next_archive_job(worker_id=f"archive-worker-{attempt}", now=now)
+        assert claim is not None
+        worker.fail_archive_job(claim, RuntimeError(f"archive-failure-{attempt}"), now=now)
+        persisted = local_simulation._team_states[team_id]["groups"][0]["barcode_verification"]
+        assert persisted["auto_archive_attempt_count"] == attempt
+        assert persisted["auto_archive_lease_owner"] is None
+        if attempt < worker.MAX_AUTO_ARCHIVE_ATTEMPTS:
+            assert persisted["auto_archive_status"] == "retry_pending"
+        else:
+            assert persisted["auto_archive_status"] == "manual_required"
+
+    assert worker.claim_next_archive_job(worker_id="archive-worker-final", now=now) is None
+
+
+def test_worker_claim_rotation_includes_durable_archive_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    archive_job = worker.MaintenanceJob(
+        kind="auto_archive",
+        team_id="team-a",
+        group_id="group-a",
+        lease_owner="worker-a",
+        lease_token="lease-a",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(worker, "_next_claim_kind", "verification")
+    monkeypatch.setattr(
+        worker,
+        "claim_next_verification_job",
+        lambda *, worker_id: calls.append(f"verification:{worker_id}"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "claim_next_archive_job",
+        lambda *, worker_id: calls.append(f"auto_archive:{worker_id}") or archive_job,
+    )
+    monkeypatch.setattr(
+        worker,
+        "claim_next_delivery_cache_job",
+        lambda *, worker_id: calls.append(f"delivery_cache:{worker_id}"),
+    )
+
+    assert worker._claim_next_work("worker-a") == archive_job
+    assert calls == ["verification:worker-a", "auto_archive:worker-a"]
+
+
+def test_worker_processes_archive_only_through_the_claimed_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    monkeypatch.setattr(
+        worker,
+        "auto_archive_verified_group",
+        lambda group_id, **kwargs: calls.append({"group_id": group_id, **kwargs})
+        or {"archived": True, "group_id": group_id},
+    )
+    job = worker.MaintenanceJob(
+        kind="auto_archive",
+        team_id="team-a",
+        group_id="group-a",
+        lease_owner="worker-a",
+        lease_token="lease-a",
+    )
+
+    worker._process_job(job)
+
+    assert calls == [
+        {
+            "group_id": "group-a",
+            "actor": worker.WORKER_ACTOR,
+            "lease_owner": "worker-a",
+            "lease_token": "lease-a",
+        }
+    ]
+
+
+def test_postgres_archive_claim_uses_skip_locked_and_dedicated_lease_state() -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    assert hasattr(worker, "build_postgres_archive_claim_statement")
+    statement = worker.build_postgres_archive_claim_statement(
+        team_id="team-a",
+        now=datetime(2026, 7, 22, 6, 0, tzinfo=UTC),
+    )
+    sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "group_barcode_verifications.status IN ('passed', 'manual_confirmed')" in sql
+    assert "group_barcode_verifications.auto_archive_status" in sql
+    assert "group_barcode_verifications.auto_archive_attempt_count" in sql
+    assert "group_barcode_verifications.auto_archive_lease_expires_at" in sql
+
+
+def test_postgres_delivery_package_claim_uses_skip_locked_and_persistent_lease_state() -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    assert hasattr(worker, "build_postgres_delivery_package_claim_statement")
+    statement = worker.build_postgres_delivery_package_claim_statement(
+        team_id="team-a",
+        now=datetime(2026, 7, 23, 2, 0, tzinfo=UTC),
+    )
+    sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "delivery_package_jobs.status" in sql
+    assert "delivery_package_jobs.lease_expires_at" in sql
+
+
+def test_json_delivery_package_job_is_claimed_once_and_completed_by_serial_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+    from app.services import state_repository
+
+    assert hasattr(worker, "claim_next_delivery_package_job")
+    team_id = install_json_queue(monkeypatch, [])
+    package_path = tmp_path / "packages" / f"{'a' * 64}.zip"
+    package_path.parent.mkdir(parents=True, exist_ok=True)
+    package_path.write_bytes(b"formal-package")
+    local_simulation._team_states[team_id]["delivery_package_jobs"] = [
+        {
+            "id": "package-job-a",
+            "team_id": team_id,
+            "scope_payload": {"task_id": 17, "terminal": "", "review_scope": "reviewed"},
+            "evidence_fingerprint": "a" * 64,
+            "status": "pending",
+            "attempt_count": 0,
+            "updated_at": "2026-07-23T02:00:00+00:00",
+        }
+    ]
+    releases: list[Path] = []
+
+    class Package:
+        path = package_path
+
+        def release(self):
+            releases.append(self.path)
+
+    class Repository:
+        def build_final_delivery_export(self, **kwargs):
+            assert kwargs == {"task_id": 17, "terminal": "", "review_scope": "reviewed"}
+            return Package()
+
+    monkeypatch.setattr(state_repository, "get_state_repository", lambda: Repository())
+    now = datetime(2026, 7, 23, 2, 5, tzinfo=UTC)
+
+    claim = worker.claim_next_delivery_package_job(worker_id="package-worker", now=now)
+    competing = worker.claim_next_delivery_package_job(worker_id="other-worker", now=now)
+    assert claim is not None
+    assert claim.kind == "delivery_package"
+    assert competing is None
+
+    worker._process_job(claim)
+
+    job = local_simulation._team_states[team_id]["delivery_package_jobs"][0]
+    assert job["status"] == "ready"
+    assert job["package_path"] == str(package_path)
+    assert job["lease_owner"] is None
+    assert job["lease_token"] is None
+    assert releases == [package_path]
+
+
+def test_json_delivery_package_failures_stop_after_retry_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    team_id = install_json_queue(monkeypatch, [])
+    local_simulation._team_states[team_id]["delivery_package_jobs"] = [
+        {
+            "id": "package-job-retry",
+            "team_id": team_id,
+            "scope_payload": {"task_id": 17, "terminal": "", "review_scope": "reviewed"},
+            "evidence_fingerprint": "b" * 64,
+            "status": "pending",
+            "attempt_count": 0,
+            "updated_at": "2026-07-23T02:00:00+00:00",
+        }
+    ]
+    now = datetime(2026, 7, 23, 2, 10, tzinfo=UTC)
+
+    for attempt in range(1, worker.MAX_DELIVERY_PACKAGE_ATTEMPTS + 1):
+        claim = worker.claim_next_delivery_package_job(worker_id=f"package-worker-{attempt}", now=now)
+        assert claim is not None
+        worker.fail_delivery_package_job(claim, RuntimeError(f"failure-{attempt}"), now=now)
+
+    job = local_simulation._team_states[team_id]["delivery_package_jobs"][0]
+    assert job["status"] == "failed"
+    assert job["attempt_count"] == worker.MAX_DELIVERY_PACKAGE_ATTEMPTS
+    assert job["lease_owner"] is None
+    assert worker.claim_next_delivery_package_job(worker_id="package-worker-final", now=now) is None
+
+
 @pytest.mark.parametrize("status", ["partial", "unreadable", "mismatch", "failed"])
 def test_auto_archive_rejects_nonpassing_verification_states(
     monkeypatch: pytest.MonkeyPatch,
@@ -630,6 +877,33 @@ def test_worker_and_daily_enqueue_paths_run_delivery_cache_reconciliation(
     worker.enqueue_verification_jobs([])
 
     assert reconciliations == ["reconcile:20", "reconcile:20"]
+
+
+def test_low_load_worker_runs_delivery_cleanup_before_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    install_json_queue(monkeypatch, [])
+    events: list[str] = []
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    monkeypatch.setattr(
+        worker,
+        "run_delivery_cache_cleanup_if_due",
+        lambda: events.append("cleanup") or {"status": "complete"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        worker,
+        "reconcile_delivery_cache_jobs",
+        lambda *, limit: events.append(f"reconcile:{limit}") or {"enqueued": 0},
+    )
+    monkeypatch.setattr(worker, "_claim_next_work", lambda _worker_id: None)
+    monkeypatch.setattr(worker, "_maintenance_can_claim", lambda: True)
+
+    worker.run_worker_batch(sleeper=lambda _seconds: None)
+
+    assert events == ["cleanup", "reconcile:20"]
 
 
 def test_worker_gates_reconciliation_before_pause_or_load_can_do_work(

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import threading
+from collections import deque
 from contextlib import contextmanager
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -53,6 +54,32 @@ _ACTIVE_CACHE_PATHS: dict[str, int] = {}
 _CACHE_PATH_CONDITION = threading.Condition(threading.Lock())
 
 
+@dataclass(eq=False)
+class DeliveryCacheFileLock:
+    handle: Any
+    path: Path
+    exclusive: bool
+    platform_token: Any = field(default=None, repr=False)
+    _released: bool = field(default=False, init=False, repr=False)
+    _release_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def release(self) -> None:
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        try:
+            _unlock_file_handle(self.handle, self.platform_token)
+        finally:
+            self.handle.close()
+
+    def downgrade_to_shared(self) -> None:
+        if not self.exclusive:
+            return
+        self.platform_token = _downgrade_file_handle(self.handle, self.platform_token)
+        self.exclusive = False
+
+
 class DeliveryPackageValidationError(ValueError):
     def __init__(self, errors: Sequence[Mapping[str, Any]]):
         self.errors = [dict(error) for error in errors]
@@ -63,6 +90,7 @@ class DeliveryPackageValidationError(ValueError):
 class LeasedDeliveryPackage:
     path: Path
     lease: str
+    file_lock: DeliveryCacheFileLock | None = field(default=None, repr=False)
     _released: bool = field(default=False, init=False, repr=False)
     _release_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -83,6 +111,8 @@ class LeasedDeliveryPackage:
                 return
             self._released = True
         release_delivery_cache_path(self.lease)
+        if self.file_lock is not None:
+            self.file_lock.release()
 
 
 def _text(value: Any) -> str:
@@ -195,6 +225,10 @@ def collect_delivery_validation_errors(
     for index, group in enumerate(deduplicated, start=1):
         group_id = _text(group.get("id")) or f"group-{index}"
         identity = _group_identity(group)
+        if _text(group.get("status")).lower() != "approved":
+            errors.append(
+                _error(group_id, "review_not_approved", "status", "Current group review state is not approved")
+            )
         for field, code in (
             ("terminal", "missing_terminal"),
             ("meter_no", "missing_meter_no"),
@@ -496,6 +530,127 @@ def delivery_evidence_fingerprint(groups: Iterable[Mapping[str, Any]]) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _windows_overlapped() -> Any:
+    import ctypes
+    from ctypes import wintypes
+
+    class Overlapped(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_size_t),
+            ("InternalHigh", ctypes.c_size_t),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+    return Overlapped()
+
+
+def _lock_file_handle(handle: Any, *, blocking: bool, exclusive: bool) -> Any | None:
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        overlapped = _windows_overlapped()
+        flags = 0x00000002 if exclusive else 0
+        if not blocking:
+            flags |= 0x00000001
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        ctypes.set_last_error(0)
+        acquired = kernel32.LockFileEx(
+            wintypes.HANDLE(msvcrt.get_osfhandle(handle.fileno())),
+            wintypes.DWORD(flags),
+            wintypes.DWORD(0),
+            wintypes.DWORD(1),
+            wintypes.DWORD(0),
+            ctypes.byref(overlapped),
+        )
+        if acquired:
+            return overlapped
+        error = ctypes.get_last_error()
+        if not blocking and error in {32, 33, 158}:
+            return None
+        raise OSError(error, "Unable to lock delivery cache file")
+
+    import fcntl
+
+    operation = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | (0 if blocking else fcntl.LOCK_NB)
+    try:
+        fcntl.flock(handle.fileno(), operation)
+        return True
+    except BlockingIOError:
+        return None
+
+
+def _unlock_file_handle(handle: Any, platform_token: Any) -> None:
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.UnlockFileEx(
+            wintypes.HANDLE(msvcrt.get_osfhandle(handle.fileno())),
+            wintypes.DWORD(0),
+            wintypes.DWORD(1),
+            wintypes.DWORD(0),
+            ctypes.byref(platform_token),
+        )
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _downgrade_file_handle(handle: Any, platform_token: Any) -> Any:
+    if os.name == "nt":
+        _unlock_file_handle(handle, platform_token)
+        shared_token = _lock_file_handle(handle, blocking=True, exclusive=False)
+        if shared_token is None:  # pragma: no cover - blocking acquisition returns a token or raises
+            raise RuntimeError("Unable to downgrade delivery cache lock")
+        return shared_token
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+    return platform_token
+
+
+def acquire_delivery_cache_file_lock(
+    cache_root: Path | str,
+    target: Path | str,
+    *,
+    blocking: bool = True,
+    exclusive: bool = True,
+) -> DeliveryCacheFileLock | None:
+    root = Path(cache_root).resolve()
+    target_key = _cache_path_key(target)
+    lock_root = root / ".locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_root / f"{hashlib.sha256(target_key.encode('utf-8')).hexdigest()}.lock"
+    handle = lock_path.open("a+b")
+    try:
+        platform_token = _lock_file_handle(handle, blocking=blocking, exclusive=exclusive)
+        if platform_token is None:
+            handle.close()
+            return None
+        return DeliveryCacheFileLock(
+            handle=handle,
+            path=lock_path,
+            exclusive=exclusive,
+            platform_token=platform_token,
+        )
+    except BaseException:
+        handle.close()
+        raise
+
+
 @contextmanager
 def _package_lock(key: str):
     with _PACKAGE_LOCKS_GUARD:
@@ -549,12 +704,50 @@ def _cache_path_is_reserved(key: str) -> bool:
     )
 
 
+def _bounded_cache_files(
+    root: Path,
+    *,
+    max_entries: int,
+    suffix: str | None = None,
+) -> tuple[list[Path], int, bool]:
+    limit = max(0, int(max_entries))
+    if limit == 0 or not root.exists():
+        return [], 0, root.exists()
+    pending: deque[Path] = deque([root])
+    files: list[Path] = []
+    scanned = 0
+    truncated = False
+    while pending and scanned < limit:
+        directory = pending.popleft()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if scanned >= limit:
+                        truncated = True
+                        break
+                    scanned += 1
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            path = Path(entry.path)
+                            if suffix is None or path.suffix.casefold() == suffix.casefold():
+                                files.append(path)
+                    except FileNotFoundError:
+                        continue
+        except FileNotFoundError:
+            continue
+    return files, scanned, truncated or bool(pending)
+
+
 def cleanup_delivery_cache(
     cache_root: Path,
     *,
     max_object_bytes: int,
     groups: Iterable[Mapping[str, Any]],
     now: datetime | None = None,
+    max_scan_entries: int = 2_000,
+    cleanup_objects: bool = True,
 ) -> dict[str, int]:
     root = Path(cache_root).resolve()
     current = now or datetime.now(UTC)
@@ -578,52 +771,95 @@ def cleanup_delivery_cache(
             referenced.add(_cache_path_key(candidate))
 
     object_root = root / "objects"
-    object_files = [path for path in object_root.rglob("*") if path.is_file()] if object_root.exists() else []
+    object_files: list[Path] = []
+    scanned_object_entries = 0
+    object_scan_truncated = False
+    object_tree_busy = 0
+    object_lock = None
+    if cleanup_objects and object_root.exists():
+        object_lock = acquire_delivery_cache_file_lock(root, object_root, blocking=False)
+        if object_lock is None:
+            object_tree_busy = 1
+        else:
+            object_files, scanned_object_entries, object_scan_truncated = _bounded_cache_files(
+                object_root,
+                max_entries=max_scan_entries,
+            )
     total_bytes = sum(path.stat().st_size for path in object_files)
     deleted_objects = 0
     protected_objects = 0
-    for path in sorted(object_files, key=lambda item: (item.stat().st_mtime, str(item))):
-        key = _cache_path_key(path)
-        if key in referenced:
-            protected_objects += 1
-            continue
-        if total_bytes <= max(0, int(max_object_bytes)):
-            continue
-        with _CACHE_PATH_CONDITION:
-            if _cache_path_is_reserved(key):
+    try:
+        for path in sorted(object_files, key=lambda item: (item.stat().st_mtime, str(item))):
+            key = _cache_path_key(path)
+            if key in referenced:
                 protected_objects += 1
                 continue
-            try:
-                size = path.stat().st_size
-                path.unlink()
-            except FileNotFoundError:
+            if total_bytes <= max(0, int(max_object_bytes)):
                 continue
-            total_bytes -= size
-            deleted_objects += 1
+            with _CACHE_PATH_CONDITION:
+                if _cache_path_is_reserved(key):
+                    protected_objects += 1
+                    continue
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                total_bytes -= size
+                deleted_objects += 1
+    finally:
+        if object_lock is not None:
+            object_lock.release()
 
     deleted_packages = 0
+    scanned_package_entries = 0
+    package_scan_truncated = False
     package_root = root / "packages"
     if package_root.exists():
         expires_before = current.astimezone(UTC) - PACKAGE_TTL
-        for path in package_root.rglob("*.zip"):
-            if not path.is_file():
-                continue
+        package_files, scanned_package_entries, package_scan_truncated = _bounded_cache_files(
+            package_root,
+            max_entries=max_scan_entries,
+            suffix=".zip",
+        )
+        for path in package_files:
             key = _cache_path_key(path)
             with _CACHE_PATH_CONDITION:
                 if _cache_path_is_reserved(key):
                     continue
-                try:
-                    modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-                    if modified < expires_before:
-                        path.unlink()
-                        deleted_packages += 1
-                except FileNotFoundError:
+                build_lock = acquire_delivery_cache_file_lock(
+                    root,
+                    path.with_suffix(f"{path.suffix}.build"),
+                    blocking=False,
+                )
+                if build_lock is None:
                     continue
+                try:
+                    file_lock = acquire_delivery_cache_file_lock(root, path, blocking=False)
+                    if file_lock is None:
+                        continue
+                    try:
+                        try:
+                            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+                            if modified < expires_before:
+                                path.unlink()
+                                deleted_packages += 1
+                        except FileNotFoundError:
+                            continue
+                    finally:
+                        file_lock.release()
+                finally:
+                    build_lock.release()
     return {
         "deleted_objects": deleted_objects,
         "protected_objects": protected_objects,
         "remaining_object_bytes": total_bytes,
         "deleted_packages": deleted_packages,
+        "scanned_object_entries": scanned_object_entries,
+        "scanned_package_entries": scanned_package_entries,
+        "object_scan_truncated": int(object_scan_truncated),
+        "package_scan_truncated": int(package_scan_truncated),
+        "object_tree_busy": object_tree_busy,
     }
 
 
@@ -652,26 +888,87 @@ def get_or_build_delivery_package(
     lock_key = str(target).lower()
     with _package_lock(lock_key):
         target_key = _cache_path_key(target)
-        with _CACHE_PATH_CONDITION:
-            if target.is_file():
-                modified = datetime.fromtimestamp(target.stat().st_mtime, tz=UTC)
-                if current.astimezone(UTC) - modified <= PACKAGE_TTL:
-                    _reserve_delivery_cache_key_locked(target_key)
-                    return LeasedDeliveryPackage(target, target_key)
-        content = package_builder(validated_groups, photo_reader)
-        package_dir.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(f".zip.tmp-{uuid4().hex}")
+        file_lock = acquire_delivery_cache_file_lock(
+            cache_root,
+            target,
+            blocking=True,
+            exclusive=False,
+        )
+        if file_lock is None:  # pragma: no cover - blocking acquisition returns a lock or raises
+            raise RuntimeError("Unable to lock delivery package path")
         try:
-            with temporary.open("xb") as output:
-                output.write(content)
-                output.flush()
-                os.fsync(output.fileno())
-            os.utime(temporary, (current.timestamp(), current.timestamp()))
             with _CACHE_PATH_CONDITION:
-                while _cache_path_is_reserved(target_key):
-                    _CACHE_PATH_CONDITION.wait()
-                temporary.replace(target)
-                _reserve_delivery_cache_key_locked(target_key)
-                return LeasedDeliveryPackage(target, target_key)
+                if target.is_file():
+                    modified = datetime.fromtimestamp(target.stat().st_mtime, tz=UTC)
+                    if current.astimezone(UTC) - modified <= PACKAGE_TTL:
+                        _reserve_delivery_cache_key_locked(target_key)
+                        package = LeasedDeliveryPackage(target, target_key, file_lock=file_lock)
+                        file_lock = None
+                        return package
         finally:
-            temporary.unlink(missing_ok=True)
+            if file_lock is not None:
+                file_lock.release()
+
+        build_lock = acquire_delivery_cache_file_lock(
+            cache_root,
+            target.with_suffix(f"{target.suffix}.build"),
+            blocking=True,
+        )
+        if build_lock is None:  # pragma: no cover - blocking acquisition returns a lock or raises
+            raise RuntimeError("Unable to lock delivery package build")
+        try:
+            file_lock = acquire_delivery_cache_file_lock(
+                cache_root,
+                target,
+                blocking=True,
+                exclusive=False,
+            )
+            if file_lock is None:  # pragma: no cover - blocking acquisition returns a lock or raises
+                raise RuntimeError("Unable to lock delivery package path")
+            try:
+                with _CACHE_PATH_CONDITION:
+                    if target.is_file():
+                        modified = datetime.fromtimestamp(target.stat().st_mtime, tz=UTC)
+                        if current.astimezone(UTC) - modified <= PACKAGE_TTL:
+                            _reserve_delivery_cache_key_locked(target_key)
+                            package = LeasedDeliveryPackage(target, target_key, file_lock=file_lock)
+                            file_lock = None
+                            return package
+                content = package_builder(validated_groups, photo_reader)
+                package_dir.mkdir(parents=True, exist_ok=True)
+                temporary = target.with_suffix(f".zip.tmp-{uuid4().hex}")
+                try:
+                    try:
+                        with temporary.open("xb") as output:
+                            output.write(content)
+                            output.flush()
+                            os.fsync(output.fileno())
+                        os.utime(temporary, (current.timestamp(), current.timestamp()))
+                    finally:
+                        if file_lock is not None:
+                            file_lock.release()
+                            file_lock = None
+
+                    replacement_lock = acquire_delivery_cache_file_lock(cache_root, target, blocking=True)
+                    if replacement_lock is None:  # pragma: no cover - blocking acquisition returns a lock or raises
+                        raise RuntimeError("Unable to lock delivery package replacement")
+                    try:
+                        with _CACHE_PATH_CONDITION:
+                            while _cache_path_is_reserved(target_key):
+                                _CACHE_PATH_CONDITION.wait()
+                            temporary.replace(target)
+                            _reserve_delivery_cache_key_locked(target_key)
+                            replacement_lock.downgrade_to_shared()
+                            package = LeasedDeliveryPackage(target, target_key, file_lock=replacement_lock)
+                            replacement_lock = None
+                            return package
+                    finally:
+                        if replacement_lock is not None:
+                            replacement_lock.release()
+                finally:
+                    temporary.unlink(missing_ok=True)
+            finally:
+                if file_lock is not None:
+                    file_lock.release()
+        finally:
+            build_lock.release()

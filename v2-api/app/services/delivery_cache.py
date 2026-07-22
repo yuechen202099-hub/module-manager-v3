@@ -15,7 +15,14 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.database import SessionLocal
-from app.models import BarcodeMaintenanceControl, DeliveryCacheJob, GroupStatus, MaterialGroup, Photo
+from app.models import (
+    BarcodeMaintenanceControl,
+    DeliveryCacheJob,
+    DeliveryPackageJob,
+    GroupStatus,
+    MaterialGroup,
+    Photo,
+)
 from app.services import local_simulation
 
 
@@ -320,6 +327,91 @@ def sync_postgres_delivery_cache_job_for_group(
         group.raw_data = raw
     session.flush()
     return job
+
+
+def invalidate_postgres_delivery_cache_for_review(
+    session: Session,
+    group: MaterialGroup,
+    *,
+    actor: str,
+    reason: str,
+) -> None:
+    package_group_ids = [str(group.id)]
+    legacy_group_id = str(getattr(group, "legacy_id", "") or "").strip()
+    if legacy_group_id and legacy_group_id != package_group_ids[0]:
+        package_group_ids.append(legacy_group_id)
+    photos = list(
+        session.scalars(
+            select(Photo)
+            .where(
+                Photo.team_id == group.team_id,
+                Photo.group_id == group.id,
+                Photo.is_active.is_(True),
+            )
+            .with_for_update()
+        ).all()
+    )
+    job = session.scalar(
+        select(DeliveryCacheJob)
+        .where(
+            DeliveryCacheJob.team_id == group.team_id,
+            DeliveryCacheJob.group_id == group.id,
+        )
+        .with_for_update()
+    )
+    package_jobs = list(
+        session.scalars(
+            select(DeliveryPackageJob)
+            .where(
+                DeliveryPackageJob.team_id == group.team_id,
+                or_(
+                    *(DeliveryPackageJob.group_ids.contains([group_id]) for group_id in package_group_ids)
+                ),
+                DeliveryPackageJob.status.in_(("pending", "processing", "ready", "failed")),
+            )
+            .with_for_update()
+        ).all()
+    )
+    invalidated_at = _now_iso()
+    raw = dict(group.raw_data or {})
+    raw.update(
+        {
+            "delivery_cache_status": "stale",
+            "delivery_cache_error": reason,
+            "delivery_cache_retryable": False,
+            "delivery_cache_invalidated_at": invalidated_at,
+            "delivery_cache_invalidated_by": actor,
+        }
+    )
+    group.raw_data = raw
+    for photo in photos:
+        photo_raw = dict(photo.raw_data or {})
+        photo_raw.update(
+            {
+                "delivery_cache_status": "stale",
+                "delivery_cache_error": reason,
+                "delivery_cache_invalidated_at": invalidated_at,
+            }
+        )
+        photo.raw_data = photo_raw
+    if job is not None:
+        job.status = "not_eligible"
+        job.evidence_version = int(getattr(job, "evidence_version", 0) or 0) + 1
+        job.lease_owner = None
+        job.lease_token = None
+        job.lease_expires_at = None
+        job.requested_by = actor
+        job.request_reason = reason
+        job.last_error = reason
+        job.completed_at = None
+    for package_job in package_jobs:
+        package_job.status = "stale"
+        package_job.lease_owner = None
+        package_job.lease_token = None
+        package_job.lease_expires_at = None
+        package_job.last_error = reason
+        package_job.completed_at = None
+    session.flush()
 
 
 def build_postgres_delivery_claim_statement(*, team_id: str, now: datetime):
@@ -700,14 +792,22 @@ def cache_group_photos(
     ]
     | None = None,
 ) -> dict[str, Any]:
-    from app.services.final_delivery_export import release_delivery_cache_path, reserve_delivery_cache_path
+    from app.services.final_delivery_export import (
+        acquire_delivery_cache_file_lock,
+        release_delivery_cache_path,
+        reserve_delivery_cache_path,
+    )
 
     root = (cache_root or local_simulation.delivery_cache_root()).resolve()
+    file_lock = acquire_delivery_cache_file_lock(root, root / "objects", blocking=True)
+    if file_lock is None:  # pragma: no cover - blocking acquisition returns a lock or raises
+        raise RuntimeError("Unable to lock delivery object cache")
     lease = reserve_delivery_cache_path(root / "objects")
     try:
         return _cache_group_photos_impl(group, cache_root=root, fetch_photo=fetch_photo)
     finally:
         release_delivery_cache_path(lease)
+        file_lock.release()
 
 
 def _reconciliation_limit(limit: int) -> int:

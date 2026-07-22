@@ -207,7 +207,7 @@ async function startShellExport(scope: Record<string, unknown>) {
   shellExportActive = true
   try {
     setShellJob('准备导出终端包', `正在读取 ${terminal || taskId} 的清单`, 2)
-    const result = await exportTerminalDeliveryPackage({
+    await exportTerminalDeliveryPackage({
       taskId,
       terminal,
       reviewScope,
@@ -215,7 +215,7 @@ async function startShellExport(scope: Record<string, unknown>) {
     })
     setShellJob(
       '导出完成',
-      result.failed ? `压缩包已生成，${result.failed} 张图片下载失败` : `压缩包已生成，已下载 ${result.downloaded} 张图片`,
+      '正式交付包已下载',
       100,
       'success',
       true,

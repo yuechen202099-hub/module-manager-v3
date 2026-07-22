@@ -16,14 +16,21 @@ Historical client-demo package instructions are not part of the production workf
 
 ## Build Command
 
+Generate the report only against an isolated service listening on `localhost` or `127.0.0.1`. The report must be generated from and verified against the exact commit being packaged:
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version <version>
+$sourceCommit = (git rev-parse HEAD).Trim().ToLowerInvariant()
+.\.venv\Scripts\python.exe .\v2-api\scripts\verify_task_review_performance.py --base-url http://127.0.0.1:<port> --output .\outputs\performance\v<version>-task-review.json --source-commit $sourceCommit
+.\.venv\Scripts\python.exe .\v2-api\scripts\verify_v3_1_release.py --repo-root . --performance-report .\outputs\performance\v<version>-task-review.json --expected-source-commit $sourceCommit
+powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version <version> -PerformanceReport .\outputs\performance\v<version>-task-review.json
 ```
+
+Missing evidence, a non-local URL, empty route data, invalid pagination or serialization evidence, less than 60 seconds of sampling, a changed cache instance, failed thresholds, or a source commit mismatch blocks both acceptance and packaging.
 
 ## Verification Commands
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-<version>.zip
+.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-<version>.zip --expected-source-commit $sourceCommit
 Get-FileHash .\build\server-release\module-manager-v2-server-<version>.zip -Algorithm SHA256
 ```
 

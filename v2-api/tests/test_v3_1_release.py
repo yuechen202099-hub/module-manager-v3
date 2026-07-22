@@ -559,3 +559,29 @@ def test_v3_1_release_package_contains_new_release_guards() -> None:
         "v2-api/scripts/verify_v3_1_release.py",
     ):
         assert path in package_verifier
+
+
+def test_v3_1_acceptance_gate_wires_source_bound_performance_evidence() -> None:
+    acceptance = read("scripts/run-client-acceptance-gate.ps1")
+
+    source_commit = acceptance.index("$sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()")
+    performance = acceptance.index("verify_task_review_performance.py")
+    release_verifier = acceptance.index("verify_v3_1_release.py")
+
+    assert source_commit < performance < release_verifier
+    assert "--source-commit $sourceCommit" in acceptance
+    assert "--performance-report $performanceOutput" in acceptance
+    assert "--expected-source-commit $sourceCommit" in acceptance
+    assert "build-client-release.ps1 -Version $Version -PerformanceReport $performanceOutput" in acceptance
+
+
+def test_v3_1_package_builder_blocks_without_verified_performance_evidence() -> None:
+    builder = read("scripts/build-client-release.ps1")
+    package_sop = read("docs/sop/05-release-package-and-hash.md")
+
+    assert '[string]$PerformanceReport = ""' in builder
+    assert "Performance report is required for V3.1.0 packaging" in builder
+    assert "verify_v3_1_release.py" in builder
+    assert "--performance-report $performanceReportPath" in builder
+    assert "--expected-source-commit $sourceCommit" in builder
+    assert "-PerformanceReport" in package_sop

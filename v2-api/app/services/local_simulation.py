@@ -7030,6 +7030,8 @@ def confirm_group_barcode_manually(
     reason: str,
     photo_ids: list[str],
 ) -> dict[str, Any]:
+    from app.services.group_barcode_verification import mark_auto_archive_pending
+
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
@@ -7100,6 +7102,7 @@ def confirm_group_barcode_manually(
             "result": verification_result,
         }
     )
+    verification = mark_auto_archive_pending(verification)
     group["barcode_verification"] = verification
     after = _manual_confirmation_audit_snapshot(group, verification)
     after.update({"actor": actor, "reason": reason, "photo_ids": selected_ids})

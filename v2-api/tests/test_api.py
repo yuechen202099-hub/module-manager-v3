@@ -6104,10 +6104,15 @@ def test_installer_kpi_clusters_same_building_number_public_equipment() -> None:
 def test_excel_exports_return_real_workbooks() -> None:
     client.post("/local-test/bootstrap")
     task = client.get("/local-test/tasks").json()["data"]["items"][0]
+    admin_headers = _final_delivery_headers()
 
     task_export = client.post("/exports/task-detail", json={"task_id": task["id"]})
-    all_final_export = client.post("/exports/final-delivery", json={"project_id": 1})
-    terminal_final_export = client.post("/exports/final-delivery", json={"task_id": task["id"]})
+    all_final_export = client.post("/exports/final-delivery", headers=admin_headers, json={"project_id": 1})
+    terminal_final_export = client.post(
+        "/exports/final-delivery",
+        headers=admin_headers,
+        json={"task_id": task["id"]},
+    )
     exception_export = client.post("/exports/exception-meters", json={})
 
     assert task_export.status_code == 200
@@ -6130,6 +6135,42 @@ def test_excel_exports_return_real_workbooks() -> None:
     assert "\u73b0\u573a\u5904\u7406\u5efa\u8bae" in headers
 
 
+def _final_delivery_headers(*, role: str = "admin", subject: str = "admin-a") -> dict[str, str]:
+    token = security.create_access_token(
+        {
+            "sub": subject,
+            "username": subject,
+            "roles": [role],
+            "team_id": local_simulation.DEFAULT_TEAM_ID,
+        }
+    )
+    return {"Authorization": f"bearer {token}"}
+
+
+def test_final_delivery_rejects_anonymous_and_non_admin_before_repository_access(monkeypatch) -> None:
+    from app.services.delivery_package_queue import DeliveryPackageNotReady
+
+    calls: list[dict] = []
+
+    class Repository:
+        def request_final_delivery_export(self, **kwargs):
+            calls.append(kwargs)
+            raise DeliveryPackageNotReady(job_id="must-not-enqueue", status="pending")
+
+    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
+
+    anonymous = client.post("/exports/final-delivery", json={"task_id": 17})
+    reviewer = client.post(
+        "/exports/final-delivery",
+        headers=_final_delivery_headers(role="reviewer", subject="reviewer-a"),
+        json={"task_id": 17},
+    )
+
+    assert anonymous.status_code == 401
+    assert reviewer.status_code == 403
+    assert calls == []
+
+
 def test_final_delivery_export_returns_versioned_zip(monkeypatch, tmp_path: Path) -> None:
     package = tmp_path / "formal.zip"
     with ZipFile(package, "w") as archive:
@@ -6144,13 +6185,22 @@ def test_final_delivery_export_returns_versioned_zip(monkeypatch, tmp_path: Path
             released.append(self.path)
 
     class Repository:
-        def build_final_delivery_export(self, **kwargs):
-            assert kwargs == {"task_id": 17, "terminal": "", "review_scope": "reviewed"}
+        def request_final_delivery_export(self, **kwargs):
+            assert kwargs == {
+                "task_id": 17,
+                "terminal": "",
+                "review_scope": "reviewed",
+                "requested_by": "admin-a",
+            }
             return Package()
 
     monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
 
-    response = client.post("/exports/final-delivery", json={"task_id": 17})
+    response = client.post(
+        "/exports/final-delivery",
+        headers=_final_delivery_headers(),
+        json={"task_id": 17},
+    )
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/zip"
@@ -6158,6 +6208,39 @@ def test_final_delivery_export_returns_versioned_zip(monkeypatch, tmp_path: Path
     assert response.headers["content-disposition"].endswith('.zip"')
     assert response.content == package.read_bytes()
     assert released == [package]
+
+
+def test_final_delivery_cache_miss_returns_stable_202_without_building_zip(monkeypatch) -> None:
+    from app.services.delivery_package_queue import DeliveryPackageNotReady
+
+    class Repository:
+        def request_final_delivery_export(self, **kwargs):
+            assert kwargs == {
+                "task_id": 17,
+                "terminal": "",
+                "review_scope": "reviewed",
+                "requested_by": "admin-a",
+            }
+            raise DeliveryPackageNotReady(job_id="package-job-1", status="pending")
+
+        def build_final_delivery_export(self, **_kwargs):
+            pytest.fail("HTTP request must never invoke the synchronous ZIP builder")
+
+    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
+
+    response = client.post(
+        "/exports/final-delivery",
+        headers=_final_delivery_headers(),
+        json={"task_id": 17},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["detail"] == {
+        "code": "formal_delivery_not_ready",
+        "message": "正式交付包正在后台生成，请稍后重试。",
+        "job_id": "package-job-1",
+        "status": "pending",
+    }
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("response failed"), asyncio.CancelledError()])
@@ -6177,7 +6260,7 @@ def test_final_delivery_export_releases_exact_lease_when_response_construction_f
             releases.append(self.path)
 
     class Repository:
-        def build_final_delivery_export(self, **_kwargs):
+        def request_final_delivery_export(self, **_kwargs):
             return Package()
 
     def fail_response(*_args, **_kwargs):
@@ -6189,7 +6272,8 @@ def test_final_delivery_export_releases_exact_lease_when_response_construction_f
     with pytest.raises(type(failure)):
         export_routes.export_final_delivery(
             export_routes.FinalDeliveryExportRequest(task_id=17),
-            SimpleNamespace(),
+            SimpleNamespace(state=SimpleNamespace(auth={"sub": "admin", "roles": ["admin"]})),
+            {"sub": "admin", "roles": ["admin"]},
         )
 
     assert releases == [package_path]
@@ -6224,13 +6308,14 @@ def _leased_export_response(
             releases.append(self.path)
 
     class Repository:
-        def build_final_delivery_export(self, **_kwargs):
+        def request_final_delivery_export(self, **_kwargs):
             return Package()
 
     monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
     return export_routes.export_final_delivery(
         export_routes.FinalDeliveryExportRequest(task_id=17),
-        SimpleNamespace(),
+        SimpleNamespace(state=SimpleNamespace(auth={"sub": "admin", "roles": ["admin"]})),
+        {"sub": "admin", "roles": ["admin"]},
     )
 
 
@@ -6284,12 +6369,16 @@ def test_final_delivery_export_returns_structured_group_errors(monkeypatch) -> N
     ]
 
     class Repository:
-        def build_final_delivery_export(self, **_kwargs):
+        def request_final_delivery_export(self, **_kwargs):
             raise DeliveryPackageValidationError(errors)
 
     monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
 
-    response = client.post("/exports/final-delivery", json={"terminal": "00112233"})
+    response = client.post(
+        "/exports/final-delivery",
+        headers=_final_delivery_headers(),
+        json={"terminal": "00112233"},
+    )
 
     assert response.status_code == 422
     assert response.json()["detail"] == {"code": "formal_delivery_invalid", "groups": errors}
@@ -6315,12 +6404,16 @@ def test_final_delivery_export_returns_422_for_every_cache_validation_shape(
     ]
 
     class Repository:
-        def build_final_delivery_export(self, **_kwargs):
+        def request_final_delivery_export(self, **_kwargs):
             raise DeliveryPackageValidationError(errors)
 
     monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
 
-    response = client.post("/exports/final-delivery", json={"task_id": 17})
+    response = client.post(
+        "/exports/final-delivery",
+        headers=_final_delivery_headers(),
+        json={"task_id": 17},
+    )
 
     assert response.status_code == 422
     assert response.json()["detail"]["groups"] == errors

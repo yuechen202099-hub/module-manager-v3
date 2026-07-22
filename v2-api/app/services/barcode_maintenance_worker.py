@@ -7,6 +7,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import islice
 from pathlib import Path
 from typing import Any, Callable
 from uuid import UUID, uuid4
@@ -33,18 +34,40 @@ from app.services.delivery_cache import (
     reconcile_delivery_cache_jobs,
     sync_json_delivery_cache_job_for_group,
 )
+from app.services.delivery_package_queue import (
+    MAX_DELIVERY_PACKAGE_ATTEMPTS,
+    DeliveryPackageClaim,
+    build_postgres_delivery_package_claim_statement,
+    claim_json_delivery_package_job,
+    claim_postgres_delivery_package_job,
+    complete_json_delivery_package_job,
+    complete_postgres_delivery_package_job,
+    fail_json_delivery_package_job,
+    fail_postgres_delivery_package_job,
+    load_json_delivery_package_scope,
+    load_postgres_delivery_package_scope,
+)
 from app.services.group_barcode_verification import (
     evaluate_group_eligibility,
     invalidate_group_verification,
     scan_group_evidence,
 )
+from app.services.final_delivery_export import (
+    acquire_delivery_cache_file_lock,
+    cleanup_delivery_cache,
+)
 
 
 MAX_VERIFICATION_ATTEMPTS = 3
+MAX_AUTO_ARCHIVE_ATTEMPTS = 3
 DEFAULT_BATCH_SIZE = 20
 DEFAULT_BATCH_PAUSE_SECONDS = 5
 DEFAULT_LEASE_SECONDS = 300
 DEFAULT_MAX_LOAD_RATIO = 0.75
+DEFAULT_DELIVERY_CACHE_MAX_OBJECT_BYTES = 20 * 1024 * 1024 * 1024
+DEFAULT_DELIVERY_CACHE_CLEANUP_INTERVAL_SECONDS = 3600
+DEFAULT_DELIVERY_CACHE_CLEANUP_MAX_SCAN_ENTRIES = 2_000
+DEFAULT_DELIVERY_CACHE_CLEANUP_MAX_REFERENCE_ITEMS = 10_000
 WORKER_ACTOR = "barcode-maintenance"
 _batch_lock = threading.Lock()
 _claim_kind_lock = threading.Lock()
@@ -313,6 +336,304 @@ def claim_next_verification_job(
     raise StateBackendNotReady("Dual barcode worker claim is disabled until one backend is authoritative")
 
 
+def build_postgres_archive_claim_statement(*, team_id: str, now: datetime):
+    return (
+        select(GroupBarcodeVerification)
+        .where(
+            GroupBarcodeVerification.team_id == team_id,
+            GroupBarcodeVerification.status.in_(("passed", "manual_confirmed")),
+            or_(
+                GroupBarcodeVerification.auto_archive_status.is_(None),
+                GroupBarcodeVerification.auto_archive_status == "pending",
+                (GroupBarcodeVerification.auto_archive_status == "retry_pending")
+                & (GroupBarcodeVerification.auto_archive_attempt_count < MAX_AUTO_ARCHIVE_ATTEMPTS),
+                (GroupBarcodeVerification.auto_archive_status == "processing")
+                & (GroupBarcodeVerification.auto_archive_attempt_count < MAX_AUTO_ARCHIVE_ATTEMPTS)
+                & (GroupBarcodeVerification.auto_archive_lease_expires_at < now),
+            ),
+        )
+        .order_by(GroupBarcodeVerification.updated_at, GroupBarcodeVerification.id)
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+
+
+def _claim_json_archive(
+    *,
+    worker_id: str,
+    team_id: str,
+    now: datetime,
+    lease_seconds: int,
+) -> MaintenanceJob | None:
+    transaction = local_simulation.begin_authoritative_json_write(team_id)
+    token = local_simulation.activate_authoritative_json_write(transaction)
+    changed = False
+    try:
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for group in transaction.working_state.get("groups", []):
+            verification = group.get("barcode_verification")
+            if not isinstance(verification, dict) or str(verification.get("status") or "") not in {
+                "passed",
+                "manual_confirmed",
+            }:
+                continue
+            archive_status = str(verification.get("auto_archive_status") or "")
+            attempts = int(verification.get("auto_archive_attempt_count") or 0)
+            expires_at = _parse_datetime(verification.get("auto_archive_lease_expires_at"))
+            expired = expires_at is not None and expires_at < now
+            if not archive_status:
+                verification.update(
+                    {
+                        "auto_archive_status": "pending",
+                        "auto_archive_attempt_count": 0,
+                        "auto_archive_lease_owner": None,
+                        "auto_archive_lease_token": None,
+                        "auto_archive_lease_expires_at": None,
+                        "auto_archive_error": "",
+                    }
+                )
+                local_simulation.append_audit_event(
+                    "group_barcode_auto_archive_reconciled",
+                    WORKER_ACTOR,
+                    {"group_id": str(group.get("id") or ""), "verification_status": verification["status"]},
+                )
+                archive_status = "pending"
+                changed = True
+            if archive_status == "processing" and expired and attempts >= MAX_AUTO_ARCHIVE_ATTEMPTS:
+                verification.update(
+                    {
+                        "auto_archive_status": "manual_required",
+                        "auto_archive_lease_owner": None,
+                        "auto_archive_lease_token": None,
+                        "auto_archive_lease_expires_at": None,
+                        "auto_archive_error": "automatic archive lease expired after maximum attempts",
+                    }
+                )
+                changed = True
+                continue
+            if (
+                archive_status == "pending"
+                or (archive_status == "retry_pending" and attempts < MAX_AUTO_ARCHIVE_ATTEMPTS)
+                or (archive_status == "processing" and expired and attempts < MAX_AUTO_ARCHIVE_ATTEMPTS)
+            ):
+                candidates.append((str(group.get("id") or ""), verification))
+        if not candidates:
+            if changed:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+            else:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            return None
+        group_id, verification = sorted(candidates, key=lambda item: item[0])[0]
+        lease_token = str(uuid4())
+        verification.update(
+            {
+                "auto_archive_status": "processing",
+                "auto_archive_attempt_count": int(verification.get("auto_archive_attempt_count") or 0) + 1,
+                "auto_archive_lease_owner": worker_id,
+                "auto_archive_lease_token": lease_token,
+                "auto_archive_lease_expires_at": (
+                    now + timedelta(seconds=max(1, int(lease_seconds)))
+                ).isoformat(),
+                "auto_archive_error": "",
+            }
+        )
+        claim = MaintenanceJob(
+            kind="auto_archive",
+            team_id=team_id,
+            group_id=group_id,
+            lease_owner=worker_id,
+            lease_token=lease_token,
+            evidence_fingerprint=str(verification.get("evidence_fingerprint") or ""),
+            evidence_version=int(verification.get("evidence_version") or 0),
+            attempt_count=int(verification.get("auto_archive_attempt_count") or 0),
+        )
+        local_simulation.finish_authoritative_json_write(transaction, token)
+        return claim
+    except BaseException:
+        if not transaction.closed:
+            local_simulation.abort_authoritative_json_write(transaction, token)
+        raise
+
+
+def _terminalize_expired_postgres_archive_leases(session, *, team_id: str, now: datetime) -> int:
+    verifications = list(
+        session.scalars(
+            select(GroupBarcodeVerification)
+            .where(
+                GroupBarcodeVerification.team_id == team_id,
+                GroupBarcodeVerification.status.in_(("passed", "manual_confirmed")),
+                GroupBarcodeVerification.auto_archive_status == "processing",
+                GroupBarcodeVerification.auto_archive_attempt_count >= MAX_AUTO_ARCHIVE_ATTEMPTS,
+                GroupBarcodeVerification.auto_archive_lease_expires_at < now,
+            )
+            .with_for_update(skip_locked=True)
+        ).all()
+    )
+    for verification in verifications:
+        verification.auto_archive_status = "manual_required"
+        verification.auto_archive_lease_owner = None
+        verification.auto_archive_lease_token = None
+        verification.auto_archive_lease_expires_at = None
+        verification.auto_archive_error = "automatic archive lease expired after maximum attempts"
+    return len(verifications)
+
+
+def _claim_postgres_archive(
+    *,
+    worker_id: str,
+    team_id: str,
+    now: datetime,
+    lease_seconds: int,
+) -> MaintenanceJob | None:
+    from app.services.state_repository import _stage_transactional_audit
+
+    with SessionLocal() as session:
+        control = session.scalar(
+            select(BarcodeMaintenanceControl)
+            .where(BarcodeMaintenanceControl.team_id == team_id)
+            .with_for_update()
+        )
+        if control is None or control.paused:
+            session.rollback()
+            return None
+        terminalized = _terminalize_expired_postgres_archive_leases(session, team_id=team_id, now=now)
+        verification = session.scalar(build_postgres_archive_claim_statement(team_id=team_id, now=now))
+        if verification is None:
+            if terminalized:
+                session.commit()
+            else:
+                session.rollback()
+            return None
+        if not verification.auto_archive_status:
+            verification.auto_archive_status = "pending"
+            verification.auto_archive_attempt_count = 0
+            _stage_transactional_audit(
+                session,
+                team_id=team_id,
+                actor=WORKER_ACTOR,
+                action="group_barcode_auto_archive_reconciled",
+                entity_type="material_group",
+                entity_id=verification.group_id,
+                payload={"group_id": str(verification.group_id), "verification_status": verification.status},
+            )
+        lease_token = str(uuid4())
+        verification.auto_archive_status = "processing"
+        verification.auto_archive_attempt_count = int(verification.auto_archive_attempt_count or 0) + 1
+        verification.auto_archive_lease_owner = worker_id
+        verification.auto_archive_lease_token = lease_token
+        verification.auto_archive_lease_expires_at = now + timedelta(seconds=max(1, int(lease_seconds)))
+        verification.auto_archive_error = None
+        session.commit()
+        return MaintenanceJob(
+            kind="auto_archive",
+            team_id=team_id,
+            group_id=str(verification.group_id),
+            lease_owner=worker_id,
+            lease_token=lease_token,
+            evidence_fingerprint=str(verification.evidence_fingerprint or ""),
+            evidence_version=int(verification.evidence_version or 0),
+            attempt_count=int(verification.auto_archive_attempt_count or 0),
+        )
+
+
+def claim_next_archive_job(
+    *,
+    worker_id: str,
+    now: datetime | None = None,
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
+) -> MaintenanceJob | None:
+    claimed_at = now or datetime.now(UTC)
+    team_id = local_simulation.current_team_id()
+    backend = _backend()
+    if backend == "json":
+        return _claim_json_archive(
+            worker_id=worker_id,
+            team_id=team_id,
+            now=claimed_at,
+            lease_seconds=lease_seconds,
+        )
+    if backend == "postgres":
+        return _claim_postgres_archive(
+            worker_id=worker_id,
+            team_id=team_id,
+            now=claimed_at,
+            lease_seconds=lease_seconds,
+        )
+    from app.services.state_repository import StateBackendNotReady
+
+    raise StateBackendNotReady("Dual automatic archive claim is disabled until one backend is authoritative")
+
+
+def claim_next_delivery_package_job(
+    *,
+    worker_id: str,
+    now: datetime | None = None,
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
+) -> MaintenanceJob | None:
+    claimed_at = now or datetime.now(UTC)
+    team_id = local_simulation.current_team_id()
+    backend = _backend()
+    if backend == "json":
+        claim = claim_json_delivery_package_job(
+            worker_id=worker_id,
+            team_id=team_id,
+            now=claimed_at,
+            lease_seconds=lease_seconds,
+        )
+    elif backend == "postgres":
+        claim = claim_postgres_delivery_package_job(
+            worker_id=worker_id,
+            team_id=team_id,
+            now=claimed_at,
+            lease_seconds=lease_seconds,
+        )
+    else:
+        from app.services.state_repository import StateBackendNotReady
+
+        raise StateBackendNotReady("Dual delivery package claim is disabled until one backend is authoritative")
+    if claim is None:
+        return None
+    return MaintenanceJob(
+        kind="delivery_package",
+        team_id=claim.team_id,
+        group_id=claim.job_id,
+        lease_owner=claim.lease_owner,
+        lease_token=claim.lease_token,
+        evidence_fingerprint=claim.evidence_fingerprint,
+        attempt_count=claim.attempt_count,
+    )
+
+
+def _package_claim(job: MaintenanceJob) -> DeliveryPackageClaim:
+    return DeliveryPackageClaim(
+        team_id=job.team_id,
+        job_id=job.group_id,
+        lease_owner=job.lease_owner,
+        lease_token=job.lease_token,
+        evidence_fingerprint=job.evidence_fingerprint,
+        attempt_count=job.attempt_count,
+    )
+
+
+def fail_delivery_package_job(
+    job: MaintenanceJob,
+    error: Exception,
+    *,
+    now: datetime | None = None,
+) -> None:
+    claim = _package_claim(job)
+    backend = _backend()
+    if backend == "json":
+        fail_json_delivery_package_job(claim, error, now=now)
+        return
+    if backend == "postgres":
+        fail_postgres_delivery_package_job(claim, error, now=now)
+        return
+    from app.services.state_repository import StateBackendNotReady
+
+    raise StateBackendNotReady("Dual delivery package failure handling is disabled until one backend is authoritative")
+
+
 def _fail_json_verification(job: MaintenanceJob, error: Exception, now: datetime) -> None:
     transaction = local_simulation.begin_authoritative_json_write(job.team_id)
     token = local_simulation.activate_authoritative_json_write(transaction)
@@ -411,6 +732,112 @@ def fail_verification_job(
         _fail_postgres_verification(job, error, failed_at)
 
 
+def _fail_json_archive(job: MaintenanceJob, error: Exception, now: datetime) -> None:
+    transaction = local_simulation.begin_authoritative_json_write(job.team_id)
+    token = local_simulation.activate_authoritative_json_write(transaction)
+    try:
+        group = next(
+            (item for item in transaction.working_state.get("groups", []) if str(item.get("id") or "") == job.group_id),
+            None,
+        )
+        if group is None:
+            raise KeyError(job.group_id)
+        verification = group.get("barcode_verification") or {}
+        if (
+            verification.get("auto_archive_lease_owner") != job.lease_owner
+            or verification.get("auto_archive_lease_token") != job.lease_token
+        ):
+            local_simulation.abort_authoritative_json_write(transaction, token)
+            return
+        retryable = int(verification.get("auto_archive_attempt_count") or 0) < MAX_AUTO_ARCHIVE_ATTEMPTS
+        verification.update(
+            {
+                "auto_archive_status": "retry_pending" if retryable else "manual_required",
+                "auto_archive_lease_owner": None,
+                "auto_archive_lease_token": None,
+                "auto_archive_lease_expires_at": None,
+                "auto_archive_error": str(error)[:500],
+            }
+        )
+        local_simulation.append_audit_event(
+            "group_barcode_auto_archive_failed",
+            WORKER_ACTOR,
+            {
+                "group_id": job.group_id,
+                "attempt_count": verification.get("auto_archive_attempt_count"),
+                "retryable": retryable,
+                "failed_at": now.isoformat(),
+            },
+        )
+        local_simulation.finish_authoritative_json_write(transaction, token)
+    except BaseException:
+        if not transaction.closed:
+            local_simulation.abort_authoritative_json_write(transaction, token)
+        raise
+
+
+def _fail_postgres_archive(job: MaintenanceJob, error: Exception, now: datetime) -> None:
+    from app.services.state_repository import _stage_transactional_audit
+
+    with SessionLocal() as session:
+        verification = session.scalar(
+            select(GroupBarcodeVerification)
+            .where(
+                GroupBarcodeVerification.team_id == job.team_id,
+                GroupBarcodeVerification.group_id == UUID(job.group_id),
+            )
+            .with_for_update()
+        )
+        if verification is None:
+            raise KeyError(job.group_id)
+        if (
+            verification.auto_archive_lease_owner != job.lease_owner
+            or verification.auto_archive_lease_token != job.lease_token
+        ):
+            session.rollback()
+            return
+        retryable = int(verification.auto_archive_attempt_count or 0) < MAX_AUTO_ARCHIVE_ATTEMPTS
+        verification.auto_archive_status = "retry_pending" if retryable else "manual_required"
+        verification.auto_archive_lease_owner = None
+        verification.auto_archive_lease_token = None
+        verification.auto_archive_lease_expires_at = None
+        verification.auto_archive_error = str(error)[:500]
+        _stage_transactional_audit(
+            session,
+            team_id=job.team_id,
+            actor=WORKER_ACTOR,
+            action="group_barcode_auto_archive_failed",
+            entity_type="material_group",
+            entity_id=verification.group_id,
+            payload={
+                "group_id": job.group_id,
+                "attempt_count": verification.auto_archive_attempt_count,
+                "retryable": retryable,
+                "failed_at": now.isoformat(),
+            },
+        )
+        session.commit()
+
+
+def fail_archive_job(
+    job: MaintenanceJob,
+    error: Exception,
+    *,
+    now: datetime | None = None,
+) -> None:
+    failed_at = now or datetime.now(UTC)
+    backend = _backend()
+    if backend == "json":
+        _fail_json_archive(job, error, failed_at)
+        return
+    if backend == "postgres":
+        _fail_postgres_archive(job, error, failed_at)
+        return
+    from app.services.state_repository import StateBackendNotReady
+
+    raise StateBackendNotReady("Dual automatic archive failure handling is disabled until one backend is authoritative")
+
+
 def _archive_block_reason(group: dict[str, Any], verification: dict[str, Any]) -> tuple[str, str]:
     status = str(verification.get("status") or "")
     source = str(verification.get("recognition_source") or "")
@@ -452,6 +879,8 @@ def _auto_archive_json_in_state(
     group_id: str,
     *,
     actor: str,
+    lease_owner: str | None = None,
+    lease_token: str | None = None,
 ) -> dict[str, Any]:
     group = next((item for item in state.get("groups", []) if str(item.get("id") or "") == group_id), None)
     if group is None:
@@ -459,8 +888,28 @@ def _auto_archive_json_in_state(
     verification = group.get("barcode_verification") or {}
     if str(group.get("status") or "") == "approved" and verification.get("auto_archive_status") == "archived":
         return {"archived": False, "group_id": group_id, "reason": "already_archived"}
+    if lease_owner is not None or lease_token is not None:
+        if (
+            verification.get("auto_archive_lease_owner") != lease_owner
+            or verification.get("auto_archive_lease_token") != lease_token
+        ):
+            return {"archived": False, "group_id": group_id, "reason": "archive_lease_lost"}
     reason, source = _archive_block_reason(group, verification)
     if reason:
+        verification.update(
+            {
+                "auto_archive_status": "blocked",
+                "auto_archive_lease_owner": None,
+                "auto_archive_lease_token": None,
+                "auto_archive_lease_expires_at": None,
+                "auto_archive_error": reason,
+            }
+        )
+        local_simulation.append_audit_event(
+            "group_barcode_auto_archive_blocked",
+            actor,
+            {"group_id": group_id, "reason": reason},
+        )
         return {"archived": False, "group_id": group_id, "reason": reason}
     now = datetime.now(UTC).isoformat()
     for photo in group.get("photos", []):
@@ -480,6 +929,9 @@ def _auto_archive_json_in_state(
         {
             "auto_archive_status": "archived",
             "auto_archived_at": now,
+            "auto_archive_lease_owner": None,
+            "auto_archive_lease_token": None,
+            "auto_archive_lease_expires_at": None,
             "auto_archive_error": "",
             "recognition_source": source,
         }
@@ -498,11 +950,24 @@ def _auto_archive_json_in_state(
     return {"archived": True, "group_id": group_id, "source": source}
 
 
-def _auto_archive_json(group_id: str, *, actor: str, team_id: str) -> dict[str, Any]:
+def _auto_archive_json(
+    group_id: str,
+    *,
+    actor: str,
+    team_id: str,
+    lease_owner: str | None = None,
+    lease_token: str | None = None,
+) -> dict[str, Any]:
     transaction = local_simulation.begin_authoritative_json_write(team_id)
     token = local_simulation.activate_authoritative_json_write(transaction)
     try:
-        result = _auto_archive_json_in_state(transaction.working_state, group_id, actor=actor)
+        result = _auto_archive_json_in_state(
+            transaction.working_state,
+            group_id,
+            actor=actor,
+            lease_owner=lease_owner,
+            lease_token=lease_token,
+        )
         local_simulation.finish_authoritative_json_write(transaction, token)
         return result
     except BaseException:
@@ -518,7 +983,14 @@ def _postgres_group_id(group_id: str) -> UUID | None:
         return None
 
 
-def _auto_archive_postgres(group_id: str, *, actor: str, team_id: str) -> dict[str, Any]:
+def _auto_archive_postgres(
+    group_id: str,
+    *,
+    actor: str,
+    team_id: str,
+    lease_owner: str | None = None,
+    lease_token: str | None = None,
+) -> dict[str, Any]:
     from app.services import state_repository
 
     repository = state_repository.PostgresStateRepository()
@@ -536,6 +1008,13 @@ def _auto_archive_postgres(group_id: str, *, actor: str, team_id: str) -> dict[s
             return {"archived": False, "group_id": group_id, "reason": "verification_not_passed"}
         if group.status == GroupStatus.APPROVED and verification.auto_archive_status == "archived":
             return {"archived": False, "group_id": group_id, "reason": "already_archived"}
+        if lease_owner is not None or lease_token is not None:
+            if (
+                verification.auto_archive_lease_owner != lease_owner
+                or verification.auto_archive_lease_token != lease_token
+            ):
+                session.rollback()
+                return {"archived": False, "group_id": group_id, "reason": "archive_lease_lost"}
         photos = list(
             session.scalars(
                 select(Photo)
@@ -559,6 +1038,9 @@ def _auto_archive_postgres(group_id: str, *, actor: str, team_id: str) -> dict[s
         reason, source = _archive_block_reason(payload, verification_payload)
         if reason:
             verification.auto_archive_status = "blocked"
+            verification.auto_archive_lease_owner = None
+            verification.auto_archive_lease_token = None
+            verification.auto_archive_lease_expires_at = None
             verification.auto_archive_error = reason
             session.commit()
             return {"archived": False, "group_id": group_id, "reason": reason}
@@ -582,6 +1064,9 @@ def _auto_archive_postgres(group_id: str, *, actor: str, team_id: str) -> dict[s
             {
                 "auto_archive_status": "archived",
                 "auto_archived_at": now.isoformat(),
+                "auto_archive_lease_owner": None,
+                "auto_archive_lease_token": None,
+                "auto_archive_lease_expires_at": None,
                 "auto_archive_error": "",
                 "recognition_source": source,
             }
@@ -590,6 +1075,9 @@ def _auto_archive_postgres(group_id: str, *, actor: str, team_id: str) -> dict[s
         group.raw_data = raw
         verification.auto_archive_status = "archived"
         verification.auto_archived_at = now
+        verification.auto_archive_lease_owner = None
+        verification.auto_archive_lease_token = None
+        verification.auto_archive_lease_expires_at = None
         verification.auto_archive_error = None
         verification.recognition_source = source
         state_repository._stage_transactional_audit(
@@ -613,13 +1101,31 @@ def _auto_archive_postgres(group_id: str, *, actor: str, team_id: str) -> dict[s
     return result
 
 
-def auto_archive_verified_group(group_id: str, *, actor: str = WORKER_ACTOR) -> dict[str, Any]:
+def auto_archive_verified_group(
+    group_id: str,
+    *,
+    actor: str = WORKER_ACTOR,
+    lease_owner: str | None = None,
+    lease_token: str | None = None,
+) -> dict[str, Any]:
     backend = _backend()
     team_id = local_simulation.current_team_id()
     if backend == "json":
-        return _auto_archive_json(group_id, actor=actor, team_id=team_id)
+        return _auto_archive_json(
+            group_id,
+            actor=actor,
+            team_id=team_id,
+            lease_owner=lease_owner,
+            lease_token=lease_token,
+        )
     if backend == "postgres":
-        return _auto_archive_postgres(group_id, actor=actor, team_id=team_id)
+        return _auto_archive_postgres(
+            group_id,
+            actor=actor,
+            team_id=team_id,
+            lease_owner=lease_owner,
+            lease_token=lease_token,
+        )
     from app.services.state_repository import StateBackendNotReady
 
     raise StateBackendNotReady("Dual auto archive is disabled until one backend is authoritative")
@@ -784,14 +1290,22 @@ def claim_next_delivery_cache_job(*, worker_id: str, now: datetime | None = None
 
 def _claim_next_work(worker_id: str) -> MaintenanceJob | None:
     global _next_claim_kind
+    claim_order = ("verification", "auto_archive", "delivery_cache", "delivery_package")
     with _claim_kind_lock:
         first = _next_claim_kind
-        _next_claim_kind = "delivery_cache" if first == "verification" else "verification"
+        first_index = claim_order.index(first) if first in claim_order else 0
+        _next_claim_kind = claim_order[(first_index + 1) % len(claim_order)]
     claimers = {
         "verification": lambda: claim_next_verification_job(worker_id=worker_id),
+        "auto_archive": lambda: claim_next_archive_job(worker_id=worker_id),
         "delivery_cache": lambda: claim_next_delivery_cache_job(worker_id=worker_id),
+        "delivery_package": lambda: claim_next_delivery_package_job(worker_id=worker_id),
     }
-    return claimers[first]() or claimers[_next_claim_kind]()
+    for kind in claim_order[first_index:] + claim_order[:first_index]:
+        job = claimers[kind]()
+        if job is not None:
+            return job
+    return None
 
 
 def _load_group_for_scan(job: MaintenanceJob) -> dict[str, Any]:
@@ -821,7 +1335,7 @@ def _process_verification_job(job: MaintenanceJob) -> None:
     try:
         group = _load_group_for_scan(job)
         result = scan_group_evidence(group, list(group.get("photos") or []))
-        applied = get_state_repository().apply_group_scan_result(
+        get_state_repository().apply_group_scan_result(
             job.group_id,
             result,
             claimed_evidence_fingerprint=job.evidence_fingerprint,
@@ -830,9 +1344,51 @@ def _process_verification_job(job: MaintenanceJob) -> None:
             lease_token=job.lease_token,
             actor=WORKER_ACTOR,
         )
-        if applied.get("applied") and result.status == "passed":
-            auto_archive_verified_group(job.group_id, actor=WORKER_ACTOR)
     finally:
+        local_simulation.reset_current_team(token)
+
+
+def _process_archive_job(job: MaintenanceJob) -> None:
+    token = local_simulation.set_current_team(job.team_id)
+    try:
+        auto_archive_verified_group(
+            job.group_id,
+            actor=WORKER_ACTOR,
+            lease_owner=job.lease_owner,
+            lease_token=job.lease_token,
+        )
+    finally:
+        local_simulation.reset_current_team(token)
+
+
+def _process_delivery_package_job(job: MaintenanceJob) -> None:
+    from app.services import state_repository
+
+    claim = _package_claim(job)
+    backend = _backend()
+    if backend == "json":
+        scope = load_json_delivery_package_scope(claim)
+    elif backend == "postgres":
+        scope = load_postgres_delivery_package_scope(claim)
+    else:
+        raise state_repository.StateBackendNotReady(
+            "Dual delivery package processing is disabled until one backend is authoritative"
+        )
+    token = local_simulation.set_current_team(job.team_id)
+    package = None
+    try:
+        package = state_repository.get_state_repository().build_final_delivery_export(
+            task_id=scope.get("task_id"),
+            terminal=str(scope.get("terminal") or ""),
+            review_scope=str(scope.get("review_scope") or "reviewed"),
+        )
+        if backend == "json":
+            complete_json_delivery_package_job(claim, package.path)
+        else:
+            complete_postgres_delivery_package_job(claim, package.path)
+    finally:
+        if package is not None:
+            package.release()
         local_simulation.reset_current_team(token)
 
 
@@ -1013,6 +1569,12 @@ def _process_job(job: MaintenanceJob) -> None:
     if job.kind == "verification":
         _process_verification_job(job)
         return
+    if job.kind == "auto_archive":
+        _process_archive_job(job)
+        return
+    if job.kind == "delivery_package":
+        _process_delivery_package_job(job)
+        return
     if job.kind == "delivery_cache":
         _process_delivery_job(job)
         return
@@ -1022,6 +1584,12 @@ def _process_job(job: MaintenanceJob) -> None:
 def _fail_job(job: MaintenanceJob, error: Exception) -> None:
     if job.kind == "verification":
         fail_verification_job(job, error)
+        return
+    if job.kind == "auto_archive":
+        fail_archive_job(job, error)
+        return
+    if job.kind == "delivery_package":
+        fail_delivery_package_job(job, error)
         return
     if job.kind == "delivery_cache" and _backend() == "json":
         token = local_simulation.set_current_team(job.team_id)
@@ -1097,6 +1665,116 @@ def _maintenance_can_claim() -> bool:
     return _maintenance_control_allows_work() and not maintenance_load_too_high()
 
 
+def _delivery_cache_cleanup_references(*, limit: int) -> tuple[list[dict[str, Any]], bool]:
+    bounded = max(1, int(limit))
+    backend = _backend()
+    team_id = local_simulation.current_team_id()
+    if backend == "json":
+        groups = list(islice(local_simulation.state_for_team(team_id).get("groups", []), bounded + 1))
+        if len(groups) > bounded:
+            return [], False
+        return [deepcopy(dict(group)) for group in groups if isinstance(group, dict)], True
+    if backend == "dual":
+        return [], False
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(Photo.raw_data)
+            .where(Photo.team_id == team_id, Photo.is_active.is_(True))
+            .limit(bounded + 1)
+        ).all()
+    if len(rows) > bounded:
+        return [], False
+    groups = []
+    for index, raw_value in enumerate(rows):
+        raw = dict(raw_value or {})
+        raw["is_active"] = True
+        groups.append(
+            {
+                "id": f"cleanup-reference-{index}",
+                "delivery_cache_status": "ready",
+                "photos": [raw],
+            }
+        )
+    return groups, True
+
+
+def run_delivery_cache_cleanup_if_due(*, now: datetime | None = None) -> dict[str, Any]:
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    root = local_simulation.delivery_cache_root().resolve()
+    if not root.exists():
+        return {"status": "skipped", "reason": "cache_root_missing"}
+    interval = max(
+        60,
+        int(
+            getattr(
+                settings,
+                "delivery_cache_cleanup_interval_seconds",
+                DEFAULT_DELIVERY_CACHE_CLEANUP_INTERVAL_SECONDS,
+            )
+        ),
+    )
+    marker = root / ".cleanup-last-run"
+    run_lock = acquire_delivery_cache_file_lock(root, marker, blocking=False)
+    if run_lock is None:
+        return {"status": "skipped", "reason": "cleanup_busy"}
+    try:
+        try:
+            last_run = datetime.fromtimestamp(marker.stat().st_mtime, tz=UTC)
+        except FileNotFoundError:
+            last_run = None
+        if last_run is not None and current.astimezone(UTC) - last_run < timedelta(seconds=interval):
+            return {"status": "skipped", "reason": "interval_not_elapsed"}
+        reference_limit = max(
+            1,
+            int(
+                getattr(
+                    settings,
+                    "delivery_cache_cleanup_max_reference_items",
+                    DEFAULT_DELIVERY_CACHE_CLEANUP_MAX_REFERENCE_ITEMS,
+                )
+            ),
+        )
+        groups, cleanup_objects = _delivery_cache_cleanup_references(limit=reference_limit)
+        report = cleanup_delivery_cache(
+            root,
+            max_object_bytes=max(
+                0,
+                int(
+                    getattr(
+                        settings,
+                        "delivery_cache_max_object_bytes",
+                        DEFAULT_DELIVERY_CACHE_MAX_OBJECT_BYTES,
+                    )
+                ),
+            ),
+            groups=groups,
+            now=current,
+            max_scan_entries=max(
+                1,
+                int(
+                    getattr(
+                        settings,
+                        "delivery_cache_cleanup_max_scan_entries",
+                        DEFAULT_DELIVERY_CACHE_CLEANUP_MAX_SCAN_ENTRIES,
+                    )
+                ),
+            ),
+            cleanup_objects=cleanup_objects,
+        )
+        temporary = marker.with_name(f"{marker.name}.tmp-{uuid4().hex}")
+        try:
+            temporary.write_text(current.isoformat(), encoding="utf-8")
+            os.utime(temporary, (current.timestamp(), current.timestamp()))
+            temporary.replace(marker)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return {"status": "complete", "object_cleanup_enabled": cleanup_objects, **report}
+    finally:
+        run_lock.release()
+
+
 def run_worker_batch(
     batch_size: int = DEFAULT_BATCH_SIZE,
     batch_pause_seconds: float = DEFAULT_BATCH_PAUSE_SECONDS,
@@ -1123,10 +1801,15 @@ def run_worker_batch(
     on_failure = fail_job or _fail_job
     processed = 0
     failed = 0
+    cleanup_report: dict[str, Any] | None = None
     try:
         if not can_continue():
             return {"processed": 0, "failed": 0, "status": "complete"}
         if claim_next is None:
+            try:
+                cleanup_report = run_delivery_cache_cleanup_if_due()
+            except Exception as exc:
+                cleanup_report = {"status": "failed", "error": str(exc)[:500]}
             reconcile_delivery_cache_jobs(limit=limit)
         while processed < limit:
             if not can_continue():
@@ -1142,7 +1825,10 @@ def run_worker_batch(
             processed += 1
         if limit > 0 and processed == limit and batch_pause_seconds > 0:
             sleeper(float(batch_pause_seconds))
-        return {"processed": processed, "failed": failed, "status": "complete"}
+        report = {"processed": processed, "failed": failed, "status": "complete"}
+        if cleanup_report is not None:
+            report["cleanup"] = cleanup_report
+        return report
     finally:
         _batch_lock.release()
 

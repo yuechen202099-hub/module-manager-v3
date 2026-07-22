@@ -397,6 +397,13 @@ class GroupBarcodeVerification(Base, TimestampMixin):
         ),
         Index("ix_group_barcode_verifications_pending", "team_id", "status", "updated_at"),
         Index("ix_group_barcode_verifications_lease", "team_id", "lease_expires_at"),
+        Index(
+            "ix_group_barcode_verifications_archive_pending",
+            "team_id",
+            "auto_archive_status",
+            "auto_archive_lease_expires_at",
+            "updated_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_column()
@@ -417,6 +424,15 @@ class GroupBarcodeVerification(Base, TimestampMixin):
     invalidated_by: Mapped[str | None] = mapped_column(String(64))
     invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     auto_archive_status: Mapped[str | None] = mapped_column(String(32))
+    auto_archive_attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    auto_archive_lease_owner: Mapped[str | None] = mapped_column(String(128))
+    auto_archive_lease_token: Mapped[str | None] = mapped_column(String(128))
+    auto_archive_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     auto_archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     auto_archive_error: Mapped[str | None] = mapped_column(Text)
 
@@ -453,6 +469,43 @@ class DeliveryCacheJob(Base, TimestampMixin):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     evidence_fingerprint: Mapped[str | None] = mapped_column(String(64))
     evidence_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    requested_by: Mapped[str | None] = mapped_column(String(64))
+    request_reason: Mapped[str | None] = mapped_column(String(128))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DeliveryPackageJob(Base, TimestampMixin):
+    __tablename__ = "delivery_package_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "team_id",
+            "scope_hash",
+            "evidence_fingerprint",
+            name="uq_delivery_package_jobs_scope_fingerprint",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'ready', 'failed', 'stale')",
+            name="ck_delivery_package_jobs_status",
+        ),
+        Index("ix_delivery_package_jobs_pending", "team_id", "status", "updated_at"),
+        Index("ix_delivery_package_jobs_lease", "team_id", "lease_expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    scope_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    group_ids: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    evidence_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", server_default=text("'pending'"))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_token: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    package_path: Mapped[str | None] = mapped_column(Text)
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     requested_by: Mapped[str | None] = mapped_column(String(64))
     request_reason: Mapped[str | None] = mapped_column(String(128))
     last_error: Mapped[str | None] = mapped_column(Text)

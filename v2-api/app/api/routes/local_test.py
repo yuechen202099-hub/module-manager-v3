@@ -71,6 +71,12 @@ from app.services.state_repository import (
     invalidate_verification_for_group,
 )
 from app.services import photo_barcode_check, unmatched_review
+from app.services.final_delivery_export import (
+    DeliveryCacheFileLock,
+    acquire_delivery_cache_file_lock,
+    release_delivery_cache_path,
+    reserve_delivery_cache_path,
+)
 from app.services.local_simulation import (
     CONSTRUCTION_SLOT_CATEGORIES,
     add_photo_urls_to_group,
@@ -89,6 +95,7 @@ from app.services.local_simulation import (
     current_team_id,
     delete_group_photo,
     delete_unmatched_record,
+    delivery_cache_root,
     build_photo_record,
     expand_detail_pages_for_rows,
     get_group,
@@ -174,6 +181,35 @@ ALLOWED_UPLOAD_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 DANGEROUS_UPLOAD_SUFFIXES = {".html", ".svg", ".js", ".exe", ".bat", ".cmd", ".ps1"}
 DANGEROUS_UPLOAD_PREFIXES = (b"<!doctype", b"<html", b"<script", b"<svg", b"<?xml")
 DANGEROUS_UPLOAD_MARKERS = (b"<script", b"javascript:", b"onerror=", b"onload=")
+
+
+class LeasedDeliveryCacheFileResponse(Response):
+    def __init__(self, response: FileResponse, lease: str, file_lock: DeliveryCacheFileLock):
+        self.response = response
+        self.lease = lease
+        self.file_lock = file_lock
+        self.status_code = response.status_code
+        self.media_type = response.media_type
+        self.background = response.background
+        self.raw_headers = response.raw_headers
+        self._released = False
+        self._release_lock = Lock()
+
+    def release(self) -> None:
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        try:
+            release_delivery_cache_path(self.lease)
+        finally:
+            self.file_lock.release()
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        try:
+            await self.response(scope, receive, send)
+        finally:
+            self.release()
 
 
 def _upload_content_type(file: UploadFile) -> str:
@@ -1550,14 +1586,35 @@ def final_delivery_manifest(
 
 @router.get("/delivery-cache/{group_id}/{photo_id}")
 def delivery_cache_photo(group_id: str, photo_id: str):
+    root = delivery_cache_root().resolve()
+    file_lock = acquire_delivery_cache_file_lock(
+        root,
+        root / "objects",
+        blocking=True,
+        exclusive=False,
+    )
+    if file_lock is None:  # pragma: no cover - blocking acquisition returns a lock or raises
+        raise HTTPException(status_code=503, detail="Cached photo store is busy")
+    lease = ""
     try:
-        path = state_repository().get_delivery_cached_photo_path(group_id, photo_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Cached photo not found") from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Cached photo not ready") from exc
-    media_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-    return FileResponse(path, media_type=media_type, headers={"Cache-Control": "private, max-age=86400"})
+        try:
+            path = state_repository().get_delivery_cached_photo_path(group_id, photo_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Cached photo not found") from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Cached photo not ready") from exc
+        lease = reserve_delivery_cache_path(path)
+        media_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        return LeasedDeliveryCacheFileResponse(
+            FileResponse(path, media_type=media_type, headers={"Cache-Control": "private, max-age=86400"}),
+            lease,
+            file_lock,
+        )
+    except BaseException:
+        if lease:
+            release_delivery_cache_path(lease)
+        file_lock.release()
+        raise
 
 
 def _read_remote_image(
