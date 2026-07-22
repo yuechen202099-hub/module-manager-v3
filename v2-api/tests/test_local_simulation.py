@@ -4120,6 +4120,34 @@ def test_json_evidence_writes_invalidate_current_group_verification(
     assert any(event["action"] == "group_barcode_verification_invalidated" for event in synthetic_state["audit_events"])
 
 
+@pytest.mark.parametrize("operation", ["photo_added", "photo_deleted"])
+def test_json_photo_mutations_schedule_delivery_cache_reconciliation(
+    operation: str,
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = synthetic_state["groups"][0]
+    claim_task(group["task_id"], reviewer="alice")
+    scheduled = []
+    monkeypatch.setattr(
+        local_simulation,
+        "schedule_delivery_cache_build",
+        lambda group_id, **kwargs: scheduled.append((group_id, kwargs["reason"])),
+    )
+
+    if operation == "photo_added":
+        add_photo_urls_to_group(
+            group["id"],
+            actor="alice",
+            photo_urls=["https://example.test/requeue-photo.jpg"],
+            photo_metadata={"https://example.test/requeue-photo.jpg": {"sha256": "a" * 64}},
+        )
+    else:
+        delete_group_photo(group["id"], group["photos"][0]["id"], reviewer="alice")
+
+    assert scheduled == [(group["id"], operation)]
+
+
 def test_json_duplicate_construction_identity_change_invalidates_once_and_rolls_back_failed_commit(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,

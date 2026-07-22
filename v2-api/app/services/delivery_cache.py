@@ -490,6 +490,8 @@ def _reconcile_json_delivery_cache_jobs(team_id: str, *, limit: int) -> dict[str
             retry_pending = str(group.get("delivery_cache_status") or "") == "retry_pending"
             if group_id in jobs_by_group and not retry_pending:
                 continue
+            if retry_pending and not local_simulation.delivery_cache_group_is_eligible(group):
+                continue
             job = enqueue_json_delivery_cache_job(
                 group_id,
                 team_id=team_id,

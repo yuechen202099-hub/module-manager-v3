@@ -6118,6 +6118,37 @@ def test_final_delivery_export_returns_structured_group_errors(monkeypatch) -> N
     assert response.json()["detail"] == {"code": "formal_delivery_invalid", "groups": errors}
 
 
+@pytest.mark.parametrize(
+    "cache_code",
+    ["delivery_cache_invalid", "delivery_cache_pending", "invalid_photo_count"],
+)
+def test_final_delivery_export_returns_422_for_every_cache_validation_shape(
+    cache_code: str,
+    monkeypatch,
+) -> None:
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    errors = [
+        {
+            "group_id": "group-cache",
+            "code": cache_code,
+            "field": "photos",
+            "message": "cache validation failed",
+        }
+    ]
+
+    class Repository:
+        def build_final_delivery_export(self, **_kwargs):
+            raise DeliveryPackageValidationError(errors)
+
+    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
+
+    response = client.post("/exports/final-delivery", json={"task_id": 17})
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["groups"] == errors
+
+
 def test_final_delivery_manifest_supports_frontend_zip_export() -> None:
     client.post("/local-test/bootstrap")
     task = client.get("/local-test/tasks").json()["data"]["items"][0]

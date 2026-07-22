@@ -10,6 +10,7 @@ from zipfile import ZipFile
 import pytest
 from openpyxl import load_workbook
 
+from app.services import final_delivery_export
 from app.services.final_delivery_export import (
     DeliveryPackageValidationError,
     build_delivery_package,
@@ -362,6 +363,225 @@ def test_identity_category_and_photo_changes_invalidate_delivery_fingerprint() -
     photo_changed = delivery_evidence_fingerprint([group])
 
     assert len({original, identity_changed, category_changed, photo_changed}) == 4
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda group: group.update(replacement_old_meter_no="000000001111"),
+        lambda group: group.update(exception_reasons=["reason-a"]),
+        lambda group: group.update(exception_note="note-a"),
+        lambda group: group.update(group_barcode_manual_confirmed=True),
+        lambda group: group.update(export_remark="export-a"),
+    ],
+    ids=["replacement", "exception-reasons", "exception-note", "manual-confirmation", "export-remark"],
+)
+def test_delivery_fingerprint_includes_every_workbook_visible_remark(mutation) -> None:
+    group = delivery_group()
+    original = delivery_evidence_fingerprint([group])
+
+    mutation(group)
+
+    assert delivery_evidence_fingerprint([group]) != original
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda photo: photo.update(is_active=False),
+        lambda photo: photo.update(upload_status="invalid"),
+    ],
+    ids=["inactive", "invalid-upload"],
+)
+def test_invalid_photo_evidence_cannot_satisfy_formal_four_photo_contract(mutation) -> None:
+    group = delivery_group()
+    mutation(group["photos"][0])
+
+    with pytest.raises(DeliveryPackageValidationError) as captured:
+        build_delivery_package(
+            [group],
+            lambda _photo: (_ for _ in ()).throw(AssertionError("invalid evidence must block before reads")),
+        )
+
+    assert "invalid_photo_count" in {error["code"] for error in captured.value.errors}
+
+
+@pytest.mark.parametrize("content", [b"", b"wrong-content"], ids=["empty", "wrong-hash"])
+def test_delivery_package_converts_invalid_cached_bytes_to_group_error(content: bytes) -> None:
+    group = delivery_group()
+
+    with pytest.raises(DeliveryPackageValidationError) as captured:
+        build_delivery_package([group], lambda _photo: content)
+
+    assert captured.value.errors[0]["group_id"] == group["id"]
+    assert {error["code"] for error in captured.value.errors} == {"delivery_cache_invalid"}
+
+
+def test_windows_casefold_collision_assignment_is_stable_and_suffixes_every_member() -> None:
+    upper = delivery_group(
+        "group-UPPER",
+        terminal="TERM-A",
+        meter_no="METER-A",
+        module_no="MODULE-A",
+        collector="COLLECTOR-A",
+        address="ADDRESS-A",
+    )
+    lower = delivery_group(
+        "group-lower",
+        terminal="term-a",
+        meter_no="meter-a",
+        module_no="module-a",
+        collector="collector-a",
+        address="address-a",
+    )
+
+    first = build_delivery_package([upper, lower], read_photo)
+    reordered = build_delivery_package([lower, upper], read_photo)
+
+    with ZipFile(BytesIO(first)) as archive:
+        first_names = archive.namelist()[1:]
+    with ZipFile(BytesIO(reordered)) as archive:
+        reordered_names = archive.namelist()[1:]
+    assert first_names == reordered_names
+    assert len({name.casefold() for name in first_names}) == 8
+    assert all("group-UPPER" in name or "group-lower" in name for name in first_names)
+
+
+def test_cleanup_rechecks_a_late_path_reservation_before_delete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "objects" / "aa" / "late.jpg"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"late-reservation")
+    paused = Event()
+    resume = Event()
+    original_stat = Path.stat
+
+    def pausing_stat(path: Path, *args, **kwargs):
+        if path == target and not paused.is_set():
+            paused.set()
+            assert resume.wait(5)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", pausing_stat)
+    cleanup = Thread(
+        target=cleanup_delivery_cache,
+        kwargs={"cache_root": tmp_path, "max_object_bytes": 0, "groups": []},
+    )
+    cleanup.start()
+    assert paused.wait(5)
+    lease = reserve_delivery_cache_path(target)
+    try:
+        resume.set()
+        cleanup.join(5)
+        assert not cleanup.is_alive()
+        assert target.exists()
+    finally:
+        release_delivery_cache_path(lease)
+
+
+def test_expired_package_replacement_waits_for_active_download(tmp_path: Path) -> None:
+    group = delivery_group()
+    now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    target = get_or_build_delivery_package(
+        "active-download",
+        "a" * 64,
+        groups=[group],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now,
+    )
+    original = target.read_bytes()
+    lease = reserve_delivery_cache_path(target)
+    builder_started = Event()
+    finished = Event()
+
+    def rebuilt_package(_groups, _reader) -> bytes:
+        builder_started.set()
+        return b"replacement-package"
+
+    def rebuild() -> None:
+        get_or_build_delivery_package(
+            "active-download",
+            "a" * 64,
+            groups=[group],
+            photo_reader=read_photo,
+            cache_root=tmp_path,
+            now=now + timedelta(days=8),
+            package_builder=rebuilt_package,
+        )
+        finished.set()
+
+    worker = Thread(target=rebuild)
+    worker.start()
+    assert builder_started.wait(5)
+    try:
+        assert not finished.wait(0.2)
+        assert target.read_bytes() == original
+    finally:
+        release_delivery_cache_path(lease)
+    worker.join(5)
+    assert not worker.is_alive()
+    assert target.read_bytes() == b"replacement-package"
+
+
+def test_package_lock_registry_is_bounded_after_key_churn(tmp_path: Path) -> None:
+    group = delivery_group()
+    now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+
+    for index in range(40):
+        get_or_build_delivery_package(
+            f"scope-{index}",
+            f"{index:064x}",
+            groups=[group],
+            photo_reader=read_photo,
+            cache_root=tmp_path,
+            now=now,
+        )
+
+    assert final_delivery_export._PACKAGE_LOCKS == {}
+
+
+def test_concurrent_same_key_builders_share_one_package_lock(tmp_path: Path) -> None:
+    group = delivery_group()
+    started = Event()
+    release = Event()
+    builds = 0
+    paths: list[Path] = []
+
+    def package_builder(_groups, _reader) -> bytes:
+        nonlocal builds
+        builds += 1
+        started.set()
+        assert release.wait(5)
+        return b"one-package"
+
+    def build() -> None:
+        paths.append(
+            get_or_build_delivery_package(
+                "same-scope",
+                "f" * 64,
+                groups=[group],
+                photo_reader=read_photo,
+                cache_root=tmp_path,
+                package_builder=package_builder,
+            )
+        )
+
+    first = Thread(target=build)
+    second = Thread(target=build)
+    first.start()
+    assert started.wait(5)
+    second.start()
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert builds == 1
+    assert paths[0] == paths[1]
+    assert final_delivery_export._PACKAGE_LOCKS == {}
 
 
 def test_delivery_lru_keeps_referenced_and_active_paths(tmp_path: Path) -> None:

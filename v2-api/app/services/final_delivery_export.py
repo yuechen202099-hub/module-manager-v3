@@ -5,7 +5,9 @@ import json
 import os
 import re
 import threading
+from contextlib import contextmanager
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -40,10 +42,16 @@ LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 _INVALID_WINDOWS_PART = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _TRAILING_WINDOWS_PART = re.compile(r"[ .]+$")
-_PACKAGE_LOCKS: dict[str, threading.Lock] = {}
+@dataclass
+class _PackageLockEntry:
+    lock: threading.Lock
+    references: int = 0
+
+
+_PACKAGE_LOCKS: dict[str, _PackageLockEntry] = {}
 _PACKAGE_LOCKS_GUARD = threading.Lock()
 _ACTIVE_CACHE_PATHS: dict[str, int] = {}
-_ACTIVE_CACHE_PATHS_GUARD = threading.Lock()
+_CACHE_PATH_CONDITION = threading.Condition(threading.Lock())
 
 
 class DeliveryPackageValidationError(ValueError):
@@ -61,10 +69,12 @@ def _first_text(*values: Any) -> str:
 
 
 def _active_photos(group: Mapping[str, Any]) -> list[dict[str, Any]]:
+    from app.services.local_simulation import is_valid_photo_evidence
+
     return [
         dict(photo)
         for photo in group.get("photos", []) or []
-        if isinstance(photo, Mapping) and photo.get("is_active") is not False
+        if isinstance(photo, Mapping) and is_valid_photo_evidence(photo)
     ]
 
 
@@ -190,6 +200,11 @@ def validate_delivery_groups(
             )
         if require_cache:
             for photo in photos:
+                if _text(photo.get("delivery_cache_status")) == "invalid":
+                    errors.append(
+                        _error(group_id, "delivery_cache_invalid", "photos", "Completed photo cache is invalid")
+                    )
+                    break
                 if _text(photo.get("delivery_cache_status")) != "ready" or not _text(photo.get("delivery_cache_path")):
                     errors.append(
                         _error(group_id, "delivery_cache_pending", "photos", "Completed original photo cache is required")
@@ -224,12 +239,39 @@ def _delivery_remark(group: Mapping[str, Any]) -> str:
     )
     if old_meter_no:
         notes.insert(0, f"换表：旧表号 {old_meter_no}")
+    for field in ("replacement_remark", "export_remark", "delivery_export_remark"):
+        value = _text(group.get(field))
+        if value:
+            notes.append(value)
     manually_confirmed = bool(group.get("group_barcode_manual_confirmed")) or _text(
         group.get("auto_archive_source")
     ) == "manual_confirmed"
     if manually_confirmed and "人工确认" not in notes:
         notes.append("人工确认")
     return "；".join(dict.fromkeys(notes))
+
+
+def _workbook_rows(group: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
+    identity = _group_identity(group)
+    return {
+        "old": (
+            identity["terminal"],
+            "",
+            identity["address"],
+            identity["meter_no"],
+            identity["collector"],
+            "南大供电服务中心",
+            "奕福",
+            "",
+            "",
+        ),
+        "new": (
+            _local_date(_completed_at(group)),
+            identity["meter_no"],
+            identity["module_asset_no"],
+            _delivery_remark(group),
+        ),
+    }
 
 
 def _append_text_row(sheet: Any, values: Sequence[Any]) -> None:
@@ -252,30 +294,9 @@ def build_delivery_workbook(groups: Iterable[Mapping[str, Any]]) -> bytes:
     old_sheet.freeze_panes = "A2"
     new_sheet.freeze_panes = "A2"
     for group in validated:
-        identity = _group_identity(group)
-        _append_text_row(
-            old_sheet,
-            (
-                identity["terminal"],
-                "",
-                identity["address"],
-                identity["meter_no"],
-                identity["collector"],
-                "南大供电服务中心",
-                "奕福",
-                "",
-                "",
-            ),
-        )
-        _append_text_row(
-            new_sheet,
-            (
-                _local_date(_completed_at(group)),
-                identity["meter_no"],
-                identity["module_asset_no"],
-                _delivery_remark(group),
-            ),
-        )
+        rows = _workbook_rows(group)
+        _append_text_row(old_sheet, rows["old"])
+        _append_text_row(new_sheet, rows["new"])
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -300,64 +321,122 @@ def _photo_extension(photo: Mapping[str, Any]) -> str:
     return ".jpg"
 
 
-def _collision_name(path: str, group_id: str, used: set[str]) -> str:
-    if path not in used:
-        return path
+def _windows_member_key(path: str) -> str:
+    return "/".join(part.rstrip(" .").casefold() for part in path.replace("\\", "/").split("/"))
+
+
+def _collision_name(path: str, group_id: str, discriminator: str = "") -> str:
     candidate = Path(path)
     suffix = candidate.suffix
     stable_id = sanitize_delivery_path_part(group_id)
-    collided = str(candidate.with_name(f"{candidate.stem}-{stable_id}{suffix}")).replace("\\", "/")
-    serial = 2
-    while collided in used:
-        collided = str(candidate.with_name(f"{candidate.stem}-{stable_id}-{serial}{suffix}")).replace("\\", "/")
-        serial += 1
-    return collided
+    if discriminator:
+        stable_id = f"{stable_id}-{hashlib.sha256(discriminator.encode('utf-8')).hexdigest()[:8]}"
+    return str(candidate.with_name(f"{candidate.stem}-{stable_id}{suffix}")).replace("\\", "/")
+
+
+def _delivery_photo_members(groups: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for group in sorted(groups, key=lambda item: _text(item.get("id"))):
+        identity = _group_identity(group)
+        group_id = _text(group.get("id")) or "group"
+        directory = "/".join(
+            (
+                sanitize_delivery_path_part(identity["terminal"]),
+                sanitize_delivery_path_part(
+                    f'{identity["meter_no"]}-{identity["module_asset_no"]}-{identity["address"]}'
+                ),
+            )
+        )
+        photos = {str(photo.get("category")): photo for photo in _active_photos(group)}
+        for category in STANDARD_PHOTO_ORDER:
+            photo = photos[category]
+            filename = sanitize_delivery_path_part(
+                f'{identity["module_asset_no"]}-{STANDARD_PHOTO_CATEGORIES[category]}'
+            ) + _photo_extension(photo)
+            path = f"{directory}/{filename}"
+            candidates.append(
+                {
+                    "group_id": group_id,
+                    "photo": photo,
+                    "path": path,
+                    "member_key": _windows_member_key(path),
+                    "discriminator": f'{group_id}|{category}|{_text(photo.get("id"))}',
+                    "category_order": STANDARD_PHOTO_ORDER.index(category),
+                }
+            )
+    collision_counts: dict[str, int] = {}
+    for candidate in candidates:
+        key = candidate["member_key"]
+        collision_counts[key] = collision_counts.get(key, 0) + 1
+    assigned: set[str] = set()
+    for candidate in sorted(
+        candidates,
+        key=lambda item: (item["member_key"], item["group_id"].casefold(), item["discriminator"]),
+    ):
+        path = candidate["path"]
+        if collision_counts[candidate["member_key"]] > 1:
+            path = _collision_name(path, candidate["group_id"])
+        key = _windows_member_key(path)
+        if key in assigned:
+            path = _collision_name(candidate["path"], candidate["group_id"], candidate["discriminator"])
+            key = _windows_member_key(path)
+        assigned.add(key)
+        candidate["path"] = path
+    return sorted(
+        candidates,
+        key=lambda item: (item["group_id"].casefold(), item["group_id"], item["category_order"]),
+    )
 
 
 def build_delivery_package(
     groups: Iterable[Mapping[str, Any]],
     photo_reader: Callable[[dict[str, Any]], bytes],
 ) -> bytes:
-    validated = validate_delivery_groups(groups)
+    validated = sorted(validate_delivery_groups(groups), key=lambda item: _text(item.get("id")))
+    members = _delivery_photo_members(validated)
+    errors: list[dict[str, str]] = []
+    for member in members:
+        photo = member["photo"]
+        group_id = member["group_id"]
+        try:
+            content = photo_reader(photo)
+        except DeliveryPackageValidationError as exc:
+            errors.extend(exc.errors)
+            continue
+        except Exception:
+            errors.append(
+                _error(group_id, "delivery_cache_invalid", "photos", "Completed photo cache could not be read")
+            )
+            continue
+        expected_sha256 = _text(photo.get("delivery_cache_content_sha256")).lower()
+        if (
+            not isinstance(content, bytes)
+            or not content
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+            or hashlib.sha256(content).hexdigest() != expected_sha256
+        ):
+            errors.append(
+                _error(group_id, "delivery_cache_invalid", "photos", "Completed photo cache failed integrity verification")
+            )
+            continue
+        member["content"] = content
+    if errors:
+        raise DeliveryPackageValidationError(errors)
     output = BytesIO()
-    used_names = {"设备清单.xlsx"}
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr("设备清单.xlsx", build_delivery_workbook(validated))
-        for group in validated:
-            identity = _group_identity(group)
-            group_id = _text(group.get("id")) or "group"
-            directory = "/".join(
-                (
-                    sanitize_delivery_path_part(identity["terminal"]),
-                    sanitize_delivery_path_part(
-                        f'{identity["meter_no"]}-{identity["module_asset_no"]}-{identity["address"]}'
-                    ),
-                )
-            )
-            photos = {str(photo.get("category")): photo for photo in _active_photos(group)}
-            for category in STANDARD_PHOTO_ORDER:
-                photo = photos[category]
-                filename = sanitize_delivery_path_part(
-                    f'{identity["module_asset_no"]}-{STANDARD_PHOTO_CATEGORIES[category]}'
-                ) + _photo_extension(photo)
-                path = _collision_name(f"{directory}/{filename}", group_id, used_names)
-                used_names.add(path)
-                content = photo_reader(photo)
-                if not isinstance(content, bytes) or not content:
-                    raise ValueError(f"Empty completed photo cache for {group_id}/{photo.get('id')}")
-                archive.writestr(path, content)
+        for member in members:
+            archive.writestr(member["path"], member["content"])
     return output.getvalue()
 
 
 def delivery_evidence_fingerprint(groups: Iterable[Mapping[str, Any]]) -> str:
     payload = []
     for group in sorted(_deduplicated_groups(groups), key=lambda item: _text(item.get("id"))):
-        identity = _group_identity(group)
         payload.append(
             {
                 "id": _text(group.get("id")),
-                **identity,
-                "client_completed_at": _completed_at(group),
+                "workbook_rows": _workbook_rows(group),
                 "photos": sorted(
                     (
                         {
@@ -367,6 +446,7 @@ def delivery_evidence_fingerprint(groups: Iterable[Mapping[str, Any]]) -> str:
                                 photo.get("delivery_cache_content_sha256"), photo.get("sha256")
                             ).lower(),
                             "cache_version": _text(photo.get("delivery_cache_version")),
+                            "extension": _photo_extension(photo),
                         }
                         for photo in _active_photos(group)
                     ),
@@ -377,9 +457,23 @@ def delivery_evidence_fingerprint(groups: Iterable[Mapping[str, Any]]) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _package_lock(key: str) -> threading.Lock:
+@contextmanager
+def _package_lock(key: str):
     with _PACKAGE_LOCKS_GUARD:
-        return _PACKAGE_LOCKS.setdefault(key, threading.Lock())
+        entry = _PACKAGE_LOCKS.get(key)
+        if entry is None:
+            entry = _PackageLockEntry(threading.Lock())
+            _PACKAGE_LOCKS[key] = entry
+        entry.references += 1
+    entry.lock.acquire()
+    try:
+        yield
+    finally:
+        entry.lock.release()
+        with _PACKAGE_LOCKS_GUARD:
+            entry.references -= 1
+            if entry.references == 0 and _PACKAGE_LOCKS.get(key) is entry:
+                _PACKAGE_LOCKS.pop(key, None)
 
 
 def _cache_path_key(path: Path | str) -> str:
@@ -388,24 +482,28 @@ def _cache_path_key(path: Path | str) -> str:
 
 def reserve_delivery_cache_path(path: Path | str) -> str:
     key = _cache_path_key(path)
-    with _ACTIVE_CACHE_PATHS_GUARD:
+    with _CACHE_PATH_CONDITION:
         _ACTIVE_CACHE_PATHS[key] = _ACTIVE_CACHE_PATHS.get(key, 0) + 1
     return key
 
 
 def release_delivery_cache_path(lease: Path | str) -> None:
     key = str(lease).casefold()
-    with _ACTIVE_CACHE_PATHS_GUARD:
+    with _CACHE_PATH_CONDITION:
         count = _ACTIVE_CACHE_PATHS.get(key, 0)
         if count <= 1:
             _ACTIVE_CACHE_PATHS.pop(key, None)
         else:
             _ACTIVE_CACHE_PATHS[key] = count - 1
+        _CACHE_PATH_CONDITION.notify_all()
 
 
-def _active_cache_path_keys() -> set[str]:
-    with _ACTIVE_CACHE_PATHS_GUARD:
-        return {key for key, count in _ACTIVE_CACHE_PATHS.items() if count > 0}
+def _cache_path_is_reserved(key: str) -> bool:
+    separator = os.sep.casefold()
+    return any(
+        count > 0 and (key == reserved or key.startswith(f"{reserved.rstrip(separator)}{separator}"))
+        for reserved, count in _ACTIVE_CACHE_PATHS.items()
+    )
 
 
 def cleanup_delivery_cache(
@@ -419,7 +517,6 @@ def cleanup_delivery_cache(
     current = now or datetime.now(UTC)
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
-    active = _active_cache_path_keys()
     referenced: set[str] = set()
     for group in groups:
         if _text(group.get("delivery_cache_status")) != "ready":
@@ -440,34 +537,45 @@ def cleanup_delivery_cache(
     object_root = root / "objects"
     object_files = [path for path in object_root.rglob("*") if path.is_file()] if object_root.exists() else []
     total_bytes = sum(path.stat().st_size for path in object_files)
-    protected = active | referenced
-    if _cache_path_key(object_root) in active:
-        protected.update(_cache_path_key(path) for path in object_files)
     deleted_objects = 0
     protected_objects = 0
     for path in sorted(object_files, key=lambda item: (item.stat().st_mtime, str(item))):
         key = _cache_path_key(path)
-        if key in protected:
+        if key in referenced:
             protected_objects += 1
             continue
         if total_bytes <= max(0, int(max_object_bytes)):
             continue
-        size = path.stat().st_size
-        path.unlink(missing_ok=True)
-        total_bytes -= size
-        deleted_objects += 1
+        with _CACHE_PATH_CONDITION:
+            if _cache_path_is_reserved(key):
+                protected_objects += 1
+                continue
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            total_bytes -= size
+            deleted_objects += 1
 
     deleted_packages = 0
     package_root = root / "packages"
     if package_root.exists():
         expires_before = current.astimezone(UTC) - PACKAGE_TTL
         for path in package_root.rglob("*.zip"):
-            if not path.is_file() or _cache_path_key(path) in active:
+            if not path.is_file():
                 continue
-            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-            if modified < expires_before:
-                path.unlink(missing_ok=True)
-                deleted_packages += 1
+            key = _cache_path_key(path)
+            with _CACHE_PATH_CONDITION:
+                if _cache_path_is_reserved(key):
+                    continue
+                try:
+                    modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+                    if modified < expires_before:
+                        path.unlink()
+                        deleted_packages += 1
+                except FileNotFoundError:
+                    continue
     return {
         "deleted_objects": deleted_objects,
         "protected_objects": protected_objects,
@@ -513,7 +621,11 @@ def get_or_build_delivery_package(
                 output.flush()
                 os.fsync(output.fileno())
             os.utime(temporary, (current.timestamp(), current.timestamp()))
-            temporary.replace(target)
+            target_key = _cache_path_key(target)
+            with _CACHE_PATH_CONDITION:
+                while _cache_path_is_reserved(target_key):
+                    _CACHE_PATH_CONDITION.wait()
+                temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
         return target

@@ -722,6 +722,120 @@ def test_json_review_group_durable_cache_enqueue_is_idempotent(
     assert len(persistence_calls) == 4
 
 
+def _make_json_group_delivery_cache_eligible(state: dict) -> dict:
+    group = state["groups"][0]
+    group.update(
+        {
+            "status": "approved",
+            "reviewer": "reviewer-a",
+            "address": "delivery road",
+            "delivery_cache_status": "ready",
+        }
+    )
+    for photo in group["photos"]:
+        photo.update(
+            {
+                "upload_status": "uploaded",
+                "image_url": f"oss://bucket/{photo['id']}.jpg",
+                "storage_type": "oss",
+                "archive_status": "archived",
+                "download_status": "downloaded",
+            }
+        )
+    return group
+
+
+def test_json_identity_and_category_invalidations_enqueue_one_durable_cache_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"json-mutation-cache-{uuid4()}"
+    state = _prepare_json_review_cache_state(monkeypatch, team_id)
+    group = _make_json_group_delivery_cache_eligible(state)
+    monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: None)
+    monkeypatch.setattr(repository.local_simulation, "validate_group_archive", lambda _group: [])
+    monkeypatch.setattr(repository.local_simulation, "update_group_archive_status", lambda *_args: None)
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: pytest.fail("authoritative mutations must not access OSS"),
+    )
+    repo = repository.JsonStateRepository()
+
+    repo.update_group_metadata(group["id"], actor="reviewer-a", updates={"meter_no": "M-VERIFY-002"})
+    group = repository.local_simulation._team_states[team_id]["groups"][0]
+    group["photos"][0]["category"] = "unclassified"
+    repo.classify_photo(group["id"], group["photos"][0]["id"], "before_box", "reviewer-a")
+    repo.update_group_metadata(group["id"], actor="reviewer-a", updates={"meter_no": "M-VERIFY-002"})
+
+    jobs = repository.local_simulation._team_states[team_id]["delivery_cache_jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["group_id"] == group["id"]
+    assert jobs[0]["status"] == "pending"
+
+
+def test_json_identity_invalidation_commit_failure_creates_no_durable_cache_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"json-mutation-rollback-{uuid4()}"
+    state = _prepare_json_review_cache_state(monkeypatch, team_id)
+    group = _make_json_group_delivery_cache_eligible(state)
+    before = deepcopy(state)
+    monkeypatch.setattr(repository.local_simulation, "validate_group_archive", lambda _group: [])
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "save_all_team_states",
+        lambda: (_ for _ in ()).throw(RuntimeError("injected mutation persistence failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="injected mutation persistence failure"):
+        repository.JsonStateRepository().update_group_metadata(
+            group["id"],
+            actor="reviewer-a",
+            updates={"meter_no": "M-VERIFY-002"},
+        )
+
+    assert repository.local_simulation._team_states[team_id] == before
+
+
+@pytest.mark.parametrize("ineligible_kind", ["source", "category"])
+def test_json_ineligible_invalidation_stays_retry_pending_until_reconciliation(
+    ineligible_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
+    team_id = f"json-mutation-reconcile-{uuid4()}"
+    state = _prepare_json_review_cache_state(monkeypatch, team_id)
+    group = _make_json_group_delivery_cache_eligible(state)
+    if ineligible_kind == "source":
+        for photo in group["photos"]:
+            photo.update(image_url="", storage_type="")
+    else:
+        group["photos"][0]["category"] = "unclassified"
+    monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: None)
+    monkeypatch.setattr(repository.local_simulation, "validate_group_archive", lambda _group: [])
+
+    repository.JsonStateRepository().update_group_metadata(
+        group["id"],
+        actor="reviewer-a",
+        updates={"meter_no": "M-VERIFY-002"},
+    )
+
+    committed = repository.local_simulation._team_states[team_id]
+    assert committed["groups"][0]["delivery_cache_status"] == "retry_pending"
+    assert committed["delivery_cache_jobs"] == []
+    if ineligible_kind == "source":
+        for photo in committed["groups"][0]["photos"]:
+            photo.update(image_url=f"oss://bucket/{photo['id']}.jpg", storage_type="oss")
+    else:
+        committed["groups"][0]["photos"][0]["category"] = "before_box"
+
+    result = delivery_cache._reconcile_json_delivery_cache_jobs(team_id, limit=20)
+
+    assert result["enqueued"] == 1
+    assert len(repository.local_simulation._team_states[team_id]["delivery_cache_jobs"]) == 1
+
+
 def test_postgres_review_enqueues_cache_job_after_review_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1022,6 +1136,139 @@ def test_json_formal_export_reports_missing_completed_cache_before_zip_build(
         repository.JsonStateRepository().build_final_delivery_export(task_id=17)
 
     assert {error["code"] for error in captured.value.errors} == {"delivery_cache_pending"}
+
+
+@pytest.mark.parametrize("backend", ["json", "postgres"])
+def test_formal_export_rejects_invalid_upload_evidence_for_both_repositories(
+    backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    group_payload = _formal_delivery_group(tmp_path, f"{backend}-invalid-evidence")
+    group_payload["photos"][0]["upload_status"] = "invalid"
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    if backend == "json":
+        monkeypatch.setattr(
+            repository.local_simulation,
+            "filter_delivery_groups",
+            lambda **_kwargs: [deepcopy(group_payload)],
+        )
+        repo = repository.JsonStateRepository()
+    else:
+        group = SimpleNamespace(
+            id=uuid4(),
+            legacy_id=group_payload["id"],
+            team_id="postgres-invalid-team",
+            terminal=group_payload["terminal"],
+            display_meter_no=group_payload["meter_no"],
+            status=repository.GroupStatus.APPROVED,
+            raw_data={},
+        )
+
+        class ScalarRows:
+            def all(self):
+                return [group]
+
+        class Session:
+            def scalars(self, _statement):
+                return ScalarRows()
+
+        class TestRepository(repository.PostgresStateRepository):
+            def _session(self):
+                return nullcontext(Session())
+
+            def _task_by_legacy_id(self, _session, _task_id):
+                return SimpleNamespace(id=uuid4())
+
+        monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: group.team_id)
+        monkeypatch.setattr(repository, "_group_payload", lambda *_args, **_kwargs: deepcopy(group_payload))
+        repo = TestRepository()
+
+    with pytest.raises(DeliveryPackageValidationError) as captured:
+        repo.build_final_delivery_export(task_id=17)
+
+    assert "invalid_photo_count" in {error["code"] for error in captured.value.errors}
+
+
+@pytest.mark.parametrize("invalid_kind", ["directory", "empty", "corrupt", "outside"])
+def test_json_formal_export_rejects_invalid_cache_files_with_structured_errors(
+    invalid_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    group = _formal_delivery_group(tmp_path, f"invalid-cache-{invalid_kind}")
+    photo = group["photos"][0]
+    path = tmp_path / photo["delivery_cache_path"]
+    if invalid_kind == "directory":
+        path.unlink()
+        path.mkdir()
+    elif invalid_kind == "empty":
+        path.write_bytes(b"")
+    elif invalid_kind == "corrupt":
+        path.write_bytes(b"corrupt")
+    else:
+        outside = tmp_path.parent / f"outside-{uuid4()}.png"
+        outside.write_bytes(path.read_bytes())
+        photo["delivery_cache_path"] = str(outside)
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+    scheduled = []
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "schedule_delivery_cache_build",
+        lambda group_id, **kwargs: scheduled.append((group_id, kwargs["reason"])),
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: pytest.fail("formal request must not access OSS"),
+    )
+
+    with pytest.raises(DeliveryPackageValidationError) as captured:
+        repository.JsonStateRepository().build_final_delivery_export(task_id=17)
+
+    assert {error["code"] for error in captured.value.errors} == {"delivery_cache_invalid"}
+    assert scheduled == [(group["id"], "formal_cache_validation_failed")]
+
+
+def test_json_formal_export_converts_cache_disappearance_race_to_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    group = _formal_delivery_group(tmp_path, "disappearing-cache")
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+    original = repository.local_simulation.get_delivery_cached_photo_path_from_payload
+    calls = 0
+    scheduled = []
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "schedule_delivery_cache_build",
+        lambda group_id, **kwargs: scheduled.append((group_id, kwargs["reason"])),
+    )
+
+    def disappear(checked_group, photo):
+        nonlocal calls
+        path = original(checked_group, photo)
+        calls += 1
+        if calls == 5:
+            path.unlink()
+            raise FileNotFoundError(str(path))
+        return path
+
+    monkeypatch.setattr(repository.local_simulation, "get_delivery_cached_photo_path_from_payload", disappear)
+
+    with pytest.raises(DeliveryPackageValidationError) as captured:
+        repository.JsonStateRepository().build_final_delivery_export(task_id=17)
+
+    assert {error["code"] for error in captured.value.errors} == {"delivery_cache_invalid"}
+    assert scheduled == [(group["id"], "formal_cache_validation_failed")]
 
 
 def test_postgres_repository_uses_shared_formal_package_builder(
@@ -4414,6 +4661,7 @@ def test_postgres_unmatched_review_photo_payload_reads_back_every_evidence_field
         collector="C001",
         asset_no="M001",
         creator="reviewer-a",
+        upload_status="invalid",
         raw_data=evidence,
     )
 
@@ -4424,6 +4672,7 @@ def test_postgres_unmatched_review_photo_payload_reads_back_every_evidence_field
     assert payload["temporary_review_manual_confirmed"] is True
     assert payload["temporary_review_reviewer"] == "reviewer-a"
     assert payload["temporary_review_reviewed_at"] == "2026-07-13T09:00:00+00:00"
+    assert payload["upload_status"] == "invalid"
 
 
 def test_postgres_unmatched_review_locks_and_merges_duplicate_photo_evidence(
@@ -5227,6 +5476,7 @@ def test_postgres_formal_identity_updates_reject_placeholders_before_transaction
 
 def test_postgres_classify_photo_persists_archive_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *args, **kwargs: {})
+    events = []
     photo = SimpleNamespace(
         id="photo-uuid",
         legacy_id="p-1",
@@ -5274,7 +5524,7 @@ def test_postgres_classify_photo_persists_archive_fields(monkeypatch: pytest.Mon
             pass
 
         def commit(self):
-            pass
+            events.append("commit")
 
         def refresh(self, _obj):
             pass
@@ -5291,6 +5541,9 @@ def test_postgres_classify_photo_persists_archive_fields(monkeypatch: pytest.Mon
             assert checked_group is group
             assert actor == "reviewer-a"
 
+        def _enqueue_delivery_cache_after_commit(self, group_id: str, *, actor: str, reason: str, **_kwargs) -> None:
+            events.append(("requeue", group_id, actor, reason))
+
     result = TestPostgresRepository().classify_photo("g-1", "p-1", "after_box", "reviewer-a")
 
     assert result["category"] == "after_box"
@@ -5301,6 +5554,103 @@ def test_postgres_classify_photo_persists_archive_fields(monkeypatch: pytest.Mon
     assert photo.archived_at is not None
     assert photo.raw_data["archive_status"] == "archived"
     assert photo.raw_data["category_label"] == repository.local_simulation.PHOTO_CATEGORIES["after_box"]
+    assert events == ["commit", ("requeue", "g-1", "reviewer-a", "photo_category_changed")]
+
+
+@pytest.mark.parametrize("fail_commit", [False, True], ids=["committed", "commit-failure"])
+def test_postgres_identity_invalidation_requeues_only_after_commit(
+    fail_commit: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="postgres-identity-cache",
+        team_id="postgres-cache-team",
+        display_meter_no="M-OLD",
+        meter_match_key="M-OLD",
+        terminal="T-001",
+        installation_address="delivery road",
+        status=repository.GroupStatus.APPROVED,
+        reviewer="reviewer-a",
+        review_note="ready",
+        exception_note="",
+        exception_reasons=[],
+        has_archive_blocker=False,
+        exception_status=None,
+        raw_data={"status": "approved", "delivery_cache_status": "ready"},
+        updated_at=None,
+    )
+    events = []
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def commit(self):
+            events.append("commit")
+            if fail_commit:
+                raise RuntimeError("injected postgres mutation commit failure")
+
+        def refresh(self, _value):
+            return None
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return Session()
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert group_id == group.legacy_id
+            assert lock is True
+            return group
+
+        def _enqueue_delivery_cache_after_commit(self, group_id: str, *, actor: str, reason: str, **_kwargs) -> None:
+            events.append(("requeue", group_id, actor, reason))
+
+    def payload(_session, value, include_photos=False, **_kwargs):
+        return {
+            "id": value.legacy_id,
+            "meter_no": value.display_meter_no,
+            "meter_match_key": value.meter_match_key,
+            "terminal": value.terminal,
+            "address": value.installation_address,
+            "status": "approved",
+            "reviewer": value.reviewer,
+            "review_note": value.review_note,
+            "exception_note": value.exception_note,
+            "collector": "C-001",
+            "module_asset_no": "MOD-001",
+            "creator": "installer-a",
+            "construction_collector": "C-001",
+            "construction_module_asset_no": "MOD-001",
+            "photos": [],
+        }
+
+    monkeypatch.setattr(repository, "_group_payload", payload)
+    monkeypatch.setattr(repository.local_simulation, "validate_group_archive", lambda _group: [])
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(repository, "_stage_transactional_audit", lambda *_args, **_kwargs: None)
+
+    if fail_commit:
+        with pytest.raises(RuntimeError, match="injected postgres mutation commit failure"):
+            TestRepository().update_group_metadata(
+                group.legacy_id,
+                actor="reviewer-a",
+                updates={"meter_no": "M-NEW"},
+            )
+        assert events == ["commit"]
+    else:
+        TestRepository().update_group_metadata(
+            group.legacy_id,
+            actor="reviewer-a",
+            updates={"meter_no": "M-NEW"},
+        )
+        assert events == [
+            "commit",
+            ("requeue", group.legacy_id, "reviewer-a", "group_identity_changed"),
+        ]
 
 
 def test_postgres_classify_photo_rejects_unknown_category_before_opening_a_transaction() -> None:
@@ -5310,6 +5660,89 @@ def test_postgres_classify_photo_rejects_unknown_category_before_opening_a_trans
 
     with pytest.raises(ValueError, match="Unsupported photo category"):
         TestPostgresRepository().classify_photo("g-1", "p-1", "unsupported-category", "reviewer-a")
+
+
+def test_postgres_photo_deletion_requeues_delivery_cache_only_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    photo = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="p-delete-cache",
+        image_url="https://example.test/delete.jpg",
+        source_url="",
+        storage_type="external_url",
+        storage_bucket="",
+        storage_key="",
+        sha256="a" * 64,
+        category="before_box",
+        archive_filename="before.jpg",
+        archive_status="archived",
+        sort_order=1,
+        barcode="",
+        collector="",
+        asset_no="",
+        creator="",
+        upload_status="uploaded",
+        raw_data={},
+        is_active=True,
+        deleted_at=None,
+        deleted_by="",
+        delete_reason="",
+    )
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="g-delete-cache",
+        team_id="postgres-cache-team",
+        status=repository.GroupStatus.APPROVED,
+        photo_count=4,
+        reviewer="reviewer-a",
+        review_note="ready",
+        exception_note="",
+        reviewed_at=datetime.now(UTC),
+        raw_data={"status": "approved", "delivery_cache_status": "ready"},
+    )
+    events = []
+
+    class Session:
+        scalar_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalar(self, _statement):
+            self.scalar_calls += 1
+            return photo if self.scalar_calls == 1 else 3
+
+        def commit(self):
+            events.append("commit")
+
+        def refresh(self, _value):
+            return None
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return Session()
+
+        def _group_by_legacy_id(self, _session, _group_id: str, *, lock: bool = False):
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, *_args, **_kwargs):
+            return None
+
+        def _enqueue_delivery_cache_after_commit(self, group_id: str, *, actor: str, reason: str, **_kwargs):
+            events.append(("requeue", group_id, actor, reason))
+
+    monkeypatch.setattr(repository, "_apply_photo_quality_exception_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(repository, "_group_payload", lambda *_args, **_kwargs: {"id": group.legacy_id})
+
+    TestRepository().delete_photo(group.legacy_id, photo.legacy_id, "reviewer-a")
+
+    assert events == ["commit", ("requeue", group.legacy_id, "reviewer-a", "photo_deleted")]
 
 
 def test_postgres_reset_group_to_unconstructed_clears_barcode_evidence(

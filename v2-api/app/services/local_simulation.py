@@ -1143,10 +1143,38 @@ def group_delivery_cache_ready(group: dict[str, Any]) -> bool:
     return bool(photos) and all(delivery_cache_url_for_photo(group, photo) for photo in photos)
 
 
+class DeliveryCacheFileValidationError(FileNotFoundError):
+    pass
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def get_delivery_cached_photo_path_from_payload(group: dict[str, Any], photo: dict[str, Any]) -> Path:
     path = delivery_cache_file_for_photo(group, photo)
-    if not path or not path.exists() or photo.get("delivery_cache_version") != delivery_photo_cache_version(photo):
+    if path is None:
+        if str(photo.get("delivery_cache_path") or "").strip():
+            raise DeliveryCacheFileValidationError(str(photo.get("id") or ""))
         raise FileNotFoundError(str(photo.get("id") or ""))
+    if not path.exists() or photo.get("delivery_cache_version") != delivery_photo_cache_version(photo):
+        raise FileNotFoundError(str(photo.get("id") or ""))
+    expected_sha256 = str(photo.get("delivery_cache_content_sha256") or "").strip().lower()
+    try:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.stat().st_size <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+            or _file_sha256(path) != expected_sha256
+        ):
+            raise DeliveryCacheFileValidationError(str(photo.get("id") or ""))
+    except OSError as exc:
+        raise DeliveryCacheFileValidationError(str(photo.get("id") or "")) from exc
     return path
 
 
@@ -1215,6 +1243,21 @@ def photo_can_build_delivery_cache(photo: dict[str, Any]) -> bool:
     return False
 
 
+def delivery_cache_group_is_eligible(group: dict[str, Any]) -> bool:
+    photos = [
+        photo
+        for photo in group.get("photos", [])
+        if isinstance(photo, dict) and is_valid_photo_evidence(photo)
+    ]
+    slots = [photo_construction_slot(photo) for photo in photos]
+    return (
+        len(photos) == 4
+        and set(slots) == CONSTRUCTION_QUALITY_REQUIRED_SLOTS
+        and is_reviewed_group(group)
+        and all(photo_can_build_delivery_cache(photo) for photo in photos)
+    )
+
+
 def mark_delivery_cache_stale(group: dict[str, Any], reason: str = "") -> None:
     if not group:
         return
@@ -1264,6 +1307,7 @@ def build_delivery_cache_for_group(group_id: str, force: bool = False) -> dict[s
             photo["delivery_cache_path"] = str(rel).replace("\\", "/")
             photo["delivery_cache_version"] = version
             photo["delivery_cache_status"] = "ready"
+            photo["delivery_cache_content_sha256"] = hashlib.sha256(content).hexdigest()
             photo["delivery_cache_content_type"] = content_type
             photo["delivery_cache_built_at"] = now_iso()
             built += 1
@@ -1331,6 +1375,23 @@ def schedule_delivery_cache_build(
     team = normalize_team_id(team_id or current_team_id())
     active_transaction = active_authoritative_json_write(team)
 
+    def group_can_enqueue(group: dict[str, Any]) -> bool:
+        if not is_reviewed_group(group) and reason != "review_completed":
+            group["delivery_cache_status"] = "retry_pending"
+            group["delivery_cache_error"] = "delivery cache evidence is temporarily ineligible"
+            group["delivery_cache_retryable"] = True
+            group["delivery_cache_retry_requested_at"] = now_iso()
+            return False
+        if not is_reviewed_group(group):
+            return False
+        if reason != "review_completed" and not delivery_cache_group_is_eligible(group):
+            group["delivery_cache_status"] = "retry_pending"
+            group["delivery_cache_error"] = "delivery cache evidence is temporarily ineligible"
+            group["delivery_cache_retryable"] = True
+            group["delivery_cache_retry_requested_at"] = now_iso()
+            return False
+        return True
+
     def enqueue_after_commit() -> None:
         team_token = set_current_team(team)
         transaction = None
@@ -1338,8 +1399,12 @@ def schedule_delivery_cache_build(
             transaction = begin_authoritative_json_write(team)
             token = activate_authoritative_json_write(transaction)
             group = get_group(group_id)
-            if not group or not is_reviewed_group(group):
+            if not group:
                 abort_authoritative_json_write(transaction, token)
+                transaction = None
+                return
+            if not group_can_enqueue(group):
+                finish_authoritative_json_write(transaction, token)
                 transaction = None
                 return
             enqueue_json_delivery_cache_job(
@@ -1364,7 +1429,23 @@ def schedule_delivery_cache_build(
             enqueue_after_commit,
         )
         return
-    enqueue_after_commit()
+    team_token = set_current_team(team)
+    try:
+        group = get_group(group_id)
+        if not group:
+            return
+        if group_can_enqueue(group):
+            enqueue_json_delivery_cache_job(
+                group_id,
+                team_id=team,
+                actor=str(group.get("reviewer") or "system"),
+                reason=reason,
+            )
+        save_all_team_states()
+    except Exception as exc:
+        _record_delivery_cache_submission_failure(group_id, team, exc)
+    finally:
+        reset_current_team(team_token)
 
 
 def copy_oss_reference(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -2155,6 +2236,7 @@ def _finalize_unmatched_match_in_state(
         from app.services.state_repository import invalidate_verification_for_group
 
         invalidate_verification_for_group(None, group, actor, "photo_restored_or_replaced")
+        schedule_delivery_cache_build(group["id"], reason="photo_restored_or_replaced")
 
     result = {
         "group": copy.deepcopy(group),
@@ -3040,6 +3122,7 @@ def update_group_terminal(group_id: str, terminal: str, actor: str) -> dict[str,
         from app.services.state_repository import invalidate_verification_for_group
 
         invalidate_verification_for_group(None, group, actor, "group_terminal_changed")
+        schedule_delivery_cache_build(group_id, reason="group_terminal_changed")
     append_audit_event(
         "update_group_terminal",
         actor,
@@ -3108,6 +3191,7 @@ def update_group_metadata(
     changed_fields = sorted(
         field for field in allowed_group_fields.union(photo_field_map) if field in updates and previous.get(field) != group.get(field)
     )
+    cache_invalidated = False
     if changed_fields:
         if set(changed_fields).intersection(
             {
@@ -3122,6 +3206,7 @@ def update_group_metadata(
             from app.services.state_repository import invalidate_verification_for_group
 
             invalidate_verification_for_group(None, group, actor, "group_identity_changed")
+            cache_invalidated = True
         append_audit_event(
             audit_action,
             actor,
@@ -3133,6 +3218,8 @@ def update_group_metadata(
             },
         )
     refresh_summary()
+    if cache_invalidated:
+        schedule_delivery_cache_build(group_id, reason="group_identity_changed")
     return {"group": group, "changed_fields": changed_fields}
 
 
@@ -3202,6 +3289,7 @@ def add_photo_urls_to_group(
         from app.services.state_repository import invalidate_verification_for_group
 
         invalidate_verification_for_group(None, group, actor, "photo_added")
+        schedule_delivery_cache_build(group_id, reason="photo_added")
     mark_delivery_cache_stale(group, "manual photos changed")
     append_audit_event("add_group_photos", actor, {"group_id": group_id, "added": added, "skipped_duplicates": skipped_duplicates})
     refresh_summary()
@@ -5305,6 +5393,7 @@ def build_final_delivery_package_from_groups(
     archived_only: bool = True,
 ) -> Path:
     from app.services.final_delivery_export import (
+        DeliveryPackageValidationError,
         delivery_evidence_fingerprint,
         get_or_build_delivery_package,
         group_is_formally_archived,
@@ -5324,6 +5413,9 @@ def build_final_delivery_package_from_groups(
                 if photo.get("is_active") is not False and photo.get("delivery_cache_status") == "ready":
                     try:
                         get_delivery_cached_photo_path_from_payload(group, photo)
+                    except DeliveryCacheFileValidationError:
+                        photo["delivery_cache_status"] = "invalid"
+                        cache_ready = False
                     except FileNotFoundError:
                         photo["delivery_cache_status"] = "pending"
                         cache_ready = False
@@ -5335,21 +5427,37 @@ def build_final_delivery_package_from_groups(
 
         group_id = str(photo.get("_delivery_group_id") or "")
         group = groups_by_id[group_id]
-        path = get_delivery_cached_photo_path_from_payload(group, photo)
-        lease = reserve_delivery_cache_path(path)
+        candidate = delivery_cache_file_for_photo(group, photo)
+        if candidate is None:
+            raise DeliveryCacheFileValidationError(str(photo.get("id") or ""))
+        lease = reserve_delivery_cache_path(candidate)
         try:
+            path = get_delivery_cached_photo_path_from_payload(group, photo)
             return path.read_bytes()
         finally:
             release_delivery_cache_path(lease)
 
     fingerprint = delivery_evidence_fingerprint(candidates)
-    return get_or_build_delivery_package(
-        scope,
-        fingerprint,
-        groups=candidates,
-        photo_reader=read_completed_cache,
-        cache_root=delivery_cache_root(),
-    )
+    try:
+        return get_or_build_delivery_package(
+            scope,
+            fingerprint,
+            groups=candidates,
+            photo_reader=read_completed_cache,
+            cache_root=delivery_cache_root(),
+        )
+    except DeliveryPackageValidationError as exc:
+        invalid_group_ids = sorted(
+            {
+                str(error.get("group_id") or "")
+                for error in exc.errors
+                if error.get("code") in {"delivery_cache_invalid", "delivery_cache_pending"}
+                and str(error.get("group_id") or "")
+            }
+        )
+        for group_id in invalid_group_ids:
+            schedule_delivery_cache_build(group_id, reason="formal_cache_validation_failed")
+        raise
 
 
 def build_exception_meter_export(reviewer: str = "") -> bytes:
@@ -6823,6 +6931,8 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
         invalidate_verification_for_group(None, group, reviewer, "photo_category_changed")
     update_group_archive_status(group, reviewer)
     refresh_after_photo_classification(before_group, group, previous, category)
+    if previous != category:
+        schedule_delivery_cache_build(group_id, reason="photo_category_changed")
     return photo
 
 
@@ -7110,6 +7220,7 @@ def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str,
     )
     mark_delivery_cache_stale(group, "photo deleted")
     refresh_summary()
+    schedule_delivery_cache_build(group_id, reason="photo_deleted")
     return {"group": group, "deleted_photo": photo}
 
 

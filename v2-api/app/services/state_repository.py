@@ -1048,6 +1048,10 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
         "collector": photo.collector or "",
         "module_asset_no": photo.asset_no or "",
         "creator": photo.creator or "",
+        "upload_status": str(
+            getattr(getattr(photo, "upload_status", "uploaded"), "value", getattr(photo, "upload_status", "uploaded"))
+            or ""
+        ),
         "upload_source": raw.get("upload_source") or raw.get("storage_source") or "",
     }
     for key in (
@@ -2812,7 +2816,27 @@ class JsonStateRepository(StateRepository):
         updates: dict[str, Any],
         audit_action: str = "update_group_metadata",
     ) -> dict[str, Any]:
-        return local_simulation.update_group_metadata(group_id, actor=actor, updates=updates, audit_action=audit_action)
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            result = local_simulation.update_group_metadata(
+                group_id,
+                actor=actor,
+                updates=updates,
+                audit_action=audit_action,
+            )
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction and transaction is not None and not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        return result
 
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         return local_simulation.claim_task(task_id, reviewer)
@@ -3028,7 +3052,22 @@ class JsonStateRepository(StateRepository):
         return result
 
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
-        return local_simulation.classify_photo(group_id, photo_id, category, reviewer)
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            result = local_simulation.classify_photo(group_id, photo_id, category, reviewer)
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction and transaction is not None and not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        return result
 
     def rescan_photo_barcode(
         self,
@@ -5840,6 +5879,7 @@ class PostgresStateRepository(StateRepository):
         audit_action: str = "update_group_metadata",
     ) -> dict[str, Any]:
         updates = local_simulation.validate_formal_identity_updates(updates)
+        requeue_delivery_cache = False
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             before = _group_payload(session, group, include_photos=False)
@@ -5966,6 +6006,7 @@ class PostgresStateRepository(StateRepository):
                         actor=actor,
                         reason="group_identity_changed",
                     )
+                    requeue_delivery_cache = True
                 _stage_transactional_audit(
                     session,
                     team_id=local_simulation.current_team_id(),
@@ -5979,7 +6020,15 @@ class PostgresStateRepository(StateRepository):
                 )
             session.commit()
             session.refresh(group)
-            return {"group": _group_payload(session, group), "changed_fields": changed_fields}
+            result = {"group": _group_payload(session, group), "changed_fields": changed_fields}
+        if requeue_delivery_cache:
+            self._enqueue_delivery_cache_after_commit(
+                group_id,
+                actor=actor,
+                reason="group_identity_changed",
+                require_eligible=True,
+            )
+        return result
 
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         with self._session() as session:
@@ -6668,12 +6717,28 @@ class PostgresStateRepository(StateRepository):
         *,
         actor: str,
         reason: str,
+        require_eligible: bool = False,
     ) -> None:
         from app.services.delivery_cache import enqueue_postgres_delivery_cache_job
 
         try:
             with self._session() as session:
                 group = self._group_by_legacy_id(session, group_id, lock=True)
+                if require_eligible and not local_simulation.delivery_cache_group_is_eligible(
+                    _group_payload(session, group)
+                ):
+                    raw_data = dict(group.raw_data or {})
+                    raw_data.update(
+                        {
+                            "delivery_cache_status": "retry_pending",
+                            "delivery_cache_error": "delivery cache evidence is temporarily ineligible",
+                            "delivery_cache_retryable": True,
+                            "delivery_cache_retry_requested_at": datetime.now(UTC).isoformat(),
+                        }
+                    )
+                    group.raw_data = raw_data
+                    session.commit()
+                    return
                 enqueue_postgres_delivery_cache_job(
                     session,
                     group,
@@ -6745,6 +6810,7 @@ class PostgresStateRepository(StateRepository):
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
         if category not in local_simulation.PHOTO_CATEGORIES:
             raise ValueError(f"Unsupported photo category: {category}")
+        category_changed = False
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, reviewer)
@@ -6795,6 +6861,7 @@ class PostgresStateRepository(StateRepository):
             )
             photo.raw_data = raw_data
             if previous_category != category:
+                category_changed = True
                 _stage_transactional_audit(
                     session,
                     team_id=group.team_id,
@@ -6820,7 +6887,15 @@ class PostgresStateRepository(StateRepository):
                 )
             session.commit()
             session.refresh(photo)
-            return _photo_payload(photo)
+            result = _photo_payload(photo)
+        if category_changed:
+            self._enqueue_delivery_cache_after_commit(
+                group_id,
+                actor=reviewer,
+                reason="photo_category_changed",
+                require_eligible=True,
+            )
+        return result
 
     def rescan_photo_barcode(
         self,
@@ -7220,7 +7295,14 @@ class PostgresStateRepository(StateRepository):
             invalidate_verification_for_group(session, group, actor=reviewer, reason="photo_deleted")
             session.commit()
             session.refresh(group)
-            return {"group": _group_payload(session, group), "deleted_photo": deleted_payload}
+            result = {"group": _group_payload(session, group), "deleted_photo": deleted_payload}
+        self._enqueue_delivery_cache_after_commit(
+            group_id,
+            actor=reviewer,
+            reason="photo_deleted",
+            require_eligible=True,
+        )
+        return result
 
     def _project_id_for_team(self, session: Session, team_id: str):
         project_id = session.scalar(
@@ -7564,10 +7646,17 @@ class PostgresStateRepository(StateRepository):
             session.commit()
             session.refresh(group)
             session.refresh(task)
-            return {
+            result = {
                 "group": _group_payload(session, group),
                 "task": _construction_task_payload(task, self._task_payload_stats(session, task)),
             }
+        self._enqueue_delivery_cache_after_commit(
+            group_id,
+            actor=actor,
+            reason="group_terminal_changed",
+            require_eligible=True,
+        )
+        return result
 
     def save_exception_note(self, group_id: str, *, reviewer: str, note: str) -> dict[str, Any]:
         return self.review_group(group_id, status="exception", reviewer=reviewer, exception_note=note)
