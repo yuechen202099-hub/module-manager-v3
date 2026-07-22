@@ -6051,6 +6051,17 @@ def upload_construction_group_batch(
     if task.get("construction_claimed_by") != actor:
         raise ValueError("Construction task must be claimed by the current constructor before upload")
     validate_construction_upload_required_slots(group, photos)
+    normalized_collector = str(collector or "").strip()
+    normalized_module_asset_no = str(module_asset_no or "").strip()
+    previous_identity = (
+        str(group.get("construction_collector") or "").strip(),
+        str(group.get("construction_module_asset_no") or "").strip(),
+    )
+    next_identity = (
+        normalized_collector or previous_identity[0],
+        normalized_module_asset_no or previous_identity[1],
+    )
+    identity_changed = next_identity != previous_identity
     existing_composite = {
         make_construction_photo_unique_key(photo)
         for photo in group.get("photos", [])
@@ -6118,10 +6129,10 @@ def upload_construction_group_batch(
             existing_sha.add(sha256)
         added += 1
     group["photo_count"] = len(group["photos"])
-    if collector:
-        group["construction_collector"] = collector
-    if module_asset_no:
-        group["construction_module_asset_no"] = module_asset_no
+    if normalized_collector:
+        group["construction_collector"] = normalized_collector
+    if normalized_module_asset_no:
+        group["construction_module_asset_no"] = normalized_module_asset_no
     group["constructor"] = actor
     group["construction_updated_at"] = now_iso()
     if group["status"] == "exception":
@@ -6140,10 +6151,15 @@ def upload_construction_group_batch(
     group["exception_note"] = ""
     group["reviewed_at"] = None
     apply_photo_quality_exception_status(group)
-    if added:
+    if added or identity_changed:
         from app.services.state_repository import invalidate_verification_for_group
 
-        invalidate_verification_for_group(None, group, actor, "construction_photos_changed")
+        invalidate_verification_for_group(
+            None,
+            group,
+            actor,
+            "construction_photos_changed" if added else "construction_identity_changed",
+        )
     mark_delivery_cache_stale(group, "construction upload changed photos")
     append_audit_event(
         "construction_upload_batch",

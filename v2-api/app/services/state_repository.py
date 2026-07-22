@@ -422,7 +422,14 @@ def _stage_transactional_audit(
 
 def _verification_group_payload(session: Session | None, group: Any) -> dict[str, Any]:
     if isinstance(group, Mapping):
-        return dict(group)
+        payload = dict(group)
+        construction_collector = str(payload.get("construction_collector") or "").strip()
+        construction_module_asset_no = str(payload.get("construction_module_asset_no") or "").strip()
+        if construction_collector:
+            payload["collector"] = construction_collector
+        if construction_module_asset_no:
+            payload["module_asset_no"] = construction_module_asset_no
+        return payload
     raw = dict(getattr(group, "raw_data", None) or {})
     photos = []
     if session is not None:
@@ -454,9 +461,9 @@ def _verification_group_payload(session: Session | None, group: Any) -> dict[str
     return {
         "terminal": str(getattr(group, "terminal", None) or raw.get("terminal") or "").strip(),
         "meter_no": str(getattr(group, "display_meter_no", None) or raw.get("meter_no") or "").strip(),
-        "collector": str(raw.get("collector") or raw.get("construction_collector") or first_collector).strip(),
+        "collector": str(raw.get("construction_collector") or raw.get("collector") or first_collector).strip(),
         "module_asset_no": str(
-            raw.get("module_asset_no") or raw.get("construction_module_asset_no") or first_module
+            raw.get("construction_module_asset_no") or raw.get("module_asset_no") or first_module
         ).strip(),
         "photos": [
             {
@@ -7377,8 +7384,21 @@ class PostgresStateRepository(StateRepository):
                 for photo in photos:
                     photo.setdefault("client_completed_at", client_completed_at)
             raw = dict(group.raw_data or {})
-            raw["construction_collector"] = collector
-            raw["construction_module_asset_no"] = module_asset_no
+            normalized_collector = str(collector or "").strip()
+            normalized_module_asset_no = str(module_asset_no or "").strip()
+            previous_identity = (
+                str(raw.get("construction_collector") or "").strip(),
+                str(raw.get("construction_module_asset_no") or "").strip(),
+            )
+            next_identity = (
+                normalized_collector or previous_identity[0],
+                normalized_module_asset_no or previous_identity[1],
+            )
+            identity_changed = next_identity != previous_identity
+            if normalized_collector:
+                raw["construction_collector"] = normalized_collector
+            if normalized_module_asset_no:
+                raw["construction_module_asset_no"] = normalized_module_asset_no
             group.raw_data = raw
             result = self._add_photo_records_to_group(
                 session,
@@ -7391,6 +7411,17 @@ class PostgresStateRepository(StateRepository):
                 source="construction",
                 client_batch_id=client_batch_id,
             )
+            evidence_changed = any(
+                int(result.get(key) or 0) > 0
+                for key in ("added", "merged_duplicates", "reactivated_duplicates")
+            )
+            if identity_changed and not evidence_changed:
+                invalidate_verification_for_group(
+                    session,
+                    group,
+                    actor=actor,
+                    reason="construction_identity_changed",
+                )
             session.flush()
             task_stats = self._task_stats(session, task)
             construction_available, _review_available = construction_task_availability(task_stats)

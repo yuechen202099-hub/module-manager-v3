@@ -189,6 +189,26 @@ def test_active_invalid_upload_photos_are_not_eligible_evidence() -> None:
     assert result.reason == "invalid_photo_evidence"
 
 
+@pytest.mark.parametrize(
+    "historical_photo",
+    [
+        {"id": "p-inactive", "sha256": "e" * 64, "category": "other", "is_active": False},
+        {"id": "p-invalid", "sha256": "e" * 64, "category": "other", "upload_status": "invalid"},
+    ],
+    ids=["inactive", "invalid"],
+)
+def test_inactive_or_invalid_historical_photos_do_not_count_against_four_valid_evidence(
+    historical_photo: dict,
+) -> None:
+    group = eligible_group()
+    group["photos"].append(historical_photo)
+
+    result = evaluate_group_eligibility(group)
+
+    assert result.status == "pending"
+    assert result.evidence_fingerprint
+
+
 def test_invalidation_without_fingerprint_clears_passed_state_and_versions_evidence() -> None:
     verification = {
         "status": "passed",

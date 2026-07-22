@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.services import local_simulation
+from app.services import local_simulation, state_repository
 from app.services import photo_barcode_check
 from app.services import unmatched_review
 from app.services.state_repository import DualWriteStateRepository, JsonStateRepository, StateBackendNotReady
@@ -4117,6 +4117,80 @@ def test_json_evidence_writes_invalidate_current_group_verification(
     assert group["group_barcode_manual_confirmed"] is False
     assert any(event["action"] == "group_barcode_verification_passed" for event in synthetic_state["audit_events"])
     assert any(event["action"] == "group_barcode_verification_invalidated" for event in synthetic_state["audit_events"])
+
+
+def test_json_duplicate_construction_identity_change_invalidates_once_and_rolls_back_failed_commit(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = synthetic_state["groups"][0]
+    task = next(item for item in synthetic_state["tasks"] if item["id"] == group["task_id"])
+    task["construction_claimed_by"] = "constructor-a"
+    seed_passed_group_verification(group)
+    group["construction_collector"] = "collector-old"
+    group["construction_module_asset_no"] = "module-old"
+    for index, photo in enumerate(group["photos"]):
+        photo["construction_slot"] = photo["category"]
+        photo["image_url"] = f"https://example.test/duplicate-{index}.jpg"
+    duplicate_photos = [
+        {
+            "url": photo["image_url"],
+            "sha256": photo["sha256"],
+            "slot": photo["category"],
+            "client_photo_id": f"duplicate-{index}",
+        }
+        for index, photo in enumerate(group["photos"])
+    ]
+    invalidations = []
+    original_invalidate = state_repository.invalidate_verification_for_group
+
+    def tracked_invalidate(*args, **kwargs):
+        invalidations.append((args, kwargs))
+        return original_invalidate(*args, **kwargs)
+
+    monkeypatch.setattr(state_repository, "invalidate_verification_for_group", tracked_invalidate)
+    monkeypatch.setattr(local_simulation, "save_all_team_states", lambda: None)
+    repository = JsonStateRepository()
+
+    result = repository.upload_construction_group_batch(
+        group["id"],
+        actor="constructor-a",
+        client_batch_id="duplicate-identity-json",
+        collector="collector-new",
+        module_asset_no="module-new",
+        photos=duplicate_photos,
+    )
+
+    persisted = local_simulation.get_group(group["id"])
+    assert result["added"] == 0
+    assert result["skipped_duplicates"] == 4
+    assert result["group"]["construction_collector"] == "collector-new"
+    assert result["group"]["construction_module_asset_no"] == "module-new"
+    assert persisted["barcode_verification"]["status"] == "pending"
+    assert persisted["barcode_verification"]["evidence_version"] == 8
+    expected_identity = {**persisted, "collector": "collector-new", "module_asset_no": "module-new"}
+    assert persisted["barcode_verification"]["evidence_fingerprint"] == evaluate_group_eligibility(
+        expected_identity
+    ).evidence_fingerprint
+    assert len(invalidations) == 1
+
+    before_failed_commit = deepcopy(local_simulation.get_state())
+    monkeypatch.setattr(
+        local_simulation,
+        "save_all_team_states",
+        lambda: (_ for _ in ()).throw(RuntimeError("injected json commit failure")),
+    )
+    with pytest.raises(RuntimeError, match="injected json commit failure"):
+        repository.upload_construction_group_batch(
+            group["id"],
+            actor="constructor-a",
+            client_batch_id="duplicate-identity-json-failure",
+            collector="collector-failed",
+            module_asset_no="module-failed",
+            photos=duplicate_photos,
+        )
+
+    assert local_simulation.get_state() == before_failed_commit
 
 
 def test_json_photo_category_correction_audit_is_complete_and_redacted(synthetic_state: dict) -> None:

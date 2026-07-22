@@ -44,10 +44,23 @@ def evaluate_group_eligibility(group: Any) -> EligibilityResult:
         return EligibilityResult(status="not_eligible", reason="missing_identity")
 
     photos = _group_value(group, "photos") or []
-    if not isinstance(photos, list) or len(photos) != len(REQUIRED_CATEGORIES):
+    if not isinstance(photos, list):
         return EligibilityResult(status="not_eligible", reason="invalid_photo_count")
 
-    evidence = [_photo_evidence(photo) for photo in photos]
+    valid_photos = [photo for photo in photos if is_valid_photo_evidence(photo)]
+    if len(valid_photos) != len(REQUIRED_CATEGORIES):
+        has_active_invalid_photo = any(
+            bool(photo.get("is_active", True))
+            and str(photo.get("upload_status") or "").strip().lower() == "invalid"
+            for photo in photos
+            if isinstance(photo, Mapping)
+        )
+        return EligibilityResult(
+            status="not_eligible",
+            reason="invalid_photo_evidence" if has_active_invalid_photo else "invalid_photo_count",
+        )
+
+    evidence = [_photo_evidence(photo) for photo in valid_photos]
     if any(item is None for item in evidence):
         return EligibilityResult(status="not_eligible", reason="invalid_photo_evidence")
 

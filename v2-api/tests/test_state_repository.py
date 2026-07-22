@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from app.models import AuditLog, GroupBarcodeVerification
 from app.services import state_repository as repository
 from app.services.construction_priority_import import PriorityImportRow
+from app.services.group_barcode_verification import evaluate_group_eligibility
 
 
 def test_json_repository_sets_construction_priority_through_simulation(
@@ -132,6 +133,245 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
     )
     assert invalidation_audit.payload["group_id"] == "group-verify"
     assert invalidation_audit.payload["reason"] == "photo_replaced"
+
+
+@pytest.mark.parametrize(
+    "historical_photo",
+    [
+        {"id": "inactive", "sha256": "e" * 64, "category": "other", "is_active": False},
+        {"id": "invalid", "sha256": "e" * 64, "category": "other", "upload_status": "invalid"},
+    ],
+    ids=["inactive", "invalid"],
+)
+def test_json_and_postgres_verification_payloads_ignore_historical_non_evidence_photos(
+    historical_photo: dict,
+) -> None:
+    categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
+    json_group = {
+        "terminal": "T-VERIFY-001",
+        "meter_no": "M-VERIFY-001",
+        "collector": "C-VERIFY-001",
+        "module_asset_no": "MOD-VERIFY-001",
+        "photos": [
+            {"id": category, "sha256": f"{index + 1:x}" * 64, "category": category}
+            for index, category in enumerate(categories)
+        ] + [historical_photo],
+    }
+    postgres_group = SimpleNamespace(
+        id="group-verify",
+        team_id="verify-team",
+        terminal="T-VERIFY-001",
+        display_meter_no="M-VERIFY-001",
+        raw_data={"construction_collector": "C-VERIFY-001", "construction_module_asset_no": "MOD-VERIFY-001"},
+    )
+    postgres_photos = [
+        SimpleNamespace(
+            id=f"pg-{category}",
+            legacy_id=f"pg-{category}",
+            sha256=f"{index + 1:x}" * 64,
+            category=category,
+            is_active=True,
+            upload_status="uploaded",
+        )
+        for index, category in enumerate(categories)
+    ]
+    postgres_photos.append(
+        SimpleNamespace(
+            id="pg-history",
+            legacy_id="pg-history",
+            sha256="e" * 64,
+            category="other",
+            is_active=historical_photo.get("is_active", True),
+            upload_status=historical_photo.get("upload_status", "uploaded"),
+        )
+    )
+
+    class FakeSession:
+        def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: postgres_photos)
+
+    assert evaluate_group_eligibility(repository._verification_group_payload(None, json_group)).status == "pending"
+    assert evaluate_group_eligibility(
+        repository._verification_group_payload(FakeSession(), postgres_group)
+    ).status == "pending"
+
+
+def test_postgres_duplicate_construction_identity_change_invalidates_once_and_rolls_back_commit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
+    group = SimpleNamespace(
+        id="group-identity",
+        legacy_id="group-identity",
+        legacy_task_id=12,
+        task_id="task-identity",
+        team_id="identity-team",
+        display_meter_no="M-IDENTITY-001",
+        meter_match_key="M-IDENTITY-001",
+        installation_address="Identity road",
+        photo_count=4,
+        photos=[],
+        raw_data={
+            "construction_collector": "collector-old",
+            "construction_module_asset_no": "module-old",
+        },
+    )
+    task = SimpleNamespace(
+        id="task-identity",
+        legacy_id=12,
+        team_id="identity-team",
+        terminal="T-IDENTITY-001",
+        construction_claimed_by="constructor-a",
+        construction_priority=False,
+    )
+    verification = SimpleNamespace(status="passed", evidence_fingerprint="old", evidence_version=7)
+    invalidations = []
+
+    class FakeSession:
+        def __init__(self, *, fail_commit: bool) -> None:
+            self.fail_commit = fail_commit
+            self.raw_before = deepcopy(group.raw_data)
+            self.verification_before = deepcopy(vars(verification))
+            self.rollbacks = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if exc_type is not None:
+                self.rollback()
+            return False
+
+        def scalar(self, _statement):
+            return task
+
+        def flush(self) -> None:
+            return None
+
+        def commit(self) -> None:
+            if self.fail_commit:
+                raise RuntimeError("injected postgres commit failure")
+
+        def refresh(self, _value) -> None:
+            return None
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+            group.raw_data = deepcopy(self.raw_before)
+            for key, value in self.verification_before.items():
+                setattr(verification, key, value)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def __init__(self, session) -> None:
+            super().__init__()
+            self.session = session
+
+        def _session(self):
+            return self.session
+
+        def _group_by_legacy_id(self, _session, _group_id: str, *, lock: bool = False):
+            assert lock is True
+            return group
+
+        def _add_photo_records_to_group(self, *_args, **_kwargs):
+            return {"added": 0, "skipped_duplicates": 4, "merged_duplicates": 0}
+
+        def _task_stats(self, _session, _task):
+            return {"total_groups": 1, "uploaded_count": 1, "reviewed_count": 0, "unreviewed_count": 1}
+
+        def _task_payload_stats(self, session, checked_task):
+            return self._task_stats(session, checked_task)
+
+        def _add_construction_activity_audit(self, *_args, **_kwargs):
+            return None
+
+    def tracked_invalidate(_session, checked_group, actor: str, reason: str):
+        invalidations.append((checked_group, actor, reason))
+        evaluation = evaluate_group_eligibility(
+            {
+                "terminal": task.terminal,
+                "meter_no": checked_group.display_meter_no,
+                "collector": checked_group.raw_data["construction_collector"],
+                "module_asset_no": checked_group.raw_data["construction_module_asset_no"],
+                "photos": [
+                    {"id": category, "sha256": f"{index + 1:x}" * 64, "category": category}
+                    for index, category in enumerate(categories)
+                ],
+            }
+        )
+        verification.status = evaluation.status
+        verification.evidence_fingerprint = evaluation.evidence_fingerprint
+        verification.evidence_version += 1
+        return {"status": verification.status, "evidence_fingerprint": verification.evidence_fingerprint}
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "identity-team")
+    monkeypatch.setattr(repository.local_simulation, "assert_not_placeholder_construction_group", lambda **_kwargs: None)
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", tracked_invalidate)
+    monkeypatch.setattr(
+        repository,
+        "_group_payload",
+        lambda _session, checked_group: {
+            "construction_collector": checked_group.raw_data["construction_collector"],
+            "construction_module_asset_no": checked_group.raw_data["construction_module_asset_no"],
+        },
+    )
+    monkeypatch.setattr(repository, "_construction_task_payload", lambda *_args: {})
+
+    result = TestPostgresRepository(FakeSession(fail_commit=False)).upload_construction_group_batch(
+        "group-identity",
+        actor="constructor-a",
+        client_batch_id="duplicate-identity-postgres",
+        collector="collector-new",
+        module_asset_no="module-new",
+        photos=[{"url": "https://example.test/duplicate.jpg", "sha256": "a" * 64}],
+    )
+
+    assert result["added"] == 0
+    assert result["skipped_duplicates"] == 4
+    assert result["group"] == {
+        "construction_collector": "collector-new",
+        "construction_module_asset_no": "module-new",
+    }
+    assert verification.status == "pending"
+    assert verification.evidence_version == 8
+    assert verification.evidence_fingerprint == evaluate_group_eligibility(
+        {
+            "terminal": task.terminal,
+            "meter_no": group.display_meter_no,
+            "collector": "collector-new",
+            "module_asset_no": "module-new",
+            "photos": [
+                {"id": category, "sha256": f"{index + 1:x}" * 64, "category": category}
+                for index, category in enumerate(categories)
+            ],
+        }
+    ).evidence_fingerprint
+    assert invalidations == [(group, "constructor-a", "construction_identity_changed")]
+
+    group.raw_data = {
+        "construction_collector": "collector-old",
+        "construction_module_asset_no": "module-old",
+    }
+    verification.status = "passed"
+    verification.evidence_fingerprint = "old"
+    verification.evidence_version = 7
+    failing_session = FakeSession(fail_commit=True)
+    with pytest.raises(RuntimeError, match="injected postgres commit failure"):
+        TestPostgresRepository(failing_session).upload_construction_group_batch(
+            "group-identity",
+            actor="constructor-a",
+            client_batch_id="duplicate-identity-postgres-failure",
+            collector="collector-failed",
+            module_asset_no="module-failed",
+            photos=[{"url": "https://example.test/duplicate.jpg", "sha256": "a" * 64}],
+        )
+
+    assert failing_session.rollbacks == 1
+    assert group.raw_data == {
+        "construction_collector": "collector-old",
+        "construction_module_asset_no": "module-old",
+    }
+    assert vars(verification) == {"status": "passed", "evidence_fingerprint": "old", "evidence_version": 7}
 
 
 def test_json_task_reads_mask_stale_priority_without_mutating_persisted_state(
