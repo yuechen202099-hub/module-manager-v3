@@ -339,7 +339,7 @@ def _is_url_fingerprint_sha(photo: Mapping[str, Any], sha256: str) -> bool:
     return False
 
 
-def cache_group_photos(
+def _cache_group_photos_impl(
     group: dict[str, Any],
     *,
     cache_root: Path | None = None,
@@ -430,6 +430,26 @@ def cache_group_photos(
         "reused": reused,
         "failed": [],
     }
+
+
+def cache_group_photos(
+    group: dict[str, Any],
+    *,
+    cache_root: Path | None = None,
+    fetch_photo: Callable[
+        [dict[str, Any]],
+        tuple[bytes, str] | tuple[bytes, str, str],
+    ]
+    | None = None,
+) -> dict[str, Any]:
+    from app.services.final_delivery_export import release_delivery_cache_path, reserve_delivery_cache_path
+
+    root = (cache_root or local_simulation.delivery_cache_root()).resolve()
+    lease = reserve_delivery_cache_path(root / "objects")
+    try:
+        return _cache_group_photos_impl(group, cache_root=root, fetch_photo=fetch_photo)
+    finally:
+        release_delivery_cache_path(lease)
 
 
 def _reconciliation_limit(limit: int) -> int:

@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
+from zipfile import ZipFile
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -66,7 +67,11 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
             sha256=f"{index + 1:x}" * 64,
             category=category,
             is_active=True,
-            raw_data={"construction_slot": category},
+            raw_data={
+                "construction_slot": category,
+                "delivery_cache_path": f"objects/{index}/photo.jpg",
+                "delivery_cache_status": "ready",
+            },
         )
         for index, category in enumerate(
             ["before_box", "collector_barcode", "module_meter", "after_box"]
@@ -78,7 +83,11 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
         team_id="verify-team",
         terminal="T-VERIFY-001",
         display_meter_no="M-VERIFY-001",
-        raw_data={"collector": "C-VERIFY-001", "module_asset_no": "MOD-VERIFY-001"},
+        raw_data={
+            "collector": "C-VERIFY-001",
+            "module_asset_no": "MOD-VERIFY-001",
+            "delivery_cache_status": "ready",
+        },
     )
     verification = GroupBarcodeVerification(
         team_id="verify-team",
@@ -145,12 +154,51 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
     assert verification.invalidation_reason == "photo_replaced"
     assert verification.invalidated_by == "reviewer-a"
     assert verification.invalidated_at is not None
+    assert group.raw_data["delivery_cache_status"] == "stale"
+    assert group.raw_data["delivery_cache_error"] == "photo_replaced"
+    assert all(photo.raw_data["delivery_cache_status"] == "stale" for photo in photos)
     assert previous_audit in session.staged
     invalidation_audit = next(
         event for event in session.staged if event.action == "group_barcode_verification_invalidated"
     )
     assert invalidation_audit.payload["group_id"] == "group-verify"
     assert invalidation_audit.payload["reason"] == "photo_replaced"
+
+
+def test_json_unified_invalidation_stales_completed_delivery_cache() -> None:
+    group = {
+        "id": "json-cache-invalidation",
+        "terminal": "00112233",
+        "meter_no": "000011112222",
+        "collector": "00005555",
+        "module_asset_no": "000033334444",
+        "barcode_verification": {
+            "status": "passed",
+            "evidence_fingerprint": "a" * 64,
+            "evidence_version": 3,
+        },
+        "delivery_cache_status": "ready",
+        "photos": [
+            {
+                "id": f"photo-{index}",
+                "sha256": f"{index:x}" * 64,
+                "category": category,
+                "is_active": True,
+                "delivery_cache_path": f"objects/{index}/photo.jpg",
+                "delivery_cache_status": "ready",
+            }
+            for index, category in enumerate(
+                ("before_box", "collector_barcode", "module_meter", "after_box"),
+                start=1,
+            )
+        ],
+    }
+
+    repository.invalidate_verification_for_group(None, group, actor="reviewer-a", reason="photo_category_changed")
+
+    assert group["delivery_cache_status"] == "stale"
+    assert group["delivery_cache_error"] == "photo_category_changed"
+    assert all(photo["delivery_cache_status"] == "stale" for photo in group["photos"])
 
 
 @pytest.mark.parametrize(
@@ -892,6 +940,137 @@ def test_postgres_repository_manifest_and_path_read_completed_durable_cache(
     assert manifest["groups"][0]["photos"][0]["sha256"] == sha256
     assert manifest["groups"][0]["photos"][0]["delivery_cache_content_sha256"] == content_sha
     assert cached_path.read_bytes() == content
+
+
+def _formal_delivery_group(cache_root: Path, group_id: str = "formal-group-001") -> dict:
+    categories = ("before_box", "collector_barcode", "module_meter", "after_box")
+    photos = []
+    for index, category in enumerate(categories, start=1):
+        content = f"{group_id}-{category}".encode()
+        sha256 = hashlib.sha256(content).hexdigest()
+        relative = Path("objects") / sha256[:2] / f"{sha256}.png"
+        path = cache_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        photo = {
+            "id": f"{group_id}-photo-{index}",
+            "category": category,
+            "sha256": sha256,
+            "delivery_cache_content_sha256": sha256,
+            "delivery_cache_path": str(relative).replace("\\", "/"),
+            "delivery_cache_status": "ready",
+            "original_filename": f"{category}.png",
+            "archive_status": "archived",
+            "client_completed_at": "2026-07-22T00:30:00+08:00",
+            "is_active": True,
+        }
+        photo["delivery_cache_version"] = repository.local_simulation.delivery_photo_cache_version(photo)
+        photos.append(photo)
+    return {
+        "id": group_id,
+        "task_id": 17,
+        "terminal": "00112233",
+        "meter_no": "000011112222",
+        "module_asset_no": "000033334444",
+        "collector": "00005555",
+        "address": "南京路 1 号",
+        "status": "approved",
+        "photos": photos,
+        "delivery_cache_status": "ready",
+    }
+
+
+def test_json_repository_builds_formal_zip_only_from_completed_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    group = _formal_delivery_group(tmp_path)
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: (_ for _ in ()).throw(AssertionError("formal request must not reach OSS")),
+    )
+
+    package_path = repository.JsonStateRepository().build_final_delivery_export(task_id=17)
+
+    assert isinstance(package_path, Path)
+    with ZipFile(package_path) as archive:
+        assert archive.namelist()[0] == "设备清单.xlsx"
+        assert len(archive.namelist()) == 5
+
+
+def test_json_formal_export_reports_missing_completed_cache_before_zip_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    group = _formal_delivery_group(tmp_path, "missing-cache-group")
+    missing = tmp_path / group["photos"][0]["delivery_cache_path"]
+    missing.unlink()
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: (_ for _ in ()).throw(AssertionError("formal request must not reach OSS")),
+    )
+
+    with pytest.raises(DeliveryPackageValidationError) as captured:
+        repository.JsonStateRepository().build_final_delivery_export(task_id=17)
+
+    assert {error["code"] for error in captured.value.errors} == {"delivery_cache_pending"}
+
+
+def test_postgres_repository_uses_shared_formal_package_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    group_payload = _formal_delivery_group(tmp_path, "postgres-formal-group")
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id=group_payload["id"],
+        team_id="postgres-formal-team",
+        terminal=group_payload["terminal"],
+        display_meter_no=group_payload["meter_no"],
+        status=repository.GroupStatus.APPROVED,
+        raw_data={},
+    )
+
+    class ScalarRows:
+        def all(self):
+            return [group]
+
+    class Session:
+        def scalars(self, _statement):
+            return ScalarRows()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(Session())
+
+        def _task_by_legacy_id(self, _session, task_id):
+            assert task_id == 17
+            return SimpleNamespace(id=uuid4())
+
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "postgres-formal-team")
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, _group, **_kwargs: deepcopy(group_payload))
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: (_ for _ in ()).throw(AssertionError("formal request must not reach OSS")),
+    )
+
+    package_path = TestRepository().build_final_delivery_export(task_id=17)
+
+    assert isinstance(package_path, Path)
+    with ZipFile(package_path) as archive:
+        workbook = archive.read("设备清单.xlsx")
+        assert workbook.startswith(b"PK")
+        assert len(archive.namelist()) == 5
 
 
 def test_group_barcode_rescan_audit_payload_has_unique_keys() -> None:

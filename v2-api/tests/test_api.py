@@ -12,6 +12,7 @@ from uuid import uuid4
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
+from zipfile import ZipFile
 
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
@@ -20,7 +21,7 @@ from starlette.requests import Request
 
 import app.main as main_module
 from app.main import create_app
-from app.api.routes import auth, groups as group_routes, local_test, miniprogram
+from app.api.routes import auth, exports as export_routes, groups as group_routes, local_test, miniprogram
 from app.core.config import settings
 from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
@@ -6057,8 +6058,8 @@ def test_excel_exports_return_real_workbooks() -> None:
     assert "attachment" in task_export.headers["content-disposition"]
     assert task_export.content.startswith(b"PK")
     assert all_final_export.status_code == 400
-    assert terminal_final_export.status_code == 200
-    assert terminal_final_export.content.startswith(b"PK")
+    assert terminal_final_export.status_code == 422
+    assert terminal_final_export.json()["detail"]["code"] == "formal_delivery_invalid"
     assert exception_export.status_code == 200
     assert exception_export.content.startswith(b"PK")
     from io import BytesIO
@@ -6070,6 +6071,51 @@ def test_excel_exports_return_real_workbooks() -> None:
     headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
     assert "\u5f02\u5e38\u539f\u56e0" in headers
     assert "\u73b0\u573a\u5904\u7406\u5efa\u8bae" in headers
+
+
+def test_final_delivery_export_returns_versioned_zip(monkeypatch, tmp_path: Path) -> None:
+    package = tmp_path / "formal.zip"
+    with ZipFile(package, "w") as archive:
+        archive.writestr("设备清单.xlsx", b"workbook")
+
+    class Repository:
+        def build_final_delivery_export(self, **kwargs):
+            assert kwargs == {"task_id": 17, "terminal": "", "review_scope": "reviewed"}
+            return package
+
+    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
+
+    response = client.post("/exports/final-delivery", json={"task_id": 17})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert "V3.1.0-final-delivery-17-" in response.headers["content-disposition"]
+    assert response.headers["content-disposition"].endswith('.zip"')
+    assert response.content == package.read_bytes()
+
+
+def test_final_delivery_export_returns_structured_group_errors(monkeypatch) -> None:
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    errors = [
+        {
+            "group_id": "group-bad",
+            "code": "missing_module_no",
+            "field": "module_asset_no",
+            "message": "Missing required module_asset_no",
+        }
+    ]
+
+    class Repository:
+        def build_final_delivery_export(self, **_kwargs):
+            raise DeliveryPackageValidationError(errors)
+
+    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
+
+    response = client.post("/exports/final-delivery", json={"terminal": "00112233"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {"code": "formal_delivery_invalid", "groups": errors}
 
 
 def test_final_delivery_manifest_supports_frontend_zip_export() -> None:

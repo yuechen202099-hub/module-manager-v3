@@ -25,7 +25,6 @@ from app.services.local_simulation import (
     add_photo_urls_to_group,
     blank_state,
     build_delivery_cache_for_group,
-    build_final_delivery_export,
     build_final_delivery_manifest,
     bootstrap_local_simulation,
     classify_photo,
@@ -39,6 +38,7 @@ from app.services.local_simulation import (
     delete_group_photo,
     delete_unmatched_record,
     dedupe_unmatched_records,
+    delivery_group_remark,
     get_task_progress,
     get_delivery_cached_photo_path,
     get_group,
@@ -3831,7 +3831,6 @@ def test_unmatched_record_attaches_to_existing_terminal_group(synthetic_state: d
 
 
 def test_replacement_rematch_adds_delivery_export_remark(synthetic_state: dict) -> None:
-    openpyxl = pytest.importorskip("openpyxl")
     target = synthetic_state["groups"][0]
     claim_task(target["task_id"], "alice")
     archive_all_group_photos(target)
@@ -3861,18 +3860,11 @@ def test_replacement_rematch_adds_delivery_export_remark(synthetic_state: dict) 
         terminal=target["terminal"],
     )
 
-    workbook = openpyxl.load_workbook(
-        BytesIO(build_final_delivery_export(terminal=target["terminal"], review_scope="all")),
-        read_only=True,
-    )
-    sheet = workbook.active
-    rows = list(sheet.iter_rows(values_only=True))
-    remark_index = rows[0].index("备注")
-    target_rows = [row for row in rows[1:] if row[1] == target["meter_no"]]
+    persisted_target = get_group(target["id"])
+    assert persisted_target is not None
 
     assert result["matched"] is True
-    assert target_rows
-    assert any(row[remark_index] == f"换表：旧表号 {target['meter_no']}" for row in target_rows)
+    assert delivery_group_remark(persisted_target) == f"换表：旧表号 {target['meter_no']}"
 
 
 def test_list_replacement_records_includes_matched_manual_replacements(synthetic_state: dict) -> None:

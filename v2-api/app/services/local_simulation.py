@@ -5288,9 +5288,68 @@ def build_task_detail_export(task_id: int) -> bytes:
     return build_groups_export_workbook(groups, f"task-{task_id}")
 
 
-def build_final_delivery_export(task_id: int | None = None, terminal: str = "", review_scope: str = "reviewed") -> bytes:
-    groups = filter_delivery_groups(task_id=task_id, terminal=terminal, review_scope=review_scope)
-    return build_groups_export_workbook(groups, "final-delivery")
+def build_final_delivery_export(task_id: int | None = None, terminal: str = "", review_scope: str = "reviewed") -> Path:
+    groups = filter_delivery_groups(task_id=task_id, terminal=terminal, review_scope="all")
+    scope = f"{current_team_id()}|task={task_id or ''}|terminal={terminal.strip()}|review_scope={review_scope}"
+    return build_final_delivery_package_from_groups(
+        groups,
+        scope=scope,
+        archived_only=review_scope == "reviewed",
+    )
+
+
+def build_final_delivery_package_from_groups(
+    groups: list[dict[str, Any]],
+    *,
+    scope: str,
+    archived_only: bool = True,
+) -> Path:
+    from app.services.final_delivery_export import (
+        delivery_evidence_fingerprint,
+        get_or_build_delivery_package,
+        group_is_formally_archived,
+    )
+
+    candidates = [copy.deepcopy(group) for group in groups]
+    if archived_only:
+        candidates = [group for group in candidates if group_is_formally_archived(group)]
+    groups_by_id: dict[str, dict[str, Any]] = {}
+    for group in candidates:
+        group_id = str(group.get("id") or "")
+        groups_by_id[group_id] = group
+        cache_ready = True
+        for photo in group.get("photos", []):
+            if isinstance(photo, dict):
+                photo["_delivery_group_id"] = group_id
+                if photo.get("is_active") is not False and photo.get("delivery_cache_status") == "ready":
+                    try:
+                        get_delivery_cached_photo_path_from_payload(group, photo)
+                    except FileNotFoundError:
+                        photo["delivery_cache_status"] = "pending"
+                        cache_ready = False
+        if not cache_ready:
+            group["delivery_cache_status"] = "pending"
+
+    def read_completed_cache(photo: dict[str, Any]) -> bytes:
+        from app.services.final_delivery_export import release_delivery_cache_path, reserve_delivery_cache_path
+
+        group_id = str(photo.get("_delivery_group_id") or "")
+        group = groups_by_id[group_id]
+        path = get_delivery_cached_photo_path_from_payload(group, photo)
+        lease = reserve_delivery_cache_path(path)
+        try:
+            return path.read_bytes()
+        finally:
+            release_delivery_cache_path(lease)
+
+    fingerprint = delivery_evidence_fingerprint(candidates)
+    return get_or_build_delivery_package(
+        scope,
+        fingerprint,
+        groups=candidates,
+        photo_reader=read_completed_cache,
+        cache_root=delivery_cache_root(),
+    )
 
 
 def build_exception_meter_export(reviewer: str = "") -> bytes:

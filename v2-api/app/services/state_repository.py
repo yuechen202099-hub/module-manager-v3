@@ -561,6 +561,7 @@ def invalidate_verification_for_group(
         )
         group["barcode_verification"] = result
         _clear_legacy_verification_flags(group)
+        local_simulation.mark_delivery_cache_stale(group, reason)
         local_simulation.append_audit_event(
             "group_barcode_verification_invalidated",
             actor,
@@ -626,6 +627,23 @@ def invalidate_verification_for_group(
     verification.recognition_source = None
     verification.invalidated_at = now
     _clear_legacy_verification_flags(group)
+    group_raw = dict(group.raw_data or {})
+    if group_raw.get("delivery_cache_status") not in {None, "", "none"}:
+        group_raw["delivery_cache_status"] = "stale"
+        group_raw["delivery_cache_error"] = reason
+        group.raw_data = group_raw
+    cached_photos = session.scalars(
+        select(Photo).where(
+            Photo.team_id == group.team_id,
+            Photo.group_id == group.id,
+            Photo.is_active.is_(True),
+        )
+    ).all()
+    for photo in cached_photos:
+        photo_raw = dict(photo.raw_data or {})
+        if photo_raw.get("delivery_cache_path"):
+            photo_raw["delivery_cache_status"] = "stale"
+            photo.raw_data = photo_raw
     _stage_transactional_audit(
         session,
         team_id=group.team_id,
@@ -1024,6 +1042,7 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
         or local_simulation.PHOTO_CATEGORIES.get(_photo_construction_slot(photo), ""),
         "archive_filename": photo.archive_filename or "",
         "archive_status": photo.archive_status or "",
+        "original_filename": getattr(photo, "original_filename", None) or "",
         "sort_order": photo.sort_order,
         "barcode": photo.barcode or "",
         "collector": photo.collector or "",
@@ -1044,6 +1063,7 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
         "delivery_cache_content_type",
         "delivery_cache_built_at",
         "delivery_cache_error",
+        "client_completed_at",
     ):
         if key in raw:
             payload[key] = raw[key]
@@ -2365,7 +2385,7 @@ class StateRepository(ABC):
         task_id: int | None = None,
         terminal: str = "",
         review_scope: str = "reviewed",
-    ) -> bytes:
+    ) -> Path:
         raise NotImplementedError
 
     @abstractmethod
@@ -3275,7 +3295,7 @@ class JsonStateRepository(StateRepository):
         task_id: int | None = None,
         terminal: str = "",
         review_scope: str = "reviewed",
-    ) -> bytes:
+    ) -> Path:
         return local_simulation.build_final_delivery_export(
             task_id=task_id,
             terminal=terminal,
@@ -7912,7 +7932,7 @@ class PostgresStateRepository(StateRepository):
         task_id: int | None = None,
         terminal: str = "",
         review_scope: str = "reviewed",
-    ) -> bytes:
+    ) -> Path:
         terminal = terminal.strip()
         if task_id is None and not terminal:
             raise ValueError("Final delivery export must be scoped to one terminal")
@@ -7932,9 +7952,12 @@ class PostgresStateRepository(StateRepository):
                     statement.order_by(MaterialGroup.terminal, MaterialGroup.display_meter_no, MaterialGroup.legacy_id)
                 ).all()
             ]
-        if review_scope == "reviewed":
-            groups = [group for group in groups if _is_reviewed_group(group)]
-        return local_simulation.build_groups_export_workbook(groups, "final-delivery")
+        scope = f"{team_id}|task={task_id or ''}|terminal={terminal}|review_scope={review_scope}"
+        return local_simulation.build_final_delivery_package_from_groups(
+            groups,
+            scope=scope,
+            archived_only=review_scope == "reviewed",
+        )
 
     def build_final_delivery_manifest(
         self,

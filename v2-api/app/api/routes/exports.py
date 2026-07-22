@@ -1,11 +1,17 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from starlette.background import BackgroundTask
+from fastapi.responses import FileResponse, Response
 
 from app.core.security import decode_access_token
 from app.schemas.export import ExceptionMetersExportRequest, FinalDeliveryExportRequest, TaskDetailExportRequest
 from app.services.state_repository import get_state_repository
+from app.services.final_delivery_export import (
+    DeliveryPackageValidationError,
+    release_delivery_cache_path,
+    reserve_delivery_cache_path,
+)
 from app.services.local_simulation import (
     reset_current_team,
     set_current_team,
@@ -48,18 +54,29 @@ def export_task_detail(payload: TaskDetailExportRequest, request: Request):
 @router.post("/final-delivery")
 def export_final_delivery(payload: FinalDeliveryExportRequest, request: Request):
     try:
-        content = get_state_repository().build_final_delivery_export(
+        package_path = get_state_repository().build_final_delivery_export(
             task_id=payload.task_id,
             terminal=payload.terminal,
             review_scope=payload.review_scope,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
+    except DeliveryPackageValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "formal_delivery_invalid", "groups": exc.errors},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     scope = payload.task_id or payload.terminal or "terminal"
-    filename = f"final-delivery-{scope}-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
-    return excel_response(content, filename)
+    filename = f"V3.1.0-final-delivery-{scope}-{datetime.now().strftime('%Y%m%d%H%M%S')}.zip"
+    lease = reserve_delivery_cache_path(package_path)
+    return FileResponse(
+        package_path,
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(release_delivery_cache_path, lease),
+    )
 
 
 @router.post("/exception-meters")
