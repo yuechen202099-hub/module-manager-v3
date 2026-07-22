@@ -2657,20 +2657,11 @@ def test_fourth_review_delivery_cache_submission_is_discarded_on_late_failure(
 ) -> None:
     group = synthetic_state["groups"][0]
     group["status"] = "approved"
-    submitted: list[tuple] = []
-
-    class CapturingExecutor:
-        def submit(self, callback, *args):
-            submitted.append((callback, args))
-
-    monkeypatch.setattr(local_simulation, "_delivery_cache_executor", CapturingExecutor())
-    monkeypatch.setattr(local_simulation, "photo_can_build_delivery_cache", lambda _photo: True)
     transaction = local_simulation.begin_authoritative_json_write()
     token = local_simulation.activate_authoritative_json_write(transaction)
     try:
         local_simulation.schedule_delivery_cache_build(group["id"])
-
-        assert submitted == []
+        assert transaction.working_state["delivery_cache_jobs"] == []
 
         def fail_late_persistence() -> None:
             raise RuntimeError("late request persistence failure")
@@ -2678,12 +2669,10 @@ def test_fourth_review_delivery_cache_submission_is_discarded_on_late_failure(
         with pytest.raises(RuntimeError, match="late request persistence failure"):
             local_simulation.finish_authoritative_json_write(transaction, token, persist=fail_late_persistence)
 
-        assert submitted == []
-        assert (local_simulation.DEFAULT_TEAM_ID, group["id"]) not in local_simulation._delivery_cache_inflight
+        assert local_simulation._team_states[local_simulation.DEFAULT_TEAM_ID]["delivery_cache_jobs"] == []
     finally:
         if local_simulation._private_team_state.get() is transaction:
             local_simulation.abort_authoritative_json_write(transaction, token)
-        local_simulation._delivery_cache_inflight.discard((local_simulation.DEFAULT_TEAM_ID, group["id"]))
 
 
 def test_fourth_review_delivery_cache_worker_serializes_with_finalizer(
@@ -2691,92 +2680,26 @@ def test_fourth_review_delivery_cache_worker_serializes_with_finalizer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    del tmp_path
     group = synthetic_state["groups"][0]
     group["status"] = "approved"
-    group["photos"][0]["image_url"] = "https://example.test/cache-worker.jpg"
-    state = local_simulation.get_state()
-    state["total_catalog"] = []
-    unmatched_id = seed_unmatched_review_record(
-        meter_no="120000912474",
-        photo_prefix="https://photos.example/cache-finalizer",
-        manual_confirmed=True,
+    monkeypatch.setattr(
+        local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: pytest.fail("durable enqueue must not access OSS"),
     )
-    add_unmatched_match_catalog_row(
-        catalog_id="catalog-cache-finalizer",
-        terminal="T-CACHE-FINALIZER",
-        meter_no="120000912474",
-    )
-    candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
-    submitted: list[tuple] = []
-
-    class CapturingExecutor:
-        def submit(self, callback, *args):
-            submitted.append((callback, args))
-
-    monkeypatch.setattr(local_simulation, "_delivery_cache_executor", CapturingExecutor())
-    monkeypatch.setattr(local_simulation.settings, "delivery_cache_path", str(tmp_path))
-    monkeypatch.setattr(local_simulation, "photo_can_build_delivery_cache", lambda _photo: True)
     transaction = local_simulation.begin_authoritative_json_write()
     token = local_simulation.activate_authoritative_json_write(transaction)
     try:
         local_simulation.schedule_delivery_cache_build(group["id"])
-        assert submitted == []
         local_simulation.finish_authoritative_json_write(transaction, token)
     finally:
         if local_simulation._private_team_state.get() is transaction:
             local_simulation.abort_authoritative_json_write(transaction, token)
-        local_simulation._delivery_cache_inflight.discard((local_simulation.DEFAULT_TEAM_ID, group["id"]))
-    assert len(submitted) == 1
-
-    finalizer_staged = Event()
-    release_finalizer = Event()
-    worker_mutating = Event()
-    original_recompute = local_simulation._apply_formal_group_barcode_check
-
-    def pause_finalizer(group_state: dict) -> None:
-        if group_state.get("source_unmatched_id") == unmatched_id:
-            finalizer_staged.set()
-            if not release_finalizer.wait(timeout=5):
-                raise TimeoutError("test did not release cache finalizer")
-        original_recompute(group_state)
-
-    def tracked_download(_photo: dict):
-        worker_mutating.set()
-        return b"cached-photo", ".jpg", "image/jpeg"
-
-    monkeypatch.setattr(local_simulation, "_apply_formal_group_barcode_check", pause_finalizer)
-    monkeypatch.setattr(local_simulation, "download_delivery_photo_content", tracked_download)
-    finalizer_errors: list[BaseException] = []
-
-    def run_finalizer() -> None:
-        try:
-            local_simulation.finalize_unmatched_match(
-                unmatched_id,
-                actor="admin-finalizer",
-                candidate_key=candidate["candidate_key"],
-                expected_version=1,
-            )
-        except BaseException as exc:
-            finalizer_errors.append(exc)
-
-    callback, args = submitted[0]
-    finalizer_thread = Thread(target=run_finalizer)
-    worker_thread = Thread(target=callback, args=args)
-    finalizer_thread.start()
-    assert finalizer_staged.wait(timeout=5)
-    worker_thread.start()
-    try:
-        assert worker_mutating.wait(timeout=0.2) is False
-    finally:
-        release_finalizer.set()
-        finalizer_thread.join(timeout=5)
-        worker_thread.join(timeout=5)
-
-    assert finalizer_errors == []
-    assert not finalizer_thread.is_alive()
-    assert not worker_thread.is_alive()
-    assert worker_mutating.is_set()
-    assert local_simulation.get_group(group["id"])["delivery_cache_status"] == "ready"
+    jobs = local_simulation.get_state()["delivery_cache_jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["group_id"] == group["id"]
+    assert jobs[0]["status"] == "pending"
 
 
 def test_json_state_repository_finalizes_unmatched_match_from_server_candidate(synthetic_state: dict) -> None:

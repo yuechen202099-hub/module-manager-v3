@@ -371,18 +371,7 @@ def test_group_needs_not_matched_analysis_skips_current_recheck_batch() -> None:
 
 
 def test_group_ready_for_auto_archive_requires_classified_photos_and_group_barcode_match() -> None:
-    photos = [
-        {"category": "meter_barcode", "barcode_check_normalized_values": ["110000288056"]},
-        {"category": "module_meter", "barcode_check_normalized_values": ["MOD001"]},
-        {"category": "collector_barcode", "barcode_check_normalized_values": ["COLLECTOR001"]},
-        {"category": "before_box", "barcode_check_status": "not_required", "barcode_check_normalized_values": []},
-    ]
-    group = {
-        "meter_no": "110000288056",
-        "module_asset_no": "MOD-001",
-        "collector": "COLLECTOR-001",
-        "photos": photos,
-    }
+    group, photos = durable_archive_group()
 
     assert group_ready_for_auto_archive(group, photos) is True
 
@@ -465,6 +454,66 @@ def test_group_status_allows_auto_archive_only_before_final_review() -> None:
     assert group_status_allows_auto_archive("incomplete") is True
     assert group_status_allows_auto_archive("approved") is False
     assert group_status_allows_auto_archive("rejected") is False
+
+
+def durable_archive_group(*, status: str = "passed", source: str = "machine_barcode") -> tuple[dict, list[dict]]:
+    photos = [
+        {
+            "id": f"durable-photo-{index}",
+            "category": category,
+            "sha256": f"{index + 1:x}" * 64,
+            "is_active": True,
+            "upload_status": "uploaded",
+        }
+        for index, category in enumerate(("before_box", "collector_barcode", "module_meter", "after_box"))
+    ]
+    group = {
+        **group_payload(),
+        "status": "unreviewed",
+        "photos": photos,
+        "barcode_verification": {
+            "status": status,
+            "meter_matched": status in {"passed", "manual_confirmed"},
+            "module_matched": status in {"passed", "manual_confirmed"},
+            "collector_matched": status in {"passed", "manual_confirmed"},
+            "recognition_source": source,
+            "result": {
+                "passed_count": 3 if status in {"passed", "manual_confirmed"} else 0,
+                "matched_fields": ["meter", "module", "collector"] if status in {"passed", "manual_confirmed"} else [],
+            },
+        },
+    }
+    return group, photos
+
+
+@pytest.mark.parametrize("status", ["partial", "unreadable", "mismatch", "failed"])
+def test_group_ready_for_auto_archive_requires_durable_three_of_three(status: str) -> None:
+    group, photos = durable_archive_group(status=status)
+
+    assert group_ready_for_auto_archive(group, photos) is False
+
+
+@pytest.mark.parametrize(
+    ("status", "source"),
+    [
+        ("passed", "machine_barcode"),
+        ("passed", "machine_qr"),
+        ("manual_confirmed", "manual_confirmed"),
+    ],
+)
+def test_group_ready_for_auto_archive_accepts_machine_or_manual_durable_pass(
+    status: str,
+    source: str,
+) -> None:
+    group, photos = durable_archive_group(status=status, source=source)
+
+    assert group_ready_for_auto_archive(group, photos) is True
+
+
+def test_group_ready_for_auto_archive_rejects_ocr_only_durable_pass() -> None:
+    group, photos = durable_archive_group(status="passed", source="ocr_candidate")
+
+    assert group_ready_for_auto_archive(group, photos) is False
 
 
 def test_record_report_error_keeps_short_diagnostic_messages() -> None:

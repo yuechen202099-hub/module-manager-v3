@@ -88,6 +88,7 @@ def create_app() -> FastAPI:
         "/exports",
         "/jobs",
         "/ezcodes",
+        "/barcode-maintenance",
     )
 
     def required_production_write_roles(request: Request) -> tuple[set[str], str]:

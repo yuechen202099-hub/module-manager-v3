@@ -67,3 +67,17 @@ def test_group_barcode_verification_lease_token_revision_chain() -> None:
 
     assert migration.revision == "20260722_0007"
     assert migration.down_revision == "20260722_0006"
+
+
+def test_delivery_cache_job_migration_is_reversible_and_chained() -> None:
+    migration = load_migration_module("0008_delivery_cache_jobs.py")
+    upgrade = render_postgresql_ddl("upgrade", "0008_delivery_cache_jobs.py")
+    downgrade = render_postgresql_ddl("downgrade", "0008_delivery_cache_jobs.py")
+
+    assert migration.revision == "20260722_0008"
+    assert migration.down_revision == "20260722_0007"
+    assert "CREATE TABLE delivery_cache_jobs" in upgrade
+    assert "CONSTRAINT uq_delivery_cache_jobs_team_group UNIQUE (team_id, group_id)" in upgrade
+    assert "CREATE INDEX ix_delivery_cache_jobs_pending" in upgrade
+    assert "CREATE INDEX ix_delivery_cache_jobs_lease" in upgrade
+    assert "DROP TABLE delivery_cache_jobs" in downgrade

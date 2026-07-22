@@ -3037,6 +3037,25 @@ class JsonStateRepository(StateRepository):
                 actor=actor,
             )
             next_verification = dict(applied["verification"])
+            if applied["applied"]:
+                scan_result = next_verification.get("result") or {}
+                matched_fields = set(scan_result.get("matched_fields") or [])
+                next_verification.update(
+                    {
+                        "meter_matched": "meter" in matched_fields,
+                        "module_matched": "module" in matched_fields,
+                        "collector_matched": "collector" in matched_fields,
+                        "recognition_source": (
+                            "machine_qr"
+                            if scan_result.get("machine_qr_values") and not scan_result.get("machine_barcode_values")
+                            else "machine_barcode"
+                            if scan_result.get("machine_barcode_values") or scan_result.get("machine_qr_values")
+                            else "ocr_candidate"
+                            if scan_result.get("ocr_candidates")
+                            else "none"
+                        ),
+                    }
+                )
             if next_verification != current:
                 group["barcode_verification"] = next_verification
                 local_simulation.append_audit_event(
@@ -6605,6 +6624,45 @@ class PostgresStateRepository(StateRepository):
             session.refresh(group)
             return {"order": self._exception_order_payload(session, order, group)}
 
+    def _enqueue_delivery_cache_after_commit(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        reason: str,
+    ) -> None:
+        from app.services.delivery_cache import enqueue_postgres_delivery_cache_job
+
+        try:
+            with self._session() as session:
+                group = self._group_by_legacy_id(session, group_id, lock=True)
+                enqueue_postgres_delivery_cache_job(
+                    session,
+                    group,
+                    actor=actor,
+                    reason=reason,
+                )
+                session.commit()
+        except Exception as exc:
+            logger.exception("Failed to enqueue delivery cache for reviewed group %s", group_id)
+            try:
+                with self._session() as session:
+                    group = self._group_by_legacy_id(session, group_id, lock=True)
+                    raw_data = dict(group.raw_data or {})
+                    raw_data.update(
+                        {
+                            "delivery_cache_status": "retry_pending",
+                            "delivery_cache_error": "delivery cache enqueue failed",
+                            "delivery_cache_retryable": True,
+                            "delivery_cache_retry_requested_at": datetime.now(UTC).isoformat(),
+                            "delivery_cache_error_type": type(exc).__name__,
+                        }
+                    )
+                    group.raw_data = raw_data
+                    session.commit()
+            except Exception:
+                logger.exception("Failed to persist delivery-cache retry state for group %s", group_id)
+
     def review_group(
         self,
         group_id: str,
@@ -6637,7 +6695,14 @@ class PostgresStateRepository(StateRepository):
             group.raw_data = raw_data
             session.commit()
             session.refresh(group)
-            return _group_payload(session, group)
+            result = _group_payload(session, group)
+        if status == "approved":
+            self._enqueue_delivery_cache_after_commit(
+                group_id,
+                actor=reviewer,
+                reason="review_completed",
+            )
+        return result
 
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
         if category not in local_simulation.PHOTO_CATEGORIES:
@@ -6846,8 +6911,10 @@ class PostgresStateRepository(StateRepository):
                 verification.meter_matched = "meter" in matched_fields
                 verification.module_matched = "module" in matched_fields
                 verification.collector_matched = "collector" in matched_fields
-                if scan_result.get("machine_barcode_values") or scan_result.get("machine_qr_values"):
-                    verification.recognition_source = "machine"
+                if scan_result.get("machine_qr_values") and not scan_result.get("machine_barcode_values"):
+                    verification.recognition_source = "machine_qr"
+                elif scan_result.get("machine_barcode_values") or scan_result.get("machine_qr_values"):
+                    verification.recognition_source = "machine_barcode"
                 elif scan_result.get("ocr_candidates"):
                     verification.recognition_source = "ocr_candidate"
                 else:
@@ -7017,7 +7084,7 @@ class PostgresStateRepository(StateRepository):
             verification.meter_matched = True
             verification.module_matched = True
             verification.collector_matched = True
-            verification.recognition_source = "manual"
+            verification.recognition_source = "manual_confirmed"
             verification.lease_owner = None
             verification.lease_token = None
             verification.lease_expires_at = None
@@ -7036,7 +7103,7 @@ class PostgresStateRepository(StateRepository):
                 "meter_matched": True,
                 "module_matched": True,
                 "collector_matched": True,
-                "recognition_source": "manual",
+                "recognition_source": "manual_confirmed",
                 "lease_owner": None,
                 "lease_token": None,
                 "lease_expires_at": None,

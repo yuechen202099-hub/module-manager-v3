@@ -207,6 +207,79 @@ def test_production_group_create_rejects_placeholder_formal_identity(monkeypatch
     assert repository.calls == []
 
 
+def test_barcode_maintenance_routes_are_admin_only_and_never_run_recognition(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.api.routes import barcode_maintenance
+    from app.services import barcode_maintenance_worker
+
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        barcode_maintenance_worker,
+        "scan_group_evidence",
+        lambda *_args, **_kwargs: pytest.fail("admin API must not execute recognition"),
+    )
+    monkeypatch.setattr(
+        barcode_maintenance,
+        "maintenance_status",
+        lambda: {"paused": True, "verification_pending": 2, "delivery_cache_pending": 1},
+    )
+    monkeypatch.setattr(
+        barcode_maintenance,
+        "set_maintenance_paused",
+        lambda paused, actor: calls.append(("paused", paused, actor)) or {"paused": paused},
+    )
+    monkeypatch.setattr(
+        barcode_maintenance,
+        "enqueue_verification_jobs",
+        lambda group_ids, actor: calls.append(("enqueue", tuple(group_ids), actor))
+        or {"enqueued": len(group_ids)},
+    )
+
+    assert production_client.get("/barcode-maintenance/status", headers=headers["reviewer"]).status_code == 403
+    status = production_client.get("/barcode-maintenance/status", headers=headers["admin"])
+    paused = production_client.post("/barcode-maintenance/pause", headers=headers["admin"])
+    resumed = production_client.post("/barcode-maintenance/resume", headers=headers["admin"])
+    enqueued = production_client.post(
+        "/barcode-maintenance/enqueue",
+        headers=headers["admin"],
+        json={"group_ids": ["group-1", "group-2"]},
+    )
+
+    assert status.status_code == 200
+    assert status.json()["data"]["paused"] is True
+    assert paused.status_code == 200
+    assert resumed.status_code == 200
+    assert enqueued.status_code == 200
+    assert enqueued.json()["data"]["enqueued"] == 2
+    assert calls == [
+        ("paused", True, "root-admin"),
+        ("paused", False, "root-admin"),
+        ("enqueue", ("group-1", "group-2"), "root-admin"),
+    ]
+
+
+def test_barcode_maintenance_route_fails_closed_when_backend_is_unavailable(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.api.routes import barcode_maintenance
+
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        barcode_maintenance,
+        "maintenance_status",
+        lambda: (_ for _ in ()).throw(state_repository.StateBackendNotReady("backend unavailable")),
+    )
+
+    response = production_client.get("/barcode-maintenance/status", headers=headers["admin"])
+
+    assert response.status_code == 503
+    assert "backend unavailable" in response.text
+
+
 def test_production_legacy_unmatched_mutations_require_admin(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
     repository = FakeLegacyUnmatchedRepository()
@@ -3674,7 +3747,7 @@ def test_validation_error_uses_contract_shape() -> None:
     assert isinstance(payload["request_id"], str)
 
 
-def test_review_api_submits_delivery_cache_only_after_json_persistence(
+def test_review_api_publishes_durable_delivery_cache_job_only_after_json_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client.post("/local-test/bootstrap")
@@ -3688,15 +3761,19 @@ def test_review_api_submits_delivery_cache_only_after_json_persistence(
     group = client.get(f"/local-test/tasks/{task['id']}/groups?limit=1").json()["data"]["items"][0]
     events: list[str] = []
 
-    class CapturingExecutor:
-        def submit(self, _callback, *_args):
-            events.append("submit")
-
     monkeypatch.setattr(local_test, "state_repository", lambda: state_repository.JsonStateRepository())
     monkeypatch.setattr(local_simulation, "photo_can_build_delivery_cache", lambda _photo: True)
-    monkeypatch.setattr(local_simulation, "_delivery_cache_executor", CapturingExecutor())
-    monkeypatch.setattr(local_simulation, "_delivery_cache_inflight", set())
-    monkeypatch.setattr(main_module, "save_all_team_states", lambda: events.append("persist"))
+    monkeypatch.setattr(
+        local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: pytest.fail("review request must not access OSS"),
+    )
+
+    def persist() -> None:
+        assert local_simulation._team_states[local_simulation.DEFAULT_TEAM_ID]["delivery_cache_jobs"] == []
+        events.append("persist")
+
+    monkeypatch.setattr(main_module, "save_all_team_states", persist)
 
     response = client.patch(
         f"/local-test/groups/{group['id']}/review",
@@ -3705,7 +3782,11 @@ def test_review_api_submits_delivery_cache_only_after_json_persistence(
 
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "approved"
-    assert events == ["persist", "submit"]
+    assert events == ["persist"]
+    jobs = local_simulation.get_state()["delivery_cache_jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["group_id"] == group["id"]
+    assert jobs[0]["status"] == "pending"
 
 
 def test_local_test_task_and_review_flow() -> None:

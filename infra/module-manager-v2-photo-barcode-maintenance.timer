@@ -1,12 +1,10 @@
 [Unit]
-Description=Run Module Manager V2 photo barcode maintenance in slow silent slices
+Description=Enqueue Module Manager V2 photo barcode maintenance daily
 
 [Timer]
-OnBootSec=10min
-OnUnitInactiveSec=10min
-RandomizedDelaySec=2min
+OnCalendar=*-*-* 00:00:00
 Persistent=true
-Unit=module-manager-v2-photo-barcode-maintenance.service
+Unit=module-manager-v2-photo-barcode-maintenance-enqueue.service
 
 [Install]
 WantedBy=timers.target

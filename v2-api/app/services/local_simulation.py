@@ -158,6 +158,12 @@ def blank_state(team_id: str = DEFAULT_TEAM_ID) -> dict[str, Any]:
         "photo_events": [],
         "audit_events": [],
         "unmatched_finalization_replays": {},
+        "barcode_maintenance_control": {
+            "paused": True,
+            "last_batch_id": "",
+            "last_batch_progress": 0,
+        },
+        "delivery_cache_jobs": [],
     }
 
 
@@ -206,9 +212,6 @@ _persistence_lock = threading.RLock()
 _authoritative_write_locks: dict[str, threading.Lock] = {}
 _authoritative_write_lock_users: dict[str, int] = {}
 _authoritative_write_locks_guard = threading.Lock()
-_delivery_cache_executor = ThreadPoolExecutor(max_workers=2)
-_delivery_cache_lock = threading.RLock()
-_delivery_cache_inflight: set[tuple[str, str]] = set()
 
 
 def persisted_state_path() -> Path | None:
@@ -297,12 +300,22 @@ def state_for_team(team_id: str | None = None) -> dict[str, Any]:
     if private_state is not None and private_state.team_id == team:
         state = private_state.working_state
         state.setdefault("summary", empty_summary())
+        state.setdefault(
+            "barcode_maintenance_control",
+            {"paused": True, "last_batch_id": "", "last_batch_progress": 0},
+        )
+        state.setdefault("delivery_cache_jobs", [])
         state["summary"]["team_id"] = team
         return state
     if team not in _team_states:
         _team_states[team] = blank_state(team)
         _team_states[team]["summary"] = empty_summary()
     _team_states[team].setdefault("summary", empty_summary())
+    _team_states[team].setdefault(
+        "barcode_maintenance_control",
+        {"paused": True, "last_batch_id": "", "last_batch_progress": 0},
+    )
+    _team_states[team].setdefault("delivery_cache_jobs", [])
     _team_states[team]["summary"]["team_id"] = team
     return _team_states[team]
 
@@ -1300,65 +1313,53 @@ def _record_delivery_cache_submission_failure(group_id: str, team: str, exc: Exc
         reset_current_team(team_token)
 
 
-def schedule_delivery_cache_build(group_id: str, team_id: str | None = None, force: bool = False) -> None:
-    team = normalize_team_id(team_id or current_team_id())
-    group = get_group(group_id)
-    if not group or not is_reviewed_group(group):
-        return
-    if not any(photo_can_build_delivery_cache(photo) for photo in group.get("photos", [])):
-        return
-    key = (team, group_id)
+def schedule_delivery_cache_build(
+    group_id: str,
+    team_id: str | None = None,
+    force: bool = False,
+    *,
+    reason: str = "review_completed",
+) -> None:
+    del force
+    from app.services.delivery_cache import enqueue_json_delivery_cache_job
 
-    def worker() -> None:
+    team = normalize_team_id(team_id or current_team_id())
+    active_transaction = active_authoritative_json_write(team)
+
+    def enqueue_after_commit() -> None:
         team_token = set_current_team(team)
         transaction = None
         try:
             transaction = begin_authoritative_json_write(team)
-            activate_authoritative_json_write(transaction)
-            try:
-                build_delivery_cache_for_group(group_id, force=force)
-            except Exception:
-                failed_group = get_group(group_id)
-                if failed_group:
-                    failed_group["delivery_cache_status"] = "failed"
-                    failed_group["delivery_cache_error"] = "delivery cache worker failed"
-                    save_all_team_states()
-            finish_authoritative_json_write(transaction, transaction.context_token)
-        except BaseException as exc:
-            if transaction is not None:
+            token = activate_authoritative_json_write(transaction)
+            group = get_group(group_id)
+            if not group or not is_reviewed_group(group):
+                abort_authoritative_json_write(transaction, token)
+                transaction = None
+                return
+            enqueue_json_delivery_cache_job(
+                group_id,
+                team_id=team,
+                actor=str(group.get("reviewer") or "system"),
+                reason=reason,
+            )
+            finish_authoritative_json_write(transaction, token)
+            transaction = None
+        except Exception as exc:
+            if transaction is not None and not transaction.closed:
                 abort_authoritative_json_write(transaction)
-            if not isinstance(exc, Exception):
-                raise
+            _record_delivery_cache_submission_failure(group_id, team, exc)
         finally:
             reset_current_team(team_token)
-            with _delivery_cache_lock:
-                _delivery_cache_inflight.discard(key)
 
-    def submit_worker() -> None:
-        with _delivery_cache_lock:
-            if key in _delivery_cache_inflight:
-                return
-            _delivery_cache_inflight.add(key)
-        try:
-            _delivery_cache_executor.submit(worker)
-        except Exception as exc:
-            with _delivery_cache_lock:
-                _delivery_cache_inflight.discard(key)
-            _record_delivery_cache_submission_failure(group_id, team, exc)
-        except BaseException:
-            with _delivery_cache_lock:
-                _delivery_cache_inflight.discard(key)
-            raise
-
-    active_transaction = _private_team_state.get()
-    if active_transaction is not None and active_transaction.team_id == team:
+    if active_transaction is not None:
         _queue_after_authoritative_commit(
             active_transaction,
-            ("delivery-cache", team, group_id),
-            submit_worker,
+            ("durable-delivery-cache", team, group_id),
+            enqueue_after_commit,
         )
         return
-    submit_worker()
+    enqueue_after_commit()
 
 
 def copy_oss_reference(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -3384,6 +3385,7 @@ def rebuild_state_from_total_catalog(
             "review_events": state.get("review_events", []) if preserve_existing else [],
             "photo_events": state.get("photo_events", []) if preserve_existing else [],
             "audit_events": state.get("audit_events", []) if preserve_existing else [],
+            "delivery_cache_jobs": state.get("delivery_cache_jobs", []) if preserve_existing else [],
         }
     )
     refresh_group_exceptions()
@@ -6281,11 +6283,11 @@ def review_group(
             "created_at": now_iso(),
         }
     )
-    if status == "approved":
-        schedule_delivery_cache_build(group_id, current_team_id())
-    else:
+    if status != "approved":
         mark_delivery_cache_stale(group, f"review status changed to {status}")
     refresh_summary()
+    if status == "approved":
+        schedule_delivery_cache_build(group_id, current_team_id())
     return group
 
 
@@ -6871,7 +6873,7 @@ def confirm_group_barcode_manually(
             "meter_matched": True,
             "module_matched": True,
             "collector_matched": True,
-            "recognition_source": "manual",
+            "recognition_source": "manual_confirmed",
             "lease_owner": None,
             "lease_token": None,
             "lease_expires_at": None,

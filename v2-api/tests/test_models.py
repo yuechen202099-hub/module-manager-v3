@@ -44,3 +44,26 @@ def test_barcode_maintenance_control_is_scoped_to_one_team() -> None:
     assert {"paused", "last_batch_id", "last_batch_progress"} <= set(table.c.keys())
     assert table.c.paused.default.arg is True
     assert str(table.c.paused.server_default.arg) == "true"
+
+
+def test_delivery_cache_job_is_durable_retryable_and_group_idempotent() -> None:
+    table = models.DeliveryCacheJob.__table__
+    unique_constraints = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    check_constraints = [
+        str(constraint.sqltext)
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    ]
+    indexes = {index.name: tuple(column.name for column in index.columns) for index in table.indexes}
+
+    assert table.name == "delivery_cache_jobs"
+    assert ("team_id", "group_id") in unique_constraints
+    assert any("processing" in constraint and "failed" in constraint for constraint in check_constraints)
+    assert indexes["ix_delivery_cache_jobs_pending"] == ("team_id", "status", "updated_at")
+    assert indexes["ix_delivery_cache_jobs_lease"] == ("team_id", "lease_expires_at")
+    assert table.c.attempt_count.server_default.arg.text == "0"
+    assert table.c.lease_token.type.length == 128

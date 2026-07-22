@@ -430,6 +430,32 @@ class BarcodeMaintenanceControl(Base, TimestampMixin):
     last_batch_progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 
 
+class DeliveryCacheJob(Base, TimestampMixin):
+    __tablename__ = "delivery_cache_jobs"
+    __table_args__ = (
+        UniqueConstraint("team_id", "group_id", name="uq_delivery_cache_jobs_team_group"),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'ready', 'failed')",
+            name="ck_delivery_cache_jobs_status",
+        ),
+        Index("ix_delivery_cache_jobs_pending", "team_id", "status", "updated_at"),
+        Index("ix_delivery_cache_jobs_lease", "team_id", "lease_expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("material_groups.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", server_default=text("'pending'"))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_token: Mapped[str | None] = mapped_column(String(128))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_by: Mapped[str | None] = mapped_column(String(64))
+    request_reason: Mapped[str | None] = mapped_column(String(128))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class TaskGroup(Base, TimestampMixin):
     __tablename__ = "task_groups"
     __table_args__ = (

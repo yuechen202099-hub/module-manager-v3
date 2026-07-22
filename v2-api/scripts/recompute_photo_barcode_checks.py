@@ -152,27 +152,38 @@ def group_needs_not_matched_analysis(photos: list[Any], *, recheck_batch_id: str
 
 
 def group_ready_for_auto_archive(group: dict[str, Any], photos: list[Any]) -> bool:
-    from app.services import photo_barcode_check
-
     if not group_status_allows_auto_archive(group.get("status")):
         return False
     if not should_scan_group_photos(photos):
         return False
-    for photo in photos:
-        category = _photo_category(photo)
-        if not category or category == "unclassified":
-            return False
-        raw = _photo_raw(photo)
-        method = str(raw.get("barcode_check_method") or "").strip()
-        if method in photo_barcode_check.OCR_REVIEW_REQUIRED_METHODS:
-            return False
-    payload = dict(group)
-    payload["photos"] = [_photo_raw(photo) for photo in photos]
-    check = photo_barcode_check.build_group_barcode_check(payload)
-    return (
-        str(check.get("group_barcode_check_status") or "") == "matched"
-        and not check.get("group_barcode_unmatched_values")
-    )
+    categories = [_photo_category(photo) for photo in photos]
+    if len(set(categories)) != 4 or set(categories) != {
+        "before_box",
+        "collector_barcode",
+        "module_meter",
+        "after_box",
+    }:
+        return False
+    verification = group.get("barcode_verification")
+    if not isinstance(verification, dict):
+        return False
+    status = str(verification.get("status") or "")
+    source = str(verification.get("recognition_source") or "")
+    if status == "manual_confirmed":
+        source = "manual_confirmed"
+    if source == "manual":
+        source = "manual_confirmed"
+    if status not in {"passed", "manual_confirmed"}:
+        return False
+    if source not in {"machine_barcode", "machine_qr", "manual_confirmed"}:
+        return False
+    if not all(
+        verification.get(field) is True
+        for field in ("meter_matched", "module_matched", "collector_matched")
+    ):
+        return False
+    result = verification.get("result") or {}
+    return int(result.get("passed_count") or 0) == 3
 
 
 def group_status_allows_auto_archive(status: Any) -> bool:
@@ -681,6 +692,19 @@ def main(argv: list[str] | None = None) -> int:
     dry_run = not args.apply
     env_loaded = load_env_file(Path(args.env_file)) if args.env_file else False
     validate_runtime_environment(dry_run=dry_run)
+    if args.apply:
+        from app.services.barcode_maintenance_worker import enqueue_verification_jobs
+
+        report = {
+            "backend": "durable_queue",
+            "dry_run": False,
+            **enqueue_verification_jobs(actor=str(args.auto_archive_actor or "barcode-maintenance")),
+        }
+        report["env_file"] = str(args.env_file or "")
+        report["env_loaded"] = env_loaded
+        report["database_url_host_hint"] = _database_url_host_hint(str(os.environ.get("DATABASE_URL") or ""))
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     report = recompute_postgres(
         team_id=args.team_id,
         dry_run=dry_run,

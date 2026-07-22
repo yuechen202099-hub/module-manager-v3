@@ -530,25 +530,23 @@ def test_dual_manual_confirmation_restores_json_when_postgres_confirmation_fails
 
 def _prepare_json_review_cache_state(monkeypatch: pytest.MonkeyPatch, team_id: str) -> dict:
     state = _json_barcode_state(team_id)
+    state["delivery_cache_jobs"] = []
     monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
     monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
-    monkeypatch.setattr(repository.local_simulation, "photo_can_build_delivery_cache", lambda _photo: True)
-    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_inflight", set())
     return state
 
 
-def test_json_review_group_submits_cache_only_after_authoritative_persistence(
+def test_json_review_group_persists_durable_cache_job_without_oss_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     team_id = f"json-review-cache-{uuid4()}"
     _prepare_json_review_cache_state(monkeypatch, team_id)
     events: list[str] = []
-
-    class CapturingExecutor:
-        def submit(self, _callback, *_args):
-            events.append("submit")
-
-    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_executor", CapturingExecutor())
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: pytest.fail("review must not synchronously access OSS"),
+    )
     monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: events.append("persist"))
 
     reviewed = repository.JsonStateRepository().review_group(
@@ -559,7 +557,11 @@ def test_json_review_group_submits_cache_only_after_authoritative_persistence(
     )
 
     assert reviewed["status"] == "approved"
-    assert events == ["persist", "submit"]
+    assert events == ["persist", "persist"]
+    jobs = repository.local_simulation._team_states[team_id]["delivery_cache_jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["group_id"] == "group-json-barcode"
+    assert jobs[0]["status"] == "pending"
 
 
 def test_json_review_group_persistence_failure_submits_no_cache(
@@ -568,16 +570,10 @@ def test_json_review_group_persistence_failure_submits_no_cache(
     team_id = f"json-review-rollback-{uuid4()}"
     state = _prepare_json_review_cache_state(monkeypatch, team_id)
     before = deepcopy(state)
-    submitted: list[str] = []
-
-    class CapturingExecutor:
-        def submit(self, _callback, *_args):
-            submitted.append("submit")
 
     def fail_persistence() -> None:
         raise RuntimeError("injected JSON review persistence failure")
 
-    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_executor", CapturingExecutor())
     monkeypatch.setattr(repository.local_simulation, "save_all_team_states", fail_persistence)
 
     with pytest.raises(RuntimeError, match="injected JSON review persistence failure"):
@@ -588,8 +584,35 @@ def test_json_review_group_persistence_failure_submits_no_cache(
             "ready",
         )
 
-    assert submitted == []
     assert repository.local_simulation._team_states[team_id] == before
+
+
+def test_json_review_cache_enqueue_failure_preserves_review_and_records_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
+    team_id = f"json-review-cache-failure-{uuid4()}"
+    _prepare_json_review_cache_state(monkeypatch, team_id)
+    monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: None)
+    monkeypatch.setattr(
+        delivery_cache,
+        "enqueue_json_delivery_cache_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("durable enqueue unavailable")),
+    )
+
+    reviewed = repository.JsonStateRepository().review_group(
+        "group-json-barcode",
+        "approved",
+        "reviewer-a",
+        "ready",
+    )
+
+    committed = repository.local_simulation._team_states[team_id]
+    assert reviewed["status"] == "approved"
+    assert committed["groups"][0]["status"] == "approved"
+    assert committed["groups"][0]["delivery_cache_status"] == "retry_pending"
+    assert committed["delivery_cache_jobs"] == []
 
 
 def test_dual_review_group_mirror_failure_rolls_back_json_and_submits_no_cache(
@@ -598,17 +621,11 @@ def test_dual_review_group_mirror_failure_rolls_back_json_and_submits_no_cache(
     team_id = f"dual-review-rollback-{uuid4()}"
     state = _prepare_json_review_cache_state(monkeypatch, team_id)
     before = deepcopy(state)
-    submitted: list[str] = []
-
-    class CapturingExecutor:
-        def submit(self, _callback, *_args):
-            submitted.append("submit")
 
     class BrokenMirrorRepository:
         def review_group(self, *_args, **_kwargs):
             raise RuntimeError("injected PostgreSQL review failure")
 
-    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_executor", CapturingExecutor())
     monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", BrokenMirrorRepository)
 
     with pytest.raises(RuntimeError, match="injected PostgreSQL review failure"):
@@ -619,22 +636,15 @@ def test_dual_review_group_mirror_failure_rolls_back_json_and_submits_no_cache(
             "ready",
         )
 
-    assert submitted == []
     assert repository.local_simulation._team_states[team_id] == before
 
 
-def test_json_review_group_keeps_committed_review_when_cache_submission_fails(
+def test_json_review_group_durable_cache_enqueue_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     team_id = f"json-review-retry-{uuid4()}"
     _prepare_json_review_cache_state(monkeypatch, team_id)
     persistence_calls: list[str] = []
-
-    class BrokenExecutor:
-        def submit(self, _callback, *_args):
-            raise RuntimeError("executor unavailable")
-
-    monkeypatch.setattr(repository.local_simulation, "_delivery_cache_executor", BrokenExecutor())
     monkeypatch.setattr(
         repository.local_simulation,
         "save_all_team_states",
@@ -647,20 +657,149 @@ def test_json_review_group_keeps_committed_review_when_cache_submission_fails(
         "reviewer-a",
         "ready",
     )
+    repository.JsonStateRepository().review_group(
+        "group-json-barcode",
+        "approved",
+        "reviewer-a",
+        "ready",
+    )
 
     committed_state = repository.local_simulation._team_states[team_id]
     committed_group = committed_state["groups"][0]
     assert reviewed["status"] == "approved"
     assert committed_group["status"] == "approved"
-    assert committed_group["delivery_cache_status"] == "retry_pending"
-    assert committed_group["delivery_cache_retryable"] is True
-    assert committed_group["delivery_cache_error"] == "delivery cache submission failed"
-    assert any(
-        event["action"] == "delivery_cache_submission_failed"
-        and event["payload"]["retryable"] is True
-        for event in committed_state["audit_events"]
+    assert len(committed_state["delivery_cache_jobs"]) == 1
+    assert committed_state["delivery_cache_jobs"][0]["status"] == "pending"
+    assert len(persistence_calls) == 4
+
+
+def test_postgres_review_enqueues_cache_job_after_review_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="postgres-review-cache",
+        team_id="postgres-review-team",
+        status=repository.GroupStatus.UNREVIEWED,
+        reviewer=None,
+        review_note="",
+        exception_note="",
+        reviewed_at=None,
+        raw_data={},
     )
-    assert len(persistence_calls) == 2
+    events: list[str] = []
+
+    class Session:
+        def __enter__(self):
+            events.append("begin")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def commit(self):
+            events.append("commit")
+
+        def refresh(self, _value):
+            events.append("refresh")
+
+    session = Session()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, checked_session, group_id, lock=False):
+            assert checked_session is session
+            assert group_id == group.legacy_id
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, value, **_kwargs: {"id": value.legacy_id, "status": value.status.value})
+
+    from app.services import delivery_cache
+
+    monkeypatch.setattr(
+        delivery_cache,
+        "enqueue_postgres_delivery_cache_job",
+        lambda checked_session, checked_group, **_kwargs: events.append("enqueue")
+        or {"status": "pending"},
+    )
+
+    result = TestRepository().review_group(group.legacy_id, "approved", "reviewer-a", "ready")
+
+    assert result["status"] == "approved"
+    assert events == ["begin", "commit", "refresh", "begin", "enqueue", "commit"]
+
+
+def test_postgres_review_cache_enqueue_failure_preserves_review_and_records_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="postgres-review-cache-failure",
+        team_id="postgres-review-team",
+        status=repository.GroupStatus.UNREVIEWED,
+        reviewer=None,
+        review_note="",
+        exception_note="",
+        reviewed_at=None,
+        raw_data={},
+    )
+    events: list[str] = []
+
+    class Session:
+        def __enter__(self):
+            events.append("begin")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def commit(self):
+            events.append("commit")
+
+        def refresh(self, _value):
+            events.append("refresh")
+
+    session = Session()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, checked_session, group_id, lock=False):
+            assert checked_session is session
+            assert group_id == group.legacy_id
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(
+        repository,
+        "_group_payload",
+        lambda _session, value, **_kwargs: {"id": value.legacy_id, "status": value.status.value},
+    )
+    from app.services import delivery_cache
+
+    monkeypatch.setattr(
+        delivery_cache,
+        "enqueue_postgres_delivery_cache_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("durable enqueue unavailable")),
+    )
+
+    result = TestRepository().review_group(group.legacy_id, "approved", "reviewer-a", "ready")
+
+    assert result["status"] == "approved"
+    assert group.status == repository.GroupStatus.APPROVED
+    assert group.raw_data["delivery_cache_status"] == "retry_pending"
+    assert group.raw_data["delivery_cache_retryable"] is True
+    assert events == ["begin", "commit", "refresh", "begin", "begin", "commit"]
 
 
 def test_group_barcode_rescan_audit_payload_has_unique_keys() -> None:
