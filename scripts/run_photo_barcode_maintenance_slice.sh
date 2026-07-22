@@ -7,6 +7,7 @@ MODE="${2:---serve}"
 CURRENT="${APP_ROOT}/current"
 ENV_FILE="${APP_ROOT}/.env"
 PYTHON="${APP_ROOT}/venv/bin/python"
+LOCK_FILE="${APP_ROOT}/shared/photo-barcode-maintenance.lock"
 
 case "$MODE" in
   --serve|--enqueue) ;;
@@ -23,8 +24,21 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
+if [ "$MODE" = "--serve" ]; then
+  export BARCODE_MAINTENANCE_START_PAUSED=true
+fi
+
 cd "$CURRENT/v2-api"
-exec "$PYTHON" -m app.services.barcode_maintenance_worker \
-  "$MODE" \
-  --batch-size "${BARCODE_MAINTENANCE_BATCH_SIZE:-20}" \
-  --batch-pause-seconds "${BARCODE_MAINTENANCE_BATCH_PAUSE_SECONDS:-5}"
+WORKER_ARGS=(
+  -m app.services.barcode_maintenance_worker
+  "$MODE"
+  --batch-size 20
+  --batch-pause-seconds 5
+)
+
+if [ "$MODE" = "--serve" ]; then
+  mkdir -p "$(dirname "$LOCK_FILE")"
+  exec flock -n "$LOCK_FILE" -- "$PYTHON" "${WORKER_ARGS[@]}"
+fi
+
+exec "$PYTHON" "${WORKER_ARGS[@]}"

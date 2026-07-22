@@ -1036,6 +1036,12 @@ def _photo_payload(photo: Photo) -> dict[str, Any]:
         "temporary_review_manual_confirmed",
         "temporary_review_reviewer",
         "temporary_review_reviewed_at",
+        "delivery_cache_path",
+        "delivery_cache_version",
+        "delivery_cache_status",
+        "delivery_cache_content_type",
+        "delivery_cache_built_at",
+        "delivery_cache_error",
     ):
         if key in raw:
             payload[key] = raw[key]
@@ -1379,6 +1385,10 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
         "group_barcode_detected_values",
         "group_barcode_matched_fields",
         "group_barcode_unmatched_values",
+        "delivery_cache_status",
+        "delivery_cache_built_at",
+        "delivery_cache_error",
+        "delivery_cache_retryable",
     ):
         if key in raw and key not in payload:
             payload[key] = raw[key]
@@ -1682,7 +1692,7 @@ def _delivery_photo_manifest(group: dict[str, Any], photo: dict[str, Any], index
         "storage_bucket": photo.get("storage_bucket", ""),
         "sha256": photo.get("sha256", ""),
         "source_file": photo.get("source_file", ""),
-        "delivery_cache_url": photo.get("delivery_cache_url", ""),
+        "delivery_cache_url": local_simulation.delivery_cache_url_for_photo(group, photo),
         "delivery_cache_status": photo.get("delivery_cache_status", "none"),
     }
 
@@ -7971,7 +7981,16 @@ class PostgresStateRepository(StateRepository):
         return local_simulation.build_project_outside_workbook(payloads)
 
     def get_delivery_cached_photo_path(self, group_id: str, photo_id: str) -> Path:
-        raise FileNotFoundError(photo_id)
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id)
+            payload = _group_payload(session, group, include_photos=True)
+        photo = next(
+            (item for item in payload.get("photos", []) if str(item.get("id") or "") == photo_id),
+            None,
+        )
+        if photo is None:
+            raise KeyError(photo_id)
+        return local_simulation.get_delivery_cached_photo_path_from_payload(payload, photo)
 
     def reset_group_to_unconstructed(
         self,

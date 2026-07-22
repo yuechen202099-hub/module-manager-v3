@@ -28,6 +28,7 @@ from app.services.delivery_cache import (
     MAX_DELIVERY_CACHE_ATTEMPTS,
     cache_group_photos,
     claim_postgres_delivery_cache_job,
+    reconcile_delivery_cache_jobs,
 )
 from app.services.group_barcode_verification import (
     evaluate_group_eligibility,
@@ -92,6 +93,7 @@ def build_postgres_verification_claim_statement(*, team_id: str, now: datetime):
                 & (GroupBarcodeVerification.attempt_count < MAX_VERIFICATION_ATTEMPTS)
                 & (GroupBarcodeVerification.auto_archive_status == "retry_pending"),
                 (GroupBarcodeVerification.status == "processing")
+                & (GroupBarcodeVerification.attempt_count < MAX_VERIFICATION_ATTEMPTS)
                 & (GroupBarcodeVerification.lease_expires_at < now),
             ),
         )
@@ -99,6 +101,35 @@ def build_postgres_verification_claim_statement(*, team_id: str, now: datetime):
         .limit(1)
         .with_for_update(skip_locked=True)
     )
+
+
+def _terminalize_expired_json_verification_leases(state: dict[str, Any], now: datetime) -> int:
+    terminalized = 0
+    for group in state.get("groups", []):
+        verification = group.get("barcode_verification")
+        if not isinstance(verification, dict):
+            continue
+        expired = (_parse_datetime(verification.get("lease_expires_at")) or datetime.max.replace(tzinfo=UTC)) < now
+        if (
+            str(verification.get("status") or "") != "processing"
+            or not expired
+            or int(verification.get("attempt_count") or 0) < MAX_VERIFICATION_ATTEMPTS
+        ):
+            continue
+        verification.update(
+            {
+                "status": "failed",
+                "lease_owner": None,
+                "lease_token": None,
+                "lease_expires_at": None,
+                "retryable": False,
+                "manual_review_required": True,
+                "last_error": "worker lease expired after maximum attempts; manual review required",
+                "failed_at": now.isoformat(),
+            }
+        )
+        terminalized += 1
+    return terminalized
 
 
 def _claim_json_verification_in_state(
@@ -159,6 +190,7 @@ def _claim_json_verification(
     transaction = local_simulation.begin_authoritative_json_write(team_id)
     token = local_simulation.activate_authoritative_json_write(transaction)
     try:
+        terminalized = _terminalize_expired_json_verification_leases(transaction.working_state, now)
         claim = _claim_json_verification_in_state(
             transaction.working_state,
             worker_id=worker_id,
@@ -166,7 +198,10 @@ def _claim_json_verification(
             lease_seconds=lease_seconds,
         )
         if claim is None:
-            local_simulation.abort_authoritative_json_write(transaction, token)
+            if terminalized:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+            else:
+                local_simulation.abort_authoritative_json_write(transaction, token)
             return None
         local_simulation.finish_authoritative_json_write(transaction, token)
         return claim
@@ -174,6 +209,29 @@ def _claim_json_verification(
         if not transaction.closed:
             local_simulation.abort_authoritative_json_write(transaction, token)
         raise
+
+
+def _terminalize_expired_postgres_verification_leases(session, *, team_id: str, now: datetime) -> int:
+    verifications = list(
+        session.scalars(
+            select(GroupBarcodeVerification)
+            .where(
+                GroupBarcodeVerification.team_id == team_id,
+                GroupBarcodeVerification.status == "processing",
+                GroupBarcodeVerification.attempt_count >= MAX_VERIFICATION_ATTEMPTS,
+                GroupBarcodeVerification.lease_expires_at < now,
+            )
+            .with_for_update(skip_locked=True)
+        ).all()
+    )
+    for verification in verifications:
+        verification.status = "failed"
+        verification.lease_owner = None
+        verification.lease_token = None
+        verification.lease_expires_at = None
+        verification.auto_archive_status = "manual_required"
+        verification.auto_archive_error = "worker lease expired after maximum attempts; manual review required"
+    return len(verifications)
 
 
 def _claim_postgres_verification(
@@ -192,9 +250,17 @@ def _claim_postgres_verification(
         if control is None or control.paused:
             session.rollback()
             return None
+        terminalized = _terminalize_expired_postgres_verification_leases(
+            session,
+            team_id=team_id,
+            now=now,
+        )
         verification = session.scalar(build_postgres_verification_claim_statement(team_id=team_id, now=now))
         if verification is None:
-            session.rollback()
+            if terminalized:
+                session.commit()
+            else:
+                session.rollback()
             return None
         token = str(uuid4())
         verification.status = "processing"
@@ -239,38 +305,9 @@ def claim_next_verification_job(
             now=claimed_at,
             lease_seconds=lease_seconds,
         )
-    transaction = local_simulation.begin_authoritative_json_write(team_id)
-    token = local_simulation.activate_authoritative_json_write(transaction)
-    try:
-        json_claim = _claim_json_verification_in_state(
-            transaction.working_state,
-            worker_id=worker_id,
-            now=claimed_at,
-            lease_seconds=lease_seconds,
-        )
-        postgres_claim = _claim_postgres_verification(
-            worker_id=worker_id,
-            team_id=team_id,
-            now=claimed_at,
-            lease_seconds=lease_seconds,
-        )
-        if (json_claim is None) != (postgres_claim is None) or (
-            json_claim is not None
-            and postgres_claim is not None
-            and json_claim.group_id != postgres_claim.group_id
-        ):
-            from app.services.state_repository import StateBackendNotReady
+    from app.services.state_repository import StateBackendNotReady
 
-            raise StateBackendNotReady("Dual barcode worker claim diverged; JSON claim was aborted")
-        if json_claim is None:
-            local_simulation.abort_authoritative_json_write(transaction, token)
-            return None
-        local_simulation.finish_authoritative_json_write(transaction, token)
-        return json_claim
-    except BaseException:
-        if not transaction.closed:
-            local_simulation.abort_authoritative_json_write(transaction, token)
-        raise
+    raise StateBackendNotReady("Dual barcode worker claim is disabled until one backend is authoritative")
 
 
 def _fail_json_verification(job: MaintenanceJob, error: Exception, now: datetime) -> None:
@@ -580,21 +617,9 @@ def auto_archive_verified_group(group_id: str, *, actor: str = WORKER_ACTOR) -> 
         return _auto_archive_json(group_id, actor=actor, team_id=team_id)
     if backend == "postgres":
         return _auto_archive_postgres(group_id, actor=actor, team_id=team_id)
-    transaction = local_simulation.begin_authoritative_json_write(team_id)
-    token = local_simulation.activate_authoritative_json_write(transaction)
-    try:
-        json_result = _auto_archive_json_in_state(transaction.working_state, group_id, actor=actor)
-        postgres_result = _auto_archive_postgres(group_id, actor=actor, team_id=team_id)
-        if json_result != postgres_result:
-            from app.services.state_repository import StateBackendNotReady
+    from app.services.state_repository import StateBackendNotReady
 
-            raise StateBackendNotReady("Dual auto archive diverged; JSON archive was aborted")
-        local_simulation.finish_authoritative_json_write(transaction, token)
-        return json_result
-    except BaseException:
-        if not transaction.closed:
-            local_simulation.abort_authoritative_json_write(transaction, token)
-        raise
+    raise StateBackendNotReady("Dual auto archive is disabled until one backend is authoritative")
 
 
 def _claim_json_delivery(*, worker_id: str, team_id: str, now: datetime) -> MaintenanceJob | None:
@@ -607,14 +632,41 @@ def _claim_json_delivery(*, worker_id: str, team_id: str, now: datetime) -> Main
             local_simulation.abort_authoritative_json_write(transaction, token)
             return None
         candidates = []
+        terminalized = 0
         for job in state.setdefault("delivery_cache_jobs", []):
             status = str(job.get("status") or "")
             attempts = int(job.get("attempt_count") or 0)
             expired = (_parse_datetime(job.get("lease_expires_at")) or datetime.max.replace(tzinfo=UTC)) < now
+            if status == "processing" and expired and attempts >= MAX_DELIVERY_CACHE_ATTEMPTS:
+                job.update(
+                    {
+                        "status": "failed",
+                        "lease_owner": None,
+                        "lease_token": None,
+                        "lease_expires_at": None,
+                        "retryable": False,
+                        "manual_review_required": True,
+                        "last_error": "worker lease expired after maximum attempts; manual review required",
+                        "updated_at": now.isoformat(),
+                    }
+                )
+                group = next(
+                    (item for item in state.get("groups", []) if str(item.get("id") or "") == str(job.get("group_id") or "")),
+                    None,
+                )
+                if group is not None:
+                    group["delivery_cache_status"] = "manual_required"
+                    group["delivery_cache_error"] = job["last_error"]
+                    group["delivery_cache_retryable"] = False
+                terminalized += 1
+                continue
             if status == "pending" or (status == "failed" and attempts < MAX_DELIVERY_CACHE_ATTEMPTS) or (status == "processing" and expired):
                 candidates.append(job)
         if not candidates:
-            local_simulation.abort_authoritative_json_write(transaction, token)
+            if terminalized:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+            else:
+                local_simulation.abort_authoritative_json_write(transaction, token)
             return None
         job = sorted(candidates, key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")))[0]
         lease_token = str(uuid4())
@@ -655,7 +707,11 @@ def claim_next_delivery_cache_job(*, worker_id: str, now: datetime | None = None
 
         raise StateBackendNotReady("Dual delivery-cache claim is disabled until PostgreSQL is authoritative")
     with SessionLocal() as session:
-        control = session.scalar(select(BarcodeMaintenanceControl).where(BarcodeMaintenanceControl.team_id == team_id))
+        control = session.scalar(
+            select(BarcodeMaintenanceControl)
+            .where(BarcodeMaintenanceControl.team_id == team_id)
+            .with_for_update()
+        )
         if control is None or control.paused:
             return None
         claim = claim_postgres_delivery_cache_job(
@@ -951,6 +1007,8 @@ def run_worker_batch(
     processed = 0
     failed = 0
     try:
+        if claim_next is None:
+            reconcile_delivery_cache_jobs()
         while processed < limit:
             if not allowed() or loaded():
                 break
@@ -1157,6 +1215,7 @@ def enqueue_verification_jobs(group_ids: list[str] | None = None, actor: str = W
     clean_ids = list(dict.fromkeys(str(value).strip() for value in (group_ids or []) if str(value).strip()))
     backend = _backend()
     team_id = local_simulation.current_team_id()
+    reconcile_delivery_cache_jobs()
     if backend == "json":
         return _enqueue_json_verifications(clean_ids, actor=actor, team_id=team_id)
     if backend == "postgres":
@@ -1179,17 +1238,22 @@ def _load_env(path: str) -> None:
             os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    value = str(os.getenv(name, "true" if default else "false")).strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run durable low-load barcode maintenance work.")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--serve", action="store_true")
     mode.add_argument("--enqueue", action="store_true")
     parser.add_argument("--env-file", default="")
-    parser.add_argument("--batch-size", type=int, default=int(os.getenv("BARCODE_MAINTENANCE_BATCH_SIZE", "20")))
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument(
         "--batch-pause-seconds",
         type=float,
-        default=float(os.getenv("BARCODE_MAINTENANCE_BATCH_PAUSE_SECONDS", "5")),
+        default=DEFAULT_BATCH_PAUSE_SECONDS,
     )
     args = parser.parse_args(argv)
     if args.env_file:
@@ -1198,13 +1262,15 @@ def main(argv: list[str] | None = None) -> int:
         report = enqueue_verification_jobs(actor=WORKER_ACTOR)
         print(report)
         return 0
+    if _env_flag("BARCODE_MAINTENANCE_START_PAUSED"):
+        set_maintenance_paused(True, WORKER_ACTOR)
     while True:
         report = run_worker_batch(
-            batch_size=args.batch_size,
-            batch_pause_seconds=args.batch_pause_seconds,
+            batch_size=min(DEFAULT_BATCH_SIZE, max(0, int(args.batch_size))),
+            batch_pause_seconds=DEFAULT_BATCH_PAUSE_SECONDS,
         )
         if int(report.get("processed") or 0) < min(DEFAULT_BATCH_SIZE, max(0, int(args.batch_size))):
-            time.sleep(max(1.0, float(args.batch_pause_seconds)))
+            time.sleep(DEFAULT_BATCH_PAUSE_SECONDS)
 
 
 if __name__ == "__main__":

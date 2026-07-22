@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import shutil
+import subprocess
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -325,7 +331,8 @@ def test_auto_archive_is_transactional_idempotent_and_enqueues_cache(
 def test_delivery_cache_reuses_sha_across_groups_and_retries_after_failure(tmp_path: Path) -> None:
     from app.services.delivery_cache import cache_group_photos
 
-    shared_sha = "a" * 64
+    shared_content = b"same-original"
+    shared_sha = hashlib.sha256(shared_content).hexdigest()
     group_a = eligible_group("cache-a")
     group_b = eligible_group("cache-b")
     group_a["status"] = "approved"
@@ -338,7 +345,7 @@ def test_delivery_cache_reuses_sha_across_groups_and_retries_after_failure(tmp_p
 
     def fetch(photo: dict) -> tuple[bytes, str]:
         fetches.append(photo["id"])
-        return b"same-original", "image/jpeg"
+        return shared_content, "image/jpeg"
 
     first = cache_group_photos(group_a, cache_root=tmp_path, fetch_photo=fetch)
     second = cache_group_photos(group_b, cache_root=tmp_path, fetch_photo=fetch)
@@ -351,6 +358,7 @@ def test_delivery_cache_reuses_sha_across_groups_and_retries_after_failure(tmp_p
     retry_group = eligible_group("cache-retry")
     retry_group["status"] = "approved"
     retry_group["photos"] = [retry_group["photos"][0]]
+    retry_group["photos"][0]["sha256"] = hashlib.sha256(b"recovered").hexdigest()
     attempts = 0
 
     def flaky_fetch(_photo: dict) -> tuple[bytes, str]:
@@ -367,6 +375,384 @@ def test_delivery_cache_reuses_sha_across_groups_and_retries_after_failure(tmp_p
     assert failed["retryable"] is True
     assert recovered["status"] == "ready"
     assert attempts == 2
+
+
+def test_delivery_cache_accepts_real_default_fetcher_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.delivery_cache import cache_group_photos
+
+    content = b"default-fetcher-content"
+    group = eligible_group("default-fetcher")
+    group["status"] = "approved"
+    group["photos"] = [group["photos"][0]]
+    group["photos"][0]["sha256"] = hashlib.sha256(content).hexdigest()
+    monkeypatch.setattr(
+        local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: (content, ".png", "image/png"),
+    )
+
+    result = cache_group_photos(group, cache_root=tmp_path)
+
+    assert result["status"] == "ready"
+    assert result["built"] == 1
+    cached = tmp_path / group["photos"][0]["delivery_cache_path"]
+    assert cached.suffix == ".png"
+    assert cached.read_bytes() == content
+
+
+def test_json_repository_delivery_cache_job_builds_readable_manifest_and_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+    from app.services.delivery_cache import enqueue_json_delivery_cache_job
+    from app.services.state_repository import JsonStateRepository
+
+    content = b"json-durable-cache"
+    group = eligible_group("json-cache-e2e")
+    group.update({"status": "approved", "reviewer": "reviewer-a"})
+    group["photos"] = [group["photos"][0]]
+    group["photos"][0]["sha256"] = hashlib.sha256(content).hexdigest()
+    team_id = install_json_queue(monkeypatch, [group])
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    monkeypatch.setattr(local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(
+        local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: (content, ".jpg", "image/jpeg"),
+    )
+    enqueue_json_delivery_cache_job(group["id"], team_id=team_id, actor="reviewer-a")
+
+    claim = worker.claim_next_delivery_cache_job(worker_id="cache-worker")
+    assert claim is not None
+    worker._process_delivery_job(claim)
+
+    repository = JsonStateRepository()
+    manifest = repository.build_final_delivery_manifest(terminal=group["terminal"])
+    manifest_photo = manifest["groups"][0]["photos"][0]
+    cached_path = repository.get_delivery_cached_photo_path(group["id"], group["photos"][0]["id"])
+    assert manifest_photo["delivery_cache_url"].startswith("/local-test/delivery-cache/")
+    assert cached_path.read_bytes() == content
+
+
+def test_delivery_cache_rejects_corrupt_named_objects_and_partial_temp_files(tmp_path: Path) -> None:
+    from app.services.delivery_cache import cache_group_photos
+
+    content = b"complete-object"
+    sha256 = hashlib.sha256(content).hexdigest()
+    object_dir = tmp_path / "objects" / sha256[:2]
+    object_dir.mkdir(parents=True)
+    corrupt = object_dir / f"{sha256}.png"
+    corrupt.write_bytes(b"wrong-content")
+    partial = object_dir / f"{sha256}.jpg.tmp-interrupted"
+    partial.write_bytes(content[:4])
+    group = eligible_group("corrupt-cache")
+    group["status"] = "approved"
+    group["photos"] = [group["photos"][0]]
+    group["photos"][0]["sha256"] = sha256
+    fetches: list[str] = []
+
+    result = cache_group_photos(
+        group,
+        cache_root=tmp_path,
+        fetch_photo=lambda photo: fetches.append(photo["id"]) or (content, ".jpg", "image/jpeg"),
+    )
+
+    cached = tmp_path / group["photos"][0]["delivery_cache_path"]
+    assert result["status"] == "ready"
+    assert fetches == [group["photos"][0]["id"]]
+    assert cached.read_bytes() == content
+    assert hashlib.sha256(cached.read_bytes()).hexdigest() == sha256
+    assert not corrupt.exists()
+    assert not partial.exists()
+
+
+@pytest.mark.parametrize("gap", ["review", "auto_archive"])
+def test_json_delivery_cache_reconciliation_recovers_post_commit_enqueue_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    gap: str,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+    from app.services import delivery_cache
+    from app.services.state_repository import JsonStateRepository
+
+    group = eligible_group(f"reconcile-{gap}", verification_status="passed")
+    team_id = install_json_queue(monkeypatch, [group])
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    original_enqueue = delivery_cache.enqueue_json_delivery_cache_job
+    monkeypatch.setattr(
+        delivery_cache,
+        "enqueue_json_delivery_cache_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("enqueue unavailable")),
+    )
+
+    if gap == "review":
+        monkeypatch.setattr(local_simulation, "ensure_task_claimed_by", lambda *_args, **_kwargs: None)
+        JsonStateRepository().review_group(group["id"], "approved", "reviewer-a")
+    else:
+        worker.auto_archive_verified_group(group["id"])
+
+    committed = local_simulation._team_states[team_id]
+    assert committed["groups"][0]["status"] == "approved"
+    assert committed["groups"][0]["delivery_cache_status"] == "retry_pending"
+    assert committed["delivery_cache_jobs"] == []
+
+    monkeypatch.setattr(delivery_cache, "enqueue_json_delivery_cache_job", original_enqueue)
+    report = delivery_cache.reconcile_delivery_cache_jobs()
+
+    assert report["enqueued"] == 1
+    reconciled = local_simulation._team_states[team_id]
+    assert reconciled["delivery_cache_jobs"][0]["status"] == "pending"
+
+
+def test_worker_and_daily_enqueue_paths_run_delivery_cache_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    install_json_queue(monkeypatch, [])
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    reconciliations: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "reconcile_delivery_cache_jobs",
+        lambda: reconciliations.append("reconcile") or {"enqueued": 0},
+    )
+    monkeypatch.setattr(worker, "_claim_next_work", lambda _worker_id: None)
+    monkeypatch.setattr(worker, "_maintenance_can_claim", lambda: True)
+    monkeypatch.setattr(worker, "maintenance_load_too_high", lambda: False)
+
+    worker.run_worker_batch(sleeper=lambda _seconds: None)
+    worker.enqueue_verification_jobs([])
+
+    assert reconciliations == ["reconcile", "reconcile"]
+
+
+def test_serve_startup_forces_persisted_control_back_to_paused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    events: list[tuple[str, object]] = []
+    monkeypatch.setenv("BARCODE_MAINTENANCE_START_PAUSED", "true")
+    monkeypatch.setattr(
+        worker,
+        "set_maintenance_paused",
+        lambda paused, actor: events.append(("paused", paused)) or {"paused": paused},
+    )
+
+    def stop_after_start(**_kwargs):
+        events.append(("batch", None))
+        raise RuntimeError("stop test worker")
+
+    monkeypatch.setattr(worker, "run_worker_batch", stop_after_start)
+
+    with pytest.raises(RuntimeError, match="stop test worker"):
+        worker.main(["--serve"])
+
+    assert events == [("paused", True), ("batch", None)]
+
+
+def test_runner_executes_with_flock_and_fixed_batch_limits_despite_hostile_env(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    runner = root / "scripts" / "run_photo_barcode_maintenance_slice.sh"
+    app_root = tmp_path / "app"
+    fake_bin = app_root / "bin"
+    python_path = app_root / "venv" / "bin" / "python"
+    (app_root / "current" / "v2-api").mkdir(parents=True)
+    fake_bin.mkdir(parents=True)
+    python_path.parent.mkdir(parents=True)
+    args_file = tmp_path / "python-args.txt"
+    lock_file = tmp_path / "flock-called.txt"
+    paused_file = tmp_path / "start-paused.txt"
+    python_path.write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "$BARCODE_ARGS_FILE"\n'
+        'printf "%s\\n" "$BARCODE_MAINTENANCE_START_PAUSED" > "$BARCODE_PAUSED_FILE"\n',
+        encoding="utf-8",
+    )
+    fake_flock = fake_bin / "flock"
+    fake_flock.write_text(
+        '#!/usr/bin/env bash\nprintf "called\\n" > "$BARCODE_FLOCK_FILE"\n'
+        'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
+        'shift\nexec "$@"\n',
+        encoding="utf-8",
+    )
+    python_path.chmod(0o755)
+    fake_flock.chmod(0o755)
+    (app_root / ".env").write_text(
+        'BARCODE_MAINTENANCE_BATCH_SIZE=999\n'
+        'BARCODE_MAINTENANCE_BATCH_PAUSE_SECONDS=0.01\n'
+        'BARCODE_MAINTENANCE_START_PAUSED=false\n'
+        'PATH="$APP_ROOT/bin:$PATH"\n',
+        encoding="utf-8",
+    )
+    bash = Path(os.environ.get("PROGRAMFILES", "")) / "Git" / "bin" / "bash.exe"
+    if not bash.exists():
+        bash = Path(shutil.which("bash") or "")
+    assert bash.exists(), "bash is required to execute the production runner test"
+    env = os.environ.copy()
+    env.update(
+        {
+            "BARCODE_ARGS_FILE": str(args_file),
+            "BARCODE_FLOCK_FILE": str(lock_file),
+            "BARCODE_PAUSED_FILE": str(paused_file),
+        }
+    )
+    app_root_argument = app_root.as_posix()
+    if app_root.drive:
+        app_root_argument = f"/{app_root.drive[0].lower()}{app_root_argument[2:]}"
+
+    completed = subprocess.run(
+        [str(bash), str(runner), app_root_argument, "--serve"],
+        check=False,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    args = args_file.read_text(encoding="utf-8").splitlines()
+    assert lock_file.read_text(encoding="utf-8").strip() == "called"
+    assert paused_file.read_text(encoding="utf-8").strip() == "true"
+    assert args[-4:] == ["--batch-size", "20", "--batch-pause-seconds", "5"]
+
+
+def test_expired_json_verification_lease_stops_at_retry_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    group = eligible_group("dead-verification-worker")
+    team_id = install_json_queue(monkeypatch, [group])
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    now = datetime(2026, 7, 22, 6, 0, tzinfo=UTC)
+
+    for attempt in range(worker.MAX_VERIFICATION_ATTEMPTS):
+        claim = worker.claim_next_verification_job(worker_id=f"dead-{attempt}", now=now)
+        assert claim is not None
+        now += timedelta(seconds=worker.DEFAULT_LEASE_SECONDS + 1)
+
+    assert worker.claim_next_verification_job(worker_id="must-not-claim", now=now) is None
+    verification = local_simulation._team_states[team_id]["groups"][0]["barcode_verification"]
+    assert verification["status"] == "failed"
+    assert verification["attempt_count"] == worker.MAX_VERIFICATION_ATTEMPTS
+    assert verification["manual_review_required"] is True
+    assert verification["retryable"] is False
+    assert verification["lease_owner"] is None
+
+
+def test_expired_json_delivery_cache_lease_stops_at_retry_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+    from app.services.delivery_cache import enqueue_json_delivery_cache_job
+
+    group = eligible_group("dead-cache-worker")
+    group["status"] = "approved"
+    team_id = install_json_queue(monkeypatch, [group])
+    monkeypatch.setattr(worker.settings, "state_backend", "json")
+    enqueue_json_delivery_cache_job(group["id"], team_id=team_id)
+    now = datetime(2026, 7, 22, 7, 0, tzinfo=UTC)
+
+    for attempt in range(worker.MAX_DELIVERY_CACHE_ATTEMPTS):
+        claim = worker.claim_next_delivery_cache_job(worker_id=f"dead-{attempt}", now=now)
+        assert claim is not None
+        now += timedelta(seconds=worker.DEFAULT_LEASE_SECONDS + 1)
+
+    assert worker.claim_next_delivery_cache_job(worker_id="must-not-claim", now=now) is None
+    state = local_simulation._team_states[team_id]
+    durable_job = state["delivery_cache_jobs"][0]
+    assert durable_job["status"] == "failed"
+    assert durable_job["attempt_count"] == worker.MAX_DELIVERY_CACHE_ATTEMPTS
+    assert durable_job["retryable"] is False
+    assert durable_job["manual_review_required"] is True
+    assert durable_job["lease_owner"] is None
+    assert state["groups"][0]["delivery_cache_status"] == "manual_required"
+
+
+def test_postgres_delivery_claim_locks_control_before_job_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+    from app.services.delivery_cache import DeliveryCacheClaim
+
+    events: list[str] = []
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            events.append(sql)
+            return SimpleNamespace(paused=False)
+
+    monkeypatch.setattr(worker.settings, "state_backend", "postgres")
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "team-lock")
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+
+    def claim(_session, **_kwargs):
+        assert "FOR UPDATE" in events[0]
+        events.append("job-claim")
+        return DeliveryCacheClaim("team-lock", str(uuid4()), "worker", "token", 1)
+
+    monkeypatch.setattr(worker, "claim_postgres_delivery_cache_job", claim)
+
+    result = worker.claim_next_delivery_cache_job(worker_id="worker")
+
+    assert result is not None
+    assert events[-1] == "job-claim"
+
+
+def test_dual_verification_claim_refuses_before_either_backend_mutates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+    from app.services.state_repository import StateBackendNotReady
+
+    group = eligible_group("dual-claim")
+    team_id = install_json_queue(monkeypatch, [group])
+    before = deepcopy(local_simulation._team_states[team_id])
+    monkeypatch.setattr(worker.settings, "state_backend", "dual")
+    monkeypatch.setattr(
+        worker,
+        "_claim_postgres_verification",
+        lambda **_kwargs: pytest.fail("PostgreSQL must not be touched in DualWrite"),
+    )
+
+    with pytest.raises(StateBackendNotReady, match="Dual"):
+        worker.claim_next_verification_job(worker_id="dual-worker")
+
+    assert local_simulation._team_states[team_id] == before
+
+
+def test_dual_auto_archive_refuses_before_backends_or_cache_queue_mutate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+    from app.services.state_repository import StateBackendNotReady
+
+    group = eligible_group("dual-archive", verification_status="passed")
+    team_id = install_json_queue(monkeypatch, [group])
+    before = deepcopy(local_simulation._team_states[team_id])
+    monkeypatch.setattr(worker.settings, "state_backend", "dual")
+    monkeypatch.setattr(
+        worker,
+        "_auto_archive_postgres",
+        lambda *_args, **_kwargs: pytest.fail("PostgreSQL must not be touched in DualWrite"),
+    )
+
+    with pytest.raises(StateBackendNotReady, match="Dual"):
+        worker.auto_archive_verified_group(group["id"])
+
+    assert local_simulation._team_states[team_id] == before
+    assert local_simulation._team_states[team_id]["delivery_cache_jobs"] == []
 
 
 def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:

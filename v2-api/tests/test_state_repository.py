@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -800,6 +801,91 @@ def test_postgres_review_cache_enqueue_failure_preserves_review_and_records_retr
     assert group.raw_data["delivery_cache_status"] == "retry_pending"
     assert group.raw_data["delivery_cache_retryable"] is True
     assert events == ["begin", "commit", "refresh", "begin", "begin", "commit"]
+
+
+def test_postgres_repository_manifest_and_path_read_completed_durable_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.delivery_cache import cache_group_photos
+
+    content = b"postgres-durable-cache"
+    sha256 = hashlib.sha256(content).hexdigest()
+    group_payload = {
+        "id": "postgres-cache-e2e",
+        "task_id": 17,
+        "terminal": "T-POSTGRES-CACHE",
+        "meter_no": "M-POSTGRES-CACHE",
+        "status": "approved",
+        "reviewer": "reviewer-a",
+        "photos": [
+            {
+                "id": "postgres-photo-cache",
+                "image_url": "oss://bucket/postgres-photo-cache.jpg",
+                "storage_type": "oss",
+                "storage_bucket": "bucket",
+                "storage_key": "postgres-photo-cache.jpg",
+                "sha256": sha256,
+                "category": "before_box",
+                "archive_filename": "before.jpg",
+                "is_active": True,
+            }
+        ],
+    }
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    cache_group_photos(
+        group_payload,
+        cache_root=tmp_path,
+        fetch_photo=lambda _photo: (content, ".jpg", "image/jpeg"),
+    )
+    group_id = uuid4()
+    group = SimpleNamespace(
+        id=group_id,
+        legacy_id=group_payload["id"],
+        team_id="postgres-cache-team",
+        terminal=group_payload["terminal"],
+        display_meter_no=group_payload["meter_no"],
+        status=repository.GroupStatus.APPROVED,
+        raw_data={
+            "delivery_cache_status": group_payload["delivery_cache_status"],
+        },
+    )
+
+    class ScalarRows:
+        def all(self):
+            return [group]
+
+    class Session:
+        def scalars(self, _statement):
+            return ScalarRows()
+
+    session = Session()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(session)
+
+        def _group_by_legacy_id(self, checked_session, group_id_value, lock=False):
+            assert checked_session is session
+            assert group_id_value == group.legacy_id
+            return group
+
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, _group, **_kwargs: deepcopy(group_payload))
+    postgres_repository = TestRepository()
+
+    manifest = postgres_repository.build_final_delivery_manifest(
+        terminal=group_payload["terminal"],
+        review_scope="all",
+    )
+    cached_path = postgres_repository.get_delivery_cached_photo_path(
+        group_payload["id"],
+        group_payload["photos"][0]["id"],
+    )
+
+    assert manifest["groups"][0]["photos"][0]["delivery_cache_url"].startswith(
+        "/local-test/delivery-cache/"
+    )
+    assert cached_path.read_bytes() == content
 
 
 def test_group_barcode_rescan_audit_payload_has_unique_keys() -> None:

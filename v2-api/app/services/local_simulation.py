@@ -1128,11 +1128,12 @@ def delivery_cache_file_for_photo(group: dict[str, Any], photo: dict[str, Any]) 
 
 
 def delivery_cache_url_for_photo(group: dict[str, Any], photo: dict[str, Any]) -> str:
-    path = delivery_cache_file_for_photo(group, photo)
     version = str(photo.get("delivery_cache_version") or "")
-    if not path or not version or not path.exists():
+    if not version:
         return ""
-    if version != delivery_photo_cache_version(photo):
+    try:
+        get_delivery_cached_photo_path_from_payload(group, photo)
+    except FileNotFoundError:
         return ""
     return f"/local-test/delivery-cache/{group.get('id')}/{photo.get('id')}?v={version[:16]}"
 
@@ -1142,6 +1143,13 @@ def group_delivery_cache_ready(group: dict[str, Any]) -> bool:
     return bool(photos) and all(delivery_cache_url_for_photo(group, photo) for photo in photos)
 
 
+def get_delivery_cached_photo_path_from_payload(group: dict[str, Any], photo: dict[str, Any]) -> Path:
+    path = delivery_cache_file_for_photo(group, photo)
+    if not path or not path.exists() or photo.get("delivery_cache_version") != delivery_photo_cache_version(photo):
+        raise FileNotFoundError(str(photo.get("id") or ""))
+    return path
+
+
 def get_delivery_cached_photo_path(group_id: str, photo_id: str) -> Path:
     group = get_group(group_id)
     if group is None:
@@ -1149,10 +1157,7 @@ def get_delivery_cached_photo_path(group_id: str, photo_id: str) -> Path:
     photo = next((item for item in group.get("photos", []) if item.get("id") == photo_id), None)
     if photo is None:
         raise KeyError(photo_id)
-    path = delivery_cache_file_for_photo(group, photo)
-    if not path or not path.exists() or photo.get("delivery_cache_version") != delivery_photo_cache_version(photo):
-        raise FileNotFoundError(photo_id)
-    return path
+    return get_delivery_cached_photo_path_from_payload(group, photo)
 
 
 def photo_cache_download_url(photo: dict[str, Any]) -> str:
