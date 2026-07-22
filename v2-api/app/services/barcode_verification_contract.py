@@ -23,6 +23,15 @@ TERMINAL_STATUSES = frozenset({"passed", "partial", "unreadable", "mismatch", "m
 PASS_STATUSES = frozenset({"passed", "manual_confirmed"})
 EXCEPTION_STATUSES = frozenset({"partial", "mismatch", "failed"})
 MATCH_FIELDS = (("meter", "meter_matched"), ("module", "module_matched"), ("collector", "collector_matched"))
+EVIDENCE_ARRAY_KEYS = (
+    "machine_barcode_values",
+    "machine_qr_values",
+    "ocr_candidates",
+    "unmatched_machine_values",
+    "matched_ocr_candidates",
+    "unmatched_ocr_candidates",
+)
+OCR_ONLY_METHODS = frozenset({"ocr", "barcode_ocr", "ocr_assisted"})
 
 
 def _value(source: Any, key: str, default: Any = None) -> Any:
@@ -60,7 +69,7 @@ def normalize_barcode_verification(source: Any, raw: Mapping[str, Any] | None = 
     source_result = source.get("result") if source_is_mapping else None
     if isinstance(source_result, Mapping):
         raw_result = source_result
-    elif source_is_mapping or _same_evidence(source, raw_payload):
+    elif _same_evidence(source, raw_payload):
         raw_result = raw_payload.get("result")
     else:
         raw_result = {}
@@ -85,14 +94,7 @@ def normalize_barcode_verification(source: Any, raw: Mapping[str, Any] | None = 
         "matched_fields": matched_fields,
         "missing_fields": missing_fields,
     }
-    for key in (
-        "machine_barcode_values",
-        "machine_qr_values",
-        "ocr_candidates",
-        "unmatched_machine_values",
-        "matched_ocr_candidates",
-        "unmatched_ocr_candidates",
-    ):
+    for key in EVIDENCE_ARRAY_KEYS:
         values = raw_result.get(key)
         result[key] = [str(item) for item in values or [] if str(item)] if isinstance(values, (list, tuple, set)) else []
 
@@ -117,6 +119,131 @@ def normalize_barcode_verification(source: Any, raw: Mapping[str, Any] | None = 
         "result": result,
     }
     return payload
+
+
+def _unique_strings(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    unique: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in unique:
+            unique.append(text)
+    return unique
+
+
+def _legacy_evidence(photos: list[Mapping[str, Any]]) -> tuple[list[str], list[str], list[str], bool]:
+    machine_barcodes: list[str] = []
+    machine_qrs: list[str] = []
+    ocr_candidates: list[str] = []
+    has_machine_evidence = False
+    has_ocr_evidence = False
+    for photo in photos:
+        if photo.get("is_active", True) is False:
+            continue
+        upload_status = getattr(
+            photo.get("upload_status", "uploaded"),
+            "value",
+            photo.get("upload_status", "uploaded"),
+        )
+        if str(upload_status or "").strip().lower() == "invalid":
+            continue
+        method = str(photo.get("barcode_check_method") or "").strip().lower()
+        barcode_values = _unique_strings(photo.get("machine_barcode_values"))
+        qr_values = _unique_strings(photo.get("machine_qr_values"))
+        ocr_values = _unique_strings(photo.get("ocr_candidate_values"))
+        ocr_values.extend(
+            value
+            for value in _unique_strings(photo.get("barcode_check_ocr_values"))
+            if value not in ocr_values
+        )
+        if not barcode_values and not qr_values and method and method not in OCR_ONLY_METHODS:
+            barcode_values = _unique_strings(photo.get("barcode_check_values"))
+        for target, values in (
+            (machine_barcodes, barcode_values),
+            (machine_qrs, qr_values),
+            (ocr_candidates, ocr_values),
+        ):
+            target.extend(value for value in values if value not in target)
+        has_machine_evidence = has_machine_evidence or bool(barcode_values or qr_values)
+        has_ocr_evidence = has_ocr_evidence or bool(ocr_values) or method in OCR_ONLY_METHODS
+    return machine_barcodes, machine_qrs, ocr_candidates, has_ocr_evidence and not has_machine_evidence
+
+
+def _legacy_verification(raw: Mapping[str, Any], photos: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    legacy_status = str(raw.get("group_barcode_check_status") or "").strip().lower()
+    status_map = {
+        "mismatched": "mismatch",
+        "unreadable": "unreadable",
+        "not_required": "not_eligible",
+    }
+    machine_barcodes, machine_qrs, ocr_candidates, ocr_only = _legacy_evidence(photos)
+    manual_confirmed = bool(raw.get("group_barcode_manual_confirmed"))
+    if legacy_status == "matched":
+        if manual_confirmed:
+            status = "manual_confirmed"
+        elif ocr_only:
+            status = "partial"
+        else:
+            status = "passed"
+    else:
+        status = status_map.get(legacy_status, "")
+    if not status:
+        return None
+
+    matched_fields = [
+        str(field)
+        for field in raw.get("group_barcode_matched_fields") or []
+        if str(field) in {name for name, _attribute in MATCH_FIELDS}
+    ]
+    if status in PASS_STATUSES:
+        matched_fields = [name for name, _attribute in MATCH_FIELDS]
+    if ocr_only:
+        matched_fields = []
+    matched_set = set(matched_fields)
+    return {
+        "status": status,
+        "evidence_fingerprint": "",
+        "evidence_version": 0,
+        "meter_matched": "meter" in matched_set,
+        "module_matched": "module" in matched_set,
+        "collector_matched": "collector" in matched_set,
+        "recognition_source": (
+            "manual_confirmed"
+            if status == "manual_confirmed"
+            else "ocr_candidate"
+            if ocr_only
+            else "legacy_machine"
+        ),
+        "attempt_count": 0,
+        "result": {
+            "passed_count": len(matched_fields),
+            "matched_fields": matched_fields,
+            "missing_fields": [name for name, _attribute in MATCH_FIELDS if name not in matched_set],
+            "machine_barcode_values": machine_barcodes,
+            "machine_qr_values": machine_qrs,
+            "ocr_candidates": ocr_candidates,
+            "unmatched_machine_values": _unique_strings(raw.get("group_barcode_unmatched_values")),
+            "matched_ocr_candidates": [],
+            "unmatched_ocr_candidates": [],
+        },
+    }
+
+
+def resolve_persisted_barcode_verification(
+    source: Any,
+    raw: Mapping[str, Any] | None,
+    photos: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    raw_payload = raw if isinstance(raw, Mapping) else {}
+    nested = raw_payload.get("barcode_verification")
+    nested_payload = nested if isinstance(nested, Mapping) else {}
+    if source is not None:
+        return normalize_barcode_verification(source, nested_payload)
+    durable = normalize_barcode_verification(nested_payload)
+    if durable:
+        return durable
+    return normalize_barcode_verification(_legacy_verification(raw_payload, list(photos or [])))
 
 
 def verification_compatibility_fields(verification: Mapping[str, Any] | None) -> dict[str, Any]:

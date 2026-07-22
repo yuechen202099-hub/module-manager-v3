@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import String, and_, case, cast, func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.core.config import settings
 from app.database import SessionLocal
@@ -39,11 +39,14 @@ from app.models import (
 )
 from app.services import account_store
 from app.services.barcode_verification_contract import (
+    DURABLE_STATUSES,
     EXCEPTION_STATUSES,
+    OCR_ONLY_METHODS,
     PASS_STATUSES,
     REQUIRED_CATEGORIES,
     TERMINAL_STATUSES,
     normalize_barcode_verification,
+    resolve_persisted_barcode_verification,
     summarize_durable_accuracy,
     verification_compatibility_fields,
 )
@@ -1201,6 +1204,7 @@ def _group_barcode_payload_from_row(row: Any) -> dict[str, Any]:
         "creator": raw.get("creator") or "",
         "status": _row_value(row, "status") or raw.get("status") or "",
         "photo_count": int(_row_value(row, "photo_count", 0) or 0),
+        "_barcode_legacy_raw": raw,
     }
     verification_status = str(_row_value(row, "verification_status", "") or "")
     if verification_status:
@@ -1231,12 +1235,18 @@ def _group_barcode_payload_from_row(row: Any) -> dict[str, Any]:
         if durable_verification:
             payload["barcode_verification"] = durable_verification
             payload.update(verification_compatibility_fields(durable_verification))
+    else:
+        durable_verification = normalize_barcode_verification(raw.get("barcode_verification"))
+        if durable_verification:
+            payload["barcode_verification"] = durable_verification
+            payload.update(verification_compatibility_fields(durable_verification))
     return payload
 
 
 def _group_barcode_payload(group: Any, photos: list[Any]) -> dict[str, Any]:
     if isinstance(group, dict):
         payload = dict(group)
+        raw = payload.pop("_barcode_legacy_raw", payload)
     else:
         payload = _group_barcode_context(group)
         raw = getattr(group, "raw_data", {}) or {}
@@ -1250,6 +1260,14 @@ def _group_barcode_payload(group: Any, photos: list[Any]) -> dict[str, Any]:
         else:
             photo_payloads.append(_photo_payload(photo))
     payload["photos"] = photo_payloads
+    durable_verification = resolve_persisted_barcode_verification(
+        payload.get("barcode_verification"),
+        raw,
+        photo_payloads,
+    )
+    if durable_verification:
+        payload["barcode_verification"] = durable_verification
+        payload.update(verification_compatibility_fields(durable_verification))
     return payload
 
 
@@ -1326,6 +1344,80 @@ def _eligible_group_photo_set_subquery(team_id: str):
             func.sum(case((Photo.category.in_(REQUIRED_CATEGORIES), 1), else_=0)) == required_count,
         )
         .subquery()
+    )
+
+
+def _postgres_review_verification_status_expression():
+    legacy_photo = aliased(Photo)
+    nested_status = MaterialGroup.raw_data["barcode_verification"]["status"].as_string()
+    legacy_status = func.lower(
+        func.coalesce(MaterialGroup.raw_data.op("->>")("group_barcode_check_status"), "")
+    )
+    photo_status = func.lower(
+        func.coalesce(legacy_photo.raw_data.op("->>")("barcode_check_status"), "")
+    )
+    photo_method = func.lower(
+        func.coalesce(legacy_photo.raw_data.op("->>")("barcode_check_method"), "")
+    )
+    legacy_ocr_match = (
+        select(legacy_photo.id)
+        .where(
+            legacy_photo.team_id == MaterialGroup.team_id,
+            legacy_photo.group_id == MaterialGroup.id,
+            legacy_photo.is_active.is_(True),
+            legacy_photo.upload_status != PhotoUploadStatus.INVALID,
+            photo_status == "matched",
+            photo_method.in_(OCR_ONLY_METHODS),
+        )
+        .exists()
+    )
+    legacy_machine_match = (
+        select(legacy_photo.id)
+        .where(
+            legacy_photo.team_id == MaterialGroup.team_id,
+            legacy_photo.group_id == MaterialGroup.id,
+            legacy_photo.is_active.is_(True),
+            legacy_photo.upload_status != PhotoUploadStatus.INVALID,
+            photo_status == "matched",
+            or_(
+                and_(photo_method != "", photo_method.notin_(OCR_ONLY_METHODS)),
+                func.jsonb_array_length(legacy_photo.raw_data["machine_barcode_values"]) > 0,
+                func.jsonb_array_length(legacy_photo.raw_data["machine_qr_values"]) > 0,
+            ),
+        )
+        .exists()
+    )
+    manual_confirmed = (
+        func.lower(
+            func.coalesce(
+                MaterialGroup.raw_data.op("->>")("group_barcode_manual_confirmed"),
+                "",
+            )
+        )
+        == "true"
+    )
+    nested_durable_status = case(
+        (nested_status.in_(DURABLE_STATUSES), nested_status),
+        else_=None,
+    )
+    legacy_durable_status = case(
+        (
+            legacy_status == "matched",
+            case(
+                (manual_confirmed, "manual_confirmed"),
+                (and_(legacy_ocr_match, ~legacy_machine_match), "partial"),
+                else_="passed",
+            ),
+        ),
+        (legacy_status == "mismatched", "mismatch"),
+        (legacy_status == "unreadable", "unreadable"),
+        (legacy_status == "not_required", "not_eligible"),
+        else_=None,
+    )
+    return func.coalesce(
+        GroupBarcodeVerification.status,
+        nested_durable_status,
+        legacy_durable_status,
     )
 
 
@@ -1478,7 +1570,7 @@ def _group_payload(
                 GroupBarcodeVerification.group_id == group.id,
             )
         )
-    durable_verification = normalize_barcode_verification(verification, raw.get("barcode_verification") or {})
+    durable_verification = resolve_persisted_barcode_verification(verification, raw, photos)
     if durable_verification:
         payload["barcode_verification"] = durable_verification
         payload.update(verification_compatibility_fields(durable_verification))
@@ -4543,10 +4635,11 @@ class PostgresStateRepository(StateRepository):
             durable_statuses = frozenset({"unreadable"})
 
         valid_photo_counts = _eligible_group_photo_set_subquery(team_id)
+        resolved_verification_status = _postgres_review_verification_status_expression()
         statement = (
             select(MaterialGroup)
             .join(valid_photo_counts, valid_photo_counts.c.group_id == MaterialGroup.id)
-            .join(
+            .outerjoin(
                 GroupBarcodeVerification,
                 and_(
                     GroupBarcodeVerification.team_id == MaterialGroup.team_id,
@@ -4555,7 +4648,7 @@ class PostgresStateRepository(StateRepository):
             )
             .where(
                 MaterialGroup.team_id == team_id,
-                GroupBarcodeVerification.status.in_(durable_statuses),
+                resolved_verification_status.in_(durable_statuses),
             )
         )
         for term in [item for item in re.split(r"\s+", query.strip()) if item]:
@@ -4583,7 +4676,7 @@ class PostgresStateRepository(StateRepository):
                     MaterialGroup.display_meter_no.ilike(pattern),
                     MaterialGroup.installation_address.ilike(pattern),
                     cast(MaterialGroup.raw_data, String).ilike(pattern),
-                    GroupBarcodeVerification.status.ilike(pattern),
+                    resolved_verification_status.ilike(pattern),
                     GroupBarcodeVerification.recognition_source.ilike(pattern),
                     photo_match,
                 )
@@ -4632,9 +4725,10 @@ class PostgresStateRepository(StateRepository):
         payloads = []
         for group in groups:
             payload = _group_barcode_payload(group, photos_by_group_id.get(str(group.id), []))
-            durable_verification = normalize_barcode_verification(
+            durable_verification = resolve_persisted_barcode_verification(
                 verification_by_group_id.get(str(group.id)),
-                (group.raw_data or {}).get("barcode_verification") or {},
+                group.raw_data or {},
+                payload.get("photos") or [],
             )
             if durable_verification:
                 payload["barcode_verification"] = durable_verification

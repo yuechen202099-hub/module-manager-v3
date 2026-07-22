@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import os
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import create_engine, text
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import sessionmaker
 
+from app.database import Base
+from app.models import GroupBarcodeVerification, MaterialGroup, Photo, PhotoUploadStatus, Project, Team
 from app.services import photo_barcode_check
+from app.services import local_simulation
 from app.services import state_repository as repository
 
 
@@ -142,6 +149,134 @@ def test_postgres_group_payload_prefers_current_verification_row_over_stale_raw_
     assert payload["barcode_verification_status"] == "processing"
 
 
+def legacy_postgres_group(legacy_status: str, *, nested: dict | None = None) -> SimpleNamespace:
+    raw_data = {
+        "collector": "COLLECTOR-001",
+        "module_asset_no": "MODULE-001",
+        "group_barcode_check_status": legacy_status,
+    }
+    if nested is not None:
+        raw_data["barcode_verification"] = nested
+    return SimpleNamespace(
+        id=uuid4(),
+        legacy_id=f"legacy-{legacy_status}",
+        team_id="legacy-team",
+        task_id=None,
+        legacy_task_id=1,
+        display_meter_no="METER-001",
+        meter_match_key="METER-001",
+        terminal="TERMINAL-001",
+        installation_address="Address",
+        status=repository.GroupStatus.APPROVED,
+        photo_count=4,
+        raw_data=raw_data,
+    )
+
+
+@pytest.mark.parametrize(
+    ("legacy_status", "durable_status", "summary_key"),
+    [
+        ("matched", "passed", "group_barcode_accuracy_passed"),
+        ("mismatched", "mismatch", "group_barcode_accuracy_mismatch"),
+        ("unreadable", "unreadable", "group_barcode_accuracy_unreadable"),
+    ],
+)
+def test_postgres_dashboard_keeps_eligible_legacy_groups_without_verification_rows(
+    legacy_status: str,
+    durable_status: str,
+    summary_key: str,
+) -> None:
+    group = legacy_postgres_group(legacy_status)
+    row = {
+        "group_id": group.id,
+        "legacy_id": group.legacy_id,
+        "legacy_task_id": group.legacy_task_id,
+        "display_meter_no": group.display_meter_no,
+        "meter_match_key": group.meter_match_key,
+        "terminal": group.terminal,
+        "installation_address": group.installation_address,
+        "status": group.status,
+        "photo_count": group.photo_count,
+        "raw_data": group.raw_data,
+        "verification_status": None,
+    }
+    payload = repository._group_barcode_payload_from_row(row)
+
+    summary = repository._group_barcode_accuracy_summary(
+        [payload],
+        {str(group.id): eligible_photos(legacy_status)},
+        total_groups=1,
+    )
+
+    assert payload.get("barcode_verification") is None
+    assert summary[summary_key] == 1
+    assert summary["group_barcode_accuracy_not_eligible"] == 0
+
+
+@pytest.mark.parametrize(
+    ("legacy_status", "durable_status", "review_status"),
+    [
+        ("matched", "passed", "matched"),
+        ("mismatched", "mismatch", "mismatched"),
+        ("unreadable", "unreadable", "unreadable"),
+    ],
+)
+def test_postgres_review_and_export_payload_keeps_legacy_groups_without_verification_rows(
+    legacy_status: str,
+    durable_status: str,
+    review_status: str,
+) -> None:
+    group = legacy_postgres_group(legacy_status)
+    payload = repository._group_barcode_payload(group, eligible_photos(legacy_status))
+
+    items = photo_barcode_check.list_group_barcode_review_items(
+        [payload],
+        statuses={"matched", "mismatched", "unreadable"},
+    )
+
+    assert payload["barcode_verification"]["status"] == durable_status
+    assert len(items) == 1
+    assert items[0]["status"] == review_status
+    assert items[0]["barcode_verification"]["status"] == durable_status
+
+
+def test_nested_persisted_verification_wins_when_postgres_relation_row_is_missing() -> None:
+    nested = durable_verification("mismatch", passed_count=1, source="machine_qr")
+    group = legacy_postgres_group("matched", nested=nested)
+
+    payload = repository._group_barcode_payload(group, eligible_photos("nested"))
+
+    assert payload["barcode_verification"]["status"] == "mismatch"
+    assert payload["barcode_verification"]["result"] == nested["result"]
+
+
+def test_legacy_ocr_only_match_never_becomes_passed_or_manual_confirmed() -> None:
+    group = legacy_postgres_group("matched")
+    photos = eligible_photos("ocr-only")
+    for index, photo in enumerate(photos, start=1):
+        photo.update(
+            {
+                "barcode_check_status": "matched",
+                "barcode_check_method": "ocr",
+                "barcode_check_ocr_values": [f"OCR-{index}"],
+            }
+        )
+
+    payload = repository._group_barcode_payload(group, photos)
+
+    assert payload["barcode_verification"]["status"] == "partial"
+    assert payload["barcode_verification"]["status"] not in {"passed", "manual_confirmed"}
+    assert payload["barcode_verification"]["result"]["passed_count"] == 0
+    assert payload["barcode_verification"]["result"]["machine_barcode_values"] == []
+    assert payload["barcode_verification"]["result"]["machine_qr_values"] == []
+    assert payload["barcode_verification"]["result"]["ocr_candidates"] == [
+        "OCR-1",
+        "OCR-2",
+        "OCR-3",
+        "OCR-4",
+    ]
+
+
 def test_json_durable_verification_preserves_current_machine_and_ocr_result_details() -> None:
     source = durable_verification("partial", passed_count=2, source="machine_qr")
     source["result"].update(
@@ -156,6 +291,55 @@ def test_json_durable_verification_preserves_current_machine_and_ocr_result_deta
     )
 
     payload = repository.normalize_barcode_verification(source)
+
+    assert payload is not None
+    assert payload["result"] == source["result"]
+
+
+@pytest.mark.parametrize(
+    ("source_version", "source_fingerprint"),
+    [
+        (8, "a" * 64),
+        (7, "b" * 64),
+    ],
+)
+def test_normalize_barcode_verification_rejects_stale_raw_evidence_arrays(
+    source_version: int,
+    source_fingerprint: str,
+) -> None:
+    raw = durable_verification("passed", passed_count=3)
+    source = {
+        "status": "partial",
+        "evidence_fingerprint": source_fingerprint,
+        "evidence_version": source_version,
+        "meter_matched": True,
+        "module_matched": False,
+        "collector_matched": False,
+        "recognition_source": "machine_barcode",
+    }
+
+    payload = repository.normalize_barcode_verification(source, raw)
+
+    assert payload is not None
+    for key in (
+        "machine_barcode_values",
+        "machine_qr_values",
+        "ocr_candidates",
+        "unmatched_machine_values",
+        "matched_ocr_candidates",
+        "unmatched_ocr_candidates",
+    ):
+        assert payload["result"][key] == []
+
+
+def test_normalize_barcode_verification_keeps_explicit_source_result_when_raw_is_stale() -> None:
+    raw = durable_verification("passed", passed_count=3)
+    source = durable_verification("partial", passed_count=1)
+    source["evidence_fingerprint"] = "b" * 64
+    source["evidence_version"] = 8
+    source["result"]["machine_barcode_values"] = ["CURRENT-METER"]
+
+    payload = repository.normalize_barcode_verification(source, raw)
 
     assert payload is not None
     assert payload["result"] == source["result"]
@@ -546,6 +730,226 @@ def test_postgres_review_eligibility_counts_every_valid_photo_before_category_ma
     assert "count(DISTINCT photos.category) = 4" in having_sql
     assert "sum(CASE WHEN (photos.category IN" in having_sql
     assert "photos.category IN" not in where_sql
+
+
+@pytest.fixture()
+def isolated_task6_postgres(monkeypatch: pytest.MonkeyPatch):
+    database_url = (
+        os.getenv("TASK6_POSTGRES_TEST_URL", "").strip()
+        or os.getenv("ROUND3_POSTGRES_TEST_URL", "").strip()
+    )
+    if not database_url:
+        pytest.skip("TASK6_POSTGRES_TEST_URL is required for the real PostgreSQL repository test")
+    parsed = make_url(database_url)
+    assert parsed.get_backend_name() == "postgresql"
+    assert parsed.host in {"localhost", "127.0.0.1", "::1"}, "Task 6 PostgreSQL test must stay local"
+
+    schema = f"task6_{uuid4().hex}"
+    admin_engine = create_engine(database_url, pool_pre_ping=True)
+    with admin_engine.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    test_engine = create_engine(
+        database_url,
+        pool_pre_ping=True,
+        execution_options={"schema_translate_map": {None: schema}},
+        connect_args={
+            "options": f"-csearch_path={schema},public -cstatement_timeout=15000 -clock_timeout=10000"
+        },
+    )
+    try:
+        Base.metadata.create_all(test_engine)
+        session_factory = sessionmaker(
+            bind=test_engine,
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+        )
+        monkeypatch.setattr(repository, "SessionLocal", session_factory)
+        yield session_factory
+    finally:
+        test_engine.dispose()
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        admin_engine.dispose()
+
+
+def test_postgres_review_repository_executes_eligibility_and_pagination_rules(
+    isolated_task6_postgres,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = isolated_task6_postgres
+    team_id = f"task6-team-{uuid4().hex[:12]}"
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+    expected_ids: list[str] = []
+
+    with session_factory.begin() as session:
+        team = Team(id=team_id, name="Task 6 isolated PostgreSQL test")
+        session.add(team)
+        session.flush()
+        project = Project(team_id=team_id, code=f"TASK6-{uuid4().hex[:12]}", name="Task 6 project")
+        session.add(project)
+        session.flush()
+
+        def add_group(
+            name: str,
+            categories: list[str],
+            *,
+            legacy_status: str = "matched",
+            nested: dict | None = None,
+            relation_status: str | None = "passed",
+            invalid_last: bool = False,
+            ocr_only: bool = False,
+            invalid_machine_extra: bool = False,
+        ) -> MaterialGroup:
+            raw_data = {
+                "collector": f"COLLECTOR-{name}",
+                "module_asset_no": f"MODULE-{name}",
+                "group_barcode_check_status": legacy_status,
+            }
+            if nested is not None:
+                raw_data["barcode_verification"] = nested
+            group = MaterialGroup(
+                team_id=team_id,
+                project_id=project.id,
+                legacy_id=name,
+                terminal=f"TERMINAL-{name}",
+                meter_match_key=f"METER-{name}",
+                display_meter_no=f"METER-{name}",
+                installation_address=f"Address {name}",
+                status=repository.GroupStatus.APPROVED,
+                photo_count=len(categories),
+                raw_data=raw_data,
+            )
+            session.add(group)
+            session.flush()
+            for index, category in enumerate(categories):
+                photo_raw = {}
+                if ocr_only:
+                    photo_raw = {
+                        "barcode_check_status": "matched",
+                        "barcode_check_method": "ocr",
+                        "barcode_check_ocr_values": [f"OCR-{name}-{index}"],
+                    }
+                if invalid_machine_extra and index == len(categories) - 1:
+                    photo_raw = {
+                        "barcode_check_status": "matched",
+                        "barcode_check_method": "barcode",
+                        "machine_barcode_values": [f"INVALID-MACHINE-{name}"],
+                    }
+                session.add(
+                    Photo(
+                        team_id=team_id,
+                        group_id=group.id,
+                        legacy_id=f"{name}-photo-{index}",
+                        sha256=f"{name}-{index}".encode().hex().ljust(64, "0")[:64],
+                        object_key=f"task6/{name}/{index}.jpg",
+                        category=category,
+                        upload_status=(
+                            PhotoUploadStatus.INVALID
+                            if invalid_last and index == len(categories) - 1
+                            else PhotoUploadStatus.UPLOADED
+                        ),
+                        is_active=True,
+                        sort_order=index,
+                        raw_data=photo_raw,
+                    )
+                )
+            if relation_status is not None:
+                session.add(
+                    GroupBarcodeVerification(
+                        team_id=team_id,
+                        group_id=group.id,
+                        status=relation_status,
+                        evidence_fingerprint=f"{name}".encode().hex().ljust(64, "0")[:64],
+                        evidence_version=1,
+                        meter_matched=relation_status == "passed",
+                        module_matched=relation_status == "passed",
+                        collector_matched=relation_status == "passed",
+                        recognition_source="machine_barcode",
+                    )
+                )
+            return group
+
+        for index in range(44):
+            name = f"eligible-{index:02d}"
+            expected_ids.append(name)
+            options = {}
+            categories = list(REQUIRED_CATEGORIES)
+            if index == 0:
+                options = {"relation_status": None, "legacy_status": "matched"}
+            elif index == 1:
+                options = {"relation_status": None, "legacy_status": "mismatched"}
+            elif index == 2:
+                options = {"relation_status": None, "legacy_status": "unreadable"}
+            elif index == 3:
+                options = {
+                    "relation_status": None,
+                    "legacy_status": "matched",
+                    "nested": durable_verification("mismatch", passed_count=1),
+                }
+            elif index == 4:
+                options = {"relation_status": "unreadable", "legacy_status": "matched"}
+            elif index == 5:
+                categories.append("before_box")
+                options = {
+                    "relation_status": None,
+                    "legacy_status": "matched",
+                    "ocr_only": True,
+                    "invalid_last": True,
+                    "invalid_machine_extra": True,
+                }
+            add_group(name, categories, **options)
+
+        expected_ids.append("eligible-44-invalid-extra")
+        add_group(
+            "eligible-44-invalid-extra",
+            [*REQUIRED_CATEGORIES, "before_box"],
+            invalid_last=True,
+        )
+        add_group("excluded-5-valid", [*REQUIRED_CATEGORIES, "before_box"])
+        add_group("excluded-duplicate", ["before_box", "before_box", "module_meter", "after_box"])
+        add_group("excluded-missing", list(REQUIRED_CATEGORIES[:-1]))
+
+    result_pages = [
+        repository.PostgresStateRepository().list_photo_barcode_review_groups(
+            status="all",
+            query="",
+            limit=20,
+            offset=offset,
+        )
+        for offset in (0, 20, 40)
+    ]
+
+    assert [page["total"] for page in result_pages] == [45, 45, 45]
+    assert [len(page["items"]) for page in result_pages] == [20, 20, 5]
+    assert [page["page"] for page in result_pages] == [1, 2, 3]
+    assert [item["group_id"] for page in result_pages for item in page["items"]] == expected_ids
+
+    by_id = {item["group_id"]: item for page in result_pages for item in page["items"]}
+    assert by_id["eligible-00"]["barcode_verification"]["status"] == "passed"
+    assert by_id["eligible-01"]["barcode_verification"]["status"] == "mismatch"
+    assert by_id["eligible-02"]["barcode_verification"]["status"] == "unreadable"
+    assert by_id["eligible-03"]["barcode_verification"]["status"] == "mismatch"
+    assert by_id["eligible-04"]["barcode_verification"]["status"] == "unreadable"
+    assert by_id["eligible-05"]["barcode_verification"]["status"] == "partial"
+    assert by_id["eligible-05"]["barcode_verification"]["status"] not in {"passed", "manual_confirmed"}
+    assert by_id["eligible-44-invalid-extra"]["photo_count"] == 5
+
+    matched = repository.PostgresStateRepository().list_photo_barcode_review_groups(
+        status="matched", query="", limit=100, offset=0
+    )
+    mismatched = repository.PostgresStateRepository().list_photo_barcode_review_groups(
+        status="mismatched", query="", limit=100, offset=0
+    )
+    unreadable = repository.PostgresStateRepository().list_photo_barcode_review_groups(
+        status="unreadable", query="", limit=100, offset=0
+    )
+    assert matched["total"] == 40
+    assert mismatched["total"] == 3
+    assert unreadable["total"] == 2
+    assert "eligible-04" not in {item["group_id"] for item in matched["items"]}
+    assert "eligible-04" in {item["group_id"] for item in unreadable["items"]}
+    assert "eligible-05" in {item["group_id"] for item in mismatched["items"]}
 
 
 def _statement_group_ids(statement) -> list:
