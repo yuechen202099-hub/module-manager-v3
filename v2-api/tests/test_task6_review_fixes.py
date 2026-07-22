@@ -1274,3 +1274,141 @@ def test_postgres_scalar_legacy_evidence_is_ignored_by_review_and_export(
     assert _exported_postgres_group_ids(monkeypatch, postgres_repository, status="mismatched") == [
         "legacy-scalar-evidence"
     ]
+
+
+def test_postgres_review_uses_normalized_evidence_arrays_and_sanitizes_scalar_photo_payloads(
+    isolated_task6_postgres,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = isolated_task6_postgres
+    team_id = f"task6-round3-evidence-{uuid4().hex[:12]}"
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+
+    with session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Task 6 round 3 evidence test"))
+        session.flush()
+        project = Project(team_id=team_id, code=f"T6R3-E-{uuid4().hex[:10]}", name="Task 6 round 3")
+        session.add(project)
+        session.flush()
+
+        for name, value in (("empty", ""), ("blank", "   "), ("null", None)):
+            photos = [{} for _category in REQUIRED_CATEGORIES]
+            photos[0] = {"ocr_candidate_values": [value]}
+            _add_legacy_postgres_group(
+                session,
+                team_id=team_id,
+                project_id=project.id,
+                name=f"legacy-empty-evidence-{name}",
+                photo_raw_data=photos,
+            )
+
+        for name, value in (("string", "SCALAR"), ("int", 7), ("bool", True), ("null", None)):
+            photos = [{} for _category in REQUIRED_CATEGORIES]
+            photos[0] = {
+                "barcode_check_values": value,
+                "barcode_check_ocr_values": value,
+                "machine_barcode_values": value,
+                "machine_barcode_normalized_values": value,
+                "machine_qr_values": value,
+                "machine_qr_normalized_values": value,
+                "ocr_candidate_values": value,
+                "ocr_candidate_normalized_values": value,
+            }
+            group = _add_legacy_postgres_group(
+                session,
+                team_id=team_id,
+                project_id=project.id,
+                name=f"relation-scalar-evidence-{name}",
+                photo_raw_data=photos,
+            )
+            session.add(
+                GroupBarcodeVerification(
+                    team_id=team_id,
+                    group_id=group.id,
+                    status="passed",
+                    evidence_fingerprint=uuid4().hex * 2,
+                    evidence_version=1,
+                    meter_matched=True,
+                    module_matched=True,
+                    collector_matched=True,
+                    recognition_source="machine_barcode",
+                )
+            )
+
+        mismatch_group = _add_legacy_postgres_group(
+            session,
+            team_id=team_id,
+            project_id=project.id,
+            name="relation-mismatch",
+        )
+        unreadable_group = _add_legacy_postgres_group(
+            session,
+            team_id=team_id,
+            project_id=project.id,
+            name="relation-unreadable",
+        )
+        for group, status in ((mismatch_group, "mismatch"), (unreadable_group, "unreadable")):
+            session.add(
+                GroupBarcodeVerification(
+                    team_id=team_id,
+                    group_id=group.id,
+                    status=status,
+                    evidence_fingerprint=uuid4().hex * 2,
+                    evidence_version=1,
+                    recognition_source="machine_barcode",
+                )
+            )
+
+    postgres_repository = repository.PostgresStateRepository()
+    expected_statuses = {
+        "matched": {"matched"},
+        "mismatched": {"mismatched"},
+        "unreadable": {"unreadable"},
+        "all": {"matched", "mismatched", "unreadable"},
+    }
+    expected_ids = {
+        "matched": {
+            "legacy-empty-evidence-empty",
+            "legacy-empty-evidence-blank",
+            "legacy-empty-evidence-null",
+            "relation-scalar-evidence-string",
+            "relation-scalar-evidence-int",
+            "relation-scalar-evidence-bool",
+            "relation-scalar-evidence-null",
+        },
+        "mismatched": {"relation-mismatch"},
+        "unreadable": {"relation-unreadable"},
+    }
+    expected_ids["all"] = set().union(*expected_ids.values())
+
+    for status in ("matched", "mismatched", "unreadable", "all"):
+        result = postgres_repository.list_photo_barcode_review_groups(
+            status=status,
+            query="",
+            limit=100,
+            offset=0,
+        )
+        assert result["total"] == len(result["items"])
+        assert {item["status"] for item in result["items"]} <= expected_statuses[status]
+        assert {item["group_id"] for item in result["items"]} == expected_ids[status]
+        assert set(_exported_postgres_group_ids(monkeypatch, postgres_repository, status=status)) == expected_ids[status]
+
+    matched = postgres_repository.list_photo_barcode_review_groups(status="matched", query="", limit=100, offset=0)
+    scalar_photo = next(
+        photo
+        for item in matched["items"]
+        if item["group_id"] == "relation-scalar-evidence-string"
+        for photo in item["photos"]
+        if photo["id"].endswith("-photo-0")
+    )
+    for key in (
+        "barcode_check_values",
+        "barcode_check_ocr_values",
+        "machine_barcode_values",
+        "machine_barcode_normalized_values",
+        "machine_qr_values",
+        "machine_qr_normalized_values",
+        "ocr_candidate_values",
+        "ocr_candidate_normalized_values",
+    ):
+        assert scalar_photo[key] == []

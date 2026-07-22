@@ -1042,6 +1042,12 @@ def _unique_values(values: Iterable[Any]) -> list[str]:
     return list(dict.fromkeys(str(item or "").strip() for item in values if str(item or "").strip()))
 
 
+def _review_evidence_array(value: Any) -> list[Any]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item for item in value if str(item or "").strip()]
+
+
 def _matched_expected_value(normalized_values: Iterable[str], expected_values: list[str], expected_type: str) -> str:
     expected = set(expected_values)
     for value in normalized_values:
@@ -1067,9 +1073,9 @@ def _barcode_check_method(barcode_matched: str, ocr_values: list[str], matched: 
 
 
 def _photo_barcode_values(photo: dict[str, Any]) -> list[str]:
-    raw_values = photo.get("barcode_check_normalized_values") or photo.get("barcode_check_values") or []
-    if not isinstance(raw_values, list):
-        raw_values = [raw_values]
+    raw_values = _review_evidence_array(photo.get("barcode_check_normalized_values"))
+    if not raw_values:
+        raw_values = _review_evidence_array(photo.get("barcode_check_values"))
     values = [normalize_barcode_value(value) for value in raw_values]
     return list(dict.fromkeys(value for value in values if value))
 
@@ -1150,17 +1156,21 @@ def _group_review_photo_payload(group: dict[str, Any], photo: dict[str, Any]) ->
         "image_url": image_url,
         "thumbnail_url": thumbnail_url,
         "barcode_check_status": str(photo.get("barcode_check_status") or ""),
-        "barcode_check_values": list(photo.get("barcode_check_values") or []),
+        "barcode_check_values": _review_evidence_array(photo.get("barcode_check_values")),
         "barcode_check_normalized_values": _photo_barcode_values(photo),
-        "barcode_check_ocr_values": list(photo.get("barcode_check_ocr_values") or []),
-        "barcode_check_ocr_normalized_values": _normalized_values(photo.get("barcode_check_ocr_values") or []),
+        "barcode_check_ocr_values": _review_evidence_array(photo.get("barcode_check_ocr_values")),
+        "barcode_check_ocr_normalized_values": _normalized_values(
+            _review_evidence_array(photo.get("barcode_check_ocr_values"))
+        ),
         "barcode_check_method": str(photo.get("barcode_check_method") or ""),
-        "machine_barcode_values": list(photo.get("machine_barcode_values") or []),
-        "machine_barcode_normalized_values": list(photo.get("machine_barcode_normalized_values") or []),
-        "machine_qr_values": list(photo.get("machine_qr_values") or []),
-        "machine_qr_normalized_values": list(photo.get("machine_qr_normalized_values") or []),
-        "ocr_candidate_values": list(photo.get("ocr_candidate_values") or []),
-        "ocr_candidate_normalized_values": list(photo.get("ocr_candidate_normalized_values") or []),
+        "machine_barcode_values": _review_evidence_array(photo.get("machine_barcode_values")),
+        "machine_barcode_normalized_values": _review_evidence_array(
+            photo.get("machine_barcode_normalized_values")
+        ),
+        "machine_qr_values": _review_evidence_array(photo.get("machine_qr_values")),
+        "machine_qr_normalized_values": _review_evidence_array(photo.get("machine_qr_normalized_values")),
+        "ocr_candidate_values": _review_evidence_array(photo.get("ocr_candidate_values")),
+        "ocr_candidate_normalized_values": _review_evidence_array(photo.get("ocr_candidate_normalized_values")),
     }
 
 

@@ -1347,8 +1347,15 @@ def _postgres_review_verification_status_expression():
 
     def has_array_values(key: str):
         value = legacy_photo.raw_data[key]
+        elements = func.jsonb_array_elements_text(value).table_valued("value")
+        non_empty_element_count = (
+            select(func.count())
+            .select_from(elements)
+            .where(func.btrim(elements.c.value) != "")
+            .scalar_subquery()
+        )
         return case(
-            (func.jsonb_typeof(value) == "array", func.jsonb_array_length(value)),
+            (func.jsonb_typeof(value) == "array", non_empty_element_count),
             else_=0,
         ) > 0
 
