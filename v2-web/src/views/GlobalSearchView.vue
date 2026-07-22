@@ -13,6 +13,7 @@ import {
   updateAdminGroupMetadata,
 } from '@/api/services'
 import type { MaterialGroup, ReviewPhoto, TaskStatus } from '@/api/types'
+import { mapBarcodeVerificationState, mapPhotoCategoryState } from '@/utils/barcodeVerificationState.mjs'
 
 type EditableGroupForm = {
   meterNo: string
@@ -41,6 +42,8 @@ const loading = ref(false)
 const searched = ref(false)
 const saving = ref(false)
 const total = ref(0)
+const PAGE_SIZE = 20
+const currentPage = ref(1)
 const terminals = ref<string[]>([])
 const groups = ref<MaterialGroup[]>([])
 const selectedGroups = ref<MaterialGroup[]>([])
@@ -119,8 +122,8 @@ async function runSearch() {
     const result = await searchGroups({
       query: trimmedQuery.value,
       terminal: terminal.value,
-      limit: 80,
-      offset: 0,
+      limit: PAGE_SIZE,
+      offset: (currentPage.value - 1) * PAGE_SIZE,
     })
     total.value = result.total
     terminals.value = result.terminals
@@ -136,6 +139,16 @@ async function runSearch() {
   }
 }
 
+function startSearch() {
+  currentPage.value = 1
+  void runSearch()
+}
+
+function handlePageChange(page: number) {
+  currentPage.value = page
+  void runSearch()
+}
+
 function resetSearch() {
   query.value = ''
   terminal.value = ''
@@ -144,28 +157,15 @@ function resetSearch() {
   groups.value = []
   selectedGroups.value = []
   total.value = 0
+  currentPage.value = 1
 }
 
 function statusLabel(status: string) {
   return statusLabels[status] || status || '未知'
 }
 
-function barcodeProgress(row: MaterialGroup) {
-  const totalCount = Number(row.groupBarcodeTotalCount || 3)
-  const passedCount = Math.max(0, Math.min(totalCount, Number(row.groupBarcodePassedCount || 0)))
-  return { passedCount, totalCount }
-}
-
-function barcodeProgressLabel(row: MaterialGroup) {
-  const { passedCount, totalCount } = barcodeProgress(row)
-  return `扫码通过${passedCount}/${totalCount}`
-}
-
-function barcodeProgressType(row: MaterialGroup) {
-  const { passedCount, totalCount } = barcodeProgress(row)
-  if (totalCount > 0 && passedCount >= totalCount) return 'success'
-  if (passedCount > 0) return 'warning'
-  return 'danger'
+function barcodeState(row: MaterialGroup) {
+  return mapBarcodeVerificationState(row)
 }
 
 const groupPhotoContextItems = computed(() => [
@@ -189,11 +189,8 @@ const groupPhotoContextItems = computed(() => [
   { label: '地址', value: photoGroup.value?.address || '-' },
 ])
 
-function photoCategoryLabel(row: MaterialGroup) {
-  const classified = Number(row.photoCategoryClassifiedCount || 0)
-  const totalCount = Number(row.photoCategoryTotalCount || row.photoCount || 0)
-  if (row.photoCategoryComplete) return `已分类${classified}/${totalCount}`
-  return `未完成${classified}/${totalCount}`
+function photoCategoryState(row: MaterialGroup) {
+  return mapPhotoCategoryState(row)
 }
 
 function groupPhotoKey(groupId: string, photoId: string) {
@@ -487,7 +484,7 @@ function applyScannedValue(value: string) {
   scannerLocked = true
   query.value = text
   closeScanner()
-  void runSearch()
+  startSearch()
 }
 
 function stopScanner() {
@@ -604,13 +601,13 @@ async function decodeScannerFile(event: Event) {
           size="large"
           placeholder="输入表号、模块号、采集器号、地址"
           :prefix-icon="Search"
-          @keyup.enter="runSearch"
+          @keyup.enter="startSearch"
         />
         <el-select v-model="terminal" clearable filterable size="large" placeholder="终端">
           <el-option v-for="item in terminals" :key="item" :label="item" :value="item" />
         </el-select>
         <el-button size="large" :icon="Camera" @click="startScanner">扫码</el-button>
-        <el-button type="primary" size="large" :icon="Search" :loading="loading" @click="runSearch">搜索</el-button>
+        <el-button type="primary" size="large" :icon="Search" :loading="loading" @click="startSearch">搜索</el-button>
         <el-button size="large" :icon="Refresh" @click="resetSearch">重置</el-button>
       </div>
     </div>
@@ -661,17 +658,17 @@ async function decodeScannerFile(event: Event) {
             <el-tag size="small" effect="plain">{{ statusLabel(row.status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="扫码状态" width="130">
+        <el-table-column label="扫码状态" width="170">
           <template #default="{ row }">
-            <el-tag size="small" effect="plain" :type="barcodeProgressType(row)">
-              {{ barcodeProgressLabel(row) }}
+            <el-tag size="small" effect="plain" :type="barcodeState(row).type">
+              {{ barcodeState(row).label }} {{ barcodeState(row).progressLabel }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="图片分类" width="120">
+        <el-table-column label="图片分类" width="150">
           <template #default="{ row }">
-            <el-tag size="small" effect="plain" :type="row.photoCategoryComplete ? 'success' : 'warning'">
-              {{ photoCategoryLabel(row) }}
+            <el-tag size="small" effect="plain" :type="photoCategoryState(row).type">
+              {{ photoCategoryState(row).label }}
             </el-tag>
           </template>
         </el-table-column>
@@ -704,6 +701,15 @@ async function decodeScannerFile(event: Event) {
           </template>
         </el-table-column>
       </el-table>
+      <el-pagination
+        v-if="searched && total > PAGE_SIZE"
+        v-model:current-page="currentPage"
+        class="result-pagination"
+        layout="prev, pager, next, total"
+        :page-size="PAGE_SIZE"
+        :total="total"
+        @current-change="handlePageChange"
+      />
     </div>
 
     <el-dialog v-model="scannerOpen" title="扫码定位资料组" width="min(420px, 92vw)" class="scanner-dialog" @closed="stopScanner">
@@ -888,6 +894,12 @@ async function decodeScannerFile(event: Event) {
 
 .result-table {
   width: 100%;
+}
+
+.result-pagination {
+  justify-self: end;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .plain-link {

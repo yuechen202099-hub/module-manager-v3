@@ -223,10 +223,50 @@ export type MaterialGroup = {
   groupBarcodePassedCount?: number
   groupBarcodeTotalCount?: number
   groupBarcodeManualConfirmed?: boolean
+  barcodeVerification?: BarcodeVerification
+  barcodeVerificationStatus?: BarcodeVerificationStatus
+  barcodeVerificationSource?: string
+  barcodeVerificationPassedCount?: number
+  barcodeVerificationTotalCount?: number
+  barcodeVerificationReason?: string
   photoCategoryClassifiedCount?: number
   photoCategoryTotalCount?: number
   photoCategoryComplete?: boolean
+  photoCategoryStatus?: PhotoCategoryStatus
   photos?: ReviewPhoto[]
+}
+
+export type BarcodeVerificationStatus =
+  | 'not_eligible'
+  | 'pending'
+  | 'processing'
+  | 'passed'
+  | 'partial'
+  | 'unreadable'
+  | 'mismatch'
+  | 'manual_confirmed'
+  | 'failed'
+
+export type BarcodeVerification = {
+  status: BarcodeVerificationStatus
+  recognitionSource: string
+  invalidationReason: string
+  evidenceVersion: number
+  result: {
+    passedCount: number
+    matchedFields: string[]
+    missingFields: string[]
+  }
+}
+
+export type PhotoCategoryStatus = 'complete' | 'duplicate' | 'missing' | 'invalid_count'
+
+export type GroupBarcodeManualConfirmation = {
+  meterNo: string
+  moduleAssetNo: string
+  collector: string
+  reason: string
+  photoIds: string[]
 }
 
 export type ReviewGroupStatus = 'all' | 'reviewable' | 'exception' | 'archived' | 'unconstructed'

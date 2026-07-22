@@ -36,6 +36,7 @@ import type { BarcodeType, ConstructionExceptionOrder, MaterialGroup, RegionScan
 import ReviewImageInspector from '@/components/ReviewImageInspector.vue'
 import UnmatchedReviewDialog from '@/components/UnmatchedReviewDialog.vue'
 import { useAuthStore } from '@/stores/auth'
+import { mapBarcodeVerificationState } from '@/utils/barcodeVerificationState.mjs'
 
 const categories = [
   { key: 'before_box', label: '表箱整体改造前', hotkey: '1' },
@@ -189,6 +190,7 @@ const isAdmin = computed(() => {
 })
 const selectedTask = computed(() => myTasks.value.find((task) => task.id === selectedTaskId.value) || null)
 const selectedPhoto = computed(() => photos.value.find((photo) => photo.id === selectedPhotoId.value) || null)
+const activeVerificationState = computed(() => mapBarcodeVerificationState(activeGroup.value || {}))
 const regionScanOriginalValue = computed(() => metadataDraft[draftFieldByBarcodeType[regionScanDialog.barcodeType]])
 const regionScanMethodLabel = computed(() => ({ barcode: '条码', ocr: 'OCR', none: '未识别' })[regionScanDialog.method])
 const selectedPhotoIndex = computed(() => photos.value.findIndex((photo) => photo.id === selectedPhotoId.value))
@@ -327,23 +329,16 @@ function groupStatusTag(group: MaterialGroup) {
   return groupBarcodeProgressTag(group)
 }
 
-function groupBarcodeProgress(group: MaterialGroup) {
-  const total = Number(group.groupBarcodeTotalCount || 3)
-  const passed = Math.max(0, Math.min(total, Number(group.groupBarcodePassedCount || 0)))
-  return { passed, total }
-}
-
 function groupBarcodeProgressTag(group: MaterialGroup) {
-  const { passed, total } = groupBarcodeProgress(group)
-  const complete = total > 0 && passed >= total
+  const state = mapBarcodeVerificationState(group)
   return {
-    label: `扫码通过${passed}/${total}`,
-    type: complete ? ('success' as const) : passed > 0 ? ('warning' as const) : ('danger' as const),
+    label: `${state.label} ${state.progressLabel}`,
+    type: state.type,
   }
 }
 
 function isManualBarcodeConfirmed() {
-  return Boolean(activeGroup.value?.groupBarcodeManualConfirmed)
+  return activeVerificationState.value.status === 'manual_confirmed'
 }
 
 function isPhotoBarcodePassed(photo: ReviewPhoto | null | undefined) {
@@ -353,23 +348,6 @@ function isPhotoBarcodePassed(photo: ReviewPhoto | null | undefined) {
 
 function categoryLabel(key: string | undefined) {
   return categories.find((item) => item.key === key)?.label || '未分类'
-}
-
-function barcodeStatusType(photo: ReviewPhoto | null | undefined) {
-  if (isPhotoBarcodePassed(photo)) return 'success' as const
-  const status = String(photo?.barcodeCheckStatus || '')
-  if (status === 'mismatched') return 'danger' as const
-  if (status === 'unreadable') return 'warning' as const
-  return 'info' as const
-}
-
-function barcodeStatusLabel(photo: ReviewPhoto | null | undefined) {
-  if (isPhotoBarcodePassed(photo)) return '扫码通过'
-  const status = String(photo?.barcodeCheckStatus || '')
-  if (status === 'mismatched') return '条码异常'
-  if (status === 'unreadable') return '无法识别'
-  if (status === 'not_required') return '无需扫码'
-  return '未扫码'
 }
 
 function barcodeValues(photo: ReviewPhoto | null | undefined) {
@@ -383,14 +361,6 @@ function barcodeValues(photo: ReviewPhoto | null | undefined) {
     .map((value) => String(value || '').trim())
     .filter(Boolean)
   return Array.from(new Set(values)).slice(0, 3).join(' / ')
-}
-
-function barcodeMethodLabel(photo: ReviewPhoto | null | undefined) {
-  const method = String(photo?.barcodeCheckMethod || '')
-  if (method === 'ocr') return 'OCR'
-  if (method === 'barcode_ocr') return '扫码+OCR'
-  if (method === 'barcode') return '扫码'
-  return ''
 }
 
 function isBrowserImageUrl(url: string | undefined) {
@@ -946,21 +916,10 @@ async function rescanSelectedPhotoBarcode() {
   const category = selectedCategory.value || selectedPhoto.value.category || ''
   rescanningBarcode.value = true
   try {
-    const result = await rescanPhotoBarcode(groupId, photoId, category)
-    if (activeGroup.value?.id !== groupId) {
-      groupDetailCache.delete(groupId)
-      return
-    }
-    const updatedPhoto = { ...result.photo, category: result.photo.category || category }
-    applyPhotoUpdate(updatedPhoto)
-    if (result.group) syncGroupEntry({ ...result.group, photos: photos.value })
-    await refreshGroupsSilently()
-    const label = barcodeStatusLabel(updatedPhoto)
-    if (updatedPhoto.barcodeCheckStatus === 'matched') {
-      ElMessage.success(`${label}${barcodeMethodLabel(updatedPhoto) ? `（${barcodeMethodLabel(updatedPhoto)}）` : ''}`)
-    } else {
-      ElMessage.warning(label)
-    }
+    await rescanPhotoBarcode(groupId, photoId, category)
+    await refreshCurrentReviewGroup(groupId)
+    await refreshCurrentReviewPage()
+    ElMessage.success('已提交重新扫码')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '重新扫码失败')
   } finally {
@@ -972,7 +931,23 @@ async function confirmSelectedGroupBarcodeManually() {
   if (!activeGroup.value || confirmingBarcode.value) return
   markInteraction()
   const groupId = activeGroup.value.id
+  const meterNo = metadataDraft.meterNo.trim() || activeGroup.value.meterNo.trim()
+  const moduleAssetNo = metadataDraft.moduleAssetNo.trim() || String(activeGroup.value.moduleAssetNo || '').trim()
+  const collector = metadataDraft.collector.trim() || String(activeGroup.value.collector || '').trim()
+  const photoIds = photos.value.map((photo) => photo.id).filter(Boolean)
+  if (!meterNo || !moduleAssetNo || !collector || !photoIds.length) {
+    ElMessage.warning('请先补全表号、模块号、采集器号和照片证据')
+    return
+  }
+  let reason = ''
   try {
+    const prompt = await ElMessageBox.prompt('请输入人工确认原因', '人工确认扫码', {
+      confirmButtonText: '下一步',
+      cancelButtonText: '取消',
+      inputPlaceholder: '例如：现场标签清晰，机器读取失败',
+      inputValidator: (value) => Boolean(String(value || '').trim()) || '请输入确认原因',
+    })
+    reason = String(prompt.value || '').trim()
     await ElMessageBox.confirm(
       '确认当前资料组的表号、模块号、采集器号均与照片一致？确认后会写入审计记录。',
       '人工确认扫码',
@@ -987,7 +962,13 @@ async function confirmSelectedGroupBarcodeManually() {
   }
   confirmingBarcode.value = true
   try {
-    const result = await confirmGroupBarcodeManually(groupId)
+    const result = await confirmGroupBarcodeManually(groupId, {
+      meterNo,
+      moduleAssetNo,
+      collector,
+      reason,
+      photoIds,
+    })
     if (result.group) {
       const nextGroup = {
         ...result.group,
@@ -1173,6 +1154,23 @@ async function refreshGroupsSilently() {
     resetPage: false,
     invalidateDetails: true,
   })
+}
+
+async function refreshCurrentReviewPage() {
+  if (!selectedTaskId.value) return
+  await loadGroups(selectedTaskId.value, {
+    autoOpen: false,
+    resetPage: false,
+    invalidateDetails: false,
+  })
+}
+
+async function refreshCurrentReviewGroup(groupId: string) {
+  if (activeGroup.value?.id !== groupId || selectedGroupId.value !== groupId) return
+  const preferredPhotoId = selectedPhotoId.value
+  groupDetailCache.delete(groupId)
+  groupDetailRequests.delete(groupId)
+  await loadGroup(groupId, preferredPhotoId)
 }
 
 async function refreshTasksSilently() {
@@ -1950,7 +1948,7 @@ onUnmounted(() => {
         class="review-group-pagination"
         layout="prev, pager, next, total"
         :current-page="groupPage"
-        :page-size="20"
+        :page-size="REVIEW_GROUP_PAGE_SIZE"
         :total="groupTotal"
         @current-change="handleGroupPageChange"
       />
@@ -1961,15 +1959,15 @@ onUnmounted(() => {
       <div class="review-panel-head">
         <div>
           <h3>图片审阅</h3>
-          <p class="muted">1-4 分类，方向键切换，Enter 归档；双击图片看完整大图</p>
+          <p class="muted">1-4 纠正分类，方向键切换，Enter 归档；双击图片看完整大图</p>
         </div>
         <div class="review-head-tags">
           <ElTag
-            v-if="selectedPhoto?.barcodeCheckStatus"
-            :type="barcodeStatusType(selectedPhoto)"
+            v-if="activeGroup"
+            :type="activeVerificationState.type"
             effect="light"
           >
-            {{ barcodeStatusLabel(selectedPhoto) }}
+            {{ activeVerificationState.label }} {{ activeVerificationState.progressLabel }}
           </ElTag>
           <ElTag effect="plain">{{ selectedPhotoPosition }}</ElTag>
         </div>
@@ -2006,9 +2004,11 @@ onUnmounted(() => {
 
         <div v-if="selectedPhoto" class="review-barcode-row">
           <div class="review-barcode-state">
-            <ElTag :type="barcodeStatusType(selectedPhoto)" effect="light">{{ barcodeStatusLabel(selectedPhoto) }}</ElTag>
+            <ElTag :type="activeVerificationState.type" effect="light">
+              {{ activeVerificationState.label }} {{ activeVerificationState.progressLabel }}
+            </ElTag>
             <span v-if="barcodeValues(selectedPhoto)">{{ barcodeValues(selectedPhoto) }}</span>
-            <small v-if="barcodeMethodLabel(selectedPhoto)">{{ barcodeMethodLabel(selectedPhoto) }}</small>
+            <small>{{ activeVerificationState.source.label }}</small>
           </div>
           <ElButton
             size="small"
@@ -2082,6 +2082,7 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <span class="category-section-label">纠正分类</span>
         <div class="category-grid review-category-grid">
           <button
             v-for="item in categories"
@@ -3217,6 +3218,12 @@ onUnmounted(() => {
   color: var(--v2-text-muted);
   font-size: 11px;
   font-weight: 760;
+}
+
+.category-section-label {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .photo-chip {

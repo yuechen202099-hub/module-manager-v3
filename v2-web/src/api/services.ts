@@ -7,6 +7,7 @@ import type {
   ConstructionPriorityImportResult,
   ConstructionUploadPayload,
   CurrentUser,
+  GroupBarcodeManualConfirmation,
   GroupSearchResult,
   ImportJob,
   InstallerWorkload,
@@ -31,6 +32,8 @@ import type {
   UnmatchedReviewPhoto,
   UserAccount,
   UserRole,
+  BarcodeVerification,
+  BarcodeVerificationStatus,
 } from './types'
 
 type BackendRegionScanResult = {
@@ -221,10 +224,29 @@ type BackendGroup = {
   group_barcode_passed_count?: number
   group_barcode_total_count?: number
   group_barcode_manual_confirmed?: boolean
+  barcode_verification?: BackendBarcodeVerification
+  barcode_verification_status?: string
+  barcode_verification_source?: string
+  barcode_verification_passed_count?: number
+  barcode_verification_total_count?: number
+  barcode_verification_reason?: string
   photo_category_classified_count?: number
   photo_category_total_count?: number
   photo_category_complete?: boolean
+  photo_category_status?: string
   photos?: BackendPhoto[]
+}
+
+type BackendBarcodeVerification = {
+  status?: string
+  recognition_source?: string
+  invalidation_reason?: string
+  evidence_version?: number
+  result?: {
+    passed_count?: number
+    matched_fields?: unknown[]
+    missing_fields?: unknown[]
+  }
 }
 
 type BackendReviewGroupPage = {
@@ -828,6 +850,13 @@ function mapPhoto(raw: BackendPhoto): ReviewPhoto {
 }
 
 function mapGroup(raw: BackendGroup): MaterialGroup {
+  const barcodeVerification = mapBarcodeVerification(raw.barcode_verification)
+  const barcodeVerificationStatus = normalizeBarcodeVerificationStatus(
+    barcodeVerification?.status || raw.barcode_verification_status,
+  )
+  const durablePassedCount = Number(
+    barcodeVerification?.result.passedCount ?? raw.barcode_verification_passed_count ?? raw.group_barcode_passed_count ?? 0,
+  )
   return {
     id: String(raw.id),
     taskId: raw.task_id || '',
@@ -856,11 +885,62 @@ function mapGroup(raw: BackendGroup): MaterialGroup {
     groupBarcodePassedCount: Number(raw.group_barcode_passed_count || 0),
     groupBarcodeTotalCount: Number(raw.group_barcode_total_count || 3),
     groupBarcodeManualConfirmed: Boolean(raw.group_barcode_manual_confirmed),
+    barcodeVerification,
+    barcodeVerificationStatus,
+    barcodeVerificationSource: barcodeVerification?.recognitionSource || raw.barcode_verification_source || '',
+    barcodeVerificationPassedCount: durablePassedCount,
+    barcodeVerificationTotalCount: Number(raw.barcode_verification_total_count || raw.group_barcode_total_count || 3),
+    barcodeVerificationReason: barcodeVerification?.invalidationReason || raw.barcode_verification_reason || '',
     photoCategoryClassifiedCount: Number(raw.photo_category_classified_count || 0),
     photoCategoryTotalCount: Number(raw.photo_category_total_count || 0),
     photoCategoryComplete: Boolean(raw.photo_category_complete),
+    photoCategoryStatus: normalizePhotoCategoryStatus(raw.photo_category_status),
     photos: (raw.photos || []).map(mapPhoto),
   }
+}
+
+function normalizeBarcodeVerificationStatus(value: unknown): BarcodeVerificationStatus | undefined {
+  const status = String(value || '')
+  if (
+    [
+      'not_eligible',
+      'pending',
+      'processing',
+      'passed',
+      'partial',
+      'unreadable',
+      'mismatch',
+      'manual_confirmed',
+      'failed',
+    ].includes(status)
+  ) {
+    return status as BarcodeVerificationStatus
+  }
+  return undefined
+}
+
+function mapBarcodeVerification(raw?: BackendBarcodeVerification): BarcodeVerification | undefined {
+  const status = normalizeBarcodeVerificationStatus(raw?.status)
+  if (!raw || !status) return undefined
+  return {
+    status,
+    recognitionSource: raw.recognition_source || '',
+    invalidationReason: raw.invalidation_reason || '',
+    evidenceVersion: Number(raw.evidence_version || 0),
+    result: {
+      passedCount: Number(raw.result?.passed_count || 0),
+      matchedFields: mapStringArray(raw.result?.matched_fields),
+      missingFields: mapStringArray(raw.result?.missing_fields),
+    },
+  }
+}
+
+function normalizePhotoCategoryStatus(value: unknown): MaterialGroup['photoCategoryStatus'] {
+  const status = String(value || '')
+  if (['complete', 'duplicate', 'missing', 'invalid_count'].includes(status)) {
+    return status as MaterialGroup['photoCategoryStatus']
+  }
+  return undefined
 }
 
 function mapConstructionExceptionOrder(raw: BackendConstructionExceptionOrder): ConstructionExceptionOrder {
@@ -1448,12 +1528,22 @@ export async function rescanPhotoBarcode(
   return { photo: mapPhoto(data as BackendPhoto) }
 }
 
-export async function confirmGroupBarcodeManually(groupId: string): Promise<{ group?: MaterialGroup }> {
+export async function confirmGroupBarcodeManually(
+  groupId: string,
+  payload: GroupBarcodeManualConfirmation,
+): Promise<{ group?: MaterialGroup }> {
   const data = await api<{ group?: BackendGroup }>(
     `/local-test/groups/${encodeURIComponent(groupId)}/barcode-manual-confirm`,
     {
       method: 'POST',
-      body: JSON.stringify({ actor: currentActor() }),
+      body: JSON.stringify({
+        actor: currentActor(),
+        meter_no: payload.meterNo,
+        module_asset_no: payload.moduleAssetNo,
+        collector: payload.collector,
+        reason: payload.reason,
+        photo_ids: payload.photoIds,
+      }),
     },
   )
   return { group: data.group ? mapGroup(data.group) : undefined }

@@ -12,7 +12,8 @@ function assertNotContains(pattern, message) {
 
 assertContains(/fetchReviewTaskGroups/, 'TaskHallView must use the bounded review queue API')
 assertContains(/<ElPagination/, 'TaskHallView must render review queue pagination')
-assertContains(/:page-size="20"/, 'TaskHallView review queue page size must be 20')
+assertContains(/const REVIEW_GROUP_PAGE_SIZE = 20/, 'TaskHallView review queue page size must remain fixed at 20')
+assertContains(/:page-size="REVIEW_GROUP_PAGE_SIZE"/, 'TaskHallView pagination must use its fixed page-size constant')
 assertNotContains(/limit=1000/, 'TaskHallView must not request 1000 review groups')
 assertNotContains(/fetchTaskGroups\(currentTaskId\)/, 'TaskHallView background refresh must not fetch every group')
 assertContains(/items\.slice\(0, 4\)/, 'TaskHallView may preload at most four thumbnails')
@@ -64,6 +65,10 @@ assertContains(
 assertContains(
   /async function refreshGroupsSilently\(\)[\s\S]*loadGroups\(currentTaskId, \{[\s\S]*invalidateDetails: true/,
   'TaskHallView silent and external refreshes must invalidate same-task group details',
+)
+assertContains(
+  /async function refreshCurrentReviewGroup\(groupId:\s*string\)[\s\S]*groupDetailCache\.delete\(groupId\)[\s\S]*await loadGroup\(groupId(?:,\s*preferredPhotoId)?\)/,
+  'TaskHallView durable rescan refresh must invalidate and reload only the active group detail',
 )
 assertContains(
   /async function refreshTaskAndGroupsSilently\(\)[\s\S]*await refreshTasksSilently\(\)[\s\S]*await refreshGroupsSilently\(\)/,

@@ -45,6 +45,7 @@ import type {
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import UnmatchedReviewDialog from '@/components/UnmatchedReviewDialog.vue'
+import { mapBarcodeDashboardState } from '@/utils/barcodeVerificationState.mjs'
 
 const DIALOG_PAGE_SIZE = 20
 
@@ -158,7 +159,6 @@ const photoBarcodeQuery = ref('')
 const photoBarcodeRows = ref<PhotoBarcodeReviewGroup[]>([])
 const photoBarcodeTotal = ref(0)
 const photoBarcodePage = ref(1)
-const photoBarcodePageSize = ref(DIALOG_PAGE_SIZE)
 const photoBarcodeObjectUrls = reactive<Record<string, string>>({})
 const photoBarcodePhotoErrors = reactive<Record<string, string>>({})
 const photoBarcodePhotoDialogVisible = ref(false)
@@ -185,26 +185,27 @@ function paginateDialogRows<T>(rows: T[], page: number) {
 const isAdmin = computed(() => Boolean(auth.user?.roles?.includes('admin') || auth.user?.role === 'admin'))
 const scannedRate = computed(() => (summary.value.groups ? summary.value.scannedGroups / summary.value.groups : 0))
 const archiveRate = computed(() => (summary.value.groups ? summary.value.approvedGroups / summary.value.groups : 0))
-const photoAccuracyRate = computed(() => summary.value.groupBarcodeAccuracyRate || summary.value.photoAccuracyRate || 0)
-const photoAccuracyCaption = computed(() => {
-  const checked = summary.value.groupBarcodeAccuracyChecked
-  if (!checked) return `暂无可判断资料组，${summary.value.groupBarcodeAccuracyNotRequired} 组资料不足`
-  return `通过 ${summary.value.groupBarcodeAccuracyPassed} / 应检 ${checked}，异常 ${summary.value.groupBarcodeAccuracyFailed}，无法识别 ${summary.value.groupBarcodeAccuracyUnreadable}`
-})
-const barcodeMetricCards = computed(() => [
+const barcodeDashboard = computed(() => mapBarcodeDashboardState(summary.value))
+const barcodeCompactCards = computed(() => [
   {
-    label: '通过',
-    value: summary.value.groupBarcodeAccuracyPassed,
+    label: '条码准确率',
+    value: barcodeDashboard.value.rateLabel,
+    tone: 'primary',
+    action: true,
+  },
+  {
+    label: '核验通过',
+    value: barcodeDashboard.value.passed,
     tone: 'success',
   },
   {
     label: '待人工',
-    value: summary.value.groupBarcodeAccuracyFailed + summary.value.groupBarcodeAccuracyUnreadable,
+    value: barcodeDashboard.value.failed + barcodeDashboard.value.unreadable,
     tone: 'warning',
   },
   {
-    label: '资料不足',
-    value: summary.value.groupBarcodeAccuracyNotRequired,
+    label: '不符合条件',
+    value: barcodeDashboard.value.notEligible,
     tone: 'muted',
   },
 ])
@@ -1220,7 +1221,7 @@ async function loadPhotoBarcodeRows() {
     const result = await fetchPhotoBarcodeReviewGroups(
       photoBarcodeStatus.value,
       photoBarcodePage.value,
-      photoBarcodePageSize.value,
+      DIALOG_PAGE_SIZE,
       photoBarcodeQuery.value,
     )
     photoBarcodeTotal.value = result.total
@@ -1255,12 +1256,6 @@ async function handlePhotoBarcodeSearch() {
 
 async function handlePhotoBarcodePageChange(page: number) {
   photoBarcodePage.value = page
-  await loadPhotoBarcodeRows()
-}
-
-async function handlePhotoBarcodePageSizeChange(size: number) {
-  photoBarcodePageSize.value = size
-  photoBarcodePage.value = 1
   await loadPhotoBarcodeRows()
 }
 
@@ -1460,33 +1455,25 @@ onUnmounted(() => {
         <span class="metric-label">已归档</span>
         <strong class="metric-value">{{ summary.approvedGroups }}</strong>
       </article>
-      <button
-        v-if="isAdmin"
-        class="metric barcode-metric barcode-metric-button"
-        type="button"
-        @click="openPhotoBarcodeDialog"
-      >
-        <span class="metric-label">条码准确率</span>
-        <strong class="metric-value">{{ percent(photoAccuracyRate) }}</strong>
-        <span class="barcode-metric-caption">{{ photoAccuracyCaption }}</span>
-        <span class="barcode-metric-mini-grid">
-          <span v-for="item in barcodeMetricCards" :key="item.label" class="barcode-metric-mini" :class="`tone-${item.tone}`">
-            <small>{{ item.label }}</small>
-            <b>{{ item.value }}</b>
-          </span>
-        </span>
-      </button>
-      <article v-else class="metric barcode-metric">
-        <span class="metric-label">条码准确率</span>
-        <strong class="metric-value">{{ percent(photoAccuracyRate) }}</strong>
-        <span class="barcode-metric-caption">{{ photoAccuracyCaption }}</span>
-        <span class="barcode-metric-mini-grid">
-          <span v-for="item in barcodeMetricCards" :key="item.label" class="barcode-metric-mini" :class="`tone-${item.tone}`">
-            <small>{{ item.label }}</small>
-            <b>{{ item.value }}</b>
-          </span>
-        </span>
-      </article>
+    </div>
+
+    <div class="barcode-compact-cards">
+      <template v-for="item in barcodeCompactCards" :key="item.label">
+        <button
+          v-if="item.action && isAdmin"
+          class="barcode-compact-card is-action"
+          :class="`tone-${item.tone}`"
+          type="button"
+          @click="openPhotoBarcodeDialog"
+        >
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+        </button>
+        <article v-else class="barcode-compact-card" :class="`tone-${item.tone}`">
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+        </article>
+      </template>
     </div>
 
     <div class="board-grid">
@@ -1999,7 +1986,7 @@ onUnmounted(() => {
           <el-button :loading="photoBarcodeExporting" :disabled="!photoBarcodeTotal" @click="exportPhotoBarcodeRows">导出清单</el-button>
         </div>
       </div>
-      <el-table v-loading="photoBarcodeLoading" :data="photoBarcodeRows" height="540" size="small">
+      <el-table v-loading="photoBarcodeLoading" :data="photoBarcodeRows" height="540" size="small" class="barcode-review-table">
         <el-table-column type="index" width="54" label="#" />
         <el-table-column label="资料组" min-width="180">
           <template #default="{ row }">
@@ -2052,14 +2039,12 @@ onUnmounted(() => {
       <div class="barcode-review-pagination">
         <el-pagination
           v-model:current-page="photoBarcodePage"
-          v-model:page-size="photoBarcodePageSize"
           :total="photoBarcodeTotal"
-          :page-sizes="[10, 20, 50, 100]"
-          layout="total, sizes, prev, pager, next, jumper"
+          :page-size="DIALOG_PAGE_SIZE"
+          layout="total, prev, pager, next, jumper"
           small
           background
           @current-change="handlePhotoBarcodePageChange"
-          @size-change="handlePhotoBarcodePageSizeChange"
         />
       </div>
       <template #footer>
@@ -2405,81 +2390,66 @@ onUnmounted(() => {
 }
 
 .native-board-page .board-metrics {
-  grid-template-columns: repeat(4, minmax(136px, 1fr));
+  grid-template-columns: repeat(3, minmax(136px, 1fr));
 }
 
-.barcode-metric {
-  gap: 8px;
-  min-height: 166px;
+.barcode-compact-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(128px, 1fr));
+  gap: 10px;
 }
 
-.barcode-metric-button {
+.barcode-compact-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 58px;
+  padding: 10px 14px;
   border: 1px solid var(--v2-border-soft, #dde5ee);
+  border-radius: 8px;
+  background: var(--v2-surface, #fff);
   color: inherit;
-  cursor: pointer;
   font: inherit;
   text-align: left;
 }
 
-.barcode-metric-button:hover {
+.barcode-compact-card span {
+  color: var(--v2-text-muted, #64748b);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.barcode-compact-card strong {
+  color: var(--v2-text-strong, #0f172a);
+  font-size: 20px;
+}
+
+.barcode-compact-card.is-action {
+  cursor: pointer;
+}
+
+.barcode-compact-card.is-action:hover {
   border-color: rgba(10, 114, 216, 0.32);
   box-shadow: var(--v2-shadow-raised, 0 1px 2px rgba(15, 26, 36, 0.05));
   transform: translateY(-1px);
 }
 
-.barcode-metric-caption {
-  display: -webkit-box;
-  min-height: 34px;
-  color: var(--v2-text-muted, #64748b);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.45;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+.barcode-compact-card.tone-primary {
+  border-color: rgba(10, 114, 216, 0.22);
+  background: #eff6ff;
 }
 
-.barcode-metric-mini-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.barcode-metric-mini {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  padding: 7px 8px;
-  border: 1px solid rgba(100, 116, 139, 0.16);
-  border-radius: 8px;
-  background: #f8fafc;
-}
-
-.barcode-metric-mini small {
-  color: var(--v2-text-muted, #64748b);
-  font-size: 11px;
-  font-weight: 760;
-  line-height: 1.2;
-  white-space: nowrap;
-}
-
-.barcode-metric-mini b {
-  color: var(--v2-text-strong, #0f172a);
-  font-size: 18px;
-  line-height: 1.1;
-}
-
-.barcode-metric-mini.tone-success {
-  background: #f0fdf4;
+.barcode-compact-card.tone-success {
   border-color: rgba(22, 163, 74, 0.18);
+  background: #f0fdf4;
 }
 
-.barcode-metric-mini.tone-warning {
-  background: #fff7ed;
+.barcode-compact-card.tone-warning {
   border-color: rgba(234, 88, 12, 0.18);
+  background: #fff7ed;
 }
 
-.barcode-metric-mini.tone-muted {
+.barcode-compact-card.tone-muted {
   background: #f8fafc;
 }
 
@@ -3009,6 +2979,10 @@ onUnmounted(() => {
 
 @media (max-width: 1280px) {
   .native-board-page .board-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .barcode-compact-cards {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

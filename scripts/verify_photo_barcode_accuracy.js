@@ -66,17 +66,19 @@ assertContains(board, 'clearPhotoBarcodeObjectUrls', 'ProjectBoardView must rele
 assertContains(board, '<el-pagination', 'ProjectBoardView must paginate barcode review details')
 assertContains(board, 'exportPhotoBarcodeReviewGroups', 'ProjectBoardView must export barcode review details')
 assertContains(board, 'openPhotoBarcodePhotos', 'ProjectBoardView must open photos on demand instead of rendering thumbnails in the list')
-assertContains(board, 'photoBarcodePageSize', 'ProjectBoardView must keep a small barcode review page size')
+assertContains(board, 'const DIALOG_PAGE_SIZE = 20', 'ProjectBoardView must keep barcode review pages fixed at 20 rows')
+assertContains(board, ':page-size="DIALOG_PAGE_SIZE"', 'barcode review pagination must use the fixed dialog page size')
+assertNotContains(board, 'photoBarcodePageSize', 'barcode review pagination must not expose variable page sizes')
 assertOrdered(
   board,
   'title="条码复核清单"',
   'v-model:current-page="photoBarcodePage"',
   'barcode review pagination must stay inside the barcode review dialog',
 )
-assertContains(board, 'photoAccuracyRate', 'ProjectBoardView must use the mapped accuracy rate')
+assertContains(board, 'mapBarcodeDashboardState', 'ProjectBoardView must map the durable API accuracy denominator')
 assertContains(board, 'groupBarcodeAccuracyPassed', 'ProjectBoardView must show group-level passed count')
-assertContains(board, 'barcode-metric', 'ProjectBoardView must promote barcode accuracy into the top metric strip')
-assertContains(board, 'barcode-metric-mini-grid', 'ProjectBoardView must show compact barcode accuracy parameter cards')
+assertContains(board, 'barcode-compact-cards', 'ProjectBoardView must show compact barcode accuracy cards')
+assertNotContains(board, 'class="metric barcode-metric', 'ProjectBoardView must not restore the deleted tall barcode metric')
 assertContains(board, 'groupBarcodeAccuracyUnreadable', 'ProjectBoardView must show group-level unreadable count')
 assertNotContains(board, '<span>资料组条码准确率</span>', 'ProjectBoardView must not keep the duplicate barcode accuracy risk card in project progress')
 assertContains(board, "photoBarcodePhotoErrors", 'ProjectBoardView must expose photo loading failures instead of blank image cards')
