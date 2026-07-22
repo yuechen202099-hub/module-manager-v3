@@ -73,7 +73,7 @@ Required production references:
 Verify SOP references after changing release process files:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.1.0
 ```
 
 ## Vue Migration Gate

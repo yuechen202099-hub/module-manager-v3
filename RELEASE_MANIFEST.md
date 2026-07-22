@@ -47,7 +47,7 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.1.0
 
 ## Verified During Packaging
 

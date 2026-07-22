@@ -237,6 +237,23 @@ def test_release_builder_embeds_the_current_source_commit() -> None:
     assert "verify-client-release.py $zipPath --expected-source-commit $sourceCommit" in build_script
 
 
+def test_release_builder_checks_cleanliness_before_building_into_isolated_staging() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    vite_config = (ROOT / "v2-web" / "vite.config.ts").read_text(encoding="utf-8")
+
+    clean_check = build_script.index("git status --porcelain --untracked-files=all")
+    dependency_build = build_script.index("-m pip install")
+    vue_build = build_script.index('Write-Host "Building Vue production bundle..."')
+    create_staging = build_script.index("New-Item -ItemType Directory -Force -Path $staging")
+    copy_api = build_script.index('Copy-ReleaseItem "v2-api\\app" "v2-api\\app"')
+
+    assert clean_check < dependency_build < vue_build
+    assert create_staging < copy_api < vue_build
+    assert '$stagedVueDir = Join-Path $staging "v2-api\\app\\static\\vue"' in build_script
+    assert "$env:MODULE_MANAGER_VUE_OUT_DIR = $stagedVueDir" in build_script
+    assert "process.env.MODULE_MANAGER_VUE_OUT_DIR" in vite_config
+
+
 def test_release_builder_removes_same_version_output_before_any_validation() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
@@ -265,6 +282,29 @@ def test_archive_members_must_be_tracked_by_the_expected_source_commit() -> None
             {"SOURCE_COMMIT", "README.md", "v2-api/app/ignored-debug.log"},
             source_commit,
         )
+
+
+def test_generated_vue_assets_are_bound_by_manifest_instead_of_git_membership() -> None:
+    verifier = load_verifier()
+    source_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+
+    verifier.verify_archive_members_are_tracked(
+        {
+            "SOURCE_COMMIT",
+            "README.md",
+            "v2-api/app/static/vue/index.html",
+            "v2-api/app/static/vue/assets/index-generated-hash.js",
+        },
+        source_commit,
+    )
+
 
 
 def test_archive_rejects_missing_source_commit(tmp_path: Path) -> None:

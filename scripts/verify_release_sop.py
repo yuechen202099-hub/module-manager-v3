@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from collections.abc import Callable
 import json
 import re
@@ -649,6 +650,11 @@ def candidate_release_record_is_pending(record: str, version: str, deployed_base
             lifecycle_values[field].append(value)
     for field, value in required_fields.items():
         values = lifecycle_values[field]
+        if field == "Local Verification":
+            allowed = {normalize_text("not run"), normalize_text("passed")}
+            if len(values) != 1 or normalize_text(values[0]).strip() not in allowed:
+                fail(f"{version} release record must define Local Verification: not run or passed exactly once")
+            continue
         if len(values) != 1 or normalize_text(values[0]).strip() != normalize_text(value):
             fail(f"{version} release record must define {field}: {value} exactly once")
     if release_record_claims_deployed_without_live_evidence(record):
@@ -695,7 +701,24 @@ def validate_release_lifecycle_records(
         )
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Verify release SOP files for one explicit candidate version.")
+    parser.add_argument("--version", required=True, help="Expected candidate version, including the V prefix.")
+    return parser.parse_args(argv)
+
+
+def validate_requested_candidate_version(version: str, agents: str) -> str:
+    requested = str(version or "").strip()
+    if VERSION_TOKEN_PATTERN.fullmatch(requested) is None:
+        fail("--version must be an exact candidate such as V3.1.0")
+    candidate = release_candidate(agents)
+    if requested != candidate:
+        fail(f"Requested version {requested} does not match release candidate {candidate}")
+    return candidate
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     missing = [path for path in REQUIRED_FILES if not (ROOT / path).exists()]
     if missing:
         fail("Missing SOP files: " + ", ".join(missing))
@@ -750,8 +773,12 @@ def main() -> int:
     for artifact in ["v2-api/app/static/vue/version.json", "v2-web/src/version.json"]:
         if artifact not in release_verifier:
             fail(f"verify-client-release.py must require {artifact}")
-    for artifact in ["v2-web\\src\\version.json", "v2-api\\app\\static\\vue\\version.json"]:
-        if artifact not in build_script:
+    for marker, artifact in [
+        ("v2-web\\src\\version.json", "v2-web/src/version.json"),
+        ('$stagedVueDir = Join-Path $staging "v2-api\\app\\static\\vue"', "staged Vue output directory"),
+        ('Join-Path $stagedVueDir "version.json"', "staged Vue version.json"),
+    ]:
+        if marker not in build_script:
             fail(f"build-client-release.ps1 must verify the version artifact: {artifact}")
     for path in [
         "docs/sop/01-demand-intake-and-priority.md",
@@ -822,7 +849,7 @@ def main() -> int:
 
     agents = read("AGENTS.md")
     deployed_baseline = deployed_production_baseline(agents)
-    candidate = release_candidate(agents)
+    candidate = validate_requested_candidate_version(args.version, agents)
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
 

@@ -22,7 +22,7 @@ V3.1.0 完成生产部署后，客户侧功能、发布包、生产备份、独�
 | 甲方签收清单 | `docs/CLIENT_SIGNOFF_CHECKLIST.md`，列出可现场确认并签字的验收项 | 已完成 |
 | 页面高级感 | 登录页重做，主页面固定导航清理，统一工作台视觉语言 | 已完成，需人眼最终确认 |
 | 服务器部署准备 | `docs/SERVER_DEPLOYMENT_PREP.md`、Nginx 配置、systemd 服务、生产账号注意事项 | 已完成 |
-| 发布包 | `build/server-release/module-manager-v2-server-3.1.0.zip` | 发布流程中 |
+| 发布包 | `build/server-release/module-manager-v2-server-3.1.0.zip` | 待 Task 8 从最终审阅提交构建并验包 |
 
 ## 已运行验证
 
@@ -61,7 +61,7 @@ cd .\v2-api
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.1.0.zip
 ```
 
-结果：以 `ops/releases/V3.1.0.md` 记录的实际大小、SHA256 和验包结论为准。
+结果：待 Task 8 从最终审阅提交构建；实际大小、SHA256 和验包结论届时写入 `ops/releases/V3.1.0.md`。
 
 ## 发布包
 

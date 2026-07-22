@@ -215,6 +215,27 @@ def test_delivery_package_blocks_invalid_groups_with_structured_errors(mutate, e
     assert expected_code in {error["code"] for error in captured.value.errors}
 
 
+@pytest.mark.parametrize("field", ["terminal", "meter_no", "module_asset_no", "collector"])
+@pytest.mark.parametrize(
+    "placeholder",
+    ["0", "00", "00000000", "000000000000", "test-device", "TEST123", "manual-device", "unmatched-device"],
+)
+def test_delivery_package_reuses_formal_identity_validation_for_every_device_field(
+    field: str,
+    placeholder: str,
+) -> None:
+    group = delivery_group()
+    group[field] = placeholder
+
+    with pytest.raises(DeliveryPackageValidationError) as captured:
+        build_delivery_package([group], read_photo)
+
+    assert any(
+        error["code"] == "placeholder_identity" and error["field"] == field
+        for error in captured.value.errors
+    )
+
+
 def test_delivery_package_reports_cross_group_device_conflicts_without_partial_output() -> None:
     first = delivery_group("group-001")
     second = delivery_group("group-002", address="江宁路 2 号")

@@ -12,6 +12,18 @@ if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+$sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
+    throw "Unable to resolve the full Git source commit for this release."
+}
+$worktreeChanges = @(git status --porcelain --untracked-files=all)
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to verify Git worktree state before packaging."
+}
+if ($worktreeChanges.Count -ne 0) {
+    throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
+}
+
 $releaseRoot = Join-Path $root "build\server-release"
 $packageName = "module-manager-v2-server-$Version"
 $staging = Join-Path $releaseRoot $packageName
@@ -48,46 +60,12 @@ if ($LASTEXITCODE -ne 0) {
         throw "Dependency installation failed."
 }
 
-Write-Host "Building Vue production bundle..."
-Push-Location .\v2-web
-try {
-    npm run build
-    if ($LASTEXITCODE -ne 0) {
-        throw "Vue production build failed."
-    }
-}
-finally {
-    Pop-Location
-}
-
-$versionArtifacts = @(
-    (Join-Path $root "v2-web\src\version.json"),
-    (Join-Path $root "v2-api\app\static\vue\version.json")
-)
-foreach ($versionArtifact in $versionArtifacts) {
-    if (-not (Test-Path -LiteralPath $versionArtifact -PathType Leaf)) {
-        throw "Vue version artifact missing after build: $versionArtifact"
-    }
-}
-
 if (-not $SkipSmoke) {
     Write-Host "Running release smoke check before packaging..."
     .\.venv\Scripts\python.exe .\scripts\smoke-client-demo.py
     if ($LASTEXITCODE -ne 0) {
         throw "Release smoke check failed."
     }
-}
-
-$sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
-if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
-    throw "Unable to resolve the full Git source commit for this release."
-}
-$worktreeChanges = @(git status --porcelain --untracked-files=all)
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to verify Git worktree state before packaging."
-}
-if ($worktreeChanges.Count -ne 0) {
-    throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
 }
 
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
@@ -194,6 +172,37 @@ if (Test-Path $stagedStaticDir) {
     }
 }
 
+$stagedVueDir = Join-Path $staging "v2-api\app\static\vue"
+$previousVueOutDir = $env:MODULE_MANAGER_VUE_OUT_DIR
+$env:MODULE_MANAGER_VUE_OUT_DIR = $stagedVueDir
+Write-Host "Building Vue production bundle..."
+Push-Location .\v2-web
+try {
+    npm run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "Vue production build failed."
+    }
+}
+finally {
+    Pop-Location
+    if ($null -eq $previousVueOutDir) {
+        Remove-Item Env:\MODULE_MANAGER_VUE_OUT_DIR -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:MODULE_MANAGER_VUE_OUT_DIR = $previousVueOutDir
+    }
+}
+
+$versionArtifacts = @(
+    (Join-Path $root "v2-web\src\version.json"),
+    (Join-Path $stagedVueDir "version.json")
+)
+foreach ($versionArtifact in $versionArtifacts) {
+    if (-not (Test-Path -LiteralPath $versionArtifact -PathType Leaf)) {
+        throw "Vue version artifact missing after build: $versionArtifact"
+    }
+}
+
 Get-ChildItem -LiteralPath $staging -Recurse -Directory -Force |
     Where-Object { $_.Name -in @("__pycache__", ".pytest_cache") } |
     Remove-Item -Recurse -Force
@@ -258,7 +267,7 @@ $manifest = @"
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V$Version
 
 ## Verified During Packaging
 

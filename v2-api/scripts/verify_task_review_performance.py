@@ -163,7 +163,7 @@ def run_verification(base_url: str, token: str) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Verify V3.0.84 task and review performance thresholds.")
+    parser = argparse.ArgumentParser(description="Verify V3.1.0 task and review performance thresholds.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8010")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--token", default=os.getenv("MODULE_MANAGER_ACCESS_TOKEN", ""))

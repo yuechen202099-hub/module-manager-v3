@@ -36,7 +36,6 @@ STANDARD_PHOTO_CATEGORIES = {
     "after_box": "表箱整体改造后",
 }
 STANDARD_PHOTO_ORDER = tuple(STANDARD_PHOTO_CATEGORIES)
-FORMAL_IDENTITY_PLACEHOLDERS = {"", "00000000", "未关联终端"}
 PACKAGE_TTL = timedelta(days=7)
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
@@ -179,16 +178,16 @@ def _deduplicated_groups(groups: Iterable[Mapping[str, Any]]) -> list[dict[str, 
     return result
 
 
-def validate_delivery_groups(
+def collect_delivery_validation_errors(
     groups: Iterable[Mapping[str, Any]],
     *,
     require_cache: bool = True,
 ) -> list[dict[str, Any]]:
+    from app.services.local_simulation import validate_real_formal_identity_value
+
     deduplicated = _deduplicated_groups(groups)
     if not deduplicated:
-        raise DeliveryPackageValidationError(
-            [_error("", "no_groups", "scope", "No archived groups are eligible for formal delivery")]
-        )
+        return [_error("", "no_groups", "scope", "No archived groups are eligible for formal delivery")]
     errors: list[dict[str, str]] = []
     identities: dict[str, dict[str, list[str]]] = {
         field: {} for field in ("terminal", "meter_no", "module_asset_no", "collector")
@@ -206,9 +205,13 @@ def validate_delivery_groups(
             if not identity[field]:
                 errors.append(_error(group_id, code, field, f"Missing required {field}"))
         for field in ("terminal", "meter_no", "module_asset_no", "collector"):
-            if identity[field] in FORMAL_IDENTITY_PLACEHOLDERS - {""}:
+            if not identity[field]:
+                continue
+            try:
+                validate_real_formal_identity_value(identity[field], f"delivery {field}")
+            except ValueError:
                 errors.append(_error(group_id, "placeholder_identity", field, "Placeholder identity is forbidden"))
-            if identity[field]:
+            else:
                 identities[field].setdefault(identity[field], []).append(group_id)
         if not group_is_formally_archived(group):
             errors.append(_error(group_id, "not_archived", "status", "Group is not archived"))
@@ -245,6 +248,16 @@ def validate_delivery_groups(
                 errors.append(
                     _error(group_id, "device_conflict", field, f"Device identifier {value} is used by multiple groups")
                 )
+    return errors
+
+
+def validate_delivery_groups(
+    groups: Iterable[Mapping[str, Any]],
+    *,
+    require_cache: bool = True,
+) -> list[dict[str, Any]]:
+    deduplicated = _deduplicated_groups(groups)
+    errors = collect_delivery_validation_errors(deduplicated, require_cache=require_cache)
     if errors:
         raise DeliveryPackageValidationError(errors)
     return deduplicated

@@ -32,6 +32,29 @@ def test_parses_current_deployed_baseline_and_release_candidate_markers() -> Non
     assert verifier.release_candidate(agents) == "V3.1.0"
 
 
+def test_cli_parses_version_and_rejects_unknown_arguments() -> None:
+    verifier = load_verifier()
+
+    assert verifier.parse_args(["--version", "V3.1.0"]).version == "V3.1.0"
+    with pytest.raises(SystemExit):
+        verifier.parse_args(["--version", "V3.1.0", "--unknown"])
+
+
+def test_cli_version_must_match_the_release_candidate() -> None:
+    verifier = load_verifier()
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert verifier.validate_requested_candidate_version("V3.1.0", agents) == "V3.1.0"
+    with pytest.raises(AssertionError, match="release candidate"):
+        verifier.validate_requested_candidate_version("V3.0.84", agents)
+
+
+def test_cli_verifies_the_current_release_contract() -> None:
+    verifier = load_verifier()
+
+    assert verifier.main(["--version", "V3.1.0"]) == 0
+
+
 def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
@@ -67,6 +90,21 @@ def test_accepts_pending_v3081_candidate_release_record() -> None:
 """
 
     verifier.candidate_release_record_is_pending(record, "V3.0.81")
+
+
+def test_accepts_pending_candidate_after_local_verification() -> None:
+    verifier = load_verifier()
+    record = """# V3.1.0 Production Release Record
+
+- Status: pending
+- Local Verification: passed
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.0.84
+"""
+
+    verifier.candidate_release_record_is_pending(record, "V3.1.0", "V3.0.84")
 
 
 @pytest.mark.parametrize(

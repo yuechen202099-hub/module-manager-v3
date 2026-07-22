@@ -49,7 +49,7 @@ build/server-release/module-manager-v2-server-3.1.0.zip
 - 静态页面校验：通过
 - 部署样例校验：通过
 - 演示 smoke：通过
-- 发布包验包：通过，126 个必需文件齐全
+- V3.1.0 正式发布包：待构建；SOURCE_COMMIT、文件清单和 SHA256：待验包，均由 Task 8 留证
 
 ## 签字
 

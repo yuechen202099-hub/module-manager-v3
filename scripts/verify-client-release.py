@@ -239,7 +239,12 @@ def verify_archive_members_are_tracked(names: set[str], source_commit: str) -> N
     if result.returncode != 0:
         fail(f"Unable to inspect SOURCE_COMMIT {source_commit}: {result.stderr.strip()}")
     tracked_names = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-    unexpected = sorted(names - tracked_names - {"SOURCE_COMMIT"})
+    generated_vue_prefix = "v2-api/app/static/vue/"
+    unexpected = sorted(
+        name
+        for name in names - tracked_names - {"SOURCE_COMMIT"}
+        if not name.startswith(generated_vue_prefix)
+    )
     if unexpected:
         fail("Release archive members not tracked by SOURCE_COMMIT: " + ", ".join(unexpected[:20]))
 

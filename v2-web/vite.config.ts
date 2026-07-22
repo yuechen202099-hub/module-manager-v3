@@ -7,6 +7,7 @@ import versionArtifact from './src/version.json'
 
 const entryAttestationPrefix =
   `globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__={"version":"${versionArtifact.version}"};\n`
+const configuredOutDir = process.env.MODULE_MANAGER_VUE_OUT_DIR?.trim()
 
 export default defineConfig({
   base: '/vue/',
@@ -62,7 +63,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: '../v2-api/app/static/vue',
+    outDir: configuredOutDir || '../v2-api/app/static/vue',
     emptyOutDir: true,
     rollupOptions: {
       output: {
