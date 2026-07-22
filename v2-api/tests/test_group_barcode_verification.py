@@ -197,3 +197,32 @@ def test_invalidation_can_mark_evidence_as_ineligible(reason, mutate) -> None:
     assert result["evidence_fingerprint"] is None
     assert result["evidence_version"] == 4
     assert result["should_enqueue"] is False
+
+
+@pytest.mark.parametrize("next_status", ["passed", "manual_confirmed"])
+def test_invalidation_rejects_completed_status_for_changed_evidence(next_status: str) -> None:
+    with pytest.raises(ValueError, match="pending or not_eligible"):
+        invalidate_group_verification(
+            {"status": "passed", "evidence_fingerprint": "old", "evidence_version": 3},
+            reason="photo_changed",
+            actor="reviewer-a",
+            evidence_fingerprint="new",
+            next_status=next_status,
+        )
+
+
+@pytest.mark.parametrize(
+    ("next_status", "should_enqueue"),
+    [("pending", True), ("not_eligible", False)],
+)
+def test_invalidation_accepts_only_pending_or_not_eligible(next_status: str, should_enqueue: bool) -> None:
+    result = invalidate_group_verification(
+        {"status": "passed", "evidence_fingerprint": "old", "evidence_version": 3},
+        reason="photo_changed",
+        actor="reviewer-a",
+        evidence_fingerprint="new",
+        next_status=next_status,
+    )
+
+    assert result["status"] == next_status
+    assert result["should_enqueue"] is should_enqueue

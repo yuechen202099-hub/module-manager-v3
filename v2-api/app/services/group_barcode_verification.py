@@ -19,6 +19,8 @@ VerificationStatus = Literal[
     "manual_confirmed",
     "failed",
 ]
+InvalidationStatus = Literal["pending", "not_eligible"]
+INVALIDATION_STATUSES = frozenset({"pending", "not_eligible"})
 
 REQUIRED_CATEGORIES = frozenset(
     {"meter_barcode", "collector_barcode", "module_meter", "module_barcode"}
@@ -72,7 +74,7 @@ def invalidate_group_verification(
     reason: str,
     actor: str,
     evidence_fingerprint: str | None = None,
-    next_status: VerificationStatus | None = None,
+    next_status: InvalidationStatus | None = None,
 ) -> dict[str, Any]:
     result = dict(verification)
     current_fingerprint = str(result.get("evidence_fingerprint") or "")
@@ -84,7 +86,9 @@ def invalidate_group_verification(
         result["should_enqueue"] = False
         return result
 
-    resolved_status: VerificationStatus = next_status or "pending"
+    resolved_status = next_status or "pending"
+    if resolved_status not in INVALIDATION_STATUSES:
+        raise ValueError("next_status must be pending or not_eligible")
     result.update(
         {
             "status": resolved_status,
