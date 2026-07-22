@@ -64,9 +64,15 @@ from app.services.photo_storage import (
     resolve_remote_image_host_addresses,
     validate_remote_image_url,
 )
-from app.services.state_repository import StateBackendNotReady, _unmatched_duplicate_keys, get_state_repository
+from app.services.state_repository import (
+    StateBackendNotReady,
+    _unmatched_duplicate_keys,
+    get_state_repository,
+    invalidate_verification_for_group,
+)
 from app.services import photo_barcode_check, unmatched_review
 from app.services.local_simulation import (
+    CONSTRUCTION_SLOT_CATEGORIES,
     add_photo_urls_to_group,
     assign_construction_task,
     bootstrap_local_simulation,
@@ -110,6 +116,7 @@ from app.services.local_simulation import (
     open_construction_task,
     read_catalog_xlsx_rows,
     normalize_url_import_row,
+    normalize_construction_slot,
     read_scan_template_xlsx_rows,
     scan_record_to_photo_rows,
     release_all_claimed_tasks,
@@ -1589,7 +1596,17 @@ def _source_url_for_photo(photo: dict) -> str:
 
 
 def _persist_repaired_photo_storage(group_id: str, photo: dict) -> None:
-    if settings.state_backend.lower() not in {"postgres", "dual"}:
+    backend = settings.state_backend.lower()
+    if backend in {"json", "dual"}:
+        json_group = get_group(group_id)
+        if json_group is not None:
+            invalidate_verification_for_group(
+                None,
+                json_group,
+                actor="photo-storage-repair",
+                reason="photo_replaced",
+            )
+    if backend not in {"postgres", "dual"}:
         return
     photo_id = str(photo.get("id") or "").strip()
     if not photo_id:
@@ -1641,6 +1658,12 @@ def _persist_repaired_photo_storage(group_id: str, photo: dict) -> None:
                 }
             )
             record.raw_data = raw_data
+            invalidate_verification_for_group(
+                session,
+                group,
+                actor="photo-storage-repair",
+                reason="photo_replaced",
+            )
             session.commit()
     except Exception:
         # Preview repair must not take down the review page. The current request
@@ -2773,7 +2796,9 @@ async def construction_group_upload_batch(
     for index, file, content in validated_files:
         filename = file.filename or f"photo-{index + 1}.jpg"
         client_photo_id = client_photo_ids[index] if index < len(client_photo_ids) else f"photo-{index + 1}"
-        slot = photo_slots[index] if index < len(photo_slots) else "other"
+        raw_slot = photo_slots[index] if index < len(photo_slots) else "other"
+        slot = normalize_construction_slot(raw_slot) or "other"
+        category = CONSTRUCTION_SLOT_CATEGORIES.get(slot, "other")
         try:
             stored = save_image_bytes(
                 scope="construction",
@@ -2795,6 +2820,7 @@ async def construction_group_upload_batch(
                 "client_photo_id": client_photo_id,
                 "client_completed_at": client_completed_at,
                 "slot": slot,
+                "category": category,
                 "filename": filename,
                 "storage_type": stored["storage_type"],
                 "storage_key": stored["storage_key"],

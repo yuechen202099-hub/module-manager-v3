@@ -17,10 +17,10 @@ def eligible_group() -> dict:
         "module_asset_no": "MOD-001",
         "collector": "COL-001",
         "photos": [
-            {"id": "p-meter", "sha256": "a" * 64, "category": "meter_barcode"},
+            {"id": "p-before", "sha256": "a" * 64, "category": "before_box"},
             {"id": "p-collector", "sha256": "b" * 64, "category": "collector_barcode"},
             {"id": "p-module-meter", "sha256": "c" * 64, "category": "module_meter"},
-            {"id": "p-module-barcode", "sha256": "d" * 64, "category": "module_barcode"},
+            {"id": "p-after", "sha256": "d" * 64, "category": "after_box"},
         ],
     }
 
@@ -40,7 +40,7 @@ def test_eligible_group_with_exactly_four_unique_categories_is_pending() -> None
         lambda group: group["photos"].append(
             {"id": "p-extra", "sha256": "e" * 64, "category": "extra"}
         ),
-        lambda group: group["photos"].__setitem__(3, {"id": "p-duplicate", "sha256": "e" * 64, "category": "meter_barcode"}),
+        lambda group: group["photos"].__setitem__(3, {"id": "p-duplicate", "sha256": "e" * 64, "category": "before_box"}),
         lambda group: group.__setitem__("terminal", ""),
         lambda group: group.__setitem__("meter_no", "未关联终端"),
     ],

@@ -928,6 +928,91 @@ class ApiReviewSession:
         vars(self.record).update(deepcopy(self.record_snapshot))
 
 
+def test_postgres_photo_storage_repair_invalidates_verification_before_commit(monkeypatch) -> None:
+    group = SimpleNamespace(id=uuid4(), legacy_id="group-repair", team_id="team-repair")
+    photo = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="photo-repair",
+        image_url="https://old.example/photo.jpg",
+        storage_type="oss",
+        storage_bucket="old-bucket",
+        storage_key="old-key",
+        sha256="a" * 64,
+        object_key="old-key",
+        byte_size=1,
+        content_type="image/jpeg",
+        raw_data={},
+    )
+    tracker = {"commits": 0}
+
+    class RepairSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            return group if "material_groups" in str(statement) else photo
+
+        def commit(self):
+            tracker["commits"] += 1
+
+    invalidations = []
+    monkeypatch.setattr(local_test.settings, "state_backend", "postgres")
+    monkeypatch.setattr(local_test, "SessionLocal", lambda: RepairSession())
+    monkeypatch.setattr(local_test, "current_team_id", lambda: "team-repair")
+    monkeypatch.setattr(
+        local_test,
+        "invalidate_verification_for_group",
+        lambda session, changed_group, actor, reason: invalidations.append(
+            (session, changed_group, actor, reason, tracker["commits"])
+        ),
+        raising=False,
+    )
+
+    local_test._persist_repaired_photo_storage(
+        "group-repair",
+        {
+            "id": "photo-repair",
+            "image_url": "https://new.example/photo.jpg",
+            "storage_type": "oss",
+            "storage_bucket": "new-bucket",
+            "storage_key": "new-key",
+            "sha256": "b" * 64,
+            "byte_size": 2,
+            "content_type": "image/jpeg",
+        },
+    )
+
+    assert len(invalidations) == 1
+    _session, changed_group, actor, reason, commits_before_invalidation = invalidations[0]
+    assert changed_group is group
+    assert actor == "photo-storage-repair"
+    assert reason == "photo_replaced"
+    assert commits_before_invalidation == 0
+    assert tracker["commits"] == 1
+
+
+def test_json_photo_storage_repair_invalidates_verification(monkeypatch) -> None:
+    group = {"id": "group-repair", "photos": []}
+    invalidations = []
+    monkeypatch.setattr(local_test.settings, "state_backend", "json")
+    monkeypatch.setattr(local_test, "get_group", lambda group_id: group if group_id == "group-repair" else None)
+    monkeypatch.setattr(
+        local_test,
+        "invalidate_verification_for_group",
+        lambda session, changed_group, actor, reason: invalidations.append(
+            (session, changed_group, actor, reason)
+        ),
+        raising=False,
+    )
+
+    local_test._persist_repaired_photo_storage("group-repair", {"id": "photo-repair"})
+
+    assert invalidations == [(None, group, "photo-storage-repair", "photo_replaced")]
+
+
 def postgres_review_record() -> SimpleNamespace:
     return SimpleNamespace(
         id="11111111-1111-1111-1111-111111111111",
@@ -4345,7 +4430,7 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert "missing_collector_photo" in payload["group"]["exception_reasons"]
     assert payload["group"]["photos"][0]["upload_source"] == "construction-mobile"
     assert payload["group"]["photos"][0]["construction_slot"] == "before_box"
-    assert payload["group"]["photos"][0]["category"] == "unclassified"
+    assert payload["group"]["photos"][0]["category"] == "before_box"
     assert payload["group"]["photos"][0]["creator"] == constructor_name
     assert payload["group"]["photos"][0]["creator"] != "constructor"
     assert payload["group"]["photos"][0]["sha256"]
@@ -4427,7 +4512,12 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert len(review_detail["photos"]) == 4
     assert all(photo["image_url"].startswith("/static/uploads/construction/") for photo in review_detail["photos"])
     assert all(photo["download_status"] == "downloaded" for photo in review_detail["photos"])
-    assert all(photo["category"] == "unclassified" for photo in review_detail["photos"])
+    assert {photo["category"] for photo in review_detail["photos"]} == {
+        "before_box",
+        "collector_barcode",
+        "module_meter",
+        "after_box",
+    }
 
     repaired_detail = client.get(f"/local-test/groups/{group['id']}", headers=reviewer_headers).json()["data"]
     collector_photo = next(photo for photo in repaired_detail["photos"] if photo["construction_slot"] == "collector_barcode")

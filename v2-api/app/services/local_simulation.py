@@ -2972,6 +2972,10 @@ def update_group_terminal(group_id: str, terminal: str, actor: str) -> dict[str,
     group["terminal"] = terminal
     group["stage_terminal"] = terminal
     group["task_id"] = task["id"]
+    if previous_terminal != terminal:
+        from app.services.state_repository import invalidate_verification_for_group
+
+        invalidate_verification_for_group(None, group, actor, "group_terminal_changed")
     append_audit_event(
         "update_group_terminal",
         actor,
@@ -3041,6 +3045,19 @@ def update_group_metadata(
         field for field in allowed_group_fields.union(photo_field_map) if field in updates and previous.get(field) != group.get(field)
     )
     if changed_fields:
+        if set(changed_fields).intersection(
+            {
+                "meter_no",
+                "terminal",
+                "collector",
+                "module_asset_no",
+                "construction_collector",
+                "construction_module_asset_no",
+            }
+        ):
+            from app.services.state_repository import invalidate_verification_for_group
+
+            invalidate_verification_for_group(None, group, actor, "group_identity_changed")
         append_audit_event(
             audit_action,
             actor,
@@ -3117,6 +3134,10 @@ def add_photo_urls_to_group(
         group["status"] = "pending"
     group["reviewer"] = None
     group["reviewed_at"] = None
+    if added:
+        from app.services.state_repository import invalidate_verification_for_group
+
+        invalidate_verification_for_group(None, group, actor, "photo_added")
     mark_delivery_cache_stale(group, "manual photos changed")
     append_audit_event("add_group_photos", actor, {"group_id": group_id, "added": added, "skipped_duplicates": skipped_duplicates})
     refresh_summary()
@@ -6017,7 +6038,7 @@ def upload_construction_group_batch(
         url = str(item.get("url") or "").strip()
         sha256 = str(item.get("sha256") or "").strip()
         client_photo_id = str(item.get("client_photo_id") or "").strip()
-        slot = str(item.get("slot") or "other").strip() or "other"
+        slot = normalize_construction_slot(item.get("slot") or item.get("category")) or "other"
         if not url:
             continue
         composite = (client_batch_id, client_photo_id, sha256)
@@ -6055,8 +6076,8 @@ def upload_construction_group_batch(
                 "storage_bucket": item.get("storage_bucket", ""),
                 "storage_source": item.get("storage_source") or "construction-mobile",
                 "original_filename": item.get("filename", ""),
-                "category": "unclassified",
-                "category_label": PHOTO_CATEGORIES["unclassified"],
+                "category": slot_category,
+                "category_label": PHOTO_CATEGORIES[slot_category],
                 "archive_status": "pending",
                 "archive_filename": "",
                 "archived_at": None,
@@ -6090,6 +6111,10 @@ def upload_construction_group_batch(
     group["exception_note"] = ""
     group["reviewed_at"] = None
     apply_photo_quality_exception_status(group)
+    if added:
+        from app.services.state_repository import invalidate_verification_for_group
+
+        invalidate_verification_for_group(None, group, actor, "construction_photos_changed")
     mark_delivery_cache_stale(group, "construction upload changed photos")
     append_audit_event(
         "construction_upload_batch",
@@ -6446,6 +6471,9 @@ def reset_group_to_unconstructed(group_id: str, actor: str, reason: str = "", fo
     group["has_archive_blocker"] = False
     group["reviewed_at"] = None
     group["reset_to_unconstructed_at"] = now_iso()
+    from app.services.state_repository import invalidate_verification_for_group
+
+    invalidate_verification_for_group(None, group, actor, "reset_to_unconstructed")
     mark_delivery_cache_stale(group, "reset to unconstructed")
     append_audit_event(
         "group_reset_to_unconstructed",
@@ -6478,6 +6506,9 @@ def reset_group_to_unreviewed(group_id: str, actor: str, reason: str = "", force
     group["exception_reasons"] = []
     group["has_archive_blocker"] = False
     group["reviewed_at"] = None
+    from app.services.state_repository import invalidate_verification_for_group
+
+    invalidate_verification_for_group(None, group, actor, "reset_to_unreviewed")
     mark_delivery_cache_stale(group, "reset to unreviewed")
     append_audit_event(
         "admin_group_reset_unreviewed",
@@ -6615,6 +6646,21 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
             "created_at": now_iso(),
         }
     )
+    if previous != category:
+        append_audit_event(
+            "photo_category_corrected",
+            reviewer,
+            {
+                "group_id": group_id,
+                "photo_id": photo_id,
+                "previous_category": previous,
+                "next_category": category,
+                "invalidation_reason": "photo_category_changed",
+            },
+        )
+        from app.services.state_repository import invalidate_verification_for_group
+
+        invalidate_verification_for_group(None, group, reviewer, "photo_category_changed")
     update_group_archive_status(group, reviewer)
     refresh_after_photo_classification(before_group, group, previous, category)
     return photo
@@ -6633,10 +6679,25 @@ def rescan_photo_barcode(group_id: str, photo_id: str, reviewer: str, category: 
         raise ValueError(f"Unsupported photo category: {next_category}")
     now = now_iso()
     if next_category != photo.get("category"):
+        previous_category = str(photo.get("category") or "unclassified")
         photo["category"] = next_category
         photo["category_label"] = PHOTO_CATEGORIES[next_category]
         photo["classified_by"] = reviewer
         photo["classified_at"] = now
+        append_audit_event(
+            "photo_category_corrected",
+            reviewer,
+            {
+                "group_id": group_id,
+                "photo_id": photo_id,
+                "previous_category": previous_category,
+                "next_category": next_category,
+                "invalidation_reason": "photo_category_changed",
+            },
+        )
+        from app.services.state_repository import invalidate_verification_for_group
+
+        invalidate_verification_for_group(None, group, reviewer, "photo_category_changed")
     photo.update(photo_barcode_check.check_photo_barcode(photo, group, use_ocr=True))
     photo["barcode_rescanned_by"] = reviewer
     photo["barcode_rescanned_at"] = now
@@ -6710,6 +6771,9 @@ def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str,
     group["exception_note"] = ""
     group["reviewed_at"] = None
     apply_photo_quality_exception_status(group)
+    from app.services.state_repository import invalidate_verification_for_group
+
+    invalidate_verification_for_group(None, group, reviewer, "photo_deleted")
     state = get_state()
     state["photo_events"].append(
         {

@@ -57,6 +57,7 @@ from app.services.local_simulation import (
     release_task,
     rematch_unmatched_record,
     reset_group_to_unconstructed,
+    reset_group_to_unreviewed,
     return_group_to_exception_order,
     review_group,
     save_exception_note,
@@ -67,6 +68,7 @@ from app.services.local_simulation import (
     reset_current_team,
     update_group_metadata,
 )
+from app.services.group_barcode_verification import evaluate_group_eligibility
 
 
 SAMPLE_FILES = [DEFAULT_TOTAL_CATALOG, DEFAULT_SCAN_FILE]
@@ -4019,6 +4021,117 @@ def test_group_metadata_form_updates_group_and_photo_fields(synthetic_state: dic
     assert all(photo["asset_no"] == "module-form" for photo in result["group"]["photos"])
     assert all(photo["creator"] == "installer-form" for photo in result["group"]["photos"])
     assert audits["items"][0]["action"] == "update_group_metadata"
+
+
+def seed_passed_group_verification(group: dict) -> None:
+    categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
+    group["terminal"] = "T-VERIFY-001"
+    group["meter_no"] = "M-VERIFY-001"
+    group["collector"] = "C-VERIFY-001"
+    group["module_asset_no"] = "MOD-VERIFY-001"
+    group["photos"] = group["photos"][:4]
+    group["photo_count"] = 4
+    for index, photo in enumerate(group["photos"]):
+        photo["category"] = categories[index]
+        photo["category_label"] = local_simulation.PHOTO_CATEGORIES[categories[index]]
+        photo["sha256"] = f"{index + 1:x}" * 64
+    evaluation = evaluate_group_eligibility(group)
+    assert evaluation.status == "pending"
+    group["barcode_verification"] = {
+        "status": "passed",
+        "evidence_fingerprint": evaluation.evidence_fingerprint,
+        "evidence_version": 7,
+        "meter_matched": True,
+        "module_matched": True,
+        "collector_matched": True,
+        "recognition_source": "legacy-worker",
+    }
+    group["group_barcode_manual_confirmed"] = True
+    local_simulation.append_audit_event(
+        "group_barcode_verification_passed",
+        "worker-a",
+        {"group_id": group["id"], "evidence_version": 7},
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_status"),
+    [
+        ("photo_added", "not_eligible"),
+        ("photo_deleted", "not_eligible"),
+        ("photo_reclassified", "not_eligible"),
+        ("meter_changed", "pending"),
+        ("module_changed", "pending"),
+        ("collector_changed", "pending"),
+        ("reset_unreviewed", "pending"),
+        ("reset_unconstructed", "not_eligible"),
+    ],
+)
+def test_json_evidence_writes_invalidate_current_group_verification(
+    synthetic_state: dict,
+    operation: str,
+    expected_status: str,
+) -> None:
+    group = synthetic_state["groups"][0]
+    seed_passed_group_verification(group)
+    claim_task(group["task_id"], reviewer="alice")
+
+    if operation == "photo_added":
+        add_photo_urls_to_group(
+            group["id"],
+            actor="alice",
+            photo_urls=["https://example.test/new-photo.jpg"],
+            photo_metadata={"https://example.test/new-photo.jpg": {"sha256": "a" * 64}},
+        )
+    elif operation == "photo_deleted":
+        delete_group_photo(group["id"], group["photos"][0]["id"], reviewer="alice")
+    elif operation == "photo_reclassified":
+        classify_photo(group["id"], group["photos"][0]["id"], "other", reviewer="alice")
+    elif operation == "meter_changed":
+        update_group_metadata(group["id"], actor="alice", updates={"meter_no": "M-VERIFY-002"})
+    elif operation == "module_changed":
+        update_group_metadata(group["id"], actor="alice", updates={"module_asset_no": "MOD-VERIFY-002"})
+    elif operation == "collector_changed":
+        update_group_metadata(group["id"], actor="alice", updates={"collector": "C-VERIFY-002"})
+    elif operation == "reset_unreviewed":
+        reset_group_to_unreviewed(group["id"], actor="alice", reason="review reset")
+    else:
+        reset_group_to_unconstructed(group["id"], actor="alice", reason="construction reset")
+
+    verification = group["barcode_verification"]
+    assert verification["status"] == expected_status
+    assert verification["evidence_version"] == 8
+    assert verification["meter_matched"] is None
+    assert verification["module_matched"] is None
+    assert verification["collector_matched"] is None
+    assert verification["recognition_source"] is None
+    assert group["group_barcode_manual_confirmed"] is False
+    assert any(event["action"] == "group_barcode_verification_passed" for event in synthetic_state["audit_events"])
+    assert any(event["action"] == "group_barcode_verification_invalidated" for event in synthetic_state["audit_events"])
+
+
+def test_json_photo_category_correction_audit_is_complete_and_redacted(synthetic_state: dict) -> None:
+    group = synthetic_state["groups"][0]
+    seed_passed_group_verification(group)
+    photo = group["photos"][0]
+    photo["image_url"] = "https://oss.example.test/photo.jpg?access_token=secret-token"
+    photo["storage_key"] = "secret/storage/key.jpg"
+    claim_task(group["task_id"], reviewer="alice")
+
+    classify_photo(group["id"], photo["id"], "after_box", reviewer="alice")
+
+    audit = next(event for event in synthetic_state["audit_events"] if event["action"] == "photo_category_corrected")
+    assert audit["actor"] == "alice"
+    assert audit["created_at"]
+    assert audit["payload"] == {
+        "group_id": group["id"],
+        "photo_id": photo["id"],
+        "previous_category": "before_box",
+        "next_category": "after_box",
+        "invalidation_reason": "photo_category_changed",
+    }
+    assert "secret-token" not in str(audit)
+    assert "secret/storage/key.jpg" not in str(audit)
 
 
 @pytest.mark.parametrize(

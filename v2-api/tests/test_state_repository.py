@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
+from app.models import AuditLog, GroupBarcodeVerification
 from app.services import state_repository as repository
 from app.services.construction_priority_import import PriorityImportRow
 
@@ -35,6 +36,102 @@ def test_json_repository_sets_construction_priority_through_simulation(
 
     assert result == {"id": 7}
     assert calls == [(7, "admin-a", True)]
+
+
+def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state() -> None:
+    group_id = uuid4()
+    photos = [
+        SimpleNamespace(
+            id=uuid4(),
+            legacy_id=f"photo-{index}",
+            sha256=f"{index + 1:x}" * 64,
+            category=category,
+            is_active=True,
+            raw_data={"construction_slot": category},
+        )
+        for index, category in enumerate(
+            ["before_box", "collector_barcode", "module_meter", "after_box"]
+        )
+    ]
+    group = SimpleNamespace(
+        id=group_id,
+        legacy_id="group-verify",
+        team_id="verify-team",
+        terminal="T-VERIFY-001",
+        display_meter_no="M-VERIFY-001",
+        raw_data={"collector": "C-VERIFY-001", "module_asset_no": "MOD-VERIFY-001"},
+    )
+    verification = GroupBarcodeVerification(
+        team_id="verify-team",
+        group_id=group_id,
+        status="passed",
+        evidence_fingerprint="old-fingerprint",
+        evidence_version=4,
+        meter_matched=True,
+        module_matched=True,
+        collector_matched=True,
+        recognition_source="legacy-worker",
+        attempt_count=2,
+    )
+    previous_audit = AuditLog(
+        team_id="verify-team",
+        legacy_id="verification-passed-history",
+        actor_username="worker-a",
+        action="group_barcode_verification_passed",
+        entity_type="material_group",
+        entity_id=group_id,
+        before_data={},
+        after_data={},
+        payload={},
+    )
+
+    class FakeScalars:
+        def all(self):
+            return photos
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.staged = [previous_audit]
+
+        def scalar(self, statement):
+            assert "group_barcode_verifications" in str(statement)
+            return verification
+
+        def scalars(self, statement):
+            assert "FROM photos" in str(statement)
+            return FakeScalars()
+
+        def add(self, value) -> None:
+            self.staged.append(value)
+
+        def flush(self) -> None:
+            return None
+
+    session = FakeSession()
+
+    result = repository.invalidate_verification_for_group(
+        session,
+        group,
+        actor="reviewer-a",
+        reason="photo_replaced",
+    )
+
+    assert result["status"] == "pending"
+    assert verification.status == "pending"
+    assert verification.evidence_version == 5
+    assert verification.meter_matched is None
+    assert verification.module_matched is None
+    assert verification.collector_matched is None
+    assert verification.recognition_source is None
+    assert verification.invalidation_reason == "photo_replaced"
+    assert verification.invalidated_by == "reviewer-a"
+    assert verification.invalidated_at is not None
+    assert previous_audit in session.staged
+    invalidation_audit = next(
+        event for event in session.staged if event.action == "group_barcode_verification_invalidated"
+    )
+    assert invalidation_audit.payload["group_id"] == "group-verify"
+    assert invalidation_audit.payload["reason"] == "photo_replaced"
 
 
 def test_json_task_reads_mask_stale_priority_without_mutating_persisted_state(
@@ -1361,10 +1458,18 @@ class FinalizeFakeSession:
             return uuid4()
         if "FROM material_groups" in sql:
             return None
+        if "FROM group_barcode_verifications" in sql:
+            return None
         return 0
 
     def scalars(self, statement):
         self.statements.append(statement)
+        if "FROM photos" in str(statement):
+            return FinalizeFakeScalars(
+                item
+                for item in self.staged
+                if isinstance(item, repository.Photo) and item.is_active
+            )
         return FinalizeFakeScalars()
 
     def get(self, model, identity):
@@ -1372,6 +1477,9 @@ class FinalizeFakeSession:
 
     def add(self, value):
         self.staged.append(value)
+
+    def flush(self):
+        return None
 
     def commit(self):
         self.commit_attempts += 1

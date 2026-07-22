@@ -22,6 +22,7 @@ from app.models import (
     AuditLog,
     ExceptionItem,
     ExceptionStatus,
+    GroupBarcodeVerification,
     GroupStatus,
     MaterialGroup,
     Photo,
@@ -417,6 +418,211 @@ def _stage_transactional_audit(
     )
     session.add(event)
     return event
+
+
+def _verification_group_payload(session: Session | None, group: Any) -> dict[str, Any]:
+    if isinstance(group, Mapping):
+        return dict(group)
+    raw = dict(getattr(group, "raw_data", None) or {})
+    photos = []
+    if session is not None:
+        photos = list(
+            session.scalars(
+                select(Photo).where(
+                    Photo.team_id == group.team_id,
+                    Photo.group_id == group.id,
+                    Photo.is_active.is_(True),
+                )
+            ).all()
+        )
+    first_collector = next(
+        (
+            str(getattr(photo, "collector", None) or "").strip()
+            for photo in photos
+            if str(getattr(photo, "collector", None) or "").strip()
+        ),
+        "",
+    )
+    first_module = next(
+        (
+            str(getattr(photo, "asset_no", None) or "").strip()
+            for photo in photos
+            if str(getattr(photo, "asset_no", None) or "").strip()
+        ),
+        "",
+    )
+    return {
+        "terminal": str(getattr(group, "terminal", None) or raw.get("terminal") or "").strip(),
+        "meter_no": str(getattr(group, "display_meter_no", None) or raw.get("meter_no") or "").strip(),
+        "collector": str(raw.get("collector") or raw.get("construction_collector") or first_collector).strip(),
+        "module_asset_no": str(
+            raw.get("module_asset_no") or raw.get("construction_module_asset_no") or first_module
+        ).strip(),
+        "photos": [
+            {
+                "id": str(
+                    getattr(photo, "legacy_id", None)
+                    or getattr(photo, "id", None)
+                    or ""
+                ),
+                "sha256": str(getattr(photo, "sha256", None) or ""),
+                "category": str(getattr(photo, "category", None) or ""),
+            }
+            for photo in photos
+        ],
+    }
+
+
+def _force_completed_verification_transition(
+    current: Mapping[str, Any],
+    evidence_fingerprint: str | None,
+) -> dict[str, Any]:
+    transition_source = dict(current)
+    if (
+        str(transition_source.get("status") or "") in {"passed", "manual_confirmed"}
+        and evidence_fingerprint == transition_source.get("evidence_fingerprint")
+    ):
+        transition_source["evidence_fingerprint"] = None
+    return transition_source
+
+
+def _clear_legacy_verification_flags(group: Any) -> None:
+    values = {
+        "group_barcode_manual_confirmed": False,
+        "group_barcode_manual_confirmed_fields": [],
+        "group_barcode_manual_confirmed_by": "",
+        "group_barcode_manual_confirmed_at": "",
+    }
+    if isinstance(group, dict):
+        group.update(values)
+        return
+    raw = dict(getattr(group, "raw_data", None) or {})
+    raw.update(values)
+    group.raw_data = raw
+
+
+def invalidate_verification_for_group(
+    session: Session | None,
+    group: Any,
+    actor: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Invalidate the current verification after an evidence write."""
+    from app.services.group_barcode_verification import (
+        evaluate_group_eligibility,
+        invalidate_group_verification,
+    )
+
+    evaluation = evaluate_group_eligibility(_verification_group_payload(session, group))
+    now = datetime.now(UTC)
+
+    if isinstance(group, dict):
+        current = dict(
+            group.get("barcode_verification")
+            or {"status": "not_eligible", "evidence_version": 0, "evidence_fingerprint": None}
+        )
+        transition_source = _force_completed_verification_transition(
+            current,
+            evaluation.evidence_fingerprint,
+        )
+        result = invalidate_group_verification(
+            transition_source,
+            reason=reason,
+            actor=actor,
+            evidence_fingerprint=evaluation.evidence_fingerprint,
+            next_status=evaluation.status,
+        )
+        result.update(
+            {
+                "meter_matched": None,
+                "module_matched": None,
+                "collector_matched": None,
+                "recognition_source": None,
+                "invalidated_at": now.isoformat(),
+            }
+        )
+        group["barcode_verification"] = result
+        _clear_legacy_verification_flags(group)
+        local_simulation.append_audit_event(
+            "group_barcode_verification_invalidated",
+            actor,
+            {
+                "group_id": str(group.get("id") or ""),
+                "reason": reason,
+                "previous_status": current.get("status"),
+                "status": result["status"],
+                "evidence_version": result["evidence_version"],
+            },
+        )
+        return result
+
+    if session is None:
+        raise ValueError("PostgreSQL verification invalidation requires a session")
+    verification = session.scalar(
+        select(GroupBarcodeVerification)
+        .where(
+            GroupBarcodeVerification.team_id == group.team_id,
+            GroupBarcodeVerification.group_id == group.id,
+        )
+        .with_for_update()
+    )
+    if verification is None:
+        verification = GroupBarcodeVerification(
+            team_id=group.team_id,
+            group_id=group.id,
+            status="not_eligible",
+            evidence_version=0,
+        )
+        session.add(verification)
+    current = {
+        "status": verification.status,
+        "evidence_fingerprint": verification.evidence_fingerprint,
+        "evidence_version": verification.evidence_version,
+        "attempt_count": verification.attempt_count,
+        "lease_owner": verification.lease_owner,
+        "lease_expires_at": verification.lease_expires_at,
+    }
+    result = invalidate_group_verification(
+        _force_completed_verification_transition(current, evaluation.evidence_fingerprint),
+        reason=reason,
+        actor=actor,
+        evidence_fingerprint=evaluation.evidence_fingerprint,
+        next_status=evaluation.status,
+    )
+    for field in (
+        "status",
+        "evidence_fingerprint",
+        "evidence_version",
+        "attempt_count",
+        "lease_owner",
+        "lease_expires_at",
+        "invalidation_reason",
+        "invalidated_by",
+    ):
+        setattr(verification, field, result.get(field))
+    verification.meter_matched = None
+    verification.module_matched = None
+    verification.collector_matched = None
+    verification.recognition_source = None
+    verification.invalidated_at = now
+    _clear_legacy_verification_flags(group)
+    _stage_transactional_audit(
+        session,
+        team_id=group.team_id,
+        actor=actor,
+        action="group_barcode_verification_invalidated",
+        entity_type="material_group",
+        entity_id=group.id,
+        before_data={"status": current["status"], "evidence_version": current["evidence_version"]},
+        after_data={"status": result["status"], "evidence_version": result["evidence_version"]},
+        payload={
+            "group_id": str(getattr(group, "legacy_id", None) or group.id),
+            "reason": reason,
+            "evidence_fingerprint": evaluation.evidence_fingerprint or "",
+        },
+    )
+    session.flush()
+    return {**result, "invalidated_at": now.isoformat()}
 
 
 def _auto_archive_exception_note(note: str) -> bool:
@@ -5539,6 +5745,22 @@ class PostgresStateRepository(StateRepository):
                 field for field in comparable_fields if field in updates and str(before.get(field) or "") != str(after.get(field) or "")
             )
             if changed_fields:
+                if set(changed_fields).intersection(
+                    {
+                        "meter_no",
+                        "terminal",
+                        "collector",
+                        "module_asset_no",
+                        "construction_collector",
+                        "construction_module_asset_no",
+                    }
+                ):
+                    invalidate_verification_for_group(
+                        session,
+                        group,
+                        actor=actor,
+                        reason="group_identity_changed",
+                    )
                 _stage_transactional_audit(
                     session,
                     team_id=local_simulation.current_team_id(),
@@ -6271,7 +6493,7 @@ class PostgresStateRepository(StateRepository):
 
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
         with self._session() as session:
-            group = self._group_by_legacy_id(session, group_id)
+            group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, reviewer)
             photo = session.scalar(
                 select(Photo).where(
@@ -6283,6 +6505,7 @@ class PostgresStateRepository(StateRepository):
             )
             if photo is None:
                 raise KeyError(photo_id)
+            previous_category = str(photo.category or "unclassified")
             category_label = local_simulation.PHOTO_CATEGORIES.get(
                 category,
                 local_simulation.PHOTO_CATEGORIES["unclassified"],
@@ -6318,6 +6541,30 @@ class PostgresStateRepository(StateRepository):
                 )
             )
             photo.raw_data = raw_data
+            if previous_category != category:
+                _stage_transactional_audit(
+                    session,
+                    team_id=group.team_id,
+                    actor=reviewer,
+                    action="photo_category_corrected",
+                    entity_type="photo",
+                    entity_id=photo.id,
+                    before_data={"category": previous_category},
+                    after_data={"category": category},
+                    payload={
+                        "group_id": str(group.legacy_id or group.id),
+                        "photo_id": str(photo.legacy_id or photo.id),
+                        "previous_category": previous_category,
+                        "next_category": category,
+                        "invalidation_reason": "photo_category_changed",
+                    },
+                )
+                invalidate_verification_for_group(
+                    session,
+                    group,
+                    actor=reviewer,
+                    reason="photo_category_changed",
+                )
             session.commit()
             session.refresh(photo)
             return _photo_payload(photo)
@@ -6330,7 +6577,7 @@ class PostgresStateRepository(StateRepository):
         category: str = "",
     ) -> dict[str, Any]:
         with self._session() as session:
-            group = self._group_by_legacy_id(session, group_id)
+            group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, reviewer)
             photo = session.scalar(
                 select(Photo).where(
@@ -6351,9 +6598,33 @@ class PostgresStateRepository(StateRepository):
                 local_simulation.PHOTO_CATEGORIES["unclassified"],
             )
             if next_category != photo.category:
+                previous_category = str(photo.category or "unclassified")
                 photo.category = next_category
                 photo.classified_by = reviewer
                 photo.classified_at = now
+                _stage_transactional_audit(
+                    session,
+                    team_id=group.team_id,
+                    actor=reviewer,
+                    action="photo_category_corrected",
+                    entity_type="photo",
+                    entity_id=photo.id,
+                    before_data={"category": previous_category},
+                    after_data={"category": next_category},
+                    payload={
+                        "group_id": str(group.legacy_id or group.id),
+                        "photo_id": str(photo.legacy_id or photo.id),
+                        "previous_category": previous_category,
+                        "next_category": next_category,
+                        "invalidation_reason": "photo_category_changed",
+                    },
+                )
+                invalidate_verification_for_group(
+                    session,
+                    group,
+                    actor=reviewer,
+                    reason="photo_category_changed",
+                )
             raw_data = dict(photo.raw_data or {})
             raw_data.update(
                 {
@@ -6494,6 +6765,7 @@ class PostgresStateRepository(StateRepository):
             raw_data.update({"status": "incomplete" if group.photo_count < 4 else "pending"})
             group.raw_data = raw_data
             _apply_photo_quality_exception_status(session, group, exclude_photo_id=photo.id)
+            invalidate_verification_for_group(session, group, actor=reviewer, reason="photo_deleted")
             session.commit()
             session.refresh(group)
             return {"group": _group_payload(session, group), "deleted_photo": deleted_payload}
@@ -6836,6 +7108,7 @@ class PostgresStateRepository(StateRepository):
             group.terminal = terminal_value
             group.legacy_task_id = task.legacy_id
             group.task_id = task.id
+            invalidate_verification_for_group(session, group, actor=actor, reason="group_terminal_changed")
             session.commit()
             session.refresh(group)
             session.refresh(task)
@@ -6957,12 +7230,13 @@ class PostgresStateRepository(StateRepository):
                 continue
             active_count += 1
             legacy_id = str(item.get("id") or f"p-{group.legacy_id or group.id}-{uuid4().hex[:12]}")
-            category = str(item.get("slot") or item.get("category") or "unclassified")
+            category = str(item.get("category") or "unclassified")
             raw_payload = dict(item)
             if source == "construction":
                 raw_payload.setdefault("upload_source", "construction-mobile")
                 slot = local_simulation.normalize_construction_slot(item.get("slot") or item.get("category"))
                 if slot:
+                    category = local_simulation.CONSTRUCTION_SLOT_CATEGORIES.get(slot, "other")
                     raw_payload.setdefault("construction_slot", slot)
                     raw_payload.setdefault(
                         "construction_slot_label",
@@ -7022,6 +7296,12 @@ class PostgresStateRepository(StateRepository):
             _apply_photo_quality_exception_status(session, group)
         elif merged_duplicates:
             session.flush()
+        if added or merged_duplicates or reactivated_duplicates:
+            reason = {
+                "construction": "construction_photos_changed",
+                "unmatched-review-finalize": "photo_restored_or_replaced",
+            }.get(source, "photo_added")
+            invalidate_verification_for_group(session, group, actor=actor, reason=reason)
         result = {
             "added": added,
             "skipped_duplicates": skipped_duplicates,
@@ -7308,6 +7588,7 @@ class PostgresStateRepository(StateRepository):
             group.exception_reasons = []
             group.has_archive_blocker = False
             group.reviewed_at = None
+            invalidate_verification_for_group(session, group, actor=actor, reason="reset_to_unconstructed")
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),
@@ -7370,6 +7651,7 @@ class PostgresStateRepository(StateRepository):
             group.exception_reasons = []
             group.has_archive_blocker = False
             group.reviewed_at = None
+            invalidate_verification_for_group(session, group, actor=actor, reason="reset_to_unreviewed")
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),

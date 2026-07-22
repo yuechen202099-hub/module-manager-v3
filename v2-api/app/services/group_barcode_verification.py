@@ -23,7 +23,7 @@ InvalidationStatus = Literal["pending", "not_eligible"]
 INVALIDATION_STATUSES = frozenset({"pending", "not_eligible"})
 
 REQUIRED_CATEGORIES = frozenset(
-    {"meter_barcode", "collector_barcode", "module_meter", "module_barcode"}
+    {"before_box", "collector_barcode", "module_meter", "after_box"}
 )
 IDENTITY_FIELDS = ("terminal", "meter_no", "module_asset_no", "collector")
 PLACEHOLDER_VALUES = frozenset(
