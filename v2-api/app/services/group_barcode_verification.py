@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
+from app.services.local_simulation import validate_real_formal_identity_value
 
 VerificationStatus = Literal[
     "not_eligible",
@@ -70,26 +72,30 @@ def invalidate_group_verification(
     reason: str,
     actor: str,
     evidence_fingerprint: str | None = None,
+    next_status: VerificationStatus | None = None,
 ) -> dict[str, Any]:
     result = dict(verification)
     current_fingerprint = str(result.get("evidence_fingerprint") or "")
-    next_fingerprint = str(evidence_fingerprint or current_fingerprint)
+    same_explicit_fingerprint = (
+        evidence_fingerprint is not None and evidence_fingerprint == current_fingerprint
+    )
 
-    if next_fingerprint == current_fingerprint:
+    if same_explicit_fingerprint:
         result["should_enqueue"] = False
         return result
 
+    resolved_status: VerificationStatus = next_status or "pending"
     result.update(
         {
-            "status": "pending",
-            "evidence_fingerprint": next_fingerprint,
+            "status": resolved_status,
+            "evidence_fingerprint": evidence_fingerprint,
             "evidence_version": int(result.get("evidence_version") or 0) + 1,
             "attempt_count": 0,
             "lease_owner": None,
             "lease_expires_at": None,
             "invalidation_reason": reason,
             "invalidated_by": actor,
-            "should_enqueue": True,
+            "should_enqueue": resolved_status == "pending",
         }
     )
     return result
@@ -108,8 +114,15 @@ def _group_value(group: Any, field: str) -> Any:
 
 
 def _is_missing_identity(value: Any) -> bool:
-    normalized = str(value or "").strip().lower()
-    return not normalized or normalized in PLACEHOLDER_VALUES
+    clean_value = str(value or "").strip()
+    normalized = clean_value.lower()
+    if not normalized or normalized in PLACEHOLDER_VALUES:
+        return True
+    try:
+        validate_real_formal_identity_value(clean_value, "barcode verification identity")
+    except ValueError:
+        return True
+    return bool(re.fullmatch(r"0+", clean_value) or normalized.startswith("test"))
 
 
 def _photo_evidence(photo: Any) -> dict[str, str] | None:
@@ -118,6 +131,6 @@ def _photo_evidence(photo: Any) -> dict[str, str] | None:
     photo_id = str(photo.get("id") or "").strip()
     sha256 = str(photo.get("sha256") or "").strip().lower()
     category = str(photo.get("category") or "").strip()
-    if not photo_id or len(sha256) != 64 or not category:
+    if not photo_id or not re.fullmatch(r"[0-9a-f]{64}", sha256) or not category:
         return None
     return {"id": photo_id, "sha256": sha256, "category": category}

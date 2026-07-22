@@ -37,3 +37,5 @@ def test_barcode_maintenance_control_is_scoped_to_one_team() -> None:
     assert table.name == "barcode_maintenance_controls"
     assert table.c.team_id.primary_key is True
     assert {"paused", "last_batch_id", "last_batch_progress"} <= set(table.c.keys())
+    assert table.c.paused.default.arg is True
+    assert str(table.c.paused.server_default.arg) == "true"

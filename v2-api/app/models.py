@@ -424,7 +424,7 @@ class BarcodeMaintenanceControl(Base, TimestampMixin):
     __tablename__ = "barcode_maintenance_controls"
 
     team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), primary_key=True)
-    paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     last_batch_id: Mapped[str | None] = mapped_column(String(128))
     last_batch_progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
 

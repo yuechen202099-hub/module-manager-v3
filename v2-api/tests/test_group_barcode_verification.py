@@ -53,6 +53,22 @@ def test_ineligible_photo_or_identity_sets_are_not_eligible(mutate) -> None:
     assert evaluate_group_eligibility(group).status == "not_eligible"
 
 
+@pytest.mark.parametrize("placeholder", ["00000000", "0000", "test", "TEST-001"])
+def test_formal_identity_placeholders_are_not_eligible(placeholder: str) -> None:
+    group = eligible_group()
+    group["terminal"] = placeholder
+
+    assert evaluate_group_eligibility(group).status == "not_eligible"
+
+
+def test_real_identity_with_zeroes_is_eligible() -> None:
+    group = eligible_group()
+    group["terminal"] = "350000000001"
+    group["meter_no"] = "120000912473"
+
+    assert evaluate_group_eligibility(group).status == "pending"
+
+
 def test_missing_required_photo_category_is_not_eligible() -> None:
     group = eligible_group()
     group["photos"][3]["category"] = "overview"
@@ -76,6 +92,17 @@ def test_evidence_fingerprint_is_category_sorted_and_detects_photo_changes() -> 
     assert evaluate_group_eligibility(group).evidence_fingerprint != evaluate_group_eligibility(
         changed_group
     ).evidence_fingerprint
+
+
+@pytest.mark.parametrize("sha256", ["g" * 64, "a" * 63, "a" * 65])
+def test_photo_evidence_requires_a_64_character_hex_sha256(sha256: str) -> None:
+    group = eligible_group()
+    group["photos"][0]["sha256"] = sha256
+
+    result = evaluate_group_eligibility(group)
+
+    assert result.status == "not_eligible"
+    assert result.reason == "invalid_photo_evidence"
 
 
 def test_invalidation_with_new_evidence_resets_to_pending_and_records_actor() -> None:
@@ -120,4 +147,53 @@ def test_invalidation_with_unchanged_pending_fingerprint_does_not_requeue() -> N
     assert result["status"] == "pending"
     assert result["evidence_version"] == 3
     assert result["attempt_count"] == 1
+    assert result["should_enqueue"] is False
+
+
+def test_invalidation_without_fingerprint_clears_passed_state_and_versions_evidence() -> None:
+    verification = {
+        "status": "passed",
+        "evidence_fingerprint": "old-fingerprint",
+        "evidence_version": 3,
+        "attempt_count": 2,
+    }
+
+    result = invalidate_group_verification(
+        verification,
+        reason="photo_changed",
+        actor="reviewer-a",
+    )
+
+    assert result["status"] == "pending"
+    assert result["evidence_fingerprint"] is None
+    assert result["evidence_version"] == 4
+    assert result["should_enqueue"] is True
+
+
+@pytest.mark.parametrize(
+    "reason,mutate",
+    [
+        ("photo_deleted", lambda group: group["photos"].pop()),
+        ("photo_reclassified", lambda group: group["photos"].__setitem__(3, {"id": "p-overview", "sha256": "d" * 64, "category": "overview"})),
+        ("identity_deleted", lambda group: group.__setitem__("collector", "")),
+    ],
+    ids=["photo_deleted", "photo_reclassified", "identity_deleted"],
+)
+def test_invalidation_can_mark_evidence_as_ineligible(reason, mutate) -> None:
+    group = eligible_group()
+    mutate(group)
+    evaluation = evaluate_group_eligibility(group)
+
+    result = invalidate_group_verification(
+        {"status": "passed", "evidence_fingerprint": "old", "evidence_version": 3},
+        reason=reason,
+        actor="reviewer-a",
+        evidence_fingerprint=evaluation.evidence_fingerprint,
+        next_status=evaluation.status,
+    )
+
+    assert evaluation.status == "not_eligible"
+    assert result["status"] == "not_eligible"
+    assert result["evidence_fingerprint"] is None
+    assert result["evidence_version"] == 4
     assert result["should_enqueue"] is False

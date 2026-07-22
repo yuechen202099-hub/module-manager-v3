@@ -62,7 +62,7 @@ def upgrade() -> None:
     op.create_table(
         "barcode_maintenance_controls",
         sa.Column("team_id", sa.String(length=64), primary_key=True),
-        sa.Column("paused", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("paused", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column("last_batch_id", sa.String(length=128)),
         sa.Column("last_batch_progress", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
