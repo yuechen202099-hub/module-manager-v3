@@ -162,42 +162,80 @@ def build_postgres_delivery_claim_statement(*, team_id: str, now: datetime):
     )
 
 
+def build_postgres_delivery_job_lock_statement(*, team_id: str, group_ids: list[Any]):
+    return (
+        select(DeliveryCacheJob)
+        .where(
+            DeliveryCacheJob.team_id == team_id,
+            DeliveryCacheJob.group_id.in_(group_ids),
+        )
+        .order_by(DeliveryCacheJob.group_id, DeliveryCacheJob.id)
+        .with_for_update(of=DeliveryCacheJob, skip_locked=True)
+    )
+
+
+def build_postgres_expired_delivery_group_statement(*, team_id: str, now: datetime):
+    return (
+        select(MaterialGroup)
+        .join(
+            DeliveryCacheJob,
+            and_(
+                DeliveryCacheJob.team_id == MaterialGroup.team_id,
+                DeliveryCacheJob.group_id == MaterialGroup.id,
+            ),
+        )
+        .where(
+            MaterialGroup.team_id == team_id,
+            DeliveryCacheJob.status == "processing",
+            DeliveryCacheJob.attempt_count >= MAX_DELIVERY_CACHE_ATTEMPTS,
+            DeliveryCacheJob.lease_expires_at < now,
+        )
+        .order_by(MaterialGroup.id)
+        .with_for_update(of=MaterialGroup, skip_locked=True)
+    )
+
+
 def _terminalize_expired_postgres_delivery_leases(
     session: Session,
     *,
     team_id: str,
     now: datetime,
 ) -> int:
+    groups = list(
+        session.scalars(build_postgres_expired_delivery_group_statement(team_id=team_id, now=now)).all()
+    )
+    if not groups:
+        return 0
+    groups_by_id = {group.id: group for group in groups}
     jobs = list(
         session.scalars(
-            select(DeliveryCacheJob)
-            .where(
-                DeliveryCacheJob.team_id == team_id,
-                DeliveryCacheJob.status == "processing",
-                DeliveryCacheJob.attempt_count >= MAX_DELIVERY_CACHE_ATTEMPTS,
-                DeliveryCacheJob.lease_expires_at < now,
+            build_postgres_delivery_job_lock_statement(
+                team_id=team_id,
+                group_ids=list(groups_by_id),
             )
-            .with_for_update(skip_locked=True)
         ).all()
     )
+    terminalized = 0
     for job in jobs:
+        group = groups_by_id.get(job.group_id)
+        if group is None or not _delivery_job_is_terminalizable(job, now=now):
+            continue
         job.status = "failed"
         job.lease_owner = None
         job.lease_token = None
         job.lease_expires_at = None
         job.last_error = "worker lease expired after maximum attempts; manual review required"
-        group = session.get(MaterialGroup, job.group_id)
-        if group is not None:
-            raw = dict(group.raw_data or {})
-            raw.update(
-                {
-                    "delivery_cache_status": "manual_required",
-                    "delivery_cache_error": job.last_error,
-                    "delivery_cache_retryable": False,
-                }
-            )
-            group.raw_data = raw
-    return len(jobs)
+        raw = dict(group.raw_data or {})
+        raw.update(
+            {
+                "delivery_cache_status": "manual_required",
+                "delivery_cache_error": job.last_error,
+                "delivery_cache_retryable": False,
+            }
+        )
+        group.raw_data = raw
+        terminalized += 1
+    return terminalized
 
 
 def claim_postgres_delivery_cache_job(
@@ -463,10 +501,9 @@ def build_postgres_existing_reconciliation_statement(
 ):
     bounded = _reconciliation_limit(limit)
     return (
-        select(MaterialGroup, DeliveryCacheJob)
-        .select_from(DeliveryCacheJob)
+        select(MaterialGroup)
         .join(
-            MaterialGroup,
+            DeliveryCacheJob,
             and_(
                 DeliveryCacheJob.team_id == MaterialGroup.team_id,
                 DeliveryCacheJob.group_id == MaterialGroup.id,
@@ -491,9 +528,9 @@ def build_postgres_existing_reconciliation_statement(
                 ),
             ),
         )
-        .order_by(DeliveryCacheJob.group_id, DeliveryCacheJob.id)
+        .order_by(MaterialGroup.id)
         .limit(bounded)
-        .with_for_update(of=DeliveryCacheJob, skip_locked=True)
+        .with_for_update(of=MaterialGroup, skip_locked=True)
     )
 
 
@@ -529,6 +566,31 @@ def _delivery_job_has_live_lease(job: DeliveryCacheJob, *, now: datetime) -> boo
     return lease_expires_at >= now
 
 
+def _delivery_job_is_terminalizable(job: DeliveryCacheJob, *, now: datetime) -> bool:
+    return (
+        str(job.status or "") == "processing"
+        and int(job.attempt_count or 0) >= MAX_DELIVERY_CACHE_ATTEMPTS
+        and not _delivery_job_has_live_lease(job, now=now)
+    )
+
+
+def _delivery_job_is_reconciliation_eligible(job: DeliveryCacheJob, *, now: datetime) -> bool:
+    status = str(job.status or "")
+    attempts = int(job.attempt_count or 0)
+    if status in {"pending", "ready"}:
+        return True
+    if status == "failed":
+        return attempts < MAX_DELIVERY_CACHE_ATTEMPTS
+    return status == "processing" and attempts < MAX_DELIVERY_CACHE_ATTEMPTS and not _delivery_job_has_live_lease(job, now=now)
+
+
+def _group_is_reconciliation_eligible(group: MaterialGroup) -> bool:
+    return (
+        group.status == GroupStatus.APPROVED
+        and str((group.raw_data or {}).get("delivery_cache_status") or "") == "retry_pending"
+    )
+
+
 def _reconcile_postgres_delivery_cache_jobs(
     team_id: str,
     *,
@@ -538,20 +600,36 @@ def _reconcile_postgres_delivery_cache_jobs(
     reconciled_at = now or datetime.now(UTC)
     bounded = _reconciliation_limit(limit)
     with SessionLocal() as session:
-        existing_rows = list(
+        existing_groups = list(
             session.execute(
                 build_postgres_existing_reconciliation_statement(
                     team_id=team_id,
                     limit=bounded,
                     now=reconciled_at,
                 )
-            ).all()
+            ).scalars().all()
         )
+        groups_by_id = {group.id: group for group in existing_groups}
+        existing_jobs = []
+        if groups_by_id:
+            existing_jobs = list(
+                session.execute(
+                    build_postgres_delivery_job_lock_statement(
+                        team_id=team_id,
+                        group_ids=list(groups_by_id),
+                    )
+                ).scalars().all()
+            )
         enqueued = 0
         skipped_live = 0
-        for group, job in existing_rows:
+        for job in existing_jobs:
+            group = groups_by_id.get(job.group_id)
+            if group is None or not _group_is_reconciliation_eligible(group):
+                continue
             if _delivery_job_has_live_lease(job, now=reconciled_at):
                 skipped_live += 1
+                continue
+            if not _delivery_job_is_reconciliation_eligible(job, now=reconciled_at):
                 continue
             enqueue_postgres_delivery_cache_job(
                 session,
@@ -561,7 +639,7 @@ def _reconcile_postgres_delivery_cache_jobs(
                 existing_job=job,
             )
             enqueued += 1
-        remaining = max(0, bounded - len(existing_rows))
+        remaining = max(0, bounded - len(existing_groups))
         missing_rows = []
         if remaining:
             missing_rows = list(
@@ -587,7 +665,7 @@ def _reconcile_postgres_delivery_cache_jobs(
             session.rollback()
         return {
             "backend": "postgres",
-            "scanned": len(existing_rows) + len(missing_rows),
+            "scanned": len(existing_groups) + len(missing_rows),
             "enqueued": enqueued,
             "skipped_live": skipped_live,
         }

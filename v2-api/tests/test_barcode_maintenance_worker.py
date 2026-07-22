@@ -777,7 +777,7 @@ def test_json_delivery_cache_reconciliation_is_bounded_and_eventually_recovers(
     assert len(local_simulation._team_states[team_id]["delivery_cache_jobs"]) == 25
 
 
-def test_postgres_delivery_cache_reconciliation_uses_two_bounded_bulk_lock_queries(
+def test_postgres_delivery_cache_reconciliation_uses_bounded_group_first_bulk_lock_queries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.services import delivery_cache
@@ -787,6 +787,9 @@ def test_postgres_delivery_cache_reconciliation_uses_two_bounded_bulk_lock_queri
     class Rows:
         def all(self):
             return []
+
+        def scalars(self):
+            return self
 
     class Session:
         def __enter__(self):
@@ -813,13 +816,21 @@ def test_postgres_delivery_cache_reconciliation_uses_two_bounded_bulk_lock_queri
 
     assert report["enqueued"] == 0
     assert len(statements) == 2
-    existing_sql, missing_sql = statements
-    assert "LEFT OUTER JOIN" not in existing_sql
-    assert "JOIN material_groups" in existing_sql
-    assert "LIMIT 20" in existing_sql
-    assert "FOR UPDATE OF delivery_cache_jobs SKIP LOCKED" in existing_sql
-    assert "delivery_cache_jobs.lease_expires_at <" in existing_sql
-    assert "delivery_cache_jobs.attempt_count < 3" in existing_sql
+    existing_group_sql, missing_sql = statements
+    existing_job_sql = str(
+        delivery_cache.build_postgres_delivery_job_lock_statement(
+            team_id="team-reconcile",
+            group_ids=[uuid4()],
+        ).compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert "LEFT OUTER JOIN" not in existing_group_sql
+    assert "JOIN delivery_cache_jobs" in existing_group_sql
+    assert "LIMIT 20" in existing_group_sql
+    assert "FOR UPDATE OF material_groups SKIP LOCKED" in existing_group_sql
+    assert "delivery_cache_jobs.lease_expires_at <" in existing_group_sql
+    assert "delivery_cache_jobs.attempt_count < 3" in existing_group_sql
+    assert "ORDER BY delivery_cache_jobs.group_id, delivery_cache_jobs.id" in existing_job_sql
+    assert "FOR UPDATE OF delivery_cache_jobs SKIP LOCKED" in existing_job_sql
     assert "NOT (EXISTS" in missing_sql
     assert "LIMIT 20" in missing_sql
     assert "FOR UPDATE OF material_groups SKIP LOCKED" in missing_sql
@@ -849,6 +860,9 @@ def test_postgres_delivery_cache_reconciliation_uses_two_queries_per_bounded_ite
 
         def all(self):
             return self.values
+
+        def scalars(self):
+            return self
 
     class Session:
         def __init__(self, values):
@@ -903,6 +917,7 @@ def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
     group = SimpleNamespace(
         id=uuid4(),
         team_id="team-live-lease",
+        status="approved",
         reviewer="reviewer-a",
         raw_data={"delivery_cache_status": "retry_pending"},
     )
@@ -930,6 +945,9 @@ def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
         def all(self):
             return self.values
 
+        def scalars(self):
+            return self
+
     class Session:
         def __init__(self):
             self.execute_calls = 0
@@ -944,7 +962,9 @@ def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
             self.execute_calls += 1
             statements.append(str(statement.compile(dialect=postgresql.dialect())))
             if self.execute_calls == 1:
-                return Rows([(group, live_job)])
+                return Rows([group])
+            if self.execute_calls == 2:
+                return Rows([live_job])
             return Rows([])
 
         def scalar(self, _statement):
@@ -970,7 +990,7 @@ def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
     assert live_job.lease_token == "live-token"
     assert live_job.lease_expires_at == live_lease_expires_at
     assert group.raw_data["delivery_cache_status"] == "retry_pending"
-    assert len(statements) == 2
+    assert len(statements) == 3
 
 
 def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_limit(
@@ -982,6 +1002,7 @@ def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_l
     group = SimpleNamespace(
         id=uuid4(),
         team_id="team-expired-lease",
+        status="approved",
         reviewer="reviewer-a",
         raw_data={"delivery_cache_status": "retry_pending"},
     )
@@ -1007,6 +1028,9 @@ def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_l
         def all(self):
             return self.values
 
+        def scalars(self):
+            return self
+
     class Session:
         def __init__(self):
             self.execute_calls = 0
@@ -1019,7 +1043,11 @@ def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_l
 
         def execute(self, _statement):
             self.execute_calls += 1
-            return Rows([(group, expired_job)] if self.execute_calls == 1 else [])
+            if self.execute_calls == 1:
+                return Rows([group])
+            if self.execute_calls == 2:
+                return Rows([expired_job])
+            return Rows([])
 
         def scalar(self, _statement):
             pytest.fail("reconciliation must not issue per-group queries")
@@ -1049,6 +1077,209 @@ def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_l
     assert expired_job.lease_expires_at is None
     assert expired_job.attempt_count == 1
     assert group.raw_data["delivery_cache_status"] == "pending"
+
+
+def test_postgres_reconciliation_and_expired_worker_completion_lock_group_before_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import GroupStatus
+    from app.services import barcode_maintenance_worker as worker
+    from app.services import delivery_cache, state_repository
+
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="team-lock-order",
+        status=GroupStatus.APPROVED,
+        reviewer="reviewer-a",
+        raw_data={"delivery_cache_status": "retry_pending"},
+    )
+    expired_job = SimpleNamespace(
+        id=uuid4(),
+        team_id=group.team_id,
+        group_id=group.id,
+        status="processing",
+        attempt_count=1,
+        lease_owner="expired-worker",
+        lease_token="expired-token",
+        lease_expires_at=now - timedelta(seconds=1),
+        requested_by="reviewer-a",
+        request_reason="review_completed",
+        last_error="",
+        completed_at=None,
+    )
+    reconciliation_locks: list[str] = []
+    completion_locks: list[str] = []
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+        def scalars(self):
+            return self
+
+    class ReconciliationSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            if "FOR UPDATE OF material_groups" in sql:
+                reconciliation_locks.append("material_groups")
+                return Rows([] if "NOT (EXISTS" in sql else [group])
+            if "FOR UPDATE OF delivery_cache_jobs" in sql:
+                reconciliation_locks.append("delivery_cache_jobs")
+                return Rows([(group, expired_job)] if "JOIN material_groups" in sql else [expired_job])
+            pytest.fail(f"unexpected reconciliation statement: {sql}")
+
+        def scalar(self, _statement):
+            pytest.fail("reconciliation must not issue per-group queries")
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    class SnapshotSession:
+        def scalar(self, _statement):
+            return group
+
+    class CompletionSession:
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "FROM material_groups" in sql:
+                completion_locks.append("material_groups")
+                return group
+            if "FROM delivery_cache_jobs" in sql:
+                completion_locks.append("delivery_cache_jobs")
+                return expired_job
+            pytest.fail(f"unexpected completion statement: {sql}")
+
+        def rollback(self):
+            return None
+
+    class SessionContext:
+        def __init__(self, session):
+            self.session = session
+
+        def __enter__(self):
+            return self.session
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Repository:
+        def __init__(self):
+            self.sessions = deque([SnapshotSession(), CompletionSession()])
+
+        def _session(self):
+            return SessionContext(self.sessions.popleft())
+
+    monkeypatch.setattr(delivery_cache, "SessionLocal", ReconciliationSession)
+    monkeypatch.setattr(worker.settings, "state_backend", "postgres")
+    monkeypatch.setattr(state_repository, "PostgresStateRepository", Repository)
+    monkeypatch.setattr(
+        state_repository,
+        "_group_payload",
+        lambda _session, _group, *, include_photos: {"id": str(group.id), "photos": []},
+    )
+    monkeypatch.setattr(
+        worker,
+        "cache_group_photos",
+        lambda _snapshot: {"status": "ready", "retryable": False},
+    )
+
+    report = delivery_cache._reconcile_postgres_delivery_cache_jobs(
+        group.team_id,
+        limit=20,
+        now=now,
+    )
+    worker._process_delivery_job(
+        worker.MaintenanceJob(
+            kind="delivery_cache",
+            team_id=group.team_id,
+            group_id=str(group.id),
+            lease_owner="expired-worker",
+            lease_token="expired-token",
+        )
+    )
+
+    assert reconciliation_locks[:2] == ["material_groups", "delivery_cache_jobs"]
+    assert completion_locks == ["material_groups", "delivery_cache_jobs"]
+    assert report["enqueued"] == 1
+    assert expired_job.status == "pending"
+    assert expired_job.lease_owner is None
+    assert expired_job.lease_token is None
+    assert group.raw_data["delivery_cache_status"] == "pending"
+
+
+def test_postgres_expired_delivery_lease_terminalization_locks_group_before_job() -> None:
+    from app.services import delivery_cache
+
+    now = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="team-terminalize-order",
+        raw_data={"delivery_cache_status": "processing"},
+    )
+    expired_job = SimpleNamespace(
+        id=uuid4(),
+        team_id=group.team_id,
+        group_id=group.id,
+        status="processing",
+        attempt_count=3,
+        lease_owner="expired-worker",
+        lease_token="expired-token",
+        lease_expires_at=now - timedelta(seconds=1),
+        last_error=None,
+    )
+    lock_order: list[str] = []
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Session:
+        def scalars(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            if "FOR UPDATE OF material_groups" in sql:
+                lock_order.append("material_groups")
+                return Rows([group])
+            if "FOR UPDATE OF delivery_cache_jobs" in sql or "FOR UPDATE SKIP LOCKED" in sql:
+                lock_order.append("delivery_cache_jobs")
+                return Rows([expired_job])
+            pytest.fail(f"unexpected terminalization statement: {sql}")
+
+        def get(self, model, identity):
+            lock_order.append("material_groups")
+            assert identity == group.id
+            return group
+
+    terminalized = delivery_cache._terminalize_expired_postgres_delivery_leases(
+        Session(),
+        team_id=group.team_id,
+        now=now,
+    )
+
+    assert lock_order == ["material_groups", "delivery_cache_jobs"]
+    assert terminalized == 1
+    assert expired_job.status == "failed"
+    assert expired_job.lease_owner is None
+    assert expired_job.lease_token is None
+    assert group.raw_data["delivery_cache_status"] == "manual_required"
 
 
 def test_serve_restart_preserves_persisted_admin_resume(
