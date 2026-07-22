@@ -1152,7 +1152,15 @@ def test_manual_group_barcode_confirmation_audits_and_marks_group_passed(synthet
     )
     claim_task(group["task_id"], "alice")
 
-    result = confirm_group_barcode_manually(group["id"], actor="alice")
+    result = confirm_group_barcode_manually(
+        group["id"],
+        actor="alice",
+        meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        reason="现场标签清晰，机器读取失败",
+        photo_ids=["p1", "p2"],
+    )
     updated = result["group"]
     events = list_audit_events(limit=5)["items"]
 
@@ -1161,6 +1169,10 @@ def test_manual_group_barcode_confirmation_audits_and_marks_group_passed(synthet
     assert updated["group_barcode_passed_count"] == 3
     assert events[0]["action"] == "group_barcode_manual_confirmed"
     assert events[0]["payload"]["group_id"] == group["id"]
+    assert events[0]["payload"]["reason"] == "现场标签清晰，机器读取失败"
+    assert events[0]["payload"]["photo_ids"] == ["p1", "p2"]
+    assert events[0]["payload"]["formal_values"]["meter_no"] == "11***56"
+    assert group["barcode_verification"]["status"] == "manual_confirmed"
 
 
 def test_task_groups_are_ordered_for_review_queue(synthetic_state: dict) -> None:

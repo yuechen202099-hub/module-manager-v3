@@ -1153,6 +1153,11 @@ class PhotoRegionScanRequest(BaseModel):
 
 class GroupBarcodeManualConfirmRequest(BaseModel):
     actor: str = "local-reviewer"
+    meter_no: str = Field(min_length=1)
+    module_asset_no: str = Field(min_length=1)
+    collector: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    photo_ids: list[str] = Field(min_length=1)
 
 
 class UrlImportRequest(BaseModel):
@@ -3154,7 +3159,15 @@ def confirm_group_barcode_manually(
 ):
     try:
         actor = bound_review_actor(request, payload.actor)
-        result = state_repository().confirm_group_barcode_manually(group_id, actor=actor)
+        result = state_repository().confirm_group_barcode_manually(
+            group_id,
+            actor=actor,
+            meter_no=payload.meter_no,
+            module_asset_no=payload.module_asset_no,
+            collector=payload.collector,
+            reason=payload.reason,
+            photo_ids=payload.photo_ids,
+        )
         invalidate_project_board_summary_cache()
         invalidate_task_snapshot()
     except KeyError as exc:

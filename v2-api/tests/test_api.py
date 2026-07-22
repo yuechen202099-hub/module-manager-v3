@@ -4099,7 +4099,7 @@ def test_miniprogram_upload_refresh_failure_rolls_back_json_state(monkeypatch) -
     assert after_audits == before_audits
 
 
-def test_photo_barcode_rescan_route_updates_photo_with_ocr(monkeypatch) -> None:
+def test_photo_barcode_rescan_route_only_requeues_group_without_ocr(monkeypatch) -> None:
     headers = {"X-Team-Id": "rescan-route-test"}
     client.post("/local-test/bootstrap", headers=headers)
     task = next(item for item in client.get("/local-test/tasks", headers=headers).json()["data"]["items"] if item["can_claim"])
@@ -4116,24 +4116,11 @@ def test_photo_barcode_rescan_route_updates_photo_with_ocr(monkeypatch) -> None:
     )
     photo = photo_group["photos"][0]
 
-    def fake_check(photo_payload, _group_payload, **kwargs):
-        assert kwargs["use_ocr"] is True
-        assert photo_payload["category"] == "module_meter"
-        return {
-            "barcode_check_status": "matched",
-            "barcode_check_expected_type": "module",
-            "barcode_check_values": ["MOD-001"],
-            "barcode_check_normalized_values": ["MOD001"],
-            "barcode_check_ocr_values": ["MOD-001"],
-            "barcode_check_ocr_normalized_values": ["MOD001"],
-            "barcode_check_expected_values": ["MOD001"],
-            "barcode_check_matched_value": "MOD001",
-            "barcode_checked_at": "2026-06-28T00:00:00+00:00",
-            "barcode_check_error": "",
-            "barcode_check_method": "ocr",
-        }
-
-    monkeypatch.setattr(local_simulation.photo_barcode_check, "check_photo_barcode", fake_check)
+    monkeypatch.setattr(
+        local_simulation.photo_barcode_check,
+        "check_photo_barcode",
+        lambda *_args, **_kwargs: pytest.fail("rescan request must not execute OCR or barcode recognition"),
+    )
 
     response = client.post(
         f"/local-test/groups/{photo_group['id']}/photos/{photo['id']}/barcode-rescan?include_group=true",
@@ -4143,13 +4130,10 @@ def test_photo_barcode_rescan_route_updates_photo_with_ocr(monkeypatch) -> None:
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["photo"]["category"] == "module_meter"
-    assert data["photo"]["barcode_check_status"] == "matched"
-    assert data["photo"]["barcode_check_method"] == "ocr"
-    assert data["photo"]["barcode_check_ocr_normalized_values"] == ["MOD001"]
+    assert data["photo"]["category"] == photo["category"]
     assert data["group"]["id"] == photo_group["id"]
     audits = client.get("/local-test/audit-log?limit=5", headers=headers).json()["data"]["items"]
-    assert any(item["action"] == "photo_barcode_rescan" for item in audits)
+    assert any(item["action"] == "group_barcode_rescan_requested" for item in audits)
 
     spoof_token = security.create_access_token(
         {"username": "intruder", "name": "Intruder", "roles": ["reviewer"], "team_id": "rescan-route-test"}
@@ -4199,7 +4183,14 @@ def test_group_barcode_manual_confirm_route_marks_summary_and_audits() -> None:
 
     response = client.post(
         f"/local-test/groups/{group['id']}/barcode-manual-confirm",
-        json={"actor": "api-test"},
+        json={
+            "actor": "api-test",
+            "meter_no": "110000288056",
+            "collector": "COLLECTOR001",
+            "module_asset_no": "MOD001",
+            "reason": "现场标签清晰，机器读取失败",
+            "photo_ids": ["manual-confirm-p1", "manual-confirm-p2"],
+        },
         headers=headers,
     )
     assert response.status_code == 200

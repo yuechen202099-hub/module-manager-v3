@@ -6719,71 +6719,89 @@ def rescan_photo_barcode(group_id: str, photo_id: str, reviewer: str, category: 
     photo = next((item for item in group["photos"] if item["id"] == photo_id), None)
     if photo is None:
         raise KeyError(photo_id)
-    next_category = str(category or photo.get("category") or "unclassified").strip() or "unclassified"
-    if next_category not in PHOTO_CATEGORIES:
-        raise ValueError(f"Unsupported photo category: {next_category}")
     now = now_iso()
-    if next_category != photo.get("category"):
-        previous_category = str(photo.get("category") or "unclassified")
-        photo["category"] = next_category
-        photo["category_label"] = PHOTO_CATEGORIES[next_category]
-        photo["classified_by"] = reviewer
-        photo["classified_at"] = now
-        append_audit_event(
-            "photo_category_corrected",
-            reviewer,
-            {
-                "group_id": group_id,
-                "photo_id": photo_id,
-                "previous_category": previous_category,
-                "next_category": next_category,
-                "invalidation_reason": "photo_category_changed",
-            },
-        )
-        from app.services.state_repository import invalidate_verification_for_group
+    from app.services.state_repository import invalidate_verification_for_group
 
-        invalidate_verification_for_group(None, group, reviewer, "photo_category_changed")
-    photo.update(photo_barcode_check.check_photo_barcode(photo, group, use_ocr=True))
-    photo["barcode_rescanned_by"] = reviewer
-    photo["barcode_rescanned_at"] = now
+    verification = invalidate_verification_for_group(None, group, reviewer, "group_barcode_rescan_requested")
+    photo["barcode_rescan_requested_by"] = reviewer
+    photo["barcode_rescan_requested_at"] = now
     state = get_state()
     state["photo_events"].append(
         {
             "group_id": group_id,
             "photo_id": photo_id,
-            "category": next_category,
+            "category": str(photo.get("category") or "unclassified"),
             "reviewer": reviewer,
-            "event": "barcode_rescan",
-            "status": photo.get("barcode_check_status", ""),
+            "event": "group_barcode_rescan_requested",
+            "status": verification.get("status", "pending"),
             "created_at": now,
         }
     )
     append_audit_event(
-        "photo_barcode_rescan",
+        "group_barcode_rescan_requested",
         reviewer,
         {
             "group_id": group_id,
             "photo_id": photo_id,
-            "category": next_category,
-            "status": photo.get("barcode_check_status", ""),
-            "matched_value": photo.get("barcode_check_matched_value", ""),
-            "method": photo.get("barcode_check_method", ""),
+            "photo_id": photo_id,
+            "status": verification.get("status", "pending"),
+            "should_enqueue": bool(verification.get("should_enqueue")),
         },
     )
     refresh_summary()
     return photo
 
 
-def confirm_group_barcode_manually(group_id: str, actor: str) -> dict[str, Any]:
+def confirm_group_barcode_manually(
+    group_id: str,
+    actor: str,
+    *,
+    meter_no: str,
+    module_asset_no: str,
+    collector: str,
+    reason: str,
+    photo_ids: list[str],
+) -> dict[str, Any]:
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
     ensure_task_claimed_by(group, actor)
+    formal_values = {
+        "meter_no": meter_no.strip(),
+        "module_asset_no": module_asset_no.strip(),
+        "collector": collector.strip(),
+    }
+    for field, value in formal_values.items():
+        validate_real_formal_identity_value(value, field)
+    reason = reason.strip()
+    if not reason:
+        raise ValueError("人工确认原因不能为空")
+    selected_ids = [str(photo_id).strip() for photo_id in photo_ids if str(photo_id).strip()]
+    active_ids = {str(photo.get("id") or "") for photo in group.get("photos") or [] if photo.get("is_active", True)}
+    if not selected_ids or any(photo_id not in active_ids for photo_id in selected_ids):
+        raise ValueError("人工确认照片证据无效")
     now = now_iso()
+    group.update(formal_values)
     group["group_barcode_manual_confirmed"] = True
     group["group_barcode_manual_confirmed_fields"] = list(photo_barcode_check.GROUP_BARCODE_TYPES)
     group["group_barcode_manual_confirmed_by"] = actor
     group["group_barcode_manual_confirmed_at"] = now
+    group["group_barcode_manual_confirmation_reason"] = reason
+    group["group_barcode_manual_confirmation_photo_ids"] = selected_ids
+    verification = dict(group.get("barcode_verification") or {})
+    verification.update(
+        {
+            "status": "manual_confirmed",
+            "meter_matched": True,
+            "module_matched": True,
+            "collector_matched": True,
+            "recognition_source": "manual",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "should_enqueue": False,
+        }
+    )
+    group["barcode_verification"] = verification
     append_audit_event(
         "group_barcode_manual_confirmed",
         actor,
@@ -6791,10 +6809,19 @@ def confirm_group_barcode_manually(group_id: str, actor: str) -> dict[str, Any]:
             "group_id": group_id,
             "fields": group["group_barcode_manual_confirmed_fields"],
             "confirmed_at": now,
+            "reason": reason,
+            "photo_ids": selected_ids,
+            "formal_values": {field: _mask_barcode_audit_value(value) for field, value in formal_values.items()},
         },
     )
     refresh_summary()
     return {"group": group_target_summary(group, include_photos=True)}
+
+
+def _mask_barcode_audit_value(value: str) -> str:
+    if len(value) <= 4:
+        return "*" * len(value)
+    return f"{value[:2]}***{value[-2:]}"
 
 
 def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:

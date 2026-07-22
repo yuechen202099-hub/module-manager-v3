@@ -501,6 +501,8 @@ def _clear_legacy_verification_flags(group: Any) -> None:
         "group_barcode_manual_confirmed_fields": [],
         "group_barcode_manual_confirmed_by": "",
         "group_barcode_manual_confirmed_at": "",
+        "group_barcode_manual_confirmation_reason": "",
+        "group_barcode_manual_confirmation_photo_ids": [],
     }
     if isinstance(group, dict):
         group.update(values)
@@ -508,6 +510,12 @@ def _clear_legacy_verification_flags(group: Any) -> None:
     raw = dict(getattr(group, "raw_data", None) or {})
     raw.update(values)
     group.raw_data = raw
+
+
+def _mask_barcode_audit_value(value: str) -> str:
+    if len(value) <= 4:
+        return "*" * len(value)
+    return f"{value[:2]}***{value[-2:]}"
 
 
 def invalidate_verification_for_group(
@@ -2209,7 +2217,17 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def confirm_group_barcode_manually(self, group_id: str, *, actor: str) -> dict[str, Any]:
+    def confirm_group_barcode_manually(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        meter_no: str,
+        module_asset_no: str,
+        collector: str,
+        reason: str,
+        photo_ids: list[str],
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -2951,8 +2969,26 @@ class JsonStateRepository(StateRepository):
     ) -> dict[str, Any]:
         return local_simulation.rescan_photo_barcode(group_id, photo_id, reviewer, category)
 
-    def confirm_group_barcode_manually(self, group_id: str, *, actor: str) -> dict[str, Any]:
-        return local_simulation.confirm_group_barcode_manually(group_id, actor=actor)
+    def confirm_group_barcode_manually(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        meter_no: str,
+        module_asset_no: str,
+        collector: str,
+        reason: str,
+        photo_ids: list[str],
+    ) -> dict[str, Any]:
+        return local_simulation.confirm_group_barcode_manually(
+            group_id,
+            actor=actor,
+            meter_no=meter_no,
+            module_asset_no=module_asset_no,
+            collector=collector,
+            reason=reason,
+            photo_ids=photo_ids,
+        )
 
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
         return local_simulation.delete_group_photo(group_id, photo_id, reviewer)
@@ -6600,98 +6636,78 @@ class PostgresStateRepository(StateRepository):
             )
             if photo is None:
                 raise KeyError(photo_id)
-            next_category = str(category or photo.category or "unclassified").strip() or "unclassified"
-            if next_category not in local_simulation.PHOTO_CATEGORIES:
-                raise ValueError(f"Unsupported photo category: {next_category}")
             now = datetime.now(UTC)
-            category_label = local_simulation.PHOTO_CATEGORIES.get(
-                next_category,
-                local_simulation.PHOTO_CATEGORIES["unclassified"],
-            )
-            if next_category != photo.category:
-                previous_category = str(photo.category or "unclassified")
-                photo.category = next_category
-                photo.classified_by = reviewer
-                photo.classified_at = now
-                _stage_transactional_audit(
-                    session,
-                    team_id=group.team_id,
-                    actor=reviewer,
-                    action="photo_category_corrected",
-                    entity_type="photo",
-                    entity_id=photo.id,
-                    before_data={"category": previous_category},
-                    after_data={"category": next_category},
-                    payload={
-                        "group_id": str(group.legacy_id or group.id),
-                        "photo_id": str(photo.legacy_id or photo.id),
-                        "previous_category": previous_category,
-                        "next_category": next_category,
-                        "invalidation_reason": "photo_category_changed",
-                    },
-                )
-                invalidate_verification_for_group(
-                    session,
-                    group,
-                    actor=reviewer,
-                    reason="photo_category_changed",
-                )
             raw_data = dict(photo.raw_data or {})
             raw_data.update(
                 {
-                    "category": next_category,
-                    "category_label": category_label,
-                    "classified_by": photo.classified_by or reviewer,
-                    "barcode_rescanned_by": reviewer,
-                    "barcode_rescanned_at": now.isoformat(),
+                    "barcode_rescan_requested_by": reviewer,
+                    "barcode_rescan_requested_at": now.isoformat(),
                 }
             )
-            image_url = photo.image_url or photo.source_url or ""
-            group_context = _group_barcode_context(group)
-            raw_data.update(
-                photo_barcode_check.check_photo_barcode(
-                    {
-                        **_photo_payload(photo),
-                        **raw_data,
-                        "category": next_category,
-                        "category_label": category_label,
-                        "image_url": image_url,
-                    },
-                    group_context,
-                    use_ocr=True,
-                )
-            )
             photo.raw_data = raw_data
+            verification = invalidate_verification_for_group(
+                session,
+                group,
+                actor=reviewer,
+                reason="group_barcode_rescan_requested",
+            )
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),
                 actor=reviewer,
-                action="photo_barcode_rescan",
+                action="group_barcode_rescan_requested",
                 entity_type="photo",
                 entity_id=photo.id,
                 before_data={},
-                after_data={
-                    key: raw_data.get(key)
-                    for key in photo_barcode_check.BARCODE_CHECK_FIELDS
-                    if key in raw_data
-                },
+                after_data={"barcode_verification_status": verification.get("status")},
                 payload={
                     "group_id": group.legacy_id or str(group.id),
                     "photo_id": photo.legacy_id or str(photo.id),
-                    "category": next_category,
-                    "status": raw_data.get("barcode_check_status", ""),
-                    "matched_value": raw_data.get("barcode_check_matched_value", ""),
-                    "method": raw_data.get("barcode_check_method", ""),
+                    "status": verification.get("status", "pending"),
+                    "should_enqueue": bool(verification.get("should_enqueue")),
                 },
             )
             session.commit()
             session.refresh(photo)
             return _photo_payload(photo)
 
-    def confirm_group_barcode_manually(self, group_id: str, *, actor: str) -> dict[str, Any]:
+    def confirm_group_barcode_manually(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        meter_no: str,
+        module_asset_no: str,
+        collector: str,
+        reason: str,
+        photo_ids: list[str],
+    ) -> dict[str, Any]:
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, actor)
+            formal_values = {
+                "meter_no": meter_no.strip(),
+                "module_asset_no": module_asset_no.strip(),
+                "collector": collector.strip(),
+            }
+            for field, value in formal_values.items():
+                local_simulation.validate_real_formal_identity_value(value, field)
+            reason = reason.strip()
+            if not reason:
+                raise ValueError("人工确认原因不能为空")
+            selected_ids = [str(photo_id).strip() for photo_id in photo_ids if str(photo_id).strip()]
+            active_ids = {
+                str(photo.legacy_id or photo.id)
+                for photo in session.scalars(
+                    select(Photo).where(
+                        Photo.team_id == group.team_id,
+                        Photo.group_id == group.id,
+                        Photo.is_active.is_(True),
+                    )
+                ).all()
+            }
+            if not selected_ids or any(photo_id not in active_ids for photo_id in selected_ids):
+                raise ValueError("人工确认照片证据无效")
             now = datetime.now(UTC)
             raw_data = dict(group.raw_data or {})
             before_data = {
@@ -6701,17 +6717,41 @@ class PostgresStateRepository(StateRepository):
                     "group_barcode_manual_confirmed_fields",
                     "group_barcode_manual_confirmed_by",
                     "group_barcode_manual_confirmed_at",
+                    "group_barcode_manual_confirmation_reason",
+                    "group_barcode_manual_confirmation_photo_ids",
                 )
             }
             raw_data.update(
                 {
+                    **formal_values,
                     "group_barcode_manual_confirmed": True,
                     "group_barcode_manual_confirmed_fields": list(photo_barcode_check.GROUP_BARCODE_TYPES),
                     "group_barcode_manual_confirmed_by": actor,
                     "group_barcode_manual_confirmed_at": now.isoformat(),
+                    "group_barcode_manual_confirmation_reason": reason,
+                    "group_barcode_manual_confirmation_photo_ids": selected_ids,
                 }
             )
+            group.display_meter_no = formal_values["meter_no"]
             group.raw_data = raw_data
+            verification = session.scalar(
+                select(GroupBarcodeVerification)
+                .where(
+                    GroupBarcodeVerification.team_id == group.team_id,
+                    GroupBarcodeVerification.group_id == group.id,
+                )
+                .with_for_update()
+            )
+            if verification is None:
+                verification = GroupBarcodeVerification(team_id=group.team_id, group_id=group.id)
+                session.add(verification)
+            verification.status = "manual_confirmed"
+            verification.meter_matched = True
+            verification.module_matched = True
+            verification.collector_matched = True
+            verification.recognition_source = "manual"
+            verification.lease_owner = None
+            verification.lease_expires_at = None
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),
@@ -6727,12 +6767,19 @@ class PostgresStateRepository(StateRepository):
                         "group_barcode_manual_confirmed_fields",
                         "group_barcode_manual_confirmed_by",
                         "group_barcode_manual_confirmed_at",
+                        "group_barcode_manual_confirmation_reason",
+                        "group_barcode_manual_confirmation_photo_ids",
                     )
                 },
                 payload={
                     "group_id": group.legacy_id or str(group.id),
                     "fields": raw_data["group_barcode_manual_confirmed_fields"],
                     "confirmed_at": raw_data["group_barcode_manual_confirmed_at"],
+                    "reason": reason,
+                    "photo_ids": selected_ids,
+                    "formal_values": {
+                        field: _mask_barcode_audit_value(value) for field, value in formal_values.items()
+                    },
                 },
             )
             session.commit()
@@ -8043,9 +8090,36 @@ class DualWriteStateRepository(JsonStateRepository):
         self._mirror_write("rescan_photo_barcode", group_id, photo_id, reviewer, category)
         return result
 
-    def confirm_group_barcode_manually(self, group_id: str, *, actor: str) -> dict[str, Any]:
-        result = super().confirm_group_barcode_manually(group_id, actor=actor)
-        self._mirror_write("confirm_group_barcode_manually", group_id, actor=actor)
+    def confirm_group_barcode_manually(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        meter_no: str,
+        module_asset_no: str,
+        collector: str,
+        reason: str,
+        photo_ids: list[str],
+    ) -> dict[str, Any]:
+        result = super().confirm_group_barcode_manually(
+            group_id,
+            actor=actor,
+            meter_no=meter_no,
+            module_asset_no=module_asset_no,
+            collector=collector,
+            reason=reason,
+            photo_ids=photo_ids,
+        )
+        self._mirror_write(
+            "confirm_group_barcode_manually",
+            group_id,
+            actor=actor,
+            meter_no=meter_no,
+            module_asset_no=module_asset_no,
+            collector=collector,
+            reason=reason,
+            photo_ids=photo_ids,
+        )
         return result
 
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
