@@ -411,6 +411,7 @@ class GroupBarcodeVerification(Base, TimestampMixin):
     recognition_source: Mapped[str | None] = mapped_column(String(64))
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_token: Mapped[str | None] = mapped_column(String(128))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     invalidation_reason: Mapped[str | None] = mapped_column(String(128))
     invalidated_by: Mapped[str | None] = mapped_column(String(64))

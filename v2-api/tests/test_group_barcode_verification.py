@@ -79,6 +79,49 @@ def test_scan_group_evidence_never_passes_from_ocr_candidates_alone() -> None:
     assert result.ocr_candidates == ["110000288056", "MOD001", "COLLECTOR001"]
 
 
+def test_default_persisted_adapter_keeps_legacy_combined_and_barcode_ocr_values_as_candidates() -> None:
+    group = _group()
+    for photo, value in zip(group["photos"], ["110000288056", "MOD001", "COLLECTOR001", ""], strict=True):
+        photo["barcode_check_normalized_values"] = [value]
+        photo["barcode_ocr"] = [value]
+
+    result = scan_group_evidence(group, group["photos"])
+
+    assert result.status == "partial"
+    assert result.passed_count == 0
+    assert result.machine_barcode_values == []
+    assert result.machine_qr_values == []
+    assert result.ocr_candidates == ["110000288056", "MOD001", "COLLECTOR001"]
+
+
+def test_scan_group_evidence_treats_meaningful_non_matching_ocr_as_mismatch() -> None:
+    group = _group()
+
+    result = scan_group_evidence(group, group["photos"], {"recognize": lambda _photo: {"ocr": ["WRONG-001"]}})
+
+    assert result.status == "mismatch"
+    assert result.passed_count == 0
+
+
+def test_scan_group_evidence_uses_only_the_exact_eligible_fingerprint_photo_set() -> None:
+    group = eligible_group()
+    group["photos"].append(
+        {
+            "id": "historical",
+            "sha256": "e" * 64,
+            "category": "other",
+            "is_active": False,
+            "barcode_check_normalized_values": ["110000288056", "MOD001", "COL001"],
+        }
+    )
+
+    ignored_history = scan_group_evidence(group, group["photos"])
+
+    assert ignored_history.status == "unreadable"
+    with pytest.raises(ValueError, match="exact eligible evidence"):
+        scan_group_evidence(group, group["photos"][:-2])
+
+
 def test_scan_group_evidence_distinguishes_unreadable_mismatch_and_partial() -> None:
     group = _group()
 
@@ -116,6 +159,38 @@ def test_apply_group_scan_result_rejects_stale_claim_and_requeues_current_eviden
     assert applied["verification"]["status"] == "pending"
     assert applied["verification"]["should_enqueue"] is True
     assert applied["verification"]["invalidation_reason"] == "evidence_fingerprint_changed"
+
+
+def test_apply_group_scan_result_does_not_overwrite_a_newer_passed_verification_from_an_old_claim() -> None:
+    group = _group()
+    fingerprint = evaluate_group_eligibility(group).evidence_fingerprint
+    assert fingerprint
+    verification = {
+        "status": "passed",
+        "evidence_fingerprint": fingerprint,
+        "evidence_version": 4,
+        "lease_owner": "worker-new",
+        "lease_token": "lease-new",
+        "result": {"passed_count": 3},
+        "claim": {
+            "evidence_fingerprint": fingerprint,
+            "evidence_version": 3,
+            "lease_owner": "worker-old",
+            "lease_token": "lease-old",
+        },
+    }
+    result = scan_group_evidence(group, group["photos"], {"recognize": lambda _photo: {}})
+
+    applied = apply_group_scan_result(
+        verification,
+        group,
+        result,
+        claimed_evidence_fingerprint=fingerprint,
+        actor="barcode-worker",
+    )
+
+    assert applied["applied"] is False
+    assert applied["verification"] == verification
 
 
 def test_manual_confirmation_request_requires_formal_values_reason_and_photo_evidence() -> None:

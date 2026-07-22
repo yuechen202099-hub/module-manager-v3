@@ -52,6 +52,8 @@ class GroupScanResult:
     matched_fields: list[str]
     missing_fields: list[str]
     unmatched_machine_values: list[str]
+    matched_ocr_candidates: list[str]
+    unmatched_ocr_candidates: list[str]
 
 
 PhotoRecognizer = Callable[[Mapping[str, Any]], Mapping[str, Any]]
@@ -68,10 +70,11 @@ def scan_group_evidence(
     if recognizer is not None and not callable(recognizer):
         raise ValueError("recognize must be callable")
 
+    scan_photos = _exact_eligible_scan_photos(group, photos)
     machine_barcodes: list[str] = []
     machine_qrs: list[str] = []
     ocr_candidates: list[str] = []
-    for photo in photos:
+    for photo in scan_photos:
         evidence = recognizer(photo) if recognizer else _photo_scan_evidence(photo)
         if not isinstance(evidence, Mapping):
             raise ValueError("recognize must return a mapping")
@@ -90,6 +93,14 @@ def scan_group_evidence(
         else:
             _extend_unique(unmatched_machine_values, [value])
 
+    matched_ocr_candidates: list[str] = []
+    unmatched_ocr_candidates: list[str] = []
+    for value in ocr_candidates:
+        if _matched_group_field(value, expected):
+            _extend_unique(matched_ocr_candidates, [value])
+        else:
+            _extend_unique(unmatched_ocr_candidates, [value])
+
     missing_fields = [field for field in GROUP_BARCODE_TYPES if field not in matched_fields]
     if not missing_fields:
         status: VerificationStatus = "passed"
@@ -97,7 +108,9 @@ def scan_group_evidence(
         status = "partial"
     elif unmatched_machine_values:
         status = "mismatch"
-    elif ocr_candidates:
+    elif unmatched_ocr_candidates:
+        status = "mismatch"
+    elif matched_ocr_candidates:
         status = "partial"
     else:
         status = "unreadable"
@@ -110,6 +123,8 @@ def scan_group_evidence(
         matched_fields=matched_fields,
         missing_fields=missing_fields,
         unmatched_machine_values=unmatched_machine_values,
+        matched_ocr_candidates=matched_ocr_candidates,
+        unmatched_ocr_candidates=unmatched_ocr_candidates,
     )
 
 
@@ -125,6 +140,15 @@ def apply_group_scan_result(
 
     eligibility = evaluate_group_eligibility(group)
     current_fingerprint = eligibility.evidence_fingerprint
+    claim = verification.get("claim")
+    if isinstance(claim, Mapping):
+        claimed_fields = ("evidence_fingerprint", "evidence_version", "lease_owner", "lease_token")
+        claim_is_current = (
+            claimed_evidence_fingerprint == claim.get("evidence_fingerprint")
+            and all(verification.get(field) == claim.get(field) for field in claimed_fields)
+        )
+        if not claim_is_current:
+            return {"applied": False, "verification": dict(verification)}
     if eligibility.status != "pending":
         invalidated = invalidate_group_verification(
             verification,
@@ -150,6 +174,7 @@ def apply_group_scan_result(
             "status": result.status,
             "evidence_fingerprint": current_fingerprint,
             "lease_owner": None,
+            "lease_token": None,
             "lease_expires_at": None,
             "should_enqueue": False,
             "result": {
@@ -160,6 +185,8 @@ def apply_group_scan_result(
                 "matched_fields": result.matched_fields,
                 "missing_fields": result.missing_fields,
                 "unmatched_machine_values": result.unmatched_machine_values,
+                "matched_ocr_candidates": result.matched_ocr_candidates,
+                "unmatched_ocr_candidates": result.unmatched_ocr_candidates,
             },
         }
     )
@@ -237,6 +264,7 @@ def invalidate_group_verification(
             "evidence_version": int(result.get("evidence_version") or 0) + 1,
             "attempt_count": 0,
             "lease_owner": None,
+            "lease_token": None,
             "lease_expires_at": None,
             "invalidation_reason": reason,
             "invalidated_by": actor,
@@ -286,14 +314,65 @@ def _photo_evidence(photo: Any) -> dict[str, str] | None:
 def _photo_scan_evidence(photo: Mapping[str, Any]) -> dict[str, Any]:
     """Use persisted evidence when a worker has not injected a recognizer."""
 
-    method = str(photo.get("barcode_check_method") or "").strip().lower()
-    values = photo.get("barcode_check_normalized_values") or photo.get("barcode_check_values") or []
-    ocr_values = photo.get("barcode_check_ocr_normalized_values") or photo.get("barcode_check_ocr_values") or []
-    if method == "ocr":
-        return {"ocr": values or ocr_values}
-    if method in {"qr", "barcode_qr"}:
-        return {"qr": values, "ocr": ocr_values}
-    return {"barcode": values, "ocr": ocr_values}
+    # Legacy merged fields may include OCR and are candidates only, never machine evidence.
+    legacy_candidates = _first_persisted_values(
+        photo,
+        "barcode_check_normalized_values",
+        "barcode_check_values",
+        "barcode_check_ocr_normalized_values",
+        "barcode_check_ocr_values",
+        "barcode_ocr",
+    )
+    return {
+        "barcode": _first_persisted_values(
+            photo,
+            "machine_barcode_normalized_values",
+            "machine_barcode_values",
+            "barcode_machine_normalized_values",
+            "barcode_machine_values",
+        ),
+        "qr": _first_persisted_values(
+            photo,
+            "machine_qr_normalized_values",
+            "machine_qr_values",
+            "qr_machine_normalized_values",
+            "qr_machine_values",
+        ),
+        "ocr": [
+            *_first_persisted_values(photo, "ocr_candidate_normalized_values", "ocr_candidate_values"),
+            *legacy_candidates,
+        ],
+    }
+
+
+def _first_persisted_values(photo: Mapping[str, Any], *keys: str) -> list[Any]:
+    values: list[Any] = []
+    for key in keys:
+        value = photo.get(key)
+        if isinstance(value, (list, tuple, set)):
+            values.extend(value)
+        elif value is not None:
+            values.append(value)
+    return values
+
+
+def _exact_eligible_scan_photos(group: Mapping[str, Any], photos: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    eligibility = evaluate_group_eligibility(group)
+    if eligibility.status != "pending":
+        raise ValueError("group is not eligible for scanning")
+    expected = {
+        (item["id"], item["sha256"], item["category"])
+        for photo in (_group_value(group, "photos") or [])
+        if (item := _photo_evidence(photo)) is not None
+    }
+    supplied = {
+        (item["id"], item["sha256"], item["category"])
+        for photo in photos
+        if (item := _photo_evidence(photo)) is not None
+    }
+    if supplied != expected:
+        raise ValueError("scan photos must match the exact eligible evidence set")
+    return [photo for photo in photos if _photo_evidence(photo) is not None]
 
 
 def _normalized_channel_values(values: Any) -> list[str]:

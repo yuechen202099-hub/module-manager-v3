@@ -1143,10 +1143,10 @@ def test_manual_group_barcode_confirmation_audits_and_marks_group_passed(synthet
             "module_asset_no": "MOD001",
             "photo_count": 4,
             "photos": [
-                {"id": "p1", "category": "before_box", "archive_status": "archived"},
-                {"id": "p2", "category": "collector_barcode", "archive_status": "archived"},
-                {"id": "p3", "category": "module_meter", "archive_status": "archived"},
-                {"id": "p4", "category": "after_box", "archive_status": "archived"},
+                {"id": "p1", "category": "before_box", "archive_status": "archived", "sha256": "a" * 64},
+                {"id": "p2", "category": "collector_barcode", "archive_status": "archived", "sha256": "b" * 64},
+                {"id": "p3", "category": "module_meter", "archive_status": "archived", "sha256": "c" * 64},
+                {"id": "p4", "category": "after_box", "archive_status": "archived", "sha256": "d" * 64},
             ],
         }
     )
@@ -1173,6 +1173,80 @@ def test_manual_group_barcode_confirmation_audits_and_marks_group_passed(synthet
     assert events[0]["payload"]["photo_ids"] == ["p1", "p2"]
     assert events[0]["payload"]["formal_values"]["meter_no"] == "11***56"
     assert group["barcode_verification"]["status"] == "manual_confirmed"
+
+
+def test_manual_barcode_confirmation_requires_exact_valid_photo_evidence(synthetic_state: dict) -> None:
+    group = synthetic_state["groups"][0]
+    group.update(
+        {
+            "meter_no": "110000288056",
+            "collector": "COLLECTOR001",
+            "module_asset_no": "MOD001",
+            "photos": [
+                {"id": "p1", "category": "before_box", "sha256": "a" * 64},
+                {"id": "p2", "category": "collector_barcode", "sha256": "b" * 64},
+                {"id": "p3", "category": "module_meter", "sha256": "c" * 64},
+                {"id": "p4", "category": "after_box", "sha256": "d" * 64},
+                {"id": "history", "category": "before_box", "sha256": "e" * 64, "is_active": False},
+            ],
+        }
+    )
+    claim_task(group["task_id"], "alice")
+
+    with pytest.raises(ValueError, match="照片证据无效"):
+        confirm_group_barcode_manually(
+            group["id"],
+            actor="alice",
+            meter_no="110000288056",
+            module_asset_no="MOD001",
+            collector="COLLECTOR001",
+            reason="现场核验",
+            photo_ids=["p1", "p1"],
+        )
+
+    assert not group.get("group_barcode_manual_confirmed", False)
+
+
+def test_manual_barcode_confirmation_syncs_formal_identity_photos_and_complete_redacted_audit(synthetic_state: dict) -> None:
+    group = synthetic_state["groups"][0]
+    group.update(
+        {
+            "meter_no": "110000288055",
+            "meter_match_key": "00000288055",
+            "collector": "COLLECTOROLD",
+            "module_asset_no": "MODOLD",
+            "exception_reasons": ["条码无法识别", "其他业务异常"],
+            "photos": [
+                {"id": "p1", "category": "before_box", "sha256": "a" * 64, "storage_key": "secret/key"},
+                {"id": "p2", "category": "collector_barcode", "sha256": "b" * 64},
+                {"id": "p3", "category": "module_meter", "sha256": "c" * 64},
+                {"id": "p4", "category": "after_box", "sha256": "d" * 64},
+            ],
+            "barcode_verification": {"status": "mismatch", "recognition_source": "machine", "result": {"passed_count": 1}},
+        }
+    )
+    claim_task(group["task_id"], "alice")
+
+    confirm_group_barcode_manually(
+        group["id"],
+        actor="alice",
+        meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        reason="现场核验",
+        photo_ids=["p1", "p2", "p3", "p4"],
+    )
+    event = list_audit_events(limit=1)["items"][0]
+
+    assert group["meter_match_key"] == "0000288056"
+    assert all(photo["barcode"] == "110000288056" for photo in group["photos"][:4])
+    assert all(photo["collector"] == "COLLECTOR001" for photo in group["photos"][:4])
+    assert all(photo["asset_no"] == "MOD001" for photo in group["photos"][:4])
+    assert group["exception_reasons"] == ["其他业务异常"]
+    assert event["payload"]["before"]["verification"]["status"] == "mismatch"
+    assert event["payload"]["after"]["verification"]["status"] == "manual_confirmed"
+    assert event["payload"]["after"]["photo_ids"] == ["p1", "p2", "p3", "p4"]
+    assert "storage_key" not in str(event["payload"])
 
 
 def test_task_groups_are_ordered_for_review_queue(synthetic_state: dict) -> None:

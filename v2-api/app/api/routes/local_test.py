@@ -354,18 +354,16 @@ def bound_review_actor(request: Request, reviewer: str, fallback: str = "local-r
         {"reviewer", "admin"},
         detail="Reviewer or administrator role required",
     )
-    clean_reviewer = str(reviewer or "").strip()
-    if request_is_admin(request):
-        return clean_reviewer or request_actor(request, fallback)
     payload = request_auth_payload(request)
     subject = str(payload.get("sub") or payload.get("username") or "").strip()
-    if not subject:
-        if settings.app_env.lower() in {"prod", "production"}:
-            raise HTTPException(status_code=401, detail="Authentication required")
-        return clean_reviewer or fallback
-    if clean_reviewer and clean_reviewer != subject:
-        raise HTTPException(status_code=403, detail="Reviewer must match the signed-in user")
-    return subject
+    if subject:
+        requested = str(reviewer or "").strip()
+        if requested and requested != subject:
+            raise HTTPException(status_code=403, detail="Reviewer must match the signed-in user")
+        return subject
+    if settings.app_env.lower() in {"prod", "production"}:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return str(reviewer or "").strip() or fallback
 
 
 def request_is_constructor(request: Request) -> bool:

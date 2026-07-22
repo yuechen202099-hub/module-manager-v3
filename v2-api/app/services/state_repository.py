@@ -36,6 +36,7 @@ from app.models import (
     UnmatchedRecord,
 )
 from app.services import account_store
+from app.services.matching import build_total_catalog_match_key
 
 
 def construction_task_availability(stats: Mapping[str, Any]) -> tuple[bool, bool]:
@@ -597,6 +598,7 @@ def invalidate_verification_for_group(
         "evidence_version": verification.evidence_version,
         "attempt_count": verification.attempt_count,
         "lease_owner": verification.lease_owner,
+        "lease_token": verification.lease_token,
         "lease_expires_at": verification.lease_expires_at,
     }
     result = invalidate_group_verification(
@@ -612,6 +614,7 @@ def invalidate_verification_for_group(
         "evidence_version",
         "attempt_count",
         "lease_owner",
+        "lease_token",
         "lease_expires_at",
         "invalidation_reason",
         "invalidated_by",
@@ -6696,34 +6699,52 @@ class PostgresStateRepository(StateRepository):
             if not reason:
                 raise ValueError("人工确认原因不能为空")
             selected_ids = [str(photo_id).strip() for photo_id in photo_ids if str(photo_id).strip()]
-            active_ids = {
-                str(photo.legacy_id or photo.id)
-                for photo in session.scalars(
-                    select(Photo).where(
-                        Photo.team_id == group.team_id,
-                        Photo.group_id == group.id,
-                        Photo.is_active.is_(True),
-                    )
-                ).all()
-            }
-            if not selected_ids or any(photo_id not in active_ids for photo_id in selected_ids):
+            active_photos = session.scalars(
+                select(Photo).where(
+                    Photo.team_id == group.team_id,
+                    Photo.group_id == group.id,
+                    Photo.is_active.is_(True),
+                )
+            ).all()
+            evidence_by_id = local_simulation._manual_confirmation_evidence(
+                [_photo_payload(photo) for photo in active_photos]
+            )
+            if (
+                not selected_ids
+                or len(selected_ids) != len(set(selected_ids))
+                or any(photo_id not in evidence_by_id for photo_id in selected_ids)
+            ):
                 raise ValueError("人工确认照片证据无效")
             now = datetime.now(UTC)
             raw_data = dict(group.raw_data or {})
-            before_data = {
-                key: raw_data.get(key)
-                for key in (
-                    "group_barcode_manual_confirmed",
-                    "group_barcode_manual_confirmed_fields",
-                    "group_barcode_manual_confirmed_by",
-                    "group_barcode_manual_confirmed_at",
-                    "group_barcode_manual_confirmation_reason",
-                    "group_barcode_manual_confirmation_photo_ids",
+            verification = session.scalar(
+                select(GroupBarcodeVerification)
+                .where(
+                    GroupBarcodeVerification.team_id == group.team_id,
+                    GroupBarcodeVerification.group_id == group.id,
                 )
+                .with_for_update()
+            )
+            before_verification = {
+                "status": verification.status if verification else "",
+                "recognition_source": verification.recognition_source if verification else "",
+                "result": {"passed_count": 3 if verification and all((verification.meter_matched, verification.module_matched, verification.collector_matched)) else 0},
             }
+            before_data = local_simulation._manual_confirmation_audit_snapshot(
+                {
+                    **raw_data,
+                    "meter_no": group.display_meter_no,
+                    "module_asset_no": raw_data.get("module_asset_no") or "",
+                    "collector": raw_data.get("collector") or "",
+                },
+                before_verification,
+            )
             raw_data.update(
                 {
                     **formal_values,
+                    "meter_match_key": build_total_catalog_match_key(formal_values["meter_no"]),
+                    "construction_collector": formal_values["collector"],
+                    "construction_module_asset_no": formal_values["module_asset_no"],
                     "group_barcode_manual_confirmed": True,
                     "group_barcode_manual_confirmed_fields": list(photo_barcode_check.GROUP_BARCODE_TYPES),
                     "group_barcode_manual_confirmed_by": actor,
@@ -6733,15 +6754,27 @@ class PostgresStateRepository(StateRepository):
                 }
             )
             group.display_meter_no = formal_values["meter_no"]
-            group.raw_data = raw_data
-            verification = session.scalar(
-                select(GroupBarcodeVerification)
-                .where(
-                    GroupBarcodeVerification.team_id == group.team_id,
-                    GroupBarcodeVerification.group_id == group.id,
+            group.meter_match_key = build_total_catalog_match_key(formal_values["meter_no"])
+            group.exception_reasons = local_simulation._without_barcode_exception_reasons(group.exception_reasons or [])
+            group.has_archive_blocker = bool(group.exception_reasons)
+            raw_data["exception_reasons"] = list(group.exception_reasons)
+            raw_data["manual_preserved_exception_reasons"] = list(group.exception_reasons)
+            raw_data["has_archive_blocker"] = group.has_archive_blocker
+            for photo in active_photos:
+                photo.barcode = formal_values["meter_no"]
+                photo.collector = formal_values["collector"]
+                photo.asset_no = formal_values["module_asset_no"]
+                photo_raw = dict(photo.raw_data or {})
+                photo_raw.update(
+                    {
+                        "barcode": formal_values["meter_no"],
+                        "collector": formal_values["collector"],
+                        "asset_no": formal_values["module_asset_no"],
+                        "module_asset_no": formal_values["module_asset_no"],
+                    }
                 )
-                .with_for_update()
-            )
+                photo.raw_data = photo_raw
+            group.raw_data = raw_data
             if verification is None:
                 verification = GroupBarcodeVerification(team_id=group.team_id, group_id=group.id)
                 session.add(verification)
@@ -6752,6 +6785,11 @@ class PostgresStateRepository(StateRepository):
             verification.recognition_source = "manual"
             verification.lease_owner = None
             verification.lease_expires_at = None
+            after_data = local_simulation._manual_confirmation_audit_snapshot(
+                {**raw_data, "meter_no": formal_values["meter_no"]},
+                {"status": "manual_confirmed", "recognition_source": "manual", "result": {"passed_count": 3}},
+            )
+            after_data.update({"actor": actor, "reason": reason, "photo_ids": selected_ids})
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),
@@ -6760,17 +6798,7 @@ class PostgresStateRepository(StateRepository):
                 entity_type="material_group",
                 entity_id=group.id,
                 before_data=before_data,
-                after_data={
-                    key: raw_data.get(key)
-                    for key in (
-                        "group_barcode_manual_confirmed",
-                        "group_barcode_manual_confirmed_fields",
-                        "group_barcode_manual_confirmed_by",
-                        "group_barcode_manual_confirmed_at",
-                        "group_barcode_manual_confirmation_reason",
-                        "group_barcode_manual_confirmation_photo_ids",
-                    )
-                },
+                after_data=after_data,
                 payload={
                     "group_id": group.legacy_id or str(group.id),
                     "fields": raw_data["group_barcode_manual_confirmed_fields"],
@@ -6780,6 +6808,8 @@ class PostgresStateRepository(StateRepository):
                     "formal_values": {
                         field: _mask_barcode_audit_value(value) for field, value in formal_values.items()
                     },
+                    "before": before_data,
+                    "after": after_data,
                 },
             )
             session.commit()

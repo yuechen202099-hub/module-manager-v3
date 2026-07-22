@@ -4774,7 +4774,13 @@ def refresh_group_exceptions() -> None:
     if not state.get("loaded"):
         return
     for group in state.get("groups", []):
-        set_group_exception_flags(group, validate_group_archive(group))
+        computed = validate_group_archive(group)
+        preserved = [
+            str(reason).strip()
+            for reason in group.get("manual_preserved_exception_reasons", [])
+            if str(reason).strip()
+        ]
+        set_group_exception_flags(group, list(dict.fromkeys([*computed, *preserved])))
 
 
 def read_catalog_rows(path: Path, source: str) -> list[dict[str, Any]]:
@@ -6777,11 +6783,31 @@ def confirm_group_barcode_manually(
     if not reason:
         raise ValueError("人工确认原因不能为空")
     selected_ids = [str(photo_id).strip() for photo_id in photo_ids if str(photo_id).strip()]
-    active_ids = {str(photo.get("id") or "") for photo in group.get("photos") or [] if photo.get("is_active", True)}
-    if not selected_ids or any(photo_id not in active_ids for photo_id in selected_ids):
+    valid_evidence = _manual_confirmation_evidence(group.get("photos") or [])
+    if (
+        not selected_ids
+        or len(selected_ids) != len(set(selected_ids))
+        or any(photo_id not in valid_evidence for photo_id in selected_ids)
+    ):
         raise ValueError("人工确认照片证据无效")
     now = now_iso()
+    meter_match_key = build_total_catalog_match_key(formal_values["meter_no"])
+    before = _manual_confirmation_audit_snapshot(group, group.get("barcode_verification") or {})
     group.update(formal_values)
+    group["meter_match_key"] = meter_match_key
+    for photo in group.get("photos") or []:
+        if photo.get("is_active", True):
+            photo.update(
+                {
+                    "barcode": formal_values["meter_no"],
+                    "collector": formal_values["collector"],
+                    "asset_no": formal_values["module_asset_no"],
+                    "module_asset_no": formal_values["module_asset_no"],
+                }
+            )
+    group["exception_reasons"] = _without_barcode_exception_reasons(group.get("exception_reasons") or [])
+    group["manual_preserved_exception_reasons"] = list(group["exception_reasons"])
+    group["has_archive_blocker"] = bool(group["exception_reasons"])
     group["group_barcode_manual_confirmed"] = True
     group["group_barcode_manual_confirmed_fields"] = list(photo_barcode_check.GROUP_BARCODE_TYPES)
     group["group_barcode_manual_confirmed_by"] = actor
@@ -6802,6 +6828,8 @@ def confirm_group_barcode_manually(
         }
     )
     group["barcode_verification"] = verification
+    after = _manual_confirmation_audit_snapshot(group, verification)
+    after.update({"actor": actor, "reason": reason, "photo_ids": selected_ids})
     append_audit_event(
         "group_barcode_manual_confirmed",
         actor,
@@ -6812,6 +6840,8 @@ def confirm_group_barcode_manually(
             "reason": reason,
             "photo_ids": selected_ids,
             "formal_values": {field: _mask_barcode_audit_value(value) for field, value in formal_values.items()},
+            "before": before,
+            "after": after,
         },
     )
     refresh_summary()
@@ -6822,6 +6852,49 @@ def _mask_barcode_audit_value(value: str) -> str:
     if len(value) <= 4:
         return "*" * len(value)
     return f"{value[:2]}***{value[-2:]}"
+
+
+def _manual_confirmation_evidence(photos: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    required_categories = {"before_box", "collector_barcode", "module_meter", "after_box"}
+    valid = [
+        photo
+        for photo in photos
+        if is_valid_photo_evidence(photo)
+        and str(photo.get("id") or "").strip()
+        and re.fullmatch(r"[0-9a-fA-F]{64}", str(photo.get("sha256") or "").strip())
+        and str(photo.get("category") or "").strip() in required_categories
+    ]
+    if len(valid) != 4 or {str(photo.get("category")) for photo in valid} != required_categories:
+        return {}
+    evidence = {str(photo["id"]): photo for photo in valid}
+    return evidence if len(evidence) == 4 else {}
+
+
+def _without_barcode_exception_reasons(reasons: list[Any]) -> list[str]:
+    markers = ("barcode", "qr", "ocr", "条码", "二维码", "识别")
+    return [
+        str(reason).strip()
+        for reason in reasons
+        if str(reason).strip() and not any(marker in str(reason).lower() for marker in markers)
+    ]
+
+
+def _manual_confirmation_audit_snapshot(group: Mapping[str, Any], verification: Mapping[str, Any]) -> dict[str, Any]:
+    result = verification.get("result") if isinstance(verification.get("result"), Mapping) else {}
+    return {
+        "formal_values": {
+            field: _mask_barcode_audit_value(str(group.get(field) or ""))
+            for field in ("meter_no", "module_asset_no", "collector")
+        },
+        "verification": {
+            "status": str(verification.get("status") or ""),
+            "recognition_source": str(verification.get("recognition_source") or ""),
+            "matched_count": int(result.get("passed_count") or 0),
+        },
+        "manual_confirmed": bool(group.get("group_barcode_manual_confirmed")),
+        "manual_fields": list(group.get("group_barcode_manual_confirmed_fields") or []),
+        "photo_ids": list(group.get("group_barcode_manual_confirmation_photo_ids") or []),
+    }
 
 
 def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:

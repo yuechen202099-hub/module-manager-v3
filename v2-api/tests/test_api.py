@@ -1920,6 +1920,7 @@ def test_production_group_metadata_requires_reviewer_or_admin(monkeypatch, tmp_p
 
     assert denied.status_code == 403
     assert spoofed.status_code == 403
+
     assert match_key_denied.status_code == 403
     assert repository.update_calls == 0
 
@@ -1996,6 +1997,16 @@ def test_production_group_photo_url_import_requires_reviewer_or_admin(monkeypatc
 
     assert denied.status_code == 403
     assert spoofed.status_code == 403
+
+    admin_spoof_token = security.create_access_token(
+        {"username": "admin-intruder", "name": "Admin Intruder", "roles": ["admin"], "team_id": "rescan-route-test"}
+    )
+    admin_spoofed = client.post(
+        f"/local-test/groups/{photo_group['id']}/photos/{photo['id']}/barcode-rescan?include_group=true",
+        headers={**headers, "Authorization": f"bearer {admin_spoof_token}"},
+        json={"reviewer": "api-test", "category": "module_meter"},
+    )
+    assert admin_spoofed.status_code == 403
     assert repository.add_calls == 0
 
 
@@ -4162,10 +4173,10 @@ def test_group_barcode_manual_confirm_route_marks_summary_and_audits() -> None:
                 "module_asset_no": "MOD001",
                 "photo_count": 4,
                 "photos": [
-                    {"id": "manual-confirm-p1", "category": "before_box", "archive_status": "archived"},
-                    {"id": "manual-confirm-p2", "category": "collector_barcode", "archive_status": "archived"},
-                    {"id": "manual-confirm-p3", "category": "module_meter", "archive_status": "archived"},
-                    {"id": "manual-confirm-p4", "category": "after_box", "archive_status": "archived"},
+                    {"id": "manual-confirm-p1", "category": "before_box", "archive_status": "archived", "sha256": "a" * 64},
+                    {"id": "manual-confirm-p2", "category": "collector_barcode", "archive_status": "archived", "sha256": "b" * 64},
+                    {"id": "manual-confirm-p3", "category": "module_meter", "archive_status": "archived", "sha256": "c" * 64},
+                    {"id": "manual-confirm-p4", "category": "after_box", "archive_status": "archived", "sha256": "d" * 64},
                 ],
             }
         )
