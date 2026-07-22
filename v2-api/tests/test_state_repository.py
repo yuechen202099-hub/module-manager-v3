@@ -797,7 +797,7 @@ def test_json_identity_invalidation_commit_failure_creates_no_durable_cache_job(
     assert repository.local_simulation._team_states[team_id] == before
 
 
-@pytest.mark.parametrize("ineligible_kind", ["source", "category"])
+@pytest.mark.parametrize("ineligible_kind", ["source", "category", "invalid_photo"])
 def test_json_ineligible_invalidation_stays_retry_pending_until_reconciliation(
     ineligible_kind: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -810,8 +810,10 @@ def test_json_ineligible_invalidation_stays_retry_pending_until_reconciliation(
     if ineligible_kind == "source":
         for photo in group["photos"]:
             photo.update(image_url="", storage_type="")
-    else:
+    elif ineligible_kind == "category":
         group["photos"][0]["category"] = "unclassified"
+    else:
+        group["photos"][0]["upload_status"] = "invalid"
     monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: None)
     monkeypatch.setattr(repository.local_simulation, "validate_group_archive", lambda _group: [])
 
@@ -827,8 +829,10 @@ def test_json_ineligible_invalidation_stays_retry_pending_until_reconciliation(
     if ineligible_kind == "source":
         for photo in committed["groups"][0]["photos"]:
             photo.update(image_url=f"oss://bucket/{photo['id']}.jpg", storage_type="oss")
-    else:
+    elif ineligible_kind == "category":
         committed["groups"][0]["photos"][0]["category"] = "before_box"
+    else:
+        committed["groups"][0]["photos"][0]["upload_status"] = "uploaded"
 
     result = delivery_cache._reconcile_json_delivery_cache_jobs(team_id, limit=20)
 
@@ -1107,12 +1111,15 @@ def test_json_repository_builds_formal_zip_only_from_completed_cache(
         lambda _photo: (_ for _ in ()).throw(AssertionError("formal request must not reach OSS")),
     )
 
-    package_path = repository.JsonStateRepository().build_final_delivery_export(task_id=17)
+    package = repository.JsonStateRepository().build_final_delivery_export(task_id=17)
 
-    assert isinstance(package_path, Path)
-    with ZipFile(package_path) as archive:
-        assert archive.namelist()[0] == "设备清单.xlsx"
-        assert len(archive.namelist()) == 5
+    try:
+        assert isinstance(package.path, Path)
+        with ZipFile(package.path) as archive:
+            assert archive.namelist()[0] == "设备清单.xlsx"
+            assert len(archive.namelist()) == 5
+    finally:
+        package.release()
 
 
 def test_json_formal_export_reports_missing_completed_cache_before_zip_build(
@@ -1271,6 +1278,216 @@ def test_json_formal_export_converts_cache_disappearance_race_to_structured_erro
     assert scheduled == [(group["id"], "formal_cache_validation_failed")]
 
 
+@pytest.mark.parametrize("invalid_kind", ["final_symlink", "symlinked_parent", "outside_symlink"])
+def test_json_formal_export_rejects_every_symlinked_cache_path_and_schedules_repair(
+    invalid_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    group = _formal_delivery_group(tmp_path, f"symlink-cache-{invalid_kind}")
+    photo = group["photos"][0]
+    original = tmp_path / photo["delivery_cache_path"]
+    content = original.read_bytes()
+    original.unlink()
+    if invalid_kind == "final_symlink":
+        target = original.with_name(f"real-{original.name}")
+        target.write_bytes(content)
+        original.symlink_to(target)
+    elif invalid_kind == "symlinked_parent":
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        target = real_parent / original.name
+        target.write_bytes(content)
+        link_parent = tmp_path / "linked-parent"
+        link_parent.symlink_to(real_parent, target_is_directory=True)
+        photo["delivery_cache_path"] = str((link_parent / original.name).relative_to(tmp_path)).replace("\\", "/")
+    else:
+        target = tmp_path.parent / f"outside-symlink-{uuid4()}.png"
+        target.write_bytes(content)
+        original.symlink_to(target)
+
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+    scheduled = []
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "schedule_delivery_cache_build",
+        lambda group_id, **kwargs: scheduled.append((group_id, kwargs["reason"])),
+    )
+
+    with pytest.raises(DeliveryPackageValidationError) as captured:
+        repository.JsonStateRepository().build_final_delivery_export(task_id=17)
+
+    assert {error["code"] for error in captured.value.errors} == {"delivery_cache_invalid"}
+    assert scheduled == [(group["id"], "formal_cache_validation_failed")]
+
+
+def test_formal_export_keeps_valid_regular_cache_file_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    group = _formal_delivery_group(tmp_path, "regular-cache")
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+
+    package = repository.JsonStateRepository().build_final_delivery_export(task_id=17)
+    try:
+        assert package.path.is_file()
+    finally:
+        package.release()
+
+
+def test_formal_package_validation_uses_injected_repair_and_preserves_422_on_enqueue_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    group = _formal_delivery_group(tmp_path, "injected-repair")
+    (tmp_path / group["photos"][0]["delivery_cache_path"]).unlink()
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "schedule_delivery_cache_build",
+        lambda *_args, **_kwargs: pytest.fail("formal validation must not hard-code JSON repair"),
+    )
+    repairs = []
+
+    def failing_repair(group_ids, *, reason):
+        repairs.append((group_ids, reason))
+        raise RuntimeError("injected enqueue failure")
+
+    with pytest.raises(DeliveryPackageValidationError) as captured:
+        repository.local_simulation.build_final_delivery_package_from_groups(
+            [group],
+            scope="repair-callback",
+            archived_only=False,
+            repair_delivery_cache=failing_repair,
+        )
+
+    assert {error["code"] for error in captured.value.errors} == {"delivery_cache_pending"}
+    assert repairs == [([group["id"]], "formal_cache_validation_failed")]
+
+
+def test_postgres_formal_validation_uses_postgres_repair_callback_not_json(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    group_payload = _formal_delivery_group(tmp_path, "postgres-repair-callback")
+    (tmp_path / group_payload["photos"][0]["delivery_cache_path"]).unlink()
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id=group_payload["id"],
+        team_id="postgres-repair-team",
+        terminal=group_payload["terminal"],
+        display_meter_no=group_payload["meter_no"],
+        status=repository.GroupStatus.APPROVED,
+        raw_data={},
+    )
+
+    class Rows:
+        def all(self):
+            return [group]
+
+    class Session:
+        def scalars(self, _statement):
+            return Rows()
+
+    repairs = []
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(Session())
+
+        def _task_by_legacy_id(self, _session, _task_id):
+            return SimpleNamespace(id=uuid4())
+
+        def _repair_delivery_cache_groups(self, group_ids, *, reason):
+            repairs.append((group_ids, reason))
+
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: group.team_id)
+    monkeypatch.setattr(repository, "_group_payload", lambda *_args, **_kwargs: deepcopy(group_payload))
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "schedule_delivery_cache_build",
+        lambda *_args, **_kwargs: pytest.fail("PostgreSQL 422 must not create JSON-only work"),
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "download_delivery_photo_content",
+        lambda _photo: pytest.fail("formal validation must not access OSS"),
+    )
+
+    with pytest.raises(DeliveryPackageValidationError):
+        TestRepository().build_final_delivery_export(task_id=17)
+
+    assert repairs == [([group_payload["id"]], "formal_cache_validation_failed")]
+
+
+def test_postgres_formal_repair_upserts_one_durable_job_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import DeliveryCacheJob
+
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="postgres-idempotent-repair",
+        team_id="postgres-repair-team",
+        reviewer="reviewer-a",
+        raw_data={"delivery_cache_status": "retry_pending"},
+    )
+    jobs = []
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        def scalars(self, _statement):
+            self.calls += 1
+            return Rows([group] if self.calls == 1 else list(jobs))
+
+        def add(self, value):
+            assert isinstance(value, DeliveryCacheJob)
+            value.id = uuid4()
+            jobs.append(value)
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(Session())
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: group.team_id)
+    repo = TestRepository()
+
+    repo._repair_delivery_cache_groups([group.legacy_id], reason="formal_cache_validation_failed")
+    repo._repair_delivery_cache_groups([group.legacy_id], reason="formal_cache_validation_failed")
+
+    assert len(jobs) == 1
+    assert jobs[0].status == "pending"
+    assert jobs[0].group_id == group.id
+    assert group.raw_data["delivery_cache_status"] == "pending"
+
+
 def test_postgres_repository_uses_shared_formal_package_builder(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1311,13 +1528,16 @@ def test_postgres_repository_uses_shared_formal_package_builder(
         lambda _photo: (_ for _ in ()).throw(AssertionError("formal request must not reach OSS")),
     )
 
-    package_path = TestRepository().build_final_delivery_export(task_id=17)
+    package = TestRepository().build_final_delivery_export(task_id=17)
 
-    assert isinstance(package_path, Path)
-    with ZipFile(package_path) as archive:
-        workbook = archive.read("设备清单.xlsx")
-        assert workbook.startswith(b"PK")
-        assert len(archive.namelist()) == 5
+    try:
+        assert isinstance(package.path, Path)
+        with ZipFile(package.path) as archive:
+            workbook = archive.read("设备清单.xlsx")
+            assert workbook.startswith(b"PK")
+            assert len(archive.namelist()) == 5
+    finally:
+        package.release()
 
 
 def test_group_barcode_rescan_audit_payload_has_unique_keys() -> None:

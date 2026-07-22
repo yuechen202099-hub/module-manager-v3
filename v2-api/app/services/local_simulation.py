@@ -8,6 +8,7 @@ import logging
 import mimetypes
 import os
 import re
+import stat
 import threading
 import urllib.request
 from collections import defaultdict
@@ -1119,7 +1120,10 @@ def delivery_cache_file_for_photo(group: dict[str, Any], photo: dict[str, Any]) 
     if not rel:
         return None
     root = delivery_cache_root().resolve()
-    candidate = (root / rel).resolve()
+    relative = Path(rel)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    candidate = root / relative
     try:
         candidate.relative_to(root)
     except ValueError:
@@ -1161,21 +1165,36 @@ def get_delivery_cached_photo_path_from_payload(group: dict[str, Any], photo: di
         if str(photo.get("delivery_cache_path") or "").strip():
             raise DeliveryCacheFileValidationError(str(photo.get("id") or ""))
         raise FileNotFoundError(str(photo.get("id") or ""))
-    if not path.exists() or photo.get("delivery_cache_version") != delivery_photo_cache_version(photo):
+    root = delivery_cache_root().resolve()
+    try:
+        relative = path.relative_to(root)
+        original = root
+        for part in relative.parts:
+            original = original / part
+            if stat.S_ISLNK(original.lstat().st_mode):
+                raise DeliveryCacheFileValidationError(str(photo.get("id") or ""))
+        resolved = path.resolve()
+        resolved.relative_to(root)
+    except DeliveryCacheFileValidationError:
+        raise
+    except FileNotFoundError:
+        raise FileNotFoundError(str(photo.get("id") or "")) from None
+    except (OSError, ValueError) as exc:
+        raise DeliveryCacheFileValidationError(str(photo.get("id") or "")) from exc
+    if photo.get("delivery_cache_version") != delivery_photo_cache_version(photo):
         raise FileNotFoundError(str(photo.get("id") or ""))
     expected_sha256 = str(photo.get("delivery_cache_content_sha256") or "").strip().lower()
     try:
         if (
-            path.is_symlink()
-            or not path.is_file()
-            or path.stat().st_size <= 0
+            not resolved.is_file()
+            or resolved.stat().st_size <= 0
             or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
-            or _file_sha256(path) != expected_sha256
+            or _file_sha256(resolved) != expected_sha256
         ):
             raise DeliveryCacheFileValidationError(str(photo.get("id") or ""))
     except OSError as exc:
         raise DeliveryCacheFileValidationError(str(photo.get("id") or "")) from exc
-    return path
+    return resolved
 
 
 def get_delivery_cached_photo_path(group_id: str, photo_id: str) -> Path:
@@ -5376,13 +5395,20 @@ def build_task_detail_export(task_id: int) -> bytes:
     return build_groups_export_workbook(groups, f"task-{task_id}")
 
 
-def build_final_delivery_export(task_id: int | None = None, terminal: str = "", review_scope: str = "reviewed") -> Path:
+def build_final_delivery_export(
+    task_id: int | None = None,
+    terminal: str = "",
+    review_scope: str = "reviewed",
+    *,
+    repair_delivery_cache: Callable[..., None] | None = None,
+):
     groups = filter_delivery_groups(task_id=task_id, terminal=terminal, review_scope="all")
     scope = f"{current_team_id()}|task={task_id or ''}|terminal={terminal.strip()}|review_scope={review_scope}"
     return build_final_delivery_package_from_groups(
         groups,
         scope=scope,
         archived_only=review_scope == "reviewed",
+        repair_delivery_cache=repair_delivery_cache,
     )
 
 
@@ -5391,7 +5417,8 @@ def build_final_delivery_package_from_groups(
     *,
     scope: str,
     archived_only: bool = True,
-) -> Path:
+    repair_delivery_cache: Callable[..., None] | None = None,
+):
     from app.services.final_delivery_export import (
         DeliveryPackageValidationError,
         delivery_evidence_fingerprint,
@@ -5455,8 +5482,17 @@ def build_final_delivery_package_from_groups(
                 and str(error.get("group_id") or "")
             }
         )
-        for group_id in invalid_group_ids:
-            schedule_delivery_cache_build(group_id, reason="formal_cache_validation_failed")
+        if invalid_group_ids and repair_delivery_cache is not None:
+            try:
+                repair_delivery_cache(
+                    invalid_group_ids,
+                    reason="formal_cache_validation_failed",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to schedule formal delivery-cache repair for groups %s",
+                    invalid_group_ids,
+                )
         raise
 
 

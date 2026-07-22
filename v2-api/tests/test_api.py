@@ -6078,10 +6078,18 @@ def test_final_delivery_export_returns_versioned_zip(monkeypatch, tmp_path: Path
     with ZipFile(package, "w") as archive:
         archive.writestr("设备清单.xlsx", b"workbook")
 
+    released = []
+
+    class Package:
+        path = package
+
+        def release(self):
+            released.append(self.path)
+
     class Repository:
         def build_final_delivery_export(self, **kwargs):
             assert kwargs == {"task_id": 17, "terminal": "", "review_scope": "reviewed"}
-            return package
+            return Package()
 
     monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
 
@@ -6092,6 +6100,42 @@ def test_final_delivery_export_returns_versioned_zip(monkeypatch, tmp_path: Path
     assert "V3.1.0-final-delivery-17-" in response.headers["content-disposition"]
     assert response.headers["content-disposition"].endswith('.zip"')
     assert response.content == package.read_bytes()
+    assert released == [package]
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("response failed"), asyncio.CancelledError()])
+def test_final_delivery_export_releases_exact_lease_when_response_construction_fails(
+    failure: BaseException,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package_path = tmp_path / "formal.zip"
+    package_path.write_bytes(b"zip")
+    releases = []
+
+    class Package:
+        path = package_path
+
+        def release(self):
+            releases.append(self.path)
+
+    class Repository:
+        def build_final_delivery_export(self, **_kwargs):
+            return Package()
+
+    def fail_response(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
+    monkeypatch.setattr(export_routes, "FileResponse", fail_response)
+
+    with pytest.raises(type(failure)):
+        export_routes.export_final_delivery(
+            export_routes.FinalDeliveryExportRequest(task_id=17),
+            SimpleNamespace(),
+        )
+
+    assert releases == [package_path]
 
 
 def test_final_delivery_export_returns_structured_group_errors(monkeypatch) -> None:

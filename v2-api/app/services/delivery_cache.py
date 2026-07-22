@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.database import SessionLocal
-from app.models import DeliveryCacheJob, GroupStatus, MaterialGroup
+from app.models import DeliveryCacheJob, GroupStatus, MaterialGroup, Photo
 from app.services import local_simulation
 
 
@@ -577,6 +577,18 @@ def build_postgres_missing_reconciliation_statement(*, team_id: str, limit: int)
     )
 
 
+def build_postgres_reconciliation_photo_statement(*, team_id: str, group_ids: list[Any]):
+    return (
+        select(Photo)
+        .where(
+            Photo.team_id == team_id,
+            Photo.group_id.in_(group_ids),
+            Photo.is_active.is_(True),
+        )
+        .order_by(Photo.group_id, Photo.sort_order, Photo.created_at, Photo.id)
+    )
+
+
 def _delivery_job_has_live_lease(job: DeliveryCacheJob, *, now: datetime) -> bool:
     if str(job.status or "") != "processing":
         return False
@@ -606,10 +618,41 @@ def _delivery_job_is_reconciliation_eligible(job: DeliveryCacheJob, *, now: date
     return status == "processing" and attempts < MAX_DELIVERY_CACHE_ATTEMPTS and not _delivery_job_has_live_lease(job, now=now)
 
 
-def _group_is_reconciliation_eligible(group: MaterialGroup) -> bool:
+def _postgres_reconciliation_photo_payload(photo: Photo) -> dict[str, Any]:
+    raw = dict(getattr(photo, "raw_data", {}) or {})
+    image_url = str(getattr(photo, "image_url", None) or getattr(photo, "source_url", None) or "")
+    storage_type = str(getattr(photo, "storage_type", None) or "")
+    storage_bucket = str(getattr(photo, "storage_bucket", None) or "")
+    storage_key = str(getattr(photo, "storage_key", None) or "")
+    if not image_url and storage_type == "oss" and storage_key:
+        image_url = f"oss://{storage_bucket}/{storage_key}"
+    upload_status = getattr(photo, "upload_status", "uploaded")
+    return {
+        "id": str(getattr(photo, "legacy_id", None) or getattr(photo, "id", "")),
+        "is_active": bool(getattr(photo, "is_active", True)),
+        "upload_status": str(getattr(upload_status, "value", upload_status) or ""),
+        "category": str(getattr(photo, "category", None) or raw.get("category") or "unclassified"),
+        "construction_slot": str(raw.get("construction_slot") or ""),
+        "image_url": image_url,
+        "source_url": str(getattr(photo, "source_url", None) or image_url),
+        "storage_type": storage_type,
+        "storage_bucket": storage_bucket,
+        "storage_key": storage_key,
+        "sha256": str(getattr(photo, "sha256", None) or ""),
+    }
+
+
+def _group_is_reconciliation_eligible(group: MaterialGroup, photos: list[Photo]) -> bool:
+    status = str(getattr(group.status, "value", group.status) or "")
     return (
-        group.status == GroupStatus.APPROVED
-        and str((group.raw_data or {}).get("delivery_cache_status") or "") == "retry_pending"
+        status == GroupStatus.APPROVED.value
+        and local_simulation.delivery_cache_group_is_eligible(
+            {
+                "id": str(group.id),
+                "status": "approved",
+                "photos": [_postgres_reconciliation_photo_payload(photo) for photo in photos],
+            }
+        )
     )
 
 
@@ -644,9 +687,36 @@ def _reconcile_postgres_delivery_cache_jobs(
             )
         enqueued = 0
         skipped_live = 0
+        retry_state_changed = False
+        remaining = max(0, bounded - len(existing_groups))
+        missing_rows = []
+        if remaining:
+            missing_rows = list(
+                session.execute(
+                    build_postgres_missing_reconciliation_statement(
+                        team_id=team_id,
+                        limit=remaining,
+                    )
+                ).all()
+            )
+        candidate_groups = [*existing_groups, *(group for group, _missing_job in missing_rows)]
+        photos_by_group: dict[Any, list[Photo]] = {group.id: [] for group in candidate_groups}
+        if photos_by_group:
+            photos = session.execute(
+                build_postgres_reconciliation_photo_statement(
+                    team_id=team_id,
+                    group_ids=list(photos_by_group),
+                )
+            ).scalars().all()
+            for photo in photos:
+                if photo.group_id in photos_by_group:
+                    photos_by_group[photo.group_id].append(photo)
         for job in existing_jobs:
             group = groups_by_id.get(job.group_id)
-            if group is None or not _group_is_reconciliation_eligible(group):
+            if group is None or not _group_is_reconciliation_eligible(
+                group,
+                photos_by_group.get(group.id, []),
+            ):
                 continue
             if _delivery_job_has_live_lease(job, now=reconciled_at):
                 skipped_live += 1
@@ -661,18 +731,21 @@ def _reconcile_postgres_delivery_cache_jobs(
                 existing_job=job,
             )
             enqueued += 1
-        remaining = max(0, bounded - len(existing_groups))
-        missing_rows = []
-        if remaining:
-            missing_rows = list(
-                session.execute(
-                    build_postgres_missing_reconciliation_statement(
-                        team_id=team_id,
-                        limit=remaining,
-                    )
-                ).all()
-            )
         for group, _missing_job in missing_rows:
+            if not _group_is_reconciliation_eligible(group, photos_by_group.get(group.id, [])):
+                raw = dict(group.raw_data or {})
+                if str(raw.get("delivery_cache_status") or "") != "retry_pending":
+                    raw.update(
+                        {
+                            "delivery_cache_status": "retry_pending",
+                            "delivery_cache_error": "delivery cache evidence is temporarily ineligible",
+                            "delivery_cache_retryable": True,
+                            "delivery_cache_retry_requested_at": reconciled_at.isoformat(),
+                        }
+                    )
+                    group.raw_data = raw
+                    retry_state_changed = True
+                continue
             enqueue_postgres_delivery_cache_job(
                 session,
                 group,
@@ -681,7 +754,7 @@ def _reconcile_postgres_delivery_cache_jobs(
                 existing_job=None,
             )
             enqueued += 1
-        if enqueued:
+        if enqueued or retry_state_changed:
             session.commit()
         else:
             session.rollback()

@@ -78,6 +78,28 @@ def eligible_group(group_id: str, *, verification_status: str = "pending") -> di
     return group
 
 
+def postgres_eligible_photos(group) -> list[SimpleNamespace]:
+    return [
+        SimpleNamespace(
+            id=uuid4(),
+            legacy_id=f"{group.id}-photo-{index}",
+            team_id=group.team_id,
+            group_id=group.id,
+            is_active=True,
+            upload_status="uploaded",
+            category=category,
+            image_url=f"oss://bucket/{group.id}-{index}.jpg",
+            source_url=f"oss://bucket/{group.id}-{index}.jpg",
+            storage_type="oss",
+            storage_bucket="bucket",
+            storage_key=f"{group.id}-{index}.jpg",
+            sha256=f"{index + 1:x}" * 64,
+            raw_data={"construction_slot": category},
+        )
+        for index, category in enumerate(REQUIRED_CATEGORIES)
+    ]
+
+
 def install_json_queue(monkeypatch: pytest.MonkeyPatch, groups: list[dict], *, paused: bool = False) -> str:
     team_id = f"maintenance-{uuid4()}"
     state = local_simulation.blank_state(team_id)
@@ -836,7 +858,7 @@ def test_postgres_delivery_cache_reconciliation_uses_bounded_group_first_bulk_lo
     assert "FOR UPDATE OF material_groups SKIP LOCKED" in missing_sql
 
 
-def test_postgres_delivery_cache_reconciliation_uses_two_queries_per_bounded_iteration(
+def test_postgres_delivery_cache_reconciliation_uses_bounded_bulk_queries_per_iteration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.models import DeliveryCacheJob
@@ -846,6 +868,7 @@ def test_postgres_delivery_cache_reconciliation_uses_two_queries_per_bounded_ite
         SimpleNamespace(
             id=uuid4(),
             team_id="team-reconcile",
+            status="approved",
             reviewer="reviewer-a",
             raw_data={"delivery_cache_status": "retry_pending"},
         )
@@ -877,11 +900,16 @@ def test_postgres_delivery_cache_reconciliation_uses_two_queries_per_bounded_ite
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, _statement):
+        def execute(self, statement):
             self.execute_calls += 1
             if self.execute_calls == 1:
                 return Rows([])
-            return Rows([(group, None) for group in self.values])
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "NOT (EXISTS" in sql:
+                return Rows([(group, None) for group in self.values])
+            if "FROM photos" in sql:
+                return Rows([photo for group in self.values for photo in postgres_eligible_photos(group)])
+            pytest.fail(f"unexpected reconciliation statement: {sql}")
 
         def scalar(self, _statement):
             pytest.fail("reconciliation must not issue an N+1 job query")
@@ -905,8 +933,207 @@ def test_postgres_delivery_cache_reconciliation_uses_two_queries_per_bounded_ite
     second = delivery_cache._reconcile_postgres_delivery_cache_jobs("team-reconcile", limit=20)
 
     assert [first["enqueued"], second["enqueued"]] == [20, 5]
-    assert [session.execute_calls for session in sessions] == [2, 2]
+    assert [session.execute_calls for session in sessions] == [3, 3]
     assert all(session.committed for session in sessions)
+
+
+@pytest.mark.parametrize("ineligible_kind", ["category", "invalid_photo", "source"])
+def test_postgres_reconciliation_matches_json_eligibility_and_recovers_after_evidence_repair(
+    ineligible_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import DeliveryCacheJob, GroupStatus
+    from app.services import delivery_cache
+
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="team-parity",
+        status=GroupStatus.APPROVED,
+        reviewer="reviewer-a",
+        raw_data={"status": "approved"},
+    )
+    photos = [
+        SimpleNamespace(
+            id=uuid4(),
+            legacy_id=f"parity-photo-{index}",
+            team_id=group.team_id,
+            group_id=group.id,
+            is_active=True,
+            upload_status="uploaded",
+            category=category,
+            image_url=f"oss://bucket/parity-{index}.jpg",
+            source_url=f"oss://bucket/parity-{index}.jpg",
+            storage_type="oss",
+            storage_bucket="bucket",
+            storage_key=f"parity-{index}.jpg",
+            sha256=f"{index + 1:x}" * 64,
+            raw_data={"construction_slot": category},
+        )
+        for index, category in enumerate(REQUIRED_CATEGORIES)
+    ]
+    if ineligible_kind == "category":
+        photos[0].category = "before_box"
+        photos[1].category = "before_box"
+        photos[1].raw_data = {"construction_slot": "before_box"}
+    elif ineligible_kind == "invalid_photo":
+        photos[0].upload_status = "invalid"
+    else:
+        for photo in photos:
+            photo.image_url = ""
+            photo.source_url = ""
+            photo.storage_type = ""
+            photo.storage_key = ""
+
+    job = SimpleNamespace(
+        id=uuid4(),
+        team_id=group.team_id,
+        group_id=group.id,
+        status="failed",
+        attempt_count=1,
+        lease_owner=None,
+        lease_token=None,
+        lease_expires_at=None,
+        requested_by="reviewer-a",
+        request_reason="review_completed",
+        last_error="old failure",
+        completed_at=None,
+    )
+    phase = {"eligible": False}
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+        def scalars(self):
+            return self
+
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement):
+            self.calls += 1
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "FROM photos" in sql:
+                return Rows(photos)
+            if "FOR UPDATE OF delivery_cache_jobs" in sql:
+                return Rows([job])
+            if "NOT (EXISTS" in sql:
+                return Rows([] if phase["eligible"] else [(group, None)])
+            if "JOIN delivery_cache_jobs" in sql:
+                return Rows([group] if phase["eligible"] else [])
+            pytest.fail(f"unexpected reconciliation statement: {sql}")
+
+        def add(self, value):
+            assert isinstance(value, DeliveryCacheJob)
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(delivery_cache, "SessionLocal", Session)
+
+    blocked = delivery_cache._reconcile_postgres_delivery_cache_jobs(group.team_id, limit=20)
+
+    assert blocked["enqueued"] == 0
+    assert group.raw_data["delivery_cache_status"] == "retry_pending"
+
+    for index, photo in enumerate(photos):
+        photo.upload_status = "uploaded"
+        photo.category = REQUIRED_CATEGORIES[index]
+        photo.raw_data = {"construction_slot": REQUIRED_CATEGORIES[index]}
+        photo.image_url = f"oss://bucket/parity-{index}.jpg"
+        photo.source_url = photo.image_url
+        photo.storage_type = "oss"
+        photo.storage_key = f"parity-{index}.jpg"
+    phase["eligible"] = True
+
+    recovered = delivery_cache._reconcile_postgres_delivery_cache_jobs(group.team_id, limit=20)
+
+    assert recovered["enqueued"] == 1
+    assert job.status == "pending"
+    assert group.raw_data["delivery_cache_status"] == "pending"
+
+
+def test_postgres_missing_job_reconciliation_recovers_review_commit_crash_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import DeliveryCacheJob, GroupStatus
+    from app.services import delivery_cache
+
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="team-missing-crash-gap",
+        status=GroupStatus.APPROVED,
+        reviewer="reviewer-a",
+        raw_data={"status": "approved"},
+    )
+    photos = postgres_eligible_photos(group)
+    created_jobs = []
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+        def scalars(self):
+            return self
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "JOIN delivery_cache_jobs" in sql:
+                return Rows([])
+            if "NOT (EXISTS" in sql:
+                return Rows([(group, None)])
+            if "FROM photos" in sql:
+                return Rows(photos)
+            pytest.fail(f"unexpected reconciliation statement: {sql}")
+
+        def add(self, value):
+            assert isinstance(value, DeliveryCacheJob)
+            value.id = uuid4()
+            created_jobs.append(value)
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(delivery_cache, "SessionLocal", Session)
+
+    report = delivery_cache._reconcile_postgres_delivery_cache_jobs(group.team_id, limit=20)
+
+    assert report["enqueued"] == 1
+    assert len(created_jobs) == 1
+    assert created_jobs[0].group_id == group.id
+    assert group.raw_data["delivery_cache_status"] == "pending"
 
 
 def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
@@ -965,6 +1192,8 @@ def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
                 return Rows([group])
             if self.execute_calls == 2:
                 return Rows([live_job])
+            if "FROM photos" in str(statement.compile(dialect=postgresql.dialect())):
+                return Rows(postgres_eligible_photos(group))
             return Rows([])
 
         def scalar(self, _statement):
@@ -990,7 +1219,7 @@ def test_postgres_reconciliation_cannot_overwrite_interleaved_live_claim(
     assert live_job.lease_token == "live-token"
     assert live_job.lease_expires_at == live_lease_expires_at
     assert group.raw_data["delivery_cache_status"] == "retry_pending"
-    assert len(statements) == 3
+    assert len(statements) == 4
 
 
 def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_limit(
@@ -1041,12 +1270,14 @@ def test_postgres_reconciliation_recovers_expired_processing_lease_below_retry_l
         def __exit__(self, exc_type, exc, tb):
             return False
 
-        def execute(self, _statement):
+        def execute(self, statement):
             self.execute_calls += 1
             if self.execute_calls == 1:
                 return Rows([group])
             if self.execute_calls == 2:
                 return Rows([expired_job])
+            if "FROM photos" in str(statement.compile(dialect=postgresql.dialect())):
+                return Rows(postgres_eligible_photos(group))
             return Rows([])
 
         def scalar(self, _statement):
@@ -1136,6 +1367,8 @@ def test_postgres_reconciliation_and_expired_worker_completion_lock_group_before
             if "FOR UPDATE OF delivery_cache_jobs" in sql:
                 reconciliation_locks.append("delivery_cache_jobs")
                 return Rows([(group, expired_job)] if "JOIN material_groups" in sql else [expired_job])
+            if "FROM photos" in sql:
+                return Rows(postgres_eligible_photos(group))
             pytest.fail(f"unexpected reconciliation statement: {sql}")
 
         def scalar(self, _statement):

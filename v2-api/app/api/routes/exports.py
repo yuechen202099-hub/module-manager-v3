@@ -9,8 +9,6 @@ from app.schemas.export import ExceptionMetersExportRequest, FinalDeliveryExport
 from app.services.state_repository import get_state_repository
 from app.services.final_delivery_export import (
     DeliveryPackageValidationError,
-    release_delivery_cache_path,
-    reserve_delivery_cache_path,
 )
 from app.services.local_simulation import (
     reset_current_team,
@@ -54,7 +52,7 @@ def export_task_detail(payload: TaskDetailExportRequest, request: Request):
 @router.post("/final-delivery")
 def export_final_delivery(payload: FinalDeliveryExportRequest, request: Request):
     try:
-        package_path = get_state_repository().build_final_delivery_export(
+        package = get_state_repository().build_final_delivery_export(
             task_id=payload.task_id,
             terminal=payload.terminal,
             review_scope=payload.review_scope,
@@ -70,13 +68,16 @@ def export_final_delivery(payload: FinalDeliveryExportRequest, request: Request)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     scope = payload.task_id or payload.terminal or "terminal"
     filename = f"V3.1.0-final-delivery-{scope}-{datetime.now().strftime('%Y%m%d%H%M%S')}.zip"
-    lease = reserve_delivery_cache_path(package_path)
-    return FileResponse(
-        package_path,
-        media_type="application/zip",
-        filename=filename,
-        background=BackgroundTask(release_delivery_cache_path, lease),
-    )
+    try:
+        return FileResponse(
+            package.path,
+            media_type="application/zip",
+            filename=filename,
+            background=BackgroundTask(package.release),
+        )
+    except BaseException:
+        package.release()
+        raise
 
 
 @router.post("/exception-meters")

@@ -7,7 +7,7 @@ import re
 import threading
 from contextlib import contextmanager
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -58,6 +58,32 @@ class DeliveryPackageValidationError(ValueError):
     def __init__(self, errors: Sequence[Mapping[str, Any]]):
         self.errors = [dict(error) for error in errors]
         super().__init__("Formal delivery package validation failed")
+
+
+@dataclass(eq=False)
+class LeasedDeliveryPackage:
+    path: Path
+    lease: str
+    _released: bool = field(default=False, init=False, repr=False)
+    _release_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def __fspath__(self) -> str:
+        return os.fspath(self.path)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.path, name)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, LeasedDeliveryPackage):
+            return self.path == other.path
+        return self.path == other
+
+    def release(self) -> None:
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        release_delivery_cache_path(self.lease)
 
 
 def _text(value: Any) -> str:
@@ -595,7 +621,7 @@ def get_or_build_delivery_package(
     package_builder: Callable[
         [Iterable[Mapping[str, Any]], Callable[[dict[str, Any]], bytes]], bytes
     ] = build_delivery_package,
-) -> Path:
+) -> LeasedDeliveryPackage:
     validated_groups = validate_delivery_groups(groups)
     current = now or datetime.now(UTC)
     if current.tzinfo is None:
@@ -611,7 +637,7 @@ def get_or_build_delivery_package(
         if target.is_file():
             modified = datetime.fromtimestamp(target.stat().st_mtime, tz=UTC)
             if current.astimezone(UTC) - modified <= PACKAGE_TTL:
-                return target
+                return LeasedDeliveryPackage(target, reserve_delivery_cache_path(target))
         content = package_builder(validated_groups, photo_reader)
         package_dir.mkdir(parents=True, exist_ok=True)
         temporary = target.with_suffix(f".zip.tmp-{uuid4().hex}")
@@ -628,4 +654,4 @@ def get_or_build_delivery_package(
                 temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
-        return target
+        return LeasedDeliveryPackage(target, reserve_delivery_cache_path(target))

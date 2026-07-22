@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.database import SessionLocal
 from app.models import (
     AuditLog,
+    DeliveryCacheJob,
     ExceptionItem,
     ExceptionStatus,
     GroupBarcodeVerification,
@@ -3339,7 +3340,12 @@ class JsonStateRepository(StateRepository):
             task_id=task_id,
             terminal=terminal,
             review_scope=review_scope,
+            repair_delivery_cache=self._repair_delivery_cache_groups,
         )
+
+    def _repair_delivery_cache_groups(self, group_ids: list[str], *, reason: str) -> None:
+        for group_id in group_ids:
+            local_simulation.schedule_delivery_cache_build(group_id, reason=reason)
 
     def build_final_delivery_manifest(
         self,
@@ -8015,6 +8021,56 @@ class PostgresStateRepository(StateRepository):
             ]
         return local_simulation.build_groups_export_workbook(groups, f"task-{task_id}")
 
+    def _repair_delivery_cache_groups(self, group_ids: list[str], *, reason: str) -> None:
+        from app.services.delivery_cache import (
+            _delivery_job_has_live_lease,
+            enqueue_postgres_delivery_cache_job,
+        )
+
+        unique_group_ids = sorted({str(group_id).strip() for group_id in group_ids if str(group_id).strip()})
+        if not unique_group_ids:
+            return
+        with self._session() as session:
+            try:
+                groups = session.scalars(
+                    select(MaterialGroup)
+                    .where(
+                        MaterialGroup.team_id == local_simulation.current_team_id(),
+                        MaterialGroup.legacy_id.in_(unique_group_ids),
+                    )
+                    .order_by(MaterialGroup.id)
+                    .with_for_update(of=MaterialGroup)
+                ).all()
+                groups_by_id = {group.id: group for group in groups}
+                jobs = []
+                if groups_by_id:
+                    jobs = session.scalars(
+                        select(DeliveryCacheJob)
+                        .where(
+                            DeliveryCacheJob.team_id == local_simulation.current_team_id(),
+                            DeliveryCacheJob.group_id.in_(list(groups_by_id)),
+                        )
+                        .order_by(DeliveryCacheJob.group_id, DeliveryCacheJob.id)
+                        .with_for_update(of=DeliveryCacheJob)
+                    ).all()
+                jobs_by_group = {job.group_id: job for job in jobs}
+                now = datetime.now(UTC)
+                for group in groups:
+                    existing_job = jobs_by_group.get(group.id)
+                    if existing_job is not None and _delivery_job_has_live_lease(existing_job, now=now):
+                        continue
+                    enqueue_postgres_delivery_cache_job(
+                        session,
+                        group,
+                        actor=str(group.reviewer or "system"),
+                        reason=reason,
+                        existing_job=existing_job,
+                    )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+
     def build_final_delivery_export(
         self,
         *,
@@ -8046,6 +8102,7 @@ class PostgresStateRepository(StateRepository):
             groups,
             scope=scope,
             archived_only=review_scope == "reviewed",
+            repair_delivery_cache=self._repair_delivery_cache_groups,
         )
 
     def build_final_delivery_manifest(
@@ -8423,6 +8480,17 @@ class DualWriteStateRepository(JsonStateRepository):
     """Dual mode keeps JSON authoritative while mirroring core writes to PostgreSQL."""
 
     postgres_repository_factory = PostgresStateRepository
+
+    def build_final_delivery_export(
+        self,
+        *,
+        task_id: int | None = None,
+        terminal: str = "",
+        review_scope: str = "reviewed",
+    ):
+        raise StateBackendNotReady(
+            "Dual formal delivery export requires one authoritative delivery-cache repair backend"
+        )
 
     def _mirror_write(self, operation: str, *args: Any, **kwargs: Any) -> None:
         try:

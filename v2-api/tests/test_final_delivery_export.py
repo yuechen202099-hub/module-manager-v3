@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -275,10 +276,14 @@ def test_get_or_build_delivery_package_reuses_same_fingerprint_for_seven_days(tm
         package_builder=counting_builder,
     )
 
-    assert first == second
-    assert first.is_file()
-    assert builds == 1
-    assert reads == 4
+    try:
+        assert first == second
+        assert first.is_file()
+        assert builds == 1
+        assert reads == 4
+    finally:
+        first.release()
+        second.release()
 
 
 def test_get_or_build_delivery_package_rebuilds_after_ttl_or_fingerprint_change(tmp_path: Path) -> None:
@@ -309,6 +314,7 @@ def test_get_or_build_delivery_package_rebuilds_after_ttl_or_fingerprint_change(
         now=now + timedelta(hours=1),
         package_builder=counting_builder,
     )
+    first.release()
     rebuilt = get_or_build_delivery_package(
         "task-1",
         "a" * 64,
@@ -319,9 +325,13 @@ def test_get_or_build_delivery_package_rebuilds_after_ttl_or_fingerprint_change(
         package_builder=counting_builder,
     )
 
-    assert first != changed
-    assert rebuilt == first
-    assert builds == 3
+    try:
+        assert first != changed
+        assert rebuilt == first
+        assert builds == 3
+    finally:
+        changed.release()
+        rebuilt.release()
 
 
 def test_cached_package_never_bypasses_current_group_validation(tmp_path: Path) -> None:
@@ -347,8 +357,11 @@ def test_cached_package_never_bypasses_current_group_validation(tmp_path: Path) 
             now=now + timedelta(hours=1),
         )
 
-    assert path.is_file()
-    assert {error["code"] for error in captured.value.errors} == {"delivery_cache_pending"}
+    try:
+        assert path.is_file()
+        assert {error["code"] for error in captured.value.errors} == {"delivery_cache_pending"}
+    finally:
+        path.release()
 
 
 def test_identity_category_and_photo_changes_invalidate_delivery_fingerprint() -> None:
@@ -468,17 +481,131 @@ def test_cleanup_rechecks_a_late_path_reservation_before_delete(
     cleanup = Thread(
         target=cleanup_delivery_cache,
         kwargs={"cache_root": tmp_path, "max_object_bytes": 0, "groups": []},
+        daemon=True,
     )
     cleanup.start()
-    assert paused.wait(5)
-    lease = reserve_delivery_cache_path(target)
+    lease = None
     try:
+        assert paused.wait(5)
+        lease = reserve_delivery_cache_path(target)
         resume.set()
         cleanup.join(5)
         assert not cleanup.is_alive()
         assert target.exists()
     finally:
-        release_delivery_cache_path(lease)
+        resume.set()
+        if lease is not None:
+            release_delivery_cache_path(lease)
+        if cleanup.is_alive():
+            cleanup.join(5)
+            assert not cleanup.is_alive()
+
+
+def test_package_is_reserved_before_build_lock_releases_to_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    original_lock = final_delivery_export._package_lock
+    cleanup_ran = Event()
+
+    @contextmanager
+    def cleanup_on_release(key: str):
+        with original_lock(key):
+            yield
+        cleanup_delivery_cache(
+            tmp_path,
+            max_object_bytes=0,
+            groups=[],
+            now=datetime.now(UTC) + timedelta(days=8),
+        )
+        cleanup_ran.set()
+
+    monkeypatch.setattr(final_delivery_export, "_package_lock", cleanup_on_release)
+
+    package = get_or_build_delivery_package(
+        "cleanup-gap",
+        "a" * 64,
+        groups=[delivery_group()],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+    )
+    try:
+        assert cleanup_ran.is_set()
+        assert package.path.is_file()
+    finally:
+        package.release()
+
+
+def test_package_is_reserved_before_build_lock_releases_to_expired_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    original_lock = final_delivery_export._package_lock
+    first_release = True
+    rebuild_started = Event()
+    rebuild_finished = Event()
+    rebuilt_packages = []
+    rebuild_errors = []
+    worker = None
+
+    def replacement_builder(_groups, _reader) -> bytes:
+        rebuild_started.set()
+        return b"replacement"
+
+    def rebuild() -> None:
+        try:
+            rebuilt_packages.append(
+                get_or_build_delivery_package(
+                    "rebuild-gap",
+                    "b" * 64,
+                    groups=[delivery_group()],
+                    photo_reader=read_photo,
+                    cache_root=tmp_path,
+                    now=datetime.now(UTC) + timedelta(days=8),
+                    package_builder=replacement_builder,
+                )
+            )
+        except BaseException as exc:
+            rebuild_errors.append(exc)
+        finally:
+            rebuild_finished.set()
+
+    @contextmanager
+    def rebuild_on_release(key: str):
+        nonlocal first_release, worker
+        with original_lock(key):
+            yield
+        if first_release:
+            first_release = False
+            worker = Thread(target=rebuild, daemon=True)
+            worker.start()
+            rebuild_started.wait(5)
+
+    monkeypatch.setattr(final_delivery_export, "_package_lock", rebuild_on_release)
+
+    package = None
+    try:
+        package = get_or_build_delivery_package(
+            "rebuild-gap",
+            "b" * 64,
+            groups=[delivery_group()],
+            photo_reader=read_photo,
+            cache_root=tmp_path,
+        )
+        assert rebuild_started.is_set()
+        assert not rebuild_finished.is_set()
+    finally:
+        if package is not None:
+            package.release()
+        if worker is not None:
+            worker.join(5)
+            assert not worker.is_alive()
+        for rebuilt in rebuilt_packages:
+            rebuilt.release()
+
+    assert rebuild_finished.is_set()
+    assert rebuild_errors == []
+    assert rebuilt_packages[0].path.read_bytes() == b"replacement"
 
 
 def test_expired_package_replacement_waits_for_active_download(tmp_path: Path) -> None:
@@ -496,33 +623,43 @@ def test_expired_package_replacement_waits_for_active_download(tmp_path: Path) -
     lease = reserve_delivery_cache_path(target)
     builder_started = Event()
     finished = Event()
+    rebuild_errors = []
 
     def rebuilt_package(_groups, _reader) -> bytes:
         builder_started.set()
         return b"replacement-package"
 
     def rebuild() -> None:
-        get_or_build_delivery_package(
-            "active-download",
-            "a" * 64,
-            groups=[group],
-            photo_reader=read_photo,
-            cache_root=tmp_path,
-            now=now + timedelta(days=8),
-            package_builder=rebuilt_package,
-        )
-        finished.set()
+        rebuilt = None
+        try:
+            rebuilt = get_or_build_delivery_package(
+                "active-download",
+                "a" * 64,
+                groups=[group],
+                photo_reader=read_photo,
+                cache_root=tmp_path,
+                now=now + timedelta(days=8),
+                package_builder=rebuilt_package,
+            )
+        except BaseException as exc:
+            rebuild_errors.append(exc)
+        finally:
+            if rebuilt is not None:
+                rebuilt.release()
+            finished.set()
 
-    worker = Thread(target=rebuild)
+    worker = Thread(target=rebuild, daemon=True)
     worker.start()
-    assert builder_started.wait(5)
     try:
+        assert builder_started.wait(5)
         assert not finished.wait(0.2)
         assert target.read_bytes() == original
     finally:
         release_delivery_cache_path(lease)
-    worker.join(5)
-    assert not worker.is_alive()
+        target.release()
+        worker.join(5)
+        assert not worker.is_alive()
+    assert rebuild_errors == []
     assert target.read_bytes() == b"replacement-package"
 
 
@@ -531,7 +668,7 @@ def test_package_lock_registry_is_bounded_after_key_churn(tmp_path: Path) -> Non
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
 
     for index in range(40):
-        get_or_build_delivery_package(
+        package = get_or_build_delivery_package(
             f"scope-{index}",
             f"{index:064x}",
             groups=[group],
@@ -539,6 +676,7 @@ def test_package_lock_registry_is_bounded_after_key_churn(tmp_path: Path) -> Non
             cache_root=tmp_path,
             now=now,
         )
+        package.release()
 
     assert final_delivery_export._PACKAGE_LOCKS == {}
 
@@ -569,19 +707,26 @@ def test_concurrent_same_key_builders_share_one_package_lock(tmp_path: Path) -> 
             )
         )
 
-    first = Thread(target=build)
-    second = Thread(target=build)
-    first.start()
-    assert started.wait(5)
-    second.start()
-    release.set()
-    first.join(5)
-    second.join(5)
-
-    assert not first.is_alive() and not second.is_alive()
-    assert builds == 1
-    assert paths[0] == paths[1]
-    assert final_delivery_export._PACKAGE_LOCKS == {}
+    first = Thread(target=build, daemon=True)
+    second = Thread(target=build, daemon=True)
+    try:
+        first.start()
+        assert started.wait(5)
+        second.start()
+        release.set()
+        first.join(5)
+        second.join(5)
+        assert not first.is_alive() and not second.is_alive()
+        assert builds == 1
+        assert paths[0] == paths[1]
+        assert final_delivery_export._PACKAGE_LOCKS == {}
+    finally:
+        release.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+        for package in paths:
+            package.release()
 
 
 def test_delivery_lru_keeps_referenced_and_active_paths(tmp_path: Path) -> None:
@@ -665,13 +810,14 @@ def test_delivery_content_builder_blocks_lru_for_its_object_store(tmp_path: Path
     worker = Thread(
         target=cache_group_photos,
         kwargs={"group": group, "cache_root": tmp_path, "fetch_photo": fetch_photo},
+        daemon=True,
     )
     worker.start()
-    assert started.wait(5)
     try:
+        assert started.wait(5)
         cleanup_delivery_cache(tmp_path, max_object_bytes=0, groups=[])
         assert old_object.exists()
     finally:
         finish.set()
         worker.join(5)
-    assert not worker.is_alive()
+        assert not worker.is_alive()
