@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from app.core.config import settings
@@ -2103,6 +2103,10 @@ def _finalize_unmatched_match_in_state(
     if added or merged:
         _reset_group_after_migrated_evidence(group)
     _apply_formal_group_barcode_check(group)
+    if added or merged:
+        from app.services.state_repository import invalidate_verification_for_group
+
+        invalidate_verification_for_group(None, group, actor, "photo_restored_or_replaced")
 
     result = {
         "group": copy.deepcopy(group),
@@ -2766,9 +2770,21 @@ FORMAL_IDENTITY_PLACEHOLDERS = {"", "00000000", "未关联终端"}
 FORMAL_IDENTITY_PREFIXES = ("manual-", "unmatched-")
 
 
+def is_placeholder_formal_identity_value(value: Any) -> bool:
+    clean_value = str(value or "").strip()
+    normalized = clean_value.lower()
+    return (
+        not clean_value
+        or normalized in FORMAL_IDENTITY_PLACEHOLDERS
+        or bool(re.fullmatch(r"0+", clean_value))
+        or normalized.startswith("test")
+        or normalized.startswith(FORMAL_IDENTITY_PREFIXES)
+    )
+
+
 def validate_real_formal_identity_value(value: Any, identity_name: str) -> str:
     clean_value = str(value or "").strip()
-    if clean_value in FORMAL_IDENTITY_PLACEHOLDERS or clean_value.lower().startswith(FORMAL_IDENTITY_PREFIXES):
+    if is_placeholder_formal_identity_value(clean_value):
         raise ValueError(f"A real {identity_name} is required")
     return clean_value
 
@@ -4272,9 +4288,9 @@ def is_placeholder_construction_group_identity(
     address: Any = "",
 ) -> bool:
     return (
-        is_all_zero_construction_code(group_id)
-        or is_all_zero_construction_code(meter_no)
-        or is_all_zero_construction_code(meter_match_key)
+        is_placeholder_formal_identity_value(group_id)
+        or is_placeholder_formal_identity_value(meter_no)
+        or is_placeholder_formal_identity_value(meter_match_key)
         or PLACEHOLDER_CONSTRUCTION_ADDRESS_MARKER in str(address or "")
     )
 
@@ -4619,9 +4635,22 @@ def photo_construction_slot(photo: dict[str, Any]) -> str:
     return ""
 
 
+def is_valid_photo_evidence(photo: Any) -> bool:
+    if isinstance(photo, Mapping):
+        is_active = photo.get("is_active", True)
+        upload_status = photo.get("upload_status", "uploaded")
+    else:
+        is_active = getattr(photo, "is_active", True)
+        upload_status = getattr(photo, "upload_status", "uploaded")
+    status_value = str(getattr(upload_status, "value", upload_status) or "").strip().lower()
+    return bool(is_active) and status_value != "invalid"
+
+
 def group_photo_slots(group: dict[str, Any]) -> set[str]:
     slots: set[str] = set()
     for photo in group.get("photos", []):
+        if not is_valid_photo_evidence(photo):
+            continue
         slot = photo_construction_slot(photo)
         if slot and slot != "other":
             slots.add(slot)

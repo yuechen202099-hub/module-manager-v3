@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
-from app.services.local_simulation import validate_real_formal_identity_value
+from app.services.local_simulation import is_valid_photo_evidence, validate_real_formal_identity_value
 
 VerificationStatus = Literal[
     "not_eligible",
@@ -85,7 +85,7 @@ def invalidate_group_verification(
         evidence_fingerprint is not None and evidence_fingerprint == current_fingerprint
     )
 
-    if same_explicit_fingerprint:
+    if same_explicit_fingerprint and str(result.get("status") or "") == resolved_status:
         result["should_enqueue"] = False
         return result
 
@@ -131,6 +131,8 @@ def _is_missing_identity(value: Any) -> bool:
 
 def _photo_evidence(photo: Any) -> dict[str, str] | None:
     if not isinstance(photo, Mapping):
+        return None
+    if not is_valid_photo_evidence(photo):
         return None
     photo_id = str(photo.get("id") or "").strip()
     sha256 = str(photo.get("sha256") or "").strip().lower()

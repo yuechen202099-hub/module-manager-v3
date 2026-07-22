@@ -2160,6 +2160,13 @@ def test_unmatched_finalize_merges_review_evidence_into_duplicate_photo(syntheti
         "photos": [existing_photo],
         "photo_count": 1,
         "status": "incomplete",
+        "barcode_verification": {
+            "status": "passed",
+            "evidence_fingerprint": "old-fingerprint",
+            "evidence_version": 7,
+            "attempt_count": 2,
+            "lease_owner": "worker-a",
+        },
     }
     state["groups"].append(group)
     candidate = local_simulation.list_unmatched_match_candidates(unmatched_id)["items"][0]
@@ -2178,6 +2185,8 @@ def test_unmatched_finalize_merges_review_evidence_into_duplicate_photo(syntheti
     assert merged["ocr_normalized_values"] == ["ocr-001"]
     assert merged["barcode_rescanned_by"] == "reviewer-a"
     assert merged["barcode_rescanned_at"] == "2026-07-13T08:59:00+00:00"
+    assert result["group"]["barcode_verification"]["status"] == "not_eligible"
+    assert result["group"]["barcode_verification"]["evidence_version"] == 8
     assert merged["temporary_review_manual_confirmed"] is True
     assert merged["temporary_review_reviewer"] == "reviewer-a"
     assert merged["source_url"] == review["photos"][0]["source_url"]
@@ -4139,7 +4148,7 @@ def test_json_photo_category_correction_audit_is_complete_and_redacted(synthetic
     [
         (operation, value)
         for operation in ("terminal", "meter_no", "meter_match_key")
-        for value in ("00000000", "未关联终端", "manual-placeholder", "unmatched-placeholder")
+        for value in ("0", "0000", "00000000", "TEST-001", "未关联终端", "manual-placeholder", "unmatched-placeholder")
     ],
 )
 def test_json_formal_identity_updates_reject_placeholders_without_state_or_audit_changes(
@@ -4159,8 +4168,10 @@ def test_json_formal_identity_updates_reject_placeholders_without_state_or_audit
     assert synthetic_state == before
 
 
+@pytest.mark.parametrize("meter_match_key", ["0000", "TEST-001"])
 def test_json_group_creation_rejects_placeholder_match_key_without_state_or_audit_changes(
     synthetic_state: dict,
+    meter_match_key: str,
 ) -> None:
     before = deepcopy(synthetic_state)
 
@@ -4169,7 +4180,7 @@ def test_json_group_creation_rejects_placeholder_match_key_without_state_or_audi
             terminal="T-REAL",
             actor="admin",
             meter_no="120000000001",
-            meter_match_key="manual-match-key",
+            meter_match_key=meter_match_key,
         )
 
     assert synthetic_state == before

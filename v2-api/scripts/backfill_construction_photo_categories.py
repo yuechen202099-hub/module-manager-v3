@@ -21,6 +21,7 @@ from app.services.local_simulation import (  # noqa: E402
     CONSTRUCTION_SLOT_CATEGORIES,
     PHOTO_CATEGORIES,
     normalize_construction_slot,
+    is_valid_photo_evidence,
 )
 from app.services.state_repository import (  # noqa: E402
     _stage_transactional_audit,
@@ -52,7 +53,7 @@ def backfill_construction_photo_categories(
     slot_counts = Counter(
         (str(group.id), _photo_slot(photo))
         for photo, group in rows
-        if bool(photo.is_active) and _photo_slot(photo) in CONSTRUCTION_SLOT_CATEGORIES
+        if is_valid_photo_evidence(photo) and _photo_slot(photo) in CONSTRUCTION_SLOT_CATEGORIES
     )
     report = {
         "mode": "apply" if apply_changes else "preview",
@@ -62,6 +63,7 @@ def backfill_construction_photo_categories(
         "skipped_conflict": 0,
         "skipped_archived_group": 0,
         "skipped_inactive": 0,
+        "skipped_invalid_upload": 0,
         "skipped_invalid_slot": 0,
         "affected_groups": 0,
     }
@@ -70,6 +72,9 @@ def backfill_construction_photo_categories(
     for photo, group in rows:
         if not bool(photo.is_active):
             report["skipped_inactive"] += 1
+            continue
+        if not is_valid_photo_evidence(photo):
+            report["skipped_invalid_upload"] += 1
             continue
         if _group_is_archived(group):
             report["skipped_archived_group"] += 1
@@ -92,6 +97,27 @@ def backfill_construction_photo_categories(
     if not apply_changes:
         session.rollback()
         return report
+
+    locked_rows = list(session.execute(statement.with_for_update()).all())
+    locked_by_photo_id = {str(photo.id): (photo, group) for photo, group in locked_rows}
+    locked_slot_counts = Counter(
+        (str(group.id), _photo_slot(photo))
+        for photo, group in locked_rows
+        if is_valid_photo_evidence(photo) and _photo_slot(photo) in CONSTRUCTION_SLOT_CATEGORIES
+    )
+    candidates = [
+        (locked_by_photo_id[str(photo.id)][0], locked_by_photo_id[str(photo.id)][1], slot)
+        for photo, _group, slot in candidates
+        if str(photo.id) in locked_by_photo_id
+        and is_valid_photo_evidence(locked_by_photo_id[str(photo.id)][0])
+        and not _group_is_archived(locked_by_photo_id[str(photo.id)][1])
+        and str(locked_by_photo_id[str(photo.id)][0].category or "unclassified") == "unclassified"
+        and not str(locked_by_photo_id[str(photo.id)][0].classified_by or "").strip()
+        and _photo_slot(locked_by_photo_id[str(photo.id)][0]) == slot
+        and locked_slot_counts[(str(locked_by_photo_id[str(photo.id)][1].id), slot)] == 1
+    ]
+    affected_groups = {str(group.id): group for _photo, group, _slot in candidates}
+    report["affected_groups"] = len(affected_groups)
 
     now = datetime.now(UTC)
     for photo, group, category in candidates:

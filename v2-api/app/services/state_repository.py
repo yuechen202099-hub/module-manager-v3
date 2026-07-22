@@ -467,6 +467,8 @@ def _verification_group_payload(session: Session | None, group: Any) -> dict[str
                 ),
                 "sha256": str(getattr(photo, "sha256", None) or ""),
                 "category": str(getattr(photo, "category", None) or ""),
+                "is_active": bool(getattr(photo, "is_active", True)),
+                "upload_status": getattr(getattr(photo, "upload_status", "uploaded"), "value", getattr(photo, "upload_status", "uploaded")),
             }
             for photo in photos
         ],
@@ -6492,6 +6494,8 @@ class PostgresStateRepository(StateRepository):
             return _group_payload(session, group)
 
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
+        if category not in local_simulation.PHOTO_CATEGORIES:
+            raise ValueError(f"Unsupported photo category: {category}")
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, reviewer)
@@ -7372,6 +7376,10 @@ class PostgresStateRepository(StateRepository):
             if client_completed_at:
                 for photo in photos:
                     photo.setdefault("client_completed_at", client_completed_at)
+            raw = dict(group.raw_data or {})
+            raw["construction_collector"] = collector
+            raw["construction_module_asset_no"] = module_asset_no
+            group.raw_data = raw
             result = self._add_photo_records_to_group(
                 session,
                 group,
@@ -7406,10 +7414,6 @@ class PostgresStateRepository(StateRepository):
                         "total_groups": int(task_stats.get("total_groups") or 0),
                     },
                 )
-            raw = dict(group.raw_data or {})
-            raw["construction_collector"] = collector
-            raw["construction_module_asset_no"] = module_asset_no
-            group.raw_data = raw
             self._add_construction_activity_audit(
                 session,
                 "group_uploaded",

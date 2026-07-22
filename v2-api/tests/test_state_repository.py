@@ -731,6 +731,10 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
         def _add_photo_records_to_group(self, checked_session, checked_group, **_kwargs):
             assert checked_session is self.session
             assert checked_group is group
+            self.identity_seen_during_photo_write = (
+                group.raw_data.get("construction_collector"),
+                group.raw_data.get("construction_module_asset_no"),
+            )
             group.photo_count += len(_kwargs["photos"])
             group.photos.extend(deepcopy(_kwargs["photos"]))
             self.stats["uploaded_count"] = 2
@@ -758,7 +762,8 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
     )
 
     successful_session = FakeSession(fail_commit=False)
-    result = TestPostgresRepository(successful_session).upload_construction_group_batch(
+    successful_repo = TestPostgresRepository(successful_session)
+    result = successful_repo.upload_construction_group_batch(
         "g-priority",
         actor="constructor-a",
         client_batch_id="priority-final-upload",
@@ -771,6 +776,7 @@ def test_postgres_final_upload_auto_clears_priority_with_audit_and_rolls_back_on
     assert result["task"]["construction_available"] is False
     assert result["task"]["construction_priority"] is False
     assert "construction_priority_auto_cleared" in [event.action for event in successful_session.staged]
+    assert successful_repo.identity_seen_during_photo_write == ("collector-a", "module-a")
 
     task.construction_priority = True
     group.photo_count = 0
@@ -2952,7 +2958,10 @@ def test_postgres_unmatched_review_photo_payload_reads_back_every_evidence_field
     assert payload["temporary_review_reviewed_at"] == "2026-07-13T09:00:00+00:00"
 
 
-def test_postgres_unmatched_review_locks_and_merges_duplicate_photo_evidence() -> None:
+def test_postgres_unmatched_review_locks_and_merges_duplicate_photo_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *args, **kwargs: {})
     source_url = "https://photos.example/duplicate.jpg?token=old"
     canonical_hash = repository.hashlib.sha256(
         source_url.split("?", 1)[0].encode("utf-8")
@@ -3032,7 +3041,10 @@ def test_postgres_unmatched_review_locks_and_merges_duplicate_photo_evidence() -
     assert existing.raw_data["temporary_review_manual_confirmed"] is True
 
 
-def test_postgres_duplicate_evidence_resets_formal_review_archive_and_exception_state() -> None:
+def test_postgres_duplicate_evidence_resets_formal_review_archive_and_exception_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *args, **kwargs: {})
     source_url = "https://photos.example/reviewed-duplicate.jpg?token=old"
     canonical_hash = repository.hashlib.sha256(
         source_url.split("?", 1)[0].encode("utf-8")
@@ -3146,7 +3158,10 @@ def test_postgres_duplicate_evidence_resets_formal_review_archive_and_exception_
     assert untouched.classified_at is None
 
 
-def test_postgres_unmatched_review_reactivates_soft_deleted_duplicate_photo() -> None:
+def test_postgres_unmatched_review_reactivates_soft_deleted_duplicate_photo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *args, **kwargs: {})
     source_url = "https://photos.example/soft-deleted.jpg?token=old"
     canonical_hash = repository.hashlib.sha256(
         source_url.split("?", 1)[0].encode("utf-8")
@@ -3242,7 +3257,10 @@ def test_postgres_unmatched_review_reactivates_soft_deleted_duplicate_photo() ->
     assert session.flush_calls >= 1
 
 
-def test_postgres_unmatched_review_prefers_active_duplicate_over_inactive_equivalent() -> None:
+def test_postgres_unmatched_review_prefers_active_duplicate_over_inactive_equivalent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *args, **kwargs: {})
     source_url = "https://photos.example/shared-identity.jpg?token=current"
     canonical_hash = repository.hashlib.sha256(
         source_url.split("?", 1)[0].encode("utf-8")
@@ -3512,8 +3530,10 @@ def test_postgres_legacy_unmatched_mutations_stage_transactional_audit(
     invoke_legacy_unmatched_mutation(TestPostgresRepository(), operation, expected_version=1)
 
     audits = [item for item in session.persisted if isinstance(item, repository.AuditLog)]
-    assert len(audits) == 1
-    audit = audits[0]
+    assert [event.action for event in audits].count(expected_action) == 1
+    if operation == "associate":
+        assert [event.action for event in audits].count("group_barcode_verification_invalidated") == 1
+    audit = next(event for event in audits if event.action == expected_action)
     assert audit.actor_username == "admin-a"
     assert audit.action == expected_action
     assert audit.entity_type == "unmatched_record"
@@ -3718,7 +3738,7 @@ def test_postgres_audit_response_recursively_redacts_provider_style_secret_keys(
     [
         (operation, value)
         for operation in ("terminal", "meter_no", "meter_match_key")
-        for value in ("00000000", "未关联终端", "manual-placeholder", "unmatched-placeholder")
+        for value in ("0", "0000", "00000000", "TEST-001", "未关联终端", "manual-placeholder", "unmatched-placeholder")
     ],
 )
 def test_postgres_formal_identity_updates_reject_placeholders_before_transaction(
@@ -3737,7 +3757,8 @@ def test_postgres_formal_identity_updates_reject_placeholders_before_transaction
             repo.update_group_metadata("g-1", actor="admin", updates={operation: value})
 
 
-def test_postgres_classify_photo_persists_archive_fields() -> None:
+def test_postgres_classify_photo_persists_archive_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *args, **kwargs: {})
     photo = SimpleNamespace(
         id="photo-uuid",
         legacy_id="p-1",
@@ -3781,6 +3802,9 @@ def test_postgres_classify_photo_persists_archive_fields() -> None:
         def scalar(self, _statement):
             return photo
 
+        def add(self, _value):
+            pass
+
         def commit(self):
             pass
 
@@ -3811,7 +3835,19 @@ def test_postgres_classify_photo_persists_archive_fields() -> None:
     assert photo.raw_data["category_label"] == repository.local_simulation.PHOTO_CATEGORIES["after_box"]
 
 
-def test_postgres_reset_group_to_unconstructed_clears_barcode_evidence() -> None:
+def test_postgres_classify_photo_rejects_unknown_category_before_opening_a_transaction() -> None:
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            pytest.fail("unsupported category must be rejected before any PostgreSQL mutation or audit")
+
+    with pytest.raises(ValueError, match="Unsupported photo category"):
+        TestPostgresRepository().classify_photo("g-1", "p-1", "unsupported-category", "reviewer-a")
+
+
+def test_postgres_reset_group_to_unconstructed_clears_barcode_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *args, **kwargs: {})
     group = SimpleNamespace(
         id="group-uuid",
         team_id="default-team",

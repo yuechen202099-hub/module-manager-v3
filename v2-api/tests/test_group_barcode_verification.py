@@ -150,6 +150,45 @@ def test_invalidation_with_unchanged_pending_fingerprint_does_not_requeue() -> N
     assert result["should_enqueue"] is False
 
 
+@pytest.mark.parametrize(
+    "status",
+    ["processing", "partial", "mismatch", "unreadable", "failed", "passed", "manual_confirmed"],
+)
+def test_evidence_write_invalidates_every_non_target_status_with_an_unchanged_fingerprint(status: str) -> None:
+    result = invalidate_group_verification(
+        {
+            "status": status,
+            "evidence_fingerprint": "same-fingerprint",
+            "evidence_version": 3,
+            "attempt_count": 2,
+            "lease_owner": "worker-a",
+            "lease_expires_at": "2026-07-22T12:00:00+00:00",
+        },
+        reason="photo_replaced",
+        actor="reviewer-a",
+        evidence_fingerprint="same-fingerprint",
+        next_status="pending",
+    )
+
+    assert result["status"] == "pending"
+    assert result["evidence_version"] == 4
+    assert result["attempt_count"] == 0
+    assert result["lease_owner"] is None
+    assert result["lease_expires_at"] is None
+    assert result["should_enqueue"] is True
+
+
+def test_active_invalid_upload_photos_are_not_eligible_evidence() -> None:
+    group = eligible_group()
+    for photo in group["photos"]:
+        photo["upload_status"] = "invalid"
+
+    result = evaluate_group_eligibility(group)
+
+    assert result.status == "not_eligible"
+    assert result.reason == "invalid_photo_evidence"
+
+
 def test_invalidation_without_fingerprint_clears_passed_state_and_versions_evidence() -> None:
     verification = {
         "status": "passed",
