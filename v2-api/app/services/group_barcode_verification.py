@@ -78,6 +78,9 @@ def invalidate_group_verification(
 ) -> dict[str, Any]:
     result = dict(verification)
     current_fingerprint = str(result.get("evidence_fingerprint") or "")
+    resolved_status = next_status or "pending"
+    if resolved_status not in INVALIDATION_STATUSES:
+        raise ValueError("next_status must be pending or not_eligible")
     same_explicit_fingerprint = (
         evidence_fingerprint is not None and evidence_fingerprint == current_fingerprint
     )
@@ -86,9 +89,6 @@ def invalidate_group_verification(
         result["should_enqueue"] = False
         return result
 
-    resolved_status = next_status or "pending"
-    if resolved_status not in INVALIDATION_STATUSES:
-        raise ValueError("next_status must be pending or not_eligible")
     result.update(
         {
             "status": resolved_status,

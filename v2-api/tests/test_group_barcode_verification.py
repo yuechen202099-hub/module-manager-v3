@@ -211,6 +211,20 @@ def test_invalidation_rejects_completed_status_for_changed_evidence(next_status:
         )
 
 
+@pytest.mark.parametrize("next_status", ["passed", "manual_confirmed"])
+def test_invalidation_rejects_completed_status_before_same_fingerprint_idempotency(
+    next_status: str,
+) -> None:
+    with pytest.raises(ValueError, match="pending or not_eligible"):
+        invalidate_group_verification(
+            {"status": "passed", "evidence_fingerprint": "same", "evidence_version": 3},
+            reason="duplicate_event",
+            actor="reviewer-a",
+            evidence_fingerprint="same",
+            next_status=next_status,
+        )
+
+
 @pytest.mark.parametrize(
     ("next_status", "should_enqueue"),
     [("pending", True), ("not_eligible", False)],
