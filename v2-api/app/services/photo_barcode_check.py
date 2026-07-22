@@ -14,6 +14,7 @@ from typing import Any, Callable, Iterable, Mapping
 from urllib.error import HTTPError
 from urllib.parse import urljoin, urlparse
 
+from app.services.barcode_verification_contract import normalize_legacy_evidence_value
 from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key
 from app.services.photo_storage import (
     parse_oss_image_url,
@@ -1039,13 +1040,19 @@ def _normalized_values(values: Iterable[Any]) -> list[str]:
 
 
 def _unique_values(values: Iterable[Any]) -> list[str]:
-    return list(dict.fromkeys(str(item or "").strip() for item in values if str(item or "").strip()))
+    return list(
+        dict.fromkeys(
+            normalized
+            for item in values
+            if (normalized := normalize_legacy_evidence_value(item))
+        )
+    )
 
 
 def _review_evidence_array(value: Any) -> list[Any]:
     if not isinstance(value, (list, tuple)):
         return []
-    return [item for item in value if str(item or "").strip()]
+    return [item for item in value if normalize_legacy_evidence_value(item)]
 
 
 def _matched_expected_value(normalized_values: Iterable[str], expected_values: list[str], expected_type: str) -> str:

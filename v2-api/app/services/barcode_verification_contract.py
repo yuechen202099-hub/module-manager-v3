@@ -32,6 +32,13 @@ EVIDENCE_ARRAY_KEYS = (
     "unmatched_ocr_candidates",
 )
 OCR_ONLY_METHODS = frozenset({"ocr", "barcode_ocr", "ocr_assisted"})
+LEGACY_EVIDENCE_WHITESPACE = (
+    "\u0009\u000a\u000b\u000c\u000d"
+    "\u001c\u001d\u001e\u001f"
+    "\u0020\u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
 
 
 def _value(source: Any, key: str, default: Any = None) -> Any:
@@ -46,6 +53,10 @@ def _timestamp(value: Any) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def normalize_legacy_evidence_value(value: Any) -> str:
+    return str(value or "").strip(LEGACY_EVIDENCE_WHITESPACE)
 
 
 def _same_evidence(source: Any, raw: Mapping[str, Any]) -> bool:
@@ -126,7 +137,7 @@ def _unique_strings(values: Any) -> list[str]:
         return []
     unique: list[str] = []
     for value in values:
-        text = str(value or "").strip()
+        text = normalize_legacy_evidence_value(value)
         if text and text not in unique:
             unique.append(text)
     return unique

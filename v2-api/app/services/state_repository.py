@@ -41,6 +41,7 @@ from app.services import account_store
 from app.services.barcode_verification_contract import (
     DURABLE_STATUSES,
     EXCEPTION_STATUSES,
+    LEGACY_EVIDENCE_WHITESPACE,
     OCR_ONLY_METHODS,
     PASS_STATUSES,
     REQUIRED_CATEGORIES,
@@ -1351,7 +1352,7 @@ def _postgres_review_verification_status_expression():
         non_empty_element_count = (
             select(func.count())
             .select_from(elements)
-            .where(func.btrim(elements.c.value) != "")
+            .where(func.btrim(elements.c.value, LEGACY_EVIDENCE_WHITESPACE) != "")
             .scalar_subquery()
         )
         return case(
