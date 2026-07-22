@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.models import GroupStatus, PhotoUploadStatus
+from app.models import GroupStatus, MaterialGroup, Photo, PhotoUploadStatus
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +29,61 @@ def load_script(module_name: str, relative_path: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def current_source_commit() -> str:
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPOSITORY_ROOT,
+        text=True,
+        encoding="utf-8",
+    ).strip()
+
+
+def valid_performance_report(source_commit: str | None = None) -> dict:
+    source_commit = source_commit or current_source_commit()
+    task_path = "/local-test/tasks/snapshot"
+    review_path = "/local-test/tasks/1/review-groups?limit=20&offset=0&review_status=all&query="
+    return {
+        "ok": True,
+        "failures": [],
+        "source_commit": source_commit,
+        "base_url": "http://127.0.0.1:18010",
+        "task_id": "1",
+        "measurements": {
+            "task_snapshot_ms": 25.0,
+            "review_groups_ms": 40.0,
+            "review_group_count": 1,
+            "task_builds_in_60_seconds": 1,
+        },
+        "thresholds": {
+            "task_snapshot_ms": 300,
+            "review_groups_ms": 1500,
+            "review_group_count": 20,
+            "task_builds_in_60_seconds": 1,
+        },
+        "build_sample_seconds": 60,
+        "start_build_count": 4,
+        "end_build_count": 5,
+        "start_cache_instance_id": "cache-instance-a",
+        "end_cache_instance_id": "cache-instance-a",
+        "routes": {
+            "task_snapshot": {
+                "path": task_path,
+                "item_count": 1,
+                "selected_task_id": "1",
+                "serialized_bytes": 256,
+            },
+            "review_groups": {
+                "path": review_path,
+                "item_count": 1,
+                "total": 1,
+                "limit": 20,
+                "offset": 0,
+                "serialized_bytes": 512,
+            },
+        },
+    }
 
 
 def release_group(group_id: str = "release-group", *, identity_suffix: str = "1") -> dict:
@@ -156,7 +211,7 @@ def test_v3_1_backfill_projection_is_in_memory_and_does_not_mutate_models() -> N
             "client_completed_at": "2026-07-23T09:00:00+08:00",
         },
     )
-    rows = []
+    photos = []
     for index, slot in enumerate(("before_box", "collector_barcode", "module_meter", "after_box"), start=1):
         photo = SimpleNamespace(
             id=f"photo-db-{index}",
@@ -174,9 +229,9 @@ def test_v3_1_backfill_projection_is_in_memory_and_does_not_mutate_models() -> N
             original_filename=f"photo-{index}.jpg",
             raw_data={"construction_slot": slot, "delivery_cache_status": "pending"},
         )
-        rows.append((photo, checked_group))
+        photos.append(photo)
 
-    projected = preview.project_backfill_groups(rows)
+    projected = preview.project_backfill_groups([checked_group], photos)
 
     assert len(projected) == 1
     assert {photo["category"] for photo in projected[0]["photos"]} == {
@@ -185,12 +240,162 @@ def test_v3_1_backfill_projection_is_in_memory_and_does_not_mutate_models() -> N
         "module_meter",
         "after_box",
     }
-    assert all(photo.category == "unclassified" for photo, _group in rows)
+    assert all(photo.category == "unclassified" for photo in photos)
 
 
-def test_v3_1_release_verifier_validates_candidate_contract() -> None:
+def _production_group(group_id: str, team_id: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=group_id,
+        legacy_id=group_id,
+        team_id=team_id,
+        terminal=f"T-{group_id}",
+        display_meter_no=f"M-{group_id}",
+        installation_address=f"Address {group_id}",
+        status=GroupStatus.UNREVIEWED,
+        raw_data={
+            "module_asset_no": f"MOD-{group_id}",
+            "collector": f"COL-{group_id}",
+            "client_completed_at": "2026-07-23T09:00:00+08:00",
+        },
+    )
+
+
+def _production_photo(
+    group: SimpleNamespace,
+    index: int,
+    slot: str,
+    *,
+    active: bool = True,
+    upload_status: PhotoUploadStatus = PhotoUploadStatus.UPLOADED,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=f"{group.id}-photo-db-{index}",
+        legacy_id=f"{group.id}-photo-{index}",
+        group_id=group.id,
+        team_id=group.team_id,
+        category="unclassified",
+        is_active=active,
+        classified_by="",
+        upload_status=upload_status,
+        sha256=f"{index:x}" * 64,
+        archive_status="",
+        collector="",
+        asset_no="",
+        original_filename=f"photo-{index}.jpg",
+        sort_order=index,
+        raw_data={"construction_slot": slot, "delivery_cache_status": "pending"},
+    )
+
+
+class _ScalarRows:
+    def __init__(self, rows: list[SimpleNamespace]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[SimpleNamespace]:
+        return list(self._rows)
+
+
+class _ProjectionSession:
+    def __init__(self, groups: list[SimpleNamespace], photos: list[SimpleNamespace]) -> None:
+        self.groups = groups
+        self.photos = photos
+        self.statements = []
+
+    def scalars(self, statement):
+        self.statements.append(statement)
+        entity = statement.column_descriptions[0]["entity"]
+        params = statement.compile().params
+        if entity is MaterialGroup:
+            team_id = next((value for key, value in params.items() if key.startswith("team_id")), "")
+            rows = [group for group in self.groups if not team_id or group.team_id == team_id]
+            return _ScalarRows(rows)
+        assert entity is Photo
+        group_ids = next(value for key, value in params.items() if key.startswith("group_id"))
+        return _ScalarRows([photo for photo in self.photos if photo.group_id in group_ids])
+
+
+def test_v3_1_preview_loads_all_team_groups_then_bulk_preloads_photos() -> None:
+    preview = load_script("preview_v3_1_group_first", "v2-api/scripts/preview_v3_1_backfill.py")
+    zero = _production_group("zero", "team-a")
+    inactive = _production_group("inactive", "team-a")
+    invalid = _production_group("invalid", "team-a")
+    eligible = _production_group("eligible", "team-a")
+    other_team = _production_group("other-team", "team-b")
+    photos = [
+        _production_photo(inactive, 1, "before_box", active=False),
+        _production_photo(invalid, 1, "before_box", upload_status=PhotoUploadStatus.INVALID),
+        *[
+            _production_photo(eligible, index, slot)
+            for index, slot in enumerate(
+                ("before_box", "collector_barcode", "module_meter", "after_box"),
+                start=1,
+            )
+        ],
+        _production_photo(other_team, 1, "before_box"),
+    ]
+    session = _ProjectionSession([zero, inactive, invalid, eligible, other_team], photos)
+
+    projected = preview.load_projected_groups(session, team_id="team-a")
+    summary = preview.summarize_preview({"mode": "preview", "projected_groups": projected})
+
+    assert [group["id"] for group in projected] == ["zero", "inactive", "invalid", "eligible"]
+    assert [len(group["photos"]) for group in projected] == [0, 1, 1, 4]
+    assert len(session.statements) == 2
+    assert "material_groups.team_id" in str(session.statements[0])
+    assert "WHERE photos.team_id" not in str(session.statements[1])
+    assert summary["queueable"] == 1
+    assert summary["unscannable"] == 3
+    assert summary["unscannable_reasons"] == {
+        "invalid_photo_count": 2,
+        "invalid_photo_evidence": 1,
+    }
+    assert summary["estimated_export_error_reasons"]["invalid_photo_count"] >= 1
+    assert "no_groups" not in summary["estimated_export_error_reasons"]
+
+
+@pytest.mark.parametrize("argv", [[], ["--preview"]])
+def test_v3_1_preview_default_and_explicit_preview_are_read_only(monkeypatch, capsys, argv: list[str]) -> None:
+    preview = load_script(f"preview_v3_1_read_only_{len(argv)}", "v2-api/scripts/preview_v3_1_backfill.py")
+    session = SimpleNamespace()
+
+    class SessionContext:
+        def __enter__(self):
+            return session
+
+        def __exit__(self, *_args):
+            return False
+
+    observed: list[dict] = []
+    monkeypatch.setattr(preview, "SessionLocal", SessionContext)
+    monkeypatch.setattr(preview, "load_projected_groups", lambda checked_session, team_id="": [])
+
+    def fake_backfill(checked_session, **kwargs):
+        assert checked_session is session
+        observed.append(kwargs)
+        return {"mode": "preview"}
+
+    monkeypatch.setattr(preview, "backfill_construction_photo_categories", fake_backfill)
+
+    assert preview.main(argv) == 0
+    assert observed == [{"apply_changes": False, "actor": "v3-1-category-backfill", "team_id": ""}]
+    assert json.loads(capsys.readouterr().out)["mode"] == "preview"
+
+
+def test_v3_1_release_verifier_validates_candidate_contract(tmp_path: Path) -> None:
+    source_commit = current_source_commit()
+    report_path = tmp_path / "performance-report.json"
+    report_path.write_text(json.dumps(valid_performance_report(source_commit)), encoding="utf-8")
     result = subprocess.run(
-        [sys.executable, "scripts/verify_v3_1_release.py", "--repo-root", str(REPOSITORY_ROOT)],
+        [
+            sys.executable,
+            "scripts/verify_v3_1_release.py",
+            "--repo-root",
+            str(REPOSITORY_ROOT),
+            "--performance-report",
+            str(report_path),
+            "--expected-source-commit",
+            source_commit,
+        ],
         cwd=API_ROOT,
         capture_output=True,
         text=True,
@@ -218,7 +423,10 @@ def test_v3_1_release_verifier_executes_worker_ocr_export_and_performance_behavi
     worker = verifier.verify_worker_behavior()
     eligibility = verifier.verify_eligibility_and_ocr_behavior()
     export = verifier.verify_export_behavior()
-    performance = verifier.measure_and_verify_performance()
+    performance = verifier.verify_performance_report(
+        valid_performance_report(),
+        expected_source_commit=current_source_commit(),
+    )
 
     assert worker == {
         "processed": 20,
@@ -233,7 +441,79 @@ def test_v3_1_release_verifier_executes_worker_ocr_export_and_performance_behavi
     assert export["old_fixed_values"] == ["南大供电服务中心", "奕福"]
     assert export["all_text_formatted"] is True
     assert performance["ok"] is True
-    assert performance["measurements"]["review_group_count"] == 20
+    assert performance["measurements"]["review_group_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda report: report["measurements"].update(task_snapshot_ms=301), "task_snapshot_ms"),
+        (lambda report: report["measurements"].update(review_groups_ms=1501), "review_groups_ms"),
+        (
+            lambda report: (
+                report["measurements"].update(task_builds_in_60_seconds=2),
+                report.update(end_build_count=6),
+            ),
+            "task_builds_in_60_seconds",
+        ),
+        (lambda report: report.update(build_sample_seconds=59), "60 seconds"),
+        (lambda report: report.update(task_id=""), "task_id"),
+        (lambda report: report["routes"]["task_snapshot"].update(item_count=0), "task snapshot data"),
+        (lambda report: report["routes"]["review_groups"].update(item_count=0), "review group data"),
+        (lambda report: report.update(source_commit="b" * 40), "source commit"),
+        (lambda report: report.update(base_url="https://production.example.com"), "localhost"),
+        (lambda report: report.update(end_cache_instance_id="cache-instance-b"), "cache instance"),
+    ],
+)
+def test_v3_1_release_rejects_unqualified_performance_reports(mutate, message: str) -> None:
+    verifier = load_script("verify_v3_1_performance_negative", "v2-api/scripts/verify_v3_1_release.py")
+    expected_commit = current_source_commit()
+    report = valid_performance_report(expected_commit)
+    mutate(report)
+
+    with pytest.raises(AssertionError, match=message):
+        verifier.verify_performance_report(report, expected_source_commit=expected_commit)
+
+
+def test_v3_1_release_cli_requires_a_performance_report() -> None:
+    result = subprocess.run(
+        [sys.executable, "scripts/verify_v3_1_release.py", "--repo-root", str(REPOSITORY_ROOT)],
+        cwd=API_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "--performance-report" in result.stderr
+
+
+def test_v3_1_release_cli_rejects_a_report_bound_to_a_non_head_commit(tmp_path: Path) -> None:
+    wrong_commit = "b" * 40
+    report_path = tmp_path / "wrong-commit-performance-report.json"
+    report_path.write_text(json.dumps(valid_performance_report(wrong_commit)), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/verify_v3_1_release.py",
+            "--repo-root",
+            str(REPOSITORY_ROOT),
+            "--performance-report",
+            str(report_path),
+            "--expected-source-commit",
+            wrong_commit,
+        ],
+        cwd=API_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "current HEAD" in result.stderr
 
 
 def test_v3_1_release_verifier_checks_migration_and_model_paused_defaults() -> None:

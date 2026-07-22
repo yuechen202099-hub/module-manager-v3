@@ -115,7 +115,18 @@ def observed_build_count(
     return int(end_count) - int(start_count)
 
 
-def run_verification(base_url: str, token: str) -> dict[str, Any]:
+def _serialized_size(document: dict[str, Any]) -> int:
+    return len(json.dumps(document, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
+
+
+def run_verification(
+    base_url: str,
+    token: str,
+    *,
+    source_commit: str,
+    sleeper=sleep,
+    sample_seconds: int = BUILD_SAMPLE_SECONDS,
+) -> dict[str, Any]:
     first_snapshot, first_snapshot_ms = timed_get(base_url, "/local-test/tasks/snapshot", token)
     second_snapshot, warm_snapshot_ms = timed_get(base_url, "/local-test/tasks/snapshot", token)
     tasks = second_snapshot.get("items") if isinstance(second_snapshot.get("items"), list) else []
@@ -129,7 +140,7 @@ def run_verification(base_url: str, token: str) -> dict[str, Any]:
     review_items = review_page.get("items") if isinstance(review_page.get("items"), list) else []
     start_build_count = cache_build_count(second_snapshot)
     start_instance_id = cache_instance_id(second_snapshot)
-    sleep(BUILD_SAMPLE_SECONDS)
+    sleeper(sample_seconds)
     sampled_snapshot, _sampled_snapshot_ms = timed_get(base_url, "/local-test/tasks/snapshot", token)
     end_build_count = cache_build_count(sampled_snapshot)
     end_instance_id = cache_instance_id(sampled_snapshot)
@@ -148,15 +159,33 @@ def run_verification(base_url: str, token: str) -> dict[str, Any]:
     report.update(
         {
             "checked_at": datetime.now(UTC).isoformat(),
+            "source_commit": source_commit,
             "base_url": base_url.rstrip("/"),
             "task_id": task_id,
             "first_task_snapshot_ms": first_snapshot_ms,
             "snapshot_version_reused": first_snapshot.get("version") == second_snapshot.get("version"),
             "snapshot_generation_reused": cache_generation(first_snapshot) == cache_generation(second_snapshot),
-            "build_sample_seconds": BUILD_SAMPLE_SECONDS,
+            "build_sample_seconds": sample_seconds,
             "start_build_count": start_build_count,
             "end_build_count": end_build_count,
-            "cache_instance_id": start_instance_id,
+            "start_cache_instance_id": start_instance_id,
+            "end_cache_instance_id": end_instance_id,
+            "routes": {
+                "task_snapshot": {
+                    "path": "/local-test/tasks/snapshot",
+                    "item_count": len(tasks),
+                    "selected_task_id": task_id,
+                    "serialized_bytes": _serialized_size(second_snapshot),
+                },
+                "review_groups": {
+                    "path": review_path,
+                    "item_count": len(review_items),
+                    "total": int(review_page.get("total") or len(review_items)),
+                    "limit": int(review_page.get("limit") or 20),
+                    "offset": int(review_page.get("offset") or 0),
+                    "serialized_bytes": _serialized_size(review_page),
+                },
+            },
         }
     )
     return report
@@ -166,6 +195,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify V3.1.0 task and review performance thresholds.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8010")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--source-commit", required=True, help="Git commit represented by this measurement report.")
     parser.add_argument("--token", default=os.getenv("MODULE_MANAGER_ACCESS_TOKEN", ""))
     parser.add_argument("--username", default=os.getenv("ADMIN_USERNAME", "admin"))
     parser.add_argument("--password", default=os.getenv("ADMIN_PASSWORD", "admin123"))
@@ -176,7 +206,7 @@ def main() -> int:
     args = parse_args()
     try:
         token = args.token or authenticate(args.base_url, args.username, args.password)
-        report = run_verification(args.base_url, token)
+        report = run_verification(args.base_url, token, source_commit=args.source_commit)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report, ensure_ascii=False))

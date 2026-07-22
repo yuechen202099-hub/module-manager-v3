@@ -4,13 +4,14 @@ import argparse
 import copy
 import importlib.util
 import json
+import re
+import subprocess
 import sys
 from collections import deque
 from io import BytesIO
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from time import perf_counter
 from typing import Any
+from urllib.parse import quote, urlsplit
 
 
 EXPECTED_VERSION = "3.1.0"
@@ -235,53 +236,116 @@ def verify_export_behavior() -> dict[str, Any]:
     }
 
 
-def measure_and_verify_performance() -> dict[str, Any]:
-    from app.services.photo_barcode_check import list_group_barcode_review_items
-    from app.services.task_snapshot_cache import TaskSnapshotCache
-    from app.services.task_status import TaskState, claim_task
-    from scripts.verify_task_review_performance import verify_measurements
+def _required_mapping(value: Any, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        fail(f"performance report {name} is missing")
+    return value
 
-    claimed = claim_task(TaskState(status="published"), reviewer_id=1)
-    build_count = 0
 
-    def build_snapshot(team_id: str) -> dict[str, Any]:
-        nonlocal build_count
-        build_count += 1
-        return {
-            "team_id": team_id,
-            "items": [{"id": "task-1", "status": claimed.status, "claimed_by_id": claimed.claimed_by_id}],
-        }
+def verify_performance_report(report: dict[str, Any], *, expected_source_commit: str) -> dict[str, Any]:
+    from scripts.verify_task_review_performance import observed_build_count, verify_measurements
 
-    with TemporaryDirectory(prefix="v3-1-release-performance-") as temp_dir:
-        cache = TaskSnapshotCache(cache_root=Path(temp_dir), interval_seconds=60, enabled=True)
-        first_snapshot = cache.get("release-team", build_snapshot)
-        started = perf_counter()
-        second_snapshot = cache.get("release-team", build_snapshot)
-        task_snapshot_ms = (perf_counter() - started) * 1000
+    expected_source_commit = str(expected_source_commit or "").strip().lower()
+    report_commit = str(report.get("source_commit") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_source_commit) or report_commit != expected_source_commit:
+        fail("performance report source commit does not match the expected source commit")
 
-    groups = []
-    for index in range(20):
-        group = sample_group()
-        group["id"] = f"review-group-{index}"
-        groups.append(group)
-    started = perf_counter()
-    review_items = list_group_barcode_review_items(groups, statuses={"unreadable"})
-    review_groups_ms = (perf_counter() - started) * 1000
-    if first_snapshot.get("items") != second_snapshot.get("items") or build_count != 1:
-        fail("task snapshot cache must reuse one measured build")
+    base_url = str(report.get("base_url") or "").strip()
+    parsed_url = urlsplit(base_url)
+    if parsed_url.scheme not in {"http", "https"} or parsed_url.hostname not in {"localhost", "127.0.0.1"}:
+        fail("performance report base_url must use localhost or 127.0.0.1")
+    if parsed_url.username or parsed_url.password:
+        fail("performance report base_url must not contain credentials")
 
-    result = verify_measurements(
-        task_snapshot_ms=task_snapshot_ms,
-        review_groups_ms=review_groups_ms,
-        review_group_count=len(review_items),
-        task_builds_in_60_seconds=build_count,
+    task_id = str(report.get("task_id") or "").strip()
+    if not task_id:
+        fail("performance report task_id must be non-empty")
+    if int(report.get("build_sample_seconds") or 0) < 60:
+        fail("performance report must sample cache builds for at least 60 seconds")
+
+    start_instance = str(report.get("start_cache_instance_id") or "").strip()
+    end_instance = str(report.get("end_cache_instance_id") or "").strip()
+    try:
+        observed_builds = observed_build_count(
+            int(report.get("start_build_count") or 0),
+            int(report.get("end_build_count") or 0),
+            start_instance,
+            end_instance,
+        )
+    except (TypeError, ValueError) as error:
+        fail(f"performance report cache instance evidence is invalid: {error}")
+
+    measurements = _required_mapping(report.get("measurements"), "measurements")
+    required_measurements = {
+        "task_snapshot_ms",
+        "review_groups_ms",
+        "review_group_count",
+        "task_builds_in_60_seconds",
+    }
+    if not required_measurements <= measurements.keys():
+        fail("performance report measurements are incomplete")
+    if int(measurements["task_builds_in_60_seconds"]) != observed_builds:
+        fail("performance report task_builds_in_60_seconds does not match cache counters")
+    recomputed = verify_measurements(
+        task_snapshot_ms=float(measurements["task_snapshot_ms"]),
+        review_groups_ms=float(measurements["review_groups_ms"]),
+        review_group_count=int(measurements["review_group_count"]),
+        task_builds_in_60_seconds=observed_builds,
     )
-    if not result["ok"]:
-        fail("measured task claim or review performance exceeds the release threshold")
-    return result
+    if not recomputed["ok"]:
+        fail(f"performance report exceeds thresholds: {', '.join(recomputed['failures'])}")
+    if report.get("ok") is not True or list(report.get("failures") or []):
+        fail("performance report did not record a successful real API verification")
+
+    routes = _required_mapping(report.get("routes"), "routes")
+    task_route = _required_mapping(routes.get("task_snapshot"), "task snapshot route")
+    review_route = _required_mapping(routes.get("review_groups"), "review groups route")
+    if task_route.get("path") != "/local-test/tasks/snapshot":
+        fail("performance report task snapshot route is invalid")
+    if int(task_route.get("item_count") or 0) < 1:
+        fail("performance report must contain non-empty task snapshot data")
+    if str(task_route.get("selected_task_id") or "").strip() != task_id:
+        fail("performance report selected task_id does not match route evidence")
+    if int(task_route.get("serialized_bytes") or 0) < 1:
+        fail("performance report task snapshot serialization evidence is empty")
+
+    expected_review_path = (
+        f"/local-test/tasks/{quote(task_id, safe='')}/review-groups"
+        "?limit=20&offset=0&review_status=all&query="
+    )
+    if review_route.get("path") != expected_review_path:
+        fail("performance report review groups route is invalid")
+    review_count = int(review_route.get("item_count") or 0)
+    if review_count < 1:
+        fail("performance report must contain non-empty review group data")
+    if review_count != int(measurements["review_group_count"]):
+        fail("performance report review group count does not match measurements")
+    if int(review_route.get("total") or 0) < review_count:
+        fail("performance report review total is inconsistent")
+    if int(review_route.get("limit") or 0) != 20 or int(review_route.get("offset", -1)) != 0:
+        fail("performance report review pagination evidence is invalid")
+    if int(review_route.get("serialized_bytes") or 0) < 1:
+        fail("performance report review serialization evidence is empty")
+    return recomputed
 
 
-def verify(root: Path) -> list[str]:
+def verify_repository_source_commit(root: Path, expected_source_commit: str) -> str:
+    try:
+        current_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            text=True,
+            encoding="utf-8",
+            stderr=subprocess.STDOUT,
+        ).strip().lower()
+    except (OSError, subprocess.CalledProcessError) as error:
+        fail(f"unable to resolve current HEAD for performance report binding: {error}")
+    if current_commit != str(expected_source_commit or "").strip().lower():
+        fail("expected performance source commit does not match current HEAD")
+    return current_commit
+
+
+def verify(root: Path, *, performance_report: dict[str, Any], expected_source_commit: str) -> list[str]:
     api_root = root / "v2-api"
     if str(api_root) not in sys.path:
         sys.path.insert(0, str(api_root))
@@ -300,11 +364,12 @@ def verify(root: Path) -> list[str]:
         if marker not in read(root, path):
             fail(f"runtime version source is not {EXPECTED_VERSION}: {path}")
 
+    verify_repository_source_commit(root, expected_source_commit)
     verify_paused_defaults(root)
     verify_worker_behavior()
     verify_eligibility_and_ocr_behavior()
     verify_export_behavior()
-    measure_and_verify_performance()
+    verify_performance_report(performance_report, expected_source_commit=expected_source_commit)
 
     return [
         "migration",
@@ -323,13 +388,25 @@ def verify(root: Path) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify the offline V3.1 release candidate contract.")
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--performance-report", type=Path, required=True)
+    parser.add_argument("--expected-source-commit", required=True)
     parser.add_argument("--json", action="store_true", help="Print the verified gate names as JSON.")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    gates = verify(args.repo_root.resolve())
+    try:
+        performance_report = json.loads(args.performance_report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"unable to read performance report: {error}")
+    if not isinstance(performance_report, dict):
+        fail("performance report root must be an object")
+    gates = verify(
+        args.repo_root.resolve(),
+        performance_report=performance_report,
+        expected_source_commit=args.expected_source_commit,
+    )
     if args.json:
         print(json.dumps({"version": EXPECTED_VERSION, "gates": gates}, ensure_ascii=False))
     else:

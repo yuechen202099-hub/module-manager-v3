@@ -71,34 +71,41 @@ def _projected_photo(photo: Any, category: str) -> dict[str, Any]:
     return raw
 
 
-def project_backfill_groups(rows: Iterable[tuple[Any, Any]]) -> list[dict[str, Any]]:
+def project_backfill_groups(groups: Iterable[Any], photos: Iterable[Any]) -> list[dict[str, Any]]:
     """Project candidate category changes in memory without mutating ORM rows."""
 
-    materialized = list(rows)
+    materialized_groups = list(groups)
+    materialized_photos = list(photos)
     slot_counts = Counter(
-        (str(_value(group, "id")), _photo_slot(photo))
-        for photo, group in materialized
+        (str(_value(photo, "group_id")), _photo_slot(photo))
+        for photo in materialized_photos
         if is_valid_photo_evidence(photo) and _photo_slot(photo) in CONSTRUCTION_SLOT_CATEGORIES
     )
     group_order: list[str] = []
-    groups: dict[str, dict[str, Any]] = {}
-    for photo, group in materialized:
+    projected_groups: dict[str, dict[str, Any]] = {}
+    source_groups: dict[str, Any] = {}
+    for group in materialized_groups:
         group_key = str(_value(group, "id"))
-        if group_key not in groups:
-            raw = dict(_value(group, "raw_data", {}) or {})
-            raw.update(
-                {
-                    "id": str(_value(group, "legacy_id") or group_key),
-                    "terminal": str(_value(group, "terminal", raw.get("terminal", "")) or ""),
-                    "meter_no": str(_value(group, "display_meter_no", raw.get("meter_no", "")) or ""),
-                    "address": str(_value(group, "installation_address", raw.get("address", "")) or ""),
-                    "status": "archived" if _group_is_archived(group) else _status_value(_value(group, "status")),
-                    "photos": [],
-                }
-            )
-            groups[group_key] = raw
-            group_order.append(group_key)
+        raw = dict(_value(group, "raw_data", {}) or {})
+        raw.update(
+            {
+                "id": str(_value(group, "legacy_id") or group_key),
+                "terminal": str(_value(group, "terminal", raw.get("terminal", "")) or ""),
+                "meter_no": str(_value(group, "display_meter_no", raw.get("meter_no", "")) or ""),
+                "address": str(_value(group, "installation_address", raw.get("address", "")) or ""),
+                "status": "archived" if _group_is_archived(group) else _status_value(_value(group, "status")),
+                "photos": [],
+            }
+        )
+        projected_groups[group_key] = raw
+        source_groups[group_key] = group
+        group_order.append(group_key)
 
+    for photo in materialized_photos:
+        group_key = str(_value(photo, "group_id"))
+        group = source_groups.get(group_key)
+        if group is None:
+            continue
         category = str(_value(photo, "category", "unclassified") or "unclassified")
         slot = _photo_slot(photo)
         is_candidate = (
@@ -111,8 +118,28 @@ def project_backfill_groups(rows: Iterable[tuple[Any, Any]]) -> list[dict[str, A
             and slot != "other"
             and slot_counts[(group_key, slot)] == 1
         )
-        groups[group_key]["photos"].append(_projected_photo(photo, slot if is_candidate else category))
-    return [groups[key] for key in group_order]
+        projected_groups[group_key]["photos"].append(_projected_photo(photo, slot if is_candidate else category))
+    return [projected_groups[key] for key in group_order]
+
+
+def load_projected_groups(session: Any, *, team_id: str = "") -> list[dict[str, Any]]:
+    """Load every selected group and all of their photos in two bulk queries."""
+
+    group_statement = select(MaterialGroup)
+    if team_id:
+        group_statement = group_statement.where(MaterialGroup.team_id == team_id)
+    groups = list(session.scalars(group_statement.order_by(MaterialGroup.id)).all())
+    if not groups:
+        return []
+
+    group_ids = [_value(group, "id") for group in groups]
+    photo_statement = (
+        select(Photo)
+        .where(Photo.group_id.in_(group_ids))
+        .order_by(Photo.group_id, Photo.sort_order, Photo.id)
+    )
+    photos = list(session.scalars(photo_statement).all())
+    return project_backfill_groups(groups, photos)
 
 
 def summarize_preview(report: dict[str, Any]) -> dict[str, Any]:
@@ -173,11 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     apply_changes = args.mode == "apply"
     with SessionLocal() as session:
-        statement = select(Photo, MaterialGroup).join(MaterialGroup, MaterialGroup.id == Photo.group_id)
-        if args.team_id:
-            statement = statement.where(Photo.team_id == args.team_id)
-        rows = list(session.execute(statement.order_by(Photo.group_id, Photo.sort_order, Photo.id)).all())
-        projected_groups = project_backfill_groups(rows)
+        projected_groups = load_projected_groups(session, team_id=args.team_id)
         source_report = backfill_construction_photo_categories(
             session,
             apply_changes=apply_changes,
