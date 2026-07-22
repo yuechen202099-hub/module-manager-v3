@@ -551,11 +551,18 @@ def test_group_barcode_accuracy_summary_uses_group_denominator() -> None:
                 "meter_no": "110000288056",
                 "module_asset_no": "MOD-001",
                 "collector": "COLLECTOR-001",
+                "barcode_verification": {
+                    "status": "passed",
+                    "meter_matched": True,
+                    "module_matched": True,
+                    "collector_matched": True,
+                    "recognition_source": "machine_barcode",
+                },
                 "photos": [
-                    {"barcode_check_normalized_values": ["110000288056"]},
-                    {"barcode_check_normalized_values": ["MOD001"]},
-                    {"barcode_check_normalized_values": ["COLLECTOR001"]},
-                    {"barcode_check_normalized_values": []},
+                    {"category": "before_box", "barcode_check_normalized_values": ["110000288056"]},
+                    {"category": "collector_barcode", "barcode_check_normalized_values": ["MOD001"]},
+                    {"category": "module_meter", "barcode_check_normalized_values": ["COLLECTOR001"]},
+                    {"category": "after_box", "barcode_check_normalized_values": []},
                 ],
             },
             {
@@ -568,11 +575,18 @@ def test_group_barcode_accuracy_summary_uses_group_denominator() -> None:
                 "meter_no": "110000288059",
                 "module_asset_no": "MOD-004",
                 "collector": "COLLECTOR-004",
+                "barcode_verification": {
+                    "status": "unreadable",
+                    "meter_matched": True,
+                    "module_matched": True,
+                    "collector_matched": False,
+                    "recognition_source": "machine_barcode",
+                },
                 "photos": [
-                    {"barcode_check_normalized_values": ["110000288059"]},
-                    {"barcode_check_normalized_values": ["MOD004"]},
-                    {"barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
-                    {"barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
+                    {"category": "before_box", "barcode_check_normalized_values": ["110000288059"]},
+                    {"category": "collector_barcode", "barcode_check_normalized_values": ["MOD004"]},
+                    {"category": "module_meter", "barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
+                    {"category": "after_box", "barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
                 ],
             },
             {"meter_no": "110000288058", "module_asset_no": "", "collector": "COLLECTOR-003", "photos": []},
@@ -586,6 +600,14 @@ def test_group_barcode_accuracy_summary_uses_group_denominator() -> None:
         "group_barcode_accuracy_unreadable": 1,
         "group_barcode_accuracy_not_required": 2,
         "group_barcode_accuracy_rate": 0.5,
+        "group_barcode_accuracy_machine_passed": 1,
+        "group_barcode_accuracy_manual_confirmed": 0,
+        "group_barcode_accuracy_partial": 0,
+        "group_barcode_accuracy_mismatch": 0,
+        "group_barcode_accuracy_terminal_failed": 0,
+        "group_barcode_accuracy_not_eligible": 2,
+        "group_barcode_accuracy_pending": 0,
+        "group_barcode_accuracy_processing": 0,
     }
 
 
@@ -666,11 +688,18 @@ def test_manual_confirmed_group_moves_from_exception_to_passed_review_items() ->
         "collector": "COLLECTOR-001",
         "group_barcode_manual_confirmed": True,
         "group_barcode_manual_confirmed_fields": ["meter", "module", "collector"],
+        "barcode_verification": {
+            "status": "manual_confirmed",
+            "meter_matched": True,
+            "module_matched": True,
+            "collector_matched": True,
+            "recognition_source": "manual_confirmed",
+        },
         "photos": [
-            {"id": "photo-1", "barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
-            {"id": "photo-2", "barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
-            {"id": "photo-3", "barcode_check_status": "mismatched", "barcode_check_normalized_values": ["NOISE999"]},
-            {"id": "photo-4", "barcode_check_status": "not_required", "barcode_check_normalized_values": []},
+            {"id": "photo-1", "category": "before_box", "barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
+            {"id": "photo-2", "category": "collector_barcode", "barcode_check_status": "unreadable", "barcode_check_normalized_values": []},
+            {"id": "photo-3", "category": "module_meter", "barcode_check_status": "mismatched", "barcode_check_normalized_values": ["NOISE999"]},
+            {"id": "photo-4", "category": "after_box", "barcode_check_status": "not_required", "barcode_check_normalized_values": []},
         ],
     }
 

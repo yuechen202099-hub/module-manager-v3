@@ -14,6 +14,7 @@ import {
 } from '@/api/services'
 import type { MaterialGroup, ReviewPhoto, TaskStatus } from '@/api/types'
 import { mapBarcodeVerificationState, mapPhotoCategoryState } from '@/utils/barcodeVerificationState.mjs'
+import { createLatestRequestGate, isAbortError } from '@/utils/latestRequestGate.mjs'
 
 type EditableGroupForm = {
   meterNo: string
@@ -39,6 +40,9 @@ type BarcodeDetectorConstructor = new (options?: { formats?: string[] }) => Barc
 const query = ref('')
 const terminal = ref('')
 const loading = ref(false)
+const searchRequestGate = createLatestRequestGate((value) => {
+  loading.value = value
+})
 const searched = ref(false)
 const saving = ref(false)
 const total = ref(0)
@@ -112,10 +116,11 @@ const statusOptions: Array<{ label: string; value: TaskStatus }> = [
 
 async function runSearch() {
   if (!canSearch.value) {
+    searchRequestGate.cancel()
     ElMessage.warning('请输入表号、模块号、采集器号、地址，或选择终端')
     return
   }
-  loading.value = true
+  const request = searchRequestGate.begin()
   searched.value = true
   errorMessage.value = ''
   try {
@@ -124,18 +129,21 @@ async function runSearch() {
       terminal: terminal.value,
       limit: PAGE_SIZE,
       offset: (currentPage.value - 1) * PAGE_SIZE,
+      signal: request.signal,
     })
+    if (!request.isCurrent()) return
     total.value = result.total
     terminals.value = result.terminals
     groups.value = result.items
     selectedGroups.value = []
   } catch (error) {
+    if (!request.isCurrent() || isAbortError(error)) return
     errorMessage.value = error instanceof Error ? error.message : '搜索失败'
     groups.value = []
     selectedGroups.value = []
     total.value = 0
   } finally {
-    loading.value = false
+    request.finish()
   }
 }
 
@@ -150,6 +158,7 @@ function handlePageChange(page: number) {
 }
 
 function resetSearch() {
+  searchRequestGate.cancel()
   query.value = ''
   terminal.value = ''
   searched.value = false
@@ -498,6 +507,7 @@ function stopScanner() {
 }
 
 onUnmounted(() => {
+  searchRequestGate.cancel()
   stopScanner()
   clearGroupPhotoObjectUrls()
 })

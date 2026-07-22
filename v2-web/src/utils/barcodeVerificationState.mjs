@@ -64,10 +64,7 @@ export function mapBarcodeVerificationState(input = {}) {
   const verification = input.barcodeVerification || null
   const status = normalizeStatus(input, verification)
   const result = verification?.result || {}
-  const totalValue = hasValue(input.barcodeVerificationTotalCount)
-    ? input.barcodeVerificationTotalCount
-    : input.groupBarcodeTotalCount
-  const totalCount = Math.max(1, Math.round(finiteNumber(totalValue, VERIFICATION_TOTAL)))
+  const totalCount = VERIFICATION_TOTAL
   const explicitPassed = hasValue(result.passedCount)
     ? result.passedCount
     : hasValue(input.barcodeVerificationPassedCount)

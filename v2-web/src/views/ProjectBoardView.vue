@@ -45,7 +45,12 @@ import type {
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import UnmatchedReviewDialog from '@/components/UnmatchedReviewDialog.vue'
-import { mapBarcodeDashboardState } from '@/utils/barcodeVerificationState.mjs'
+import {
+  mapBarcodeDashboardState,
+  mapBarcodeVerificationState,
+  mapPhotoCategoryState,
+} from '@/utils/barcodeVerificationState.mjs'
+import { createLatestRequestGate, isAbortError } from '@/utils/latestRequestGate.mjs'
 
 const DIALOG_PAGE_SIZE = 20
 
@@ -153,6 +158,9 @@ const exceptionOrders = ref<ConstructionExceptionOrder[]>([])
 const exceptionAssignDraft = reactive<Record<string, string>>({})
 const photoBarcodeDialogVisible = ref(false)
 const photoBarcodeLoading = ref(false)
+const photoBarcodeRequestGate = createLatestRequestGate((value) => {
+  photoBarcodeLoading.value = value
+})
 const photoBarcodeExporting = ref(false)
 const photoBarcodeStatus = ref<'unreadable' | 'mismatched' | 'matched' | 'all'>('unreadable')
 const photoBarcodeQuery = ref('')
@@ -358,15 +366,19 @@ const photoBarcodeDialogStats = computed(() => ({
   matched:
     photoBarcodeStatus.value === 'matched'
       ? photoBarcodeTotal.value
-      : photoBarcodeRows.value.filter((item) => item.status === 'matched').length,
+      : photoBarcodeRows.value.filter((item) =>
+          ['passed', 'manual_confirmed'].includes(mapBarcodeVerificationState(item).status),
+        ).length,
   unreadable:
     photoBarcodeStatus.value === 'unreadable'
       ? photoBarcodeTotal.value
-      : photoBarcodeRows.value.filter((item) => item.status === 'unreadable').length,
+      : photoBarcodeRows.value.filter((item) => mapBarcodeVerificationState(item).status === 'unreadable').length,
   mismatched:
     photoBarcodeStatus.value === 'mismatched'
       ? photoBarcodeTotal.value
-      : photoBarcodeRows.value.filter((item) => item.status === 'mismatched').length,
+      : photoBarcodeRows.value.filter((item) =>
+          ['partial', 'mismatch', 'failed'].includes(mapBarcodeVerificationState(item).status),
+        ).length,
 }))
 const replacementDialogStats = computed(() => ({
   total: replacementRows.value.length,
@@ -569,6 +581,14 @@ function barcodeReviewStatusLabel(status: string) {
   if (status === 'mismatched') return '异常不匹配'
   if (status === 'unreadable') return '无法识别'
   return status || '-'
+}
+
+function photoBarcodeVerificationState(row: PhotoBarcodeReviewGroup) {
+  return mapBarcodeVerificationState(row)
+}
+
+function photoBarcodeCategoryState(row: PhotoBarcodeReviewGroup) {
+  return mapPhotoCategoryState(row)
 }
 
 function groupStatusLabel(status: string) {
@@ -1216,20 +1236,23 @@ async function handleUnmatchedPageChange(page: number) {
 }
 
 async function loadPhotoBarcodeRows() {
-  photoBarcodeLoading.value = true
+  const request = photoBarcodeRequestGate.begin()
   try {
     const result = await fetchPhotoBarcodeReviewGroups(
       photoBarcodeStatus.value,
       photoBarcodePage.value,
       DIALOG_PAGE_SIZE,
       photoBarcodeQuery.value,
+      request.signal,
     )
+    if (!request.isCurrent()) return
     photoBarcodeTotal.value = result.total
     photoBarcodeRows.value = result.items
   } catch (error) {
+    if (!request.isCurrent() || isAbortError(error)) return
     ElMessage.error(error instanceof Error ? error.message : '条码识别清单加载失败')
   } finally {
-    photoBarcodeLoading.value = false
+    request.finish()
   }
 }
 
@@ -1241,6 +1264,7 @@ async function openPhotoBarcodeDialog() {
 }
 
 function handlePhotoBarcodeDialogClosed() {
+  photoBarcodeRequestGate.cancel()
   clearPhotoBarcodeObjectUrls()
 }
 
@@ -1408,6 +1432,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('message', handleExternalRefresh)
   disconnectBoardEvents()
+  photoBarcodeRequestGate.cancel()
   clearPhotoBarcodeObjectUrls()
 })
 </script>
@@ -2004,10 +2029,21 @@ onUnmounted(() => {
             <span v-else>{{ groupStatusLabel(row.groupStatus) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="120">
+        <el-table-column label="状态" width="170">
           <template #default="{ row }">
-            <el-tag v-if="row.status === 'mismatched'" type="danger" effect="plain">异常不匹配</el-tag>
-            <el-tag v-else type="warning" effect="plain">无法识别</el-tag>
+            <el-tag :type="photoBarcodeVerificationState(row).type" effect="plain">
+              {{ photoBarcodeVerificationState(row).label }}
+            </el-tag>
+            <small class="table-subline">
+              {{ photoBarcodeVerificationState(row).progressLabel }} · {{ photoBarcodeVerificationState(row).source.label }}
+            </small>
+          </template>
+        </el-table-column>
+        <el-table-column label="图片分类" width="150">
+          <template #default="{ row }">
+            <el-tag :type="photoBarcodeCategoryState(row).type" effect="plain">
+              {{ photoBarcodeCategoryState(row).label }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="缺失项" min-width="150">

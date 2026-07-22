@@ -1,4 +1,4 @@
-import type { MaterialGroup, ProjectSummary } from '@/api/types'
+import type { MaterialGroup, PhotoBarcodeReviewGroup, ProjectSummary } from '@/api/types'
 
 export type BarcodeVerificationPresentation = {
   status: NonNullable<MaterialGroup['barcodeVerification']>['status']
@@ -30,6 +30,8 @@ export type BarcodeDashboardPresentation = {
   rateLabel: string
 }
 
-export function mapBarcodeVerificationState(input?: Partial<MaterialGroup>): BarcodeVerificationPresentation
-export function mapPhotoCategoryState(input?: Partial<MaterialGroup>): PhotoCategoryPresentation
+export function mapBarcodeVerificationState(
+  input?: Partial<MaterialGroup | PhotoBarcodeReviewGroup>,
+): BarcodeVerificationPresentation
+export function mapPhotoCategoryState(input?: Partial<MaterialGroup | PhotoBarcodeReviewGroup>): PhotoCategoryPresentation
 export function mapBarcodeDashboardState(input?: Partial<ProjectSummary>): BarcodeDashboardPresentation

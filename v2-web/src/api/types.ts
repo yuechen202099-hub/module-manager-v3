@@ -256,6 +256,12 @@ export type BarcodeVerification = {
     passedCount: number
     matchedFields: string[]
     missingFields: string[]
+    machineBarcodeValues: string[]
+    machineQrValues: string[]
+    ocrCandidates: string[]
+    unmatchedMachineValues: string[]
+    matchedOcrCandidates: string[]
+    unmatchedOcrCandidates: string[]
   }
 }
 
@@ -423,6 +429,16 @@ export type PhotoBarcodeReviewGroup = {
   expected: Record<string, string[]>
   detectedValues: Record<string, string[]>
   unmatchedValues: string[]
+  barcodeVerification?: BarcodeVerification
+  barcodeVerificationStatus?: BarcodeVerificationStatus
+  barcodeVerificationSource: string
+  barcodeVerificationPassedCount: number
+  barcodeVerificationTotalCount: number
+  barcodeVerificationReason: string
+  photoCategoryClassifiedCount: number
+  photoCategoryTotalCount: number
+  photoCategoryComplete: boolean
+  photoCategoryStatus?: PhotoCategoryStatus
   photos: PhotoBarcodeReviewPhoto[]
 }
 

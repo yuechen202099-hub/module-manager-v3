@@ -369,32 +369,9 @@ def has_complete_group_photo_set(group: dict[str, Any]) -> bool:
 
 
 def summarize_group_barcode_accuracy(groups: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    passed = 0
-    failed = 0
-    unreadable = 0
-    not_required = 0
-    for group in groups:
-        if not has_complete_group_photo_set(group):
-            not_required += 1
-            continue
-        status = str(build_group_barcode_check(group).get("group_barcode_check_status") or "")
-        if status == "matched":
-            passed += 1
-        elif status == "mismatched":
-            failed += 1
-        elif status == "unreadable":
-            unreadable += 1
-        elif status == "not_required":
-            not_required += 1
-    checked = passed + failed + unreadable
-    return {
-        "group_barcode_accuracy_checked": checked,
-        "group_barcode_accuracy_passed": passed,
-        "group_barcode_accuracy_failed": failed,
-        "group_barcode_accuracy_unreadable": unreadable,
-        "group_barcode_accuracy_not_required": not_required,
-        "group_barcode_accuracy_rate": round(passed / checked, 4) if checked else 0.0,
-    }
+    from app.services.barcode_verification_contract import summarize_durable_accuracy
+
+    return summarize_durable_accuracy(list(groups))
 
 
 def list_group_barcode_review_items(
@@ -405,6 +382,54 @@ def list_group_barcode_review_items(
     target_statuses = statuses or {"unreadable", "mismatched"}
     items: list[dict[str, Any]] = []
     for group in groups:
+        from app.services.barcode_verification_contract import (
+            has_current_eligible_photo_set,
+            legacy_review_status,
+            normalize_barcode_verification,
+            verification_compatibility_fields,
+        )
+
+        durable_verification = normalize_barcode_verification(group.get("barcode_verification"))
+        if durable_verification:
+            if not has_current_eligible_photo_set(group):
+                continue
+            status = legacy_review_status(str(durable_verification.get("status") or ""))
+            if not status or status not in target_statuses:
+                continue
+            result = durable_verification.get("result") or {}
+            expected = expected_group_barcode_values(group)
+            matched_fields = [str(item) for item in result.get("matched_fields") or []]
+            detected_values = {field: expected.get(field, []) if field in matched_fields else [] for field in GROUP_BARCODE_TYPES}
+            item = {
+                "group_id": str(group.get("id") or group.get("group_id") or ""),
+                "meter_no": str(group.get("meter_no") or group.get("barcode") or ""),
+                "module_asset_no": str(group.get("module_asset_no") or group.get("asset_no") or ""),
+                "collector": str(group.get("collector") or group.get("construction_collector") or ""),
+                "terminal": str(group.get("terminal") or ""),
+                "address": str(group.get("address") or group.get("installation_address") or ""),
+                "installer": str(group.get("installer") or group.get("creator") or ""),
+                "group_status": str(group.get("status") or group.get("group_status") or ""),
+                "archived": str(group.get("status") or group.get("group_status") or "") == "approved",
+                "photo_count": int(group.get("photo_count") or len(group.get("photos") or []) or 0),
+                "status": status,
+                "missing_fields": list(result.get("missing_fields") or []),
+                "missing_expected_fields": [field for field in GROUP_BARCODE_TYPES if not expected.get(field)],
+                "expected": expected,
+                "detected_values": detected_values,
+                "unmatched_values": [
+                    *list(result.get("unmatched_machine_values") or []),
+                    *list(result.get("unmatched_ocr_candidates") or []),
+                ],
+                "barcode_verification": durable_verification,
+                "photo_category_classified_count": len({str(photo.get("category") or "") for photo in group.get("photos") or []}),
+                "photo_category_total_count": len(group.get("photos") or []),
+                "photo_category_complete": True,
+                "photo_category_status": "complete",
+                "photos": [_group_review_photo_payload(group, photo) for photo in group.get("photos") or []],
+            }
+            item.update(verification_compatibility_fields(durable_verification))
+            items.append(item)
+            continue
         if not has_complete_group_photo_set(group):
             continue
         check = build_group_barcode_check(group)

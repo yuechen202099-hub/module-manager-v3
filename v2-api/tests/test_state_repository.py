@@ -6057,6 +6057,9 @@ def test_postgres_reset_group_to_unconstructed_clears_barcode_evidence(
         def scalars(self, _statement):
             return FakeScalars([photo for photo in photos if photo.is_active])
 
+        def scalar(self, _statement):
+            return None
+
         def get(self, _model, _key):
             return None
 
@@ -6220,6 +6223,9 @@ def test_postgres_group_payload_does_not_treat_reviewer_as_installer() -> None:
                     return []
 
             return Result()
+
+        def scalar(self, _statement):
+            return None
 
         def get(self, model, key):
             assert model is repository.Task
@@ -6749,7 +6755,7 @@ def test_postgres_summary_uses_lightweight_barcode_accuracy_queries(monkeypatch:
     assert "count(photos.id)" in compiled.lower()
 
 
-def test_group_barcode_accuracy_summary_skips_payload_build_for_incomplete_groups(
+def test_group_barcode_accuracy_summary_uses_durable_rows_and_skips_legacy_recomputation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -6759,9 +6765,30 @@ def test_group_barcode_accuracy_summary_skips_payload_build_for_incomplete_group
         return {"group_barcode_check_status": "matched"}
 
     monkeypatch.setattr(repository.photo_barcode_check, "build_group_barcode_check", fake_build_group_barcode_check)
+    categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
     groups = [
-        {"id": "complete", "photos": [{"barcode_check_status": "matched"} for _ in range(4)]},
-        {"id": "incomplete", "photos": [{"barcode_check_status": "matched"} for _ in range(3)]},
+        {
+            "id": "complete",
+            "barcode_verification": {
+                "status": "passed",
+                "meter_matched": True,
+                "module_matched": True,
+                "collector_matched": True,
+                "recognition_source": "machine_barcode",
+            },
+            "photos": [{"category": category, "barcode_check_status": "matched"} for category in categories],
+        },
+        {
+            "id": "incomplete",
+            "barcode_verification": {
+                "status": "passed",
+                "meter_matched": True,
+                "module_matched": True,
+                "collector_matched": True,
+                "recognition_source": "machine_barcode",
+            },
+            "photos": [{"category": category, "barcode_check_status": "matched"} for category in categories[:3]],
+        },
     ]
 
     assert repository._group_barcode_accuracy_summary(groups, {}) == {
@@ -6771,8 +6798,16 @@ def test_group_barcode_accuracy_summary_skips_payload_build_for_incomplete_group
         "group_barcode_accuracy_unreadable": 0,
         "group_barcode_accuracy_not_required": 1,
         "group_barcode_accuracy_rate": 1.0,
+        "group_barcode_accuracy_machine_passed": 1,
+        "group_barcode_accuracy_manual_confirmed": 0,
+        "group_barcode_accuracy_partial": 0,
+        "group_barcode_accuracy_mismatch": 0,
+        "group_barcode_accuracy_terminal_failed": 0,
+        "group_barcode_accuracy_not_eligible": 1,
+        "group_barcode_accuracy_pending": 0,
+        "group_barcode_accuracy_processing": 0,
     }
-    assert calls == ["complete"]
+    assert calls == []
 
 
 def test_postgres_list_tasks_board_view_omits_large_search_text() -> None:
@@ -6884,7 +6919,10 @@ def test_postgres_list_tasks_can_skip_installer_distribution() -> None:
 
 
 def test_postgres_review_queue_limits_before_payload_build(monkeypatch: pytest.MonkeyPatch) -> None:
-    groups = [SimpleNamespace(id=f"model-{index}", legacy_id=f"group-{index}") for index in range(45)]
+    groups = [
+        SimpleNamespace(id=f"model-{index}", legacy_id=f"group-{index}", team_id="alpha-team")
+        for index in range(45)
+    ]
     built: list[str] = []
 
     class AggregateResult:
@@ -6919,7 +6957,9 @@ def test_postgres_review_queue_limits_before_payload_build(monkeypatch: pytest.M
             self.execute_calls += 1
             return AggregateResult() if self.execute_calls == 1 else PhotoResult()
 
-        def scalars(self, _statement):
+        def scalars(self, statement):
+            if "group_barcode_verifications" in str(statement):
+                return PhotoResult()
             return PageScalars()
 
     class TestPostgresRepository(repository.PostgresStateRepository):
@@ -6929,8 +6969,9 @@ def test_postgres_review_queue_limits_before_payload_build(monkeypatch: pytest.M
         def _task_by_legacy_id(self, _session, _task_id):
             return SimpleNamespace(id="task-model")
 
-    def minimal_group(_session, group, include_photos=False):
+    def minimal_group(_session, group, include_photos=False, *, verification=None):
         assert include_photos is False
+        assert verification is None
         built.append(str(group.id))
         return {
             "id": group.legacy_id,

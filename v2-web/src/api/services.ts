@@ -246,6 +246,12 @@ type BackendBarcodeVerification = {
     passed_count?: number
     matched_fields?: unknown[]
     missing_fields?: unknown[]
+    machine_barcode_values?: unknown[]
+    machine_qr_values?: unknown[]
+    ocr_candidates?: unknown[]
+    unmatched_machine_values?: unknown[]
+    matched_ocr_candidates?: unknown[]
+    unmatched_ocr_candidates?: unknown[]
   }
 }
 
@@ -335,6 +341,16 @@ type BackendPhotoBarcodeReviewGroup = {
   expected?: Record<string, string[]>
   detected_values?: Record<string, string[]>
   unmatched_values?: string[]
+  barcode_verification?: BackendBarcodeVerification
+  barcode_verification_status?: string
+  barcode_verification_source?: string
+  barcode_verification_passed_count?: number
+  barcode_verification_total_count?: number
+  barcode_verification_reason?: string
+  photo_category_classified_count?: number
+  photo_category_total_count?: number
+  photo_category_complete?: boolean
+  photo_category_status?: string
   photos?: BackendPhotoBarcodeReviewPhoto[]
 }
 
@@ -931,6 +947,12 @@ function mapBarcodeVerification(raw?: BackendBarcodeVerification): BarcodeVerifi
       passedCount: Number(raw.result?.passed_count || 0),
       matchedFields: mapStringArray(raw.result?.matched_fields),
       missingFields: mapStringArray(raw.result?.missing_fields),
+      machineBarcodeValues: mapStringArray(raw.result?.machine_barcode_values),
+      machineQrValues: mapStringArray(raw.result?.machine_qr_values),
+      ocrCandidates: mapStringArray(raw.result?.ocr_candidates),
+      unmatchedMachineValues: mapStringArray(raw.result?.unmatched_machine_values),
+      matchedOcrCandidates: mapStringArray(raw.result?.matched_ocr_candidates),
+      unmatchedOcrCandidates: mapStringArray(raw.result?.unmatched_ocr_candidates),
     },
   }
 }
@@ -1296,13 +1318,22 @@ export async function fetchReviewTaskGroups(
   }
 }
 
-export async function searchGroups(options: { query?: string; terminal?: string; limit?: number; offset?: number }): Promise<GroupSearchResult> {
+export async function searchGroups(options: {
+  query?: string
+  terminal?: string
+  limit?: number
+  offset?: number
+  signal?: AbortSignal
+}): Promise<GroupSearchResult> {
   const params = new URLSearchParams()
   params.set('query', options.query || '')
   if (options.terminal) params.set('terminal', options.terminal)
   params.set('limit', String(options.limit || 30))
   params.set('offset', String(options.offset || 0))
-  const data = await api<{ total: number; terminals?: string[]; items?: BackendGroup[] }>(`/groups/search?${params.toString()}`)
+  const data = await api<{ total: number; terminals?: string[]; items?: BackendGroup[] }>(
+    `/groups/search?${params.toString()}`,
+    { signal: options.signal },
+  )
   return {
     total: Number(data.total || 0),
     terminals: data.terminals || [],
@@ -1349,6 +1380,10 @@ function mapUnmatchedMatchCandidate(raw: BackendUnmatchedMatchCandidate): Unmatc
 }
 
 function mapPhotoBarcodeReviewGroup(raw: BackendPhotoBarcodeReviewGroup): PhotoBarcodeReviewGroup {
+  const barcodeVerification = mapBarcodeVerification(raw.barcode_verification)
+  const barcodeVerificationStatus = normalizeBarcodeVerificationStatus(
+    barcodeVerification?.status || raw.barcode_verification_status,
+  )
   return {
     groupId: raw.group_id || '',
     meterNo: raw.meter_no || '',
@@ -1366,6 +1401,18 @@ function mapPhotoBarcodeReviewGroup(raw: BackendPhotoBarcodeReviewGroup): PhotoB
     expected: raw.expected || {},
     detectedValues: raw.detected_values || {},
     unmatchedValues: raw.unmatched_values || [],
+    barcodeVerification,
+    barcodeVerificationStatus,
+    barcodeVerificationSource: barcodeVerification?.recognitionSource || raw.barcode_verification_source || '',
+    barcodeVerificationPassedCount: Number(
+      barcodeVerification?.result.passedCount ?? raw.barcode_verification_passed_count ?? 0,
+    ),
+    barcodeVerificationTotalCount: Number(raw.barcode_verification_total_count || 3),
+    barcodeVerificationReason: barcodeVerification?.invalidationReason || raw.barcode_verification_reason || '',
+    photoCategoryClassifiedCount: Number(raw.photo_category_classified_count || 0),
+    photoCategoryTotalCount: Number(raw.photo_category_total_count || 0),
+    photoCategoryComplete: Boolean(raw.photo_category_complete),
+    photoCategoryStatus: normalizePhotoCategoryStatus(raw.photo_category_status),
     photos: (raw.photos || []).map((photo) => ({
       id: String(photo.id || ''),
       category: photo.category || '',
@@ -1842,6 +1889,7 @@ export async function fetchPhotoBarcodeReviewGroups(
   page = 1,
   pageSize = 20,
   query = '',
+  signal?: AbortSignal,
 ): Promise<{ total: number; items: PhotoBarcodeReviewGroup[] }> {
   const safePage = Math.max(1, Math.floor(Number(page) || 1))
   const safePageSize = Math.max(1, Math.min(100, Math.floor(Number(pageSize) || 20)))
@@ -1853,6 +1901,7 @@ export async function fetchPhotoBarcodeReviewGroups(
   if (query.trim()) params.set('query', query.trim())
   const data = await api<{ total: number; items: BackendPhotoBarcodeReviewGroup[] }>(
     `/local-test/photo-barcode/review-groups?${params.toString()}`,
+    { signal },
   )
   return {
     total: Number(data.total || 0),

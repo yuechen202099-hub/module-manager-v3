@@ -25,6 +25,10 @@ from app.core.config import settings
 from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key
 from app.services import account_store
 from app.services import photo_barcode_check
+from app.services.barcode_verification_contract import (
+    normalize_barcode_verification,
+    verification_compatibility_fields,
+)
 from app.services import unmatched_review
 from app.services.photo_storage import (
     active_storage_backend,
@@ -5188,6 +5192,10 @@ def group_target_summary(group: dict[str, Any], *, include_photos: bool = False)
         **group_photo_category_summary(photos),
         **group_barcode_status_summary({**group, "photos": photos}),
     }
+    durable_verification = normalize_barcode_verification(group.get("barcode_verification"))
+    if durable_verification:
+        payload["barcode_verification"] = durable_verification
+        payload.update(verification_compatibility_fields(durable_verification))
     if include_photos:
         payload["photos"] = photos
     return payload

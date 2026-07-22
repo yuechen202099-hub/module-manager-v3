@@ -27,6 +27,7 @@ from app.models import (
     GroupStatus,
     MaterialGroup,
     Photo,
+    PhotoUploadStatus,
     Project,
     ProjectStatus,
     StageCatalogRow,
@@ -37,6 +38,15 @@ from app.models import (
     UnmatchedRecord,
 )
 from app.services import account_store
+from app.services.barcode_verification_contract import (
+    EXCEPTION_STATUSES,
+    PASS_STATUSES,
+    REQUIRED_CATEGORIES,
+    TERMINAL_STATUSES,
+    normalize_barcode_verification,
+    summarize_durable_accuracy,
+    verification_compatibility_fields,
+)
 from app.services.final_delivery_export import LeasedDeliveryPackage
 from app.services.matching import build_total_catalog_match_key
 
@@ -1146,6 +1156,9 @@ def _photo_barcode_payload_from_row(row: Any) -> dict[str, Any]:
         "barcode": _row_value(row, "barcode") or raw.get("barcode") or "",
         "collector": _row_value(row, "collector") or raw.get("collector") or "",
         "module_asset_no": _row_value(row, "asset_no") or raw.get("module_asset_no") or raw.get("asset_no") or "",
+        "sha256": _row_value(row, "sha256") or raw.get("sha256") or "",
+        "is_active": bool(_row_value(row, "is_active", True)),
+        "upload_status": _status_value(_row_value(row, "upload_status", "uploaded")),
     }
     for key in (
         "barcode_check_status",
@@ -1167,7 +1180,7 @@ def _photo_barcode_payload_from_row(row: Any) -> dict[str, Any]:
 
 def _group_barcode_payload_from_row(row: Any) -> dict[str, Any]:
     raw = dict(_row_value(row, "raw_data", {}) or {})
-    return {
+    payload = {
         "id": str(_row_value(row, "group_id") or _row_value(row, "id") or ""),
         "legacy_id": _row_value(row, "legacy_id") or "",
         "task_id": _row_value(row, "legacy_task_id") or "",
@@ -1189,6 +1202,36 @@ def _group_barcode_payload_from_row(row: Any) -> dict[str, Any]:
         "status": _row_value(row, "status") or raw.get("status") or "",
         "photo_count": int(_row_value(row, "photo_count", 0) or 0),
     }
+    verification_status = str(_row_value(row, "verification_status", "") or "")
+    if verification_status:
+        verification_source = {
+            key: _row_value(row, f"verification_{key}")
+            for key in (
+                "status",
+                "evidence_fingerprint",
+                "evidence_version",
+                "meter_matched",
+                "module_matched",
+                "collector_matched",
+                "recognition_source",
+                "attempt_count",
+                "invalidation_reason",
+                "invalidated_by",
+                "invalidated_at",
+                "auto_archive_status",
+                "auto_archived_at",
+                "auto_archive_error",
+                "updated_at",
+            )
+        }
+        durable_verification = normalize_barcode_verification(
+            verification_source,
+            raw.get("barcode_verification") or {},
+        )
+        if durable_verification:
+            payload["barcode_verification"] = durable_verification
+            payload.update(verification_compatibility_fields(durable_verification))
+    return payload
 
 
 def _group_barcode_payload(group: Any, photos: list[Any]) -> dict[str, Any]:
@@ -1249,37 +1292,41 @@ def _group_barcode_accuracy_summary(
     *,
     total_groups: int | None = None,
 ) -> dict[str, Any]:
-    passed = 0
-    failed = 0
-    unreadable = 0
-    not_required = max(0, int(total_groups or 0) - len(groups)) if total_groups is not None else 0
+    payloads: list[dict[str, Any]] = []
     for group in groups:
         photos = photos_by_group_id.get(_group_lookup_id(group))
         if photos is None and isinstance(group, dict):
             photos = list(group.get("photos") or [])
-        photos = photos or []
-        if len(photos) != photo_barcode_check.GROUP_BARCODE_REQUIRED_PHOTO_COUNT:
-            not_required += 1
-            continue
-        payload = _group_barcode_payload(group, photos)
-        status = str(photo_barcode_check.build_group_barcode_check(payload).get("group_barcode_check_status") or "")
-        if status == "matched":
-            passed += 1
-        elif status == "mismatched":
-            failed += 1
-        elif status == "unreadable":
-            unreadable += 1
-        elif status == "not_required":
-            not_required += 1
-    checked = passed + failed + unreadable
-    return {
-        "group_barcode_accuracy_checked": checked,
-        "group_barcode_accuracy_passed": passed,
-        "group_barcode_accuracy_failed": failed,
-        "group_barcode_accuracy_unreadable": unreadable,
-        "group_barcode_accuracy_not_required": not_required,
-        "group_barcode_accuracy_rate": round(passed / checked, 4) if checked else 0.0,
-    }
+        payloads.append(_group_barcode_payload(group, photos or []))
+    summary = summarize_durable_accuracy(payloads)
+    unmaterialized = max(0, int(total_groups or 0) - len(groups)) if total_groups is not None else 0
+    summary["group_barcode_accuracy_not_required"] += unmaterialized
+    summary["group_barcode_accuracy_not_eligible"] += unmaterialized
+    return summary
+
+
+def _eligible_group_photo_set_subquery(team_id: str):
+    required_count = len(REQUIRED_CATEGORIES)
+    return (
+        select(
+            Photo.group_id.label("group_id"),
+            func.count(Photo.id).label("photo_count"),
+            func.count(Photo.category.distinct()).label("category_count"),
+        )
+        .where(
+            Photo.team_id == team_id,
+            Photo.is_active.is_(True),
+            Photo.upload_status != PhotoUploadStatus.INVALID,
+            Photo.group_id.is_not(None),
+        )
+        .group_by(Photo.group_id)
+        .having(
+            func.count(Photo.id) == required_count,
+            func.count(Photo.category.distinct()) == required_count,
+            func.sum(case((Photo.category.in_(REQUIRED_CATEGORIES), 1), else_=0)) == required_count,
+        )
+        .subquery()
+    )
 
 
 def _group_lookup_id(group: Any) -> str:
@@ -1382,7 +1429,16 @@ def _group_barcode_context(group: Any) -> dict[str, Any]:
     }
 
 
-def _group_payload(session: Session, group: MaterialGroup, include_photos: bool = True) -> dict[str, Any]:
+_VERIFICATION_NOT_LOADED = object()
+
+
+def _group_payload(
+    session: Session,
+    group: MaterialGroup,
+    include_photos: bool = True,
+    *,
+    verification: Any = _VERIFICATION_NOT_LOADED,
+) -> dict[str, Any]:
     photos = []
     if include_photos:
         photos = [
@@ -1415,6 +1471,17 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
     }
     task_installer = task.construction_claimed_by if task is not None else ""
     raw = group.raw_data or {}
+    if verification is _VERIFICATION_NOT_LOADED:
+        verification = session.scalar(
+            select(GroupBarcodeVerification).where(
+                GroupBarcodeVerification.team_id == group.team_id,
+                GroupBarcodeVerification.group_id == group.id,
+            )
+        )
+    durable_verification = normalize_barcode_verification(verification, raw.get("barcode_verification") or {})
+    if durable_verification:
+        payload["barcode_verification"] = durable_verification
+        payload.update(verification_compatibility_fields(durable_verification))
     for key in (
         "collector",
         "module_asset_no",
@@ -1449,6 +1516,33 @@ def _group_payload(session: Session, group: MaterialGroup, include_photos: bool 
     if not str(payload.get("installer") or "").strip() and task_installer:
         payload["installer"] = task_installer
     return payload
+
+
+def _group_payloads(
+    session: Session,
+    groups: list[MaterialGroup],
+    *,
+    include_photos: bool,
+) -> list[dict[str, Any]]:
+    if not groups:
+        return []
+    group_ids = [group.id for group in groups]
+    verification_rows = session.scalars(
+        select(GroupBarcodeVerification).where(
+            GroupBarcodeVerification.team_id == groups[0].team_id,
+            GroupBarcodeVerification.group_id.in_(group_ids),
+        )
+    ).all()
+    verification_by_group_id = {str(row.group_id): row for row in verification_rows}
+    return [
+        _group_payload(
+            session,
+            group,
+            include_photos=include_photos,
+            verification=verification_by_group_id.get(str(group.id)),
+        )
+        for group in groups
+    ]
 
 
 def _installer_exception_group_payload(group: MaterialGroup, photo_count: int) -> dict[str, Any]:
@@ -1499,6 +1593,10 @@ def _group_target_summary(group: dict[str, Any], *, include_photos: bool = False
         **_group_photo_category_summary(photos),
         **_group_barcode_status_summary(_group_barcode_payload(group, photos)),
     }
+    durable_verification = normalize_barcode_verification(group.get("barcode_verification"))
+    if durable_verification:
+        payload["barcode_verification"] = durable_verification
+        payload.update(verification_compatibility_fields(durable_verification))
     if include_photos:
         payload["photos"] = photos
     return payload
@@ -3582,7 +3680,12 @@ class PostgresStateRepository(StateRepository):
             ).all()
             active_photo_counts = (
                 select(Photo.group_id.label("group_id"), func.count(Photo.id).label("active_photo_count"))
-                .where(Photo.team_id == team_id, Photo.is_active.is_(True), Photo.group_id.is_not(None))
+                .where(
+                    Photo.team_id == team_id,
+                    Photo.is_active.is_(True),
+                    Photo.upload_status != PhotoUploadStatus.INVALID,
+                    Photo.group_id.is_not(None),
+                )
                 .group_by(Photo.group_id)
                 .subquery()
             )
@@ -3598,8 +3701,30 @@ class PostgresStateRepository(StateRepository):
                     MaterialGroup.status,
                     MaterialGroup.photo_count,
                     MaterialGroup.raw_data,
+                    GroupBarcodeVerification.status.label("verification_status"),
+                    GroupBarcodeVerification.evidence_fingerprint.label("verification_evidence_fingerprint"),
+                    GroupBarcodeVerification.evidence_version.label("verification_evidence_version"),
+                    GroupBarcodeVerification.meter_matched.label("verification_meter_matched"),
+                    GroupBarcodeVerification.module_matched.label("verification_module_matched"),
+                    GroupBarcodeVerification.collector_matched.label("verification_collector_matched"),
+                    GroupBarcodeVerification.recognition_source.label("verification_recognition_source"),
+                    GroupBarcodeVerification.attempt_count.label("verification_attempt_count"),
+                    GroupBarcodeVerification.invalidation_reason.label("verification_invalidation_reason"),
+                    GroupBarcodeVerification.invalidated_by.label("verification_invalidated_by"),
+                    GroupBarcodeVerification.invalidated_at.label("verification_invalidated_at"),
+                    GroupBarcodeVerification.auto_archive_status.label("verification_auto_archive_status"),
+                    GroupBarcodeVerification.auto_archived_at.label("verification_auto_archived_at"),
+                    GroupBarcodeVerification.auto_archive_error.label("verification_auto_archive_error"),
+                    GroupBarcodeVerification.updated_at.label("verification_updated_at"),
                 )
                 .join(active_photo_counts, active_photo_counts.c.group_id == MaterialGroup.id)
+                .outerjoin(
+                    GroupBarcodeVerification,
+                    and_(
+                        GroupBarcodeVerification.team_id == MaterialGroup.team_id,
+                        GroupBarcodeVerification.group_id == MaterialGroup.id,
+                    ),
+                )
                 .where(MaterialGroup.team_id == team_id, active_photo_counts.c.active_photo_count == 4)
             ).all()
             complete_group_ids = [row.group_id for row in group_barcode_rows]
@@ -3614,6 +3739,9 @@ class PostgresStateRepository(StateRepository):
                         Photo.barcode,
                         Photo.collector,
                         Photo.asset_no,
+                        Photo.sha256,
+                        Photo.is_active,
+                        Photo.upload_status,
                         Photo.raw_data,
                     )
                     .where(
@@ -4391,10 +4519,7 @@ class PostgresStateRepository(StateRepository):
             if status:
                 groups = [group for group in groups if _legacy_group_status(group) == status]
             page = groups[offset : offset + limit]
-            return {
-                "total": len(groups),
-                "items": [_group_payload(session, group, include_photos=True) for group in page],
-            }
+            return {"total": len(groups), "items": _group_payloads(session, page, include_photos=True)}
 
     def list_photo_barcode_review_groups(
         self,
@@ -4405,41 +4530,125 @@ class PostgresStateRepository(StateRepository):
         offset: int = 0,
     ) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
+        capped_limit = max(1, min(int(limit or 100), 100000))
+        safe_offset = max(0, int(offset or 0))
+        normalized_status = str(status or "unreadable").strip().lower()
+        if normalized_status in {"matched", "passed", "success"}:
+            durable_statuses = PASS_STATUSES
+        elif normalized_status == "all":
+            durable_statuses = TERMINAL_STATUSES
+        elif normalized_status in {"mismatched", "failed", "review"}:
+            durable_statuses = EXCEPTION_STATUSES
+        else:
+            durable_statuses = frozenset({"unreadable"})
+
+        valid_photo_counts = _eligible_group_photo_set_subquery(team_id)
+        statement = (
+            select(MaterialGroup)
+            .join(valid_photo_counts, valid_photo_counts.c.group_id == MaterialGroup.id)
+            .join(
+                GroupBarcodeVerification,
+                and_(
+                    GroupBarcodeVerification.team_id == MaterialGroup.team_id,
+                    GroupBarcodeVerification.group_id == MaterialGroup.id,
+                ),
+            )
+            .where(
+                MaterialGroup.team_id == team_id,
+                GroupBarcodeVerification.status.in_(durable_statuses),
+            )
+        )
+        for term in [item for item in re.split(r"\s+", query.strip()) if item]:
+            pattern = f"%{term}%"
+            photo_match = (
+                select(Photo.id)
+                .where(
+                    Photo.team_id == team_id,
+                    Photo.group_id == MaterialGroup.id,
+                    Photo.is_active.is_(True),
+                    or_(
+                        Photo.barcode.ilike(pattern),
+                        Photo.collector.ilike(pattern),
+                        Photo.asset_no.ilike(pattern),
+                        Photo.creator.ilike(pattern),
+                        cast(Photo.raw_data, String).ilike(pattern),
+                    ),
+                )
+                .exists()
+            )
+            statement = statement.where(
+                or_(
+                    MaterialGroup.legacy_id.ilike(pattern),
+                    MaterialGroup.terminal.ilike(pattern),
+                    MaterialGroup.display_meter_no.ilike(pattern),
+                    MaterialGroup.installation_address.ilike(pattern),
+                    cast(MaterialGroup.raw_data, String).ilike(pattern),
+                    GroupBarcodeVerification.status.ilike(pattern),
+                    GroupBarcodeVerification.recognition_source.ilike(pattern),
+                    photo_match,
+                )
+            )
+
         with self._session() as session:
+            total = int(session.scalar(select(func.count()).select_from(statement.subquery())) or 0)
             groups = list(
                 session.scalars(
-                    select(MaterialGroup)
-                    .where(MaterialGroup.team_id == team_id)
-                    .order_by(MaterialGroup.terminal, MaterialGroup.display_meter_no, MaterialGroup.legacy_id)
+                    statement.order_by(
+                        MaterialGroup.terminal,
+                        MaterialGroup.display_meter_no,
+                        MaterialGroup.legacy_id,
+                        MaterialGroup.id,
+                    )
+                    .offset(safe_offset)
+                    .limit(capped_limit)
                 ).all()
             )
-            photos = list(
-                session.scalars(
+            group_ids = [group.id for group in groups]
+            verification_rows = []
+            photos = []
+            if group_ids:
+                verification_rows = list(
+                    session.scalars(
+                        select(GroupBarcodeVerification).where(
+                            GroupBarcodeVerification.team_id == team_id,
+                            GroupBarcodeVerification.group_id.in_(group_ids),
+                        )
+                    ).all()
+                )
+                photos = list(session.scalars(
                     select(Photo)
                     .where(
                         Photo.team_id == team_id,
                         Photo.is_active.is_(True),
-                        Photo.group_id.is_not(None),
+                        Photo.group_id.in_(group_ids),
                     )
                     .order_by(Photo.group_id, Photo.sort_order, Photo.created_at, Photo.legacy_id)
                 ).all()
-            )
+                )
         photos_by_group_id: dict[str, list[Any]] = defaultdict(list)
         for photo in photos:
             photos_by_group_id[str(photo.group_id)].append(photo)
-        payloads = [_group_barcode_payload(group, photos_by_group_id.get(str(group.id), [])) for group in groups]
+        verification_by_group_id = {str(row.group_id): row for row in verification_rows}
+        payloads = []
+        for group in groups:
+            payload = _group_barcode_payload(group, photos_by_group_id.get(str(group.id), []))
+            durable_verification = normalize_barcode_verification(
+                verification_by_group_id.get(str(group.id)),
+                (group.raw_data or {}).get("barcode_verification") or {},
+            )
+            if durable_verification:
+                payload["barcode_verification"] = durable_verification
+                payload.update(verification_compatibility_fields(durable_verification))
+            payloads.append(payload)
         statuses = _group_barcode_review_statuses(status)
         items = photo_barcode_check.list_group_barcode_review_items(payloads, statuses=statuses)
-        items = _filter_group_barcode_review_items(items, query)
-        capped_limit = max(1, min(int(limit or 100), 100000))
-        safe_offset = max(0, int(offset or 0))
         return {
-            "total": len(items),
+            "total": total,
             "limit": capped_limit,
             "offset": safe_offset,
             "page": (safe_offset // capped_limit) + 1,
             "page_size": capped_limit,
-            "items": items[safe_offset : safe_offset + capped_limit],
+            "items": items,
         }
 
     def search_group_targets(
@@ -4510,12 +4719,13 @@ class PostgresStateRepository(StateRepository):
                 .distinct()
                 .order_by(MaterialGroup.terminal)
             ).all()
+            payloads = _group_payloads(session, list(groups), include_photos=True)
             return {
                 "total": int(total),
                 "terminals": [str(item) for item in terminal_rows],
                 "items": [
-                    _group_target_summary(_group_payload(session, group, include_photos=True), include_photos=True)
-                    for group in groups
+                    _group_target_summary(payload, include_photos=True)
+                    for payload in payloads
                 ],
             }
 
@@ -4617,7 +4827,7 @@ class PostgresStateRepository(StateRepository):
                 groups = [group for group in groups if group.photo_count >= 4 and _legacy_group_status(group) not in {"incomplete", "exception", "unmatched"}]
             if status:
                 groups = [group for group in groups if _legacy_group_status(group) == status]
-            group_payloads = [_group_payload(session, group, include_photos=not summary_only) for group in groups]
+            group_payloads = _group_payloads(session, groups, include_photos=not summary_only)
             group_payloads.sort(
                 key=lambda group: (
                     _review_queue_rank(group),
@@ -4736,7 +4946,7 @@ class PostgresStateRepository(StateRepository):
                     .limit(limit)
                 ).all()
             )
-            payloads = [_group_payload(session, group, include_photos=False) for group in groups]
+            payloads = _group_payloads(session, groups, include_photos=False)
             photos_by_group_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
             group_ids = [group.id for group in groups]
             if group_ids:

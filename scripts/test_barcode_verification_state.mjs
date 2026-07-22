@@ -44,6 +44,22 @@ test('clamps durable progress to every supported 0/3 through 3/3 value', () => {
   }
 })
 
+test('ignores malformed API totals and always clamps progress to the fixed three-item contract', () => {
+  const malformedTotals = [0, 1, 4, -3, 'bad', null, undefined]
+  const malformedCounts = [-4, 0, 1, 2, 3, 9, 'bad']
+  for (const total of malformedTotals) {
+    for (const count of malformedCounts) {
+      const mapped = mapBarcodeVerificationState({
+        barcodeVerificationStatus: 'partial',
+        barcodeVerificationPassedCount: count,
+        barcodeVerificationTotalCount: total,
+      })
+      assert.equal(mapped.totalCount, 3)
+      assert.ok(['0/3', '1/3', '2/3', '3/3'].includes(mapped.progressLabel))
+    }
+  }
+})
+
 test('uses durable recognition source and keeps manual confirmation explicit', () => {
   assert.deepEqual(
     mapBarcodeVerificationState({

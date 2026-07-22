@@ -2719,6 +2719,56 @@ def demo_admin_headers() -> dict[str, str]:
     return {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
 
 
+def test_group_search_api_preserves_all_nested_durable_verification_statuses(monkeypatch) -> None:
+    statuses = [
+        "not_eligible",
+        "pending",
+        "processing",
+        "passed",
+        "partial",
+        "unreadable",
+        "mismatch",
+        "manual_confirmed",
+        "failed",
+    ]
+    items = [
+        {
+            "id": f"api-{status}",
+            "task_id": 1,
+            "terminal": "TERMINAL-API",
+            "meter_no": f"METER-{status}",
+            "status": "pending",
+            "photo_count": 4,
+            "barcode_verification": {
+                "status": status,
+                "eligible": status != "not_eligible",
+                "terminal": status in {"passed", "partial", "unreadable", "mismatch", "manual_confirmed", "failed"},
+                "recognition_source": "manual_confirmed" if status == "manual_confirmed" else "machine_barcode",
+                "evidence_version": 3,
+                "attempt_count": 1,
+                "invalidation_reason": "",
+                "result": {"passed_count": 3 if status in {"passed", "manual_confirmed"} else 1},
+            },
+        }
+        for status in statuses
+    ]
+
+    class FakeRepository:
+        def search_group_targets(self, **_kwargs):
+            return {"total": len(items), "terminals": ["TERMINAL-API"], "items": items}
+
+    monkeypatch.setattr(group_routes, "state_repository", lambda: FakeRepository())
+
+    response = client.get(
+        "/groups/search?query=METER&limit=20",
+        headers=demo_admin_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert [item["barcode_verification"]["status"] for item in payload["items"]] == statuses
+
+
 def tiny_jpeg_bytes(color: str | tuple[int, int, int] = "white") -> bytes:
     from PIL import Image
 
@@ -4322,6 +4372,13 @@ def test_group_barcode_manual_confirm_route_marks_summary_and_audits() -> None:
                 "collector": "COLLECTOR001",
                 "module_asset_no": "MOD001",
                 "photo_count": 4,
+                "barcode_verification": {
+                    "status": "unreadable",
+                    "meter_matched": False,
+                    "module_matched": False,
+                    "collector_matched": False,
+                    "recognition_source": "machine_barcode",
+                },
                 "photos": [
                     {"id": "manual-confirm-p1", "category": "before_box", "archive_status": "archived", "sha256": "a" * 64},
                     {"id": "manual-confirm-p2", "category": "collector_barcode", "archive_status": "archived", "sha256": "b" * 64},
