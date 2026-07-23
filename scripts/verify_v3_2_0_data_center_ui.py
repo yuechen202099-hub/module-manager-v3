@@ -80,6 +80,21 @@ def main() -> None:
         "group photo object URL fetch must accept AbortSignal",
     )
     assert_contains(
+        services,
+        "returnDataCenterGroupToException",
+        "services must expose a data-center return exception endpoint",
+    )
+    assert_contains(
+        services,
+        "/groups/data-center/groups/${encodeURIComponent(groupId)}/return-exception",
+        "data-center return exception must not call local-test",
+    )
+    assert_contains(
+        groups_route,
+        '@router.patch("/data-center/groups/{group_id}/return-exception")',
+        "backend must expose admin data-center return exception endpoint",
+    )
+    assert_contains(
         dialog,
         "photoAbortController",
         "dialog must abort in-flight photo fetches on cleanup",
@@ -88,6 +103,32 @@ def main() -> None:
         dialog,
         "fetchGroupPhotoObjectUrl(next.id, photo.id, 'preview',",
         "dialog must pass AbortSignal into photo object URL fetch",
+    )
+    assert_contains(
+        dialog,
+        "returnDataCenterGroupToException",
+        "formal group dialog must use the data-center return exception service",
+    )
+    assert_contains(
+        dialog,
+        ":data-center=\"true\"",
+        "data-center unmatched dialog must run in data-center mode",
+    )
+    assert_contains(
+        dialog,
+        ":finalize-match=\"finalizeDataCenterUnmatchedFromDialog\"",
+        "data-center unmatched dialog must inject the data-center finalize callback",
+    )
+    unmatched_dialog = read("v2-web/src/components/UnmatchedReviewDialog.vue")
+    assert_contains(
+        unmatched_dialog,
+        "finalizeMatch?:",
+        "UnmatchedReviewDialog must accept an injected finalize callback",
+    )
+    assert_contains(
+        unmatched_dialog,
+        "props.dataCenter",
+        "UnmatchedReviewDialog must expose data-center mode behavior",
     )
 
 

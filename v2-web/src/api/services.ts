@@ -1739,6 +1739,25 @@ export async function finalizeDataCenterUnmatchedToGroup(
   return { groupId: data.group?.id ? String(data.group.id) : '' }
 }
 
+export async function returnDataCenterGroupToException(
+  groupId: string,
+  payload: { category: string; note: string; reason?: string },
+): Promise<{ group: MaterialGroup }> {
+  const data = await api<{ group?: BackendGroup }>(
+    `/groups/data-center/groups/${encodeURIComponent(groupId)}/return-exception`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({
+        category: payload.category,
+        note: payload.note,
+        reason: payload.reason || payload.note,
+        source_page: 'data_center',
+      }),
+    },
+  )
+  return { group: mapGroup(data.group || ({} as BackendGroup)) }
+}
+
 export async function resetAdminGroupToUnreviewed(
   groupId: string,
   reason = '',

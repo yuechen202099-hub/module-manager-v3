@@ -8,7 +8,7 @@ import {
   fetchUnmatchedMatchCandidates,
   fetchUnmatchedReview,
   fetchUnmatchedReviewPhotoObjectUrl,
-  finalizeUnmatchedMatch,
+  finalizeUnmatchedMatch as finalizeLocalUnmatchedMatch,
   getApiErrorStatus,
   rescanUnmatchedReviewPhoto,
   saveUnmatchedReview,
@@ -18,7 +18,20 @@ import type { BarcodeType, RegionScanRequest, RegionScanResult, UnmatchedMatchCa
 import ReviewImageInspector from '@/components/ReviewImageInspector.vue'
 import { useAuthStore } from '@/stores/auth'
 
-const props = defineProps<{ modelValue: boolean; unmatchedId: string }>()
+type FinalizeMatchPayload = {
+  unmatchedId: string
+  terminal: string
+  meterNo: string
+  candidateKey: string
+  expectedVersion: number
+}
+
+const props = defineProps<{
+  modelValue: boolean
+  unmatchedId: string
+  dataCenter?: boolean
+  finalizeMatch?: (payload: FinalizeMatchPayload) => Promise<string>
+}>()
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   matched: [groupId: string]
@@ -65,6 +78,7 @@ const pagedCandidates = computed(() => {
   const start = (candidatePage.value - 1) * candidatePageSize
   return candidates.value.slice(start, start + candidatePageSize)
 })
+const selectedCandidate = computed(() => candidates.value.find((item) => item.candidateKey === selectedCandidateKey.value) || null)
 
 const categoryOptions = [
   { value: 'before_box', label: '施工前' },
@@ -499,16 +513,25 @@ async function loadMatchCandidates() {
   }
 }
 
-async function finalizeMatch() {
+async function finalizeSelectedMatch() {
   if (!isAdmin.value || !detail.value || !selectedCandidateKey.value || finalizing.value) return
   const unmatchedId = props.unmatchedId
   const candidateKey = selectedCandidateKey.value
   const expectedVersion = detail.value.version
+  const candidate = selectedCandidate.value
   const mutationSession = mutationSessionSerial
   finalizing.value = true
   errorMessage.value = ''
   try {
-    const groupId = await finalizeUnmatchedMatch(unmatchedId, candidateKey, expectedVersion)
+    const groupId = props.finalizeMatch
+      ? await props.finalizeMatch({
+        unmatchedId,
+        terminal: candidate?.terminal || detail.value.record.terminal || '',
+        meterNo: candidate?.meterNo || detail.value.meterNo || '',
+        candidateKey,
+        expectedVersion,
+      })
+      : await finalizeLocalUnmatchedMatch(unmatchedId, candidateKey, expectedVersion)
     if (!isCurrentMutation(mutationSession, unmatchedId)) return
     ElMessage.success('已匹配清单')
     emit('matched', groupId)
@@ -595,7 +618,7 @@ onUnmounted(() => {
   >
     <template #header>
       <div class="unmatched-review-title">
-        <strong>{{ mode === 'review' ? '扫码未匹配审阅' : '匹配清单' }}</strong>
+        <strong>{{ mode === 'review' ? (props.dataCenter ? '数据中台未匹配审阅' : '扫码未匹配审阅') : '匹配清单' }}</strong>
         <span>{{ detail?.record.barcode || detail?.record.meterNo || unmatchedId }}</span>
       </div>
     </template>
@@ -705,7 +728,7 @@ onUnmounted(() => {
             :total="candidates.length"
             :page-size="candidatePageSize"
           />
-          <el-button v-if="isAdmin" type="primary" :loading="finalizing" :disabled="!selectedCandidateKey" @click="finalizeMatch">
+          <el-button v-if="isAdmin" type="primary" :loading="finalizing" :disabled="!selectedCandidateKey" @click="finalizeSelectedMatch">
             确认匹配清单
           </el-button>
         </div>

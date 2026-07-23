@@ -3169,9 +3169,11 @@ def test_postgres_construction_upload_rejects_zero_terminal_before_mutation() ->
         def scalar(self, _statement):
             return task
 
+    session = FakeSession()
+
     class TestPostgresRepository(repository.PostgresStateRepository):
         def _session(self):
-            return FakeSession()
+            return session
 
         def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
             assert group_id == "g-zero-terminal"
@@ -7120,6 +7122,7 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
     class FakeSession:
         def __init__(self):
             self.scalar_calls = 0
+            self.commits = 0
 
         def __enter__(self):
             return self
@@ -7138,14 +7141,17 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
             return None
 
         def commit(self):
+            self.commits += 1
             events.append("commit")
 
         def refresh(self, _obj):
             return None
 
+    session = FakeSession()
+
     class TestPostgresRepository(repository.PostgresStateRepository):
         def _session(self):
-            return FakeSession()
+            return session
 
         def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
             assert group_id == "g-1"
@@ -7155,8 +7161,19 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
         def _ensure_task_claimed_by(self, *_args, **_kwargs) -> None:
             pytest.fail("data center admin classification must not depend on review claim")
 
-        def _enqueue_delivery_cache_after_commit(self, group_id: str, *, actor: str, reason: str, **_kwargs) -> None:
-            events.append(("requeue", group_id, actor, reason))
+        def _stage_data_center_auto_archive_delivery_jobs(
+            self,
+            _session,
+            checked_group,
+            *,
+            group_payload,
+            actor: str,
+            reason: str,
+        ) -> str:
+            assert checked_group is group
+            assert group_payload["id"] == "g-1"
+            events.append(("stage-delivery", actor, reason, session.commits))
+            return "pending"
 
     result = TestPostgresRepository().classify_data_center_group_photo(
         "g-1",
@@ -7172,7 +7189,8 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
     assert group.raw_data["archive_status"] == "archived"
     assert verification.auto_archive_status == "archived"
     assert all(photo.archive_status == "archived" for photo in photos)
-    assert events == ["invalidate", "commit", ("requeue", "g-1", "admin-a", "data_center_auto_archive")]
+    assert events == ["invalidate", ("stage-delivery", "admin-a", "data_center_auto_archive", 0), "commit"]
+    assert result["delivery_package_job_status"] == "pending"
     audit = next(item for item in audits if item["action"] == "data_center_photo_classified")
     assert audit["payload"]["source_page"] == "data_center"
     assert audit["payload"]["source"] == "data_center"
@@ -7180,6 +7198,497 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
     assert audit["payload"]["reason"] == "补齐最后一张分类"
     assert audit["before_data"]["category"] == "unclassified"
     assert audit["after_data"]["category"] == "after_box"
+
+
+def test_postgres_data_center_classify_rolls_back_archive_when_package_enqueue_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache, delivery_package_queue
+
+    events: list[object] = []
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        delivery_cache,
+        "invalidate_postgres_delivery_cache_for_group_change",
+        lambda *_args, **_kwargs: events.append("invalidate"),
+    )
+    monkeypatch.setattr(repository, "_stage_transactional_audit", lambda *_args, **kwargs: audits.append(kwargs))
+    monkeypatch.setattr(
+        delivery_package_queue,
+        "request_postgres_delivery_package",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected package enqueue failure")),
+    )
+
+    group = SimpleNamespace(
+        id="group-uuid",
+        team_id="alpha-team",
+        task_id=None,
+        legacy_id="g-1",
+        legacy_task_id=1,
+        terminal="120000000001",
+        display_meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        meter_match_key="0000288056",
+        installation_address="A road",
+        has_archive_blocker=False,
+        status=repository.GroupStatus.UNREVIEWED,
+        reviewer=None,
+        review_note="",
+        reviewed_at=None,
+        exception_note="",
+        exception_reasons=[],
+        photo_count=4,
+        raw_data={
+            "meter_no": "110000288056",
+            "module_asset_no": "MOD001",
+            "collector": "COLLECTOR001",
+            "status": "pending",
+            "archive_status": "pending",
+        },
+        updated_at=None,
+    )
+
+    def make_photo(photo_id: str, category: str, sha: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=f"{photo_id}-uuid",
+            legacy_id=photo_id,
+            team_id="alpha-team",
+            group_id="group-uuid",
+            image_url=f"https://example.test/{photo_id}.jpg",
+            source_url="",
+            storage_type="external_url",
+            storage_bucket="",
+            storage_key="",
+            sha256=sha * 64,
+            category=category,
+            archive_filename="",
+            archive_status="pending",
+            archived_at=None,
+            classified_by="",
+            classified_at=None,
+            sort_order=1,
+            barcode="",
+            collector="",
+            asset_no="",
+            creator="",
+            raw_data={"upload_status": "uploaded", "is_active": True},
+            is_active=True,
+        )
+
+    photos = [
+        make_photo("p-1", "before_box", "a"),
+        make_photo("p-2", "collector_barcode", "b"),
+        make_photo("p-3", "module_meter", "c"),
+        make_photo("p-4", "unclassified", "d"),
+    ]
+    target_photo = photos[-1]
+    future_payload = {
+        **group.raw_data,
+        "id": group.legacy_id,
+        "terminal": group.terminal,
+        "meter_no": group.display_meter_no,
+        "meter_match_key": group.meter_match_key,
+        "photos": [
+            {
+                "id": photo.legacy_id,
+                "category": "after_box" if photo is target_photo else photo.category,
+                "sha256": photo.sha256,
+                "upload_status": "uploaded",
+                "is_active": True,
+            }
+            for photo in photos
+        ],
+    }
+    eligibility = evaluate_group_eligibility(future_payload)
+    verification = SimpleNamespace(
+        id="verification-uuid",
+        team_id="alpha-team",
+        group_id="group-uuid",
+        status="passed",
+        evidence_fingerprint=eligibility.evidence_fingerprint,
+        evidence_version=3,
+        meter_matched=True,
+        module_matched=True,
+        collector_matched=True,
+        recognition_source="machine_barcode",
+        result={"passed_count": 3, "matched_fields": ["meter", "module", "collector"], "missing_fields": []},
+        auto_archive_status="pending",
+        auto_archive_attempt_count=0,
+        auto_archive_lease_owner=None,
+        auto_archive_lease_token=None,
+        auto_archive_lease_expires_at=None,
+        auto_archive_error=None,
+    )
+    group_before = deepcopy(vars(group))
+    photos_before = [deepcopy(vars(photo)) for photo in photos]
+    verification_before = deepcopy(vars(verification))
+
+    class FakeScalarResult:
+        def all(self):
+            return photos
+
+    class FakeSession:
+        def __init__(self):
+            self.scalar_calls = 0
+            self.commits = 0
+            self.rollbacks = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, _exc, _tb):
+            if exc_type is not None:
+                self.rollback()
+            return False
+
+        def scalar(self, _statement):
+            self.scalar_calls += 1
+            return target_photo if self.scalar_calls == 1 else verification
+
+        def scalars(self, _statement):
+            return FakeScalarResult()
+
+        def add(self, _value):
+            return None
+
+        def commit(self):
+            self.commits += 1
+
+        def refresh(self, _obj):
+            return None
+
+        def rollback(self):
+            self.rollbacks += 1
+            vars(group).clear()
+            vars(group).update(deepcopy(group_before))
+            for photo, before in zip(photos, photos_before, strict=True):
+                vars(photo).clear()
+                vars(photo).update(deepcopy(before))
+            vars(verification).clear()
+            vars(verification).update(deepcopy(verification_before))
+
+    session = FakeSession()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert group_id == "g-1"
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, *_args, **_kwargs) -> None:
+            pytest.fail("data center admin classification must not depend on review claim")
+
+        def _enqueue_delivery_cache_after_commit(self, *_args, **_kwargs) -> None:
+            pytest.fail("data center auto archive must enqueue delivery cache inside the same transaction")
+
+    with pytest.raises(RuntimeError, match="injected package enqueue failure"):
+        TestPostgresRepository().classify_data_center_group_photo(
+            "g-1",
+            "p-4",
+            "after_box",
+            actor="admin-a",
+            reason="补齐最后一张分类",
+            source_page="data_center",
+        )
+
+    assert session.commits == 0
+    assert session.rollbacks == 1
+    assert vars(group) == group_before
+    assert [vars(photo) for photo in photos] == photos_before
+    assert vars(verification) == verification_before
+    assert audits == []
+
+
+def test_postgres_data_center_classify_rolls_back_archive_when_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
+    events: list[object] = []
+    monkeypatch.setattr(
+        delivery_cache,
+        "invalidate_postgres_delivery_cache_for_group_change",
+        lambda *_args, **_kwargs: events.append("invalidate"),
+    )
+
+    group = SimpleNamespace(
+        id="group-uuid",
+        team_id="alpha-team",
+        task_id=None,
+        legacy_id="g-1",
+        legacy_task_id=1,
+        terminal="120000000001",
+        display_meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        meter_match_key="0000288056",
+        installation_address="A road",
+        has_archive_blocker=False,
+        status=repository.GroupStatus.UNREVIEWED,
+        reviewer=None,
+        review_note="",
+        reviewed_at=None,
+        exception_note="",
+        exception_reasons=[],
+        photo_count=4,
+        raw_data={
+            "meter_no": "110000288056",
+            "module_asset_no": "MOD001",
+            "collector": "COLLECTOR001",
+            "status": "pending",
+            "archive_status": "pending",
+        },
+        updated_at=None,
+    )
+
+    def make_photo(photo_id: str, category: str, sha: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=f"{photo_id}-uuid",
+            legacy_id=photo_id,
+            team_id="alpha-team",
+            group_id="group-uuid",
+            image_url=f"https://example.test/{photo_id}.jpg",
+            source_url="",
+            storage_type="external_url",
+            storage_bucket="",
+            storage_key="",
+            sha256=sha * 64,
+            category=category,
+            archive_filename="",
+            archive_status="pending",
+            archived_at=None,
+            classified_by="",
+            classified_at=None,
+            sort_order=1,
+            barcode="",
+            collector="",
+            asset_no="",
+            creator="",
+            raw_data={"upload_status": "uploaded", "is_active": True},
+            is_active=True,
+        )
+
+    photos = [
+        make_photo("p-1", "before_box", "a"),
+        make_photo("p-2", "collector_barcode", "b"),
+        make_photo("p-3", "module_meter", "c"),
+        make_photo("p-4", "unclassified", "d"),
+    ]
+    target_photo = photos[-1]
+    future_payload = {
+        **group.raw_data,
+        "id": group.legacy_id,
+        "terminal": group.terminal,
+        "meter_no": group.display_meter_no,
+        "meter_match_key": group.meter_match_key,
+        "photos": [
+            {
+                "id": photo.legacy_id,
+                "category": "after_box" if photo is target_photo else photo.category,
+                "sha256": photo.sha256,
+                "upload_status": "uploaded",
+                "is_active": True,
+            }
+            for photo in photos
+        ],
+    }
+    eligibility = evaluate_group_eligibility(future_payload)
+    verification = SimpleNamespace(
+        id="verification-uuid",
+        team_id="alpha-team",
+        group_id="group-uuid",
+        status="passed",
+        evidence_fingerprint=eligibility.evidence_fingerprint,
+        evidence_version=3,
+        meter_matched=True,
+        module_matched=True,
+        collector_matched=True,
+        recognition_source="machine_barcode",
+        result={"passed_count": 3, "matched_fields": ["meter", "module", "collector"], "missing_fields": []},
+        auto_archive_status="pending",
+        auto_archive_attempt_count=0,
+        auto_archive_lease_owner=None,
+        auto_archive_lease_token=None,
+        auto_archive_lease_expires_at=None,
+        auto_archive_error=None,
+    )
+    group_before = deepcopy(vars(group))
+    photos_before = [deepcopy(vars(photo)) for photo in photos]
+    verification_before = deepcopy(vars(verification))
+
+    class FakeScalarResult:
+        def all(self):
+            return photos
+
+    class FakeSession:
+        def __init__(self):
+            self.scalar_calls = 0
+            self.rollbacks = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, _exc, _tb):
+            if exc_type is not None:
+                self.rollback()
+            return False
+
+        def scalar(self, _statement):
+            self.scalar_calls += 1
+            return target_photo if self.scalar_calls == 1 else verification
+
+        def scalars(self, _statement):
+            return FakeScalarResult()
+
+        def add(self, _value):
+            return None
+
+        def commit(self):
+            raise RuntimeError("injected postgres commit failure")
+
+        def refresh(self, _obj):
+            return None
+
+        def rollback(self):
+            self.rollbacks += 1
+            vars(group).clear()
+            vars(group).update(deepcopy(group_before))
+            for photo, before in zip(photos, photos_before, strict=True):
+                vars(photo).clear()
+                vars(photo).update(deepcopy(before))
+            vars(verification).clear()
+            vars(verification).update(deepcopy(verification_before))
+
+    session = FakeSession()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert group_id == "g-1"
+            assert lock is True
+            return group
+
+        def _stage_data_center_auto_archive_delivery_jobs(
+            self,
+            _session,
+            checked_group,
+            *,
+            group_payload,
+            actor: str,
+            reason: str,
+        ) -> str:
+            assert checked_group is group
+            events.append(("stage-delivery", actor, reason))
+            return "pending"
+
+    with pytest.raises(RuntimeError, match="injected postgres commit failure"):
+        TestPostgresRepository().classify_data_center_group_photo(
+            "g-1",
+            "p-4",
+            "after_box",
+            actor="admin-a",
+            reason="补齐最后一张分类",
+            source_page="data_center",
+        )
+
+    assert session.rollbacks == 1
+    assert vars(group) == group_before
+    assert [vars(photo) for photo in photos] == photos_before
+    assert vars(verification) == verification_before
+    assert events == ["invalidate", ("stage-delivery", "admin-a", "data_center_auto_archive")]
+
+
+def test_postgres_data_center_manual_confirm_bypasses_review_claim_and_audits_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+    from app.services import barcode_maintenance_worker
+
+    group, photos, verification = _postgres_manual_confirmation_fixture()
+    staged_audits = []
+    _patch_postgres_manual_confirmation_helpers(monkeypatch, staged_audits)
+    monkeypatch.setattr(
+        delivery_cache,
+        "invalidate_postgres_delivery_cache_for_group_change",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        barcode_maintenance_worker,
+        "auto_archive_verified_group",
+        lambda *_args, **_kwargs: {"archived": False, "reason": "not_ready"},
+    )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalar(self, _statement):
+            return verification
+
+        def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: photos)
+
+        def add(self, _value) -> None:
+            return None
+
+        def commit(self) -> None:
+            return None
+
+        def refresh(self, _value) -> None:
+            return None
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert group_id == "group-manual-pg"
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, *_args, **_kwargs) -> None:
+            raise ValueError("Task is already claimed by another reviewer")
+
+        def _enqueue_delivery_cache_after_commit(self, *_args, **_kwargs) -> None:
+            return None
+
+        def get_group(self, group_id: str):
+            assert group_id == "group-manual-pg"
+            return {
+                "id": group.legacy_id,
+                "meter_no": group.display_meter_no,
+                "meter_match_key": group.meter_match_key,
+                **group.raw_data,
+            }
+
+    result = TestRepository().manual_confirm_group_barcode(
+        "group-manual-pg",
+        actor="admin-a",
+        reason="数据中台人工确认",
+        source_page="data_center",
+        meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        photo_ids=[photo.legacy_id for photo in photos],
+    )
+
+    assert result["barcode_status"] == "manual_passed"
+    audit = staged_audits[0]
+    assert audit["payload"]["source_page"] == "data_center"
+    assert audit["payload"]["source"] == "data_center"
+    assert audit["payload"]["actor"] == "admin-a"
+    assert audit["payload"]["reason"] == "数据中台人工确认"
+    assert "before" in audit["payload"]
+    assert "after" in audit["payload"]
 
 
 def test_postgres_same_category_rearchive_invalidates_before_commit_and_requeues_after_commit(

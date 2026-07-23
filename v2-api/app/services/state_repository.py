@@ -161,21 +161,23 @@ def _json_enrich_latest_audit_payload(
     source_page: str,
     actor: str,
     reason: str = "",
+    before: Mapping[str, Any] | None = None,
+    after: Mapping[str, Any] | None = None,
 ) -> None:
     state = local_simulation.get_state()
     for event in reversed(state.get("audit_events", [])):
         if event.get("action") != action:
             continue
         payload = event.setdefault("payload", {})
-        before = payload.get("before") or payload.get("previous") or {}
-        after = payload.get("after") or payload.get("updates") or {}
+        before_payload = before if before is not None else payload.get("before") or payload.get("previous") or {}
+        after_payload = after if after is not None else payload.get("after") or payload.get("updates") or {}
         payload.update(
             _data_center_audit_payload(
                 source_page=source_page,
                 actor=actor,
                 reason=reason or str(payload.get("reason") or ""),
-                before=before if isinstance(before, Mapping) else {},
-                after=after if isinstance(after, Mapping) else {},
+                before=before_payload if isinstance(before_payload, Mapping) else {},
+                after=after_payload if isinstance(after_payload, Mapping) else {},
             )
         )
         return
@@ -2618,6 +2620,19 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def return_data_center_group_to_exception_order(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        category: str,
+        note: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def finalize_unmatched_to_group(
         self,
         unmatched_id: str,
@@ -2801,6 +2816,7 @@ class StateRepository(ABC):
         reason: str,
         photo_ids: list[str],
         source_page: str = "",
+        require_claim: bool = True,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -3699,6 +3715,7 @@ class JsonStateRepository(StateRepository):
             collector=collector,
             reason=reason,
             photo_ids=photo_ids,
+            require_claim=False,
         )
         _json_enrich_latest_audit_payload(
             "group_barcode_manual_confirmed",
@@ -3725,6 +3742,50 @@ class JsonStateRepository(StateRepository):
             delivery_package_job_status=package_status,
             archive_result=archive_result,
         )
+
+    def return_data_center_group_to_exception_order(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        category: str,
+        note: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        before = deepcopy(local_simulation.get_group(group_id) or {})
+        result = self.return_group_to_exception_order(
+            group_id,
+            actor=actor,
+            category=category,
+            note=note,
+            force=True,
+        )
+        group = local_simulation.get_group(group_id)
+        if group is None:
+            raise KeyError(group_id)
+        group["exception_status"] = "open"
+        _json_enrich_latest_audit_payload(
+            "group_returned_to_exception_order",
+            source_page=source_page,
+            actor=actor,
+            reason=reason or note or "data_center_return_exception",
+            before={
+                "status": before.get("status", ""),
+                "exception_status": before.get("exception_status", ""),
+                "exception_note": before.get("exception_note", ""),
+                "exception_reasons": before.get("exception_reasons", []),
+                "has_archive_blocker": bool(before.get("has_archive_blocker")),
+            },
+            after={
+                "status": group.get("status", ""),
+                "exception_status": group.get("exception_status", ""),
+                "exception_note": group.get("exception_note", ""),
+                "exception_reasons": group.get("exception_reasons", []),
+                "has_archive_blocker": bool(group.get("has_archive_blocker")),
+            },
+        )
+        return result
 
     def finalize_unmatched_to_group(
         self,
@@ -4087,6 +4148,7 @@ class JsonStateRepository(StateRepository):
         reason: str,
         photo_ids: list[str],
         source_page: str = "",
+        require_claim: bool = True,
     ) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         transaction = local_simulation.active_authoritative_json_write(team_id)
@@ -4104,6 +4166,7 @@ class JsonStateRepository(StateRepository):
                 collector=collector,
                 reason=reason,
                 photo_ids=photo_ids,
+                require_claim=require_claim,
             )
         except BaseException:
             if owns_transaction:
@@ -4846,8 +4909,11 @@ class PostgresStateRepository(StateRepository):
             filters.append(source.c.barcode_status == query.barcode_status)
         if query.classification_status != "all":
             filters.append(source.c.classification_status == query.classification_status)
-        if query.exception_status.strip():
-            filters.append(source.c.exception_status == query.exception_status.strip())
+        requested_exception = query.exception_status.strip()
+        if requested_exception == "none":
+            filters.append(source.c.exception_status == "")
+        elif requested_exception:
+            filters.append(source.c.exception_status == requested_exception)
         if query.installer.strip():
             filters.append(func.lower(source.c.installer).like(f"%{query.installer.strip().lower()}%"))
         if query.terminal.strip():
@@ -7563,6 +7629,41 @@ class PostgresStateRepository(StateRepository):
         group_payload = self.get_group(group_id) or result.get("group") or {}
         return _data_center_group_result(group_payload, changed_fields=changed_fields)
 
+    def _stage_data_center_auto_archive_delivery_jobs(
+        self,
+        session: Session,
+        group: MaterialGroup,
+        *,
+        group_payload: dict[str, Any],
+        actor: str,
+        reason: str,
+    ) -> str:
+        from app.services.delivery_cache import sync_postgres_delivery_cache_job_for_group
+        from app.services.delivery_package_queue import DeliveryPackageNotReady, request_postgres_delivery_package
+
+        if hasattr(session, "flush"):
+            sync_postgres_delivery_cache_job_for_group(
+                session,
+                group,
+                group_payload=group_payload,
+                actor=actor,
+                reason=reason,
+            )
+        try:
+            request_postgres_delivery_package(
+                session,
+                groups=[group_payload],
+                team_id=group.team_id,
+                task_id=int(group.legacy_task_id or 0) or None,
+                terminal=str(group.terminal or ""),
+                review_scope="reviewed",
+                requested_by=actor,
+                auto_commit=False,
+            )
+            return "ready"
+        except DeliveryPackageNotReady as exc:
+            return exc.status
+
     def classify_data_center_group_photo(
         self,
         group_id: str,
@@ -7578,6 +7679,7 @@ class PostgresStateRepository(StateRepository):
         if category not in local_simulation.PHOTO_CATEGORIES:
             raise ValueError(f"Unsupported photo category: {category}")
         should_enqueue = False
+        package_status = ""
         group_payload: dict[str, Any] = {}
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
@@ -7740,6 +7842,33 @@ class PostgresStateRepository(StateRepository):
                 verification.auto_archive_lease_expires_at = None
                 verification.auto_archive_error = None
                 should_enqueue = True
+                group_payload = _group_payload(session, group, include_photos=True, verification=verification)
+                package_status = self._stage_data_center_auto_archive_delivery_jobs(
+                    session,
+                    group,
+                    group_payload=group_payload,
+                    actor=actor,
+                    reason="data_center_auto_archive",
+                )
+                _stage_transactional_audit(
+                    session,
+                    team_id=group.team_id,
+                    actor=actor,
+                    action="data_center_delivery_package_requested",
+                    entity_type="material_group",
+                    entity_id=group.id,
+                    payload=_data_center_audit_payload(
+                        source_page=source_page,
+                        actor=actor,
+                        reason="data_center_auto_archive",
+                        before={"archive_status": "pending"},
+                        after={
+                            "archive_status": "archived",
+                            "delivery_package_job_status": package_status,
+                        },
+                        group_id=str(group.legacy_id or group.id),
+                    ),
+                )
             after = {
                 "category": str(photo.category or ""),
                 "archive_status": str(photo.archive_status or ""),
@@ -7767,16 +7896,12 @@ class PostgresStateRepository(StateRepository):
             )
             session.commit()
             session.refresh(photo)
-            group_payload = _group_payload(session, group, verification=verification)
-        if should_enqueue:
-            self._enqueue_delivery_cache_after_commit(
-                group_id,
-                actor=actor,
-                reason="data_center_auto_archive",
-            )
+            if not group_payload:
+                group_payload = _group_payload(session, group, verification=verification)
         return _data_center_group_result(
             group_payload,
             changed_fields=["photo.category"],
+            delivery_package_job_status=package_status,
             archive_result={"archived": should_enqueue, "group_id": group_id},
         )
 
@@ -7906,6 +8031,7 @@ class PostgresStateRepository(StateRepository):
             reason=reason,
             photo_ids=photo_ids,
             source_page=source_page,
+            require_claim=False,
         )
         from app.services.barcode_maintenance_worker import auto_archive_verified_group
         from app.services.delivery_package_queue import DeliveryPackageNotReady
@@ -9083,13 +9209,15 @@ class PostgresStateRepository(StateRepository):
         reason: str,
         photo_ids: list[str],
         source_page: str = "",
+        require_claim: bool = True,
     ) -> dict[str, Any]:
         from app.services.group_barcode_verification import evaluate_group_eligibility
 
         identity_changed = False
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
-            self._ensure_task_claimed_by(session, group, actor)
+            if require_claim:
+                self._ensure_task_claimed_by(session, group, actor)
             formal_values = {
                 "meter_no": meter_no.strip(),
                 "module_asset_no": module_asset_no.strip(),
@@ -10693,6 +10821,108 @@ class PostgresStateRepository(StateRepository):
                 "order": {**self._exception_order_payload(session, order, group), "created_by": actor},
             }
 
+    def return_data_center_group_to_exception_order(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        category: str,
+        note: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        note = note.strip()
+        if not note:
+            raise ValueError("Exception reason is required")
+        category = category.strip() or "other"
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=True)
+            before = {
+                "status": _legacy_group_status(group),
+                "exception_status": str(group.exception_status or ""),
+                "exception_note": str(group.exception_note or ""),
+                "exception_reasons": list(group.exception_reasons or []),
+                "has_archive_blocker": bool(group.has_archive_blocker),
+            }
+            group.status = GroupStatus.REJECTED
+            group.reviewer = actor
+            group.review_note = ""
+            group.exception_status = "open"
+            group.exception_note = note
+            group.exception_reasons = [category, note] if category != note else [category]
+            group.has_archive_blocker = True
+            group.reviewed_at = None
+            raw_data = dict(group.raw_data or {})
+            raw_data.update(
+                {
+                    "status": "exception",
+                    "exception_status": "open",
+                    "exception_note": note,
+                    "exception_category": category,
+                    "exception_reasons": group.exception_reasons,
+                    "has_archive_blocker": True,
+                }
+            )
+            group.raw_data = raw_data
+            order = ExceptionItem(
+                team_id=group.team_id,
+                project_id=group.project_id,
+                group_id=group.id,
+                task_id=group.task_id,
+                category=category,
+                description=note,
+                status=ExceptionStatus.OPEN,
+            )
+            session.add(order)
+            invalidate_verification_for_group(
+                session,
+                group,
+                actor=actor,
+                reason="returned_to_exception_order",
+            )
+            from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor=actor,
+                reason="returned_to_exception_order",
+            )
+            after = {
+                "status": _legacy_group_status(group),
+                "exception_status": str(group.exception_status or ""),
+                "exception_note": str(group.exception_note or ""),
+                "exception_reasons": list(group.exception_reasons or []),
+                "has_archive_blocker": bool(group.has_archive_blocker),
+            }
+            _stage_transactional_audit(
+                session,
+                team_id=group.team_id,
+                actor=actor,
+                action="group_returned_to_exception_order",
+                entity_type="material_group",
+                entity_id=group.id,
+                before_data=before,
+                after_data=after,
+                payload=_data_center_audit_payload(
+                    source_page=source_page,
+                    actor=actor,
+                    reason=reason or note or "data_center_return_exception",
+                    before=before,
+                    after=after,
+                    group_id=group.legacy_id or str(group.id),
+                    category=category,
+                    note=note,
+                ),
+            )
+            session.commit()
+            session.refresh(group)
+            session.refresh(order)
+            return {
+                "group": _group_payload(session, group),
+                "order": {**self._exception_order_payload(session, order, group), "created_by": actor},
+            }
+
 
 class DualWriteStateRepository(JsonStateRepository):
     """Dual mode keeps JSON authoritative while mirroring core writes to PostgreSQL."""
@@ -10916,6 +11146,7 @@ class DualWriteStateRepository(JsonStateRepository):
         reason: str,
         photo_ids: list[str],
         source_page: str = "",
+        require_claim: bool = True,
     ) -> dict[str, Any]:
         self._reject_uncoordinated_dual_write("confirm_group_barcode_manually")
 
@@ -11134,6 +11365,35 @@ class DualWriteStateRepository(JsonStateRepository):
     def bulk_archive_groups(self, group_ids: list[str], *, actor: str, reason: str = "") -> dict[str, Any]:
         result = super().bulk_archive_groups(group_ids, actor=actor, reason=reason)
         self._mirror_write("bulk_archive_groups", group_ids, actor=actor, reason=reason)
+        return result
+
+    def return_data_center_group_to_exception_order(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        category: str,
+        note: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        result = super().return_data_center_group_to_exception_order(
+            group_id,
+            actor=actor,
+            category=category,
+            note=note,
+            reason=reason,
+            source_page=source_page,
+        )
+        self._mirror_write(
+            "return_data_center_group_to_exception_order",
+            group_id,
+            actor=actor,
+            category=category,
+            note=note,
+            reason=reason,
+            source_page=source_page,
+        )
         return result
 
     def return_group_to_exception_order(

@@ -213,7 +213,11 @@ def row_passes_filters(row: Mapping[str, Any], query: DataCenterQuery) -> bool:
     ):
         if requested != "all" and row.get(attr) != requested:
             return False
-    if query.exception_status.strip() and row.get("exception_status") != query.exception_status.strip():
+    requested_exception = query.exception_status.strip()
+    if requested_exception == "none":
+        if str(row.get("exception_status") or "").strip():
+            return False
+    elif requested_exception and row.get("exception_status") != requested_exception:
         return False
     if query.installer.strip() and query.installer.strip().lower() not in str(row.get("installer") or "").lower():
         return False

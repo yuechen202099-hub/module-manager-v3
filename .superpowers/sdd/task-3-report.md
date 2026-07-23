@@ -107,3 +107,44 @@
 
 - 未匹配弹窗仍复用既有 `UnmatchedReviewDialog` 视觉和交互；本轮补了数据中台 finalize wrapper 审计 source 与 `00000000` 拒绝，但未单独重做未匹配弹窗。
 - 构建警告为既有 vendor/chunk 体积与第三方注释警告，未在本任务范围内处理。
+
+---
+
+## 第二轮复审修复追加
+
+### 修复项
+
+- Critical：Postgres data-center 分类最后一张后，在同一个 `session`/事务内完成自动归档、delivery cache job staging、pending/ready DeliveryPackageJob 创建或复用，以及 `data_center_delivery_package_requested` 审计；`auto_commit=False` 禁止 package request 自行 commit/rollback，enqueue 或 commit 失败整体回滚。
+- Important 1：`manual_confirm_group_barcode` 增加内部 `require_claim` 参数，旧端点默认仍要求 claim；data-center wrapper 传 `require_claim=False`，未认领/他人认领任务可由管理员确认并写 `source_page/source=data_center` 审计。
+- Important 2：新增 `return_data_center_group_to_exception_order` repository/service 和 `/groups/data-center/groups/{group_id}/return-exception` 管理员端点，前端正式组弹窗改用新 service；退回异常审计写 actor、reason、source_page/source、before、after。
+- Important 3：`UnmatchedReviewDialog` 支持 data-center 模式和注入 finalize callback；数据中台弹窗注入 `finalizeDataCenterUnmatchedToGroup`，不再从该 UI 路径调用旧 `/local-test/unmatched/.../finalize-match`。
+- Minor：JSON/PG 数据中台列表将 `exception_status=none` 解释为无异常空值筛选，确保“无异常”返回空异常状态记录。
+
+### RED 记录
+
+- 后端 RED：`4 failed, 62 passed, 189 deselected`，失败点覆盖 data-center 退回异常方法缺失、`none` 无异常筛选返回 0、Postgres 分类 package enqueue 失败未进入同事务、data-center 人工确认仍走 `_ensure_task_claimed_by`。
+- UI verifier RED：失败于缺少 `returnDataCenterGroupToException` data-center service，随后同一 verifier 还覆盖未匹配 data-center mode/finalize callback 结构。
+
+### 验证结果
+
+- `..\.venv\Scripts\python.exe -m pytest tests/test_data_center_review.py tests/test_local_simulation.py tests/test_state_repository.py -k "data_center or auto_archive or reset_group or unmatched" -q`
+  - 119 passed, 354 deselected, 1 warning
+- `.\.venv\Scripts\python.exe .\scripts\verify_v3_2_0_data_center_ui.py`
+  - passed
+- `npm exec vue-tsc -- --noEmit`
+  - passed
+- `npm run build`
+  - passed
+  - warnings: Rollup removed third-party `#__PURE__` annotations in `@vueuse/core`; `element-components` chunk remains larger than 500 kB.
+- `git diff --check`
+  - passed
+
+### 构建产物处理
+
+- 已运行 `npm run build` 用于验证。
+- 已恢复 tracked `v2-api/app/static/vue` 文件，并用 scoped `git clean -f -- v2-api/app/static/vue` 清理本次生成的 untracked hashed assets；本次提交不包含静态构建 churn。
+
+### 剩余疑虑
+
+- `request_postgres_delivery_package(auto_commit=False)` 复用现有 request 逻辑来 stage durable row；它会在外层事务内 `flush()` 以提前暴露 enqueue/约束失败，但最终 commit 仍由 data-center 分类事务统一控制。
+- 构建警告为既有第三方注释和 chunk 体积警告，未在本轮复审范围内处理。

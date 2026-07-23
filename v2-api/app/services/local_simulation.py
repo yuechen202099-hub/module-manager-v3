@@ -7340,13 +7340,15 @@ def confirm_group_barcode_manually(
     collector: str,
     reason: str,
     photo_ids: list[str],
+    require_claim: bool = True,
 ) -> dict[str, Any]:
     from app.services.group_barcode_verification import evaluate_group_eligibility, mark_auto_archive_pending
 
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
-    ensure_task_claimed_by(group, actor)
+    if require_claim:
+        ensure_task_claimed_by(group, actor)
     formal_values = {
         "meter_no": meter_no.strip(),
         "module_asset_no": module_asset_no.strip(),

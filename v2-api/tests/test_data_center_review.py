@@ -8,6 +8,7 @@ import pytest
 from app.services import local_simulation
 from app.services import state_repository as repository
 from app.services.group_barcode_verification import evaluate_group_eligibility
+from app.schemas.data_center import DataCenterQuery
 
 
 def _photo(photo_id: str, category: str, sha: str, *, archive_status: str = "pending") -> dict:
@@ -287,3 +288,49 @@ def test_unmatched_finalize_rejects_placeholder_or_ambiguous_target(
         )
 
     assert local_simulation.get_state() == before
+
+
+def test_data_center_return_exception_uses_admin_path_and_complete_audit(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    result = json_review_repo.return_data_center_group_to_exception_order(
+        "g-1",
+        actor="admin-a",
+        category="barcode_error",
+        note="数据中台退回异常",
+        reason="照片证据需复核",
+        source_page="data_center",
+    )
+
+    group = _latest_group()
+    assert result["group"]["id"] == "g-1"
+    assert group["exception_status"] == "open"
+    payload = _audit_payload("group_returned_to_exception_order")
+    assert payload["source_page"] == "data_center"
+    assert payload["source"] == "data_center"
+    assert payload["actor"] == "admin-a"
+    assert payload["reason"] == "照片证据需复核"
+    assert payload["before"]["exception_status"] == ""
+    assert payload["after"]["exception_status"] == "open"
+
+
+def test_data_center_exception_none_filter_returns_no_exception_rows(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    state = local_simulation.get_state()
+    state["groups"].append(
+        {
+            **deepcopy(state["groups"][0]),
+            "id": "g-open",
+            "exception_status": "open",
+            "status": "rejected",
+        }
+    )
+
+    page = json_review_repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", exception_status="none", page=1, page_size=20)
+    )
+
+    assert page["total"] == 1
+    assert [item["id"] for item in page["items"]] == ["g-1"]
+    assert page["items"][0]["exception_status"] == ""

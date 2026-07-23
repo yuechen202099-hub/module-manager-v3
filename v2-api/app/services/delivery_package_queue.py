@@ -266,6 +266,7 @@ def request_postgres_delivery_package(
     terminal: str,
     review_scope: str,
     requested_by: str,
+    auto_commit: bool = True,
 ) -> LeasedDeliveryPackage:
     _candidates, fingerprint, group_ids = prepare_delivery_request(
         groups,
@@ -296,12 +297,14 @@ def request_postgres_delivery_package(
             size_bytes=job.size_bytes,
         )
         if package is not None:
-            session.rollback()
+            if auto_commit:
+                session.rollback()
             return package
     if job is not None and str(job.status or "") not in {"ready", "stale"}:
         status = str(job.status or "pending")
         job_id = str(job.id)
-        session.rollback()
+        if auto_commit:
+            session.rollback()
         raise DeliveryPackageNotReady(job_id=job_id, status=status)
     if job is None:
         job = DeliveryPackageJob(
@@ -325,7 +328,10 @@ def request_postgres_delivery_package(
     job.request_reason = "formal_delivery_requested"
     job.last_error = None
     job.completed_at = None
-    session.commit()
+    if hasattr(session, "flush"):
+        session.flush()
+    if auto_commit:
+        session.commit()
     raise DeliveryPackageNotReady(job_id=str(job.id), status=job.status)
 
 

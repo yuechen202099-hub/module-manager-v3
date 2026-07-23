@@ -8,10 +8,11 @@ import {
   confirmDataCenterGroupBarcode,
   fetchDataCenterDetail,
   fetchGroupPhotoObjectUrl,
+  finalizeDataCenterUnmatchedToGroup,
   rescanDataCenterGroupPhotoBarcode,
   resetAdminGroupToUnconstructed,
   resetAdminGroupToUnreviewed,
-  returnGroupToException,
+  returnDataCenterGroupToException,
   scanDataCenterGroupPhotoRegion,
   updateDataCenterGroup,
 } from '@/api/services'
@@ -270,9 +271,10 @@ async function returnException() {
   if (!detail.value) return
   saving.value = true
   try {
-    await returnGroupToException(detail.value.id, {
+    await returnDataCenterGroupToException(detail.value.id, {
       category: form.exceptionCategory,
       note: form.exceptionNote.trim() || form.reason.trim() || '数据中台退回异常',
+      reason: form.reason.trim() || form.exceptionNote.trim() || '数据中台退回异常',
     })
     ElMessage.success('已退回异常')
     await reloadAfterMutation()
@@ -307,6 +309,22 @@ async function resetGroup(kind: 'unreviewed' | 'unconstructed') {
   }
 }
 
+async function finalizeDataCenterUnmatchedFromDialog(payload: {
+  unmatchedId: string
+  terminal: string
+  meterNo: string
+  candidateKey: string
+  expectedVersion: number
+}) {
+  const result = await finalizeDataCenterUnmatchedToGroup(payload.unmatchedId, {
+    terminal: payload.terminal,
+    meterNo: payload.meterNo,
+    candidateKey: payload.candidateKey,
+    expectedVersion: payload.expectedVersion,
+  })
+  return result.groupId
+}
+
 watch(
   () => [props.modelValue, props.row?.kind, props.row?.id] as const,
   ([open, kind]) => {
@@ -322,6 +340,8 @@ watch(
     v-if="props.row?.kind === 'unmatched'"
     :model-value="props.modelValue"
     :unmatched-id="props.row.id"
+    :data-center="true"
+    :finalize-match="finalizeDataCenterUnmatchedFromDialog"
     @update:model-value="emit('update:modelValue', $event)"
     @updated="emit('updated')"
     @matched="emit('matched', $event)"
