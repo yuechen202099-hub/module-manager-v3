@@ -494,6 +494,11 @@ def _verification_group_payload(session: Session | None, group: Any) -> dict[str
                 "category": str(getattr(photo, "category", None) or ""),
                 "is_active": bool(getattr(photo, "is_active", True)),
                 "upload_status": getattr(getattr(photo, "upload_status", "uploaded"), "value", getattr(photo, "upload_status", "uploaded")),
+                "image_url": str(getattr(photo, "image_url", None) or ""),
+                "source_url": str(getattr(photo, "source_url", None) or ""),
+                "storage_type": str(getattr(photo, "storage_type", None) or ""),
+                "storage_bucket": str(getattr(photo, "storage_bucket", None) or ""),
+                "storage_key": str(getattr(photo, "storage_key", None) or ""),
             }
             for photo in photos
         ],
@@ -7516,6 +7521,8 @@ class PostgresStateRepository(StateRepository):
         reason: str,
         photo_ids: list[str],
     ) -> dict[str, Any]:
+        from app.services.group_barcode_verification import evaluate_group_eligibility
+
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, actor)
@@ -7618,6 +7625,9 @@ class PostgresStateRepository(StateRepository):
                 )
                 photo.raw_data = photo_raw
             group.raw_data = raw_data
+            final_eligibility = evaluate_group_eligibility(_verification_group_payload(session, group))
+            if final_eligibility.status != "pending" or not final_eligibility.evidence_fingerprint:
+                raise ValueError("资料组最终证据不满足人工确认条件")
             if verification is None:
                 verification = GroupBarcodeVerification(
                     team_id=group.team_id,
@@ -7626,6 +7636,7 @@ class PostgresStateRepository(StateRepository):
                 )
                 session.add(verification)
             verification.status = "manual_confirmed"
+            verification.evidence_fingerprint = final_eligibility.evidence_fingerprint
             verification.evidence_version = int(verification.evidence_version or 0) + 1
             verification.meter_matched = True
             verification.module_matched = True
@@ -7651,6 +7662,7 @@ class PostgresStateRepository(StateRepository):
             next_verification = {
                 **before_verification,
                 "status": "manual_confirmed",
+                "evidence_fingerprint": final_eligibility.evidence_fingerprint,
                 "evidence_version": verification.evidence_version,
                 "meter_matched": True,
                 "module_matched": True,

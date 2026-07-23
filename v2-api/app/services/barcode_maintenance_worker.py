@@ -24,7 +24,7 @@ from app.models import (
     MaterialGroup,
     Photo,
 )
-from app.services import local_simulation
+from app.services import local_simulation, photo_barcode_check
 from app.services.delivery_cache import (
     MAX_DELIVERY_CACHE_ATTEMPTS,
     cache_group_photos,
@@ -1337,13 +1337,31 @@ def _load_group_for_scan(job: MaintenanceJob) -> dict[str, Any]:
         return _verification_group_payload(session, group)
 
 
+def _recognize_group_photo(group: dict[str, Any], photo: dict[str, Any]) -> dict[str, list[str]]:
+    evidence = photo_barcode_check.check_photo_barcode(
+        photo,
+        group,
+        use_ocr=True,
+        collect_group_evidence=True,
+    )
+    return {
+        "barcode": list(evidence.get("machine_barcode_values") or []),
+        "qr": list(evidence.get("machine_qr_values") or []),
+        "ocr": list(evidence.get("barcode_check_ocr_values") or []),
+    }
+
+
 def _process_verification_job(job: MaintenanceJob) -> None:
     from app.services.state_repository import get_state_repository
 
     token = local_simulation.set_current_team(job.team_id)
     try:
         group = _load_group_for_scan(job)
-        result = scan_group_evidence(group, list(group.get("photos") or []))
+        result = scan_group_evidence(
+            group,
+            list(group.get("photos") or []),
+            {"recognize": lambda photo: _recognize_group_photo(group, dict(photo))},
+        )
         get_state_repository().apply_group_scan_result(
             job.group_id,
             result,

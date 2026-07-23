@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from PIL import Image
 from sqlalchemy.dialects import postgresql
 
 from app.services import local_simulation
@@ -98,6 +99,215 @@ def postgres_eligible_photos(group) -> list[SimpleNamespace]:
         )
         for index, category in enumerate(REQUIRED_CATEGORIES)
     ]
+
+
+def _write_machine_code_image(path: Path, value: str = "") -> None:
+    if value:
+        import zxingcpp
+
+        barcode = zxingcpp.create_barcode(value, zxingcpp.BarcodeFormat.Code128)
+        bitmap = zxingcpp.write_barcode_to_image(
+            barcode,
+            scale=4,
+            add_hrt=False,
+            add_quiet_zones=True,
+        )
+        image = Image.frombytes("L", (bitmap.shape[1], bitmap.shape[0]), bytes(memoryview(bitmap)))
+    else:
+        image = Image.new("L", (900, 180), color=255)
+    try:
+        image.save(path, format="PNG")
+    finally:
+        image.close()
+
+
+def _production_scan_fixture(tmp_path: Path, *, photo_count: int = 4):
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="production-worker-group",
+        team_id="production-worker-team",
+        terminal="120000000001",
+        display_meter_no="110000288056",
+        raw_data={
+            "construction_collector": "COLLECTOR001",
+            "construction_module_asset_no": "MODULE001",
+        },
+    )
+    machine_values = (group.display_meter_no, "COLLECTOR001", "MODULE001", "")
+    photos: list[SimpleNamespace] = []
+    for index, (category, machine_value) in enumerate(zip(REQUIRED_CATEGORIES, machine_values)):
+        if index >= photo_count:
+            break
+        filename = f"production-worker-{index}.png"
+        image_path = tmp_path / filename
+        _write_machine_code_image(image_path, machine_value)
+        content = image_path.read_bytes()
+        photos.append(
+            SimpleNamespace(
+                id=uuid4(),
+                legacy_id=f"production-worker-photo-{index}",
+                team_id=group.team_id,
+                group_id=group.id,
+                is_active=True,
+                upload_status="uploaded",
+                category=category,
+                image_url=f"/static/uploads/{filename}",
+                source_url=f"/static/uploads/{filename}",
+                storage_type="local_upload",
+                storage_bucket="",
+                storage_key=filename,
+                sha256=hashlib.sha256(content).hexdigest(),
+                raw_data={"private_secret": "must-not-enter-worker-payload"},
+            )
+        )
+    return group, photos
+
+
+def _install_production_worker_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    group: SimpleNamespace,
+    photos: list[SimpleNamespace],
+):
+    from app.services import barcode_maintenance_worker as worker
+    from app.services import state_repository
+
+    class Rows:
+        def all(self):
+            return photos
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalar(self, _statement):
+            return group
+
+        def scalars(self, _statement):
+            return Rows()
+
+    class LoadRepository:
+        def _session(self):
+            return Session()
+
+    applied: list[object] = []
+
+    class ApplyRepository:
+        def apply_group_scan_result(self, _group_id, result, **_kwargs):
+            applied.append(result)
+
+    monkeypatch.setattr(worker, "_backend", lambda: "postgres")
+    monkeypatch.setattr(state_repository, "PostgresStateRepository", LoadRepository)
+    monkeypatch.setattr(state_repository, "get_state_repository", lambda: ApplyRepository())
+    return worker, applied
+
+
+def test_production_worker_scans_real_uploaded_photos_through_existing_machine_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import photo_barcode_check
+
+    group, photos = _production_scan_fixture(tmp_path)
+    worker, applied = _install_production_worker_repository(monkeypatch, group, photos)
+    monkeypatch.setattr(photo_barcode_check, "static_upload_root", lambda: tmp_path)
+
+    worker._process_verification_job(
+        worker.MaintenanceJob(
+            kind="verification",
+            team_id=group.team_id,
+            group_id=str(group.id),
+            lease_owner="production-worker",
+            lease_token="production-lease",
+            evidence_fingerprint="f" * 64,
+            evidence_version=3,
+        )
+    )
+
+    assert len(applied) == 1
+    result = applied[0]
+    assert result.status == "passed"
+    assert result.passed_count == 3
+    assert set(result.matched_fields) == {"meter", "module", "collector"}
+    assert set(result.machine_barcode_values) >= {
+        group.display_meter_no,
+        "COLLECTOR001",
+        "MODULE001",
+    }
+
+
+def test_production_worker_never_passes_ocr_only_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import photo_barcode_check
+
+    group, photos = _production_scan_fixture(tmp_path)
+    worker, applied = _install_production_worker_repository(monkeypatch, group, photos)
+    monkeypatch.setattr(photo_barcode_check, "static_upload_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "default_machine_code_scanner",
+        lambda _photo: {"barcode": [], "qr": []},
+    )
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "default_ocr_reader",
+        lambda _photo, _expected: [group.display_meter_no, "COLLECTOR001", "MODULE001"],
+    )
+
+    worker._process_verification_job(
+        worker.MaintenanceJob(
+            kind="verification",
+            team_id=group.team_id,
+            group_id=str(group.id),
+            lease_owner="production-worker",
+            lease_token="production-lease",
+            evidence_fingerprint="f" * 64,
+            evidence_version=3,
+        )
+    )
+
+    assert len(applied) == 1
+    assert applied[0].status != "passed"
+    assert applied[0].passed_count == 0
+    assert set(applied[0].matched_ocr_candidates) >= {
+        group.display_meter_no,
+        "COLLECTOR001",
+        "MODULE001",
+    }
+
+
+def test_production_worker_rejects_non_exact_photo_set_before_reading_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import photo_barcode_check
+
+    group, photos = _production_scan_fixture(tmp_path, photo_count=3)
+    worker, applied = _install_production_worker_repository(monkeypatch, group, photos)
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "_photo_image",
+        lambda _photo: pytest.fail("ineligible photo set must not read image bytes"),
+    )
+
+    with pytest.raises(ValueError, match="not eligible"):
+        worker._process_verification_job(
+            worker.MaintenanceJob(
+                kind="verification",
+                team_id=group.team_id,
+                group_id=str(group.id),
+                lease_owner="production-worker",
+                lease_token="production-lease",
+                evidence_fingerprint="f" * 64,
+                evidence_version=3,
+            )
+        )
+
+    assert applied == []
 
 
 def install_json_queue(monkeypatch: pytest.MonkeyPatch, groups: list[dict], *, paused: bool = False) -> str:

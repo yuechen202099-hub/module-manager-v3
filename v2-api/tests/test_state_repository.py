@@ -1409,6 +1409,19 @@ def _formal_delivery_group(cache_root: Path, group_id: str = "formal-group-001")
     }
 
 
+def _write_ready_package(
+    cache_root: Path,
+    fingerprint: str,
+    *,
+    content: bytes = b"ready-package",
+    filename: str = "",
+) -> tuple[Path, str, int]:
+    package_path = cache_root / "packages" / (filename or f"{fingerprint}.zip")
+    package_path.parent.mkdir(parents=True, exist_ok=True)
+    package_path.write_bytes(content)
+    return package_path, hashlib.sha256(content).hexdigest(), len(content)
+
+
 def test_json_repository_builds_formal_zip_only_from_completed_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1468,16 +1481,100 @@ def test_json_formal_request_only_enqueues_persistent_zip_work_until_ready(
     jobs = repository.local_simulation._team_states[team_id]["delivery_package_jobs"]
     assert len(jobs) == 1
     assert jobs[0]["status"] == "pending"
-    package_path = tmp_path / "packages" / "ready.zip"
-    package_path.parent.mkdir(parents=True, exist_ok=True)
-    package_path.write_bytes(b"ready-package")
-    jobs[0].update({"status": "ready", "package_path": str(package_path)})
+    package_path, content_sha256, size_bytes = _write_ready_package(
+        tmp_path,
+        jobs[0]["evidence_fingerprint"],
+    )
+    jobs[0].update(
+        {
+            "status": "ready",
+            "package_path": str(package_path),
+            "content_sha256": content_sha256,
+            "size_bytes": size_bytes,
+            "completed_at": datetime.now(UTC).isoformat(),
+        }
+    )
 
     package = repo.request_final_delivery_export(task_id=17, requested_by="admin-a")
     try:
         assert package.path == package_path
     finally:
         package.release()
+
+
+@pytest.mark.parametrize("corruption", ["truncated", "same_size_tamper", "wrong_fingerprint_name"])
+def test_json_ready_package_integrity_failure_is_persistently_requeued_without_sync_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    from app.services import delivery_package_queue
+
+    group = _formal_delivery_group(tmp_path, f"json-integrity-{corruption}")
+    team_id = f"json-integrity-{uuid4()}"
+    state = {
+        "team_id": team_id,
+        "groups": [deepcopy(group)],
+        "delivery_package_jobs": [],
+        "audit_events": [],
+    }
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
+    monkeypatch.setattr(repository.local_simulation, "filter_delivery_groups", lambda **_kwargs: [deepcopy(group)])
+    monkeypatch.setattr(repository.local_simulation, "save_all_team_states", lambda: None)
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "build_final_delivery_package_from_groups",
+        lambda *_args, **_kwargs: pytest.fail("request must not synchronously rebuild an invalid ZIP"),
+    )
+    repo = repository.JsonStateRepository()
+    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady):
+        repo.request_final_delivery_export(task_id=17, requested_by="admin-a")
+    job = repository.local_simulation._team_states[team_id]["delivery_package_jobs"][0]
+    fingerprint = job["evidence_fingerprint"]
+    filename = "wrong-fingerprint.zip" if corruption == "wrong_fingerprint_name" else ""
+    package_path, content_sha256, size_bytes = _write_ready_package(
+        tmp_path,
+        fingerprint,
+        content=b"original-ready-package",
+        filename=filename,
+    )
+    job.update(
+        {
+            "status": "ready",
+            "attempt_count": 2,
+            "lease_owner": "old-worker",
+            "lease_token": "old-token",
+            "lease_expires_at": datetime.now(UTC).isoformat(),
+            "package_path": str(package_path),
+            "content_sha256": content_sha256,
+            "size_bytes": size_bytes,
+            "completed_at": datetime.now(UTC).isoformat(),
+        }
+    )
+    if corruption == "truncated":
+        package_path.write_bytes(b"cut")
+    elif corruption == "same_size_tamper":
+        package_path.write_bytes(b"x" * size_bytes)
+
+    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady) as captured:
+        repo.request_final_delivery_export(task_id=17, requested_by="admin-b")
+
+    job = repository.local_simulation._team_states[team_id]["delivery_package_jobs"][0]
+    assert captured.value.status == "pending"
+    assert job["status"] == "pending"
+    assert job["attempt_count"] == 0
+    for field in (
+        "package_path",
+        "content_sha256",
+        "size_bytes",
+        "completed_at",
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+    ):
+        assert job[field] is None
 
 
 def test_json_repeated_formal_request_preserves_live_processing_lease(
@@ -1647,6 +1744,160 @@ def test_postgres_repeated_formal_request_preserves_live_or_exhausted_job(
     assert job.lease_token == lease_token
     assert job.lease_expires_at == lease_expires_at
     assert job.last_error == expected_error
+
+
+def _postgres_ready_package_session(job: SimpleNamespace):
+    class Session:
+        def __init__(self) -> None:
+            self.scalar_calls = 0
+            self.commits = 0
+            self.rollbacks = 0
+
+        def scalar(self, _statement):
+            self.scalar_calls += 1
+            return None if self.scalar_calls == 1 else job
+
+        def add(self, _job):
+            pytest.fail("matching ready job must be reused or requeued")
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    return Session()
+
+
+def _patch_postgres_ready_package_request(
+    monkeypatch: pytest.MonkeyPatch,
+    fingerprint: str,
+) -> None:
+    from app.services import delivery_package_queue
+
+    monkeypatch.setattr(
+        delivery_package_queue,
+        "prepare_delivery_request",
+        lambda *_args, **_kwargs: ([], fingerprint, ["legacy-group"]),
+    )
+    monkeypatch.setattr(
+        delivery_package_queue,
+        "delivery_scope",
+        lambda *_args, **_kwargs: (
+            "team-a|task=17|terminal=|review_scope=reviewed",
+            "scope-hash",
+            {"task_id": 17, "terminal": "", "review_scope": "reviewed"},
+        ),
+    )
+
+
+def _postgres_ready_job(
+    package_path: Path,
+    content_sha256: str,
+    size_bytes: int,
+    evidence_fingerprint: str = "f" * 64,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        status="ready",
+        evidence_fingerprint=evidence_fingerprint,
+        attempt_count=2,
+        lease_owner="old-worker",
+        lease_token="old-token",
+        lease_expires_at=datetime.now(UTC),
+        package_path=str(package_path),
+        content_sha256=content_sha256,
+        size_bytes=size_bytes,
+        requested_by="admin-a",
+        request_reason="formal_delivery_requested",
+        last_error=None,
+        completed_at=datetime.now(UTC),
+        scope_payload={"task_id": 17, "terminal": "", "review_scope": "reviewed"},
+        group_ids=["legacy-group"],
+    )
+
+
+def test_postgres_ready_package_reuses_only_matching_fingerprint_size_and_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from app.services import delivery_package_queue
+
+    fingerprint = "f" * 64
+    package_path, content_sha256, size_bytes = _write_ready_package(tmp_path, fingerprint)
+    job = _postgres_ready_job(package_path, content_sha256, size_bytes)
+    session = _postgres_ready_package_session(job)
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    _patch_postgres_ready_package_request(monkeypatch, fingerprint)
+
+    package = delivery_package_queue.request_postgres_delivery_package(
+        session,
+        groups=[],
+        team_id="team-a",
+        task_id=17,
+        terminal="",
+        review_scope="reviewed",
+        requested_by="admin-b",
+    )
+    try:
+        assert package.path == package_path
+    finally:
+        package.release()
+    assert session.rollbacks == 1
+    assert session.commits == 0
+
+
+@pytest.mark.parametrize("corruption", ["truncated", "same_size_tamper", "wrong_fingerprint_name"])
+def test_postgres_ready_package_integrity_failure_is_atomically_requeued(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    from app.services import delivery_package_queue
+
+    fingerprint = "f" * 64
+    filename = "wrong-fingerprint.zip" if corruption == "wrong_fingerprint_name" else ""
+    package_path, content_sha256, size_bytes = _write_ready_package(
+        tmp_path,
+        fingerprint,
+        content=b"original-ready-package",
+        filename=filename,
+    )
+    job = _postgres_ready_job(package_path, content_sha256, size_bytes)
+    session = _postgres_ready_package_session(job)
+    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
+    _patch_postgres_ready_package_request(monkeypatch, fingerprint)
+    if corruption == "truncated":
+        package_path.write_bytes(b"cut")
+    elif corruption == "same_size_tamper":
+        package_path.write_bytes(b"x" * size_bytes)
+
+    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady) as captured:
+        delivery_package_queue.request_postgres_delivery_package(
+            session,
+            groups=[],
+            team_id="team-a",
+            task_id=17,
+            terminal="",
+            review_scope="reviewed",
+            requested_by="admin-b",
+        )
+
+    assert captured.value.status == "pending"
+    assert session.commits == 1
+    assert session.rollbacks == 0
+    assert job.status == "pending"
+    assert job.attempt_count == 0
+    for field in (
+        "package_path",
+        "content_sha256",
+        "size_bytes",
+        "completed_at",
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+    ):
+        assert getattr(job, field) is None
 
 
 def test_json_formal_export_reports_missing_completed_cache_before_zip_build(
@@ -2085,6 +2336,7 @@ def _postgres_manual_confirmation_fixture():
         id=group_id,
         legacy_id="group-manual-pg",
         team_id="manual-team",
+        terminal="120000000001",
         display_meter_no="110000288055",
         meter_match_key="0000288055",
         exception_reasons=["条码识别异常", "其他业务异常"],
@@ -2247,6 +2499,17 @@ def test_postgres_manual_confirmation_updates_formal_state_and_complete_redacted
     assert verification.lease_token is None
     assert verification.lease_expires_at is None
     assert session.commits == 1
+
+    final_payload = repository._verification_group_payload(session, group)
+    expected = evaluate_group_eligibility(final_payload)
+    assert expected.status == "pending"
+    assert verification.evidence_fingerprint == expected.evidence_fingerprint
+    assert group.raw_data["barcode_verification"]["evidence_fingerprint"] == expected.evidence_fingerprint
+    from app.services.barcode_maintenance_worker import _archive_block_reason
+
+    reason, source = _archive_block_reason(final_payload, group.raw_data["barcode_verification"])
+    assert reason == ""
+    assert source == "manual_confirmed"
 
     audit = staged_audits[0]
     before = audit["before_data"]

@@ -1249,6 +1249,95 @@ def test_manual_barcode_confirmation_syncs_formal_identity_photos_and_complete_r
     assert "storage_key" not in str(event["payload"])
 
 
+def test_json_manual_confirmation_recomputes_final_fingerprint_for_auto_archive(
+    synthetic_state: dict,
+) -> None:
+    from app.services.barcode_maintenance_worker import auto_archive_verified_group
+
+    group = synthetic_state["groups"][0]
+    group.update(
+        {
+            "terminal": "120000000001",
+            "meter_no": "110000288055",
+            "collector": "COLLECTOROLD",
+            "module_asset_no": "MODULEOLD",
+            "status": "unreviewed",
+            "exception_reasons": ["条码识别异常"],
+            "has_archive_blocker": True,
+            "photos": [
+                {"id": "fp1", "category": "before_box", "sha256": "a" * 64, "upload_status": "uploaded"},
+                {"id": "fp2", "category": "collector_barcode", "sha256": "b" * 64, "upload_status": "uploaded"},
+                {"id": "fp3", "category": "module_meter", "sha256": "c" * 64, "upload_status": "uploaded"},
+                {"id": "fp4", "category": "after_box", "sha256": "d" * 64, "upload_status": "uploaded"},
+            ],
+            "barcode_verification": {
+                "status": "mismatch",
+                "evidence_fingerprint": "old-fingerprint",
+                "evidence_version": 4,
+            },
+        }
+    )
+    claim_task(group["task_id"], "alice")
+
+    confirm_group_barcode_manually(
+        group["id"],
+        actor="alice",
+        meter_no="110000288056",
+        module_asset_no="MODULE001",
+        collector="COLLECTOR001",
+        reason="现场核验",
+        photo_ids=["fp1", "fp2", "fp3", "fp4"],
+    )
+
+    expected = evaluate_group_eligibility(group)
+    assert expected.status == "pending"
+    assert group["barcode_verification"]["evidence_fingerprint"] == expected.evidence_fingerprint
+    assert group["barcode_verification"]["status"] == "manual_confirmed"
+    assert group["barcode_verification"]["auto_archive_status"] == "pending"
+
+    archived = auto_archive_verified_group(group["id"], actor="barcode-maintenance")
+    assert archived["archived"] is True
+    assert archived.get("reason") != "evidence_changed"
+
+
+def test_json_manual_confirmation_rejects_ineligible_final_evidence_without_partial_write(
+    synthetic_state: dict,
+) -> None:
+    group = synthetic_state["groups"][0]
+    group.update(
+        {
+            "terminal": "",
+            "meter_no": "110000288055",
+            "collector": "COLLECTOROLD",
+            "module_asset_no": "MODULEOLD",
+            "photos": [
+                {"id": "fp1", "category": "before_box", "sha256": "a" * 64, "upload_status": "uploaded"},
+                {"id": "fp2", "category": "collector_barcode", "sha256": "b" * 64, "upload_status": "uploaded"},
+                {"id": "fp3", "category": "module_meter", "sha256": "c" * 64, "upload_status": "uploaded"},
+                {"id": "fp4", "category": "after_box", "sha256": "d" * 64, "upload_status": "uploaded"},
+            ],
+        }
+    )
+    claim_task(group["task_id"], "alice")
+    get_group(group["id"])
+    before_group = deepcopy(group)
+    before_audits = deepcopy(synthetic_state["audit_events"])
+
+    with pytest.raises(ValueError, match="最终证据"):
+        confirm_group_barcode_manually(
+            group["id"],
+            actor="alice",
+            meter_no="110000288056",
+            module_asset_no="MODULE001",
+            collector="COLLECTOR001",
+            reason="现场核验",
+            photo_ids=["fp1", "fp2", "fp3", "fp4"],
+        )
+
+    assert group == before_group
+    assert synthetic_state["audit_events"] == before_audits
+
+
 def test_task_groups_are_ordered_for_review_queue(synthetic_state: dict) -> None:
     template = deepcopy(synthetic_state["groups"][0])
 

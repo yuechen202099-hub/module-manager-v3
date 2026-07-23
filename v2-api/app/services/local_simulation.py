@@ -7038,7 +7038,7 @@ def confirm_group_barcode_manually(
     reason: str,
     photo_ids: list[str],
 ) -> dict[str, Any]:
-    from app.services.group_barcode_verification import mark_auto_archive_pending
+    from app.services.group_barcode_verification import evaluate_group_eligibility, mark_auto_archive_pending
 
     group = get_group(group_id)
     if group is None:
@@ -7062,8 +7062,24 @@ def confirm_group_barcode_manually(
         or any(photo_id not in valid_evidence for photo_id in selected_ids)
     ):
         raise ValueError("人工确认照片证据无效")
-    now = now_iso()
     meter_match_key = build_total_catalog_match_key(formal_values["meter_no"])
+    final_group = copy.deepcopy(group)
+    final_group.update(formal_values)
+    final_group["meter_match_key"] = meter_match_key
+    for photo in final_group.get("photos") or []:
+        if photo.get("is_active", True):
+            photo.update(
+                {
+                    "barcode": formal_values["meter_no"],
+                    "collector": formal_values["collector"],
+                    "asset_no": formal_values["module_asset_no"],
+                    "module_asset_no": formal_values["module_asset_no"],
+                }
+            )
+    final_eligibility = evaluate_group_eligibility(final_group)
+    if final_eligibility.status != "pending" or not final_eligibility.evidence_fingerprint:
+        raise ValueError("资料组最终证据不满足人工确认条件")
+    now = now_iso()
     before = _manual_confirmation_audit_snapshot(group, group.get("barcode_verification") or {})
     group.update(formal_values)
     group["meter_match_key"] = meter_match_key
@@ -7098,6 +7114,7 @@ def confirm_group_barcode_manually(
     verification.update(
         {
             "status": "manual_confirmed",
+            "evidence_fingerprint": final_eligibility.evidence_fingerprint,
             "evidence_version": int(verification.get("evidence_version") or 0) + 1,
             "meter_matched": True,
             "module_matched": True,

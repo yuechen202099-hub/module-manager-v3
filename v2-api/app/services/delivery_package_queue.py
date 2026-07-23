@@ -103,7 +103,14 @@ def prepare_delivery_request(
     return candidates, fingerprint, group_ids
 
 
-def _ready_package(path_value: Any, *, now: datetime | None = None) -> LeasedDeliveryPackage | None:
+def _ready_package(
+    path_value: Any,
+    *,
+    evidence_fingerprint: Any,
+    content_sha256: Any,
+    size_bytes: Any,
+    now: datetime | None = None,
+) -> LeasedDeliveryPackage | None:
     text = str(path_value or "").strip()
     if not text:
         return None
@@ -131,7 +138,26 @@ def _ready_package(path_value: Any, *, now: datetime | None = None) -> LeasedDel
         if current.tzinfo is None:
             current = current.replace(tzinfo=UTC)
         modified = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
-        if resolved.suffix.lower() != ".zip" or stat.st_size <= 0 or current.astimezone(UTC) - modified > PACKAGE_TTL:
+        expected_name = f"{str(evidence_fingerprint or '').strip()}.zip"
+        expected_sha256 = str(content_sha256 or "").strip().lower()
+        try:
+            expected_size = int(size_bytes)
+        except (TypeError, ValueError):
+            expected_size = -1
+        if (
+            not expected_name.removesuffix(".zip")
+            or resolved.name != expected_name
+            or stat.st_size <= 0
+            or stat.st_size != expected_size
+            or current.astimezone(UTC) - modified > PACKAGE_TTL
+        ):
+            file_lock.release()
+            return None
+        digest = hashlib.sha256()
+        with resolved.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
             file_lock.release()
             return None
         lease = reserve_delivery_cache_path(resolved)
@@ -174,7 +200,12 @@ def request_json_delivery_package(
             None,
         )
         if job is not None and str(job.get("status") or "") == "ready":
-            package = _ready_package(job.get("package_path"))
+            package = _ready_package(
+                job.get("package_path"),
+                evidence_fingerprint=job.get("evidence_fingerprint"),
+                content_sha256=job.get("content_sha256"),
+                size_bytes=job.get("size_bytes"),
+            )
             if package is not None:
                 local_simulation.abort_authoritative_json_write(transaction, token)
                 return package
@@ -258,7 +289,12 @@ def request_postgres_delivery_package(
         .with_for_update()
     )
     if job is not None and job.status == "ready":
-        package = _ready_package(job.package_path)
+        package = _ready_package(
+            job.package_path,
+            evidence_fingerprint=job.evidence_fingerprint,
+            content_sha256=job.content_sha256,
+            size_bytes=job.size_bytes,
+        )
         if package is not None:
             session.rollback()
             return package
