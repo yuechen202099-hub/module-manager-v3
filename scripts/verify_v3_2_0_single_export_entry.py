@@ -40,14 +40,18 @@ def main() -> None:
     contains(static_pages, "title: '任务派发'", "staticPages task dispatch entry")
     contains(static_pages, "title: '数据中台'", "staticPages data center entry")
     contains(static_pages, "title: '导出中心'", "staticPages export center entry")
+    contains(static_pages, "key: 'task-hall'", "staticPages legacy task-hall registry")
+    contains(static_pages, "routePath: '/task-hall-legacy'", "staticPages legacy task-hall retired route")
     not_contains(static_pages, "title: '任务领取'", "staticPages legacy claim title")
     not_contains(static_pages, "title: '任务大厅'", "staticPages legacy hall title")
+    not_contains(static_pages, "routePath: '/task-hall'", "staticPages legacy task-hall visible route")
 
     contains(router_source, "'claim-tasks': () => import('@/views/ClaimTasksView.vue')", "router task dispatch component")
     contains(router_source, "path: 'task-hall'", "router legacy task-hall redirect")
-    contains(router_source, "redirect: '/claim-tasks'", "router legacy dispatch redirect")
+    contains(router_source, "redirect: '/global-search'", "router legacy hall redirect")
     contains(router_source, "path: 'tasks'", "router legacy tasks redirect")
     not_contains(router_source, "'task-hall': () => import('@/views/GlobalSearchView.vue')", "router legacy hall mapping")
+    not_contains(router_source, "path: 'task-hall',\n          redirect: '/claim-tasks'", "router legacy task-hall claim redirect")
 
     contains(claim_tasks, "任务派发", "ClaimTasksView dispatch title")
     contains(claim_tasks, "指派施工", "ClaimTasksView dispatch action")
@@ -97,6 +101,7 @@ def main() -> None:
         "shellExportActive",
     ]:
         not_contains(app_layout, forbidden, "AppLayout")
+    contains(app_layout, "!['sync-config', 'task-hall'].includes(page.key)", "AppLayout hidden legacy task-hall nav")
 
     contains(exports_view, "createExportJob", "ExportsView single export entry")
     contains(exports_view, "downloadExportJob", "ExportsView download flow")

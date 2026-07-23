@@ -1,0 +1,1 @@
+function c(e){return!!(e&&typeof e=="object"&&e.name==="AbortError")}function a(e=()=>{}){let n=0,t=null;function u(){n+=1,t&&(t.abort(),t=null,e(!1))}function l(){t==null||t.abort();const s=++n,r=new AbortController;t=r,e(!0);const o=()=>n===s&&t===r;return{signal:r.signal,isCurrent:o,finish(){o()&&(t=null,e(!1))}}}return{begin:l,cancel:u}}export{a as c,c as i};

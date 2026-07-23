@@ -88,7 +88,7 @@ const router = createRouter({
         },
         {
           path: 'task-hall',
-          redirect: '/claim-tasks',
+          redirect: '/global-search',
         },
         {
           path: 'review/:groupId',
