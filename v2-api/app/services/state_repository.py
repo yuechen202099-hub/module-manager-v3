@@ -4606,7 +4606,9 @@ class PostgresStateRepository(StateRepository):
                 select(Photo.creator, Photo.group_id).where(
                     Photo.team_id == team_id,
                     Photo.is_active.is_(True),
+                    Photo.upload_status != PhotoUploadStatus.INVALID,
                     Photo.group_id.is_not(None),
+                    _photo_construction_source_filter(),
                 )
             ).all()
             photo_status_expr = Photo.raw_data.op("->>")("barcode_check_status")
@@ -4904,6 +4906,7 @@ class PostgresStateRepository(StateRepository):
                 group_installer.label("installer"),
                 group_photo_count.label("photo_count"),
                 func.coalesce(active_photo_stats.c.required_category_count, 0).label("required_category_count"),
+                func.coalesce(GroupBarcodeVerification.status, literal("")).label("durable_barcode_status"),
                 group_classification_status.label("classification_status"),
                 group_construction_status.label("construction_status"),
                 group_terminal_status.label("terminal_status"),
@@ -4950,6 +4953,7 @@ class PostgresStateRepository(StateRepository):
             ).label("installer"),
             literal(0).label("photo_count"),
             literal(0).label("required_category_count"),
+            literal("").label("durable_barcode_status"),
             literal("incomplete").label("classification_status"),
             case(
                 (
@@ -5010,6 +5014,7 @@ class PostgresStateRepository(StateRepository):
                     or_(
                         source.c.photo_count != required_count,
                         source.c.required_category_count != required_count,
+                        source.c.durable_barcode_status == "not_eligible",
                     )
                 )
         requested_exception = query.exception_status.strip()

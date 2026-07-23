@@ -25,6 +25,8 @@ def main() -> None:
     services = read("v2-web/src/api/services.ts")
     groups_route = read("v2-api/app/api/routes/groups.py")
     data_center_service = read("v2-api/app/services/data_center.py")
+    local_simulation = read("v2-api/app/services/local_simulation.py")
+    state_repository = read("v2-api/app/services/state_repository.py")
     combined_list = f"{global_search}\n{filters}"
 
     assert_contains(combined_list, "page-sizes=\"[20, 50, 100]\"", "data center pagination must expose 20/50/100")
@@ -149,6 +151,46 @@ def main() -> None:
         data_center_service,
         "has_current_eligible_photo_set",
         "barcode eligibility must use the durable exact photo-set contract",
+    )
+    assert_contains(
+        data_center_service,
+        'durable_status != "not_eligible"',
+        "ineligible barcode drilldown must include durable not_eligible in addition to photo-set failures",
+    )
+    assert_contains(
+        local_simulation,
+        "def summarize_installers_by_group",
+        "JSON summary must expose installer distribution",
+    )
+    assert_contains(
+        local_simulation,
+        "_photo_upload_status_is_valid(photo)",
+        "JSON installer distribution must ignore INVALID construction photos",
+    )
+    assert_contains(
+        local_simulation,
+        "_photo_is_construction_upload(photo)",
+        "JSON installer distribution must only count construction-source photos",
+    )
+    assert_contains(
+        local_simulation,
+        "installer_display_name(photo.get(\"creator\"), name_cache)",
+        "JSON installer distribution must preserve display-name aliases",
+    )
+    assert_contains(
+        state_repository,
+        "Photo.upload_status != PhotoUploadStatus.INVALID",
+        "PG installer distribution and data-center filters must ignore INVALID photos",
+    )
+    assert_contains(
+        state_repository,
+        "_photo_construction_source_filter()",
+        "PG installer distribution must only count construction-source photos",
+    )
+    assert_contains(
+        state_repository,
+        'source.c.durable_barcode_status == "not_eligible"',
+        "PG ineligible barcode drilldown must union durable not_eligible",
     )
     assert_contains(
         services,

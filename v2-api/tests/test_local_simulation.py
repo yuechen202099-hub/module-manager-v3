@@ -656,13 +656,71 @@ def test_refresh_summary_rederives_availability_without_clearing_persisted_prior
     assert payload["construction_priority"] is False
 
 
-def test_summary_reports_installer_group_share(synthetic_state: dict) -> None:
+def test_summary_installer_distribution_ignores_non_construction_scan_imports(synthetic_state: dict) -> None:
     summary = synthetic_state["summary"]
     distribution = {item["installer"]: item for item in summary["installer_distribution"]}
 
-    assert distribution["tester"]["group_count"] == 2
-    assert distribution["tester"]["share"] == 1.0
+    assert "tester" not in distribution
     assert "未填写" not in distribution
+
+
+def test_summary_installer_distribution_counts_only_valid_construction_photo_creators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get_user(username: str):
+        if username == "xa":
+            return {"username": "xa", "name": "樊哲浩"}
+        return None
+
+    monkeypatch.setattr(local_simulation.account_store, "get_user", fake_get_user)
+    groups = [
+        {
+            "id": "g-valid-a",
+            "photo_count": 3,
+            "installer": "group-field-ignored",
+            "photos": [
+                {"creator": "xa", "is_active": True, "upload_status": "uploaded", "upload_source": "construction-mobile"},
+                {"creator": "xa", "is_active": True, "upload_status": "uploaded", "upload_source": "construction-mobile"},
+                {"creator": "樊哲浩", "is_active": True, "upload_status": "uploaded", "source": "construction"},
+            ],
+        },
+        {
+            "id": "g-valid-b",
+            "photo_count": 1,
+            "photos": [
+                {"creator": "李四", "is_active": True, "upload_status": "uploaded", "upload_source": "construction-mobile"}
+            ],
+        },
+        {
+            "id": "g-invalid-photo",
+            "photo_count": 1,
+            "photos": [
+                {"creator": "ignored-invalid", "is_active": True, "upload_status": "INVALID", "upload_source": "construction-mobile"}
+            ],
+        },
+        {
+            "id": "g-non-construction",
+            "photo_count": 1,
+            "photos": [
+                {"creator": "ignored-source", "is_active": True, "upload_status": "uploaded", "upload_source": "scan-import"}
+            ],
+        },
+        {
+            "id": "g-inactive",
+            "photo_count": 1,
+            "photos": [
+                {"creator": "ignored-inactive", "is_active": False, "upload_status": "uploaded", "upload_source": "construction-mobile"}
+            ],
+        },
+    ]
+
+    distribution = local_simulation.summarize_installers_by_group(groups)
+
+    by_installer = {item["installer"]: item for item in distribution}
+    assert by_installer == {
+        "樊哲浩": {"installer": "樊哲浩", "group_count": 1, "share": 0.5},
+        "李四": {"installer": "李四", "group_count": 1, "share": 0.5},
+    }
 
 
 def test_task_installer_distribution_uses_group_installer_only(synthetic_state: dict) -> None:

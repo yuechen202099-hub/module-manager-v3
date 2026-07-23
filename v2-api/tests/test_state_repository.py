@@ -8634,6 +8634,62 @@ def test_postgres_task_stats_installer_distribution_trims_group_fields() -> None
     assert "material_groups.photo_count > 0" not in photo_installer_sql
 
 
+def test_postgres_summary_installer_pairs_use_only_valid_construction_photos() -> None:
+    captured = []
+
+    class Rows:
+        def __init__(self, values=None):
+            self.values = values or []
+
+        def all(self):
+            return self.values
+
+        def one(self):
+            return SimpleNamespace(
+                groups=0,
+                photo_rows_linked=0,
+                scanned_groups=0,
+                approved_groups=0,
+                reviewed_groups=0,
+                unreviewed_groups=0,
+                exception_groups=0,
+                incomplete_groups=0,
+                unconstructed_groups=0,
+            )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def scalar(self, statement):
+            captured.append(("scalar", statement))
+            return 0
+
+        def execute(self, statement):
+            captured.append(("execute", statement))
+            return Rows()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+    TestPostgresRepository().summary()
+
+    compiled_statements = [
+        str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})).lower()
+        for _kind, statement in captured
+    ]
+    compiled = next(statement for statement in compiled_statements if "select photos.creator" in statement)
+    assert "photos.creator" in compiled
+    assert "photos.is_active is true" in compiled
+    assert "photos.upload_status != 'invalid'" in compiled
+    assert "like '%%construction%%'" in compiled
+    assert "photos.group_id is not null" in compiled
+
+
 def test_installer_distribution_displays_account_name(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_get_user(username: str):
         if username == "xa":

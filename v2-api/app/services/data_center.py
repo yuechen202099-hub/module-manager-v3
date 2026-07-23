@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, time
 from typing import Any, Callable, Iterable, Mapping
 
 from app.schemas.data_center import DataCenterQuery
-from app.services.barcode_verification_contract import has_current_eligible_photo_set
+from app.services.barcode_verification_contract import has_current_eligible_photo_set, normalize_barcode_verification
 
 
 REQUIRED_CLASSIFICATION_SLOTS = {"before_box", "module_meter", "after_box", "collector_barcode"}
@@ -108,6 +108,11 @@ def barcode_status_from_group(group: Mapping[str, Any]) -> tuple[str, list[str],
     missing = group.get("group_barcode_missing_fields") or result.get("missing_fields") or []
     missing_fields = [str(item) for item in missing if str(item).strip()] if isinstance(missing, list) else []
     return status, missing_fields, {"status": raw_status or status, "manual_confirmed": manual}
+
+
+def durable_barcode_status_from_group(group: Mapping[str, Any]) -> str:
+    verification = normalize_barcode_verification(group.get("barcode_verification"))
+    return str((verification or {}).get("status") or "").strip()
 
 
 def construction_status_from_group(group: Mapping[str, Any], photo_count: int) -> str:
@@ -237,7 +242,8 @@ def row_passes_filters(row: Mapping[str, Any], query: DataCenterQuery) -> bool:
         eligible = bool(row.get("_barcode_eligible"))
         if query.barcode_eligibility == "eligible" and not eligible:
             return False
-        if query.barcode_eligibility == "ineligible" and eligible:
+        durable_status = str(row.get("_durable_barcode_status") or "").strip()
+        if query.barcode_eligibility == "ineligible" and eligible and durable_status != "not_eligible":
             return False
     actual_barcode_status = str(row.get("barcode_status") or "").strip()
     if not _matches_barcode_filter(actual_barcode_status, query.barcode_status):

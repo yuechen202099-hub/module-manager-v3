@@ -211,3 +211,77 @@ The first implementation used approximate dashboard drilldown mappings for scann
 ### Concerns
 
 1. Build warnings are unchanged dependency/chunk-size warnings, not introduced by this fix.
+
+---
+
+## Review Fix Addendum - Summary/Drilldown Metric Parity
+
+- Status: DONE
+- Worktree: `C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
+- Branch: `production/V3/3.2.0`
+- Base HEAD: `15047f0`
+- Date: `2026-07-24 02:09 +08:00`
+
+### Findings Addressed
+
+1. Critical: Dashboard installer distribution itself now uses the same effective photo-source creator/group口径 as the `installer_source=photo` data-center drilldown.
+2. Important: `barcode_eligibility=ineligible` now matches the dashboard notRequired set: photo-set ineligible OR durable verification status is `not_eligible`.
+
+### RED First
+
+- Added failing JSON data-center coverage for a group with exactly four required active valid photos plus durable `not_eligible`; it must remain in `eligible` and also appear in `ineligible`.
+- Added failing JSON summary coverage proving invalid, inactive, and non-construction photos do not count toward installer distribution, and username/display-name aliases collapse to one installer.
+- Added failing PG summary SQL coverage proving `installer_pairs` filters to active, non-INVALID, construction-source photos.
+- Initial RED failures matched the review findings:
+  - `barcode_eligibility=ineligible` excluded the durable `not_eligible` group.
+  - JSON summary counted invalid/inactive/non-construction photo creators.
+  - PG summary `installer_pairs` lacked `upload_status != INVALID` and construction-source filters.
+
+### Implementation Summary
+
+1. JSON `summarize_installers_by_group` now counts only active, non-INVALID, construction-source photos, de-duplicates by installer/display-name and group id, and drops group-field fallback.
+2. PG summary `installer_pairs` now uses the same photo filters: active, non-INVALID, `group_id IS NOT NULL`, and `_photo_construction_source_filter()`.
+3. Data-center JSON rows now carry `_durable_barcode_status`; `barcode_eligibility=ineligible` passes rows where the photo set is not eligible or durable status is `not_eligible`.
+4. Data-center PG source now exposes `durable_barcode_status`; PG ineligible filter uses the same OR union.
+5. Verifier now checks the implementation-level summary/photo filters and durable `not_eligible` union, while keeping the existing exact URL key assertions.
+
+### Verification
+
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_data_center.py -q`
+  - PASS: 27 passed, 1 Starlette/httpx deprecation warning.
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_local_simulation.py -k "summary_installer_distribution" -q`
+  - PASS: 2 passed, 216 deselected, 1 Starlette/httpx deprecation warning.
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_state_repository.py -k "summary_installer_pairs_use_only_valid_construction_photos" -q`
+  - PASS: 1 passed, 251 deselected.
+- `.\.venv\Scripts\python.exe scripts\verify_v3_2_0_dashboard_drilldown.py`
+  - PASS: `[OK] V3.2.0 dashboard drilldown checks passed`.
+- `.\.venv\Scripts\python.exe scripts\verify_v3_2_0_data_center_ui.py`
+  - PASS: exit 0, verifier is silent on success.
+- `cd v2-web; .\node_modules\.bin\vue-tsc.cmd --noEmit`
+  - PASS.
+- `cd v2-web; npm run build`
+  - PASS: `vue-tsc --noEmit && vite build`.
+  - Warnings retained: two Rollup `/* #__PURE__ */` annotation warnings from `@vueuse/core`, plus the existing `element-components` chunk-size warning.
+- `git diff --name-only 8af1f0e..HEAD -- v2-api/app/static/vue`
+  - PASS: no output after static restore/clean.
+
+### Self Review
+
+- No new query names were added.
+- Dashboard helper still emits `installer_source=photo` and `barcode_eligibility=eligible|ineligible`.
+- JSON and PG installer distribution now use the same photo-source filters as the data-center drilldown list.
+- `barcode_eligibility=eligible` remains photo-set eligible; `barcode_eligibility=ineligible` now matches notRequired and can overlap when a photo-eligible group is durably `not_eligible`.
+- `v2-api/app/static/vue/**` remains absent from the Task4 net diff.
+
+### Version Change
+
+- None. This is a V3.2.0 task review fix and did not change `APP_VERSION`.
+
+### Release Status
+
+- Local code, RED/GREEN tests, verifiers, type-check, build, static cleanup, report update, and self-review complete.
+- Not released.
+
+### Concerns
+
+1. Build warnings are unchanged dependency/chunk-size warnings, not introduced by this fix.

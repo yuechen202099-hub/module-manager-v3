@@ -3855,19 +3855,26 @@ def build_summary(
 
 
 def summarize_installers_by_group(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    counts: dict[str, int] = defaultdict(int)
+    installer_group_ids: dict[str, set[str]] = defaultdict(set)
+    name_cache: dict[str, str] = {}
     for group in groups:
-        installer = ""
-        for photo in group.get("photos", []):
-            installer = str(photo.get("creator") or "").strip()
+        group_id = str(group.get("id") or group.get("legacy_id") or id(group))
+        for photo in group.get("photos", []) or []:
+            if not isinstance(photo, dict):
+                continue
+            if photo.get("is_active", True) is False:
+                continue
+            if not _photo_upload_status_is_valid(photo):
+                continue
+            if not _photo_is_construction_upload(photo):
+                continue
+            installer = installer_display_name(photo.get("creator"), name_cache)
             if installer:
-                break
-        if installer:
-            counts[installer] += 1
-    total = sum(counts.values())
+                installer_group_ids[installer].add(group_id)
+    total = sum(len(group_ids) for group_ids in installer_group_ids.values())
     return [
-        {"installer": installer, "group_count": count, "share": round(count / total, 4) if total else 0.0}
-        for installer, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        {"installer": installer, "group_count": len(group_ids), "share": round(len(group_ids) / total, 4) if total else 0.0}
+        for installer, group_ids in sorted(installer_group_ids.items(), key=lambda item: (-len(item[1]), item[0]))
     ]
 
 
@@ -5282,6 +5289,7 @@ def list_data_center_rows(query) -> dict[str, Any]:
             row = data_center_service.group_row(raw)
             row["_terminal_status"] = terminal_statuses.get(str(row.get("terminal") or "").strip(), "incomplete")
             row["_barcode_eligible"] = data_center_service.has_current_eligible_photo_set(raw)
+            row["_durable_barcode_status"] = data_center_service.durable_barcode_status_from_group(raw)
             row["_installer_photo_source_match"] = bool(
                 query.installer.strip() and _data_center_installer_photos(raw, query.installer)
             )

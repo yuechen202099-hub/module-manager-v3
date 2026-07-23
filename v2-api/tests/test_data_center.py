@@ -466,6 +466,18 @@ def test_json_data_center_installer_photo_source_and_barcode_eligibility_are_exa
                 _construction_photo(5, 4, category="collector_barcode", creator="installer-a", client_completed_at="2026-07-20T11:38:00+08:00", upload_status="INVALID"),
             ],
         ),
+        _group(
+            6,
+            installer="installer-a",
+            barcode_status="not_eligible",
+            updated_at="2026-07-20T13:00:00+00:00",
+            photos=[
+                _construction_photo(6, 1, category="before_box", creator="installer-a", client_completed_at="2026-07-20T12:30:00+08:00"),
+                _construction_photo(6, 2, category="module_meter", creator="installer-a", client_completed_at="2026-07-20T12:32:00+08:00"),
+                _construction_photo(6, 3, category="after_box", creator="installer-a", client_completed_at="2026-07-20T12:35:00+08:00"),
+                _construction_photo(6, 4, category="collector_barcode", creator="installer-a", client_completed_at="2026-07-20T12:38:00+08:00"),
+            ],
+        ),
     ]
     monkeypatch.setitem(local_simulation._team_states, team_id, state)
     monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
@@ -475,7 +487,7 @@ def test_json_data_center_installer_photo_source_and_barcode_eligibility_are_exa
     no_date = repo.list_data_center_rows(
         DataCenterQuery(data_type="group", installer="installer-a", installer_source="photo", page=1, page_size=20)
     )
-    assert {row["id"] for row in no_date["items"]} == {"group-002", "group-003", "group-004", "group-005"}
+    assert {row["id"] for row in no_date["items"]} == {"group-002", "group-003", "group-004", "group-005", "group-006"}
 
     same_photo_date = repo.list_data_center_rows(
         DataCenterQuery(
@@ -488,17 +500,17 @@ def test_json_data_center_installer_photo_source_and_barcode_eligibility_are_exa
             page_size=20,
         )
     )
-    assert {row["id"] for row in same_photo_date["items"]} == {"group-002", "group-004", "group-005"}
+    assert {row["id"] for row in same_photo_date["items"]} == {"group-002", "group-004", "group-005", "group-006"}
 
     eligible = repo.list_data_center_rows(
         DataCenterQuery(data_type="group", barcode_eligibility="eligible", page=1, page_size=20)
     )
-    assert {row["id"] for row in eligible["items"]} == {"group-001", "group-002", "group-003"}
+    assert {row["id"] for row in eligible["items"]} == {"group-001", "group-002", "group-003", "group-006"}
 
     ineligible = repo.list_data_center_rows(
         DataCenterQuery(data_type="group", barcode_eligibility="ineligible", page=1, page_size=20)
     )
-    assert {row["id"] for row in ineligible["items"]} == {"group-004", "group-005"}
+    assert {row["id"] for row in ineligible["items"]} == {"group-004", "group-005", "group-006"}
 
 
 def test_data_center_list_is_lightweight_and_detail_is_lazy_loaded(
@@ -1017,8 +1029,10 @@ def test_postgres_data_center_compiles_barcode_eligibility_from_exact_photo_set(
     ]
     assert "data_center_rows.photo_count != 4" in ineligible_compiled[0]
     assert "data_center_rows.required_category_count != 4" in ineligible_compiled[0]
+    assert "data_center_rows.durable_barcode_status = 'not_eligible'" in ineligible_compiled[0]
     assert "data_center_rows.photo_count != 4" in ineligible_compiled[1]
     assert "data_center_rows.required_category_count != 4" in ineligible_compiled[1]
+    assert "data_center_rows.durable_barcode_status = 'not_eligible'" in ineligible_compiled[1]
 
 
 def test_postgres_data_center_detail_derives_statuses_after_loading_photos(
