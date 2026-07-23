@@ -353,12 +353,20 @@ export type DataCenterDetail = DataCenterRow & {
 export type ExportCenterPageSize = 20 | 50 | 100
 export type ExportCenterTab = 'terminal' | 'device' | 'business' | 'statistics'
 export type ExportCatalogMode = 'inline' | 'background'
+export type ExportCatalogRequiredFilterKind = 'task'
+
+export type ExportCatalogRequiredFilter = {
+  key: string
+  label: string
+  kind: ExportCatalogRequiredFilterKind
+}
 
 export type ExportCatalogItem = {
   key: string
   label: string
   delivery: string
   mode: ExportCatalogMode
+  requiredFilters?: ExportCatalogRequiredFilter[]
 }
 
 export type TerminalReadinessItem = {

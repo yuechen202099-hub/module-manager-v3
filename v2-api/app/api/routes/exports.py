@@ -181,15 +181,21 @@ def export_jobs(
     request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20),
+    category: str = "",
+    job_types: str = "",
+    status: str = "",
     job_type: str = "",
     auth: dict = Depends(require_admin),
 ):
     try:
         normalized_page_size = export_center.normalize_export_page_size(page_size)
+        normalized_category = export_center.normalize_export_job_category(category)
         data = state_repository().list_export_jobs(
             page=page,
             page_size=normalized_page_size,
-            job_type=job_type,
+            category=normalized_category,
+            job_types=export_center.normalize_export_job_types([job_types, job_type], category=normalized_category),
+            status=export_center.normalize_export_job_statuses([status]),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -213,7 +219,7 @@ def create_export_job(payload: ExportJobCreateRequest, request: Request, auth: d
                 {
                     "job_id": job["id"],
                     "job_type": payload.job_type,
-                    "filters": payload.filters,
+                    "filters": job.get("filters") or payload.filters,
                 },
             )
     except ValueError as exc:

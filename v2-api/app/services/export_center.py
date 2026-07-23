@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
@@ -20,13 +21,19 @@ SUPPORTED_EXPORT_JOB_PAGE_SIZES = {20, 50, 100}
 PLACEHOLDER_DEVICE_VALUES = {"", "00000000", "UNKNOWN", "N/A", "NULL", "-"}
 DEVICE_EXPORT_KINDS = {"terminal", "meter", "module", "collector"}
 
-EXPORT_CATALOG: tuple[dict[str, str], ...] = (
+EXPORT_CATALOG: tuple[dict[str, Any], ...] = (
     {"key": "final_delivery", "label": "正式交付包", "delivery": "zip", "mode": "background"},
     {"key": "device_terminal", "label": "终端设备清单", "delivery": "xlsx", "mode": "inline"},
     {"key": "device_meter", "label": "表号设备清单", "delivery": "xlsx", "mode": "inline"},
     {"key": "device_module", "label": "模块设备清单", "delivery": "xlsx", "mode": "inline"},
     {"key": "device_collector", "label": "采集器设备清单", "delivery": "xlsx", "mode": "inline"},
-    {"key": "task_detail", "label": "任务明细", "delivery": "xlsx", "mode": "inline"},
+    {
+        "key": "task_detail",
+        "label": "任务明细",
+        "delivery": "xlsx",
+        "mode": "inline",
+        "required_filters": [{"key": "task_id", "label": "任务", "kind": "task"}],
+    },
     {"key": "exception_meter", "label": "异常表计", "delivery": "xlsx", "mode": "inline"},
     {"key": "exception_missing_photo", "label": "缺图异常", "delivery": "xlsx", "mode": "inline"},
     {"key": "replacement", "label": "换表记录", "delivery": "xlsx", "mode": "inline"},
@@ -37,6 +44,20 @@ EXPORT_CATALOG: tuple[dict[str, str], ...] = (
     {"key": "installer_daily_completion", "label": "施工人员每日完成", "delivery": "xlsx", "mode": "inline"},
 )
 CATALOG_BY_KEY = {item["key"]: item for item in EXPORT_CATALOG}
+EXPORT_JOB_CATEGORY_TYPES: dict[str, tuple[str, ...]] = {
+    "terminal": ("final_delivery",),
+    "device": ("device_terminal", "device_meter", "device_module", "device_collector"),
+    "business": (
+        "task_detail",
+        "exception_meter",
+        "exception_missing_photo",
+        "replacement",
+        "unmatched",
+        "project_outside",
+    ),
+    "statistics": ("barcode_review", "installer_kpi", "installer_daily_completion"),
+}
+SUPPORTED_EXPORT_JOB_STATUSES = {"pending", "processing", "succeeded", "failed"}
 
 
 def normalize_export_page_size(value: int) -> int:
@@ -57,6 +78,51 @@ def normalize_device_value(value: object) -> str:
 
 def _text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _csv_items(values: Iterable[object] | None) -> list[str]:
+    items: list[str] = []
+    for value in values or []:
+        for part in str(value or "").split(","):
+            text = part.strip()
+            if text:
+                items.append(text)
+    return items
+
+
+def normalize_export_job_category(value: object) -> str:
+    category = _text(value)
+    if not category:
+        return ""
+    if category not in EXPORT_JOB_CATEGORY_TYPES:
+        raise ValueError(f"Unsupported export category: {category}")
+    return category
+
+
+def normalize_export_job_types(values: Iterable[object] | None = None, *, category: str = "") -> list[str]:
+    allowed_by_category = set(EXPORT_JOB_CATEGORY_TYPES.get(category, ()))
+    requested = _csv_items(values)
+    if not requested:
+        return sorted(allowed_by_category) if category else []
+    normalized: list[str] = []
+    for job_type in requested:
+        if job_type not in CATALOG_BY_KEY:
+            raise ValueError(f"Unsupported export job type filter: {job_type}")
+        if category and job_type not in allowed_by_category:
+            raise ValueError(f"Export job type {job_type} is not in category {category}")
+        if job_type not in normalized:
+            normalized.append(job_type)
+    return normalized
+
+
+def normalize_export_job_statuses(values: Iterable[object] | None = None) -> list[str]:
+    normalized: list[str] = []
+    for status in _csv_items(values):
+        if status not in SUPPORTED_EXPORT_JOB_STATUSES:
+            raise ValueError(f"Unsupported export job status filter: {status}")
+        if status not in normalized:
+            normalized.append(status)
+    return normalized
 
 
 def terminal_delivery_preflight(group: Mapping[str, Any]) -> dict[str, Any]:
@@ -197,6 +263,35 @@ def export_request_key(*, job_type: str, filters: Mapping[str, Any], snapshot: I
 
 def canonical_export_filters(filters: Mapping[str, Any]) -> dict[str, Any]:
     return dict(sorted((str(key), value) for key, value in dict(filters or {}).items()))
+
+
+def normalize_export_filters(job_type: str, filters: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = deepcopy(dict(filters or {}))
+    normalized_job_type = _text(job_type)
+    if normalized_job_type == "final_delivery":
+        terminal = _text(normalized.get("terminal"))
+        terminals = [item for item in _csv_items(normalized.get("terminals")) if item]
+        if terminal:
+            terminals = [terminal]
+        if len(terminals) > 1:
+            raise ValueError("final_delivery export supports exactly one terminal")
+        terminal = terminals[0] if terminals else terminal
+        if terminal:
+            normalized["terminal"] = terminal
+        else:
+            normalized.pop("terminal", None)
+        normalized.pop("terminals", None)
+        review_scope = _text(normalized.get("review_scope")) or "reviewed"
+        normalized["review_scope"] = "all" if review_scope == "all" else "reviewed"
+    if normalized_job_type == "task_detail":
+        try:
+            task_id = int(normalized.get("task_id") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("task_id is required for task_detail export") from exc
+        if task_id <= 0:
+            raise ValueError("task_id is required for task_detail export")
+        normalized["task_id"] = task_id
+    return canonical_export_filters(normalized)
 
 
 def inline_export_request_key(*, job_type: str, filters: Mapping[str, Any], content_sha256: str) -> str:
@@ -504,7 +599,7 @@ def export_filename(job_type: str, suffix: str = "xlsx") -> str:
 
 
 def build_inline_export_content(repository: Any, *, job_type: str, filters: Mapping[str, Any]) -> tuple[bytes, str, str]:
-    filters = dict(filters or {})
+    filters = normalize_export_filters(job_type, filters)
     media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if job_type.startswith("device_"):
         kind = job_type.removeprefix("device_")
@@ -517,7 +612,7 @@ def build_inline_export_content(repository: Any, *, job_type: str, filters: Mapp
         )
         return content, export_filename(job_type), media_type
     if job_type == "task_detail":
-        return repository.build_task_detail_export(int(filters.get("task_id") or 0)), export_filename(job_type), media_type
+        return repository.build_task_detail_export(int(filters["task_id"])), export_filename(job_type), media_type
     if job_type == "exception_meter":
         return repository.build_exception_meter_export(reviewer=str(filters.get("reviewer") or "")), export_filename(job_type), media_type
     if job_type == "project_outside":
@@ -533,6 +628,7 @@ def build_inline_export_content(repository: Any, *, job_type: str, filters: Mapp
 def request_background_export(repository: Any, *, job_type: str, filters: Mapping[str, Any], actor: str) -> dict[str, Any]:
     if job_type != "final_delivery":
         raise ValueError(f"Unsupported background export job type: {job_type}")
+    filters = normalize_export_filters(job_type, filters)
     from app.services.delivery_package_queue import DeliveryPackageNotReady
 
     try:

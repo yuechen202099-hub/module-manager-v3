@@ -120,6 +120,11 @@ type BackendExportCatalogItem = {
   label?: string
   delivery?: string
   mode?: 'inline' | 'background'
+  required_filters?: Array<{
+    key?: string
+    label?: string
+    kind?: 'task'
+  }>
 }
 
 type BackendTerminalReadinessItem = {
@@ -1083,6 +1088,11 @@ function mapExportCatalogItem(raw: BackendExportCatalogItem): ExportCatalogItem 
     label: String(raw.label || ''),
     delivery: String(raw.delivery || ''),
     mode: raw.mode === 'background' ? 'background' : 'inline',
+    requiredFilters: (raw.required_filters || []).map((item) => ({
+      key: String(item.key || ''),
+      label: String(item.label || ''),
+      kind: item.kind === 'task' ? 'task' : 'task',
+    })),
   }
 }
 
@@ -1684,7 +1694,9 @@ export type TerminalReadinessQuery = {
 export type ExportJobListQuery = {
   page?: number
   pageSize?: ExportCenterPageSize
-  jobType?: string
+  category?: string
+  jobTypes?: string[]
+  status?: string[]
   signal?: AbortSignal
 }
 
@@ -3061,7 +3073,9 @@ export async function fetchExportJobs(query: ExportJobListQuery = {}): Promise<E
     page: String(query.page || 1),
     page_size: String(query.pageSize || 20),
   })
-  if (query.jobType) params.set('job_type', query.jobType)
+  if (query.category) params.set('category', query.category)
+  if (query.jobTypes?.length) params.set('job_types', query.jobTypes.join(','))
+  if (query.status?.length) params.set('status', query.status.join(','))
   const data = await api<BackendExportJobPage>(`/exports/jobs?${params.toString()}`, {
     signal: query.signal,
   })

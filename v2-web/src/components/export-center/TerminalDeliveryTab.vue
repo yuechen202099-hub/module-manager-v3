@@ -13,7 +13,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   launch: [payload: { terminal: string; reviewScope: 'reviewed' | 'all' }]
-  download: [job: ExportJob]
+  download: [terminal: string]
   refresh: []
 }>()
 
@@ -115,9 +115,9 @@ function launchKey(terminal: string, reviewScope: 'reviewed' | 'all') {
             <el-button
               circle
               :icon="Download"
-              :loading="downloadingJobId === latestJobOf(row.terminal)?.id"
-              :disabled="!latestJobOf(row.terminal) || latestJobOf(row.terminal)?.status !== 'succeeded'"
-              @click="latestJobOf(row.terminal) && emit('download', latestJobOf(row.terminal)!)"
+              :loading="downloadingJobId === row.terminal"
+              :disabled="row.status !== 'ready'"
+              @click="emit('download', row.terminal)"
             />
           </el-tooltip>
         </div>

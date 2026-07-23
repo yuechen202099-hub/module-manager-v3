@@ -6,8 +6,8 @@ import { computed, ref, watch } from 'vue'
 import ExportCatalogTab from '@/components/export-center/ExportCatalogTab.vue'
 import ExportJobsTable from '@/components/export-center/ExportJobsTable.vue'
 import TerminalDeliveryTab from '@/components/export-center/TerminalDeliveryTab.vue'
-import { createExportJob, downloadExportJob } from '@/api/services'
-import type { ExportCatalogItem, ExportCenterPageSize, ExportCenterTab, ExportJob } from '@/api/types'
+import { createExportJob, downloadExportJob, fetchTasks } from '@/api/services'
+import type { ExportCatalogItem, ExportCenterPageSize, ExportCenterTab, ExportJob, ReviewTask } from '@/api/types'
 import { EXPORT_CENTER_PAGE_SIZES, useExportCenterQuery } from '@/composables/useExportCenterQuery'
 
 const DEVICE_JOB_TYPES = ['device_terminal', 'device_meter', 'device_module', 'device_collector'] as const
@@ -32,7 +32,7 @@ const {
   query,
   catalog,
   terminalPage,
-  jobs,
+  jobsPage,
   loading,
   jobsLoading,
   errorMessage,
@@ -46,11 +46,32 @@ const {
 const filterDraft = ref('')
 const launchingKey = ref('')
 const downloadingJobId = ref('')
+const tasksLoading = ref(false)
+const tasksLoaded = ref(false)
+const tasks = ref<ReviewTask[]>([])
+const selectedTaskId = ref('')
 
 watch(
   () => query.filter,
   (value) => {
     filterDraft.value = value
+  },
+  { immediate: true },
+)
+
+watch(
+  () => query.tab,
+  async (tab) => {
+    if (tab !== 'business' || tasksLoaded.value || tasksLoading.value) return
+    tasksLoading.value = true
+    try {
+      tasks.value = await fetchTasks({ summary: true })
+      tasksLoaded.value = true
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : '任务加载失败')
+    } finally {
+      tasksLoading.value = false
+    }
   },
   { immediate: true },
 )
@@ -81,22 +102,11 @@ const pagedCatalogItems = computed(() => {
 
 const primaryTotal = computed(() => (query.tab === 'terminal' ? terminalPage.value.total : filteredCatalogItems.value.length))
 
-const visibleJobs = computed(() => {
-  const allowed = new Set(TAB_JOB_TYPES[query.tab])
-  const needle = query.filter.trim().toLowerCase()
-  const filtered = jobs.value.filter((job) => {
-    if (!allowed.has(job.jobType)) return false
-    if (!needle) return true
-    const scope = JSON.stringify(job.filters || {}).toLowerCase()
-    const label = (catalogLabels.value[job.jobType] || job.jobType).toLowerCase()
-    return `${label} ${job.jobType} ${scope}`.includes(needle)
-  })
-  return filtered.slice(0, query.pageSize)
-})
+const visibleJobs = computed(() => jobsPage.value.items)
 
 const latestJobsByTerminal = computed<Record<string, ExportJob | undefined>>(() => {
   const byTerminal: Record<string, ExportJob | undefined> = {}
-  for (const job of jobs.value) {
+  for (const job of jobsPage.value.items) {
     if (job.jobType !== 'final_delivery') continue
     const terminal = String(job.filters?.terminal || '').trim()
     if (!terminal || byTerminal[terminal]) continue
@@ -104,6 +114,16 @@ const latestJobsByTerminal = computed<Record<string, ExportJob | undefined>>(() 
   }
   return byTerminal
 })
+
+const taskOptions = computed(() =>
+  tasks.value.map((task) => ({
+    value: String(task.id),
+    label: [task.terminal || '-', `#${task.id}`, task.name || '']
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .join(' / '),
+  })),
+)
 
 function handlePageSize(size: number) {
   void setPageSize(size as ExportCenterPageSize)
@@ -117,11 +137,35 @@ function applyFilter(next = filterDraft.value) {
   void setFilter(next)
 }
 
+function handleSelectedTaskId(value: string) {
+  selectedTaskId.value = value
+}
+
 async function handleDownloadJob(job: ExportJob) {
   downloadingJobId.value = job.id
   try {
     const result = await downloadExportJob(job.id)
     ElMessage.success(result.filename)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '下载失败')
+  } finally {
+    downloadingJobId.value = ''
+  }
+}
+
+async function handleDownloadTerminal(terminal: string) {
+  downloadingJobId.value = terminal
+  try {
+    const job = await createExportJob('final_delivery', {
+      terminals: [terminal],
+    })
+    if (job.status === 'succeeded') {
+      const result = await downloadExportJob(job.id)
+      ElMessage.success(result.filename)
+    } else {
+      ElMessage.success(`${terminal} 已提交`)
+      await refresh()
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '下载失败')
   } finally {
@@ -150,10 +194,23 @@ async function handleLaunchTerminal(payload: { terminal: string; reviewScope: 'r
   }
 }
 
+function launchFiltersFor(item: ExportCatalogItem) {
+  const filters: Record<string, unknown> = {}
+  if (item.requiredFilters?.some((field) => field.key === 'task_id' && field.kind === 'task')) {
+    filters.task_id = selectedTaskId.value
+  }
+  return filters
+}
+
 async function handleLaunchCatalog(item: ExportCatalogItem) {
+  const filters = launchFiltersFor(item)
+  if (item.key === 'task_detail' && !filters.task_id) {
+    ElMessage.error('请选择任务')
+    return
+  }
   launchingKey.value = item.key
   try {
-    const job = await createExportJob(item.key, {})
+    const job = await createExportJob(item.key, filters)
     if (job.status === 'succeeded') {
       await handleDownloadJob(job)
     } else {
@@ -207,7 +264,7 @@ async function handleLaunchCatalog(item: ExportCatalogItem) {
         :launching-key="launchingKey"
         :downloading-job-id="downloadingJobId"
         @launch="handleLaunchTerminal"
-        @download="handleDownloadJob"
+        @download="handleDownloadTerminal"
         @refresh="refresh"
       />
 
@@ -216,6 +273,10 @@ async function handleLaunchCatalog(item: ExportCatalogItem) {
         :items="pagedCatalogItems"
         :loading="loading"
         :launching-key="launchingKey"
+        :selected-task-id="selectedTaskId"
+        :task-options="taskOptions"
+        :task-loading="tasksLoading"
+        @update:selected-task-id="handleSelectedTaskId"
         @launch="handleLaunchCatalog"
       />
 
@@ -239,6 +300,17 @@ async function handleLaunchCatalog(item: ExportCatalogItem) {
         :loading="jobsLoading"
         :downloading-job-id="downloadingJobId"
         @download="handleDownloadJob"
+      />
+
+      <el-pagination
+        class="exports-pagination jobs-pagination"
+        layout="sizes, prev, pager, next, total"
+        :current-page="jobsPage.page"
+        :page-size="jobsPage.pageSize"
+        :page-sizes="EXPORT_CENTER_PAGE_SIZES"
+        :total="jobsPage.total"
+        @current-change="setPage"
+        @size-change="handlePageSize"
       />
     </div>
   </section>
@@ -281,6 +353,10 @@ async function handleLaunchCatalog(item: ExportCatalogItem) {
 .exports-pagination {
   margin-top: 14px;
   justify-content: flex-end;
+}
+
+.jobs-pagination {
+  margin-top: 12px;
 }
 
 @media (max-width: 980px) {

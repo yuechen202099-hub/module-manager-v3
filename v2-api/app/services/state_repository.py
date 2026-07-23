@@ -2289,6 +2289,18 @@ def _export_job_payload(job: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalized_export_job_filters(
+    *,
+    category: str = "",
+    job_types: Iterable[object] | None = None,
+    status: Iterable[object] | None = None,
+) -> tuple[str, list[str], list[str]]:
+    normalized_category = export_center.normalize_export_job_category(category)
+    normalized_job_types = export_center.normalize_export_job_types(job_types, category=normalized_category)
+    normalized_status = export_center.normalize_export_job_statuses(status)
+    return normalized_category, normalized_job_types, normalized_status
+
+
 
 def _file_download_payload(job: Mapping[str, Any]) -> dict[str, Any]:
     content = job.get("content")
@@ -2758,7 +2770,15 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_export_jobs(self, *, page: int = 1, page_size: int = 20, job_type: str = "") -> dict[str, Any]:
+    def list_export_jobs(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        category: str = "",
+        job_types: Iterable[object] | None = None,
+        status: Iterable[object] | None = None,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -3950,14 +3970,27 @@ class JsonStateRepository(StateRepository):
             query=query,
         )
 
-    def list_export_jobs(self, *, page: int = 1, page_size: int = 20, job_type: str = "") -> dict[str, Any]:
+    def list_export_jobs(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        category: str = "",
+        job_types: Iterable[object] | None = None,
+        status: Iterable[object] | None = None,
+    ) -> dict[str, Any]:
         page_size = export_center.normalize_export_page_size(page_size)
         page = max(1, int(page or 1))
-        requested_type = str(job_type or "").strip()
+        _category, requested_types, requested_statuses = _normalized_export_job_filters(
+            category=category,
+            job_types=job_types,
+            status=status,
+        )
         jobs = [
             dict(job)
             for job in local_simulation.get_state().setdefault("export_jobs", [])
-            if not requested_type or str(job.get("job_type") or "") == requested_type
+            if (not requested_types or str(job.get("job_type") or "") in requested_types)
+            and (not requested_statuses or str(job.get("status") or "") in requested_statuses)
         ]
         jobs.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")), reverse=True)
         offset = (page - 1) * page_size
@@ -3972,7 +4005,7 @@ class JsonStateRepository(StateRepository):
         job_type = str(job_type or "").strip()
         if job_type not in export_center.CATALOG_BY_KEY:
             raise ValueError(f"Unsupported export job type: {job_type}")
-        filters = deepcopy(dict(filters or {}))
+        filters = export_center.normalize_export_filters(job_type, filters)
         job_id = export_center.new_export_job_id()
         now = datetime.now(UTC).isoformat()
         filename = ""
@@ -8659,14 +8692,28 @@ class PostgresStateRepository(StateRepository):
                 "created_at": event.created_at.isoformat() if event.created_at else None,
             }
 
-    def list_export_jobs(self, *, page: int = 1, page_size: int = 20, job_type: str = "") -> dict[str, Any]:
+    def list_export_jobs(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        category: str = "",
+        job_types: Iterable[object] | None = None,
+        status: Iterable[object] | None = None,
+    ) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         page_size = export_center.normalize_export_page_size(page_size)
         page = max(1, int(page or 1))
+        _category, requested_types, requested_statuses = _normalized_export_job_filters(
+            category=category,
+            job_types=job_types,
+            status=status,
+        )
         statement = select(ExportJob).where(ExportJob.team_id == team_id)
-        requested_type = str(job_type or "").strip()
-        if requested_type:
-            statement = statement.where(ExportJob.job_type == requested_type)
+        if requested_types:
+            statement = statement.where(ExportJob.job_type.in_(requested_types))
+        if requested_statuses:
+            statement = statement.where(ExportJob.status.in_(requested_statuses))
         with self._session() as session:
             total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
             rows = session.scalars(
@@ -8823,7 +8870,7 @@ class PostgresStateRepository(StateRepository):
         job_type = str(job_type or "").strip()
         if job_type not in export_center.CATALOG_BY_KEY:
             raise ValueError(f"Unsupported export job type: {job_type}")
-        filters = deepcopy(dict(filters or {}))
+        filters = export_center.normalize_export_filters(job_type, filters)
         is_background = export_center.CATALOG_BY_KEY[job_type]["mode"] == "background"
         snapshot_groups: list[Mapping[str, Any]] = []
         snapshot: list[dict[str, Any]] = []

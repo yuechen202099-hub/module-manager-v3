@@ -67,6 +67,13 @@ def main() -> None:
         "useExportCenterQuery",
     )
     ensure("50" in query_composable and "100" in query_composable, "useExportCenterQuery missing supported page sizes")
+    ensure("Number.isFinite" in query_composable, "useExportCenterQuery must strictly parse page numbers")
+    ensure("MAX_EXPORT_CENTER_PAGE" in query_composable, "useExportCenterQuery missing page upper bound")
+    ensure("pageSize: 100" not in query_composable, "useExportCenterQuery must not hard-code history fetch to page 1 size 100")
+    ensure(
+        "fetchExportJobs({" in query_composable and "category:" in query_composable,
+        "useExportCenterQuery must request server-side job filters",
+    )
 
     contains_all(terminal_tab, ["阻断", "最近生成", "操作", "blockers"], "TerminalDeliveryTab")
     ensure(
@@ -92,6 +99,7 @@ def main() -> None:
         services,
         [
             "fetchExportCatalog",
+            "fetchTasks",
             "fetchTerminalReadinessPage",
             "fetchExportJobs",
             "createExportJob",
@@ -99,10 +107,18 @@ def main() -> None:
         ],
         "export-center services",
     )
+    ensure("required_filters" in services or "requiredFilters" in types, "export center task filters metadata missing")
+    ensure("task_id" in exports_view and "fetchTasks" in exports_view, "task_detail task selector missing")
+    ensure("createExportJob(item.key, {})" not in exports_view, "task_detail launch must not submit empty filters")
+    ensure(
+        "terminals: [terminal]" in exports_view or "terminals: [payload.terminal]" in exports_view,
+        "terminal download action must request final_delivery by terminal list",
+    )
     contains_all(
         types,
         [
             "export type ExportCatalogItem",
+            "requiredFilters",
             "export type TerminalReadinessItem",
             "export type ExportJob",
             "export type ExportJobPage",

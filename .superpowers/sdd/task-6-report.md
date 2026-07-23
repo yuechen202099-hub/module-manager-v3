@@ -87,3 +87,24 @@
 1. `created_by` 的 PostgreSQL 透传补丁已落代码，但没有补跑独立后端 pytest 用例；当前仅通过前端链路和代码审查确认。
 2. `task-hall` 作为兼容入口保留在静态页注册表中，但已从左侧导航隐藏，避免与 `global-search` 重复显示。
 3. 构建仍存在既有 chunk size warning，未在本任务内做额外拆包优化。
+## 2026-07-23 Review Fixes
+
+- 追加修复导出中心审阅未通过的 2 Important + 1 Minor：
+  - `task_detail` catalog 现在通过 catalog 元数据 `required_filters` 渲染任务选择器，复用现有 `/local-test/tasks` 列表，按终端 / 任务号搜索，只在选定有效 `task_id` 后发起导出。
+  - `/exports/jobs` 扩展为服务端分页过滤，支持白名单 `category` / `job_types` / `status`；JSON / PostgreSQL 路径都在 count 与 rows 上应用同一过滤条件。
+  - 终端下载动作不再依赖当前 history 页的最近 job，改为幂等 `createExportJob('final_delivery', { terminals: [terminal] })`；若返回 `succeeded` 直接下载，若返回 `pending` 刷新状态。
+  - `useExportCenterQuery.ts` 改为 `Number.isFinite` + 正整数 + `MAX_EXPORT_CENTER_PAGE` 上限的 URL 页码解析，非法值回退到 `1`，`page_size` 继续只允许 `20 / 50 / 100`。
+- 新增 / 更新 RED -> GREEN 验证：
+  - `v2-api/tests/test_export_center.py`
+    - `test_export_jobs_forward_server_side_filters`
+    - `test_json_export_jobs_filter_by_category_job_types_and_status`
+    - `test_export_catalog_marks_task_detail_required_filters`
+    - `test_task_detail_export_job_requires_positive_task_id`
+    - 保留并回归 `test_postgres_export_jobs_include_created_by`
+  - `scripts/verify_v3_2_0_export_center_ui.py` 增补 strict page parse、task selector、server-side jobs query、terminal 幂等下载检查。
+- 本次验证（2026-07-23）:
+  - `python -m pytest v2-api/tests/test_export_center.py -k "export_jobs_forward_server_side_filters or json_export_jobs_filter_by_category_job_types_and_status or export_catalog_marks_task_detail_required_filters or task_detail_export_job_requires_positive_task_id or export_jobs_use_supported_page_sizes or postgres_export_jobs_include_created_by" -q` -> `8 passed, 31 deselected`
+  - `python scripts/verify_v3_2_0_export_center_ui.py` -> `OK`
+  - `cd v2-web && npm exec vue-tsc -- --noEmit` -> `0`
+  - `cd v2-web && MODULE_MANAGER_VUE_OUT_DIR=.tmp/task6-build npm run build` -> `0`（仅既有 Rollup chunk / PURE comment warnings）
+  - `git diff --name-only 74989e7..HEAD -- v2-api/app/static/vue` -> 空输出

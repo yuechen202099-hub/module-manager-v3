@@ -167,8 +167,24 @@ def test_export_jobs_use_supported_page_sizes(monkeypatch: pytest.MonkeyPatch, t
     calls: list[dict] = []
 
     class JobRepository:
-        def list_export_jobs(self, *, page: int, page_size: int, job_type: str = "") -> dict:
-            calls.append({"page": page, "page_size": page_size, "job_type": job_type})
+        def list_export_jobs(
+            self,
+            *,
+            page: int,
+            page_size: int,
+            category: str = "",
+            job_types: list[str] | None = None,
+            status: list[str] | None = None,
+        ) -> dict:
+            calls.append(
+                {
+                    "page": page,
+                    "page_size": page_size,
+                    "category": category,
+                    "job_types": list(job_types or []),
+                    "status": list(status or []),
+                }
+            )
             return {"page": page, "page_size": page_size, "total": 0, "items": []}
 
     monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
@@ -177,7 +193,52 @@ def test_export_jobs_use_supported_page_sizes(monkeypatch: pytest.MonkeyPatch, t
 
     assert response.status_code == 200
     assert response.json()["data"]["page_size"] == page_size
-    assert calls == [{"page": 1, "page_size": page_size, "job_type": ""}]
+    assert calls == [{"page": 1, "page_size": page_size, "category": "", "job_types": [], "status": []}]
+
+
+def test_export_jobs_forward_server_side_filters(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    client, headers = production_rbac_client(monkeypatch, tmp_path)
+    calls: list[dict] = []
+
+    class JobRepository:
+        def list_export_jobs(
+            self,
+            *,
+            page: int,
+            page_size: int,
+            category: str = "",
+            job_types: list[str] | None = None,
+            status: list[str] | None = None,
+        ) -> dict:
+            calls.append(
+                {
+                    "page": page,
+                    "page_size": page_size,
+                    "category": category,
+                    "job_types": list(job_types or []),
+                    "status": list(status or []),
+                }
+            )
+            return {"page": page, "page_size": page_size, "total": 3, "items": []}
+
+    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
+
+    response = client.get(
+        "/exports/jobs?page=2&page_size=50&category=business&job_types=task_detail,exception_meter&status=pending,failed",
+        headers=headers["admin"],
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["total"] == 3
+    assert calls == [
+        {
+            "page": 2,
+            "page_size": 50,
+            "category": "business",
+            "job_types": ["task_detail", "exception_meter"],
+            "status": ["pending", "failed"],
+        }
+    ]
 
 
 def test_export_jobs_reject_unsupported_page_size(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -228,6 +289,113 @@ def test_postgres_export_jobs_include_created_by() -> None:
     page = repository.list_export_jobs(page=1, page_size=20)
 
     assert page["items"][0]["created_by"] == "root-admin"
+
+
+def test_json_export_jobs_filter_by_category_job_types_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = "team-export-jobs-filtering"
+    state = local_simulation.blank_state(team_id)
+    state["export_jobs"] = [
+        {
+            "id": "job-terminal",
+            "job_type": "final_delivery",
+            "status": "succeeded",
+            "file_name": "final-delivery.zip",
+            "row_count": 0,
+            "progress": 100,
+            "error_message": "",
+            "filter_snapshot": {"terminal": "T-1"},
+            "request_key": "req-terminal",
+            "created_by": "root-admin",
+            "created_at": "2026-07-23T10:00:00+00:00",
+            "updated_at": "2026-07-23T10:00:00+00:00",
+            "finished_at": "2026-07-23T10:00:01+00:00",
+        },
+        {
+            "id": "job-business-match",
+            "job_type": "task_detail",
+            "status": "failed",
+            "file_name": "task-detail.xlsx",
+            "row_count": 12,
+            "progress": 100,
+            "error_message": "missing row",
+            "filter_snapshot": {"task_id": 22},
+            "request_key": "req-business-match",
+            "created_by": "root-admin",
+            "created_at": "2026-07-23T11:00:00+00:00",
+            "updated_at": "2026-07-23T11:00:00+00:00",
+            "finished_at": "2026-07-23T11:00:01+00:00",
+        },
+        {
+            "id": "job-business-other-status",
+            "job_type": "exception_meter",
+            "status": "succeeded",
+            "file_name": "exception-meter.xlsx",
+            "row_count": 2,
+            "progress": 100,
+            "error_message": "",
+            "filter_snapshot": {},
+            "request_key": "req-business-other-status",
+            "created_by": "root-admin",
+            "created_at": "2026-07-23T12:00:00+00:00",
+            "updated_at": "2026-07-23T12:00:00+00:00",
+            "finished_at": "2026-07-23T12:00:01+00:00",
+        },
+        {
+            "id": "job-device",
+            "job_type": "device_terminal",
+            "status": "failed",
+            "file_name": "device-terminal.xlsx",
+            "row_count": 5,
+            "progress": 100,
+            "error_message": "device failed",
+            "filter_snapshot": {},
+            "request_key": "req-device",
+            "created_by": "root-admin",
+            "created_at": "2026-07-23T13:00:00+00:00",
+            "updated_at": "2026-07-23T13:00:00+00:00",
+            "finished_at": "2026-07-23T13:00:01+00:00",
+        },
+    ]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        page = JsonStateRepository().list_export_jobs(
+            page=1,
+            page_size=20,
+            category="business",
+            job_types=["task_detail", "exception_meter"],
+            status=["failed"],
+        )
+    finally:
+        local_simulation.reset_current_team(token)
+
+    assert page["total"] == 1
+    assert [item["id"] for item in page["items"]] == ["job-business-match"]
+
+
+def test_export_catalog_marks_task_detail_required_filters(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    response = client.get("/exports/catalog", headers=headers["admin"])
+
+    assert response.status_code == 200
+    task_detail = next(item for item in response.json()["data"]["items"] if item["key"] == "task_detail")
+    assert task_detail["required_filters"] == [{"key": "task_id", "label": "任务", "kind": "task"}]
+
+
+def test_task_detail_export_job_requires_positive_task_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = "team-task-detail-filter"
+    monkeypatch.setitem(local_simulation._team_states, team_id, local_simulation.blank_state(team_id))
+    token = local_simulation.set_current_team(team_id)
+    try:
+        with pytest.raises(ValueError, match="task_id"):
+            JsonStateRepository().create_export_job(
+                job_type="task_detail",
+                filters={},
+                actor="root-admin",
+            )
+    finally:
+        local_simulation.reset_current_team(token)
 
 
 def test_constructor_cannot_create_or_download_export(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

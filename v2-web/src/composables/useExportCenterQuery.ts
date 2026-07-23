@@ -6,11 +6,26 @@ import type {
   ExportCatalogItem,
   ExportCenterPageSize,
   ExportCenterTab,
-  ExportJob,
+  ExportJobPage,
   TerminalReadinessPage,
 } from '@/api/types'
 
 export const EXPORT_CENTER_PAGE_SIZES = [20, 50, 100] as const
+const MAX_EXPORT_CENTER_PAGE = 1000
+const EXPORT_CENTER_JOB_TYPES_BY_TAB: Record<ExportCenterTab, readonly string[]> = {
+  terminal: ['final_delivery'],
+  device: ['device_terminal', 'device_meter', 'device_module', 'device_collector'],
+  business: [
+    'task_detail',
+    'exception_meter',
+    'exception_missing_photo',
+    'replacement',
+    'unmatched',
+    'project_outside',
+  ],
+  statistics: ['barcode_review', 'installer_kpi', 'installer_daily_completion'],
+}
+const EXPORT_CENTER_JOB_STATUS_FILTERS = new Set(['pending', 'processing', 'succeeded', 'failed'])
 
 export interface ExportCenterRouteQuery {
   tab: ExportCenterTab
@@ -30,6 +45,14 @@ function first(value: unknown): string {
   return Array.isArray(value) ? String(value[0] || '') : String(value || '')
 }
 
+function parsePositiveInteger(value: unknown, fallback: number, max: number): number {
+  const parsed = Number(first(value))
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+    return fallback
+  }
+  return Math.min(parsed, max)
+}
+
 function pageSize(value: unknown): ExportCenterPageSize {
   const parsed = Number(first(value))
   return EXPORT_CENTER_PAGE_SIZES.includes(parsed as ExportCenterPageSize) ? (parsed as ExportCenterPageSize) : 20
@@ -43,7 +66,7 @@ function normalizeTab(value: unknown): ExportCenterTab {
 function routeQueryToState(query: Record<string, unknown>): ExportCenterRouteQuery {
   return {
     tab: normalizeTab(query.tab),
-    page: Math.max(1, Math.floor(Number(first(query.page)) || 1)),
+    page: parsePositiveInteger(query.page, 1, MAX_EXPORT_CENTER_PAGE),
     pageSize: pageSize(query.page_size || query.pageSize),
     filter: first(query.filter || query.query),
   }
@@ -58,12 +81,33 @@ function serializeQuery(state: ExportCenterRouteQuery) {
   return query
 }
 
-function emptyTerminalPage(page: number, pageSize: ExportCenterPageSize): TerminalReadinessPage {
+function emptyTerminalPage(page: number, pageSizeValue: ExportCenterPageSize): TerminalReadinessPage {
   return {
     total: 0,
     page,
-    pageSize,
+    pageSize: pageSizeValue,
     items: [],
+  }
+}
+
+function emptyJobsPage(page: number, pageSizeValue: ExportCenterPageSize): ExportJobPage {
+  return {
+    total: 0,
+    page,
+    pageSize: pageSizeValue,
+    items: [],
+  }
+}
+
+function buildJobHistoryQuery(state: ExportCenterRouteQuery) {
+  const filter = state.filter.trim().toLowerCase()
+  const allowedJobTypes = EXPORT_CENTER_JOB_TYPES_BY_TAB[state.tab]
+  return {
+    page: state.page,
+    pageSize: state.pageSize,
+    category: state.tab,
+    jobTypes: allowedJobTypes.includes(filter) ? [filter] : undefined,
+    status: EXPORT_CENTER_JOB_STATUS_FILTERS.has(filter) ? [filter] : undefined,
   }
 }
 
@@ -73,7 +117,7 @@ export function useExportCenterQuery() {
   const query = reactive<ExportCenterRouteQuery>(routeQueryToState(route.query as Record<string, unknown>))
   const catalog = ref<ExportCatalogItem[]>([])
   const terminalPage = ref<TerminalReadinessPage>(emptyTerminalPage(query.page, query.pageSize))
-  const jobs = ref<ExportJob[]>([])
+  const jobsPage = ref<ExportJobPage>(emptyJobsPage(query.page, query.pageSize))
   const loading = ref(false)
   const jobsLoading = ref(false)
   const errorMessage = ref('')
@@ -89,7 +133,7 @@ export function useExportCenterQuery() {
   }
 
   function setPage(page: number) {
-    return replace({ ...query, page: Math.max(1, page) })
+    return replace({ ...query, page: parsePositiveInteger(page, 1, MAX_EXPORT_CENTER_PAGE) })
   }
 
   function setPageSize(size: ExportCenterPageSize) {
@@ -109,9 +153,9 @@ export function useExportCenterQuery() {
     jobsLoading.value = true
     errorMessage.value = ''
     try {
-      const [catalogItems, latestJobs, readinessPage] = await Promise.all([
+      const [catalogItems, exportJobsPage, readinessPage] = await Promise.all([
         fetchExportCatalog(controller.signal),
-        fetchExportJobs({ page: 1, pageSize: 100, signal: controller.signal }),
+        fetchExportJobs({ ...buildJobHistoryQuery(query), signal: controller.signal }),
         query.tab === 'terminal'
           ? fetchTerminalReadinessPage({
               page: query.page,
@@ -123,13 +167,13 @@ export function useExportCenterQuery() {
       ])
       if (serial !== requestSerial) return
       catalog.value = catalogItems
-      jobs.value = latestJobs.items
+      jobsPage.value = exportJobsPage
       terminalPage.value = readinessPage
     } catch (error) {
       if (serial !== requestSerial || (error instanceof DOMException && error.name === 'AbortError')) return
       errorMessage.value = error instanceof Error ? error.message : '导出中心加载失败'
-      if (query.tab === 'terminal') terminalPage.value = emptyTerminalPage(query.page, query.pageSize)
-      jobs.value = []
+      terminalPage.value = emptyTerminalPage(query.page, query.pageSize)
+      jobsPage.value = emptyJobsPage(query.page, query.pageSize)
       catalog.value = []
     } finally {
       if (serial === requestSerial) {
@@ -156,7 +200,7 @@ export function useExportCenterQuery() {
     query,
     catalog,
     terminalPage,
-    jobs,
+    jobsPage,
     loading,
     jobsLoading,
     errorMessage,
