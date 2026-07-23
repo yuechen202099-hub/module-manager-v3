@@ -47,7 +47,15 @@ def main() -> None:
         ["终端交付", "设备清单", "业务清单", "统计报表"],
         "ExportsView tabs",
     )
-    ensure("page-sizes" in exports_view or "EXPORT_CENTER_PAGE_SIZES" in exports_view, "ExportsView missing page-size control")
+    ensure(
+        exports_view.count(':page-sizes="EXPORT_CENTER_PAGE_SIZES"') == 2,
+        "ExportsView must bind exactly two paginated lists to the supported page sizes",
+    )
+    ensure(
+        ':page-size="query.terminalPageSize"' in exports_view
+        and ':page-size="jobsPage.pageSize"' in exports_view,
+        "ExportsView must bind terminal and job lists to their page-size state",
+    )
     ensure("el-tabs" in exports_view, "ExportsView must render tabs")
 
     contains_all(
@@ -65,6 +73,19 @@ def main() -> None:
         query_composable,
         ["EXPORT_CENTER_PAGE_SIZES", "tab", "page_size", "router.replace", "AbortController", "requestSerial"],
         "useExportCenterQuery",
+    )
+    ensure(
+        "export const EXPORT_CENTER_PAGE_SIZES = [20, 50, 100] as const" in query_composable,
+        "export-center page-size choices must be exactly 20/50/100",
+    )
+    ensure(
+        "terminalPageSize: 20," in query_composable and "jobPageSize: 20," in query_composable,
+        "both export-center paginated lists must default to 20",
+    )
+    ensure(
+        "return EXPORT_CENTER_PAGE_SIZES.includes(parsed as ExportCenterPageSize) ? (parsed as ExportCenterPageSize) : 20"
+        in query_composable,
+        "export-center URL parsing must reject unsupported page sizes and fall back to 20",
     )
     contains_all(
         query_composable,

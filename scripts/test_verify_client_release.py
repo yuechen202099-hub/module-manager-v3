@@ -332,7 +332,6 @@ def test_v3083_feature_verifiers_are_packaged_and_required() -> None:
         "scripts/verify_claim_tasks_construction_priority.js",
         "scripts/verify_construction_priority_import_dialog.js",
         "scripts/verify_review_image_inspector.js",
-        "scripts/verify_task_hall_region_scan.js",
     }
 
     assert feature_verifiers <= verifier.REQUIRED_FILES
@@ -341,18 +340,11 @@ def test_v3083_feature_verifiers_are_packaged_and_required() -> None:
         assert f'Copy-ReleaseItem "{windows_path}" "{windows_path}"' in build_script
 
 
-def test_v3084_performance_verifiers_are_packaged_and_required() -> None:
+def test_v3084_backend_performance_verifier_is_packaged_and_required() -> None:
     verifier = load_verifier()
-    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     acceptance_script = (ROOT / "scripts" / "run-client-acceptance-gate.ps1").read_text(encoding="utf-8")
 
-    assert "scripts/verify_task_hall_pagination.js" in verifier.REQUIRED_FILES
     assert "v2-api/scripts/verify_task_review_performance.py" in verifier.REQUIRED_FILES
-    assert (
-        'Copy-ReleaseItem "scripts\\verify_task_hall_pagination.js" '
-        '"scripts\\verify_task_hall_pagination.js"'
-    ) in build_script
-    assert "node .\\scripts\\verify_task_hall_pagination.js" in acceptance_script
     assert "v2-api\\scripts\\verify_task_review_performance.py" in acceptance_script
     assert "$sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()" in acceptance_script
     assert "verify-client-release.py $zipPath --expected-source-commit $sourceCommit" in acceptance_script

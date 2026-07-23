@@ -27,9 +27,27 @@ def main() -> None:
     data_center_service = read("v2-api/app/services/data_center.py")
     local_simulation = read("v2-api/app/services/local_simulation.py")
     state_repository = read("v2-api/app/services/state_repository.py")
-    combined_list = f"{global_search}\n{filters}"
-
-    assert_contains(combined_list, "page-sizes=\"[20, 50, 100]\"", "data center pagination must expose 20/50/100")
+    assert_contains(
+        query_composable,
+        "export const DATA_CENTER_PAGE_SIZES = [20, 50, 100] as const",
+        "data center page-size choices must be exactly 20/50/100",
+    )
+    assert_contains(query_composable, "pageSize: 20,", "data center pagination must default to 20")
+    assert_contains(
+        query_composable,
+        "return DATA_CENTER_PAGE_SIZES.includes(parsed as DataCenterPageSize) ? parsed as DataCenterPageSize : 20",
+        "data center URL parsing must reject unsupported page sizes and fall back to 20",
+    )
+    assert_contains(
+        global_search,
+        ':page-size="query.pageSize"',
+        "data center pagination must use the URL-backed page size",
+    )
+    assert_contains(
+        global_search,
+        ':page-sizes="DATA_CENTER_PAGE_SIZES"',
+        "data center pagination must expose only the supported page sizes",
+    )
     assert_contains(global_search, "DataCenterReviewDialog", "global search must use the unified review dialog")
     assert_contains(dialog, "重新扫码", "review dialog must expose rescan")
     assert_contains(dialog, "人工确认", "review dialog must expose manual confirmation")

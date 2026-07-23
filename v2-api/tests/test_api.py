@@ -5874,7 +5874,6 @@ def test_legacy_static_html_pages_are_not_served() -> None:
         "/static/login.html",
         "/static/project_board.html",
         "/static/claim_tasks.html",
-        "/static/task_hall.html",
         "/static/construction.html",
         "/static/construction_cache.html",
         "/static/unmatched.html",

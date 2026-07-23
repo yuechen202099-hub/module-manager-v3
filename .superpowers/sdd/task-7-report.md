@@ -151,3 +151,78 @@ git diff --name-only 61a7025..HEAD -- v2-api/app/static/vue
 - 所有 verifier / node 测试 / `vue-tsc` / build 均通过。
 - build 使用隔离 outDir，未改动 `v2-api/app/static/vue`。
 - `git diff --name-only 61a7025..HEAD -- v2-api/app/static/vue` 输出为空。
+
+## 2026-07-24 独立复审缺口修复追加
+
+### 修复结果
+
+- 删除死的 `TaskHallView.vue` 审阅工作台和 `task_hall.html` 静态兼容页。
+- 保留 `/task-hall -> /global-search`、`/review/:groupId -> /global-search?group_id=:groupId&page=1&page_size=20&review=1`，并继续保留 `/tasks -> /claim-tasks`。
+- 从静态页、迁移、烟测、发布包和接受门禁中移除已删除页面/verifier；共享数据中台审阅组件未删除。
+- 单入口 verifier 递归检查集合新增 `exportTerminalDeliveryPackage`，不再读取 `TaskHallView.vue`，并断言两个死文件不存在。
+- 数据中台、终端交付列表和导出任务列表的静态门禁明确锁定：默认 20、可选值恰为 20/50/100、不支持的 URL page size 回退到 20。
+- `v2-web/package.json` 新增 `type-check` 脚本，映射到既有 `vue-tsc --noEmit`。
+
+### Changed files
+
+- `.superpowers/sdd/task-7-report.md`
+- `scripts/build-client-release.ps1`
+- `scripts/run-client-acceptance-gate.ps1`
+- `scripts/smoke-client-demo.py`
+- `scripts/test_verify_client_release.py`
+- `scripts/verify-client-release.py`
+- `scripts/verify-static-pages.py`
+- `scripts/verify_v3_2_0_data_center_ui.py`
+- `scripts/verify_v3_2_0_export_center_ui.py`
+- `scripts/verify_v3_2_0_single_export_entry.py`
+- `scripts/verify_vue_migration_gate.py`
+- `v2-api/tests/test_api.py`
+- `v2-web/package.json`
+- 删除 `scripts/verify_task_hall_pagination.js`
+- 删除 `scripts/verify_task_hall_region_scan.js`
+- 删除 `scripts/verify_v3_1_barcode_views.js`
+- 删除 `v2-api/app/static/task_hall.html`
+- 删除 `v2-web/src/views/TaskHallView.vue`
+
+### RED 证据
+
+- `python scripts\verify_v3_2_0_single_export_entry.py`：先失败于 `AssertionError: obsolete TaskHallView.vue must be deleted`。
+- `npm run type-check`：先失败于 `Missing script: "type-check"`。
+
+### Required verification
+
+```powershell
+python scripts\verify_v3_2_0_single_export_entry.py
+python scripts\verify_v3_2_0_role_routes.py
+python scripts\verify_v3_2_0_data_center_ui.py
+python scripts\verify_v3_2_0_export_center_ui.py
+python scripts\verify_vue_migration_gate.py --strict-native
+cd v2-api
+python -m pytest tests/test_api.py -k "task_hall_page or app_shell_page or global_search_page or unmatched_page_redirects" -q
+cd ..\v2-web
+npm run type-check
+npm run build
+```
+
+结果：
+
+- `verify_v3_2_0_single_export_entry.py`：通过，`verify_v3_2_0_single_export_entry: OK`。
+- `verify_v3_2_0_role_routes.py`：通过，`[OK] V3.2.0 role and legacy route checks passed`。
+- `verify_v3_2_0_data_center_ui.py`：通过，exit 0。
+- `verify_v3_2_0_export_center_ui.py`：通过，`verify_v3_2_0_export_center_ui: OK`。
+- `verify_vue_migration_gate.py --strict-native`：通过；7 个注册页面，0 个 legacy bridge 页面。
+- 聚焦 backend pytest：项目 `.venv` 中按上述命令通过，`4 passed, 200 deselected`；有 1 条既有 Starlette/httpx deprecation warning。系统 Python 首次收集因缺少 `fastapi` 失败，切换项目 `.venv` 后通过。
+- `npm run type-check`：通过。
+- `npm run build`：通过，1679 modules transformed；保留既有 VueUse `/* #__PURE__ */` 和大于 500 kB chunk 警告。
+- build 后执行 `git restore --worktree -- v2-api/app/static/vue`，并只清理该目录中新生成的未跟踪 hash 文件；`git status --short -- v2-api/app/static/vue` 输出为空，`git diff --exit-code -- v2-api/app/static/vue` exit 0。
+
+### Additional verification
+
+- `python -m pytest scripts\test_verify_client_release.py -q`：`208 passed`，1 条测试构造重复 zip entry 的预期 warning。
+- `python scripts\verify-static-pages.py`：保留的 5 个静态页全部通过。
+- `git diff --check`：通过，仅输出工作树既有 LF/CRLF 转换提示。
+
+### Concerns
+
+- 无阻断项。
+- build 和测试仍有上述既有 warning；本次未修改依赖或 chunk 拆分。

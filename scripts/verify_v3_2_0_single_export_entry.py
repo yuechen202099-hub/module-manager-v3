@@ -16,6 +16,7 @@ ALLOWED_TEMPLATE_USAGE = {
 BUSINESS_EXPORT_APIS = {
     "createExportJob",
     "downloadExportJob",
+    "exportTerminalDeliveryPackage",
     "exportTaskDetail",
     "exportExceptionMeters",
     "exportProjectOutsideConstruction",
@@ -67,7 +68,6 @@ def scan_vue_source() -> None:
 
 def main() -> None:
     claim_tasks = read("v2-web/src/views/ClaimTasksView.vue")
-    task_hall = read("v2-web/src/views/TaskHallView.vue")
     global_search = read("v2-web/src/views/GlobalSearchView.vue")
     project_board = read("v2-web/src/views/ProjectBoardView.vue")
     app_layout = read("v2-web/src/layouts/AppLayout.vue")
@@ -77,6 +77,15 @@ def main() -> None:
     priority_import_dialog = read("v2-web/src/components/ConstructionPriorityImportDialog.vue")
 
     scan_vue_source()
+
+    ensure(
+        not (ROOT / "v2-web/src/views/TaskHallView.vue").exists(),
+        "obsolete TaskHallView.vue must be deleted",
+    )
+    ensure(
+        not (ROOT / "v2-api/app/static/task_hall.html").exists(),
+        "obsolete task_hall.html must be deleted",
+    )
 
     contains(static_pages, "title: '任务派发'", "staticPages task dispatch entry")
     contains(static_pages, "title: '数据中台'", "staticPages data center entry")
@@ -91,6 +100,12 @@ def main() -> None:
     contains(router_source, "path: 'task-hall'", "router legacy task-hall redirect")
     contains(router_source, "redirect: '/global-search'", "router legacy hall redirect")
     contains(router_source, "path: 'tasks'", "router legacy tasks redirect")
+    contains(router_source, "path: 'review/:groupId'", "router legacy review redirect")
+    contains(
+        router_source,
+        "/global-search?group_id=${encodeURIComponent(String(to.params.groupId || ''))}&page=1&page_size=20&review=1",
+        "router legacy review redirect query",
+    )
     not_contains(router_source, "TaskHallView", "router legacy hall component")
     not_contains(router_source, "task-hall-legacy", "router legacy hall route")
     not_contains(router_source, "path: 'task-hall',\n          redirect: '/claim-tasks'", "router legacy task-hall claim redirect")
@@ -124,17 +139,6 @@ def main() -> None:
         "exportTaskDetail",
     ]:
         not_contains(claim_tasks, forbidden, "ClaimTasksView")
-
-    for forbidden in [
-        "导出项目外施工",
-        "导出异常表计",
-        "exportOutsideProjectRecords",
-        "exportProjectOutsideConstruction",
-        "exportExceptions",
-        "exportExceptionMeters",
-        "command=\"export-exceptions\"",
-    ]:
-        not_contains(task_hall, forbidden, "TaskHallView")
 
     for forbidden in [
         "exportTerminalDeliveryPackage",

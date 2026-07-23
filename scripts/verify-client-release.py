@@ -73,8 +73,6 @@ REQUIRED_FILES = {
     "scripts/verify_project_board_data_center_photos.js",
     "scripts/verify_project_board_unmatched_review.js",
     "scripts/verify_review_image_inspector.js",
-    "scripts/verify_task_hall_region_scan.js",
-    "scripts/verify_task_hall_pagination.js",
     "scripts/verify_dialog_information_integration.js",
     "v2-api/scripts/preview_v3_1_backfill.py",
     "v2-api/scripts/verify_v3_1_release.py",

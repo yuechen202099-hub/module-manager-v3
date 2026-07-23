@@ -31,7 +31,6 @@ CANCELLED_STATIC_PAGE_ROUTES = {
 COMPATIBILITY_STATIC_PAGES = {
     "app_shell.html",
     "login.html",
-    "task_hall.html",
     "v201.html",
 }
 

@@ -18,7 +18,6 @@ STATIC_PAGES = {
     "login.html": ["模块更换项目管理器", "登录系统"],
     "app_shell.html": ["模块更换项目管理器", "项目看板", "任务领取", "审阅工作台"],
     "project_board.html": ["项目看板", "项目进度总览", "导入总清单", "导入扫码表格", "安装人员资料组占比", "导出异常表计"],
-    "task_hall.html": ["任务审阅工作台", "审阅工作台", "快捷键分类"],
     "claim_tasks.html": ["任务领取", "可领取终端"],
     "sync_config.html": ["同步方案已停用", "表格导入", "供应商 API 不可用"],
 }
@@ -127,7 +126,7 @@ def verify_page(page_name: str, required_text: list[str], node: Path | None) -> 
     for text in required_text:
         if text not in rendered:
             fail(f"{page_name} missing required text: {text}")
-    if page_name in {"project_board.html", "task_hall.html", "claim_tasks.html", "sync_config.html"}:
+    if page_name in {"project_board.html", "claim_tasks.html", "sync_config.html"}:
         for text in NAV_TEXT:
             if text not in rendered:
                 fail(f"{page_name} missing fixed navigation text: {text}")
@@ -137,7 +136,7 @@ def verify_page(page_name: str, required_text: list[str], node: Path | None) -> 
             fail(f"{page_name} must use the shared 440px page navigation width token")
         if "grid-template-rows: 58px minmax(0, 1fr)" in source or "height: calc(100vh - 62px)" in source:
             fail(f"{page_name} still contains a legacy topbar height")
-    if page_name in {"project_board.html", "task_hall.html", "claim_tasks.html"}:
+    if page_name in {"project_board.html", "claim_tasks.html"}:
         if "height: 48px" not in source and "height: var(--panel-head-height)" not in source:
             fail(f"{page_name} must use the shared 48px panel header height")
     if page_name in {"project_board.html", "claim_tasks.html"}:

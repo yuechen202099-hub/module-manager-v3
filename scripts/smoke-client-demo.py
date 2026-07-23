@@ -101,7 +101,6 @@ def main() -> int:
         "/app",
         "/app?page=project-board",
         "/app?page=claim-tasks",
-        "/app?page=task-hall",
         "/app?page=construction",
         "/project-board",
         "/claim-tasks",
@@ -138,7 +137,6 @@ def main() -> int:
     for legacy_file in [
         "/static/project_board.html",
         "/static/claim_tasks.html",
-        "/static/task_hall.html",
         "/static/unmatched.html",
         "/static/construction_cache.html",
         "/static/sync_config.html",

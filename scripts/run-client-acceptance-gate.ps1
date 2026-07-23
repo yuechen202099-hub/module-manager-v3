@@ -95,10 +95,6 @@ Invoke-Step "Verify task claim completion state" {
     node .\scripts\verify_claim_tasks_completion_status.js
 }
 
-Invoke-Step "Verify task hall pagination" {
-    node .\scripts\verify_task_hall_pagination.js
-}
-
 $sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the full Git source commit for release acceptance."
