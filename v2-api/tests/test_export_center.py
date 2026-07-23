@@ -188,6 +188,48 @@ def test_export_jobs_reject_unsupported_page_size(monkeypatch: pytest.MonkeyPatc
     assert response.status_code == 422
 
 
+def test_postgres_export_jobs_include_created_by() -> None:
+    repository = PostgresStateRepository()
+    row = SimpleNamespace(
+        id="job-1",
+        job_type="device_terminal",
+        status="succeeded",
+        file_name="terminal-devices.xlsx",
+        row_count=12,
+        progress=100,
+        error_message="",
+        filter_snapshot={"terminal": "T-1"},
+        request_key="request-1",
+        created_by="root-admin",
+        created_at=None,
+        updated_at=None,
+        finished_at=None,
+    )
+
+    class FakeScalars:
+        def all(self):
+            return [row]
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, *_args, **_kwargs):
+            return 1
+
+        def scalars(self, *_args, **_kwargs):
+            return FakeScalars()
+
+    repository._session = lambda: FakeSession()
+
+    page = repository.list_export_jobs(page=1, page_size=20)
+
+    assert page["items"][0]["created_by"] == "root-admin"
+
+
 def test_constructor_cannot_create_or_download_export(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
 
