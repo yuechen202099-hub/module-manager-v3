@@ -1,9 +1,11 @@
 export type StaticPageKey =
   | 'project-board'
   | 'claim-tasks'
+  | 'task-hall'
   | 'global-search'
   | 'construction'
   | 'account-management'
+  | 'exports'
   | 'sync-config'
 
 export type StaticPageMigrationStatus = 'native_vue'
@@ -35,6 +37,14 @@ export const staticPages: StaticPageRoute[] = [
     migrationStatus: 'native_vue',
   },
   {
+    key: 'task-hall',
+    title: '任务大厅',
+    subtitle: '',
+    routePath: '/task-hall',
+    roles: ['admin'],
+    migrationStatus: 'native_vue',
+  },
+  {
     key: 'global-search',
     title: '任务派发',
     subtitle: '',
@@ -55,6 +65,14 @@ export const staticPages: StaticPageRoute[] = [
     title: '账号管理',
     subtitle: '',
     routePath: '/account-management',
+    roles: ['admin'],
+    migrationStatus: 'native_vue',
+  },
+  {
+    key: 'exports',
+    title: '导出中心',
+    subtitle: '',
+    routePath: '/exports',
     roles: ['admin'],
     migrationStatus: 'native_vue',
   },

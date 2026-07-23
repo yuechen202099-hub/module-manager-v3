@@ -25,10 +25,11 @@ const navigation = computed(() => {
     'global-search': Search,
     construction: FolderChecked,
     'account-management': UserFilled,
+    exports: SwitchButton,
     'sync-config': DataBoard,
   }
   return staticPages
-    .filter((page) => page.key !== 'sync-config')
+    .filter((page) => !['sync-config', 'task-hall'].includes(page.key))
     .filter((page) => !page.roles.length || page.roles.includes(role) || role === 'admin')
     .map((page) => ({ ...page, icon: iconMap[page.key] }))
 })

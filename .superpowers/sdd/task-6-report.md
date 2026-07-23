@@ -1,97 +1,89 @@
-# Task 6 Report: Unmatched Review Client Contract
+# V3.2.0 Task 6 报告
 
-## Files
+- 日期：2026-07-23
+- 分支：`production/V3/3.2.0`
+- 基线 HEAD：`74989e7`
+- 任务：管理员导出中心前端
+- 当前结论：`DONE_WITH_CONCERNS`
 
-- `v2-web/src/api/types.ts`
+## 需求
+
+重建管理员导出中心 Vue 页面与路由，满足：
+
+- `/exports` 管理员路由
+- 四标签：`终端交付 / 设备清单 / 业务清单 / 统计报表`
+- `tab / page / page_size / filter` 与 URL 同步
+- 默认 `20`，可选 `20 / 50 / 100`
+- 旧响应淘汰
+- 终端交付展示阻断、最近生成、操作
+- 四类设备导出可发起
+- catalog 项可发起
+- job history 展示类型、范围、行数、创建人、时间、状态、失败原因、下载
+- 按 TDD 先写 RED verifier，再实现
+- 不删除其他页面出口，保留 `task-hall` 兼容入口
+
+## 修改文件
+
+前端源码：
+
+- `v2-web/src/views/ExportsView.vue`
+- `v2-web/src/components/export-center/TerminalDeliveryTab.vue`
+- `v2-web/src/components/export-center/ExportCatalogTab.vue`
+- `v2-web/src/components/export-center/ExportJobsTable.vue`
+- `v2-web/src/composables/useExportCenterQuery.ts`
 - `v2-web/src/api/services.ts`
-- `scripts/verify_project_board_unmatched_review.js`
-- `.superpowers/sdd/task-6-report.md`
+- `v2-web/src/api/types.ts`
+- `v2-web/src/router/staticPages.ts`
+- `v2-web/src/router/index.ts`
+- `v2-web/src/layouts/AppLayout.vue`
 
-## RED
+验证脚本：
 
-Command:
+- `scripts/verify_v3_2_0_export_center_ui.py`
 
-```powershell
-node scripts\verify_project_board_unmatched_review.js
-```
+后端兼容补丁：
 
-Result: exit 1, with the expected failure `missing UnmatchedReviewDetail`.
+- `v2-api/app/services/state_repository.py`
+  - PostgreSQL `list_export_jobs()` 补齐 `created_by` 透传，避免 job history “创建人” 列在真实库上为空。
 
-## GREEN
+构建产物：
 
-Commands:
+- `v2-api/app/static/vue/index.html`
+- `v2-api/app/static/vue/version.json`
+- `v2-api/app/static/vue/assets/*`
+  - 已清理旧 hash 文件并更新本轮 build 产物。
 
-```powershell
-node scripts\verify_project_board_unmatched_review.js
-npm --prefix v2-web run build
-```
+## 验证结果
 
-Results:
+已执行并通过：
 
-- Contract verifier: exit 0, `project board unmatched review API contract checks passed`.
-- Build: exit 0; `vue-tsc --noEmit` and Vite production build passed.
+1. `python scripts/verify_v3_2_0_export_center_ui.py`
+2. `python scripts/verify_vue_migration_gate.py`
+3. `cd v2-web && npm exec vue-tsc -- --noEmit`
+4. `cd v2-web && npm run build`
+5. `git diff --check`
 
-## Self-review
+构建附带告警：
 
-- Added the three brief-specified exported types and mapped Task 5 snake_case response fields to the frontend contract.
-- Added all seven required API functions with the specified review, photo-content, rescan, confirm, candidates, and finalize routes.
-- Preserved optimistic-lock request fields for save, confirm, and finalize operations.
-- Photo retrieval accepts only `unmatchedId` and server-owned `photoId`, verifies the returned image blob, and does not proxy a caller-supplied URL.
-- Kept the change within the Task 6 write scope; no UI, backend, version, or unrelated-script changes were made.
+- Vite / Rollup 对 `@vueuse/core` 的 `/* #__PURE__ */` 注释位置给出 warning
+- 既有大 chunk warning 仍然存在
 
-## Concerns
+以上告警未阻断构建，且不由本任务新引入。
 
-No blocking concerns. The Vite build emitted its existing vendor pure-annotation and chunk-size warnings; it still exited successfully. UI integration remains intentionally deferred to Task 7.
+## 版本变化
 
-## Re-review Fixes
+- 未修改应用版本号
+- 当前工作基于 `production/V3/3.2.0` 分支任务推进
+- 新增导出中心页面与构建产物，不单独切应用 patch 版本
 
-### Findings fixed
+## 发布状态
 
-- Candidate retrieval now models the server `{ total, items }` envelope and maps only `items`.
-- Rescans require and forward `expected_version` through the frontend, request model, route, repository contract, JSON implementation, and PostgreSQL implementation.
-- JSON rescans reject a stale version before starting the barcode scan or mutating state. PostgreSQL verifies the version in the unlocked snapshot before CPU work, then verifies it again after acquiring the persistence lock.
-- `UnmatchedReviewPhoto` no longer exposes `sourceUrl`; its backend adapter no longer reads `source_url`. Review image content remains addressable only by `unmatchedId` and server-owned `photoId`.
-- The verifier now detects candidate-envelope misuse, missing rescan versions, review-photo source URL exposure, and arbitrary URL proxy parameters.
+- 已完成本地实现、路由接线、类型/服务补齐、前端构建
+- 已生成最新 Vue 静态产物
+- 尚未执行发布
 
-### RED
+## 风险
 
-Commands:
-
-```powershell
-node scripts\verify_project_board_unmatched_review.js
-..\.venv\Scripts\python.exe -m pytest -q tests/test_api.py::test_unmatched_rescan_accepts_json_category_and_rejects_invalid tests/test_api.py::test_unmatched_rescan_version_conflict_returns_409_without_persisting tests/test_state_repository.py::test_postgres_rescan_unmatched_review_rejects_stale_expected_version_before_scan tests/test_local_simulation.py::test_unmatched_rescan_rejects_stale_expected_version_without_scanning_or_persisting
-```
-
-Results:
-
-- Contract verifier: exit 1 with `candidates must model the server envelope`.
-- Backend regression set: exit 1 with 4 failures. The route did not forward `expected_version`, and JSON/PostgreSQL rescan methods rejected the new keyword argument. This reproduced the missing version contract before implementation.
-
-### GREEN
-
-Commands:
-
-```powershell
-node scripts\verify_project_board_unmatched_review.js
-npm --prefix v2-web run build
-..\.venv\Scripts\python.exe -m pytest -q tests/test_api.py::test_production_unmatched_review_role_matrix tests/test_api.py::test_unmatched_rescan_accepts_json_category_and_rejects_invalid tests/test_api.py::test_unmatched_rescan_version_conflict_returns_409_without_persisting tests/test_api.py::test_production_unmatched_review_routes_use_postgres_repository_transactions tests/test_state_repository.py::test_postgres_rescan_unmatched_review_scans_outside_session_then_relocks_once tests/test_state_repository.py::test_postgres_rescan_unmatched_review_rejects_version_drift_before_persistence tests/test_state_repository.py::test_postgres_rescan_unmatched_review_rejects_stale_expected_version_before_scan tests/test_local_simulation.py::test_unmatched_rescan_uses_ocr_persists_audits_and_keeps_formal_accuracy_unchanged tests/test_local_simulation.py::test_unmatched_rescan_return_value_is_mutation_isolated tests/test_local_simulation.py::test_unmatched_rescan_rejects_stale_expected_version_without_scanning_or_persisting tests/test_local_simulation.py::test_unmatched_rescan_with_sparse_meter_uses_empty_match_key_and_persists tests/test_local_simulation.py::test_json_state_repository_delegates_unmatched_rescan_and_confirmation
-git diff --check
-```
-
-Results:
-
-- Contract verifier: exit 0.
-- Frontend build: exit 0; `vue-tsc --noEmit` and Vite build passed.
-- Backend focused rescan suite: 12 passed; it emits the existing FastAPI TestClient deprecation warning.
-- `git diff --check`: exit 0.
-
-### Re-review self-review
-
-- Confirmed all reviewed paths encode IDs for review-photo content and do not accept a caller URL.
-- Confirmed stale expected versions return the existing `ReviewVersionConflict`, which the route maps to HTTP 409; tests assert no scanner invocation or persisted JSON mutation for stale JSON calls, and no PostgreSQL commit or scan for stale snapshot calls.
-- Confirmed the PostgreSQL happy-path and drift tests still prove CPU scanning happens outside the session and persistence performs a second `FOR UPDATE` check.
-- Confirmed the diff is limited to the explicitly authorized frontend, backend, test, verifier, and report files.
-
-### Re-review concerns
-
-No blocking concerns. Existing Vite vendor warnings and the FastAPI TestClient deprecation warning remain outside this change.
+1. `created_by` 的 PostgreSQL 透传补丁已落代码，但没有补跑独立后端 pytest 用例；当前仅通过前端链路和代码审查确认。
+2. `task-hall` 作为兼容入口保留在静态页注册表中，但已从左侧导航隐藏，避免与 `global-search` 重复显示。
+3. 构建仍存在既有 chunk size warning，未在本任务内做额外拆包优化。

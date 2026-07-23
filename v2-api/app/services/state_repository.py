@@ -8690,6 +8690,7 @@ class PostgresStateRepository(StateRepository):
                         "error_message": row.error_message,
                         "filter_snapshot": row.filter_snapshot,
                         "request_key": row.request_key,
+                        "created_by": row.created_by,
                         "created_at": row.created_at.isoformat() if row.created_at else None,
                         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
                         "finished_at": row.finished_at.isoformat() if row.finished_at else None,

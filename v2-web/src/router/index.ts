@@ -7,9 +7,11 @@ import { useAuthStore } from '@/stores/auth'
 const nativePageComponents = {
   'project-board': () => import('@/views/ProjectBoardView.vue'),
   'claim-tasks': () => import('@/views/ClaimTasksView.vue'),
+  'task-hall': () => import('@/views/GlobalSearchView.vue'),
   'global-search': () => import('@/views/GlobalSearchView.vue'),
   construction: () => import('@/views/ConstructionView.vue'),
   'account-management': () => import('@/views/AccountManagementView.vue'),
+  'exports': () => import('@/views/ExportsView.vue'),
   'sync-config': () => import('@/views/SyncConfigView.vue'),
 } as const
 
@@ -83,10 +85,6 @@ const router = createRouter({
         {
           path: 'tasks',
           redirect: '/claim-tasks',
-        },
-        {
-          path: 'task-hall',
-          redirect: { path: '/global-search' },
         },
         {
           path: 'review/:groupId',

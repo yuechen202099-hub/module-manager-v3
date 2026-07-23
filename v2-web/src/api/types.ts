@@ -350,6 +350,58 @@ export type DataCenterDetail = DataCenterRow & {
   audit: Array<Record<string, unknown>>
 }
 
+export type ExportCenterPageSize = 20 | 50 | 100
+export type ExportCenterTab = 'terminal' | 'device' | 'business' | 'statistics'
+export type ExportCatalogMode = 'inline' | 'background'
+
+export type ExportCatalogItem = {
+  key: string
+  label: string
+  delivery: string
+  mode: ExportCatalogMode
+}
+
+export type TerminalReadinessItem = {
+  terminal: string
+  groupCount: number
+  constructedCount: number
+  archivedCount: number
+  cacheReadyCount: number
+  status: 'ready' | 'blocked'
+  blockers: string[]
+}
+
+export type TerminalReadinessPage = {
+  total: number
+  page: number
+  pageSize: ExportCenterPageSize
+  items: TerminalReadinessItem[]
+}
+
+export type ExportJob = {
+  id: string
+  jobType: string
+  status: string
+  fileName: string
+  rowCount: number
+  progress: number
+  errorMessage: string
+  filters: Record<string, unknown>
+  requestKey: string
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+  finishedAt: string
+  created: boolean
+}
+
+export type ExportJobPage = {
+  total: number
+  page: number
+  pageSize: ExportCenterPageSize
+  items: ExportJob[]
+}
+
 export type ReviewPhoto = {
   id: string
   url: string
