@@ -1,11 +1,11 @@
 import type { CurrentUser, MaterialGroup, Project, ReviewPhoto, ReviewTask } from './types'
 
 export const mockUser: CurrentUser = {
-  id: 'reviewer',
-  username: 'reviewer',
-  name: '资料审阅员',
-  role: 'reviewer',
-  roles: ['reviewer'],
+  id: 'constructor',
+  username: 'constructor',
+  name: '施工员',
+  role: 'constructor',
+  roles: ['constructor'],
   teamId: 'default-team',
 }
 

@@ -1811,10 +1811,10 @@ onUnmounted(() => {
       <ElAlert v-if="errorMessage" type="error" :closable="false" :title="errorMessage" />
 
     <aside class="panel review-task-panel">
-      <div class="review-panel-head">
+        <div class="review-panel-head">
         <div>
           <h3>任务</h3>
-          <p class="muted">仅显示我已领取的终端</p>
+          <p class="muted">仅显示我当前处理的终端</p>
         </div>
         <ElButton :icon="Refresh" circle :loading="loadingTasks" @click="loadTasks({ force: true, reloadGroups: true })" />
       </div>
@@ -1832,13 +1832,13 @@ onUnmounted(() => {
           @click="loadGroups(task.id)"
         >
           <strong>终端 {{ task.terminal || task.id }}</strong>
-          <span>{{ task.claimedBy ? `已由 ${task.claimedBy} 领取` : '未领取' }}</span>
+          <span>{{ task.claimedBy ? `当前处理人 ${task.claimedBy}` : '待管理员分配' }}</span>
           <div class="task-mini-metrics">
             <b>改造 {{ task.renovationCount || task.totalGroups || 0 }}</b>
             <b>未审 {{ task.unreviewedCount || 0 }}</b>
           </div>
         </button>
-        <ElEmpty v-if="!loadingTasks && !myTasks.length" description="暂无已领取任务" />
+        <ElEmpty v-if="!loadingTasks && !myTasks.length" description="暂无当前处理任务" />
       </div>
     </aside>
 
@@ -1846,7 +1846,7 @@ onUnmounted(() => {
       <div class="review-panel-head">
         <div>
           <h3>{{ activeTaskMode === 'terminal' ? (selectedTask ? `终端 ${selectedTask.terminal || selectedTask.id}` : '资料组') : selectedFieldModeTitle }}</h3>
-          <p class="muted">{{ activeTaskMode === 'terminal' ? (selectedTask ? '按状态分类筛选' : '领取任务后显示资料组') : selectedFieldModeHint }}</p>
+          <p class="muted">{{ activeTaskMode === 'terminal' ? (selectedTask ? '按状态分类筛选' : '选择终端后显示资料组') : selectedFieldModeHint }}</p>
         </div>
         <ElTag effect="plain">{{ activeTaskMode === 'terminal' ? visibleGroupCountLabel : activeFieldTaskCards.length }}</ElTag>
       </div>

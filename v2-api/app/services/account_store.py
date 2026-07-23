@@ -6,12 +6,12 @@ import threading
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from app.core.config import settings
 from app.core.security import hash_password, verify_password
 
-VALID_ROLES = {"admin", "reviewer", "constructor"}
+VALID_ROLES = {"admin", "constructor"}
 VALID_STATUSES = {"active", "disabled"}
 LOGIN_HISTORY_LIMIT = 30
 _lock = threading.RLock()
@@ -34,6 +34,26 @@ def normalize_username(username: str) -> str:
     if len(value) > 64:
         raise ValueError("Username is too long")
     return value
+
+
+def normalize_roles(roles: Iterable[str] | None) -> list[str]:
+    return sorted({str(role).strip() for role in (roles or []) if str(role).strip() in VALID_ROLES})
+
+
+def migrate_user_record(user: dict[str, Any]) -> dict[str, Any]:
+    migrated = deepcopy(user)
+    migrated["roles"] = normalize_roles(migrated.get("roles") or [])
+    if not migrated["roles"]:
+        migrated["status"] = "disabled"
+        migrated["disabled"] = True
+        migrated["disabled_reason"] = "V3.2.0 已停用审阅员角色"
+        return migrated
+    status = migrated.get("status")
+    migrated["status"] = status if status in VALID_STATUSES else "active"
+    migrated["disabled"] = migrated["status"] == "disabled"
+    if not migrated["disabled"]:
+        migrated.pop("disabled_reason", None)
+    return migrated
 
 
 def users_path() -> Path | None:
@@ -140,17 +160,40 @@ def _default_admin_user() -> dict[str, Any]:
     }
 
 
-def _read_users_unlocked() -> dict[str, dict[str, Any]]:
+def _read_users_unlocked() -> tuple[dict[str, dict[str, Any]], bool]:
     path = users_path()
     if path is None:
-        return deepcopy(_memory_users)
+        raw_users = deepcopy(_memory_users)
+        changed = False
+        users: dict[str, dict[str, Any]] = {}
+        for raw_user in raw_users.values():
+            if not isinstance(raw_user, dict):
+                continue
+            try:
+                username = normalize_username(raw_user.get("username"))
+            except ValueError:
+                continue
+            migrated = migrate_user_record(raw_user)
+            user = {
+                **migrated,
+                "username": username,
+                "name": str(migrated.get("name") or username),
+                "team_id": normalize_team_id(migrated.get("team_id")),
+                "home": migrated.get("home") or "/app",
+            }
+            if user.get("password_hash"):
+                users[username] = user
+            if user != raw_user:
+                changed = True
+        return users, changed
     if not path.exists():
-        return {}
+        return {}, False
     payload = json.loads(path.read_text(encoding="utf-8"))
     raw_users = payload.get("users") if isinstance(payload, dict) else None
     if not isinstance(raw_users, list):
-        return {}
+        return {}, False
     users: dict[str, dict[str, Any]] = {}
+    changed = False
     for raw_user in raw_users:
         if not isinstance(raw_user, dict):
             continue
@@ -158,21 +201,19 @@ def _read_users_unlocked() -> dict[str, dict[str, Any]]:
             username = normalize_username(raw_user.get("username"))
         except ValueError:
             continue
-        roles = [role for role in raw_user.get("roles", []) if role in VALID_ROLES]
-        if not roles:
-            roles = ["reviewer"]
+        migrated = migrate_user_record(raw_user)
         user = {
-            **raw_user,
+            **migrated,
             "username": username,
-            "name": str(raw_user.get("name") or username),
-            "roles": sorted(set(roles)),
-            "team_id": normalize_team_id(raw_user.get("team_id")),
-            "status": raw_user.get("status") if raw_user.get("status") in VALID_STATUSES else "active",
-            "home": raw_user.get("home") or "/app",
+            "name": str(migrated.get("name") or username),
+            "team_id": normalize_team_id(migrated.get("team_id")),
+            "home": migrated.get("home") or "/app",
         }
         if user.get("password_hash"):
             users[username] = user
-    return users
+        if user != raw_user:
+            changed = True
+    return users, changed
 
 
 def _write_users_unlocked(users: dict[str, dict[str, Any]]) -> None:
@@ -194,12 +235,14 @@ def _write_users_unlocked(users: dict[str, dict[str, Any]]) -> None:
 
 def ensure_user_store() -> dict[str, dict[str, Any]]:
     with _lock:
-        users = _read_users_unlocked()
+        users, changed = _read_users_unlocked()
         admin_username = normalize_username(settings.admin_username)
         existing = users.get(admin_username)
         if existing is None:
             admin = _default_admin_user()
             users[admin["username"]] = admin
+            changed = True
+        if changed:
             _write_users_unlocked(users)
         return users
 
@@ -218,7 +261,7 @@ def get_user(username: str) -> dict[str, Any] | None:
 
 def authenticate_user(username: str, password: str, *, ip: str = "", device: str = "") -> dict[str, Any] | None:
     user = get_user(username)
-    if not user or user.get("status") != "active":
+    if not user or user.get("status") != "active" or user.get("disabled") is True:
         return None
     if not verify_password(password, user.get("password_hash", "")):
         return None
@@ -236,7 +279,7 @@ def upsert_user(
     status: str = "active",
 ) -> dict[str, Any]:
     normalized_username = normalize_username(username)
-    clean_roles = sorted({role for role in (roles or ["reviewer"]) if role in VALID_ROLES})
+    clean_roles = normalize_roles(roles or ["constructor"])
     if not clean_roles:
         raise ValueError("At least one valid role is required")
     if status not in VALID_STATUSES:

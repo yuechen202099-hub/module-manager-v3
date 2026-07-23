@@ -7,7 +7,6 @@ import { useAuthStore } from '@/stores/auth'
 const nativePageComponents = {
   'project-board': () => import('@/views/ProjectBoardView.vue'),
   'claim-tasks': () => import('@/views/ClaimTasksView.vue'),
-  'task-hall': () => import('@/views/TaskHallView.vue'),
   'global-search': () => import('@/views/GlobalSearchView.vue'),
   construction: () => import('@/views/ConstructionView.vue'),
   'account-management': () => import('@/views/AccountManagementView.vue'),
@@ -31,7 +30,7 @@ const router = createRouter({
       redirect: (to) => {
         const page = String(to.query.page || 'project-board')
         if (page === 'construction-cache') return { path: '/construction', query: {} }
-        if (page === 'unmatched') return { path: '/task-hall', query: {} }
+        if (page === 'unmatched') return { path: '/global-search', query: { review: '1' } }
         return `/${page}`
       },
     },
@@ -77,10 +76,12 @@ const router = createRouter({
           redirect: '/claim-tasks',
         },
         {
+          path: 'task-hall',
+          redirect: { path: '/global-search' },
+        },
+        {
           path: 'review/:groupId',
-          name: 'review',
-          component: () => import('@/views/ReviewView.vue'),
-          meta: { title: '资料审阅' },
+          redirect: (to) => `/global-search?group_id=${encodeURIComponent(String(to.params.groupId || ''))}&review=1`,
         },
       ],
     },

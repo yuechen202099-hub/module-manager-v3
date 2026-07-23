@@ -14,7 +14,7 @@ export type ApiErrorEnvelope = {
   request_id: string
 }
 
-export type UserRole = 'admin' | 'reviewer' | 'constructor'
+export type UserRole = 'admin' | 'constructor'
 
 export type BarcodeType = 'meter' | 'module' | 'collector'
 export type NormalizedRegion = { x: number; y: number; width: number; height: number }

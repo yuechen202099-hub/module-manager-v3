@@ -128,10 +128,11 @@ def production_rbac_client(monkeypatch, tmp_path) -> tuple[TestClient, dict[str,
     headers = {
         "admin": {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"},
     }
-    for username, password, role in (
-        ("reviewer-a", "ReviewPass12345", "reviewer"),
-        ("constructor-a", "ConstructPass12345", "constructor"),
-    ):
+    reviewer_token = security.create_access_token(
+        {"sub": "reviewer-a", "username": "reviewer-a", "roles": ["reviewer"], "team_id": "north-team-01"}
+    )
+    headers["reviewer"] = {"Authorization": f"bearer {reviewer_token}"}
+    for username, password, role in (("constructor-a", "ConstructPass12345", "constructor"),):
         created = production_client.post(
             "/auth/users",
             headers=headers["admin"],
@@ -152,6 +153,117 @@ def production_rbac_client(monkeypatch, tmp_path) -> tuple[TestClient, dict[str,
         assert login.status_code == 200
         headers[role] = {"Authorization": f"bearer {login.json()['data']['access_token']}"}
     return production_client, headers
+
+
+def test_reviewer_only_account_is_disabled_and_cannot_authenticate(monkeypatch, tmp_path) -> None:
+    users_path = tmp_path / "reviewer-only-users.json"
+    users_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "updated_at": "2026-07-23T00:00:00+00:00",
+                "users": [
+                    {
+                        "username": "old-reviewer",
+                        "name": "Old Reviewer",
+                        "roles": ["reviewer"],
+                        "team_id": "north-team-01",
+                        "status": "active",
+                        "disabled": False,
+                        "password_hash": security.hash_password("secret"),
+                        "created_at": "2026-07-23T00:00:00+00:00",
+                        "updated_at": "2026-07-23T00:00:00+00:00",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    production_settings = production_test_settings(
+        demo_auth_enabled=False,
+        admin_username="root-admin",
+        admin_password="RootPass12345",
+        admin_team_id="north-team-01",
+        auth_users_path=str(users_path),
+        jwt_secret="jwt-secret-for-reviewer-disable-test",
+        jwt_expire_minutes=60,
+    )
+    monkeypatch.setattr(account_store, "settings", production_settings)
+    monkeypatch.setattr(security, "settings", production_settings)
+
+    users = account_store.ensure_user_store()
+    migrated = users["old-reviewer"]
+
+    assert migrated["disabled"] is True
+    assert migrated["disabled_reason"] == "V3.2.0 已停用审阅员角色"
+    assert account_store.authenticate_user("old-reviewer", "secret") is None
+
+
+def test_review_mutation_requires_admin_after_v3_2_0(monkeypatch, tmp_path) -> None:
+    production_settings = production_test_settings(
+        demo_auth_enabled=False,
+        admin_username="root-admin",
+        admin_password="RootPass12345",
+        admin_team_id="north-team-01",
+        auth_users_path=str(tmp_path / "users.json"),
+        jwt_secret="jwt-secret-for-review-route-test",
+        jwt_expire_minutes=60,
+        trusted_proxy_hosts={"testclient"},
+    )
+    monkeypatch.setattr(auth, "settings", production_settings)
+    monkeypatch.setattr(account_store, "settings", production_settings)
+    monkeypatch.setattr(security, "settings", production_settings)
+    monkeypatch.setattr(main_module, "settings", production_settings)
+    monkeypatch.setattr(local_test, "settings", production_settings)
+    production_client = TestClient(main_module.create_app())
+
+    class FailingRepository:
+        def confirm_group_barcode_manually(self, *args, **kwargs):
+            raise AssertionError("reviewer should be rejected before repository access")
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: FailingRepository())
+    reviewer_token = security.create_access_token(
+        {"sub": "reviewer-a", "username": "reviewer-a", "roles": ["reviewer"], "team_id": "north-team-01"}
+    )
+    reviewer_headers = {"Authorization": f"bearer {reviewer_token}"}
+
+    response = production_client.post(
+        "/local-test/groups/g-1/barcode-manual-confirm",
+        headers=reviewer_headers,
+        json={
+            "actor": "reviewer-a",
+            "meter_no": "METER-001",
+            "module_asset_no": "MODULE-001",
+            "collector": "COLLECTOR-001",
+            "reason": "复核",
+            "photo_ids": ["photo-1"],
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_constructor_cannot_use_export_or_review_routes(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    export_response = production_client.get("/local-test/photo-barcode/review-groups/export", headers=headers["constructor"])
+    review_response = production_client.post(
+        "/local-test/groups/g-1/barcode-manual-confirm",
+        headers=headers["constructor"],
+        json={
+            "actor": "constructor-a",
+            "meter_no": "METER-001",
+            "module_asset_no": "MODULE-001",
+            "collector": "COLLECTOR-001",
+            "reason": "复核",
+            "photo_ids": ["photo-1"],
+        },
+    )
+
+    assert export_response.status_code == 403
+    assert review_response.status_code == 403
 
 
 def test_production_exact_group_create_requires_admin(monkeypatch, tmp_path) -> None:
@@ -2061,10 +2173,8 @@ def test_production_unmatched_review_binds_actor_to_signed_in_reviewer(monkeypat
         },
     )
 
-    assert response.status_code == 200
-    save_call = next(call for call in repository.calls if call["method"] == "save")
-    assert save_call["actor"] == "reviewer-a"
-    assert save_call["metadata"] == {"meter_no": "METER-001"}
+    assert response.status_code == 403
+    assert repository.calls == []
 
 
 def test_production_unmatched_review_maps_repository_errors(monkeypatch, tmp_path) -> None:
@@ -2229,8 +2339,8 @@ def test_production_review_mutation_requires_reviewer_or_admin(monkeypatch, tmp_
         headers=headers["reviewer"],
         json={"reviewer": "reviewer-a"},
     )
-    assert allowed.status_code == 200
-    assert repository.claim_calls == 1
+    assert allowed.status_code == 403
+    assert repository.claim_calls == 0
 
     admin_allowed = production_client.post(
         "/local-test/tasks/999999/claim",
@@ -2238,7 +2348,7 @@ def test_production_review_mutation_requires_reviewer_or_admin(monkeypatch, tmp_
         json={"reviewer": "admin-selected-reviewer"},
     )
     assert admin_allowed.status_code == 200
-    assert repository.claim_calls == 2
+    assert repository.claim_calls == 1
 
 
 def test_production_construction_mutation_requires_constructor_or_admin(monkeypatch, tmp_path) -> None:
@@ -2792,21 +2902,21 @@ DUAL_UNMATCHED_WRITE_CASES = (
             "photo_updates": [],
             "state": "pending",
         },
-        "reviewer",
+        "admin",
     ),
     (
         "rescan",
         "POST",
         "/local-test/unmatched/{unmatched_id}/photos/{photo_id}/rescan",
         lambda context: {"expected_version": context["version"], "category": "collector_barcode"},
-        "reviewer",
+        "admin",
     ),
     (
         "confirm",
         "POST",
         "/local-test/unmatched/{unmatched_id}/confirm",
         lambda context: {"expected_version": context["version"], "confirmed": True},
-        "reviewer",
+        "admin",
     ),
     (
         "finalize",
@@ -3681,28 +3791,25 @@ def test_production_account_config_and_api_token_gate(monkeypatch, tmp_path) -> 
         "/auth/users",
         headers=admin_headers,
         json={
-            "username": "reviewer-a",
-            "password": "ReviewPass12345",
-            "name": "Reviewer A",
-            "roles": ["reviewer"],
+            "username": "constructor-a",
+            "password": "ConstructPass12345",
+            "name": "Constructor A",
+            "roles": ["constructor"],
             "team_id": "north-team-01",
             "status": "active",
         },
     )
     assert created.status_code == 200
-    reviewer_login = production_client.post(
+    constructor_login = production_client.post(
         "/auth/login",
-        headers={"x-forwarded-for": "10.0.0.5", "user-agent": "reviewer-agent"},
-        json={"username": "reviewer-a", "password": "ReviewPass12345", "team_id": "other-team"},
+        headers={"x-forwarded-for": "10.0.0.5", "user-agent": "constructor-agent"},
+        json={"username": "constructor-a", "password": "ConstructPass12345", "team_id": "other-team"},
     )
-    assert reviewer_login.status_code == 200
-    assert reviewer_login.json()["data"]["team_id"] == "north-team-01"
-    reviewer_token = reviewer_login.json()["data"]["access_token"]
+    assert constructor_login.status_code == 200
+    assert constructor_login.json()["data"]["team_id"] == "north-team-01"
+    constructor_token = constructor_login.json()["data"]["access_token"]
 
-    summary = production_client.get(
-        "/local-test/summary",
-        headers={"Authorization": f"bearer {reviewer_token}", "X-Team-Id": "other-team"},
-    )
+    summary = production_client.get("/local-test/summary", headers=admin_headers)
     assert summary.status_code == 200
     summary_payload = summary.json()["data"]["summary"]
     assert summary_payload["team_id"] == "north-team-01"
@@ -3720,9 +3827,15 @@ def test_production_account_config_and_api_token_gate(monkeypatch, tmp_path) -> 
         "group_barcode_accuracy_not_required",
         "group_barcode_accuracy_rate",
     }.issubset(summary_payload)
+    reviewer_headers = {
+        "Authorization": "bearer "
+        + security.create_access_token(
+            {"sub": "reviewer-a", "username": "reviewer-a", "roles": ["reviewer"], "team_id": "north-team-01"}
+        )
+    }
     reviewer_review_list = production_client.get(
         "/local-test/photo-barcode/review-groups",
-        headers={"Authorization": f"bearer {reviewer_token}"},
+        headers=reviewer_headers,
     )
     assert reviewer_review_list.status_code == 403
     admin_review_list = production_client.get(
@@ -3733,21 +3846,21 @@ def test_production_account_config_and_api_token_gate(monkeypatch, tmp_path) -> 
     assert {"total", "items"}.issubset(admin_review_list.json()["data"])
 
     users_after_login = production_client.get("/auth/users", headers=admin_headers)
-    reviewer_user = next(item for item in users_after_login.json()["data"]["items"] if item["username"] == "reviewer-a")
-    assert reviewer_user["last_login_ip"] == "10.0.0.5"
-    assert len(reviewer_user["login_history"]) == 1
-    assert reviewer_user["login_history"][0]["ip"] == "10.0.0.5"
-    assert reviewer_user["login_history"][0]["device"] == "reviewer-agent"
-    assert reviewer_user["login_history"][0]["at"]
+    constructor_user = next(item for item in users_after_login.json()["data"]["items"] if item["username"] == "constructor-a")
+    assert constructor_user["last_login_ip"] == "10.0.0.5"
+    assert len(constructor_user["login_history"]) == 1
+    assert constructor_user["login_history"][0]["ip"] == "10.0.0.5"
+    assert constructor_user["login_history"][0]["device"] == "constructor-agent"
+    assert constructor_user["login_history"][0]["at"]
 
-    deleted = production_client.delete("/auth/users/reviewer-a", headers=admin_headers)
+    deleted = production_client.delete("/auth/users/constructor-a", headers=admin_headers)
     assert deleted.status_code == 200
-    assert deleted.json()["data"]["user"]["username"] == "reviewer-a"
+    assert deleted.json()["data"]["user"]["username"] == "constructor-a"
     users_after_delete = production_client.get("/auth/users", headers=admin_headers)
     assert {item["username"] for item in users_after_delete.json()["data"]["items"]} == {"root-admin"}
     deleted_login = production_client.post(
         "/auth/login",
-        json={"username": "reviewer-a", "password": "ReviewPass12345"},
+        json={"username": "constructor-a", "password": "ConstructPass12345"},
     )
     assert deleted_login.status_code == 401
     delete_self = production_client.delete("/auth/users/root-admin", headers=admin_headers)
@@ -4206,15 +4319,15 @@ def test_account_login_history_keeps_30_rows_and_marks_ip_common_user(monkeypatc
         json={"username": "root-admin", "password": "RootPass12345"},
     )
     admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
-    for username in ["reviewer-a", "reviewer-b"]:
+    for username in ["constructor-a", "constructor-b"]:
         created = production_client.post(
             "/auth/users",
             headers=admin_headers,
             json={
                 "username": username,
-                "password": "ReviewPass12345",
+                "password": "ConstructPass12345",
                 "name": username,
-                "roles": ["reviewer"],
+                "roles": ["constructor"],
                 "team_id": "north-team-01",
                 "status": "active",
             },
@@ -4224,27 +4337,27 @@ def test_account_login_history_keeps_30_rows_and_marks_ip_common_user(monkeypatc
     for index in range(35):
         response = production_client.post(
             "/auth/login",
-            headers={"x-forwarded-for": "10.0.0.8", "user-agent": f"reviewer-a-agent-{index}"},
-            json={"username": "reviewer-a", "password": "ReviewPass12345"},
+            headers={"x-forwarded-for": "10.0.0.8", "user-agent": f"constructor-a-agent-{index}"},
+            json={"username": "constructor-a", "password": "ConstructPass12345"},
         )
         assert response.status_code == 200
 
     reviewer_b_login = production_client.post(
         "/auth/login",
-        headers={"x-forwarded-for": "10.0.0.8", "user-agent": "reviewer-b-agent"},
-        json={"username": "reviewer-b", "password": "ReviewPass12345"},
+        headers={"x-forwarded-for": "10.0.0.8", "user-agent": "constructor-b-agent"},
+        json={"username": "constructor-b", "password": "ConstructPass12345"},
     )
     assert reviewer_b_login.status_code == 200
 
     users = production_client.get("/auth/users", headers=admin_headers).json()["data"]["items"]
     by_username = {item["username"]: item for item in users}
-    reviewer_a_history = by_username["reviewer-a"]["login_history"]
-    reviewer_b_history = by_username["reviewer-b"]["login_history"]
+    reviewer_a_history = by_username["constructor-a"]["login_history"]
+    reviewer_b_history = by_username["constructor-b"]["login_history"]
 
     assert len(reviewer_a_history) == 30
     assert reviewer_a_history[0]["ip"] == "10.0.0.8"
-    assert reviewer_a_history[0]["device"] == "reviewer-a-agent-34"
-    assert reviewer_b_history[0]["ip_common_user"] == "reviewer-a"
+    assert reviewer_a_history[0]["device"] == "constructor-a-agent-34"
+    assert reviewer_b_history[0]["ip_common_user"] == "constructor-a"
     assert reviewer_b_history[0]["ip_common_user_count"] == 30
     assert reviewer_b_history[0]["ip_login_count"] == 31
 

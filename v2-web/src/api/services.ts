@@ -633,7 +633,7 @@ function readLegacySession(): LegacySession | null {
 
 export function currentActor() {
   const session = readLegacySession()
-  return session?.user?.username || localStorage.getItem('module_manager_reviewer') || 'reviewer'
+  return session?.user?.username || localStorage.getItem('module_manager_reviewer') || 'admin'
 }
 
 export function currentTeamId() {
@@ -746,9 +746,9 @@ function emitDataMutated(reason: string, payload: Record<string, unknown> = {}) 
 function roleFromSession(session: LegacySession | null, username: string): UserRole {
   const role = session?.user?.roles?.[0]
   if (role) return role
-  if (username === 'admin') return 'admin'
+  if (username === 'admin' || username.includes('admin') || username.includes('管理')) return 'admin'
   if (username.includes('constructor') || username.includes('施工')) return 'constructor'
-  return 'reviewer'
+  return 'constructor'
 }
 
 function mapTask(raw: BackendTask): ReviewTask {
@@ -1173,7 +1173,7 @@ export async function login(username: string, password: string, teamId = current
 export async function fetchCurrentUser(): Promise<CurrentUser> {
   const session = readLegacySession()
   if (!session?.user) return mockUser
-  const username = session.user.username || session.user.name || 'reviewer'
+  const username = session.user.username || session.user.name || 'admin'
   const role = roleFromSession(session, username)
   return {
     id: username,

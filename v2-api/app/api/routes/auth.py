@@ -30,13 +30,6 @@ DEMO_USERS = {
         "home": "/app",
         "team_id": "demo-team",
     },
-    "reviewer": {
-        "password": "review123",
-        "roles": ["reviewer"],
-        "name": "资料审阅员",
-        "home": "/app",
-        "team_id": "demo-team",
-    },
     "constructor": {
         "password": "construct123",
         "roles": ["constructor"],
@@ -51,7 +44,7 @@ class UserUpsertRequest(BaseModel):
     username: str
     password: str | None = None
     name: str = ""
-    roles: list[str] = ["reviewer"]
+    roles: list[str] = ["constructor"]
     team_id: str = "default-team"
     status: str = "active"
 
@@ -89,10 +82,7 @@ def require_admin(authorization: str | None = Header(default=None)) -> dict:
 def require_production_reviewer_or_admin(authorization: str | None = Header(default=None)) -> dict:
     if not auth_required():
         return {}
-    payload = bearer_payload(authorization)
-    if set(payload.get("roles") or []).isdisjoint({"reviewer", "admin"}):
-        raise HTTPException(status_code=403, detail="Reviewer or administrator role required")
-    return payload
+    return require_admin(authorization)
 
 
 def demo_login_user(username: str, password: str) -> dict | None:
@@ -158,14 +148,6 @@ def config(request: Request):
                 "role": "admin",
                 "home": DEMO_USERS["admin"]["home"],
                 "team_id": DEMO_USERS["admin"]["team_id"],
-            },
-            {
-                "label": "审阅员",
-                "username": "reviewer",
-                "password": DEMO_USERS["reviewer"]["password"],
-                "role": "reviewer",
-                "home": DEMO_USERS["reviewer"]["home"],
-                "team_id": DEMO_USERS["reviewer"]["team_id"],
             },
             {
                 "label": "施工员",

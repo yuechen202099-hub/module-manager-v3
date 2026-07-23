@@ -19,14 +19,13 @@ const accountForm = reactive({
   name: '',
   password: '',
   teamId: auth.user?.teamId || 'default-team',
-  role: 'reviewer' as UserRole,
+  role: 'constructor' as UserRole,
   status: 'active',
   editing: false,
 })
 
 const accountRoles: Array<{ value: UserRole; label: string }> = [
   { value: 'admin', label: '管理员' },
-  { value: 'reviewer', label: '审阅员' },
   { value: 'constructor', label: '施工员' },
 ]
 
@@ -54,12 +53,12 @@ function roleLabel(role: string) {
 }
 
 function rolesLabel(user: UserAccount) {
-  return (user.roles || []).map((role) => roleLabel(role)).join(' / ') || '审阅员'
+  return (user.roles || []).map((role) => roleLabel(role)).join(' / ') || '已停用'
 }
 
 function primaryRole(user: UserAccount): UserRole {
   const role = user.roles.find((item) => accountRoles.some((option) => option.value === item))
-  return role || 'reviewer'
+  return role || 'constructor'
 }
 
 function formatDateTime(value = '') {
@@ -108,7 +107,7 @@ function resetAccountForm() {
   accountForm.name = ''
   accountForm.password = ''
   accountForm.teamId = auth.user?.teamId || 'default-team'
-  accountForm.role = 'reviewer'
+  accountForm.role = 'constructor'
   accountForm.status = 'active'
   accountForm.editing = false
 }
@@ -239,7 +238,7 @@ onMounted(() => {
       <div class="account-form-grid">
         <label class="account-field">
           <span>账号</span>
-          <el-input v-model="accountForm.username" :disabled="accountForm.editing" placeholder="例如 reviewer-a" autocomplete="off" />
+          <el-input v-model="accountForm.username" :disabled="accountForm.editing" placeholder="例如 constructor-a" autocomplete="off" />
         </label>
         <label class="account-field">
           <span>姓名</span>
