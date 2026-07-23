@@ -1,78 +1,94 @@
-# Task 8 Report: V3.0.80 Release Surface and Gate
+# V3.2.0 Task 8 报告
 
-## Status
+- 日期：2026-07-24
+- 分支：`production/V3/3.2.0`
+- 基线 HEAD：`20e04fe`
+- 任务：版本面、发布门禁与正式 Vue 构建产物
+- 结论：`DONE_WITH_CONCERNS`
 
-- Status: complete; the initial release-surface work and the review follow-up passed before their respective commits.
-- Branch: `production/V3/3.0.80`.
-- Release record: `ops/releases/V3.0.80.md` is a preparation skeleton only. Package hash, backup directory, release directory, deployment, and rollback evidence remain blank for Task 9.
+## 需求
 
-## Files Changed
+- 使用 TDD，先新增并运行失败的 `scripts/verify_v3_2_0_release.py`。
+- 将正式版本统一到 `3.2.0` / `V3.2.0`。
+- 中文更新内容包含数据中台统一审阅、驾驶舱下钻、统一导出中心、审阅员角色下线，以及所有相关分页默认 20、可选 20/50/100。
+- 将 V3.2.0 新脚本、组件、schema、service、迁移和发布记录纳入打包与验包门禁。
+- 生成并提交最终 `v2-api/app/static/vue` 正式构建产物，不恢复 Task Hall。
+- 保留生产、平台、小程序三线协作规则，并补充数据中台与导出中心维护入口。
 
-- `AGENTS.md`
-- `RELEASE_MANIFEST.md`
-- `scripts/build-client-release.ps1`
-- `scripts/verify_admin_release_notes.js`
-- `scripts/verify_project_board_data_center_photos.js`
-- `scripts/verify_photo_barcode_accuracy.js`
-- `scripts/verify_project_board_terminal_cards.js`
-- `scripts/verify-client-release.py`
-- `scripts/verify_release_sop.py`
-- `v2-api/app/main.py`
-- `v2-api/app/services/ops_status.py`
-- `v2-api/pyproject.toml`
-- `v2-api/tests/test_api.py`
-- `v2-web/package.json`
-- `v2-web/index.html`
-- `v2-web/src/components/AppLayout.vue`
-- `v2-web/src/constants/releaseNotes.ts`
-- `ops/releases/V3.0.80.md`
-- `.superpowers/sdd/task-8-report.md`
+## RED
 
-## RED and GREEN
+首次执行：
 
-### RED
+```powershell
+python scripts\verify_v3_2_0_release.py
+```
 
-- Command: `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -k "health or system_status" -q`
-- Result: expected failure, `test_system_status_requires_admin_and_reports_runtime_state` asserted `3.0.80` but the application returned `3.0.79`.
+结果为 exit 1。失败覆盖旧 `3.1.1` 版本面、缺失 V3.2.0 发布记录、缺失新打包必需文件、新门禁未接入，以及静态 `version.json`、HTML 标题和资源仍为 V3.1.1。
 
-### GREEN
+## 修改
 
-- `node scripts\verify_admin_release_notes.js`: passed.
-- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_api.py -k "health or system_status" -q`: passed, `2 passed, 100 deselected, 1 warning`.
-- `.\.venv\Scripts\python.exe scripts\verify_release_sop.py`: passed.
-- `node scripts\verify_project_board_unmatched_review.js`: passed.
-- `git diff --check`: passed after the final report update.
+### 版本与更新内容
 
-### Resolved Gate
+- 对齐 Vue package/source version、HTML 标题、FastAPI、ops status、API pyproject、兼容布局和正式交付文件名。
+- 新增 V3.2.0 中文更新内容，五项要求均使用明确文案。
+- 更新 `README.md`、验收/审计/签收文档中的当前候选打包命令与包路径。
 
-- Initial failure: `node scripts\verify_admin_release_notes.js` failed because it hard-coded `EXPECTED_VERSION = '3.0.79'` and required repository static Vue artifacts to match that version.
-- Resolution: the source gate now expects `3.0.80`, asserts the V3.0.80 Chinese title and all three specified update items, retains the V3.0.79 and older historical assertions, and no longer reads repository static Vue output.
-- Responsibility split: `verify_admin_release_notes.js` validates source release content and source version surfaces; `verify-client-release.py` independently validates the package manifest version against the packaged `static/vue/index.html` title and static JS `APP_VERSION`.
+### 发布与打包门禁
 
-### Review Follow-up: Dynamic Historical Verifiers
+- 新增 `scripts/verify_v3_2_0_release.py`，覆盖版本面、迁移、路由、退役页面、发布记录、打包接线和正式静态产物。
+- `scripts/build-client-release.ps1` 在打包前运行六个 V3.2.0 门禁，并显式校验、复制新发布输入。
+- `scripts/verify-client-release.py` 要求新脚本、组件、composable、schema、service、路由、迁移和发布记录。
+- 验包禁止 `.env`、data、uploads、node_modules、缓存、数据库、日志、coverage 和测试结果文件。
+- `scripts/verify_release_sop.py` 与测试同步到 V3.2.0 候选生命周期。
 
-- RED: `verify_project_board_data_center_photos.js`, `verify_photo_barcode_accuracy.js`, and `verify_project_board_terminal_cards.js` each failed while they hard-coded `3.0.79`; their current source surfaces correctly report `3.0.80`.
-- GREEN: all three scripts passed after reading `v2-web/package.json.version` as the current version source and checking that `releaseNotes` APP_VERSION, FastAPI, system status, `v2-web/index.html`, and the legacy AppLayout version display agree with it.
-- Historical feature and release-note assertions remain in each verifier; only the current-version source and cross-surface consistency checks changed.
+### 发布记录与协作规则
 
-## Release Package Inspection
+- 新增 `ops/releases/V3.2.0.md`，记录 V3.1.1 基线、迁移、权限、备份、rollback、健康路由、专项/完整验证命令和 `PENDING_TASK_9` 证据字段。
+- `AGENTS.md` 保持生产、项目平台、小程序三线版本规则，明确 codebase-memory-mcp 顺序、工具/skill 必读要求和数据中台/导出中心维护入口。
+- 部署基线继续为 `V3.1.1`，发布候选更新为 `V3.2.0`。
 
-- A temporary `3.0.80` package was built solely to inspect the release contents, then removed with the regenerated static output to preserve the requested scope.
-- `.\.venv\Scripts\python.exe scripts\verify-client-release.py build\server-release\module-manager-v2-server-3.0.80.zip`: passed during the temporary inspection; `118` required files were present and no verifier-defined forbidden local/cache files were present.
-- A direct ZIP entry audit found no `.env`, `data`, `uploads`, `.db`, `.sqlite`, `.sqlite3`, or `.sql` entries.
+### 正式构建产物
 
-## Version Search
+- `npm run build` 直接重建 `v2-api/app/static/vue`。
+- `version.json` 版本为 `3.2.0`，HTML 标题为 `Module Manager V3.2.0`。
+- 新 hash 资源包含 V3.2.0 中文更新内容。
+- 旧 `TaskHallView`、`ReviewView` 和 Task Hall 静态资源未生成。
 
-- All Task 8 runtime, package, page, manifest, and AGENTS version surfaces now use `3.0.80` or `V3.0.80`.
-- The retained `V3.0.79` release note and `ops/releases/V3.0.79.md` are intentional history.
-- The static Vue assets remain excluded from this task and were neither regenerated nor staged after the source gate was separated from package verification.
-- Out-of-scope current-baseline references remain in `docs/AGENT_REQUIRED_READING.md`, `docs/sop/*.md`, `docs/team-handoff-prompts.md`, release-note verifier scripts, and older plans/specs. Historical release records, branch examples, rollback references, and plan baselines were intentionally retained.
+## 验证
 
-## Self-Review and Concerns
+按 brief 执行并通过：
 
-- `build-client-release.ps1` copies `scripts\verify_project_board_unmatched_review.js`.
-- `verify-client-release.py` requires `scripts/verify_project_board_unmatched_review.js`.
-- `verify_release_sop.py` requires the verifier and cross-checks that the build script copies it and the release verifier requires it.
-- No Task 1-7 business implementation files were changed. Regenerated static artifacts and the temporary release package were restored/removed.
-- The review follow-up changed only the three approved historical verifier sources and this report. `v2-api/app/static/vue` has no staged, modified, or untracked files.
-- The former source-gate blocker was resolved through the approved scope extension. No remaining Task 8 concerns.
+```powershell
+python scripts\verify_v3_2_0_role_routes.py
+python scripts\verify_v3_2_0_data_center_ui.py
+python scripts\verify_v3_2_0_dashboard_drilldown.py
+python scripts\verify_v3_2_0_export_center_ui.py
+python scripts\verify_v3_2_0_single_export_entry.py
+python scripts\verify_v3_2_0_release.py
+python scripts\test_verify_release_sop.py
+```
+
+- 六个 V3.2.0 专项门禁通过。
+- SOP 测试：`283 passed`。
+- `npm run type-check`：通过。
+- `npm run build`：通过，`1679 modules transformed`。
+
+追加验证：
+
+- `python -m pytest scripts/test_verify_client_release.py -q`：`210 passed`，1 条测试构造重复 ZIP entry 的预期 warning。
+- `.\.venv\Scripts\python.exe -m pytest v2-api/tests/test_v3_1_release.py -q`：`37 passed`。
+- 版本状态与交付文件名聚焦 API 测试：`2 passed, 202 deselected`，1 条既有 Starlette/httpx deprecation warning。
+- `node scripts/verify_admin_release_notes.js`：通过。
+- `python scripts/verify_release_sop.py --version V3.2.0`：通过。
+
+## 发布状态
+
+- Task 8 本地版本、门禁和正式静态产物完成。
+- 未生成最终服务器 ZIP，未填写真实 SHA256、备份目录、release 目录或线上健康证据。
+- 未执行生产迁移、切换或数据写入。
+
+## Concerns
+
+- Task 9 仍需执行完整后端 pytest、独立全分支复审、正式打包验包、SHA256、生产备份、迁移、切换和线上验收。
+- Vite 构建保留既有 VueUse `/* #__PURE__ */` 注释 warning 与大于 500 kB chunk warning；构建成功，未发现本任务新增阻断。
+- 聚焦 API 测试保留既有 Starlette/httpx deprecation warning。

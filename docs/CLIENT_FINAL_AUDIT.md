@@ -1,8 +1,8 @@
-# V3.1.1 生产发布审计
+# V3.2.0 生产发布审计（Task 9 待完成）
 
 ## 审计结论
 
-V3.1.1 已完成本地验证、发布包校验、生产备份、独立复审、线上部署和队列恢复，证据统一写入 `ops/releases/V3.1.1.md`。V3.1.0 的历史证据保留在 `ops/releases/V3.1.0.md`。
+V3.2.0 已完成 Task 8 版本面、发布门禁和正式 Vue 构建。完整后端回归、独立复审、发布包校验、生产备份、迁移与线上证据由 Task 9 执行，统一写入 `ops/releases/V3.2.0.md`。
 
 最终打款前仍建议由项目负责人在浏览器里按演示脚本走一遍真实视觉确认，重点看页面高级感、现场数据展示和甲方关注的业务口径。
 
@@ -10,40 +10,41 @@ V3.1.1 已完成本地验证、发布包校验、生产备份、独立复审、�
 
 | 要求 | 当前证据 | 状态 |
 | --- | --- | --- |
-| 登录功能 | `/login` 页面、`/auth/login`、管理员与审阅员 demo 账号、生产环境禁用 demo 账号检查 | 已完成 |
+| 登录功能 | `/login` 页面、`/auth/login`、管理员与施工员 demo 账号、生产环境禁用 demo 账号检查 | Task 9 待复验 |
 | 管理端项目看板 | `/project-board`、项目进度总览、安装人员资料组占比、终端任务进度、固定页面清单 | 已完成 |
-| 审阅端工作台 | `/task-hall`、只显示已领取任务、图片审阅、元数据展示、分类归档、审阅身份使用登录账号 `reviewer` | 已完成 |
-| 演示图片保障 | `scripts/seed-client-demo-data.py`、本地静态演示图片 URL、审阅页优先打开可见图片 | 已完成 |
+| 数据中台审阅 | `/global-search`、资料组平铺、服务端筛选、图片审阅、分类归档、管理员审计 | 已完成 |
+| 演示图片保障 | `scripts/seed-client-demo-data.py`、本地静态演示图片 URL、数据中台按需打开可见图片 | Task 9 待复验 |
 | 快捷键分类 | 数字键分类、Enter 归档、方向键切换照片/资料组、`archivePhoto` 流程已测试 | 已完成 |
-| 任务领取 | `/claim-tasks`、按终端领取、仅有扫码/照片数据的终端可进入任务 | 已完成 |
-| 异常处理 | `/project-board` 的扫码未匹配清单支持临时审阅、数据修正、重新扫码、二维码/OCR识别和人工确认；管理员确认候选后才生成或并入正式资料组 | 已完成 |
+| 任务派发 | `/claim-tasks`、管理员按终端派发/改派施工并设置优先施工 | 已完成 |
+| 异常处理 | `/global-search` 的未匹配证据支持临时审阅、数据修正、重新扫码、二维码/OCR识别和人工确认；管理员确认候选后才生成或并入正式资料组 | 已完成 |
+| 统一导出 | `/exports` 提供终端交付、设备清单、业务清单、统计报表和导出任务 | 已完成 |
 | 照片复核 | 扫码未匹配弹窗按服务器记录逐张查看和分类照片，不在临时审阅阶段创建正式资料组或占位终端 | 已完成 |
 | 同步方案口径 | `/sync-config` 已改为停用说明页，明确第一版使用表格导入，不再暴露 token 输入框 | 已完成 |
 | 甲方签收清单 | `docs/CLIENT_SIGNOFF_CHECKLIST.md`，列出可现场确认并签字的验收项 | 已完成 |
 | 页面高级感 | 登录页重做，主页面固定导航清理，统一工作台视觉语言 | 已完成，需人眼最终确认 |
 | 服务器部署准备 | `docs/SERVER_DEPLOYMENT_PREP.md`、Nginx 配置、systemd 服务、生产账号注意事项 | 已完成 |
-| 发布包 | `build/server-release/module-manager-v2-server-3.1.1.zip` | 已验包并部署 |
+| V3.2.0 候选发布包 | `build/server-release/module-manager-v2-server-3.2.0.zip` | Task 9 待生成和验包 |
 
 ## 已运行验证
 
 ```powershell
-.\scripts\run-client-acceptance-gate.ps1 -Version 3.1.1
+.\scripts\run-client-acceptance-gate.ps1 -Version 3.2.0
 ```
 
-结果：本轮候选验证和后续生产验收结果见 `ops/releases/V3.1.1.md`。
+结果：Task 8 门禁已通过；完整候选验证和生产验收结果由 Task 9 写入 `ops/releases/V3.2.0.md`。
 
 ```powershell
 cd .\v2-api
 ..\.venv\Scripts\python.exe -m pytest tests -q
 ```
 
-结果：以 `ops/releases/V3.1.1.md` 本轮记录为准，不沿用 V3.1.0 的历史测试计数。
+结果：Task 9 待执行，最终测试计数写入 `ops/releases/V3.2.0.md`。
 
 ```powershell
 .\scripts\run-client-demo.ps1 -NoOpen
 ```
 
-结果：通过。覆盖登录、角色跳转、固定导航选中态、核心页面入口、审阅身份口径、同步停用说明、演示图片可见性、补图本地图片上传、补图页面无 URL 输入、生产环境禁用 demo 账号和部署文件存在性。
+结果：Task 9 待复验管理员/施工员角色跳转、数据中台、导出中心、施工采集、同步停用说明和生产环境禁用 demo 账号。
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\verify-static-pages.py
@@ -58,31 +59,31 @@ cd .\v2-api
 结果：通过。确认 `.env.example`、Nginx、systemd 和服务器部署准备材料具备生产交接所需的关键配置项。
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.1.1.zip
+.\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.2.0.zip
 ```
 
-结果：通过。发布包包含 144 个必需文件，绑定提交 `f0181977ed734844382c9837b53b1b0e87618ae0`，无本地缓存或敏感文件。
+结果：Task 9 待生成正式 ZIP、绑定最终提交并记录必需文件数与 SHA256。
 
 ## 发布包
 
 ```text
-build/server-release/module-manager-v2-server-3.1.1.zip
+build/server-release/module-manager-v2-server-3.2.0.zip
 ```
 
 ## 演示顺序
 
-1. 打开 `/login`，展示管理员和审阅员角色入口。
+1. 打开 `/login`，展示管理员和施工员角色入口。
 2. 管理员进入 `/project-board`，展示项目进度、任务进度、安装人员占比和补图入口。
-3. 进入 `/claim-tasks`，展示按终端领取任务。
-4. 进入 `/task-hall`，展示已领取任务、图片审阅、快捷键分类和归档。
-5. 进入 `/project-board` 的扫码未匹配清单，打开一条记录完成临时审阅、修正、重新识别和人工确认。
-6. 管理员确认候选终端后完成匹配，才生成或并入正式资料组；审阅员不执行最终匹配。
-7. 打开 `/sync-config`，说明供应商 API 不可用，第一版以表格导入为准。
-8. 展示 `ops/releases/V3.1.1.md`，核对本轮生产备份、发布目录、回滚目录和线上健康检查。
+3. 进入 `/claim-tasks`，展示管理员按终端派发和改派施工。
+4. 进入 `/global-search`，展示资料组平铺、组合筛选、图片审阅和快捷键分类。
+5. 从 `/project-board` 点击统计项下钻到带筛选条件的数据中台。
+6. 进入 `/exports`，展示终端交付、设备清单、业务清单、统计报表和任务记录。
+7. 打开一条未匹配证据完成临时审阅、修正、重新识别和人工确认，管理员确认后才生成或并入正式资料组。
+8. 展示 `ops/releases/V3.2.0.md`，Task 9 后核对发布包、备份、release 目录和线上健康证据。
 
 ## 剩余风险
 
-- V3.1.1 是当前公网生产基线；V3.1.0 仅作为应用回滚版本和历史证据。
+- V3.1.1 是当前公网生产基线；V3.2.0 在 Task 9 完成前不得标记为已发布。
 - 生产账号、密钥、HTTPS 和数据库备份已纳入生产配置与安全审计，后续变更必须按生产 SOP 执行。
 - 人工补图长期存储仍建议接 OSS/S3，减少对本地静态目录的依赖。
-- 本次未在真实生产资料组上制造审阅写入；审阅完成后自动缓存由完整回归测试、独立审阅和线上后台缓存状态覆盖。
+- Task 8 未执行真实生产写入；自动归档、交付缓存和导出任务的线上状态由 Task 9 验收。

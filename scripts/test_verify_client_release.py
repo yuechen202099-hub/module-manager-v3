@@ -224,7 +224,7 @@ def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.1.1"' in build_script
+    assert '[string]$Version = "3.2.0"' in build_script
 
 
 def test_release_builder_embeds_the_current_source_commit() -> None:
@@ -366,6 +366,35 @@ def test_v31_release_requires_barcode_enqueue_unit_and_all_queue_migrations() ->
     assert required <= verifier.REQUIRED_FILES
 
 
+def test_v320_release_inputs_are_packaged_and_required() -> None:
+    verifier = load_verifier()
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    required = {
+        "scripts/verify_v3_2_0_role_routes.py",
+        "scripts/verify_v3_2_0_data_center_ui.py",
+        "scripts/verify_v3_2_0_dashboard_drilldown.py",
+        "scripts/verify_v3_2_0_export_center_ui.py",
+        "scripts/verify_v3_2_0_single_export_entry.py",
+        "scripts/verify_v3_2_0_release.py",
+        "v2-api/alembic/versions/0013_data_center_query_indexes.py",
+        "v2-api/alembic/versions/0014_export_center_jobs.py",
+        "v2-api/app/schemas/data_center.py",
+        "v2-api/app/schemas/export_center.py",
+        "v2-api/app/services/data_center.py",
+        "v2-api/app/services/export_center.py",
+        "v2-web/src/components/data-center/DataCenterFilters.vue",
+        "v2-web/src/components/data-center/DataCenterReviewDialog.vue",
+        "v2-web/src/components/export-center/ExportCatalogTab.vue",
+        "v2-web/src/components/export-center/ExportJobsTable.vue",
+        "v2-web/src/components/export-center/TerminalDeliveryTab.vue",
+        "ops/releases/V3.2.0.md",
+    }
+
+    assert required <= verifier.REQUIRED_FILES
+    for path in required:
+        assert path.replace("/", "\\") in build_script
+
+
 def test_release_builder_stops_when_smoke_check_fails() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     smoke_block = build_script.split("Running release smoke check before packaging...", maxsplit=1)[1]
@@ -425,7 +454,7 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.1.1")
+        verifier.verify_release_markdown_text(document_path, content, "3.2.0")
 
 
 @pytest.mark.parametrize(

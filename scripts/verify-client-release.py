@@ -74,6 +74,12 @@ REQUIRED_FILES = {
     "scripts/verify_project_board_unmatched_review.js",
     "scripts/verify_review_image_inspector.js",
     "scripts/verify_dialog_information_integration.js",
+    "scripts/verify_v3_2_0_role_routes.py",
+    "scripts/verify_v3_2_0_data_center_ui.py",
+    "scripts/verify_v3_2_0_dashboard_drilldown.py",
+    "scripts/verify_v3_2_0_export_center_ui.py",
+    "scripts/verify_v3_2_0_single_export_entry.py",
+    "scripts/verify_v3_2_0_release.py",
     "v2-api/scripts/preview_v3_1_backfill.py",
     "v2-api/scripts/verify_v3_1_release.py",
     "v2-api/alembic/versions/0006_group_barcode_verification.py",
@@ -83,6 +89,8 @@ REQUIRED_FILES = {
     "v2-api/alembic/versions/0010_auto_archive_queue_state.py",
     "v2-api/alembic/versions/0011_delivery_package_jobs.py",
     "v2-api/alembic/versions/0012_delivery_package_group_ids_gin.py",
+    "v2-api/alembic/versions/0013_data_center_query_indexes.py",
+    "v2-api/alembic/versions/0014_export_center_jobs.py",
     "scripts/production_backup.sh",
     "scripts/cleanup_old_releases.sh",
     "scripts/production_health_check.py",
@@ -91,6 +99,7 @@ REQUIRED_FILES = {
     "ops/releases/V3.0.84.md",
     "ops/releases/V3.1.1.md",
     "ops/releases/V3.1.0.md",
+    "ops/releases/V3.2.0.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.80.md",
@@ -138,6 +147,12 @@ REQUIRED_FILES = {
     "ops/releases/V3.0.37.md",
     "ops/incidents/P0-template.md",
     "v2-api/app/main.py",
+    "v2-api/app/api/routes/groups.py",
+    "v2-api/app/api/routes/exports.py",
+    "v2-api/app/schemas/data_center.py",
+    "v2-api/app/schemas/export_center.py",
+    "v2-api/app/services/data_center.py",
+    "v2-api/app/services/export_center.py",
     "v2-api/app/static/favicon.svg",
     "v2-api/app/static/vue/index.html",
     "v2-api/app/static/vue/version.json",
@@ -157,6 +172,14 @@ REQUIRED_FILES = {
     "v2-web/package.json",
     "v2-web/src/version.json",
     "v2-web/src/main.ts",
+    "v2-web/src/components/data-center/DataCenterFilters.vue",
+    "v2-web/src/components/data-center/DataCenterReviewDialog.vue",
+    "v2-web/src/components/export-center/ExportCatalogTab.vue",
+    "v2-web/src/components/export-center/ExportJobsTable.vue",
+    "v2-web/src/components/export-center/TerminalDeliveryTab.vue",
+    "v2-web/src/composables/useDataCenterQuery.ts",
+    "v2-web/src/composables/useExportCenterQuery.ts",
+    "v2-web/src/utils/dataCenterDrilldown.ts",
 }
 
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
@@ -206,16 +229,35 @@ FORBIDDEN_PARTS = {
     ".venv",
     "__pycache__",
     ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".cache",
+    ".vite",
+    "data",
+    "uploads",
+    "node_modules",
+    "dist",
+    "htmlcov",
     "build",
 }
 
 FORBIDDEN_SUFFIXES = {
+    ".db",
+    ".log",
     ".pyc",
     ".pyo",
+    ".sqlite",
+    ".sqlite3",
 }
 
 FORBIDDEN_PREFIXES = {
     "v2-api/app/static/uploads/",
+}
+
+FORBIDDEN_NAMES = {
+    ".coverage",
+    "coverage.xml",
+    "junit.xml",
 }
 
 
@@ -526,6 +568,9 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
 
     forbidden_hits: list[str] = []
     for name in names:
+        if PurePosixPath(name).name in FORBIDDEN_NAMES:
+            forbidden_hits.append(name)
+            continue
         if any(name.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
             forbidden_hits.append(name)
             continue

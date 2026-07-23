@@ -3,8 +3,8 @@
 ## Production SOP Override
 
 - Deployed production baseline: `V3.1.1`.
-- Release candidate: `V3.1.1`.
-- Release-candidate maintenance branch: `production/V3/3.1.1`.
+- Release candidate: `V3.2.0`.
+- Release-candidate maintenance branch: `production/V3/3.2.0`.
 - Production SOP entrypoint: `docs/sop/README.md`.
 - Production release records: `ops/releases/`.
 - P0 incident records: `ops/incidents/`.
@@ -24,8 +24,8 @@
 ## 当前基线
 
 - 当前已部署生产版本：`V3.1.1`。
-- 当前发布候选版本：`V3.1.1`。
-- 当前候选维护分支：`production/V3/3.1.1`。
+- 当前发布候选版本：`V3.2.0`。
+- 当前候选维护分支：`production/V3/3.2.0`。
 - 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.1.1`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 文档和协作规则使用独立规则版本，不自动修改应用版本。
 - 详细生产 SOP 见 `docs/sop/README.md`。
@@ -42,7 +42,8 @@
 
 - 每次改动前先读取本文件和与任务相关的文档。
 - 新 agent 接手前必须读取 `docs/AGENT_REQUIRED_READING.md`，它记录当前生产分支、版本基线、插件/skill、发布边界和常用验证命令。
-- 推荐优先使用 codebase-memory-mcp 图谱工具理解代码；图谱不可用或结果不足时，直接使用 `rg`、文件读取和本地测试。
+- 工具/skill 必读：新 agent 必须先读取 `docs/AGENT_REQUIRED_READING.md` 的插件 / Skill 表，再按任务类型加载对应说明。
+- 代码发现优先使用 codebase-memory-mcp，顺序固定为 `search_graph`、`trace_path`、`get_code_snippet`、`query_graph`、`get_architecture`；图谱不可用或结果不足时，再使用 `rg`、文件读取和本地测试。
 - 修改前尊重当前工作区状态，不回退用户已有改动，除非用户明确要求。
 
 ## 核心业务硬规则
@@ -65,6 +66,12 @@
 - 涉及前端路由或静态兼容入口时，按风险运行 `python scripts/verify_vue_migration_gate.py`。
 - 微信小程序后端接口已在 `V3.0.69` 纳入生产线；小程序前端、APK 或平台扩展不得直接改生产分支，必须从当前生产分支切独立功能分支并通过交接/PR 进入生产维护流程。
 - 小程序团队使用 `MP-V1.0.xx` 独立记录自身开发进度，项目管理平台团队使用 `PM-V1.0.xx` 独立记录自身开发进度；二者都必须注明基于的生产版本，且不得占用正式生产 `V3.0.xx` 版本号。
+
+## V3.2.0 维护入口
+
+- 数据中台：前端入口 `/global-search`，主页面 `v2-web/src/views/GlobalSearchView.vue`，筛选与审阅组件位于 `v2-web/src/components/data-center/`，后端入口为 `/groups/data-center`，服务实现为 `v2-api/app/services/data_center.py`；改动后运行 `python scripts/verify_v3_2_0_data_center_ui.py`。
+- 导出中心：前端入口 `/exports`，主页面 `v2-web/src/views/ExportsView.vue`，标签页与任务表位于 `v2-web/src/components/export-center/`，后端入口为 `/exports/catalog`、`/exports/terminal-readiness` 和 `/exports/jobs`，服务实现为 `v2-api/app/services/export_center.py`；改动后运行 `python scripts/verify_v3_2_0_export_center_ui.py` 与 `python scripts/verify_v3_2_0_single_export_entry.py`。
+- 数据中台和导出中心的明细分页默认 20 条，只允许 20、50、100；新入口不得恢复 reviewer 导航、`TaskHallView.vue` 或 `v2-api/app/static/task_hall.html`。
 
 ## 验证和发布
 

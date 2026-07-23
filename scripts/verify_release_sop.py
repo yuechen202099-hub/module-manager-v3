@@ -11,6 +11,32 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+V320_RELEASE_INPUTS = (
+    "scripts/verify_v3_2_0_role_routes.py",
+    "scripts/verify_v3_2_0_data_center_ui.py",
+    "scripts/verify_v3_2_0_dashboard_drilldown.py",
+    "scripts/verify_v3_2_0_export_center_ui.py",
+    "scripts/verify_v3_2_0_single_export_entry.py",
+    "scripts/verify_v3_2_0_release.py",
+    "v2-api/alembic/versions/0013_data_center_query_indexes.py",
+    "v2-api/alembic/versions/0014_export_center_jobs.py",
+    "v2-api/app/api/routes/groups.py",
+    "v2-api/app/api/routes/exports.py",
+    "v2-api/app/schemas/data_center.py",
+    "v2-api/app/schemas/export_center.py",
+    "v2-api/app/services/data_center.py",
+    "v2-api/app/services/export_center.py",
+    "v2-web/src/components/data-center/DataCenterFilters.vue",
+    "v2-web/src/components/data-center/DataCenterReviewDialog.vue",
+    "v2-web/src/components/export-center/ExportCatalogTab.vue",
+    "v2-web/src/components/export-center/ExportJobsTable.vue",
+    "v2-web/src/components/export-center/TerminalDeliveryTab.vue",
+    "v2-web/src/composables/useDataCenterQuery.ts",
+    "v2-web/src/composables/useExportCenterQuery.ts",
+    "v2-web/src/utils/dataCenterDrilldown.ts",
+    "ops/releases/V3.2.0.md",
+)
+
 REQUIRED_FILES = [
     "docs/sop/README.md",
     "docs/sop/01-demand-intake-and-priority.md",
@@ -79,6 +105,7 @@ REQUIRED_FILES = [
     "scripts/verify_project_board_unmatched_review.js",
     "scripts/verify_dialog_information_integration.js",
     "v2-web/src/version.json",
+    *V320_RELEASE_INPUTS,
 ]
 
 RELEASE_TABLE_ROW_PATTERN = re.compile(
@@ -766,6 +793,11 @@ def main(argv: list[str] | None = None) -> int:
         fail("build-client-release.ps1 must copy scripts\\verify_dialog_information_integration.js")
     if "scripts/verify_dialog_information_integration.js" not in release_verifier:
         fail("verify-client-release.py must require scripts/verify_dialog_information_integration.js")
+    for path in V320_RELEASE_INPUTS:
+        if path not in release_verifier:
+            fail(f"verify-client-release.py must require V3.2.0 release input {path}")
+        if path.replace("/", "\\") not in build_script:
+            fail(f"build-client-release.ps1 must include V3.2.0 release input {path}")
     for path in ["v2-api/scripts/preview_v3_1_backfill.py", "v2-api/scripts/verify_v3_1_release.py"]:
         if path not in release_verifier:
             fail(f"verify-client-release.py must require {path}")

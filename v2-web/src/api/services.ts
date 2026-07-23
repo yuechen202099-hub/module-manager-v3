@@ -3213,7 +3213,7 @@ export async function exportTerminalDeliveryPackage(options: {
   }
   const blob = await response.blob()
   if (!blob.size) throw new Error('正式交付包为空，请稍后重试。')
-  const fallbackName = `V3.1.1-final-delivery-${options.terminal || options.taskId}.zip`
+  const fallbackName = `V3.2.0-final-delivery-${options.terminal || options.taskId}.zip`
   const filename = filenameFromDisposition(response.headers.get('Content-Disposition') || '', fallbackName)
   triggerBrowserDownload(blob, filename)
   options.onProgress?.({ text: '正式交付包已下载', percent: 100 })

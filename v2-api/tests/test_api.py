@@ -3487,17 +3487,17 @@ def test_health_check() -> None:
 
 def test_system_status_version_requires_admin_and_reports_runtime_state() -> None:
     admin = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
-    reviewer = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
+    constructor = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
     admin_headers = {"Authorization": f"bearer {admin.json()['data']['access_token']}"}
-    reviewer_headers = {"Authorization": f"bearer {reviewer.json()['data']['access_token']}"}
+    constructor_headers = {"Authorization": f"bearer {constructor.json()['data']['access_token']}"}
 
-    denied = client.get("/local-test/system/status", headers=reviewer_headers)
+    denied = client.get("/local-test/system/status", headers=constructor_headers)
     response = client.get("/local-test/system/status", headers=admin_headers)
 
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.1.1"
+    assert data["version"] == "3.2.0"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -7022,7 +7022,7 @@ def test_final_delivery_export_returns_versioned_zip(monkeypatch, tmp_path: Path
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/zip"
-    assert "V3.1.1-final-delivery-17-" in response.headers["content-disposition"]
+    assert "V3.2.0-final-delivery-17-" in response.headers["content-disposition"]
     assert response.headers["content-disposition"].endswith('.zip"')
     assert response.content == package.read_bytes()
     assert released == [package]

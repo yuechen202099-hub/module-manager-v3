@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.1.1",
+    [string]$Version = "3.2.0",
     [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
@@ -13,6 +13,37 @@ if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
+$v320ReleaseInputs = @(
+    "scripts\verify_v3_2_0_role_routes.py",
+    "scripts\verify_v3_2_0_data_center_ui.py",
+    "scripts\verify_v3_2_0_dashboard_drilldown.py",
+    "scripts\verify_v3_2_0_export_center_ui.py",
+    "scripts\verify_v3_2_0_single_export_entry.py",
+    "scripts\verify_v3_2_0_release.py",
+    "v2-api\alembic\versions\0013_data_center_query_indexes.py",
+    "v2-api\alembic\versions\0014_export_center_jobs.py",
+    "v2-api\app\api\routes\groups.py",
+    "v2-api\app\api\routes\exports.py",
+    "v2-api\app\schemas\data_center.py",
+    "v2-api\app\schemas\export_center.py",
+    "v2-api\app\services\data_center.py",
+    "v2-api\app\services\export_center.py",
+    "v2-web\src\components\data-center\DataCenterFilters.vue",
+    "v2-web\src\components\data-center\DataCenterReviewDialog.vue",
+    "v2-web\src\components\export-center\ExportCatalogTab.vue",
+    "v2-web\src\components\export-center\ExportJobsTable.vue",
+    "v2-web\src\components\export-center\TerminalDeliveryTab.vue",
+    "v2-web\src\composables\useDataCenterQuery.ts",
+    "v2-web\src\composables\useExportCenterQuery.ts",
+    "v2-web\src\utils\dataCenterDrilldown.ts",
+    "ops\releases\V3.2.0.md"
+)
+foreach ($releaseInput in $v320ReleaseInputs) {
+    if (-not (Test-Path -LiteralPath (Join-Path $root $releaseInput) -PathType Leaf)) {
+        throw "V3.2.0 release input is missing: $releaseInput"
+    }
+}
+
 $sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the full Git source commit for this release."
@@ -25,7 +56,7 @@ if ($worktreeChanges.Count -ne 0) {
     throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
 }
 if ([string]::IsNullOrWhiteSpace($PerformanceReport)) {
-    throw "Performance report is required for V3.1.1 packaging."
+    throw "Performance report is required for V3.2.0 packaging."
 }
 $performanceReportPath = if ([System.IO.Path]::IsPathRooted($PerformanceReport)) {
     [System.IO.Path]::GetFullPath($PerformanceReport)
@@ -79,7 +110,23 @@ Write-Host "Verifying source-bound V3.1 performance evidence..."
     --performance-report $performanceReportPath `
     --expected-source-commit $sourceCommit
 if ($LASTEXITCODE -ne 0) {
-    throw "V3.1 release verification failed."
+    throw "V3.1 performance evidence verification failed."
+}
+
+Write-Host "Running V3.2.0 focused release gates..."
+$v320ReleaseVerifiers = @(
+    "scripts\verify_v3_2_0_role_routes.py",
+    "scripts\verify_v3_2_0_data_center_ui.py",
+    "scripts\verify_v3_2_0_dashboard_drilldown.py",
+    "scripts\verify_v3_2_0_export_center_ui.py",
+    "scripts\verify_v3_2_0_single_export_entry.py",
+    "scripts\verify_v3_2_0_release.py"
+)
+foreach ($releaseVerifier in $v320ReleaseVerifiers) {
+    & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
+    if ($LASTEXITCODE -ne 0) {
+        throw "V3.2.0 release gate failed: $releaseVerifier"
+    }
 }
 
 if (-not $SkipSmoke) {
@@ -155,6 +202,12 @@ Copy-ReleaseItem "scripts\verify_project_board_data_center_photos.js" "scripts\v
 Copy-ReleaseItem "scripts\verify_project_board_unmatched_review.js" "scripts\verify_project_board_unmatched_review.js"
 Copy-ReleaseItem "scripts\verify_review_image_inspector.js" "scripts\verify_review_image_inspector.js"
 Copy-ReleaseItem "scripts\verify_dialog_information_integration.js" "scripts\verify_dialog_information_integration.js"
+Copy-ReleaseItem "scripts\verify_v3_2_0_role_routes.py" "scripts\verify_v3_2_0_role_routes.py"
+Copy-ReleaseItem "scripts\verify_v3_2_0_data_center_ui.py" "scripts\verify_v3_2_0_data_center_ui.py"
+Copy-ReleaseItem "scripts\verify_v3_2_0_dashboard_drilldown.py" "scripts\verify_v3_2_0_dashboard_drilldown.py"
+Copy-ReleaseItem "scripts\verify_v3_2_0_export_center_ui.py" "scripts\verify_v3_2_0_export_center_ui.py"
+Copy-ReleaseItem "scripts\verify_v3_2_0_single_export_entry.py" "scripts\verify_v3_2_0_single_export_entry.py"
+Copy-ReleaseItem "scripts\verify_v3_2_0_release.py" "scripts\verify_v3_2_0_release.py"
 Copy-ReleaseItem "scripts\production_backup.sh" "scripts\production_backup.sh"
 Copy-ReleaseItem "scripts\cleanup_old_releases.sh" "scripts\cleanup_old_releases.sh"
 Copy-ReleaseItem "scripts\run_photo_barcode_maintenance.sh" "scripts\run_photo_barcode_maintenance.sh"
@@ -181,6 +234,36 @@ if ($LASTEXITCODE -gt 7) {
     throw "Failed to copy v2-web release sources. Robocopy exit code: $LASTEXITCODE"
 }
 $global:LASTEXITCODE = 0
+
+$forbiddenReleaseDirectoryNames = @(
+    "data",
+    "uploads",
+    "node_modules",
+    "dist",
+    ".vite",
+    ".cache",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "htmlcov"
+)
+Get-ChildItem -LiteralPath $staging -Recurse -Directory -Force |
+    Where-Object { $_.Name -in $forbiddenReleaseDirectoryNames } |
+    Sort-Object { $_.FullName.Length } -Descending |
+    ForEach-Object {
+        if (Test-Path -LiteralPath $_.FullName) {
+            Remove-Item -Recurse -Force -LiteralPath $_.FullName
+        }
+    }
+
+$forbiddenReleaseFileNames = @(".coverage", "coverage.xml", "junit.xml")
+Get-ChildItem -LiteralPath $staging -Recurse -File -Force |
+    Where-Object {
+        $_.Name -in $forbiddenReleaseFileNames -or
+        $_.Extension -in @(".db", ".sqlite", ".sqlite3", ".log", ".pyc", ".pyo")
+    } |
+    Remove-Item -Force
 
 $stagedStaticDir = Join-Path $staging "v2-api\app\static"
 if (Test-Path $stagedStaticDir) {
@@ -295,8 +378,8 @@ $manifest = @"
 
 - Release smoke check passes unless -SkipSmoke was used
 - Source-bound V3.1 task/review performance evidence passes the release verifier
-- Demo admin and reviewer login are available only for local walkthrough when enabled
-- Reviewer task ownership uses the logged-in reviewer identity, not a local debug reviewer id
+- V3.2.0 focused release gates pass before package staging
+- Demo admin and constructor login are available only for local walkthrough when enabled
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
 - Production mode disables demo accounts by default

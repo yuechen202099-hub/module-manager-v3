@@ -2,13 +2,13 @@
 
 ## Package
 
-- Package: `build/server-release/module-manager-v2-server-3.1.1.zip`
-- Name: `module-manager-v2-server-3.1.1.zip`
-- Version: 3.1.1
-- Generated at: 2026-07-23 17:07:29 +08:00
-- Size: 1709215 bytes
-- SHA256: 02F642ECDB4CE0BBCA7FCE3EA28AF5C190E4D9C3863D9A7E61F7CF59B9BF7DE8
-- 记录口径：当前工作树文件为部署后发布账本；ZIP 内副本为打包时清单，不包含压缩包自身哈希。
+- Package: `build/server-release/module-manager-v2-server-3.2.0.zip`
+- Name: `module-manager-v2-server-3.2.0.zip`
+- Version: 3.2.0
+- Generated at: PENDING_TASK_9
+- Size: PENDING_TASK_9
+- SHA256: PENDING_TASK_9
+- 记录口径：Task 8 仅建立候选清单；Task 9 生成并验证 ZIP 后填写时间、大小和 SHA256。
 
 ## Included
 
@@ -16,6 +16,7 @@
 - Vue production bundle under v2-api/app/static/vue
 - v2-web source required by docker-compose.yml
 - Alembic migration files
+- V3.2.0 data-center and export-center schemas, services, components, migrations `0013`/`0014`, release record, and focused gates
 - JSON/PostgreSQL and photo migration scripts under v2-api/scripts
 - Requirements and Dockerfile
 - Client acceptance gate, demo startup, smoke-check, strict Vue migration verification, PostgreSQL cutover audit, production-readiness verification, and release verification scripts under scripts
@@ -28,6 +29,7 @@
 
 - Local virtual environments such as .venv
 - Local .env files and secrets
+- Runtime data, uploads, local databases, generated test results, and coverage output
 - Python caches such as __pycache__, .pyc, and .pytest_cache
 - Generated build/runtime folders outside this release package
 
@@ -47,13 +49,13 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.1.1
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.0
 
 ## Verified During Packaging
 
 - Release smoke check passes unless -SkipSmoke was used
-- Demo admin and reviewer login are available only for local walkthrough when enabled
-- Reviewer task ownership uses the logged-in reviewer identity, not a local debug reviewer id
+- Demo admin and constructor login are available only for local walkthrough when enabled
+- V3.2.0 role, data-center, dashboard-drilldown, export-center, single-export-entry, and release gates pass
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
 - Production mode disables demo accounts by default
