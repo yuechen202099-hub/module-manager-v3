@@ -63,7 +63,7 @@ const shellJobPercent = ref(0)
 const shellJobTone = ref<'info' | 'success' | 'danger'>('info')
 
 onMounted(() => {
-  void auth.hydrateFromLegacySession()
+  void auth.hydrateFromLegacySession().catch(() => undefined)
   if (!workspace.projects.length) {
     void workspace.loadProjects()
   }

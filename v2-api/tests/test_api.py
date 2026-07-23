@@ -5148,8 +5148,13 @@ def test_async_scan_template_import_job_completes() -> None:
 
 
 def test_task_hall_page_is_available() -> None:
-    assert_vue_shell_response(client.get("/task-hall"))
-    assert_vue_shell_response(client.get("/task-hall?embedded=1"))
+    response = client.get("/task-hall", follow_redirects=False)
+    assert response.status_code == 307
+    assert response.headers["location"] == "/global-search"
+
+    embedded = client.get("/task-hall?embedded=1", follow_redirects=False)
+    assert embedded.status_code == 307
+    assert embedded.headers["location"] == "/global-search"
 
 def test_app_shell_page_is_available() -> None:
     assert_vue_shell_response(client.get("/app"))
@@ -5836,14 +5841,14 @@ def test_construction_tasks_include_meter_search_text_for_task_picker() -> None:
 
 
 def test_direct_workspace_routes_redirect_to_app_shell() -> None:
-    for path in ["/project-board", "/claim-tasks", "/task-hall", "/construction", "/account-management", "/sync-config"]:
+    for path in ["/project-board", "/claim-tasks", "/construction", "/account-management", "/sync-config"]:
         assert_vue_shell_response(client.get(path, follow_redirects=False))
     response = client.get("/construction-cache", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"] == "/construction"
     response = client.get("/unmatched", follow_redirects=False)
     assert response.status_code == 307
-    assert response.headers["location"] == "/task-hall"
+    assert response.headers["location"] == "/global-search?review=1"
 
 def test_project_board_page_is_available() -> None:
     assert_vue_shell_response(client.get("/project-board"))
@@ -5901,11 +5906,18 @@ def test_global_search_page_is_available() -> None:
     assert_vue_shell_response(client.get("/global-search?embedded=1"))
 
 
-def test_unmatched_page_redirects_to_review_workbench() -> None:
+def test_unmatched_page_redirects_to_global_search_review_mode() -> None:
     response = client.get("/unmatched?embedded=1", follow_redirects=False)
 
     assert response.status_code == 307
-    assert response.headers["location"] == "/task-hall"
+    assert response.headers["location"] == "/global-search?review=1"
+
+
+def test_legacy_review_page_redirects_to_global_search_with_encoded_group_id() -> None:
+    response = client.get("/review/group%201%26review%3Dyes", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/global-search?group_id=group%201%26review%3Dyes&review=1"
 
 def test_group_target_route_is_searchable() -> None:
     client.post("/local-test/bootstrap")
@@ -6867,14 +6879,15 @@ def test_excel_exports_return_real_workbooks() -> None:
     task = client.get("/local-test/tasks").json()["data"]["items"][0]
     admin_headers = _final_delivery_headers()
 
-    task_export = client.post("/exports/task-detail", json={"task_id": task["id"]})
+    task_export = client.post("/exports/task-detail", headers=admin_headers, json={"task_id": task["id"]})
     all_final_export = client.post("/exports/final-delivery", headers=admin_headers, json={"project_id": 1})
     terminal_final_export = client.post(
         "/exports/final-delivery",
         headers=admin_headers,
         json={"task_id": task["id"]},
     )
-    exception_export = client.post("/exports/exception-meters", json={})
+    exception_export = client.post("/exports/exception-meters", headers=admin_headers, json={})
+    project_outside_export = client.post("/exports/project-outside", headers=admin_headers, json={})
 
     assert task_export.status_code == 200
     assert task_export.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -6885,6 +6898,8 @@ def test_excel_exports_return_real_workbooks() -> None:
     assert terminal_final_export.json()["detail"]["code"] == "formal_delivery_invalid"
     assert exception_export.status_code == 200
     assert exception_export.content.startswith(b"PK")
+    assert project_outside_export.status_code == 200
+    assert project_outside_export.content.startswith(b"PK")
     from io import BytesIO
 
     from openpyxl import load_workbook
@@ -6894,6 +6909,49 @@ def test_excel_exports_return_real_workbooks() -> None:
     headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
     assert "\u5f02\u5e38\u539f\u56e0" in headers
     assert "\u73b0\u573a\u5904\u7406\u5efa\u8bae" in headers
+
+
+def test_production_legacy_export_endpoints_require_admin(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+    workbook = build_api_workbook([["header"], ["value"]])
+    calls: list[tuple[str, object | None]] = []
+
+    class ExportRepository:
+        def build_task_detail_export(self, task_id):
+            calls.append(("task-detail", task_id))
+            return workbook
+
+        def build_exception_meter_export(self, reviewer=""):
+            calls.append(("exception-meters", reviewer))
+            return workbook
+
+        def build_project_outside_export(self):
+            calls.append(("project-outside", None))
+            return workbook
+
+    repository = ExportRepository()
+    monkeypatch.setattr(export_routes, "get_state_repository", lambda: repository)
+    cases = [
+        ("/exports/task-detail", {"task_id": 101}),
+        ("/exports/exception-meters", {"reviewer": ""}),
+        ("/exports/project-outside", {}),
+    ]
+
+    for role in ("constructor", "reviewer"):
+        for path, payload in cases:
+            response = production_client.post(path, headers=headers[role], json=payload)
+            assert response.status_code == 403
+
+    for path, payload in cases:
+        response = production_client.post(path, headers=headers["admin"], json=payload)
+        assert response.status_code == 200
+        assert response.content.startswith(b"PK")
+
+    assert calls == [
+        ("task-detail", 101),
+        ("exception-meters", ""),
+        ("project-outside", None),
+    ]
 
 
 def _final_delivery_headers(*, role: str = "admin", subject: str = "admin-a") -> dict[str, str]:

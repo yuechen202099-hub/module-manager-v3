@@ -51,17 +51,12 @@ function readStoredToken() {
     }
     return token
   }
-  try {
-    const session = JSON.parse(localStorage.getItem('module_manager_session') || 'null') as { access_token?: string } | null
-    const legacyToken = session?.access_token || ''
-    if (legacyToken && isTokenExpired(legacyToken)) {
-      clearStoredAuth()
-      return ''
-    }
-    return legacyToken
-  } catch {
+  const legacyToken = services.readLegacySessionAccessToken()
+  if (legacyToken && isTokenExpired(legacyToken)) {
+    clearStoredAuth()
     return ''
   }
+  return legacyToken
 }
 
 export const useAuthStore = defineStore('auth', {
@@ -83,11 +78,16 @@ export const useAuthStore = defineStore('auth', {
     },
     async hydrateFromLegacySession() {
       if (this.user) return
-      const user = await services.fetchCurrentUser()
-      this.user = user
-      this.token = readStoredToken()
-      localStorage.setItem('v2-web-token', this.token)
-      localStorage.setItem('v2-web-user', JSON.stringify(user))
+      try {
+        const user = await services.fetchCurrentUser()
+        this.user = user
+        this.token = readStoredToken()
+        localStorage.setItem('v2-web-token', this.token)
+        localStorage.setItem('v2-web-user', JSON.stringify(user))
+      } catch (error) {
+        this.logout()
+        throw error
+      }
     },
     logout() {
       this.token = ''

@@ -1,5 +1,6 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -263,7 +264,7 @@ def create_app() -> FastAPI:
 
     @app.get("/task-hall")
     def task_hall_page():
-        return vue_index_response()
+        return RedirectResponse("/global-search")
 
     @app.get("/claim-tasks")
     def claim_tasks_page():
@@ -283,7 +284,12 @@ def create_app() -> FastAPI:
 
     @app.get("/unmatched")
     def unmatched_page():
-        return RedirectResponse("/task-hall")
+        return RedirectResponse("/global-search?review=1")
+
+    @app.get("/review/{group_id}")
+    def legacy_review_page(group_id: str):
+        encoded_group_id = quote(group_id, safe="")
+        return RedirectResponse(f"/global-search?group_id={encoded_group_id}&review=1")
 
     @app.get("/construction")
     def construction_page():

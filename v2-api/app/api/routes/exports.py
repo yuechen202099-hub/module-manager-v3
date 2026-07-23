@@ -59,7 +59,7 @@ class LeasedFileResponse(Response):
 
 
 @router.post("/task-detail")
-def export_task_detail(payload: TaskDetailExportRequest, request: Request):
+def export_task_detail(payload: TaskDetailExportRequest, request: Request, auth: dict = Depends(require_admin)):
     try:
         content = get_state_repository().build_task_detail_export(payload.task_id)
     except KeyError as exc:
@@ -117,7 +117,11 @@ def export_final_delivery(
 
 
 @router.post("/exception-meters")
-def export_exception_meters(payload: ExceptionMetersExportRequest, request: Request):
+def export_exception_meters(
+    payload: ExceptionMetersExportRequest,
+    request: Request,
+    auth: dict = Depends(require_admin),
+):
     reviewer = scoped_exception_reviewer(payload.reviewer.strip(), request)
     content = get_state_repository().build_exception_meter_export(reviewer=reviewer)
     filename = f"exception-meters-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
@@ -125,7 +129,7 @@ def export_exception_meters(payload: ExceptionMetersExportRequest, request: Requ
 
 
 @router.post("/project-outside")
-def export_project_outside(request: Request):
+def export_project_outside(request: Request, auth: dict = Depends(require_admin)):
     content = get_state_repository().build_project_outside_export()
     filename = f"project-outside-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
     return excel_response(content, filename)

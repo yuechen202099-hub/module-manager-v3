@@ -1,4 +1,4 @@
-import { mockProjects, mockTasks, mockUser } from './mock'
+import { mockProjects, mockTasks } from './mock'
 import { priorityRequestBody } from './claimTasksState.mjs'
 import { parseContentDispositionFilename } from './constructionPriorityImportState.mjs'
 import type {
@@ -142,6 +142,8 @@ type BackendTaskSnapshot = {
     refresh_interval_seconds?: number
   }
 }
+
+const VALID_LEGACY_SESSION_ROLES = new Set<UserRole>(['admin', 'constructor'])
 
 type BackendTaskStatusSummary = {
   version?: string
@@ -624,16 +626,31 @@ function createApiRequestError(response: Response, payload?: ApiEnvelope<unknown
 }
 
 function readLegacySession(): LegacySession | null {
+  if (typeof localStorage === 'undefined') return null
   try {
-    return JSON.parse(localStorage.getItem('module_manager_session') || 'null') as LegacySession | null
+    const session = JSON.parse(localStorage.getItem('module_manager_session') || 'null') as LegacySession | null
+    if (!session) return null
+    if (!session.user?.username || !session.access_token) return invalidateLegacySession()
+    const rawRoles = Array.isArray(session.user.roles) ? [...session.user.roles] : []
+    const roles = normalizeLegacySessionRoles(session)
+    if (roles.length === 0 || roles.length !== rawRoles.length) {
+      return invalidateLegacySession()
+    }
+    return {
+      ...session,
+      user: {
+        ...session.user,
+        roles,
+      },
+    }
   } catch {
-    return null
+    return invalidateLegacySession()
   }
 }
 
 export function currentActor() {
   const session = readLegacySession()
-  return session?.user?.username || localStorage.getItem('module_manager_reviewer') || 'admin'
+  return session?.user?.username || 'admin'
 }
 
 export function currentTeamId() {
@@ -664,6 +681,11 @@ function formHeaders(): HeadersInit {
   return headers
 }
 
+function normalizeLegacySessionRoles(session: LegacySession | null): UserRole[] {
+  const roles = Array.isArray(session?.user?.roles) ? session.user.roles : []
+  return Array.from(new Set(roles.filter((role): role is UserRole => VALID_LEGACY_SESSION_ROLES.has(role))))
+}
+
 function clearLocalAuthSession() {
   if (typeof localStorage === 'undefined') return
   localStorage.removeItem('v2-web-token')
@@ -680,6 +702,12 @@ function redirectToLogin() {
   window.location.assign(`/login${query}`)
 }
 
+function invalidateLegacySession(): null {
+  clearLocalAuthSession()
+  redirectToLogin()
+  return null
+}
+
 function handleUnauthorizedResponse(response: Response) {
   if (response.status === 401) {
     clearLocalAuthSession()
@@ -689,6 +717,10 @@ function handleUnauthorizedResponse(response: Response) {
     const retryAfter = response.headers.get('Retry-After')
     console.warn('请求过于频繁，请稍后再试', retryAfter ? { retryAfter } : undefined)
   }
+}
+
+export function readLegacySessionAccessToken() {
+  return readLegacySession()?.access_token || ''
 }
 
 async function fetchWithAuth(path: string, init: RequestInit = {}) {
@@ -1172,7 +1204,9 @@ export async function login(username: string, password: string, teamId = current
 
 export async function fetchCurrentUser(): Promise<CurrentUser> {
   const session = readLegacySession()
-  if (!session?.user) return mockUser
+  if (!session?.user) {
+    throw new Error('Legacy session is invalid')
+  }
   const username = session.user.username || session.user.name || 'admin'
   const role = roleFromSession(session, username)
   return {
