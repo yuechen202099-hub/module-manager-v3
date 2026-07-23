@@ -3,7 +3,7 @@ import { DataBoard, FolderChecked, List, Search, SwitchButton, Tickets, UserFill
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { exportTerminalDeliveryPackage, fetchScanImportJob, startScanImportJob } from '@/api/services'
+import { fetchScanImportJob, startScanImportJob } from '@/api/services'
 import { APP_VERSION, releaseNotes } from '@/constants/releaseNotes'
 import { staticPages } from '@/router/staticPages'
 import { useAuthStore } from '@/stores/auth'
@@ -52,7 +52,6 @@ const pagedReleaseNotes = computed(() => {
 const refreshEventKey = 'module_manager_refresh_event'
 const refreshVersionKey = 'module_manager_refresh_version'
 let refreshVersion = Number(localStorage.getItem(refreshVersionKey) || 0)
-let shellExportActive = false
 let shellImportActive = false
 let shellImportTimer = 0
 let shellJobHideTimer = 0
@@ -124,10 +123,6 @@ function broadcastRefresh(reason: string, payload: Record<string, unknown> = {})
 function handleShellMessage(event: MessageEvent) {
   if (event.origin && event.origin !== window.location.origin) return
   const message = event.data || {}
-  if (message.type === 'module-manager:start-terminal-export') {
-    void startShellExport((message.scope || {}) as Record<string, unknown>)
-    return
-  }
   if (message.type === 'module-manager:start-scan-import') {
     void startShellScanImport(message as { file?: File; filename?: string })
     return
@@ -191,41 +186,6 @@ function importJobDetail(job: ImportJob) {
   if (job.status === 'failed') return job.error || '扫码表格导入失败'
   const phase = String(progress.phase || job.status || '导入中')
   return `${phase}：照片 ${progress.processed_photos || progress.resolved_image_urls || 0}/${progress.total_photos || progress.total_records || 0}`
-}
-
-async function startShellExport(scope: Record<string, unknown>) {
-  if (shellExportActive) {
-    setShellJob('导出任务进行中', '当前已有终端包导出任务，请等待完成后再发起。', shellJobPercent.value)
-    return
-  }
-  const taskId = String(scope.taskId || '')
-  const terminal = String(scope.terminal || '')
-  const reviewScope = scope.reviewScope === 'all' ? 'all' : 'reviewed'
-  if (!taskId && !terminal) {
-    setShellJob('导出失败', '只支持单终端导出，请从终端任务行发起。', 100, 'danger', true)
-    return
-  }
-  shellExportActive = true
-  try {
-    setShellJob('准备导出终端包', `正在读取 ${terminal || taskId} 的清单`, 2)
-    await exportTerminalDeliveryPackage({
-      taskId,
-      terminal,
-      reviewScope,
-      onProgress: (progress) => setShellJob('导出终端包', progress.text, progress.percent),
-    })
-    setShellJob(
-      '导出完成',
-      '正式交付包已下载',
-      100,
-      'success',
-      true,
-    )
-  } catch (error) {
-    setShellJob('导出失败', error instanceof Error ? error.message : '终端包导出失败', 100, 'danger', true)
-  } finally {
-    shellExportActive = false
-  }
 }
 
 async function startShellScanImport(message: { file?: File; filename?: string }) {

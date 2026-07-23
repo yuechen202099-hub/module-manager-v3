@@ -11,8 +11,6 @@ import {
   currentActor,
   deleteGroupPhoto,
   deleteUnmatchedRecord,
-  exportExceptionMeters,
-  exportProjectOutsideConstruction,
   fetchConstructionExceptionOrders,
   fetchGroupPhotoObjectUrl,
   fetchGroup,
@@ -1521,16 +1519,6 @@ async function deleteCurrentPhoto() {
   }
 }
 
-async function exportExceptions() {
-  markInteraction()
-  try {
-    await exportExceptionMeters()
-    ElMessage.success('异常表计已导出')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导出失败')
-  }
-}
-
 async function handleReviewMoreCommand(command: string | number | object) {
   const action = String(command)
   if (action === 'restore') {
@@ -1548,19 +1536,6 @@ async function handleReviewMoreCommand(command: string | number | object) {
   if (action === 'delete-photo') {
     await deleteCurrentPhoto()
     return
-  }
-  if (action === 'export-exceptions') {
-    await exportExceptions()
-  }
-}
-
-async function exportOutsideProjectRecords() {
-  markInteraction()
-  try {
-    await exportProjectOutsideConstruction()
-    ElMessage.success('项目外施工记录已导出')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '导出失败')
   }
 }
 
@@ -1858,7 +1833,6 @@ onUnmounted(() => {
           </div>
           <div class="field-task-actions">
             <ElButton size="small" :loading="loadingFieldTasks" @click="loadFieldTasks">刷新</ElButton>
-            <ElButton v-if="activeTaskMode === 'unmatched'" size="small" @click="exportOutsideProjectRecords">导出项目外施工</ElButton>
           </div>
         </div>
         <ElSkeleton v-if="loadingFieldTasks" :rows="6" animated />
@@ -2126,7 +2100,6 @@ onUnmounted(() => {
                   <ElDropdownItem divided command="reset">回退未施工</ElDropdownItem>
                   <ElDropdownItem command="exception">转异常工单</ElDropdownItem>
                   <ElDropdownItem command="delete-photo" :disabled="!selectedPhoto">删除当前图</ElDropdownItem>
-                  <ElDropdownItem divided command="export-exceptions">导出异常表计</ElDropdownItem>
                 </ElDropdownMenu>
               </template>
             </ElDropdown>

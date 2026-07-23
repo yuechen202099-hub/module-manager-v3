@@ -30,7 +30,7 @@ export const staticPages: StaticPageRoute[] = [
   },
   {
     key: 'claim-tasks',
-    title: '任务领取',
+    title: '任务派发',
     subtitle: '',
     routePath: '/claim-tasks',
     roles: ['admin'],
@@ -38,15 +38,15 @@ export const staticPages: StaticPageRoute[] = [
   },
   {
     key: 'task-hall',
-    title: '任务大厅',
+    title: '任务派发',
     subtitle: '',
-    routePath: '/task-hall',
+    routePath: '/task-hall-legacy',
     roles: ['admin'],
     migrationStatus: 'native_vue',
   },
   {
     key: 'global-search',
-    title: '任务派发',
+    title: '数据中台',
     subtitle: '',
     routePath: '/global-search',
     roles: ['admin'],

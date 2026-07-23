@@ -1,145 +1,98 @@
-# Task 7 Report: Dashboard Unmatched Review Dialog
+# Task 7 Report: 移除旧业务导出入口并完成任务派发 UI
 
-## Files
+## 需求
 
-- `v2-web/src/components/UnmatchedReviewDialog.vue`
-- `v2-web/src/views/ProjectBoardView.vue`
-- `v2-web/src/api/services.ts`
-- `scripts/verify_project_board_unmatched_review.js`
-- `.superpowers/sdd/task-7-report.md`
+- 按 TDD 新增单入口 verifier，阻断旧业务导出入口回流。
+- 旧业务导出入口只保留 `导出中心 /exports`；导入模板下载保留，批量归档保留。
+- 任务派发可见入口不再出现“任务领取 / 任务大厅 / 审阅工作台”语义。
+- 任务派发页只保留施工派发相关动作，旧路由重定向继续保留。
+
+## 修改文件
+
+### 前端源码
+
+- `v2-web/src/views/ClaimTasksView.vue`
+- `v2-web/src/views/TaskHallView.vue`
+- `v2-web/src/layouts/AppLayout.vue`
+- `v2-web/src/router/index.ts`
+- `v2-web/src/router/staticPages.ts`
+
+### 验证脚本
+
+- `scripts/verify_v3_2_0_single_export_entry.py`
+
+### 生产静态构建产物
+
+- `v2-api/app/static/vue/index.html`
+- `v2-api/app/static/vue/version.json`
+- `v2-api/app/static/vue/assets/*` 中本次 `vite build` 重新生成的 hash 产物
+
+## 实现结果
+
+- `ClaimTasksView` 改为真正的“任务派发”页，只保留施工派发、改派、优先施工、已施工链路。
+- `ClaimTasksView` 移除了旧审阅领取/释放、旧导出终端包、旧导出明细、旧导出范围和旧全局导出消息通道。
+- `TaskHallView` 移除了“导出项目外施工 / 导出异常表计”按钮与 handler。
+- `AppLayout` 移除了旧 `module-manager:start-terminal-export` 入口和 `exportTerminalDeliveryPackage` 壳层调度。
+- `staticPages` 将可见入口整理为：
+  - `claim-tasks` -> `任务派发`
+  - `global-search` -> `数据中台`
+  - `exports` -> `导出中心`
+- `task-hall` 保留 registry key 以通过迁移门禁，但不再作为可见入口；真实旧地址 `/task-hall` 继续重定向到 `/claim-tasks`。
+- `review/:groupId` 旧跳转仍保留，继续导向 `/global-search`。
 
 ## RED
 
-Command:
+命令：
 
 ```powershell
-node scripts\verify_project_board_unmatched_review.js
+python scripts\verify_v3_2_0_single_export_entry.py
 ```
 
-Result: exit 1 with `ENOENT` for `v2-web/src/components/UnmatchedReviewDialog.vue`. This was the expected missing-component failure after extending the Task 6 contract verifier with the Task 7 UI assertions.
+结果：
+
+- 首次执行于 2026-07-23 报红，失败点为 `staticPages` 仍未把 `/global-search` 明确为 `数据中台`，证明 verifier 已经覆盖到目标边界。
 
 ## GREEN
 
-Commands:
+命令：
 
 ```powershell
-node scripts\verify_project_board_unmatched_review.js
-npm --prefix v2-web run build
+python scripts\verify_v3_2_0_single_export_entry.py
+python scripts\verify_v3_2_0_dashboard_drilldown.py
+python scripts\verify_v3_2_0_data_center_ui.py
+python scripts\verify_v3_2_0_export_center_ui.py
+python scripts\verify_v3_2_0_role_routes.py
+python scripts\verify_vue_migration_gate.py
+cd v2-web
+npx vue-tsc --noEmit
+npm run build
 ```
 
-Results:
+结果：
 
-- UI verifier: exit 0, `project board unmatched review checks passed`.
-- Build: exit 0; `vue-tsc --noEmit` and Vite production build passed.
-- The production build regenerated static files as a side effect; all generated static changes were restored or removed before commit, leaving them outside the Task 7 diff.
+- `verify_v3_2_0_single_export_entry.py`: 通过。
+- `verify_v3_2_0_dashboard_drilldown.py`: 通过，`[OK] V3.2.0 dashboard drilldown checks passed`。
+- `verify_v3_2_0_data_center_ui.py`: 通过（exit 0，无 stderr）。
+- `verify_v3_2_0_export_center_ui.py`: 通过，`verify_v3_2_0_export_center_ui: OK`。
+- `verify_v3_2_0_role_routes.py`: 通过，`[OK] V3.2.0 role and legacy route checks passed`。
+- `verify_vue_migration_gate.py`: 通过，`[OK] Vue shell and static page registry are wired.`。
+- `npx vue-tsc --noEmit`: 通过。
+- `npm run build`: 通过；其中再次执行了 `vue-tsc --noEmit && vite build`。
 
-## Design And State Machine
+## 版本变化
 
-- `UnmatchedReviewDialog` exposes only `v-model`, `unmatched-id`, `matched`, and `updated` at its integration boundary.
-- The dialog has `review` and `match` modes. Review keeps temporary unmatched metadata and photo categories; completing review saves first, then retrieves paginated 20-item candidate pages.
-- Photo content is obtained only through `fetchUnmatchedReviewPhotoObjectUrl(unmatchedId, photoId)` and shown with native `img`. Replacing a URL, closing, unmounting, and obsolete async results revoke object URLs.
-- Rescan sends the current detail version. A 409 reloads detail with the current mode, photo selection, candidate page, selection, and draft state preserved, then shows a short message. Failed rescans do not overwrite the visible form or photo category.
-- Only administrators see the final candidate confirmation button. Successful finalization emits `matched`; the dashboard clamps the retained list page, reloads unmatched rows, and reloads dashboard data.
+- 未修改应用版本号。
+- 未修改 `APP_VERSION`、`package.json` 版本号或生产 release 记录。
 
-## Self-review
+## 发布状态
 
-- Confirmed table-row clicks open the review dialog while the review button, dropdown, and dropdown entries stop propagation.
-- Confirmed finalization is hidden for non-admin users, with backend authorization remaining the production enforcement boundary.
-- Confirmed object URL stale-request, replacement, close, unmount, and close/reopen paths revoke or reset safely.
-- Confirmed candidate paging is fixed at 20, clamps after data changes, supports empty candidates with only return/close actions, and supports single selection across multiple pages.
-- Confirmed the dialog resets its mode/candidate state on close/reopen and preserves active UI state on 409 reload.
-- Confirmed no `sourceUrl`, `el-image`, placeholder terminal, group/task/KPI/archive mutation, or formal barcode-accuracy mutation was introduced.
-- Confirmed desktop uses a two-column review layout, while screens at or below 768px use fullscreen/single-column controls without fixed-width text overlap.
+- 代码与生产静态构建产物已完成本地验证。
+- 尚未发布。
 
-## Concerns
+## 风险
 
-- Vite still emits the existing VueUse pure-annotation and large-chunk warnings. The build exits successfully; no static artifacts are included in this task.
-
-## Re-review Fixes
-
-### RED
-
-Command:
-
-```powershell
-node scripts\verify_project_board_unmatched_review.js
-```
-
-Result: exit 1 with `API errors must preserve HTTP status`. The new static checks intentionally failed against the original Task 7 implementation, which inferred 409 conflicts from error text and did not invalidate candidate requests.
-
-### GREEN
-
-Commands:
-
-```powershell
-node scripts\verify_project_board_unmatched_review.js
-npm --prefix v2-web run build
-git diff --check
-```
-
-Results:
-
-- UI verifier: exit 0, `project board unmatched review checks passed`.
-- Build: exit 0; `vue-tsc --noEmit` and Vite production build passed.
-- `git diff --check`: exit 0.
-- The build-generated static files were restored or removed before commit.
-
-### Fixes
-
-- Added `ApiRequestError extends Error` with a numeric `status`, plus `getApiErrorStatus`. The shared JSON and form API paths now create this error after their existing response handling, so the 401 clear-and-redirect behavior is unchanged. The unmatched photo-content failure path also reports the structured status.
-- All unmatched save, rescan, manual-confirm, and finalize catches continue to use one conflict helper, which now only accepts `getApiErrorStatus(error) === 409`; it no longer inspects localized text or status text.
-- Candidate retrieval now accepts an optional abort signal. The dialog owns both a monotonic request serial and an `AbortController`; starting another candidate load, returning to edit, closing, changing `unmatchedId`, and unmounting invalidates the prior request.
-- Only the current request for the same visible unmatched record while still in `match` mode may update candidates, loading, or error state. Candidate failures preserve previously loaded candidate data, and stale or aborted failures do not write UI state.
-- Candidate page numbers are explicitly clamped to the inclusive `[1, candidateTotalPages]` range. Finalization remains hidden in the template for non-admins and now has an explicit non-admin function guard.
-- Extended the verifier to fail for absent structured 409 handling, candidate invalidation/abort/current-request checks, page clamping, and either missing administrator finalization condition.
-
-### Re-review Self-review
-
-- A 409 reload still calls `loadDetail({ preserveDraft: true })`; it retains the draft, selected photo, current mode, selected candidate, and candidate page.
-- Candidate request starts keep existing candidate rows until the current request succeeds. Current-request checks prevent failed or invalidated older requests from replacing candidates, clearing newer loading state, or presenting stale errors.
-- Closing and reopening invalidates candidate work before reset; a delayed save cannot enter match mode or initiate candidate loading after the dialog closes or the record changes.
-- The object URL lifecycle is unchanged: image replacement, stale image completion, close, and unmount all revoke object URLs.
-
-### Re-review Concerns
-
-- Existing Vite VueUse pure-annotation and large-chunk warnings remain. They do not affect the successful TypeScript/Vite build, and static build outputs remain outside the commit.
-
-## Second Re-review Fix
-
-### RED
-
-Command:
-
-```powershell
-node scripts\verify_project_board_unmatched_review.js
-```
-
-Result: exit 1 with `new candidate cycles must invalidate prior results`. The previous implementation left prior candidates and `selectedCandidateKey` in memory while a new post-save candidate request was pending, so a failed request could expose an outdated finalization target.
-
-### GREEN
-
-Commands:
-
-```powershell
-node scripts\verify_project_board_unmatched_review.js
-npm --prefix v2-web run build
-git diff --check
-```
-
-Results:
-
-- UI verifier: exit 0, `project board unmatched review checks passed`.
-- Build: exit 0; `vue-tsc --noEmit` and Vite production build passed.
-- `git diff --check`: exit 0.
-- Build-generated static files were restored or removed before commit.
-
-### Fix And Self-review
-
-- Added `resetCandidateResults()` and invoke it immediately after invalidating an existing request and before creating the new candidate request. It clears candidate rows, clears the selected candidate key, and resets candidate pagination to page 1.
-- A current candidate request failure now leaves the dialog with an error plus the empty candidate state; it cannot reveal a prior candidate or permit finalization against an older reviewed version.
-- Abort/current-request guards remain unchanged. Return-to-review, close, ID changes, and unmount continue to invalidate in-flight candidate work.
-- The 409 path remains separate: it reloads detail with `preserveDraft: true` and does not start a new candidate cycle, so its current UI preservation behavior is retained.
-
-### Second Re-review Concerns
-
-- Existing Vite VueUse pure-annotation and large-chunk warnings remain; they do not affect the successful build. No static build artifacts are included in the commit.
+- `vite build` 仍有既有警告：
+  - VueUse `/* #__PURE__ */` 注释位置警告。
+  - 500 kB 以上 chunk 警告。
+- 这些警告在 2026-07-23 的本次构建中仍存在，但不影响 `vue-tsc` 和 `vite build` 成功退出。
+- `task-hall` 作为迁移 registry 兼容 key 仍保留；当前真实旧地址通过路由重定向进入 `claim-tasks`，后续如果迁移门禁规则调整，可再评估是否完全移除该 key。
