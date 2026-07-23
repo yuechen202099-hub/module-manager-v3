@@ -280,6 +280,8 @@ class MaterialGroup(Base, TimestampMixin):
         Index("ix_material_groups_team_terminal_status", "team_id", "terminal", "status"),
         Index("ix_material_groups_team_task_status", "team_id", "legacy_task_id", "status"),
         Index("ix_material_groups_task_status", "task_id", "status"),
+        Index("ix_material_groups_data_center_team_status_updated", "team_id", "status", "updated_at", "legacy_id"),
+        Index("ix_material_groups_data_center_team_terminal_updated", "team_id", "terminal", "updated_at", "legacy_id"),
     )
 
     id: Mapped[uuid.UUID] = uuid_column()
@@ -639,6 +641,7 @@ class UnmatchedRecord(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("team_id", "legacy_id", name="uq_unmatched_records_team_legacy_id"),
         Index("ix_unmatched_records_team_status", "team_id", "status"),
+        Index("ix_unmatched_records_data_center_team_status_updated", "team_id", "status", "updated_at", "legacy_id"),
     )
 
     id: Mapped[uuid.UUID] = uuid_column()

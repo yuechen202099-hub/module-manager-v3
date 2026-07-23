@@ -59,6 +59,7 @@ def test_group_barcode_verification_upgrade_renders_postgresql_schema_contract()
         "0010_auto_archive_queue_state.py",
         "0011_delivery_package_jobs.py",
         "0012_delivery_package_group_ids_gin.py",
+        "0013_data_center_query_indexes.py",
     ],
 )
 def test_v3_1_migrations_reject_downgrade_before_any_ddl(filename: str) -> None:
@@ -126,3 +127,17 @@ def test_delivery_package_group_ids_gin_migration_is_chained() -> None:
     assert migration.down_revision == "20260723_0011"
     assert "CREATE INDEX ix_delivery_package_jobs_group_ids_gin" in upgrade
     assert "USING gin (group_ids)" in upgrade
+
+
+def test_data_center_query_index_migration_is_chained_and_non_enum() -> None:
+    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0013_data_center_query_indexes.py"
+    assert path.exists()
+    migration = load_migration_module(path.name)
+    upgrade = render_postgresql_ddl("upgrade", path.name)
+
+    assert migration.revision == "20260723_0013"
+    assert migration.down_revision == "20260723_0012"
+    assert "CREATE INDEX ix_material_groups_data_center_team_status_updated" in upgrade
+    assert "CREATE INDEX ix_material_groups_data_center_team_terminal_updated" in upgrade
+    assert "CREATE INDEX ix_unmatched_records_data_center_team_status_updated" in upgrade
+    assert "CREATE TYPE" not in upgrade

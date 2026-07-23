@@ -58,6 +58,23 @@ def test_final_delivery_export_public_return_type_is_leased_package(repository_t
     assert annotation is LeasedDeliveryPackage
 
 
+def test_data_center_contract_is_available_on_all_repository_backends() -> None:
+    from app.schemas.data_center import DataCenterQuery
+
+    query = DataCenterQuery(page=1, page_size=20)
+    assert query.page_size == 20
+    for repository_type in (
+        repository.StateRepository,
+        repository.JsonStateRepository,
+        repository.PostgresStateRepository,
+        repository.DualWriteStateRepository,
+    ):
+        assert hasattr(repository_type, "list_data_center_rows")
+        assert hasattr(repository_type, "get_data_center_detail")
+        hints = get_type_hints(repository_type.list_data_center_rows)
+        assert hints["query"] is DataCenterQuery
+
+
 def test_json_repository_sets_construction_priority_through_simulation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

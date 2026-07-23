@@ -1,10 +1,12 @@
-from typing import Any
+from datetime import date
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.core.responses import ok
 from app.api.routes.auth import require_admin, require_production_reviewer_or_admin
+from app.schemas.data_center import DataCenterQuery
 from app.schemas.review import ExceptionCreate, GroupReviewUpdate
 from app.services import local_simulation
 from app.services.photo_storage import resolve_group_collection_for_response
@@ -85,6 +87,82 @@ def _admin_team_id(admin_payload: dict) -> str:
 
 def _with_admin_team(admin_payload: dict):
     return local_simulation.set_current_team(_admin_team_id(admin_payload))
+
+
+def data_center_query(
+    data_type: Literal["all", "group", "unmatched"] = "all",
+    construction_status: Literal["all", "unconstructed", "in_progress", "completed"] = "all",
+    archive_status: Literal["all", "unarchived", "pending", "archived"] = "all",
+    barcode_status: Literal["all", "passed", "manual", "mismatched", "unreadable", "ineligible"] = "all",
+    classification_status: Literal["all", "complete", "incomplete"] = "all",
+    exception_status: str = "",
+    installer: str = "",
+    date_from: date | None = None,
+    date_to: date | None = None,
+    terminal: str = "",
+    query: str = "",
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20),
+    sort: Literal["updated_desc", "updated_asc", "terminal_asc"] = "updated_desc",
+) -> DataCenterQuery:
+    try:
+        return DataCenterQuery(
+            data_type=data_type,
+            construction_status=construction_status,
+            archive_status=archive_status,
+            barcode_status=barcode_status,
+            classification_status=classification_status,
+            exception_status=exception_status,
+            installer=installer,
+            date_from=date_from,
+            date_to=date_to,
+            terminal=terminal,
+            query=query,
+            page=page,
+            page_size=page_size,
+            sort=sort,
+        )
+    except ValidationError as exc:
+        detail = [
+            {
+                "loc": ["query", *error.get("loc", ())],
+                "msg": str(error.get("msg") or ""),
+                "type": str(error.get("type") or "value_error"),
+            }
+            for error in exc.errors()
+        ]
+        raise HTTPException(status_code=422, detail=detail) from exc
+
+
+@router.get("/data-center")
+def list_data_center(
+    request: Request,
+    query: DataCenterQuery = Depends(data_center_query),
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().list_data_center_rows(query)
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, result)
+
+
+@router.get("/data-center/{kind}/{item_id}")
+def data_center_detail(
+    kind: Literal["group", "unmatched"],
+    item_id: str,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().get_data_center_detail(kind=kind, item_id=item_id)
+    finally:
+        local_simulation.reset_current_team(token)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Data center item not found")
+    return ok(request, result)
 
 
 @router.patch("/{group_id}/metadata")

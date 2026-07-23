@@ -31,6 +31,7 @@ from app.services.barcode_verification_contract import (
     verification_compatibility_fields,
 )
 from app.services import unmatched_review
+from app.services import data_center as data_center_service
 from app.services.photo_storage import (
     active_storage_backend,
     open_validated_remote_image_url,
@@ -5205,6 +5206,55 @@ def list_groups(limit: int = 100, offset: int = 0, status: str | None = None) ->
     for group in groups[offset : offset + limit]:
         ensure_group_photo_storage_fields(group)
     return {"total": len(groups), "items": groups[offset : offset + limit]}
+
+
+def list_data_center_rows(query) -> dict[str, Any]:
+    state = get_state()
+    rows = [data_center_service.group_row(group) for group in state.get("groups", [])]
+    rows.extend(data_center_service.unmatched_row(record) for record in state.get("scan_unmatched", []))
+    return data_center_service.page_rows(rows, query)
+
+
+def get_data_center_detail(*, kind: str, item_id: str) -> dict[str, Any] | None:
+    state = get_state()
+    if kind == "group":
+        group = next((item for item in state.get("groups", []) if str(item.get("id") or "") == item_id), None)
+        if group is None:
+            return None
+        detail = data_center_service.group_row(group)
+        detail["photos"] = copy.deepcopy(
+            [
+                photo
+                for photo in group.get("photos", [])
+                if isinstance(photo, dict) and photo.get("is_active", True) is not False
+            ]
+        )
+        detail["audit"] = [
+            copy.deepcopy(event)
+            for event in state.get("audit_events", [])
+            if str(event.get("entity_id") or event.get("group_id") or "") == item_id
+        ]
+        return detail
+    if kind == "unmatched":
+        record = next(
+            (
+                item
+                for item in state.get("scan_unmatched", [])
+                if str(item.get("unmatched_id") or item.get("id") or "") == item_id
+            ),
+            None,
+        )
+        if record is None:
+            return None
+        detail = data_center_service.unmatched_row(record)
+        detail["photos"] = copy.deepcopy(record.get("photos") or record.get("photo_urls") or [])
+        detail["audit"] = [
+            copy.deepcopy(event)
+            for event in state.get("audit_events", [])
+            if str(event.get("entity_id") or event.get("unmatched_id") or "") == item_id
+        ]
+        return detail
+    return None
 
 
 def ensure_group_photo_storage_fields(group: dict[str, Any]) -> dict[str, Any]:

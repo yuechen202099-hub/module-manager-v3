@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, NoReturn
 from uuid import UUID, uuid4
 
-from sqlalchemy import String, Text, and_, case, cast, func, literal, or_, select
+from sqlalchemy import String, Text, and_, case, cast, func, literal, or_, select, union_all
 from sqlalchemy.dialects.postgresql import JSONB, array
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
@@ -38,6 +38,8 @@ from app.models import (
     TotalCatalogRow,
     UnmatchedRecord,
 )
+from app.schemas.data_center import DataCenterQuery
+from app.services import data_center as data_center_service
 from app.services import account_store
 from app.services.barcode_verification_contract import (
     DURABLE_STATUSES,
@@ -2136,6 +2138,14 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_data_center_rows(self, query: DataCenterQuery) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_photo_barcode_review_groups(
         self,
         *,
@@ -2784,6 +2794,12 @@ class JsonStateRepository(StateRepository):
 
     def list_groups(self, *, limit: int = 100, offset: int = 0, status: str | None = None) -> dict[str, Any]:
         return local_simulation.list_groups(limit=limit, offset=offset, status=status)
+
+    def list_data_center_rows(self, query: DataCenterQuery) -> dict[str, Any]:
+        return local_simulation.list_data_center_rows(query)
+
+    def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
+        return local_simulation.get_data_center_detail(kind=kind, item_id=item_id)
 
     def list_photo_barcode_review_groups(
         self,
@@ -4019,6 +4035,287 @@ class PostgresStateRepository(StateRepository):
         if group is None:
             raise KeyError(group_id)
         return group
+
+    def _data_center_source(self, team_id: str, query: DataCenterQuery):
+        active_photo_counts = (
+            select(Photo.group_id.label("group_id"), func.count(Photo.id).label("active_photo_count"))
+            .where(
+                Photo.team_id == team_id,
+                Photo.is_active.is_(True),
+                Photo.upload_status != PhotoUploadStatus.INVALID,
+                Photo.group_id.is_not(None),
+            )
+            .group_by(Photo.group_id)
+            .subquery()
+        )
+        group_photo_count = func.coalesce(active_photo_counts.c.active_photo_count, MaterialGroup.photo_count, 0)
+        group_raw = MaterialGroup.raw_data
+        group_installer = func.coalesce(
+            func.nullif(func.trim(group_raw.op("->>")("installer")), ""),
+            func.nullif(func.trim(group_raw.op("->>")("constructor")), ""),
+            func.nullif(func.trim(group_raw.op("->>")("creator")), ""),
+            func.nullif(func.trim(Task.construction_claimed_by), ""),
+            literal(""),
+        )
+        group_archive = group_raw.op("->>")("archive_status")
+        group_barcode_status = case(
+            (GroupBarcodeVerification.status == "passed", literal("passed")),
+            (GroupBarcodeVerification.status == "manual_confirmed", literal("manual")),
+            (GroupBarcodeVerification.status.in_(["mismatch", "partial", "failed"]), literal("mismatched")),
+            (GroupBarcodeVerification.status == "unreadable", literal("unreadable")),
+            else_=literal("ineligible"),
+        )
+        group_construction_status = case(
+            (group_photo_count <= 0, literal("unconstructed")),
+            (MaterialGroup.status.in_([GroupStatus.APPROVED, GroupStatus.REJECTED]), literal("completed")),
+            else_=literal("in_progress"),
+        )
+        group_select = (
+            select(
+                literal("group").label("kind"),
+                MaterialGroup.legacy_id.label("legacy_id"),
+                MaterialGroup.terminal.label("terminal"),
+                MaterialGroup.display_meter_no.label("meter_no"),
+                MaterialGroup.meter_match_key.label("meter_match_key"),
+                MaterialGroup.installation_address.label("address"),
+                group_raw.op("->>")("collector").label("collector"),
+                func.coalesce(group_raw.op("->>")("module_asset_no"), group_raw.op("->>")("asset_no")).label(
+                    "module_asset_no"
+                ),
+                group_raw.op("->>")("construction_collector").label("construction_collector"),
+                group_raw.op("->>")("construction_module_asset_no").label("construction_module_asset_no"),
+                group_installer.label("installer"),
+                group_photo_count.label("photo_count"),
+                case((group_photo_count >= 4, literal("complete")), else_=literal("incomplete")).label(
+                    "classification_status"
+                ),
+                group_construction_status.label("construction_status"),
+                case(
+                    (group_archive.in_(["unarchived", "pending", "archived"]), group_archive),
+                    else_=literal("unarchived"),
+                ).label("archive_status"),
+                group_barcode_status.label("barcode_status"),
+                func.coalesce(
+                    func.nullif(func.trim(MaterialGroup.exception_status), ""),
+                    case((MaterialGroup.status == GroupStatus.REJECTED, literal("open")), else_=literal("")),
+                ).label("exception_status"),
+                MaterialGroup.updated_at.label("updated_at"),
+                MaterialGroup.raw_data.label("raw_data"),
+            )
+            .select_from(MaterialGroup)
+            .outerjoin(active_photo_counts, active_photo_counts.c.group_id == MaterialGroup.id)
+            .outerjoin(Task, and_(Task.team_id == MaterialGroup.team_id, Task.id == MaterialGroup.task_id))
+            .outerjoin(
+                GroupBarcodeVerification,
+                and_(
+                    GroupBarcodeVerification.team_id == MaterialGroup.team_id,
+                    GroupBarcodeVerification.group_id == MaterialGroup.id,
+                ),
+            )
+            .where(MaterialGroup.team_id == team_id)
+        )
+
+        unmatched_payload = UnmatchedRecord.payload
+        unmatched_select = select(
+            literal("unmatched").label("kind"),
+            UnmatchedRecord.legacy_id.label("legacy_id"),
+            UnmatchedRecord.terminal.label("terminal"),
+            UnmatchedRecord.meter_no.label("meter_no"),
+            UnmatchedRecord.meter_match_key.label("meter_match_key"),
+            UnmatchedRecord.address.label("address"),
+            UnmatchedRecord.collector.label("collector"),
+            UnmatchedRecord.module_asset_no.label("module_asset_no"),
+            literal("").label("construction_collector"),
+            literal("").label("construction_module_asset_no"),
+            func.coalesce(
+                unmatched_payload.op("->>")("assigned_to"),
+                unmatched_payload.op("->>")("creator"),
+                literal(""),
+            ).label("installer"),
+            literal(0).label("photo_count"),
+            literal("incomplete").label("classification_status"),
+            case(
+                (
+                    func.nullif(func.trim(unmatched_payload.op("->>")("assigned_to")), "").is_not(None),
+                    literal("in_progress"),
+                ),
+                else_=literal("unconstructed"),
+            ).label("construction_status"),
+            literal("unarchived").label("archive_status"),
+            literal("ineligible").label("barcode_status"),
+            UnmatchedRecord.status.label("exception_status"),
+            UnmatchedRecord.updated_at.label("updated_at"),
+            UnmatchedRecord.payload.label("raw_data"),
+        ).where(UnmatchedRecord.team_id == team_id)
+
+        if query.data_type == "group":
+            return group_select.subquery("data_center_rows")
+        if query.data_type == "unmatched":
+            return unmatched_select.subquery("data_center_rows")
+        return union_all(group_select, unmatched_select).subquery("data_center_rows")
+
+    def _data_center_filtered_source(self, team_id: str, query: DataCenterQuery):
+        source = self._data_center_source(team_id, query)
+        filters = []
+        if query.construction_status != "all":
+            filters.append(source.c.construction_status == query.construction_status)
+        if query.archive_status != "all":
+            filters.append(source.c.archive_status == query.archive_status)
+        if query.barcode_status != "all":
+            filters.append(source.c.barcode_status == query.barcode_status)
+        if query.classification_status != "all":
+            filters.append(source.c.classification_status == query.classification_status)
+        if query.exception_status.strip():
+            filters.append(source.c.exception_status == query.exception_status.strip())
+        if query.installer.strip():
+            filters.append(func.lower(source.c.installer).like(f"%{query.installer.strip().lower()}%"))
+        if query.terminal.strip():
+            filters.append(func.lower(source.c.terminal).like(f"%{query.terminal.strip().lower()}%"))
+        if query.query.strip():
+            keyword = f"%{query.query.strip().lower()}%"
+            filters.append(
+                or_(
+                    func.lower(source.c.legacy_id).like(keyword),
+                    func.lower(source.c.terminal).like(keyword),
+                    func.lower(source.c.meter_no).like(keyword),
+                    func.lower(source.c.meter_match_key).like(keyword),
+                    func.lower(source.c.address).like(keyword),
+                    func.lower(source.c.collector).like(keyword),
+                    func.lower(source.c.module_asset_no).like(keyword),
+                    func.lower(source.c.installer).like(keyword),
+                )
+            )
+        start, end = data_center_service.date_bounds(query)
+        if start is not None:
+            filters.append(source.c.updated_at >= start)
+        if end is not None:
+            filters.append(source.c.updated_at <= end)
+        return source, filters
+
+    @staticmethod
+    def _data_center_order(source, sort: str):
+        if sort == "updated_asc":
+            return (source.c.updated_at.asc(), source.c.legacy_id.asc())
+        if sort == "terminal_asc":
+            return (source.c.terminal.asc(), source.c.legacy_id.asc())
+        return (source.c.updated_at.desc(), source.c.legacy_id.desc())
+
+    @staticmethod
+    def _data_center_row_from_mapping(row: Mapping[str, Any]) -> dict[str, Any]:
+        raw = dict(row.get("raw_data") or {})
+        base = {
+            "id": row.get("legacy_id") or "",
+            "terminal": row.get("terminal") or "",
+            "meter_no": row.get("meter_no") or "",
+            "meter_match_key": row.get("meter_match_key") or "",
+            "address": row.get("address") or "",
+            "collector": row.get("collector") or "",
+            "module_asset_no": row.get("module_asset_no") or "",
+            "construction_collector": row.get("construction_collector") or "",
+            "construction_module_asset_no": row.get("construction_module_asset_no") or "",
+            "installer": row.get("installer") or "",
+            "photo_count": int(row.get("photo_count") or 0),
+            "classification_status": row.get("classification_status") or "incomplete",
+            "classification_progress": {"status": row.get("classification_status") or "incomplete"},
+            "construction_status": row.get("construction_status") or "unconstructed",
+            "archive_status": row.get("archive_status") or "unarchived",
+            "barcode_status": row.get("barcode_status") or "ineligible",
+            "exception_status": row.get("exception_status") or "",
+            "updated_at": row.get("updated_at"),
+        }
+        if row.get("kind") == "unmatched":
+            return data_center_service.unmatched_row({**raw, **base, "unmatched_id": base["id"]})
+        return data_center_service.group_row({**raw, **base})
+
+    def list_data_center_rows(self, query: DataCenterQuery) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        offset = (query.page - 1) * query.page_size
+        with self._session() as session:
+            source, filters = self._data_center_filtered_source(team_id, query)
+            count_statement = select(func.count()).select_from(source).where(*filters)
+            total = int(session.scalar(count_statement) or 0)
+            row_statement = (
+                select(source)
+                .where(*filters)
+                .order_by(*self._data_center_order(source, query.sort))
+                .limit(query.page_size)
+                .offset(offset)
+            )
+            rows = session.execute(row_statement).all()
+        return {
+            "total": total,
+            "page": query.page,
+            "page_size": query.page_size,
+            "items": [self._data_center_row_from_mapping(dict(getattr(row, "_mapping", row))) for row in rows],
+        }
+
+    def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            if kind == "group":
+                group = session.scalar(
+                    select(MaterialGroup).where(MaterialGroup.team_id == team_id, MaterialGroup.legacy_id == item_id)
+                )
+                if group is None:
+                    return None
+                detail = data_center_service.group_row(_group_payload(session, group, include_photos=False))
+                detail["photos"] = [
+                    _photo_payload(photo)
+                    for photo in session.scalars(
+                        select(Photo)
+                        .where(Photo.team_id == team_id, Photo.group_id == group.id, Photo.is_active.is_(True))
+                        .order_by(Photo.sort_order, Photo.created_at, Photo.legacy_id)
+                    ).all()
+                ]
+                detail["audit"] = [
+                    {
+                        "actor": audit.actor_username or "",
+                        "action": audit.action,
+                        "entity_type": audit.entity_type,
+                        "created_at": audit.created_at.isoformat() if audit.created_at else "",
+                        "payload": audit.payload or {},
+                    }
+                    for audit in session.scalars(
+                        select(AuditLog)
+                        .where(
+                            AuditLog.team_id == team_id,
+                            or_(
+                                AuditLog.entity_id == group.id,
+                                AuditLog.legacy_id == item_id,
+                            ),
+                        )
+                        .order_by(AuditLog.created_at.desc())
+                    ).all()
+                ]
+                return detail
+            if kind == "unmatched":
+                record = session.scalar(
+                    select(UnmatchedRecord).where(
+                        UnmatchedRecord.team_id == team_id,
+                        UnmatchedRecord.legacy_id == item_id,
+                    )
+                )
+                if record is None:
+                    return None
+                payload = _unmatched_payload(record)
+                detail = data_center_service.unmatched_row(payload)
+                detail["photos"] = payload.get("photo_urls") or []
+                detail["audit"] = [
+                    {
+                        "actor": audit.actor_username or "",
+                        "action": audit.action,
+                        "entity_type": audit.entity_type,
+                        "created_at": audit.created_at.isoformat() if audit.created_at else "",
+                        "payload": audit.payload or {},
+                    }
+                    for audit in session.scalars(
+                        select(AuditLog)
+                        .where(AuditLog.team_id == team_id, AuditLog.legacy_id == item_id)
+                        .order_by(AuditLog.created_at.desc())
+                    ).all()
+                ]
+                return detail
+        return None
 
     def _ensure_task_claimed_by(self, session: Session, group: MaterialGroup, actor: str, *, force: bool = False) -> None:
         if force:
