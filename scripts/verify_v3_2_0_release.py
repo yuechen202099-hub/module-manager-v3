@@ -4,7 +4,9 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -88,6 +90,49 @@ FORBIDDEN_RELEASE_FILE_NAMES = (
     "junit.xml",
 )
 
+CLASSIFIER_FIXTURES = (
+    {
+        "path": "config/.env.production/settings.json",
+        "is_directory": False,
+        "forbidden": True,
+    },
+    {
+        "path": "nested/.ENV.LOCAL/key.txt",
+        "is_directory": False,
+        "forbidden": True,
+    },
+    {
+        "path": "artifacts/nested/.VeNv/pyvenv.cfg",
+        "is_directory": False,
+        "forbidden": True,
+    },
+    {
+        "path": "artifacts/nested/BUILD/output.bin",
+        "is_directory": False,
+        "forbidden": True,
+    },
+    {
+        "path": "certificates/client.PEM",
+        "is_directory": False,
+        "forbidden": True,
+    },
+    {
+        "path": "database/production.DuMp",
+        "is_directory": False,
+        "forbidden": True,
+    },
+    {
+        "path": "reports/coverage.xml",
+        "is_directory": False,
+        "forbidden": True,
+    },
+    {
+        "path": "v2-web/src/main.ts",
+        "is_directory": False,
+        "forbidden": False,
+    },
+)
+
 
 def read_text(relative_path: str, failures: list[str]) -> str:
     path = ROOT / relative_path
@@ -113,6 +158,26 @@ def powershell_string_array(
     relative_path: str,
     failures: list[str],
 ) -> set[str]:
+    assignment = powershell_array_text(
+        text,
+        variable_name,
+        relative_path,
+        failures,
+    )
+    if not assignment:
+        return set()
+    values = set(re.findall(r'"([^"]+)"', assignment))
+    if not values:
+        failures.append(f"{relative_path}: ${variable_name} has no string values")
+    return values
+
+
+def powershell_array_text(
+    text: str,
+    variable_name: str,
+    relative_path: str,
+    failures: list[str],
+) -> str:
     match = re.search(
         rf"(?m)^\${re.escape(variable_name)}\s*=\s*@\(",
         text,
@@ -123,11 +188,8 @@ def powershell_string_array(
     closing_index = text.find(")", match.end())
     if closing_index < 0:
         failures.append(f"{relative_path}: unterminated ${variable_name} string array")
-        return set()
-    values = set(re.findall(r'"([^"]+)"', text[match.end():closing_index]))
-    if not values:
-        failures.append(f"{relative_path}: ${variable_name} has no string values")
-    return values
+        return ""
+    return text[match.start():closing_index + 1]
 
 
 def python_literal_set(
@@ -211,6 +273,196 @@ def python_function_text(
                 return ast.get_source_segment(text, statement) or ""
     failures.append(f"{relative_path}: missing function {function_name}")
     return ""
+
+
+def execute_python_classifier(
+    package_verifier: str,
+    failures: list[str],
+) -> dict[str, bool] | None:
+    namespace = {
+        "__name__": "v320_package_classifier",
+        "__file__": str(ROOT / "scripts" / "verify-client-release.py"),
+    }
+    try:
+        exec(
+            compile(
+                package_verifier,
+                "scripts/verify-client-release.py",
+                "exec",
+            ),
+            namespace,
+        )
+    except Exception as exc:
+        failures.append(f"Python classifier source execution failed: {exc}")
+        return None
+    classifier = namespace.get("is_forbidden_release_path")
+    if not callable(classifier):
+        failures.append(
+            "scripts/verify-client-release.py: "
+            "is_forbidden_release_path is not callable"
+        )
+        return None
+
+    results: dict[str, bool] = {}
+    for fixture in CLASSIFIER_FIXTURES:
+        path = str(fixture["path"])
+        try:
+            results[path] = bool(classifier(path))
+        except Exception as exc:
+            failures.append(
+                f"Python classifier execution failed for {path}: {exc}"
+            )
+            return None
+    return results
+
+
+def powershell_single_quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def execute_powershell_classifier(
+    build_script: str,
+    failures: list[str],
+) -> dict[str, bool] | None:
+    array_names = (
+        "forbiddenReleaseDirectoryNames",
+        "forbiddenReleaseFileNames",
+        "forbiddenReleaseFileSuffixes",
+    )
+    definitions = [
+        powershell_array_text(
+            build_script,
+            name,
+            "scripts/build-client-release.ps1",
+            failures,
+        )
+        for name in array_names
+    ]
+    classifier = powershell_function_text(
+        build_script,
+        "Test-ForbiddenReleasePath",
+        "scripts/build-client-release.ps1",
+        failures,
+    )
+    if not all(definitions) or not classifier:
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="v320-release-policy-") as temp_dir:
+        temp_root = Path(temp_dir)
+        staging = temp_root / "release-staging"
+        staging.mkdir()
+        fixtures_path = temp_root / "fixtures.json"
+        fixtures_path.write_text(
+            json.dumps(CLASSIFIER_FIXTURES),
+            encoding="utf-8",
+        )
+        harness_path = temp_root / "verify-release-policy.ps1"
+        harness = "\n".join(
+            (
+                '$ErrorActionPreference = "Stop"',
+                *definitions,
+                classifier,
+                f"$staging = {powershell_single_quoted(str(staging))}",
+                (
+                    "$fixtures = Get-Content -Raw -LiteralPath "
+                    f"{powershell_single_quoted(str(fixtures_path))} "
+                    "| ConvertFrom-Json"
+                ),
+                "$results = @()",
+                "foreach ($fixture in $fixtures) {",
+                '    $relativePath = [string]$fixture.path',
+                '    $windowsPath = $relativePath.Replace("/", "\\")',
+                "    $fullPath = Join-Path $staging $windowsPath",
+                "    $forbidden = Test-ForbiddenReleasePath `",
+                "        -Path $fullPath `",
+                "        -IsDirectory ([bool]$fixture.is_directory)",
+                "    $results += [pscustomobject]@{",
+                "        path = $relativePath",
+                "        forbidden = [bool]$forbidden",
+                "    }",
+                "}",
+                "Write-Output (ConvertTo-Json -InputObject $results -Compress)",
+            )
+        )
+        harness_path.write_text(harness, encoding="utf-8")
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(harness_path),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+        )
+    if result.returncode != 0:
+        failures.append(
+            "PowerShell classifier source execution failed: "
+            + (result.stdout + result.stderr).strip()
+        )
+        return None
+    try:
+        raw_results = json.loads(result.stdout.strip())
+    except json.JSONDecodeError as exc:
+        failures.append(f"PowerShell classifier returned invalid JSON: {exc}")
+        return None
+    if not isinstance(raw_results, list):
+        failures.append("PowerShell classifier result must be a JSON list")
+        return None
+    try:
+        return {
+            str(item["path"]): bool(item["forbidden"])
+            for item in raw_results
+        }
+    except (KeyError, TypeError) as exc:
+        failures.append(f"PowerShell classifier result is malformed: {exc}")
+        return None
+
+
+def verify_classifier_semantics(
+    build_script: str,
+    package_verifier: str,
+    failures: list[str],
+) -> None:
+    python_results = execute_python_classifier(package_verifier, failures)
+    powershell_results = execute_powershell_classifier(build_script, failures)
+    if python_results is None or powershell_results is None:
+        return
+
+    fixture_paths = {str(fixture["path"]) for fixture in CLASSIFIER_FIXTURES}
+    if set(python_results) != fixture_paths:
+        failures.append("Python classifier did not return every semantic fixture")
+    if set(powershell_results) != fixture_paths:
+        failures.append("PowerShell classifier did not return every semantic fixture")
+    for fixture in CLASSIFIER_FIXTURES:
+        path = str(fixture["path"])
+        expected = bool(fixture["forbidden"])
+        python_actual = python_results.get(path)
+        powershell_actual = powershell_results.get(path)
+        expected_label = "forbidden" if expected else "allowed"
+        if python_actual is not expected:
+            actual_label = "forbidden" if python_actual else "allowed"
+            failures.append(
+                f"Python classifier mismatch for {path}: "
+                f"expected {expected_label}, got {actual_label}"
+            )
+        if powershell_actual is not expected:
+            actual_label = "forbidden" if powershell_actual else "allowed"
+            failures.append(
+                f"PowerShell classifier mismatch for {path}: "
+                f"expected {expected_label}, got {actual_label}"
+            )
+        if python_actual != powershell_actual:
+            failures.append(
+                f"release classifiers disagree for {path}: "
+                f"Python={python_actual!r}, PowerShell={powershell_actual!r}"
+            )
 
 
 def verify_version_surfaces(failures: list[str]) -> None:
@@ -498,58 +750,7 @@ def verify_package_gates(failures: list[str]) -> None:
                 f"${build_name}: expected {sorted(expected)!r}, "
                 f"got {sorted(build_values)!r}"
             )
-    build_classifier = powershell_function_text(
-        build_script,
-        "Test-ForbiddenReleasePath",
-        "scripts/build-client-release.ps1",
-        failures,
-    )
-    for marker in (
-        "[System.IO.Path]::GetFullPath($staging)",
-        "[System.IO.Path]::GetFullPath($Path)",
-        "[System.StringComparison]::OrdinalIgnoreCase",
-        "$resolvedPath.Substring($stagingPrefix.Length)",
-        '.Replace("\\", "/")',
-        ".ToLowerInvariant()",
-        '[System.StringSplitOptions]::RemoveEmptyEntries',
-        '$component -eq ".env"',
-        '$component.StartsWith(".env.")',
-        "$component -in $forbiddenReleaseDirectoryNames",
-        "$leafName -in $forbiddenReleaseFileNames",
-        "$leafSuffix -in $forbiddenReleaseFileSuffixes",
-    ):
-        require_contains(
-            build_classifier,
-            marker,
-            "scripts/build-client-release.ps1::Test-ForbiddenReleasePath",
-            failures,
-        )
-    if "GetRelativePath" in build_classifier:
-        failures.append(
-            "scripts/build-client-release.ps1::Test-ForbiddenReleasePath: "
-            "GetRelativePath is unavailable in Windows PowerShell 5.1"
-        )
-    package_classifier = python_function_text(
-        package_verifier,
-        "is_forbidden_release_path",
-        "scripts/verify-client-release.py",
-        failures,
-    )
-    for marker in (
-        'normalized_name = name.replace("\\\\", "/").casefold()',
-        'normalized_name.split("/")',
-        'component == ".env"',
-        'component.startswith(".env.")',
-        "component in FORBIDDEN_PARTS",
-        "leaf_name in FORBIDDEN_NAMES",
-        "PurePosixPath(leaf_name).suffix in FORBIDDEN_SUFFIXES",
-    ):
-        require_contains(
-            package_classifier,
-            marker,
-            "scripts/verify-client-release.py::is_forbidden_release_path",
-            failures,
-        )
+    verify_classifier_semantics(build_script, package_verifier, failures)
     if build_script.count(
         "Test-ForbiddenReleasePath -Path $_.FullName -IsDirectory"
     ) != 2:

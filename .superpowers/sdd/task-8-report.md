@@ -160,3 +160,34 @@ python scripts\test_verify_release_sop.py
 
 - Task 9 仍需在干净提交上执行正式服务器打包/验包并填写真实路径、SHA256、备份/release 目录和线上健康证据。
 - 本轮唯一 warning 是既有重复 ZIP entry 测试的预期构造，无新增阻断。
+
+---
+
+## Remediation Round 3
+
+### RED
+
+- 在 `scripts/test_verify_client_release.py` 新增两个语义门禁回归，分别将 Python classifier 和真实 PowerShell classifier 人工退化为 leaf-only。
+- 首次运行 `python -m pytest scripts\test_verify_client_release.py -q -k "v320_semantic_gate_rejects_leaf_only"`：exit 1，`2 failed, 233 deselected`；两项均明确失败于 `verify_v3_2_0_release.py` 尚无双端 classifier 实际执行入口。
+
+### 修复
+
+- `scripts/verify_v3_2_0_release.py` 定义一份共享语义 fixtures：Round 2 的四个嵌套禁止路径、3 个代表性禁止后缀/文件名路径，以及 1 个允许的 Vue 源码路径。
+- Python 侧编译并执行真实 `scripts/verify-client-release.py` 源码，再逐 fixture 调用 `is_forbidden_release_path`。
+- PowerShell 侧从真实 `scripts/build-client-release.ps1` 提取三组数组和 `Test-ForbiddenReleasePath` 函数，生成临时 PowerShell harness，并对完全相同的 fixtures 实际执行。
+- 语义门禁逐项检查两端是否符合 expected，并比较 Python/PowerShell 结果是否一致；任一端接受禁止路径、拒绝允许路径或两端分歧均失败。
+- 保留三组集合的精确解析与相等比较；移除以函数体 marker 充当循环语义证明的检查，只保留 classifier 在 cleanup/verify_package 中的接线检查。
+- leaf-only Python 与 leaf-only PowerShell 两种人工退化现在都会被嵌套 `.env.*` fixtures 拦截。
+
+### GREEN
+
+- leaf-only 聚焦回归：`2 passed, 233 deselected`。
+- `python scripts\verify_v3_2_0_release.py`：通过，实际执行双端 classifier。
+- `python -m pytest scripts\test_verify_client_release.py -q`：`235 passed, 1 warning`；warning 为重复 ZIP entry 安全回归的预期构造。
+- `python scripts\test_verify_release_sop.py`：`283 passed`。
+- `git diff --check`：通过。
+
+### Round 3 Concerns
+
+- Task 9 仍需在干净提交上执行正式服务器打包/验包并填写真实路径、SHA256、备份/release 目录和线上健康证据。
+- 本轮唯一 warning 是既有重复 ZIP entry 测试的预期构造，无新增阻断。

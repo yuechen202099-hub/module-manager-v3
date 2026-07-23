@@ -100,6 +100,17 @@ def load_verifier():
     return module
 
 
+def load_v320_release_verifier():
+    spec = importlib.util.spec_from_file_location(
+        "verify_v3_2_0_release", ROOT / "scripts" / "verify_v3_2_0_release.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Unable to load verify_v3_2_0_release.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def write_release_archive(
     verifier,
     archive_path: Path,
@@ -1353,3 +1364,113 @@ def test_release_builder_classifier_rejects_forbidden_components_on_windows(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_v320_semantic_gate_rejects_leaf_only_python_classifier() -> None:
+    release_verifier = load_v320_release_verifier()
+    semantic_gate = getattr(
+        release_verifier,
+        "verify_classifier_semantics",
+        None,
+    )
+    assert callable(semantic_gate), (
+        "V3.2.0 release verifier must execute both package classifiers"
+    )
+
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(
+        encoding="utf-8"
+    )
+    package_verifier = (ROOT / "scripts" / "verify-client-release.py").read_text(
+        encoding="utf-8"
+    )
+    extraction_failures: list[str] = []
+    classifier_text = release_verifier.python_function_text(
+        package_verifier,
+        "is_forbidden_release_path",
+        "scripts/verify-client-release.py",
+        extraction_failures,
+    )
+    assert not extraction_failures
+    leaf_only_classifier = """def is_forbidden_release_path(name: str) -> bool:
+    normalized_name = name.replace("\\\\", "/").casefold()
+    leaf_name = PurePosixPath(normalized_name).name
+    return (
+        leaf_name in FORBIDDEN_PARTS
+        or leaf_name == ".env"
+        or leaf_name.startswith(".env.")
+        or leaf_name in FORBIDDEN_NAMES
+        or PurePosixPath(leaf_name).suffix in FORBIDDEN_SUFFIXES
+    )
+"""
+    reduced_package_verifier = package_verifier.replace(
+        classifier_text,
+        leaf_only_classifier,
+        1,
+    )
+    failures: list[str] = []
+
+    semantic_gate(build_script, reduced_package_verifier, failures)
+
+    assert any(
+        "Python classifier" in failure
+        and "config/.env.production/settings.json" in failure
+        for failure in failures
+    )
+
+
+def test_v320_semantic_gate_rejects_leaf_only_powershell_classifier() -> None:
+    release_verifier = load_v320_release_verifier()
+    semantic_gate = getattr(
+        release_verifier,
+        "verify_classifier_semantics",
+        None,
+    )
+    assert callable(semantic_gate), (
+        "V3.2.0 release verifier must execute both package classifiers"
+    )
+
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(
+        encoding="utf-8"
+    )
+    package_verifier = (ROOT / "scripts" / "verify-client-release.py").read_text(
+        encoding="utf-8"
+    )
+    extraction_failures: list[str] = []
+    classifier_text = release_verifier.powershell_function_text(
+        build_script,
+        "Test-ForbiddenReleasePath",
+        "scripts/build-client-release.ps1",
+        extraction_failures,
+    )
+    assert not extraction_failures
+    leaf_only_classifier = r"""function Test-ForbiddenReleasePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [bool]$IsDirectory
+    )
+    $leafName = [System.IO.Path]::GetFileName($Path).ToLowerInvariant()
+    $leafSuffix = [System.IO.Path]::GetExtension($leafName)
+    return (
+        $leafName -in $forbiddenReleaseDirectoryNames -or
+        $leafName -eq ".env" -or
+        $leafName.StartsWith(".env.") -or
+        $leafName -in $forbiddenReleaseFileNames -or
+        $leafSuffix -in $forbiddenReleaseFileSuffixes
+    )
+}"""
+    reduced_build_script = build_script.replace(
+        classifier_text,
+        leaf_only_classifier,
+        1,
+    )
+    failures: list[str] = []
+
+    semantic_gate(reduced_build_script, package_verifier, failures)
+
+    assert any(
+        "PowerShell classifier" in failure
+        and "nested/.ENV.LOCAL/key.txt" in failure
+        for failure in failures
+    )
