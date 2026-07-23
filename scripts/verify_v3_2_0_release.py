@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
@@ -47,25 +48,44 @@ PACKAGE_FILES = (
 )
 
 FORBIDDEN_RELEASE_DIRECTORIES = (
-    "coverage",
-    "htmlcov",
-    "test-results",
-    "playwright-report",
+    ".cache",
+    ".mypy_cache",
     ".nyc_output",
     ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    ".vite",
     "__pycache__",
+    "build",
+    "coverage",
+    "data",
+    "dist",
+    "htmlcov",
+    "node_modules",
+    "playwright-report",
+    "test-results",
+    "uploads",
 )
 
 FORBIDDEN_RELEASE_SUFFIXES = (
-    ".pem",
-    ".key",
-    ".p12",
-    ".pfx",
-    ".sql",
+    ".db",
     ".dump",
+    ".key",
+    ".log",
+    ".p12",
+    ".pem",
+    ".pfx",
+    ".pyc",
+    ".pyo",
+    ".sql",
     ".sqlite",
     ".sqlite3",
-    ".db",
+)
+
+FORBIDDEN_RELEASE_FILE_NAMES = (
+    ".coverage",
+    "coverage.xml",
+    "junit.xml",
 )
 
 
@@ -85,6 +105,112 @@ def require_contains(
 ) -> None:
     if marker not in text:
         failures.append(f"{relative_path}: missing {marker!r}")
+
+
+def powershell_string_array(
+    text: str,
+    variable_name: str,
+    relative_path: str,
+    failures: list[str],
+) -> set[str]:
+    match = re.search(
+        rf"(?m)^\${re.escape(variable_name)}\s*=\s*@\(",
+        text,
+    )
+    if match is None:
+        failures.append(f"{relative_path}: missing ${variable_name} string array")
+        return set()
+    closing_index = text.find(")", match.end())
+    if closing_index < 0:
+        failures.append(f"{relative_path}: unterminated ${variable_name} string array")
+        return set()
+    values = set(re.findall(r'"([^"]+)"', text[match.end():closing_index]))
+    if not values:
+        failures.append(f"{relative_path}: ${variable_name} has no string values")
+    return values
+
+
+def python_literal_set(
+    text: str,
+    variable_name: str,
+    relative_path: str,
+    failures: list[str],
+) -> set[str]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        failures.append(f"{relative_path}: cannot parse Python source: {exc}")
+        return set()
+    for statement in tree.body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == variable_name
+            for target in statement.targets
+        ):
+            continue
+        try:
+            value = ast.literal_eval(statement.value)
+        except (TypeError, ValueError) as exc:
+            failures.append(
+                f"{relative_path}: {variable_name} must be a literal set: {exc}"
+            )
+            return set()
+        if not isinstance(value, set) or not all(
+            isinstance(item, str) for item in value
+        ):
+            failures.append(
+                f"{relative_path}: {variable_name} must be a string set"
+            )
+            return set()
+        return value
+    failures.append(f"{relative_path}: missing {variable_name}")
+    return set()
+
+
+def powershell_function_text(
+    text: str,
+    function_name: str,
+    relative_path: str,
+    failures: list[str],
+) -> str:
+    match = re.search(
+        rf"(?m)^function\s+{re.escape(function_name)}\s*\{{",
+        text,
+    )
+    if match is None:
+        failures.append(f"{relative_path}: missing function {function_name}")
+        return ""
+    opening_index = text.find("{", match.start())
+    depth = 0
+    for index in range(opening_index, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[match.start():index + 1]
+    failures.append(f"{relative_path}: unterminated function {function_name}")
+    return ""
+
+
+def python_function_text(
+    text: str,
+    function_name: str,
+    relative_path: str,
+    failures: list[str],
+) -> str:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        failures.append(f"{relative_path}: cannot parse Python source: {exc}")
+        return ""
+    for statement in tree.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if statement.name == function_name:
+                return ast.get_source_segment(text, statement) or ""
+    failures.append(f"{relative_path}: missing function {function_name}")
+    return ""
 
 
 def verify_version_surfaces(failures: list[str]) -> None:
@@ -331,42 +457,114 @@ def verify_package_gates(failures: list[str]) -> None:
             failures,
         )
 
-    for directory_name in FORBIDDEN_RELEASE_DIRECTORIES:
-        for relative_path, content in (
-            ("scripts/build-client-release.ps1", build_script),
-            ("scripts/verify-client-release.py", package_verifier),
-        ):
-            require_contains(content, directory_name, relative_path, failures)
-    for suffix in FORBIDDEN_RELEASE_SUFFIXES:
-        for relative_path, content in (
-            ("scripts/build-client-release.ps1", build_script),
-            ("scripts/verify-client-release.py", package_verifier),
-        ):
-            require_contains(content, suffix, relative_path, failures)
-    for marker in (
-        "$_.Name.ToLowerInvariant() -in $forbiddenReleaseDirectoryNames",
-        "$normalizedExtension = $_.Extension.ToLowerInvariant()",
-        '$normalizedName -eq ".env"',
-        '$normalizedName.StartsWith(".env.")',
-    ):
-        require_contains(
+    symmetric_sets = (
+        (
+            "forbiddenReleaseDirectoryNames",
+            "FORBIDDEN_PARTS",
+            set(FORBIDDEN_RELEASE_DIRECTORIES),
+        ),
+        (
+            "forbiddenReleaseFileSuffixes",
+            "FORBIDDEN_SUFFIXES",
+            set(FORBIDDEN_RELEASE_SUFFIXES),
+        ),
+        (
+            "forbiddenReleaseFileNames",
+            "FORBIDDEN_NAMES",
+            set(FORBIDDEN_RELEASE_FILE_NAMES),
+        ),
+    )
+    for build_name, verifier_name, expected in symmetric_sets:
+        build_values = powershell_string_array(
             build_script,
-            marker,
+            build_name,
             "scripts/build-client-release.ps1",
             failures,
         )
-    for marker in (
-        "normalized_name = name.casefold()",
-        'leaf_name == ".env"',
-        'leaf_name.startswith(".env.")',
-        "parts = set(normalized_path.parts)",
-        "normalized_path.suffix in FORBIDDEN_SUFFIXES",
-    ):
-        require_contains(
+        verifier_values = python_literal_set(
             package_verifier,
-            marker,
+            verifier_name,
             "scripts/verify-client-release.py",
             failures,
+        )
+        if build_values != verifier_values:
+            failures.append(
+                "release forbidden sets differ: "
+                f"${build_name}={sorted(build_values)!r}, "
+                f"{verifier_name}={sorted(verifier_values)!r}"
+            )
+        if build_values != expected:
+            failures.append(
+                f"${build_name}: expected {sorted(expected)!r}, "
+                f"got {sorted(build_values)!r}"
+            )
+    build_classifier = powershell_function_text(
+        build_script,
+        "Test-ForbiddenReleasePath",
+        "scripts/build-client-release.ps1",
+        failures,
+    )
+    for marker in (
+        "[System.IO.Path]::GetFullPath($staging)",
+        "[System.IO.Path]::GetFullPath($Path)",
+        "[System.StringComparison]::OrdinalIgnoreCase",
+        "$resolvedPath.Substring($stagingPrefix.Length)",
+        '.Replace("\\", "/")',
+        ".ToLowerInvariant()",
+        '[System.StringSplitOptions]::RemoveEmptyEntries',
+        '$component -eq ".env"',
+        '$component.StartsWith(".env.")',
+        "$component -in $forbiddenReleaseDirectoryNames",
+        "$leafName -in $forbiddenReleaseFileNames",
+        "$leafSuffix -in $forbiddenReleaseFileSuffixes",
+    ):
+        require_contains(
+            build_classifier,
+            marker,
+            "scripts/build-client-release.ps1::Test-ForbiddenReleasePath",
+            failures,
+        )
+    if "GetRelativePath" in build_classifier:
+        failures.append(
+            "scripts/build-client-release.ps1::Test-ForbiddenReleasePath: "
+            "GetRelativePath is unavailable in Windows PowerShell 5.1"
+        )
+    package_classifier = python_function_text(
+        package_verifier,
+        "is_forbidden_release_path",
+        "scripts/verify-client-release.py",
+        failures,
+    )
+    for marker in (
+        'normalized_name = name.replace("\\\\", "/").casefold()',
+        'normalized_name.split("/")',
+        'component == ".env"',
+        'component.startswith(".env.")',
+        "component in FORBIDDEN_PARTS",
+        "leaf_name in FORBIDDEN_NAMES",
+        "PurePosixPath(leaf_name).suffix in FORBIDDEN_SUFFIXES",
+    ):
+        require_contains(
+            package_classifier,
+            marker,
+            "scripts/verify-client-release.py::is_forbidden_release_path",
+            failures,
+        )
+    if build_script.count(
+        "Test-ForbiddenReleasePath -Path $_.FullName -IsDirectory"
+    ) != 2:
+        failures.append(
+            "scripts/build-client-release.ps1: cleanup must classify both "
+            "directories and files through Test-ForbiddenReleasePath"
+        )
+    if package_verifier.count("if is_forbidden_release_path(name):") != 1:
+        failures.append(
+            "scripts/verify-client-release.py: verify_package must classify "
+            "every archive member through is_forbidden_release_path"
+        )
+    if "FORBIDDEN_PREFIXES" in package_verifier:
+        failures.append(
+            "scripts/verify-client-release.py: legacy prefix-only policy remains"
         )
     if build_script.count("Remove-ForbiddenReleaseItems") < 3:
         failures.append(

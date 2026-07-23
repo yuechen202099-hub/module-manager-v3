@@ -247,11 +247,13 @@ $forbiddenReleaseDirectoryNames = @(
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
+    ".venv",
     "coverage",
     "htmlcov",
     "test-results",
     "playwright-report",
-    ".nyc_output"
+    ".nyc_output",
+    "build"
 )
 
 $forbiddenReleaseFileNames = @(".coverage", "coverage.xml", "junit.xml")
@@ -270,10 +272,62 @@ $forbiddenReleaseFileSuffixes = @(
     ".pyo"
 )
 
+function Test-ForbiddenReleasePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [bool]$IsDirectory
+    )
+
+    $resolvedStagingPath = [System.IO.Path]::GetFullPath($staging)
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $stagingPrefix = (
+        $resolvedStagingPath.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ) + [System.IO.Path]::DirectorySeparatorChar
+    )
+    if (-not $resolvedPath.StartsWith(
+        $stagingPrefix,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "Release cleanup path is outside staging: $resolvedPath"
+    }
+    $normalizedRelativePath = (
+        $resolvedPath.Substring($stagingPrefix.Length).Replace("\", "/")
+    ).ToLowerInvariant()
+    $normalizedComponents = @(
+        $normalizedRelativePath.Split(
+            "/",
+            [System.StringSplitOptions]::RemoveEmptyEntries
+        )
+    )
+    foreach ($component in $normalizedComponents) {
+        if (
+            $component -in $forbiddenReleaseDirectoryNames -or
+            $component -eq ".env" -or
+            $component.StartsWith(".env.")
+        ) {
+            return $true
+        }
+    }
+    if ($IsDirectory -or $normalizedComponents.Count -eq 0) {
+        return $false
+    }
+
+    $leafName = $normalizedComponents[-1]
+    $leafSuffix = [System.IO.Path]::GetExtension($leafName)
+    return (
+        $leafName -in $forbiddenReleaseFileNames -or
+        $leafSuffix -in $forbiddenReleaseFileSuffixes
+    )
+}
+
 function Remove-ForbiddenReleaseItems {
     Get-ChildItem -LiteralPath $staging -Recurse -Directory -Force |
         Where-Object {
-            $_.Name.ToLowerInvariant() -in $forbiddenReleaseDirectoryNames
+            Test-ForbiddenReleasePath -Path $_.FullName -IsDirectory $true
         } |
         Sort-Object { $_.FullName.Length } -Descending |
         ForEach-Object {
@@ -284,12 +338,7 @@ function Remove-ForbiddenReleaseItems {
 
     Get-ChildItem -LiteralPath $staging -Recurse -File -Force |
         Where-Object {
-            $normalizedName = $_.Name.ToLowerInvariant()
-            $normalizedExtension = $_.Extension.ToLowerInvariant()
-            $normalizedName -eq ".env" -or
-            $normalizedName.StartsWith(".env.") -or
-            $normalizedName -in $forbiddenReleaseFileNames -or
-            $normalizedExtension -in $forbiddenReleaseFileSuffixes
+            Test-ForbiddenReleasePath -Path $_.FullName -IsDirectory $false
         } |
         Remove-Item -Force
 }

@@ -128,3 +128,35 @@ python scripts\test_verify_release_sop.py
 
 - Task 9 仍需在干净提交上执行正式服务器打包/验包并填写真实包路径、SHA256、备份/release 目录和线上健康证据。
 - Vite 仅保留既有 VueUse PURE 注释与大 chunk warning，无本轮新增阻断。
+
+---
+
+## Remediation Round 2
+
+### RED
+
+- 在 `scripts/test_verify_client_release.py` 新增两个嵌套 `.env.*`、嵌套 `.venv` 和嵌套 `build` ZIP 回归。
+- 首次运行 `python -m pytest scripts\test_verify_client_release.py -q`：exit 1，`2 failed, 230 passed, 1 warning`；仅 `config/.env.production/settings.json` 与 `nested/.ENV.LOCAL/key.txt` 穿透，`.venv` 和 `build` 已由 ZIP 侧旧集合拒绝。
+- 先增强 `scripts/verify_v3_2_0_release.py` 后运行：exit 1，准确报告 build 集合缺少 `.venv`/`build`、ZIP 集合额外包含 `.env`，并报告两侧缺少统一逐组件分类函数。
+- 初版 PowerShell 分类器真实运行时因 Windows PowerShell 5.1 不支持 `Path.GetRelativePath` 失败；固化为自动回归后，聚焦测试为 `1 failed, 232 deselected`。
+
+### 修复
+
+- build cleanup 与 ZIP verifier 现在共享严格相等的三组策略：17 个禁止目录名、12 个禁止文件后缀和 3 个禁止文件名；release gate 解析 PowerShell 数组和 Python literal set 后逐组精确比较。
+- 两侧都先统一路径分隔符与大小写，再检查每一级组件的精确目录名及 `.env`/`.env.*`，最后仅对叶文件检查禁止名称和后缀。
+- build 目录集合补齐 `.venv` 与 `build`；ZIP 集合移除冗余 `.env` 精确项，统一交由逐组件 env 规则处理，并删除旧 prefix-only 分支。
+- PowerShell 分类器使用 5.1 兼容的绝对路径前缀校验和 `Substring` 相对化，同时拒绝 staging 外路径；目录和文件清理均调用同一分类函数。
+- `scripts/verify_v3_2_0_release.py` 将算法断言限定在两个分类函数体内，确认 cleanup/verify_package 实际调用分类器，并禁止旧 prefix-only 与 `GetRelativePath` 实现回归。
+
+### GREEN
+
+- PowerShell build classifier 聚焦回归：`1 passed, 232 deselected`。
+- `python -m pytest scripts\test_verify_client_release.py -q`：`233 passed, 1 warning`；warning 为重复 ZIP entry 安全回归的预期构造。
+- `python scripts\verify_v3_2_0_release.py`：通过。
+- `python scripts\test_verify_release_sop.py`：`283 passed`。
+- `git diff --check`：通过。
+
+### Round 2 Concerns
+
+- Task 9 仍需在干净提交上执行正式服务器打包/验包并填写真实路径、SHA256、备份/release 目录和线上健康证据。
+- 本轮唯一 warning 是既有重复 ZIP entry 测试的预期构造，无新增阻断。

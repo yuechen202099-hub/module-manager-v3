@@ -1254,3 +1254,102 @@ def test_archive_rejects_sensitive_and_test_artifacts_case_insensitively(
 
     with pytest.raises(AssertionError, match="Forbidden local/cache files"):
         verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "config/.env.production/settings.json",
+        "nested/.ENV.LOCAL/key.txt",
+        "artifacts/nested/.VeNv/pyvenv.cfg",
+        "artifacts/nested/BUILD/output.bin",
+    ],
+)
+def test_archive_rejects_forbidden_directory_components_at_any_depth(
+    tmp_path: Path,
+    member_name: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "forbidden-directory-component.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={member_name: "must not ship\n"},
+    )
+
+    with pytest.raises(AssertionError, match="Forbidden local/cache files"):
+        verifier.verify_package(archive_path)
+
+
+def test_release_builder_classifier_rejects_forbidden_components_on_windows(
+    tmp_path: Path,
+) -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    def array_definition(variable_name: str) -> str:
+        start = build_script.index(f"${variable_name} = @(")
+        return build_script[start:build_script.index(")", start) + 1]
+
+    function_start = build_script.index("function Test-ForbiddenReleasePath")
+    opening_brace = build_script.index("{", function_start)
+    depth = 0
+    function_end = -1
+    for index in range(opening_brace, len(build_script)):
+        if build_script[index] == "{":
+            depth += 1
+        elif build_script[index] == "}":
+            depth -= 1
+            if depth == 0:
+                function_end = index + 1
+                break
+    assert function_end > 0
+
+    staging = str(tmp_path / "release-staging").replace("'", "''")
+    harness = "\n".join(
+        (
+            '$ErrorActionPreference = "Stop"',
+            array_definition("forbiddenReleaseDirectoryNames"),
+            array_definition("forbiddenReleaseFileNames"),
+            array_definition("forbiddenReleaseFileSuffixes"),
+            build_script[function_start:function_end],
+            f"$staging = '{staging}'",
+            "$forbiddenCases = @(",
+            "    (Join-Path $staging 'config\\.env.production\\settings.json'),",
+            "    (Join-Path $staging 'nested\\.ENV.LOCAL\\key.txt'),",
+            "    (Join-Path $staging 'artifacts\\.VeNv\\pyvenv.cfg'),",
+            "    (Join-Path $staging 'artifacts\\BUILD\\output.bin')",
+            ")",
+            "foreach ($path in $forbiddenCases) {",
+            "    if (-not (Test-ForbiddenReleasePath -Path $path -IsDirectory $false)) {",
+            '        throw "Forbidden path was accepted: $path"',
+            "    }",
+            "}",
+            "$allowedPath = Join-Path $staging 'v2-web\\src\\main.ts'",
+            "if (Test-ForbiddenReleasePath -Path $allowedPath -IsDirectory $false) {",
+            '    throw "Allowed path was rejected: $allowedPath"',
+            "}",
+        )
+    )
+    harness_path = tmp_path / "verify-build-release-policy.ps1"
+    harness_path.write_text(harness, encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness_path),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr

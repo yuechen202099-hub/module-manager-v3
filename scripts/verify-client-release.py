@@ -226,7 +226,6 @@ OPERATIONAL_RELEASE_VERSION_PATTERNS = (
 HISTORICAL_RELEASE_RECORD_PATTERN = re.compile(r"^ops/releases/V\d+\.\d+\.\d+\.md$")
 
 FORBIDDEN_PARTS = {
-    ".env",
     ".venv",
     "__pycache__",
     ".pytest_cache",
@@ -261,15 +260,35 @@ FORBIDDEN_SUFFIXES = {
     ".sqlite3",
 }
 
-FORBIDDEN_PREFIXES = {
-    "v2-api/app/static/uploads/",
-}
-
 FORBIDDEN_NAMES = {
     ".coverage",
     "coverage.xml",
     "junit.xml",
 }
+
+
+def is_forbidden_release_path(name: str) -> bool:
+    normalized_name = name.replace("\\", "/").casefold()
+    components = tuple(
+        component
+        for component in normalized_name.split("/")
+        if component
+    )
+    if not components:
+        return False
+    if any(
+        component in FORBIDDEN_PARTS
+        or component == ".env"
+        or component.startswith(".env.")
+        for component in components
+    ):
+        return True
+
+    leaf_name = components[-1]
+    return (
+        leaf_name in FORBIDDEN_NAMES
+        or PurePosixPath(leaf_name).suffix in FORBIDDEN_SUFFIXES
+    )
 
 
 def load_release_truth_parser():
@@ -579,23 +598,7 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
 
     forbidden_hits: list[str] = []
     for name in names:
-        normalized_name = name.casefold()
-        normalized_path = PurePosixPath(normalized_name)
-        leaf_name = normalized_path.name
-        if leaf_name == ".env" or leaf_name.startswith(".env."):
-            forbidden_hits.append(name)
-            continue
-        if leaf_name in FORBIDDEN_NAMES:
-            forbidden_hits.append(name)
-            continue
-        if any(normalized_name.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
-            forbidden_hits.append(name)
-            continue
-        parts = set(normalized_path.parts)
-        if parts & FORBIDDEN_PARTS:
-            forbidden_hits.append(name)
-            continue
-        if normalized_path.suffix in FORBIDDEN_SUFFIXES:
+        if is_forbidden_release_path(name):
             forbidden_hits.append(name)
     if forbidden_hits:
         fail("Forbidden local/cache files found in release: " + ", ".join(sorted(forbidden_hits)[:20]))
