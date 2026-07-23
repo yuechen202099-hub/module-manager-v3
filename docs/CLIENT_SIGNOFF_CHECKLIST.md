@@ -2,10 +2,10 @@
 
 本清单用于甲方第一版演示结束后的现场确认。签收范围是“模块更换项目管理器 V2.0 本地交付演示版”，不等同于公网生产部署版。
 
-## 交付包
+## V3.1.1 候选包路径
 
 ```text
-build/server-release/module-manager-v2-server-3.1.0.zip
+build/server-release/module-manager-v2-server-3.1.1.zip
 ```
 
 ## 演示入口
@@ -43,13 +43,18 @@ build/server-release/module-manager-v2-server-3.1.0.zip
 .\scripts\run-client-acceptance-gate.ps1
 ```
 
-最近一次门禁结果：
+V3.1.1 候选验证：
 
-- V3.1.0 发布校验测试：结果以 `ops/releases/V3.1.0.md` 中本轮记录为准；不沿用历史测试计数。
+- 本轮完整测试：`1656 passed, 13 skipped`
 - 静态页面校验：通过
 - 部署样例校验：通过
-- 演示 smoke：通过
-- V3.1.0 正式发布包：已构建并验包；`SOURCE_COMMIT=b48221e98b012002d94df3a652adce85d99dc74a`；SHA256 `2D939298EA2E8A072E3D6C9EB2AB3040DA2E0BA555473F3330A630A08A1B259A`
+- V3.1.1 发布包：尚未生成，提交和 SHA256 以 `ops/releases/V3.1.1.md` 后续实填为准
+
+已部署基线 V3.1.0 历史证据：
+
+- `SOURCE_COMMIT=b48221e98b012002d94df3a652adce85d99dc74a`
+- SHA256 `2D939298EA2E8A072E3D6C9EB2AB3040DA2E0BA555473F3330A630A08A1B259A`
+- 生产记录：`ops/releases/V3.1.0.md`
 
 ## 签字
 

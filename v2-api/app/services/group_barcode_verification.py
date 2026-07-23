@@ -34,6 +34,42 @@ PLACEHOLDER_VALUES = frozenset(
 )
 
 
+def normalize_verification_group_identity(group: Mapping[str, Any]) -> dict[str, Any]:
+    def first_nonblank(*values: Any) -> str:
+        for value in values:
+            normalized = str(value or "").strip()
+            if normalized:
+                return normalized
+        return ""
+
+    payload = dict(group)
+    source_photos = payload.get("photos")
+    photos = [
+        photo
+        for photo in source_photos
+        if isinstance(photo, Mapping)
+    ] if isinstance(source_photos, (list, tuple)) else []
+    first_photo_collector = next(
+        (value for photo in photos if (value := first_nonblank(photo.get("collector")))),
+        "",
+    )
+    first_photo_module = next(
+        (value for photo in photos if (value := first_nonblank(photo.get("module_asset_no"), photo.get("asset_no")))),
+        "",
+    )
+    payload["collector"] = first_nonblank(
+        payload.get("construction_collector"),
+        payload.get("collector"),
+        first_photo_collector,
+    )
+    payload["module_asset_no"] = first_nonblank(
+        payload.get("construction_module_asset_no"),
+        payload.get("module_asset_no"),
+        first_photo_module,
+    )
+    return payload
+
+
 @dataclass(frozen=True)
 class EligibilityResult:
     status: VerificationStatus

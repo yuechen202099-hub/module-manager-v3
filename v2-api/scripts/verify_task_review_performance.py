@@ -192,7 +192,7 @@ def run_verification(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Verify V3.1.0 task and review performance thresholds.")
+    parser = argparse.ArgumentParser(description="Verify V3.1.1 task and review performance thresholds.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8010")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-commit", required=True, help="Git commit represented by this measurement report.")

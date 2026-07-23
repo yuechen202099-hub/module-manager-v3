@@ -5,9 +5,9 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.1.0`
+- 生产维护分支：`production/V3/3.1.1`
 - 当前生产应用基线：`V3.1.0`
-- 当前发布候选版本：`V3.1.0`
+- 当前发布候选版本：`V3.1.1`
 - 当前生产 release：`/opt/module-manager-v2/releases/v3.1.0-20260723_153935`
 - 当前回滚 release：`/opt/module-manager-v2/releases/v3.0.84-20260722_033636`
 - 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.1.0`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。

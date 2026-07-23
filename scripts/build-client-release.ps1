@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.1.0",
+    [string]$Version = "3.1.1",
     [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
@@ -25,7 +25,7 @@ if ($worktreeChanges.Count -ne 0) {
     throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
 }
 if ([string]::IsNullOrWhiteSpace($PerformanceReport)) {
-    throw "Performance report is required for V3.1.0 packaging."
+    throw "Performance report is required for V3.1.1 packaging."
 }
 $performanceReportPath = if ([System.IO.Path]::IsPathRooted($PerformanceReport)) {
     [System.IO.Path]::GetFullPath($PerformanceReport)

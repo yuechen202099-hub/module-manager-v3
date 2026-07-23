@@ -444,15 +444,10 @@ def _verification_group_payload(
     *,
     prefetched_photos: list[Any] | None = None,
 ) -> dict[str, Any]:
+    from app.services.group_barcode_verification import normalize_verification_group_identity
+
     if isinstance(group, Mapping):
-        payload = dict(group)
-        construction_collector = str(payload.get("construction_collector") or "").strip()
-        construction_module_asset_no = str(payload.get("construction_module_asset_no") or "").strip()
-        if construction_collector:
-            payload["collector"] = construction_collector
-        if construction_module_asset_no:
-            payload["module_asset_no"] = construction_module_asset_no
-        return payload
+        return normalize_verification_group_identity(group)
     raw = dict(getattr(group, "raw_data", None) or {})
     photos = list(prefetched_photos or [])
     if prefetched_photos is None and session is not None:
@@ -465,29 +460,14 @@ def _verification_group_payload(
                 )
             ).all()
         )
-    first_collector = next(
-        (
-            str(getattr(photo, "collector", None) or "").strip()
-            for photo in photos
-            if str(getattr(photo, "collector", None) or "").strip()
-        ),
-        "",
-    )
-    first_module = next(
-        (
-            str(getattr(photo, "asset_no", None) or "").strip()
-            for photo in photos
-            if str(getattr(photo, "asset_no", None) or "").strip()
-        ),
-        "",
-    )
-    return {
+    return normalize_verification_group_identity({
+        "id": str(getattr(group, "legacy_id", None) or group.id),
         "terminal": str(getattr(group, "terminal", None) or raw.get("terminal") or "").strip(),
         "meter_no": str(getattr(group, "display_meter_no", None) or raw.get("meter_no") or "").strip(),
-        "collector": str(raw.get("construction_collector") or raw.get("collector") or first_collector).strip(),
-        "module_asset_no": str(
-            raw.get("construction_module_asset_no") or raw.get("module_asset_no") or first_module
-        ).strip(),
+        "construction_collector": raw.get("construction_collector"),
+        "collector": raw.get("collector"),
+        "construction_module_asset_no": raw.get("construction_module_asset_no"),
+        "module_asset_no": raw.get("module_asset_no"),
         "photos": [
             {
                 "id": str(
@@ -499,6 +479,8 @@ def _verification_group_payload(
                 "category": str(getattr(photo, "category", None) or ""),
                 "is_active": bool(getattr(photo, "is_active", True)),
                 "upload_status": getattr(getattr(photo, "upload_status", "uploaded"), "value", getattr(photo, "upload_status", "uploaded")),
+                "collector": str(getattr(photo, "collector", None) or ""),
+                "asset_no": str(getattr(photo, "asset_no", None) or ""),
                 "image_url": str(getattr(photo, "image_url", None) or ""),
                 "source_url": str(getattr(photo, "source_url", None) or ""),
                 "storage_type": str(getattr(photo, "storage_type", None) or ""),
@@ -507,7 +489,7 @@ def _verification_group_payload(
             }
             for photo in photos
         ],
-    }
+    })
 
 
 def _force_completed_verification_transition(

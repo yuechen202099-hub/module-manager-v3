@@ -432,6 +432,65 @@ def test_json_and_postgres_verification_payloads_ignore_historical_non_evidence_
     ).status == "pending"
 
 
+def test_postgres_verification_payload_defers_blank_identity_selection_to_shared_normalizer() -> None:
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="blank-construction-identity",
+        team_id="verify-team",
+        terminal="T-VERIFY-002",
+        display_meter_no="M-VERIFY-002",
+        raw_data={
+            "construction_collector": "   ",
+            "collector": "COL-TOP",
+            "construction_module_asset_no": "\t",
+            "module_asset_no": "MOD-TOP",
+        },
+    )
+
+    payload = repository._verification_group_payload(None, group, prefetched_photos=[])
+
+    assert payload["collector"] == "COL-TOP"
+    assert payload["module_asset_no"] == "MOD-TOP"
+
+
+def test_postgres_verification_payload_uses_photo_identity_fallbacks() -> None:
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="photo-identity-fallback",
+        team_id="verify-team",
+        terminal="T-VERIFY-003",
+        display_meter_no="M-VERIFY-003",
+        raw_data={},
+    )
+    categories = ("before_box", "collector_barcode", "module_meter", "after_box")
+    photos = [
+        SimpleNamespace(
+            id=uuid4(),
+            legacy_id=f"photo-identity-{index}",
+            sha256=f"{index:x}" * 64,
+            category=category,
+            is_active=True,
+            upload_status="uploaded",
+            collector="COL-PHOTO" if index == 1 else "",
+            asset_no="MOD-PHOTO" if index == 1 else "",
+            image_url="",
+            source_url="",
+            storage_type="",
+            storage_bucket="",
+            storage_key="",
+        )
+        for index, category in enumerate(categories, start=1)
+    ]
+
+    payload = repository._verification_group_payload(None, group, prefetched_photos=photos)
+    eligibility = evaluate_group_eligibility(payload)
+
+    assert payload["collector"] == "COL-PHOTO"
+    assert payload["module_asset_no"] == "MOD-PHOTO"
+    assert eligibility.status == "pending"
+    assert eligibility.evidence_fingerprint
+
+
 def _postgres_barcode_claim_fixture():
     group_id = uuid4()
     group = SimpleNamespace(

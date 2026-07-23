@@ -10,6 +10,7 @@ from app.services.group_barcode_verification import (
     apply_group_scan_result,
     evaluate_group_eligibility,
     invalidate_group_verification,
+    normalize_verification_group_identity,
     scan_group_evidence,
 )
 from app.api.routes.local_test import GroupBarcodeManualConfirmRequest
@@ -35,6 +36,43 @@ def _group() -> dict:
         "collector": "COLLECTOR-001",
         "photos": photos,
     }
+
+
+def test_identity_normalization_uses_first_nonblank_value_without_hiding_placeholders() -> None:
+    normalized = normalize_verification_group_identity(
+        {
+            "construction_collector": "   ",
+            "collector": "COL-TOP",
+            "construction_module_asset_no": "",
+            "module_asset_no": "MOD-TOP",
+            "photos": None,
+        }
+    )
+    assert normalized["collector"] == "COL-TOP"
+    assert normalized["module_asset_no"] == "MOD-TOP"
+
+    photo_fallback = normalize_verification_group_identity(
+        {
+            "photos": [
+                {
+                    "collector": " COL-PHOTO ",
+                    "module_asset_no": " ",
+                    "asset_no": " MOD-PHOTO ",
+                }
+            ]
+        }
+    )
+    assert photo_fallback["collector"] == "COL-PHOTO"
+    assert photo_fallback["module_asset_no"] == "MOD-PHOTO"
+
+    placeholder = normalize_verification_group_identity(
+        {
+            "construction_collector": "unknown",
+            "collector": "COL-TOP",
+            "photos": [],
+        }
+    )
+    assert placeholder["collector"] == "unknown"
 
 
 def test_scan_group_evidence_passes_distributed_machine_barcode_and_qr_values() -> None:

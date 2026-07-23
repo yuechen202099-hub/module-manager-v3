@@ -101,7 +101,7 @@ def export_final_delivery(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     scope = payload.task_id or payload.terminal or "terminal"
-    filename = f"V3.1.0-final-delivery-{scope}-{datetime.now().strftime('%Y%m%d%H%M%S')}.zip"
+    filename = f"V3.1.1-final-delivery-{scope}-{datetime.now().strftime('%Y%m%d%H%M%S')}.zip"
     try:
         return LeasedFileResponse(
             FileResponse(

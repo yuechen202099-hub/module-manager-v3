@@ -23,6 +23,7 @@ REQUIRED_FILES = [
     "docs/sop/08-business-acceptance-templates.md",
     "ops/releases/README.md",
     "ops/releases/V3.0.84.md",
+    "ops/releases/V3.1.1.md",
     "ops/releases/V3.1.0.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",

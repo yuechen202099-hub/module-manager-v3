@@ -2,12 +2,12 @@
 
 ## Package
 
-- Package: `build/server-release/module-manager-v2-server-3.1.0.zip`
-- Name: `module-manager-v2-server-3.1.0.zip`
-- Version: 3.1.0
-- Generated at: 2026-07-23 15:38:32 +08:00
-- Size: 1704559 bytes (1.63 MiB)
-- SHA256: 2D939298EA2E8A072E3D6C9EB2AB3040DA2E0BA555473F3330A630A08A1B259A
+- Package: `build/server-release/module-manager-v2-server-3.1.1.zip`
+- Name: `module-manager-v2-server-3.1.1.zip`
+- Version: 3.1.1
+- Generated at: pending
+- Size: pending
+- SHA256: pending
 - 记录口径：当前工作树文件为部署后发布账本；ZIP 内副本为打包时清单，不包含压缩包自身哈希。
 
 ## Included
@@ -47,7 +47,7 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.1.0
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.1.1
 
 ## Verified During Packaging
 

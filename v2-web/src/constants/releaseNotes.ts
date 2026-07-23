@@ -12,6 +12,17 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.1.1',
+    date: '2026-07-23',
+    type: 'BUG 修复',
+    title: '后台条码核验队列修复',
+    items: [
+      '修复后台条码核验完成后使用数据库 UUID 回写业务资料组，导致队列任务连续失败的问题。',
+      '统一预览统计与实际入队的采集器号、模块号兜底口径，施工填报字段和照片字段均可正确参与核验资格判断。',
+      '审阅完成后的原图与交付包仍由后台异步缓存，不阻塞审阅页面操作。',
+    ],
+  },
+  {
     version: 'V3.1.0',
     date: '2026-07-23',
     type: '大更新',

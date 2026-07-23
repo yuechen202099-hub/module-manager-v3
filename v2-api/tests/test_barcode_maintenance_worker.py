@@ -216,6 +216,7 @@ def _install_production_worker_repository(
 
     class ApplyRepository:
         def apply_group_scan_result(self, _group_id, result, **_kwargs):
+            assert _group_id == group.legacy_id
             applied.append(result)
 
     monkeypatch.setattr(worker, "_backend", lambda: "postgres")
@@ -656,6 +657,79 @@ def test_postgres_archive_claim_uses_skip_locked_and_dedicated_lease_state() -> 
     assert "group_barcode_verifications.auto_archive_status" in sql
     assert "group_barcode_verifications.auto_archive_attempt_count" in sql
     assert "group_barcode_verifications.auto_archive_lease_expires_at" in sql
+
+
+def test_postgres_archive_claim_carries_legacy_id_into_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    now = datetime(2026, 7, 23, 16, 0, tzinfo=UTC)
+    group = SimpleNamespace(id=uuid4(), legacy_id="archive-business-id", team_id="team-a")
+    control = SimpleNamespace(paused=False)
+    verification = SimpleNamespace(
+        group_id=group.id,
+        status="passed",
+        evidence_fingerprint="f" * 64,
+        evidence_version=4,
+        auto_archive_status="pending",
+        auto_archive_attempt_count=0,
+        auto_archive_lease_owner=None,
+        auto_archive_lease_token=None,
+        auto_archive_lease_expires_at=None,
+        auto_archive_error=None,
+    )
+
+    class Rows:
+        def all(self):
+            return []
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalars(self, _statement):
+            return Rows()
+
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect()))
+            if "FROM barcode_maintenance_controls" in sql:
+                return control
+            if "FROM group_barcode_verifications" in sql:
+                return verification
+            if "FROM material_groups" in sql:
+                return group
+            pytest.fail(f"unexpected archive claim statement: {sql}")
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(worker, "SessionLocal", Session)
+    claim = worker._claim_postgres_archive(
+        worker_id="archive-worker",
+        team_id=group.team_id,
+        now=now,
+        lease_seconds=60,
+    )
+    assert claim is not None
+    assert claim.group_id == str(group.id)
+    assert claim.business_group_id == group.legacy_id
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        worker,
+        "auto_archive_verified_group",
+        lambda group_id, **_kwargs: calls.append(group_id) or {"archived": True, "group_id": group_id},
+    )
+    worker._process_archive_job(claim)
+
+    assert calls == [group.legacy_id]
 
 
 def test_postgres_delivery_package_claim_uses_skip_locked_and_persistent_lease_state() -> None:

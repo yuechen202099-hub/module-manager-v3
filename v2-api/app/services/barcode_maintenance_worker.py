@@ -80,6 +80,7 @@ class MaintenanceJob:
     kind: str
     team_id: str
     group_id: str
+    business_group_id: str = ""
     lease_owner: str = ""
     lease_token: str = ""
     evidence_fingerprint: str = ""
@@ -505,6 +506,14 @@ def _claim_postgres_archive(
             else:
                 session.rollback()
             return None
+        group = session.scalar(
+            select(MaterialGroup).where(
+                MaterialGroup.id == verification.group_id,
+                MaterialGroup.team_id == team_id,
+            )
+        )
+        if group is None:
+            raise KeyError(str(verification.group_id))
         if not verification.auto_archive_status:
             verification.auto_archive_status = "pending"
             verification.auto_archive_attempt_count = 0
@@ -529,6 +538,7 @@ def _claim_postgres_archive(
             kind="auto_archive",
             team_id=team_id,
             group_id=str(verification.group_id),
+            business_group_id=str(group.legacy_id or group.id),
             lease_owner=worker_id,
             lease_token=lease_token,
             evidence_fingerprint=str(verification.evidence_fingerprint or ""),
@@ -1332,7 +1342,12 @@ def _load_group_for_scan(job: MaintenanceJob) -> dict[str, Any]:
 
     repository = PostgresStateRepository()
     with repository._session() as session:
-        group = session.scalar(select(MaterialGroup).where(MaterialGroup.id == UUID(job.group_id)))
+        group = session.scalar(
+            select(MaterialGroup).where(
+                MaterialGroup.id == UUID(job.group_id),
+                MaterialGroup.team_id == job.team_id,
+            )
+        )
         if group is None:
             raise KeyError(job.group_id)
         return _verification_group_payload(session, group)
@@ -1364,7 +1379,7 @@ def _process_verification_job(job: MaintenanceJob) -> None:
             {"recognize": lambda photo: _recognize_group_photo(group, dict(photo))},
         )
         get_state_repository().apply_group_scan_result(
-            job.group_id,
+            str(group.get("id") or job.group_id),
             result,
             claimed_evidence_fingerprint=job.evidence_fingerprint,
             claimed_evidence_version=job.evidence_version,
@@ -1380,7 +1395,7 @@ def _process_archive_job(job: MaintenanceJob) -> None:
     token = local_simulation.set_current_team(job.team_id)
     try:
         auto_archive_verified_group(
-            job.group_id,
+            job.business_group_id or job.group_id,
             actor=WORKER_ACTOR,
             lease_owner=job.lease_owner,
             lease_token=job.lease_token,

@@ -18,7 +18,10 @@ if str(ROOT) not in sys.path:
 from app.database import SessionLocal  # noqa: E402
 from app.models import GroupStatus, MaterialGroup, Photo  # noqa: E402
 from app.services.final_delivery_export import collect_delivery_validation_errors  # noqa: E402
-from app.services.group_barcode_verification import evaluate_group_eligibility  # noqa: E402
+from app.services.group_barcode_verification import (  # noqa: E402
+    evaluate_group_eligibility,
+    normalize_verification_group_identity,
+)
 from app.services.local_simulation import (  # noqa: E402
     CONSTRUCTION_SLOT_CATEGORIES,
     is_valid_photo_evidence,
@@ -119,7 +122,7 @@ def project_backfill_groups(groups: Iterable[Any], photos: Iterable[Any]) -> lis
             and slot_counts[(group_key, slot)] == 1
         )
         projected_groups[group_key]["photos"].append(_projected_photo(photo, slot if is_candidate else category))
-    return [projected_groups[key] for key in group_order]
+    return [normalize_verification_group_identity(projected_groups[key]) for key in group_order]
 
 
 def load_projected_groups(session: Any, *, team_id: str = "") -> list[dict[str, Any]]:

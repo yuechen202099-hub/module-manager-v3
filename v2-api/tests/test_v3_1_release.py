@@ -15,7 +15,7 @@ from app.models import GroupStatus, MaterialGroup, Photo, PhotoUploadStatus
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 API_ROOT = REPOSITORY_ROOT / "v2-api"
-EXPECTED_VERSION = "3.1.0"
+EXPECTED_VERSION = "3.1.1"
 
 
 def read(relative_path: str) -> str:
@@ -384,6 +384,39 @@ def test_v3_1_preview_loads_all_team_groups_then_bulk_preloads_photos() -> None:
     assert "no_groups" not in summary["estimated_export_error_reasons"]
 
 
+def test_v3_1_preview_reuses_worker_identity_fallbacks() -> None:
+    preview = load_script("preview_v3_1_identity_fallbacks", "v2-api/scripts/preview_v3_1_backfill.py")
+    construction_identity = _production_group("construction-identity", "team-a")
+    construction_identity.raw_data = {
+        "construction_collector": "COL-CONSTRUCTION",
+        "construction_module_asset_no": "MOD-CONSTRUCTION",
+    }
+    photo_identity = _production_group("photo-identity", "team-a")
+    photo_identity.raw_data = {}
+    groups = [construction_identity, photo_identity]
+    photos = [
+        _production_photo(group, index, slot)
+        for group in groups
+        for index, slot in enumerate(
+            ("before_box", "collector_barcode", "module_meter", "after_box"),
+            start=1,
+        )
+    ]
+    photo_identity_photos = [photo for photo in photos if photo.group_id == photo_identity.id]
+    photo_identity_photos[0].collector = "COL-PHOTO"
+    photo_identity_photos[0].asset_no = "MOD-PHOTO"
+
+    projected = preview.project_backfill_groups(groups, photos)
+    summary = preview.summarize_preview({"mode": "preview", "projected_groups": projected})
+
+    assert projected[0]["collector"] == "COL-CONSTRUCTION"
+    assert projected[0]["module_asset_no"] == "MOD-CONSTRUCTION"
+    assert projected[1]["collector"] == "COL-PHOTO"
+    assert projected[1]["module_asset_no"] == "MOD-PHOTO"
+    assert summary["queueable"] == 2
+    assert summary["unscannable"] == 0
+
+
 @pytest.mark.parametrize("argv", [[], ["--preview"]])
 def test_v3_1_preview_default_and_explicit_preview_are_read_only(monkeypatch, capsys, argv: list[str]) -> None:
     preview = load_script(f"preview_v3_1_read_only_{len(argv)}", "v2-api/scripts/preview_v3_1_backfill.py")
@@ -578,7 +611,7 @@ def test_task_review_performance_cli_description_is_not_bound_to_v3084() -> None
     source = read("v2-api/scripts/verify_task_review_performance.py")
 
     assert "V3.0.84" not in source
-    assert "V3.1.0" in source or "task and review performance thresholds" in source
+    assert "V3.1.1" in source or "task and review performance thresholds" in source
 
 
 def test_v3_1_release_package_contains_new_release_guards() -> None:
@@ -617,7 +650,7 @@ def test_v3_1_package_builder_blocks_without_verified_performance_evidence() -> 
     package_sop = read("docs/sop/05-release-package-and-hash.md")
 
     assert '[string]$PerformanceReport = ""' in builder
-    assert "Performance report is required for V3.1.0 packaging" in builder
+    assert "Performance report is required for V3.1.1 packaging" in builder
     assert "verify_v3_1_release.py" in builder
     assert "--performance-report $performanceReportPath" in builder
     assert "--expected-source-commit $sourceCommit" in builder
