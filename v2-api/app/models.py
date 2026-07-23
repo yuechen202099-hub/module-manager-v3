@@ -572,12 +572,15 @@ class ExportJob(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = uuid_column()
     team_id: Mapped[str | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    job_type: Mapped[ExportJobType] = mapped_column(pg_enum(ExportJobType, "export_job_type"), nullable=False)
+    job_type: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[JobStatus] = mapped_column(
         pg_enum(JobStatus, "job_status"), nullable=False, default=JobStatus.PENDING
     )
     object_key: Mapped[str | None] = mapped_column(String(512))
     file_name: Mapped[str | None] = mapped_column(String(255))
+    filter_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    content_path: Mapped[str | None] = mapped_column(Text)
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
     row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     progress: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)

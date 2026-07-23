@@ -12,7 +12,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import BarcodeMaintenanceControl, DeliveryPackageJob
+from app.models import BarcodeMaintenanceControl, DeliveryPackageJob, ExportJob, JobStatus
 from app.services import local_simulation
 from app.services.final_delivery_export import (
     PACKAGE_TTL,
@@ -575,6 +575,67 @@ def _package_metadata(path: Path, expected_fingerprint: str) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def _sync_json_export_jobs_for_delivery_package(
+    state: dict[str, Any],
+    claim: DeliveryPackageClaim,
+    *,
+    status: str,
+    package_path: Path | None = None,
+    content_sha256: str = "",
+    size_bytes: int | None = None,
+    error: str = "",
+    updated_at: datetime,
+) -> None:
+    for export_job in state.setdefault("export_jobs", []):
+        params = export_job.setdefault("params", {})
+        if str(params.get("delivery_package_job_id") or "") != claim.job_id:
+            continue
+        export_job["status"] = status
+        export_job["updated_at"] = updated_at.isoformat()
+        export_job["error_message"] = error
+        if status == "succeeded" and package_path is not None:
+            export_job["content_path"] = str(Path(package_path).resolve())
+            export_job["object_key"] = str(Path(package_path).resolve())
+            export_job["content_sha256"] = content_sha256
+            export_job["size_bytes"] = size_bytes
+            export_job["progress"] = 100
+            export_job["finished_at"] = updated_at.isoformat()
+        elif status == "failed":
+            export_job["progress"] = 0
+
+
+def _sync_postgres_export_jobs_for_delivery_package(
+    session: Session,
+    claim: DeliveryPackageClaim,
+    *,
+    status: JobStatus,
+    package_path: Path | None = None,
+    content_sha256: str | None = None,
+    error: str | None = None,
+    updated_at: datetime,
+) -> None:
+    rows = session.scalars(
+        select(ExportJob)
+        .where(
+            ExportJob.team_id == claim.team_id,
+            ExportJob.params["delivery_package_job_id"].astext == claim.job_id,
+        )
+        .with_for_update()
+    ).all()
+    for row in rows:
+        row.status = status
+        row.updated_at = updated_at
+        row.error_message = error
+        if status == JobStatus.SUCCEEDED and package_path is not None:
+            resolved = str(Path(package_path).resolve())
+            row.content_path = resolved
+            row.content_sha256 = content_sha256
+            row.progress = 100
+            row.finished_at = updated_at
+        elif status == JobStatus.FAILED:
+            row.progress = 0
+
+
 def complete_json_delivery_package_job(
     claim: DeliveryPackageClaim,
     package_path: Path,
@@ -600,6 +661,15 @@ def complete_json_delivery_package_job(
                 "completed_at": completed_at.isoformat(),
                 "updated_at": completed_at.isoformat(),
             }
+        )
+        _sync_json_export_jobs_for_delivery_package(
+            transaction.working_state,
+            claim,
+            status="succeeded",
+            package_path=package_path,
+            content_sha256=content_sha256,
+            size_bytes=size_bytes,
+            updated_at=completed_at,
         )
         local_simulation.finish_authoritative_json_write(transaction, token)
     except BaseException:
@@ -639,6 +709,14 @@ def complete_postgres_delivery_package_job(
         job.size_bytes = size_bytes
         job.last_error = None
         job.completed_at = completed_at
+        _sync_postgres_export_jobs_for_delivery_package(
+            session,
+            claim,
+            status=JobStatus.SUCCEEDED,
+            package_path=package_path,
+            content_sha256=content_sha256,
+            updated_at=completed_at,
+        )
         session.commit()
 
 
@@ -662,6 +740,13 @@ def fail_json_delivery_package_job(
                 "last_error": str(error)[:500],
                 "updated_at": failed_at.isoformat(),
             }
+        )
+        _sync_json_export_jobs_for_delivery_package(
+            transaction.working_state,
+            claim,
+            status="failed",
+            error=str(error)[:500],
+            updated_at=failed_at,
         )
         local_simulation.finish_authoritative_json_write(transaction, token)
     except BaseException:
@@ -697,4 +782,11 @@ def fail_postgres_delivery_package_job(
         job.lease_expires_at = None
         job.last_error = str(error)[:500]
         job.updated_at = failed_at
+        _sync_postgres_export_jobs_for_delivery_package(
+            session,
+            claim,
+            status=JobStatus.FAILED,
+            error=str(error)[:500],
+            updated_at=failed_at,
+        )
         session.commit()

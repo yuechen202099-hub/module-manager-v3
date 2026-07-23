@@ -174,6 +174,7 @@ def blank_state(team_id: str = DEFAULT_TEAM_ID) -> dict[str, Any]:
         "review_events": [],
         "photo_events": [],
         "audit_events": [],
+        "export_jobs": [],
         "unmatched_finalization_replays": {},
         "barcode_maintenance_control": {
             "paused": True,
@@ -322,6 +323,7 @@ def state_for_team(team_id: str | None = None) -> dict[str, Any]:
             {"paused": True, "last_batch_id": "", "last_batch_progress": 0},
         )
         state.setdefault("delivery_cache_jobs", [])
+        state.setdefault("export_jobs", [])
         state["summary"]["team_id"] = team
         return state
     if team not in _team_states:
@@ -333,6 +335,7 @@ def state_for_team(team_id: str | None = None) -> dict[str, Any]:
         {"paused": True, "last_batch_id": "", "last_batch_progress": 0},
     )
     _team_states[team].setdefault("delivery_cache_jobs", [])
+    _team_states[team].setdefault("export_jobs", [])
     _team_states[team]["summary"]["team_id"] = team
     return _team_states[team]
 

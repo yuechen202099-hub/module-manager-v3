@@ -1,12 +1,16 @@
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
 from app.core.security import decode_access_token
+from app.core.responses import ok
 from app.api.routes.auth import require_admin
+from app.schemas.export_center import ExportJobCreateRequest
 from app.schemas.export import ExceptionMetersExportRequest, FinalDeliveryExportRequest, TaskDetailExportRequest
+from app.services import export_center
+from app.services.state_repository import StateBackendNotReady
 from app.services.state_repository import get_state_repository
 from app.services.final_delivery_export import (
     DeliveryPackageValidationError,
@@ -42,6 +46,17 @@ async def use_team_context(request: Request):
 router = APIRouter(prefix="/exports", dependencies=[Depends(use_team_context)])
 
 
+def state_repository():
+    try:
+        return get_state_repository()
+    except StateBackendNotReady as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def actor_from_auth(auth: dict) -> str:
+    return str(auth.get("username") or auth.get("sub") or "")
+
+
 class LeasedFileResponse(Response):
     def __init__(self, response: FileResponse, package: LeasedDeliveryPackage):
         self.response = response
@@ -61,7 +76,7 @@ class LeasedFileResponse(Response):
 @router.post("/task-detail")
 def export_task_detail(payload: TaskDetailExportRequest, request: Request, auth: dict = Depends(require_admin)):
     try:
-        content = get_state_repository().build_task_detail_export(payload.task_id)
+        content = state_repository().build_task_detail_export(payload.task_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Task not found") from exc
     filename = f"task-detail-{payload.task_id}-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
@@ -75,7 +90,7 @@ def export_final_delivery(
     auth: dict = Depends(require_admin),
 ):
     try:
-        package = get_state_repository().request_final_delivery_export(
+        package = state_repository().request_final_delivery_export(
             task_id=payload.task_id,
             terminal=payload.terminal,
             review_scope=payload.review_scope,
@@ -123,16 +138,110 @@ def export_exception_meters(
     auth: dict = Depends(require_admin),
 ):
     reviewer = scoped_exception_reviewer(payload.reviewer.strip(), request)
-    content = get_state_repository().build_exception_meter_export(reviewer=reviewer)
+    content = state_repository().build_exception_meter_export(reviewer=reviewer)
     filename = f"exception-meters-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
     return excel_response(content, filename)
 
 
 @router.post("/project-outside")
 def export_project_outside(request: Request, auth: dict = Depends(require_admin)):
-    content = get_state_repository().build_project_outside_export()
+    content = state_repository().build_project_outside_export()
     filename = f"project-outside-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
     return excel_response(content, filename)
+
+
+@router.get("/catalog")
+def export_catalog(request: Request, auth: dict = Depends(require_admin)):
+    return ok(request, {"items": list(export_center.EXPORT_CATALOG)})
+
+
+@router.get("/terminal-readiness")
+def terminal_readiness(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20),
+    query: str = "",
+    auth: dict = Depends(require_admin),
+):
+    try:
+        normalized_page_size = export_center.normalize_export_page_size(page_size)
+        data = state_repository().list_terminal_delivery_readiness(
+            page=page,
+            page_size=normalized_page_size,
+            query=query,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ok(request, data)
+
+
+@router.get("/jobs")
+def export_jobs(
+    request: Request,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20),
+    job_type: str = "",
+    auth: dict = Depends(require_admin),
+):
+    try:
+        normalized_page_size = export_center.normalize_export_page_size(page_size)
+        data = state_repository().list_export_jobs(
+            page=page,
+            page_size=normalized_page_size,
+            job_type=job_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ok(request, data)
+
+
+@router.post("/jobs")
+def create_export_job(payload: ExportJobCreateRequest, request: Request, auth: dict = Depends(require_admin)):
+    actor = actor_from_auth(auth)
+    try:
+        job = state_repository().create_export_job(
+            job_type=payload.job_type,
+            filters=payload.filters,
+            actor=actor,
+        )
+        state_repository().append_audit_event(
+            "export_job_created",
+            actor,
+            {
+                "job_id": job["id"],
+                "job_type": payload.job_type,
+                "filters": payload.filters,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    data = {key: value for key, value in job.items() if key != "content"}
+    return ok(request, data)
+
+
+@router.get("/jobs/{job_id}/download")
+def download_export_job(job_id: str, request: Request, auth: dict = Depends(require_admin)):
+    actor = actor_from_auth(auth)
+    try:
+        download = state_repository().open_export_job_download(job_id, actor=actor)
+        state_repository().append_audit_event(
+            "export_job_downloaded",
+            actor,
+            {
+                "job_id": job_id,
+                "job_type": download.get("job_type") or "",
+                "file_name": download.get("file_name") or "",
+            },
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Export job not found") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="Export job is not ready") from exc
+    return Response(
+        content=download["content"],
+        media_type=download.get("media_type") or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{download["file_name"]}"'},
+    )
 
 
 def scoped_exception_reviewer(requested_reviewer: str, request: Request) -> str:

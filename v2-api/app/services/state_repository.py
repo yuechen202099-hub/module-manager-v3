@@ -24,8 +24,10 @@ from app.models import (
     DeliveryCacheJob,
     ExceptionItem,
     ExceptionStatus,
+    ExportJob,
     GroupBarcodeVerification,
     GroupStatus,
+    JobStatus,
     MaterialGroup,
     Photo,
     PhotoUploadStatus,
@@ -41,6 +43,7 @@ from app.models import (
 from app.schemas.data_center import DataCenterQuery
 from app.services import data_center as data_center_service
 from app.services import account_store
+from app.services import export_center
 from app.services.barcode_verification_contract import (
     DURABLE_STATUSES,
     EXCEPTION_STATUSES,
@@ -2267,6 +2270,85 @@ def _unmatched_duplicate_keys(records: list[UnmatchedRecord]) -> set[str]:
     return keys
 
 
+def _export_job_payload(job: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(job.get("id") or ""),
+        "job_type": str(job.get("job_type") or ""),
+        "status": str(getattr(job.get("status"), "value", job.get("status")) or ""),
+        "file_name": str(job.get("file_name") or ""),
+        "row_count": int(job.get("row_count") or 0),
+        "progress": float(job.get("progress") or 0),
+        "error_message": str(job.get("error_message") or ""),
+        "filters": deepcopy(dict(job.get("filter_snapshot") or job.get("params") or {})),
+        "created_by": str(job.get("created_by") or ""),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+        "finished_at": job.get("finished_at"),
+    }
+
+
+def _terminal_readiness_item(terminal: str, groups: list[Mapping[str, Any]]) -> dict[str, Any]:
+    group_count = len(groups)
+    constructed_count = sum(1 for group in groups if int(group.get("photo_count") or 0) >= 4)
+    archived_count = sum(
+        1
+        for group in groups
+        if str(group.get("archive_status") or "").strip() == "archived"
+        or str(group.get("status") or "").strip() in {"approved", "completed"}
+    )
+    cache_ready_count = 0
+    for group in groups:
+        photos = [
+            photo
+            for photo in group.get("photos") or []
+            if isinstance(photo, Mapping) and photo.get("is_active") is not False
+        ]
+        if (
+            int(group.get("photo_count") or len(photos) or 0) >= 4
+            and (
+                str(group.get("archive_status") or "").strip() == "archived"
+                or str(group.get("status") or "").strip() in {"approved", "completed"}
+            )
+            and photos
+            and all(str(photo.get("delivery_cache_status") or "").strip() == "ready" for photo in photos)
+        ):
+            cache_ready_count += 1
+    blockers: list[str] = []
+    if constructed_count < group_count:
+        blockers.append(f"{group_count - constructed_count} 个资料组未施工")
+    if archived_count < group_count:
+        blockers.append(f"{group_count - archived_count} 个资料组未归档")
+    if cache_ready_count < archived_count:
+        blockers.append(f"{archived_count - cache_ready_count} 个已归档资料组缓存未就绪")
+    return {
+        "terminal": terminal,
+        "group_count": group_count,
+        "constructed_count": constructed_count,
+        "archived_count": archived_count,
+        "cache_ready_count": cache_ready_count,
+        "status": "ready" if group_count > 0 and not blockers else "blocked",
+        "blockers": blockers,
+    }
+
+
+def _file_download_payload(job: Mapping[str, Any]) -> dict[str, Any]:
+    content = job.get("content")
+    if isinstance(content, bytes):
+        payload_content = content
+    else:
+        path = str(job.get("content_path") or job.get("object_key") or "")
+        if not path:
+            raise FileNotFoundError(str(job.get("id") or ""))
+        payload_content = export_center.read_export_content(path)
+    return {
+        "id": str(job.get("id") or ""),
+        "job_type": str(job.get("job_type") or ""),
+        "file_name": str(job.get("file_name") or f"{job.get('job_type') or 'export'}.bin"),
+        "media_type": str(job.get("media_type") or "application/octet-stream"),
+        "content": payload_content,
+    }
+
+
 class StateRepository(ABC):
     @abstractmethod
     def summary(self) -> dict[str, Any]:
@@ -2682,6 +2764,26 @@ class StateRepository(ABC):
 
     @abstractmethod
     def list_audit_events(self, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def append_audit_event(self, action: str, actor: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_terminal_delivery_readiness(self, *, page: int = 1, page_size: int = 20, query: str = "") -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_export_jobs(self, *, page: int = 1, page_size: int = 20, job_type: str = "") -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_export_job(self, *, job_type: str, filters: dict[str, Any], actor: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def open_export_job_download(self, job_id: str, *, actor: str) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -3851,6 +3953,128 @@ class JsonStateRepository(StateRepository):
 
     def list_audit_events(self, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         return local_simulation.list_audit_events(limit=limit, offset=offset)
+
+    def append_audit_event(self, action: str, actor: str, payload: dict[str, Any]) -> dict[str, Any]:
+        event = local_simulation.append_audit_event(action, actor, payload)
+        local_simulation.save_all_team_states()
+        return event
+
+    def list_terminal_delivery_readiness(self, *, page: int = 1, page_size: int = 20, query: str = "") -> dict[str, Any]:
+        page_size = export_center.normalize_export_page_size(page_size)
+        page = max(1, int(page or 1))
+        query_text = str(query or "").strip().lower()
+        groups_by_terminal: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for group in deepcopy(local_simulation.get_state().get("groups", [])):
+            terminal = str(group.get("terminal") or "").strip()
+            if not terminal:
+                continue
+            if query_text and query_text not in terminal.lower():
+                continue
+            groups_by_terminal[terminal].append(group)
+        items = [
+            _terminal_readiness_item(terminal, groups)
+            for terminal, groups in sorted(groups_by_terminal.items(), key=lambda item: item[0])
+        ]
+        offset = (page - 1) * page_size
+        return {"page": page, "page_size": page_size, "total": len(items), "items": items[offset : offset + page_size]}
+
+    def list_export_jobs(self, *, page: int = 1, page_size: int = 20, job_type: str = "") -> dict[str, Any]:
+        page_size = export_center.normalize_export_page_size(page_size)
+        page = max(1, int(page or 1))
+        requested_type = str(job_type or "").strip()
+        jobs = [
+            dict(job)
+            for job in local_simulation.get_state().setdefault("export_jobs", [])
+            if not requested_type or str(job.get("job_type") or "") == requested_type
+        ]
+        jobs.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")), reverse=True)
+        offset = (page - 1) * page_size
+        return {
+            "page": page,
+            "page_size": page_size,
+            "total": len(jobs),
+            "items": [_export_job_payload(job) for job in jobs[offset : offset + page_size]],
+        }
+
+    def create_export_job(self, *, job_type: str, filters: dict[str, Any], actor: str) -> dict[str, Any]:
+        job_type = str(job_type or "").strip()
+        if job_type not in export_center.CATALOG_BY_KEY:
+            raise ValueError(f"Unsupported export job type: {job_type}")
+        filters = deepcopy(dict(filters or {}))
+        job_id = export_center.new_export_job_id()
+        now = datetime.now(UTC).isoformat()
+        filename = ""
+        content_path = ""
+        content_sha256 = ""
+        size_bytes = None
+        status = "pending"
+        progress = 0
+        params: dict[str, Any] = {}
+        if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
+            params.update(export_center.request_background_export(self, job_type=job_type, filters=filters, actor=actor))
+            status = str(params.get("status") or "pending")
+            progress = 100 if status == "succeeded" else 0
+            content_path = str(params.get("content_path") or "")
+            content_sha256 = str(params.get("content_sha256") or "")
+            size_bytes = params.get("size_bytes")
+            filename = export_center.export_filename(job_type, "zip")
+        else:
+            content, filename, _media_type = export_center.build_inline_export_content(
+                self,
+                job_type=job_type,
+                filters=filters,
+            )
+            content_path, content_sha256, size_bytes = export_center.write_export_content(
+                content,
+                job_id=job_id,
+                filename=filename,
+            )
+            status = "succeeded"
+            progress = 100
+        job = {
+            "id": job_id,
+            "team_id": local_simulation.current_team_id(),
+            "job_type": job_type,
+            "status": status,
+            "file_name": filename,
+            "filter_snapshot": filters,
+            "params": {**filters, **params},
+            "content_path": content_path,
+            "content_sha256": content_sha256,
+            "size_bytes": size_bytes,
+            "row_count": 0,
+            "progress": progress,
+            "error_message": "",
+            "created_by": actor,
+            "created_at": now,
+            "updated_at": now,
+            "finished_at": now if status == "succeeded" else "",
+        }
+        transaction = local_simulation.begin_authoritative_json_write(local_simulation.current_team_id())
+        token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            transaction.working_state.setdefault("export_jobs", []).append(job)
+            local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        return _export_job_payload(job)
+
+    def open_export_job_download(self, job_id: str, *, actor: str) -> dict[str, Any]:
+        job = next(
+            (
+                dict(item)
+                for item in local_simulation.get_state().setdefault("export_jobs", [])
+                if str(item.get("id") or "") == str(job_id)
+            ),
+            None,
+        )
+        if job is None:
+            raise KeyError(job_id)
+        if str(job.get("status") or "") != "succeeded":
+            raise FileNotFoundError(job_id)
+        return _file_download_payload(job)
 
     def list_construction_tasks(self, *, actor: str = "", include_closed: bool = False) -> list[dict[str, Any]]:
         return local_simulation.list_construction_tasks(actor=actor, include_closed=include_closed)
@@ -8370,6 +8594,248 @@ class PostgresStateRepository(StateRepository):
                     for row in rows
                 ],
             }
+
+    def append_audit_event(self, action: str, actor: str, payload: dict[str, Any]) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            event = AuditLog(
+                team_id=team_id,
+                legacy_id=f"audit-{uuid4().hex}",
+                actor_username=actor,
+                action=action,
+                entity_type="export_job",
+                payload=unmatched_review.redact_audit_photo_secrets(deepcopy(payload)),
+            )
+            session.add(event)
+            session.commit()
+            return {
+                "id": event.legacy_id,
+                "action": event.action,
+                "actor": event.actor_username or "",
+                "payload": event.payload or {},
+                "created_at": event.created_at.isoformat() if event.created_at else None,
+            }
+
+    def list_terminal_delivery_readiness(self, *, page: int = 1, page_size: int = 20, query: str = "") -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        page_size = export_center.normalize_export_page_size(page_size)
+        page = max(1, int(page or 1))
+        query_text = str(query or "").strip()
+        photo_counts = (
+            select(
+                Photo.group_id.label("group_id"),
+                func.count(Photo.id).label("active_photo_count"),
+                func.coalesce(
+                    func.sum(case((Photo.raw_data["delivery_cache_status"].astext == "ready", 1), else_=0)),
+                    0,
+                ).label("ready_photo_count"),
+            )
+            .where(Photo.team_id == team_id, Photo.is_active.is_(True))
+            .group_by(Photo.group_id)
+            .subquery()
+        )
+        archived_condition = or_(
+            MaterialGroup.status == GroupStatus.APPROVED,
+            MaterialGroup.raw_data["archive_status"].astext == "archived",
+        )
+        constructed_condition = or_(
+            MaterialGroup.photo_count >= 4,
+            func.coalesce(photo_counts.c.active_photo_count, 0) >= 4,
+        )
+        cache_ready_condition = and_(
+            archived_condition,
+            constructed_condition,
+            func.coalesce(photo_counts.c.active_photo_count, 0) >= 4,
+            func.coalesce(photo_counts.c.active_photo_count, 0) == func.coalesce(photo_counts.c.ready_photo_count, 0),
+        )
+        statement = (
+            select(
+                MaterialGroup.terminal.label("terminal"),
+                func.count(MaterialGroup.id).label("group_count"),
+                func.coalesce(func.sum(case((constructed_condition, 1), else_=0)), 0).label("constructed_count"),
+                func.coalesce(func.sum(case((archived_condition, 1), else_=0)), 0).label("archived_count"),
+                func.coalesce(func.sum(case((cache_ready_condition, 1), else_=0)), 0).label("cache_ready_count"),
+            )
+            .select_from(MaterialGroup)
+            .outerjoin(photo_counts, photo_counts.c.group_id == MaterialGroup.id)
+            .where(MaterialGroup.team_id == team_id, MaterialGroup.terminal.is_not(None), MaterialGroup.terminal != "")
+            .group_by(MaterialGroup.terminal)
+            .order_by(MaterialGroup.terminal)
+        )
+        if query_text:
+            statement = statement.where(MaterialGroup.terminal.ilike(f"%{query_text}%"))
+        with self._session() as session:
+            rows = session.execute(statement).all()
+        items = []
+        for row in rows:
+            item = {
+                "terminal": str(row.terminal or ""),
+                "group_count": int(row.group_count or 0),
+                "constructed_count": int(row.constructed_count or 0),
+                "archived_count": int(row.archived_count or 0),
+                "cache_ready_count": int(row.cache_ready_count or 0),
+            }
+            blockers: list[str] = []
+            if item["constructed_count"] < item["group_count"]:
+                blockers.append(f"{item['group_count'] - item['constructed_count']} 个资料组未施工")
+            if item["archived_count"] < item["group_count"]:
+                blockers.append(f"{item['group_count'] - item['archived_count']} 个资料组未归档")
+            if item["cache_ready_count"] < item["archived_count"]:
+                blockers.append(f"{item['archived_count'] - item['cache_ready_count']} 个已归档资料组缓存未就绪")
+            item["status"] = "ready" if item["group_count"] > 0 and not blockers else "blocked"
+            item["blockers"] = blockers
+            items.append(item)
+        offset = (page - 1) * page_size
+        return {"page": page, "page_size": page_size, "total": len(items), "items": items[offset : offset + page_size]}
+
+    def list_export_jobs(self, *, page: int = 1, page_size: int = 20, job_type: str = "") -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        page_size = export_center.normalize_export_page_size(page_size)
+        page = max(1, int(page or 1))
+        statement = select(ExportJob).where(ExportJob.team_id == team_id)
+        requested_type = str(job_type or "").strip()
+        if requested_type:
+            statement = statement.where(ExportJob.job_type == requested_type)
+        with self._session() as session:
+            total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+            rows = session.scalars(
+                statement.order_by(ExportJob.created_at.desc(), ExportJob.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            ).all()
+        return {
+            "page": page,
+            "page_size": page_size,
+            "total": int(total),
+            "items": [
+                _export_job_payload(
+                    {
+                        "id": row.id,
+                        "job_type": row.job_type,
+                        "status": row.status,
+                        "file_name": row.file_name,
+                        "row_count": row.row_count,
+                        "progress": row.progress,
+                        "error_message": row.error_message,
+                        "filter_snapshot": row.filter_snapshot,
+                        "created_at": row.created_at.isoformat() if row.created_at else None,
+                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                    }
+                )
+                for row in rows
+            ],
+        }
+
+    def _export_project_id(self, session: Session):
+        project = session.scalar(
+            select(Project)
+            .where(Project.team_id == local_simulation.current_team_id())
+            .order_by(Project.created_at, Project.id)
+            .limit(1)
+        )
+        if project is None:
+            raise ValueError("Export jobs require a project in the current team")
+        return project.id
+
+    def create_export_job(self, *, job_type: str, filters: dict[str, Any], actor: str) -> dict[str, Any]:
+        job_type = str(job_type or "").strip()
+        if job_type not in export_center.CATALOG_BY_KEY:
+            raise ValueError(f"Unsupported export job type: {job_type}")
+        filters = deepcopy(dict(filters or {}))
+        job_id = export_center.new_export_job_id()
+        filename = ""
+        content_path = ""
+        content_sha256 = ""
+        size_bytes = None
+        status = JobStatus.PENDING
+        progress = 0
+        params: dict[str, Any] = {}
+        if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
+            params.update(export_center.request_background_export(self, job_type=job_type, filters=filters, actor=actor))
+            status = JobStatus.SUCCEEDED if params.get("status") == "succeeded" else JobStatus.PENDING
+            progress = 100 if status == JobStatus.SUCCEEDED else 0
+            content_path = str(params.get("content_path") or "")
+            content_sha256 = str(params.get("content_sha256") or "")
+            size_bytes = params.get("size_bytes")
+            filename = export_center.export_filename(job_type, "zip")
+        else:
+            content, filename, _media_type = export_center.build_inline_export_content(
+                self,
+                job_type=job_type,
+                filters=filters,
+            )
+            content_path, content_sha256, size_bytes = export_center.write_export_content(
+                content,
+                job_id=job_id,
+                filename=filename,
+            )
+            status = JobStatus.SUCCEEDED
+            progress = 100
+        now = datetime.now(UTC)
+        with self._session() as session:
+            try:
+                row = ExportJob(
+                    id=UUID(job_id),
+                    team_id=local_simulation.current_team_id(),
+                    project_id=self._export_project_id(session),
+                    job_type=job_type,
+                    status=status,
+                    file_name=filename,
+                    filter_snapshot=filters,
+                    content_path=content_path,
+                    content_sha256=content_sha256,
+                    row_count=0,
+                    progress=progress,
+                    params={**filters, **params, "size_bytes": size_bytes},
+                    finished_at=now if status == JobStatus.SUCCEEDED else None,
+                )
+                session.add(row)
+                session.commit()
+                return _export_job_payload(
+                    {
+                        "id": row.id,
+                        "job_type": row.job_type,
+                        "status": row.status,
+                        "file_name": row.file_name,
+                        "row_count": row.row_count,
+                        "progress": row.progress,
+                        "error_message": row.error_message,
+                        "filter_snapshot": row.filter_snapshot,
+                        "created_by": actor,
+                        "created_at": row.created_at.isoformat() if row.created_at else None,
+                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                    }
+                )
+            except Exception:
+                session.rollback()
+                raise
+
+    def open_export_job_download(self, job_id: str, *, actor: str) -> dict[str, Any]:
+        try:
+            parsed_id = UUID(str(job_id))
+        except ValueError as exc:
+            raise KeyError(job_id) from exc
+        with self._session() as session:
+            row = session.scalar(
+                select(ExportJob).where(
+                    ExportJob.team_id == local_simulation.current_team_id(),
+                    ExportJob.id == parsed_id,
+                )
+            )
+            if row is None:
+                raise KeyError(job_id)
+            if row.status != JobStatus.SUCCEEDED:
+                raise FileNotFoundError(job_id)
+            return _file_download_payload(
+                {
+                    "id": row.id,
+                    "job_type": row.job_type,
+                    "file_name": row.file_name,
+                    "content_path": row.content_path or row.object_key,
+                }
+            )
 
     def record_construction_activity_event(
         self,

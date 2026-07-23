@@ -150,3 +150,25 @@ def test_data_center_query_index_downgrade_drops_only_created_indexes() -> None:
     assert "DROP INDEX ix_material_groups_data_center_team_status_updated" in downgrade
     assert "DROP TABLE" not in downgrade
     assert "DROP TYPE" not in downgrade
+
+
+def test_export_center_jobs_migration_is_reversible_and_non_enum() -> None:
+    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0014_export_center_jobs.py"
+    assert path.exists()
+    migration = load_migration_module(path.name)
+    upgrade = render_postgresql_ddl("upgrade", path.name)
+    downgrade = render_postgresql_ddl("downgrade", path.name)
+
+    assert migration.revision == "20260724_0014"
+    assert migration.down_revision == "20260723_0013"
+    assert "ALTER TABLE export_jobs ALTER COLUMN job_type TYPE VARCHAR(64)" in upgrade
+    assert "ADD COLUMN filter_snapshot JSONB DEFAULT '{}'::jsonb NOT NULL" in upgrade
+    assert "ADD COLUMN content_path TEXT" in upgrade
+    assert "ADD COLUMN content_sha256 VARCHAR(64)" in upgrade
+    assert "CREATE INDEX ix_export_jobs_team_type_created" in upgrade
+    assert "CREATE TYPE" not in upgrade
+    assert "DROP INDEX ix_export_jobs_team_type_created" in downgrade
+    assert "DROP COLUMN content_sha256" in downgrade
+    assert "DROP COLUMN content_path" in downgrade
+    assert "DROP COLUMN filter_snapshot" in downgrade
+    assert "DROP TYPE" not in downgrade
