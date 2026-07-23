@@ -310,6 +310,8 @@ export type DataCenterBarcodeFilterStatus =
   | 'ineligible'
   | 'verified'
   | 'needs_review'
+export type DataCenterBarcodeEligibility = 'all' | 'eligible' | 'ineligible'
+export type DataCenterInstallerSource = 'all' | 'photo'
 export type DataCenterTerminalFilterStatus = 'all' | 'completed' | 'incomplete' | 'pending_archive' | 'archived'
 
 export type DataCenterRow = {

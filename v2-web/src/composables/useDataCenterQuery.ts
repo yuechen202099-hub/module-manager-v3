@@ -4,7 +4,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { fetchDataCenterRows } from '@/api/services'
 import type {
   DataCenterBarcodeFilterStatus,
+  DataCenterBarcodeEligibility,
   DataCenterDataType,
+  DataCenterInstallerSource,
   DataCenterPageSize,
   DataCenterRow,
   DataCenterTerminalFilterStatus,
@@ -20,9 +22,11 @@ export interface DataCenterRouteQuery {
   terminalStatus: DataCenterTerminalFilterStatus
   archiveStatus: string
   barcodeStatus: DataCenterBarcodeFilterStatus
+  barcodeEligibility: DataCenterBarcodeEligibility
   classificationStatus: string
   exceptionStatus: string
   installer: string
+  installerSource: DataCenterInstallerSource
   hasPhotos: boolean
   dateFrom: string
   dateTo: string
@@ -43,9 +47,11 @@ const DEFAULT_QUERY: DataCenterRouteQuery = {
   terminalStatus: 'all',
   archiveStatus: 'all',
   barcodeStatus: 'all',
+  barcodeEligibility: 'all',
   classificationStatus: 'all',
   exceptionStatus: '',
   installer: '',
+  installerSource: 'all',
   hasPhotos: false,
   dateFrom: '',
   dateTo: '',
@@ -72,6 +78,8 @@ function routeQueryToState(query: Record<string, unknown>): DataCenterRouteQuery
   const dataType = first(query.data_type || query.dataType)
   const terminalStatus = first(query.terminal_status || query.terminalStatus)
   const barcodeStatus = first(query.barcode_status || query.barcodeStatus)
+  const barcodeEligibility = first(query.barcode_eligibility || query.barcodeEligibility)
+  const installerSource = first(query.installer_source || query.installerSource)
   return {
     page,
     pageSize: pageSize(query.page_size || query.pageSize),
@@ -84,9 +92,13 @@ function routeQueryToState(query: Record<string, unknown>): DataCenterRouteQuery
     barcodeStatus: ['all', 'passed', 'manual', 'manual_confirmed', 'mismatched', 'failed', 'unreadable', 'ineligible', 'verified', 'needs_review'].includes(barcodeStatus)
       ? barcodeStatus as DataCenterBarcodeFilterStatus
       : 'all',
+    barcodeEligibility: ['all', 'eligible', 'ineligible'].includes(barcodeEligibility)
+      ? barcodeEligibility as DataCenterBarcodeEligibility
+      : 'all',
     classificationStatus: first(query.classification_status || query.classificationStatus) || 'all',
     exceptionStatus: first(query.exception_status || query.exceptionStatus),
     installer: first(query.installer),
+    installerSource: ['all', 'photo'].includes(installerSource) ? installerSource as DataCenterInstallerSource : 'all',
     hasPhotos: first(query.has_photos || query.hasPhotos) === '1',
     dateFrom: first(query.date_from || query.dateFrom),
     dateTo: first(query.date_to || query.dateTo),
@@ -110,9 +122,11 @@ function serializeQuery(state: DataCenterRouteQuery) {
     ['terminalStatus', 'terminal_status', state.terminalStatus],
     ['archiveStatus', 'archive_status', state.archiveStatus],
     ['barcodeStatus', 'barcode_status', state.barcodeStatus],
+    ['barcodeEligibility', 'barcode_eligibility', state.barcodeEligibility],
     ['classificationStatus', 'classification_status', state.classificationStatus],
     ['exceptionStatus', 'exception_status', state.exceptionStatus],
     ['installer', 'installer', state.installer],
+    ['installerSource', 'installer_source', state.installerSource],
     ['dateFrom', 'date_from', state.dateFrom],
     ['dateTo', 'date_to', state.dateTo],
     ['activityDateFrom', 'activity_date_from', state.activityDateFrom],
@@ -209,9 +223,11 @@ export function useDataCenterQuery() {
         terminalStatus: query.terminalStatus,
         archiveStatus: query.archiveStatus,
         barcodeStatus: query.barcodeStatus,
+        barcodeEligibility: query.barcodeEligibility,
         classificationStatus: query.classificationStatus,
         exceptionStatus: query.exceptionStatus,
         installer: query.installer,
+        installerSource: query.installerSource,
         hasPhotos: query.hasPhotos,
         dateFrom: query.dateFrom,
         dateTo: query.dateTo,

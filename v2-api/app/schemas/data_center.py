@@ -27,8 +27,10 @@ class DataCenterQuery(BaseModel):
         "needs_review",
     ] = "all"
     classification_status: Literal["all", "complete", "incomplete"] = "all"
+    barcode_eligibility: Literal["all", "eligible", "ineligible"] = "all"
     exception_status: str = ""
     installer: str = ""
+    installer_source: Literal["all", "photo"] = "all"
     has_photos: bool = False
     date_from: date | None = None
     date_to: date | None = None

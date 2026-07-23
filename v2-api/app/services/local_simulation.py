@@ -5238,17 +5238,28 @@ def _data_center_terminal_status_map(groups: list[dict[str, Any]]) -> dict[str, 
     return statuses
 
 
-def _data_center_activity_datetime(group: dict[str, Any], installer: str = "") -> datetime | None:
+def _photo_upload_status_is_valid(photo: dict[str, Any]) -> bool:
+    status = getattr(photo.get("upload_status", "uploaded"), "value", photo.get("upload_status", "uploaded"))
+    return str(status or "").strip().lower() != "invalid"
+
+
+def _data_center_installer_photos(group: dict[str, Any], installer: str = "") -> list[dict[str, Any]]:
     target = str(installer or "").strip()
     aliases = installer_actor_aliases(target) if target else set()
     photos = [
         photo
         for photo in group.get("photos", []) or []
         if isinstance(photo, dict) and photo.get("is_active", True) is not False
+        and _photo_upload_status_is_valid(photo)
+        and _photo_is_construction_upload(photo)
     ]
     if aliases:
         photos = [photo for photo in photos if str(photo.get("creator") or "").strip() in aliases]
-    construction_times = [_photo_work_datetime(photo) for photo in photos if _photo_is_construction_upload(photo)]
+    return photos
+
+
+def _data_center_activity_datetime(group: dict[str, Any], installer: str = "") -> datetime | None:
+    construction_times = [_photo_work_datetime(photo) for photo in _data_center_installer_photos(group, installer)]
     valid_construction_times = [value for value in construction_times if value is not None]
     if valid_construction_times:
         return max(valid_construction_times)
@@ -5270,6 +5281,10 @@ def list_data_center_rows(query) -> dict[str, Any]:
         if kind == "group":
             row = data_center_service.group_row(raw)
             row["_terminal_status"] = terminal_statuses.get(str(row.get("terminal") or "").strip(), "incomplete")
+            row["_barcode_eligible"] = data_center_service.has_current_eligible_photo_set(raw)
+            row["_installer_photo_source_match"] = bool(
+                query.installer.strip() and _data_center_installer_photos(raw, query.installer)
+            )
             row["_activity_at"] = _data_center_activity_datetime(raw, query.installer)
             return row
         row = data_center_service.unmatched_row(raw)

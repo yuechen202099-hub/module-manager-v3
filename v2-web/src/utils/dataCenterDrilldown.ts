@@ -54,18 +54,18 @@ const BUILDERS: Record<
   groups: () => ({ ...BASE_GROUP_QUERY }),
   scanned_groups: () => ({ ...BASE_GROUP_QUERY, has_photos: '1' }),
   archived_groups: () => ({ ...BASE_GROUP_QUERY, archive_status: 'archived' }),
-  barcode_eligible: () => ({ ...BASE_GROUP_QUERY, classification_status: 'complete' }),
+  barcode_eligible: () => ({ ...BASE_GROUP_QUERY, barcode_eligibility: 'eligible' }),
   barcode_passed: () => ({
     ...BASE_GROUP_QUERY,
-    classification_status: 'complete',
+    barcode_eligibility: 'eligible',
     barcode_status: 'verified',
   }),
   barcode_manual_queue: () => ({
     ...BASE_GROUP_QUERY,
-    classification_status: 'complete',
+    barcode_eligibility: 'eligible',
     barcode_status: 'needs_review',
   }),
-  barcode_ineligible: () => ({ ...BASE_GROUP_QUERY, barcode_status: 'ineligible' }),
+  barcode_ineligible: () => ({ ...BASE_GROUP_QUERY, barcode_eligibility: 'ineligible' }),
   unmatched_records: () => ({ data_type: 'unmatched' }),
   exception_missing_photo: () => ({ ...BASE_GROUP_QUERY, exception_status: 'open' }),
   unconstructed_unscanned: () => ({ ...BASE_GROUP_QUERY, construction_status: 'unconstructed' }),
@@ -75,7 +75,7 @@ const BUILDERS: Record<
   terminal_pending_archive: () => ({ ...BASE_GROUP_QUERY, terminal_status: 'pending_archive' }),
   terminal_archived: () => ({ ...BASE_GROUP_QUERY, terminal_status: 'archived' }),
   installer_completed: (context) => withContext(
-    { ...BASE_GROUP_QUERY, construction_status: 'completed' },
+    { ...BASE_GROUP_QUERY, installer_source: 'photo' },
     context,
   ),
 }

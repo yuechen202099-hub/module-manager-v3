@@ -39,8 +39,12 @@ def main() -> None:
     assert_contains(query_composable, "terminalStatus", "query composable must track the terminal_status drilldown key")
     assert_contains(query_composable, "activityDateFrom", "query composable must track the activity-date start key")
     assert_contains(query_composable, "activityDateTo", "query composable must track the activity-date end key")
+    assert_contains(query_composable, "barcodeEligibility", "query composable must track exact barcode eligibility")
+    assert_contains(query_composable, "installerSource", "query composable must track explicit installer source")
     assert_contains(filters, "exceptionOptions", "data center filters must expose exception status options")
     assert_contains(filters, "exceptionStatus", "data center exception status filter must sync through model")
+    assert_contains(filters, "barcodeEligibilityOptions", "data center filters must expose barcode eligibility options")
+    assert_contains(filters, "installerSourceOptions", "data center filters must expose installer source options")
     assert_contains(
         query_composable,
         "query.dataType === 'unmatched' ? 'unmatched' : 'group'",
@@ -72,6 +76,16 @@ def main() -> None:
         "services must keep barcode_status as a first-class query contract",
     )
     assert_contains(
+        services,
+        "barcode_eligibility: query.barcodeEligibility || 'all'",
+        "services must forward exact barcode eligibility filters",
+    )
+    assert_contains(
+        services,
+        "installer_source: query.installerSource || 'all'",
+        "services must forward explicit installer source filters",
+    )
+    assert_contains(
         groups_route,
         "terminal_status",
         "backend data-center route must accept precise terminal status filters",
@@ -90,6 +104,16 @@ def main() -> None:
         groups_route,
         "activity_date_to",
         "backend data-center route must accept precise activity-date end filters",
+    )
+    assert_contains(
+        groups_route,
+        "barcode_eligibility",
+        "backend route must accept exact barcode eligibility filters",
+    )
+    assert_contains(
+        groups_route,
+        "installer_source",
+        "backend route must accept explicit installer source filters",
     )
     assert_contains(
         groups_route,
@@ -120,6 +144,11 @@ def main() -> None:
         data_center_service,
         '{"mismatched", "failed", "unreadable"}',
         "needs_review barcode filter must expand only to mismatched, failed, and unreadable",
+    )
+    assert_contains(
+        data_center_service,
+        "has_current_eligible_photo_set",
+        "barcode eligibility must use the durable exact photo-set contract",
     )
     assert_contains(
         services,

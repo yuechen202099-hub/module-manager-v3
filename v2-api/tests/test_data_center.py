@@ -83,6 +83,8 @@ def test_data_center_route_accepts_precise_dashboard_filters(monkeypatch: pytest
             "&has_photos=1"
             "&terminal_status=incomplete"
             "&barcode_status=verified"
+            "&barcode_eligibility=eligible"
+            "&installer_source=photo"
             "&activity_date_from=2026-07-20"
             "&activity_date_to=2026-07-20"
         ),
@@ -94,6 +96,8 @@ def test_data_center_route_accepts_precise_dashboard_filters(monkeypatch: pytest
     assert getattr(recorded, "has_photos", False) is True
     assert getattr(recorded, "terminal_status", "") == "incomplete"
     assert recorded.barcode_status == "verified"
+    assert recorded.barcode_eligibility == "eligible"
+    assert recorded.installer_source == "photo"
     assert str(getattr(recorded, "activity_date_from", "")) == "2026-07-20"
     assert str(getattr(recorded, "activity_date_to", "")) == "2026-07-20"
 
@@ -163,6 +167,7 @@ def _construction_photo(
     creator: str = "installer-a",
     client_completed_at: str = "",
     created_at: str = "",
+    upload_status: str = "uploaded",
 ) -> dict:
     return {
         "id": f"group-{group_index:03d}-photo-{slot}",
@@ -175,6 +180,7 @@ def _construction_photo(
         "creator": creator,
         "client_completed_at": client_completed_at,
         "created_at": created_at,
+        "upload_status": upload_status,
     }
 
 
@@ -394,6 +400,105 @@ def test_json_data_center_precise_dashboard_filters_are_not_approximate(
         )
     )
     assert [row["id"] for row in installer_activity_page["items"]] == ["group-001"]
+
+
+def test_json_data_center_installer_photo_source_and_barcode_eligibility_are_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.schemas.data_center import DataCenterQuery
+
+    team_id = f"data-center-exact-source-{uuid4()}"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [
+        _group(
+            1,
+            installer="installer-a",
+            updated_at="2026-07-20T08:00:00+00:00",
+            photos=[
+                _construction_photo(1, 1, category="before_box", creator="someone-else", client_completed_at="2026-07-20T08:30:00+08:00"),
+                _construction_photo(1, 2, category="module_meter", creator="someone-else", client_completed_at="2026-07-20T08:32:00+08:00"),
+                _construction_photo(1, 3, category="after_box", creator="someone-else", client_completed_at="2026-07-20T08:35:00+08:00"),
+                _construction_photo(1, 4, category="collector_barcode", creator="someone-else", client_completed_at="2026-07-20T08:38:00+08:00"),
+            ],
+        ),
+        _group(
+            2,
+            installer="someone-else",
+            updated_at="2026-07-19T08:00:00+00:00",
+            photos=[
+                _construction_photo(2, 1, category="before_box", creator="installer-a", client_completed_at="2026-07-20T09:30:00+08:00"),
+                _construction_photo(2, 2, category="module_meter", creator="installer-a", client_completed_at="2026-07-20T09:32:00+08:00"),
+                _construction_photo(2, 3, category="after_box", creator="installer-a", client_completed_at="2026-07-20T09:35:00+08:00"),
+                _construction_photo(2, 4, category="collector_barcode", creator="installer-a", client_completed_at="2026-07-20T09:38:00+08:00"),
+            ],
+        ),
+        _group(
+            3,
+            installer="installer-a",
+            updated_at="2026-07-20T10:00:00+00:00",
+            photos=[
+                _construction_photo(3, 1, category="before_box", creator="installer-a", client_completed_at="2026-07-21T09:30:00+08:00"),
+                _construction_photo(3, 2, category="module_meter", creator="installer-a", client_completed_at="2026-07-21T09:32:00+08:00"),
+                _construction_photo(3, 3, category="after_box", creator="installer-a", client_completed_at="2026-07-21T09:35:00+08:00"),
+                _construction_photo(3, 4, category="collector_barcode", creator="installer-a", client_completed_at="2026-07-21T09:38:00+08:00"),
+            ],
+        ),
+        _group(
+            4,
+            installer="installer-a",
+            updated_at="2026-07-20T11:00:00+00:00",
+            photos=[
+                _construction_photo(4, 1, category="before_box", creator="installer-a", client_completed_at="2026-07-20T10:30:00+08:00"),
+                _construction_photo(4, 2, category="module_meter", creator="installer-a", client_completed_at="2026-07-20T10:32:00+08:00"),
+                _construction_photo(4, 3, category="after_box", creator="installer-a", client_completed_at="2026-07-20T10:35:00+08:00"),
+                _construction_photo(4, 4, category="collector_barcode", creator="installer-a", client_completed_at="2026-07-20T10:38:00+08:00"),
+                _construction_photo(4, 5, category="before_box", creator="installer-a", client_completed_at="2026-07-20T10:40:00+08:00"),
+            ],
+        ),
+        _group(
+            5,
+            installer="installer-a",
+            updated_at="2026-07-20T12:00:00+00:00",
+            photos=[
+                _construction_photo(5, 1, category="before_box", creator="installer-a", client_completed_at="2026-07-20T11:30:00+08:00"),
+                _construction_photo(5, 2, category="module_meter", creator="installer-a", client_completed_at="2026-07-20T11:32:00+08:00"),
+                _construction_photo(5, 3, category="after_box", creator="installer-a", client_completed_at="2026-07-20T11:35:00+08:00"),
+                _construction_photo(5, 4, category="collector_barcode", creator="installer-a", client_completed_at="2026-07-20T11:38:00+08:00", upload_status="INVALID"),
+            ],
+        ),
+    ]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+
+    repo = repository.JsonStateRepository()
+
+    no_date = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", installer="installer-a", installer_source="photo", page=1, page_size=20)
+    )
+    assert {row["id"] for row in no_date["items"]} == {"group-002", "group-003", "group-004", "group-005"}
+
+    same_photo_date = repo.list_data_center_rows(
+        DataCenterQuery(
+            data_type="group",
+            installer="installer-a",
+            installer_source="photo",
+            activity_date_from=date(2026, 7, 20),
+            activity_date_to=date(2026, 7, 20),
+            page=1,
+            page_size=20,
+        )
+    )
+    assert {row["id"] for row in same_photo_date["items"]} == {"group-002", "group-004", "group-005"}
+
+    eligible = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", barcode_eligibility="eligible", page=1, page_size=20)
+    )
+    assert {row["id"] for row in eligible["items"]} == {"group-001", "group-002", "group-003"}
+
+    ineligible = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", barcode_eligibility="ineligible", page=1, page_size=20)
+    )
+    assert {row["id"] for row in ineligible["items"]} == {"group-004", "group-005"}
 
 
 def test_data_center_list_is_lightweight_and_detail_is_lazy_loaded(
@@ -746,6 +851,7 @@ def test_postgres_data_center_compiles_precise_dashboard_filters(
             terminal_status="incomplete",
             barcode_status="verified",
             installer="installer-a",
+            installer_source="photo",
             activity_date_from=date(2026, 7, 20),
             activity_date_to=date(2026, 7, 20),
             page=1,
@@ -793,6 +899,126 @@ def test_postgres_data_center_compiles_precise_dashboard_filters(
     ]
     assert "data_center_rows.barcode_status in ('mismatched', 'failed', 'unreadable')" in needs_review_compiled[0]
     assert "data_center_rows.barcode_status in ('mismatched', 'failed', 'unreadable')" in needs_review_compiled[1]
+
+
+def test_postgres_data_center_compiles_photo_source_installer_without_generic_installer_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.schemas.data_center import DataCenterQuery
+
+    class ScalarResult:
+        def __init__(self, values):
+            self._values = values
+
+        def all(self):
+            return self._values
+
+    class RecordingSession:
+        def __init__(self):
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def scalar(self, statement):
+            self.statements.append(statement)
+            return 0
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return ScalarResult([])
+
+    session = RecordingSession()
+    repo = repository.PostgresStateRepository()
+    monkeypatch.setattr(repo, "_session", lambda: session)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "demo-team")
+
+    repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", installer="installer-a", installer_source="photo", page=1, page_size=20)
+    )
+
+    compiled = [
+        str(statement.compile(compile_kwargs={"literal_binds": True})).lower()
+        for statement in session.statements
+    ]
+    assert "exists (select 1" in compiled[0]
+    assert "exists (select 1" in compiled[1]
+    assert "photos.creator" in compiled[0]
+    assert "photos.creator" in compiled[1]
+    assert "photos.upload_status != 'invalid'" in compiled[0]
+    assert "photos.upload_status != 'invalid'" in compiled[1]
+    assert "like '%construction%'" in compiled[0]
+    assert "like '%construction%'" in compiled[1]
+    assert "lower(data_center_rows.installer) like '%installer-a%'" not in compiled[0]
+    assert "lower(data_center_rows.installer) like '%installer-a%'" not in compiled[1]
+
+
+def test_postgres_data_center_compiles_barcode_eligibility_from_exact_photo_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.schemas.data_center import DataCenterQuery
+
+    class ScalarResult:
+        def __init__(self, values):
+            self._values = values
+
+        def all(self):
+            return self._values
+
+    class RecordingSession:
+        def __init__(self):
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def scalar(self, statement):
+            self.statements.append(statement)
+            return 0
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return ScalarResult([])
+
+    session = RecordingSession()
+    repo = repository.PostgresStateRepository()
+    monkeypatch.setattr(repo, "_session", lambda: session)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "demo-team")
+
+    repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", barcode_eligibility="eligible", page=1, page_size=20)
+    )
+    eligible_compiled = [
+        str(statement.compile(compile_kwargs={"literal_binds": True})).lower()
+        for statement in session.statements
+    ]
+    assert "data_center_rows.photo_count = 4" in eligible_compiled[0]
+    assert "data_center_rows.photo_count = 4" in eligible_compiled[1]
+    assert "data_center_rows.required_category_count = 4" in eligible_compiled[0]
+    assert "data_center_rows.required_category_count = 4" in eligible_compiled[1]
+    assert "classification_status = 'complete'" not in eligible_compiled[0]
+    assert "classification_status = 'complete'" not in eligible_compiled[1]
+    assert "barcode_status = 'ineligible'" not in eligible_compiled[0]
+    assert "barcode_status = 'ineligible'" not in eligible_compiled[1]
+
+    session.statements.clear()
+    repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", barcode_eligibility="ineligible", page=1, page_size=20)
+    )
+    ineligible_compiled = [
+        str(statement.compile(compile_kwargs={"literal_binds": True})).lower()
+        for statement in session.statements
+    ]
+    assert "data_center_rows.photo_count != 4" in ineligible_compiled[0]
+    assert "data_center_rows.required_category_count != 4" in ineligible_compiled[0]
+    assert "data_center_rows.photo_count != 4" in ineligible_compiled[1]
+    assert "data_center_rows.required_category_count != 4" in ineligible_compiled[1]
 
 
 def test_postgres_data_center_detail_derives_statuses_after_loading_photos(

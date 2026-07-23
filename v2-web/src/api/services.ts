@@ -8,7 +8,9 @@ import type {
   ConstructionUploadPayload,
   CurrentUser,
   DataCenterBarcodeFilterStatus,
+  DataCenterBarcodeEligibility,
   DataCenterDataType,
+  DataCenterInstallerSource,
   DataCenterDetail,
   DataCenterPage,
   DataCenterPageSize,
@@ -1560,9 +1562,11 @@ export type DataCenterListQuery = {
   terminalStatus?: DataCenterTerminalFilterStatus
   archiveStatus?: string
   barcodeStatus?: DataCenterBarcodeFilterStatus
+  barcodeEligibility?: DataCenterBarcodeEligibility
   classificationStatus?: string
   exceptionStatus?: string
   installer?: string
+  installerSource?: DataCenterInstallerSource
   hasPhotos?: boolean
   dateFrom?: string
   dateTo?: string
@@ -1583,9 +1587,11 @@ export async function fetchDataCenterRows(query: DataCenterListQuery): Promise<D
     terminal_status: query.terminalStatus || 'all',
     archive_status: query.archiveStatus || 'all',
     barcode_status: query.barcodeStatus || 'all',
+    barcode_eligibility: query.barcodeEligibility || 'all',
     classification_status: query.classificationStatus || 'all',
     exception_status: query.exceptionStatus || '',
     installer: query.installer || '',
+    installer_source: query.installerSource || 'all',
     terminal: query.terminal || '',
     query: query.keyword || '',
     page: String(query.page || 1),

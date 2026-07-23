@@ -51,7 +51,7 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
             "context": {},
             "expected": {
                 "path": "/global-search",
-                "query": {"data_type": "group", "classification_status": "complete", "page": "1", "page_size": "20"},
+                "query": {"data_type": "group", "barcode_eligibility": "eligible", "page": "1", "page_size": "20"},
             },
         },
         "barcode_passed": {
@@ -60,7 +60,7 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
                 "path": "/global-search",
                 "query": {
                     "data_type": "group",
-                    "classification_status": "complete",
+                    "barcode_eligibility": "eligible",
                     "barcode_status": "verified",
                     "page": "1",
                     "page_size": "20",
@@ -73,7 +73,7 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
                 "path": "/global-search",
                 "query": {
                     "data_type": "group",
-                    "classification_status": "complete",
+                    "barcode_eligibility": "eligible",
                     "barcode_status": "needs_review",
                     "page": "1",
                     "page_size": "20",
@@ -84,7 +84,7 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
             "context": {},
             "expected": {
                 "path": "/global-search",
-                "query": {"data_type": "group", "barcode_status": "ineligible", "page": "1", "page_size": "20"},
+                "query": {"data_type": "group", "barcode_eligibility": "ineligible", "page": "1", "page_size": "20"},
             },
         },
         "unmatched_records": {
@@ -148,7 +148,7 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
                 "query": {
                     "data_type": "group",
                     "installer": "installer-a",
-                    "construction_status": "completed",
+                    "installer_source": "photo",
                     "activity_date_from": "2026-07-01",
                     "activity_date_to": "2026-07-23",
                     "page": "1",
@@ -217,7 +217,11 @@ def main() -> int:
     assert_contains(board_source, "openDashboardDrilldown(item.drilldown", "summary/progress/risk/terminal cards must share the same drilldown entry")
     assert_contains(utility_source, "has_photos", "dashboard drilldown utility must expose precise has_photos mapping")
     assert_contains(utility_source, "terminal_status", "terminal drilldowns must use terminal_status keys")
+    assert_contains(utility_source, "barcode_eligibility", "barcode eligibility drilldowns must use the exact eligibility key")
+    assert_contains(utility_source, "installer_source", "installer drilldown must use explicit photo-source key")
     assert_contains(utility_source, "activity_date_from", "installer drilldown must use activity-date keys")
+    assert_not_contains(utility_source, "classification_status: 'complete'", "barcode eligibility cannot approximate with classification_status")
+    assert_not_contains(utility_source, "construction_status: 'completed'", "installer completed cannot approximate with construction_status")
     assert_not_contains(utility_source, "barcode_status: 'manual'", "dashboard drilldown cannot use the legacy manual-only barcode filter")
     assert_not_contains(utility_source, "construction_status: 'in_progress'", "dashboard drilldown cannot approximate scanned/incomplete with in_progress")
     assert_not_contains(utility_source, "next.date_from = dateFrom", "installer drilldown cannot reuse generic updated_at start-date keys")

@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime, time
 from typing import Any, Callable, Iterable, Mapping
 
 from app.schemas.data_center import DataCenterQuery
+from app.services.barcode_verification_contract import has_current_eligible_photo_set
 
 
 REQUIRED_CLASSIFICATION_SLOTS = {"before_box", "module_meter", "after_box", "collector_barcode"}
@@ -232,6 +233,12 @@ def row_passes_filters(row: Mapping[str, Any], query: DataCenterQuery) -> bool:
             return False
     if query.has_photos and int(row.get("photo_count") or 0) <= 0:
         return False
+    if query.barcode_eligibility != "all":
+        eligible = bool(row.get("_barcode_eligible"))
+        if query.barcode_eligibility == "eligible" and not eligible:
+            return False
+        if query.barcode_eligibility == "ineligible" and eligible:
+            return False
     actual_barcode_status = str(row.get("barcode_status") or "").strip()
     if not _matches_barcode_filter(actual_barcode_status, query.barcode_status):
         return False
@@ -249,8 +256,12 @@ def row_passes_filters(row: Mapping[str, Any], query: DataCenterQuery) -> bool:
             return False
     elif requested_exception and row.get("exception_status") != requested_exception:
         return False
-    if query.installer.strip() and query.installer.strip().lower() not in str(row.get("installer") or "").lower():
-        return False
+    if query.installer.strip():
+        if query.installer_source == "photo":
+            if not row.get("_installer_photo_source_match"):
+                return False
+        elif query.installer.strip().lower() not in str(row.get("installer") or "").lower():
+            return False
     if query.terminal.strip() and query.terminal.strip().lower() not in str(row.get("terminal") or "").lower():
         return False
     if not row_matches_query(row, query.query):

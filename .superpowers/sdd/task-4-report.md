@@ -135,3 +135,79 @@ The first implementation used approximate dashboard drilldown mappings for scann
 
 1. `npm run type-check` does not exist in `v2-web/package.json`; the required `vue-tsc` verification was run directly and also runs inside `npm run build`.
 2. Build warnings are unchanged dependency/chunk-size warnings, not introduced by this drilldown fix.
+
+---
+
+## Review Fix Addendum - Installer Photo Source And Barcode Eligibility
+
+- Status: DONE
+- Worktree: `C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
+- Branch: `production/V3/3.2.0`
+- Base HEAD: `2ae9f60`
+- Date: `2026-07-24 01:59 +08:00`
+
+### Findings Addressed
+
+1. Critical: installer completed drilldown now uses explicit `installer_source=photo`, not `construction_status=completed`.
+2. Important: barcode eligible/ineligible drilldown now uses explicit `barcode_eligibility=eligible|ineligible`, not `classification_status` or `barcode_status` approximations.
+
+### RED First
+
+- Added backend RED coverage in `v2-api/tests/test_data_center.py` for:
+  - Route parsing of `barcode_eligibility=eligible` and `installer_source=photo`.
+  - JSON list/count filtering where the group installer text matches but construction photo creator does not.
+  - JSON list/count filtering where a different group installer is included because active valid construction photo creator alias matches.
+  - JSON activity date filtering on the same matching construction photo.
+  - JSON barcode eligibility using exactly four active valid photos and the complete required category set.
+  - PG count/list SQL requiring photo-source installer EXISTS without the generic `data_center_rows.installer LIKE`.
+  - PG count/list SQL requiring exact `photo_count = 4` plus `required_category_count = 4` for eligible and the inverse for ineligible.
+- Verified RED with:
+  - `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_data_center.py -k "installer_photo_source_and_barcode_eligibility or route_accepts_precise_dashboard_filters or compiles_photo_source_installer or compiles_barcode_eligibility" -q`
+  - Initial result: 4 failed, 23 deselected, 1 warning. Failures were the expected missing fields and old approximate JSON/PG filtering.
+
+### Implementation Summary
+
+1. Added `installer_source=all|photo` and `barcode_eligibility=all|eligible|ineligible` to `DataCenterQuery` and `/groups/data-center`.
+2. JSON repository now marks `_installer_photo_source_match` from active, non-INVALID construction photos whose creator/display-name alias matches the installer. Activity date filters continue to use `client_completed_at` / `construction_completed_at` / `created_at` from that same matched photo set.
+3. PG repository now emits the same active, non-INVALID construction-photo EXISTS for `installer_source=photo`, with optional date bounds on the same EXISTS, and skips the generic installer LIKE in that mode.
+4. Barcode eligibility now uses the durable exact evidence contract in JSON and exact PG aggregate conditions: valid photo count equals four and required category count equals four. Ineligible is the corresponding inverse.
+5. Frontend URL state, API service query params, data-center filters, and dashboard drilldown helper now carry the exact keys. `barcode_passed` and `barcode_manual_queue` additionally constrain `barcode_eligibility=eligible`.
+6. Dashboard and data-center UI verifiers now assert exact query objects/keys and reject the old approximate `classification_status=complete` and `construction_status=completed` helper mappings.
+7. Vue build output under `v2-api/app/static/vue/**` was restored and cleaned after build verification.
+
+### Verification
+
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_data_center.py -q`
+  - PASS: 27 passed, 1 Starlette/httpx deprecation warning.
+- `.\.venv\Scripts\python.exe scripts\verify_v3_2_0_dashboard_drilldown.py`
+  - PASS: `[OK] V3.2.0 dashboard drilldown checks passed`.
+- `.\.venv\Scripts\python.exe scripts\verify_v3_2_0_data_center_ui.py`
+  - PASS: exit 0, verifier is silent on success.
+- `cd v2-web; .\node_modules\.bin\vue-tsc.cmd --noEmit`
+  - PASS.
+- `cd v2-web; npm run build`
+  - PASS: `vue-tsc --noEmit && vite build`.
+  - Warnings retained: two Rollup `/* #__PURE__ */` annotation warnings from `@vueuse/core`, plus the existing `element-components` chunk-size warning.
+- `git diff --check`
+  - PASS exit 0; only expected CRLF working-copy warnings were printed.
+- `git diff --name-only 8af1f0e..HEAD -- v2-api/app/static/vue`
+  - PASS: no output.
+
+### Self Review
+
+- Confirmed `v2-web/src/utils/dataCenterDrilldown.ts` contains no `classification_status: 'complete'` or `construction_status: 'completed'` mappings.
+- Confirmed PG `installer_source=photo` SQL contains `photos.creator`, construction-source filtering, and `photos.upload_status != 'invalid'`.
+- Confirmed the Task4 static Vue directory remains absent from the final net diff.
+
+### Version Change
+
+- None. This is a V3.2.0 task review fix and did not change `APP_VERSION`.
+
+### Release Status
+
+- Local code, RED/GREEN tests, verifiers, type-check, build, static cleanup, report update, and self-review complete.
+- Not released.
+
+### Concerns
+
+1. Build warnings are unchanged dependency/chunk-size warnings, not introduced by this fix.

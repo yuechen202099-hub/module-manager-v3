@@ -4903,6 +4903,7 @@ class PostgresStateRepository(StateRepository):
                 group_raw.op("->>")("construction_module_asset_no").label("construction_module_asset_no"),
                 group_installer.label("installer"),
                 group_photo_count.label("photo_count"),
+                func.coalesce(active_photo_stats.c.required_category_count, 0).label("required_category_count"),
                 group_classification_status.label("classification_status"),
                 group_construction_status.label("construction_status"),
                 group_terminal_status.label("terminal_status"),
@@ -4948,6 +4949,7 @@ class PostgresStateRepository(StateRepository):
                 literal(""),
             ).label("installer"),
             literal(0).label("photo_count"),
+            literal(0).label("required_category_count"),
             literal("incomplete").label("classification_status"),
             case(
                 (
@@ -4994,12 +4996,29 @@ class PostgresStateRepository(StateRepository):
             filters.append(source.c.classification_status == query.classification_status)
         if query.has_photos:
             filters.append(source.c.photo_count > 0)
+        if query.barcode_eligibility != "all":
+            required_count = len(REQUIRED_CATEGORIES)
+            if query.barcode_eligibility == "eligible":
+                filters.append(
+                    and_(
+                        source.c.photo_count == required_count,
+                        source.c.required_category_count == required_count,
+                    )
+                )
+            else:
+                filters.append(
+                    or_(
+                        source.c.photo_count != required_count,
+                        source.c.required_category_count != required_count,
+                    )
+                )
         requested_exception = query.exception_status.strip()
         if requested_exception == "none":
             filters.append(source.c.exception_status == "")
         elif requested_exception:
             filters.append(source.c.exception_status == requested_exception)
-        if query.installer.strip():
+        use_photo_installer_source = query.installer.strip() and query.installer_source == "photo"
+        if query.installer.strip() and not use_photo_installer_source:
             filters.append(func.lower(source.c.installer).like(f"%{query.installer.strip().lower()}%"))
         if query.terminal.strip():
             filters.append(func.lower(source.c.terminal).like(f"%{query.terminal.strip().lower()}%"))
@@ -5022,14 +5041,11 @@ class PostgresStateRepository(StateRepository):
             filters.append(source.c.updated_at >= start)
         if end is not None:
             filters.append(source.c.updated_at <= end)
-        use_installer_activity_filter = query.installer.strip() and (
-            query.activity_date_from is not None or query.activity_date_to is not None
-        )
-        if query.activity_date_from is not None and not use_installer_activity_filter:
+        if query.activity_date_from is not None and not use_photo_installer_source:
             filters.append(func.substr(source.c.activity_at, 1, 10) >= query.activity_date_from.isoformat())
-        if query.activity_date_to is not None and not use_installer_activity_filter:
+        if query.activity_date_to is not None and not use_photo_installer_source:
             filters.append(func.substr(source.c.activity_at, 1, 10) <= query.activity_date_to.isoformat())
-        if use_installer_activity_filter:
+        if use_photo_installer_source:
             aliases = tuple(local_simulation.installer_actor_aliases(query.installer.strip()))
             if aliases:
                 photo_activity_at = func.coalesce(

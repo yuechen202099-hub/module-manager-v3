@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { Camera, Refresh, Search } from '@element-plus/icons-vue'
 
-import type { DataCenterBarcodeFilterStatus, DataCenterDataType } from '@/api/types'
+import type {
+  DataCenterBarcodeEligibility,
+  DataCenterBarcodeFilterStatus,
+  DataCenterDataType,
+  DataCenterInstallerSource,
+} from '@/api/types'
 import type { DataCenterRouteQuery } from '@/composables/useDataCenterQuery'
 
 const props = defineProps<{
@@ -47,6 +52,12 @@ const barcodeOptions: Array<{ label: string; value: DataCenterBarcodeFilterStatu
   { label: '不适用', value: 'ineligible' },
 ]
 
+const barcodeEligibilityOptions: Array<{ label: string; value: DataCenterBarcodeEligibility }> = [
+  { label: '条码资格', value: 'all' },
+  { label: '符合', value: 'eligible' },
+  { label: '不符合', value: 'ineligible' },
+]
+
 const classificationOptions = [
   { label: '分类', value: 'all' },
   { label: '完整', value: 'complete' },
@@ -57,6 +68,11 @@ const exceptionOptions = [
   { label: '异常', value: '' },
   { label: '有异常', value: 'open' },
   { label: '无异常', value: 'none' },
+]
+
+const installerSourceOptions: Array<{ label: string; value: DataCenterInstallerSource }> = [
+  { label: '人员来源', value: 'all' },
+  { label: '施工照片', value: 'photo' },
 ]
 
 const sortOptions = [
@@ -98,6 +114,9 @@ function update<K extends keyof DataCenterRouteQuery>(key: K, value: DataCenterR
     <el-select :model-value="props.modelValue.barcodeStatus" @update:model-value="update('barcodeStatus', ($event || 'all') as DataCenterBarcodeFilterStatus)">
       <el-option v-for="item in barcodeOptions" :key="item.value" :label="item.label" :value="item.value" />
     </el-select>
+    <el-select :model-value="props.modelValue.barcodeEligibility" @update:model-value="update('barcodeEligibility', ($event || 'all') as DataCenterBarcodeEligibility)">
+      <el-option v-for="item in barcodeEligibilityOptions" :key="item.value" :label="item.label" :value="item.value" />
+    </el-select>
     <el-select :model-value="props.modelValue.classificationStatus" @update:model-value="update('classificationStatus', String($event || 'all'))">
       <el-option v-for="item in classificationOptions" :key="item.value" :label="item.label" :value="item.value" />
     </el-select>
@@ -110,6 +129,9 @@ function update<K extends keyof DataCenterRouteQuery>(key: K, value: DataCenterR
       placeholder="安装人员"
       @update:model-value="update('installer', String($event || ''))"
     />
+    <el-select :model-value="props.modelValue.installerSource" @update:model-value="update('installerSource', ($event || 'all') as DataCenterInstallerSource)">
+      <el-option v-for="item in installerSourceOptions" :key="item.value" :label="item.label" :value="item.value" />
+    </el-select>
     <el-date-picker
       :model-value="props.modelValue.dateFrom"
       type="date"
