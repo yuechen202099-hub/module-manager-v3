@@ -2289,45 +2289,6 @@ def _export_job_payload(job: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _terminal_readiness_item(terminal: str, groups: list[Mapping[str, Any]]) -> dict[str, Any]:
-    group_count = len(groups)
-    constructed_count = sum(1 for group in groups if int(group.get("photo_count") or 0) >= 4)
-    archived_count = sum(
-        1
-        for group in groups
-        if str(group.get("archive_status") or "").strip() == "archived"
-    )
-    cache_ready_count = 0
-    for group in groups:
-        photos = [
-            photo
-            for photo in group.get("photos") or []
-            if isinstance(photo, Mapping) and photo.get("is_active") is not False
-        ]
-        if (
-            int(group.get("photo_count") or len(photos) or 0) >= 4
-            and str(group.get("archive_status") or "").strip() == "archived"
-            and photos
-            and all(str(photo.get("delivery_cache_status") or "").strip() == "ready" for photo in photos)
-        ):
-            cache_ready_count += 1
-    blockers: list[str] = []
-    if constructed_count < group_count:
-        blockers.append(f"{group_count - constructed_count} 个资料组未施工")
-    if archived_count < group_count:
-        blockers.append(f"{group_count - archived_count} 个资料组未归档")
-    if cache_ready_count < archived_count:
-        blockers.append(f"{archived_count - cache_ready_count} 个已归档资料组缓存未就绪")
-    return {
-        "terminal": terminal,
-        "group_count": group_count,
-        "constructed_count": constructed_count,
-        "archived_count": archived_count,
-        "cache_ready_count": cache_ready_count,
-        "status": "ready" if group_count > 0 and not blockers else "blocked",
-        "blockers": blockers,
-    }
-
 
 def _file_download_payload(job: Mapping[str, Any]) -> dict[str, Any]:
     content = job.get("content")
@@ -2347,6 +2308,26 @@ def _file_download_payload(job: Mapping[str, Any]) -> dict[str, Any]:
         "media_type": media_type,
         **({"content": content} if isinstance(content, bytes) else {"path": path}),
     }
+
+
+def _remove_orphan_export_content(path_value: str) -> None:
+    if not str(path_value or "").strip():
+        return
+    try:
+        export_center.validated_export_file(path_value).unlink(missing_ok=True)
+    except (FileNotFoundError, OSError, ValueError):
+        return
+
+
+def _sync_json_state_reference(team_id: str, live_state_reference: dict[str, Any]) -> None:
+    committed_state = local_simulation.get_state()
+    if live_state_reference is committed_state:
+        return
+    live_state_reference.clear()
+    live_state_reference.update(committed_state)
+    local_simulation._team_states[team_id] = live_state_reference
+    if team_id == local_simulation.DEFAULT_TEAM_ID:
+        local_simulation._state = live_state_reference
 
 
 class StateRepository(ABC):
@@ -3990,21 +3971,6 @@ class JsonStateRepository(StateRepository):
         if job_type not in export_center.CATALOG_BY_KEY:
             raise ValueError(f"Unsupported export job type: {job_type}")
         filters = deepcopy(dict(filters or {}))
-        state = local_simulation.get_state()
-        scoped_groups = export_center.scope_export_groups(state.get("groups", []), filters)
-        snapshot = export_center.stable_export_snapshot(scoped_groups)
-        request_key = export_center.export_request_key(job_type=job_type, filters=filters, snapshot=snapshot)
-        existing = next(
-            (
-                dict(job)
-                for job in state.setdefault("export_jobs", [])
-                if str(job.get("request_key") or "") == request_key
-            ),
-            None,
-        )
-        if existing is not None:
-            existing["created"] = False
-            return _export_job_payload(existing)
         job_id = export_center.new_export_job_id()
         now = datetime.now(UTC).isoformat()
         filename = ""
@@ -4014,15 +3980,8 @@ class JsonStateRepository(StateRepository):
         status = "pending"
         progress = 0
         params: dict[str, Any] = {}
-        if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
-            params.update(export_center.request_background_export(self, job_type=job_type, filters=filters, actor=actor))
-            status = str(params.get("status") or "pending")
-            progress = 100 if status == "succeeded" else 0
-            content_path = str(params.get("content_path") or "")
-            content_sha256 = str(params.get("content_sha256") or "")
-            size_bytes = params.get("size_bytes")
-            filename = export_center.export_filename(job_type, "zip")
-        else:
+        inline_generated = False
+        if export_center.CATALOG_BY_KEY[job_type]["mode"] != "background":
             content, filename, _media_type = export_center.build_inline_export_content(
                 self,
                 job_type=job_type,
@@ -4035,30 +3994,103 @@ class JsonStateRepository(StateRepository):
             )
             status = "succeeded"
             progress = 100
-        job = {
-            "id": job_id,
-            "team_id": local_simulation.current_team_id(),
-            "job_type": job_type,
-            "status": status,
-            "file_name": filename,
-            "filter_snapshot": filters,
-            "request_key": request_key,
-            "params": {**filters, **params},
-            "content_path": content_path,
-            "content_sha256": content_sha256,
-            "size_bytes": size_bytes,
-            "row_count": 0,
-            "progress": progress,
-            "error_message": "",
-            "created_by": actor,
-            "created_at": now,
-            "updated_at": now,
-            "finished_at": now if status == "succeeded" else "",
-            "created": True,
-        }
-        state.setdefault("export_jobs", []).append(job)
-        local_simulation.save_all_team_states()
-        return _export_job_payload(job)
+            inline_generated = True
+        team_id = local_simulation.current_team_id()
+        live_state_reference = local_simulation.get_state()
+        transaction = local_simulation.begin_authoritative_json_write(team_id)
+        token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            working_state = transaction.working_state
+            scoped_groups = export_center.scope_export_groups(working_state.get("groups", []), filters)
+            snapshot = export_center.stable_export_snapshot(scoped_groups)
+            request_key = export_center.export_request_key(job_type=job_type, filters=filters, snapshot=snapshot)
+            existing = next(
+                (
+                    dict(job)
+                    for job in working_state.setdefault("export_jobs", [])
+                    if str(job.get("request_key") or "") == request_key
+                ),
+                None,
+            )
+            if existing is not None:
+                if inline_generated:
+                    _remove_orphan_export_content(content_path)
+                existing["created"] = False
+                local_simulation.abort_authoritative_json_write(transaction, token)
+                return _export_job_payload(existing)
+            if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
+                filename = export_center.export_filename(job_type, "zip")
+            job = {
+                "id": job_id,
+                "team_id": transaction.team_id,
+                "job_type": job_type,
+                "status": status,
+                "file_name": filename,
+                "filter_snapshot": filters,
+                "request_key": request_key,
+                "params": {**filters, **params, "snapshot": snapshot},
+                "content_path": content_path,
+                "content_sha256": content_sha256,
+                "size_bytes": size_bytes,
+                "row_count": 0,
+                "progress": progress,
+                "error_message": "",
+                "created_by": actor,
+                "created_at": now,
+                "updated_at": now,
+                "finished_at": now if status == "succeeded" else "",
+                "created": True,
+            }
+            working_state.setdefault("export_jobs", []).append(job)
+            if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
+                from app.services.delivery_package_queue import DeliveryPackageNotReady, stage_json_delivery_package
+
+                try:
+                    package = stage_json_delivery_package(
+                        transaction,
+                        groups=scoped_groups,
+                        task_id=filters.get("task_id"),
+                        terminal=str(filters.get("terminal") or ""),
+                        review_scope=str(filters.get("review_scope") or "reviewed"),
+                        requested_by=actor,
+                    )
+                except DeliveryPackageNotReady as exc:
+                    params.update({"delivery_package_job_id": exc.job_id, "status": exc.status})
+                    job.update({"status": "pending", "progress": 0, "params": {**filters, **params, "snapshot": snapshot}})
+                else:
+                    try:
+                        resolved = package.path.resolve(strict=True)
+                        params.update(
+                            {
+                                "delivery_package_job_id": "",
+                                "status": "succeeded",
+                                "content_path": str(resolved),
+                                "content_sha256": export_center.file_sha256_path(resolved),
+                                "size_bytes": resolved.stat().st_size,
+                            }
+                        )
+                        job.update(
+                            {
+                                "status": "succeeded",
+                                "progress": 100,
+                                "content_path": params["content_path"],
+                                "content_sha256": params["content_sha256"],
+                                "size_bytes": params["size_bytes"],
+                                "finished_at": now,
+                                "params": {**filters, **params, "snapshot": snapshot},
+                            }
+                        )
+                    finally:
+                        package.release()
+            local_simulation.finish_authoritative_json_write(transaction, token)
+            _sync_json_state_reference(team_id, live_state_reference)
+            return _export_job_payload(job)
+        except BaseException:
+            if not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            if inline_generated:
+                _remove_orphan_export_content(content_path)
+            raise
 
     def open_export_job_download(self, job_id: str, *, actor: str) -> dict[str, Any]:
         job = next(
@@ -8621,78 +8653,6 @@ class PostgresStateRepository(StateRepository):
                 "created_at": event.created_at.isoformat() if event.created_at else None,
             }
 
-    def list_terminal_delivery_readiness(self, *, page: int = 1, page_size: int = 20, query: str = "") -> dict[str, Any]:
-        team_id = local_simulation.current_team_id()
-        page_size = export_center.normalize_export_page_size(page_size)
-        page = max(1, int(page or 1))
-        query_text = str(query or "").strip()
-        photo_counts = (
-            select(
-                Photo.group_id.label("group_id"),
-                func.count(Photo.id).label("active_photo_count"),
-                func.coalesce(
-                    func.sum(case((Photo.raw_data["delivery_cache_status"].astext == "ready", 1), else_=0)),
-                    0,
-                ).label("ready_photo_count"),
-            )
-            .where(Photo.team_id == team_id, Photo.is_active.is_(True))
-            .group_by(Photo.group_id)
-            .subquery()
-        )
-        archived_condition = or_(
-            MaterialGroup.status == GroupStatus.APPROVED,
-            MaterialGroup.raw_data["archive_status"].astext == "archived",
-        )
-        constructed_condition = or_(
-            MaterialGroup.photo_count >= 4,
-            func.coalesce(photo_counts.c.active_photo_count, 0) >= 4,
-        )
-        cache_ready_condition = and_(
-            archived_condition,
-            constructed_condition,
-            func.coalesce(photo_counts.c.active_photo_count, 0) >= 4,
-            func.coalesce(photo_counts.c.active_photo_count, 0) == func.coalesce(photo_counts.c.ready_photo_count, 0),
-        )
-        statement = (
-            select(
-                MaterialGroup.terminal.label("terminal"),
-                func.count(MaterialGroup.id).label("group_count"),
-                func.coalesce(func.sum(case((constructed_condition, 1), else_=0)), 0).label("constructed_count"),
-                func.coalesce(func.sum(case((archived_condition, 1), else_=0)), 0).label("archived_count"),
-                func.coalesce(func.sum(case((cache_ready_condition, 1), else_=0)), 0).label("cache_ready_count"),
-            )
-            .select_from(MaterialGroup)
-            .outerjoin(photo_counts, photo_counts.c.group_id == MaterialGroup.id)
-            .where(MaterialGroup.team_id == team_id, MaterialGroup.terminal.is_not(None), MaterialGroup.terminal != "")
-            .group_by(MaterialGroup.terminal)
-            .order_by(MaterialGroup.terminal)
-        )
-        if query_text:
-            statement = statement.where(MaterialGroup.terminal.ilike(f"%{query_text}%"))
-        with self._session() as session:
-            rows = session.execute(statement).all()
-        items = []
-        for row in rows:
-            item = {
-                "terminal": str(row.terminal or ""),
-                "group_count": int(row.group_count or 0),
-                "constructed_count": int(row.constructed_count or 0),
-                "archived_count": int(row.archived_count or 0),
-                "cache_ready_count": int(row.cache_ready_count or 0),
-            }
-            blockers: list[str] = []
-            if item["constructed_count"] < item["group_count"]:
-                blockers.append(f"{item['group_count'] - item['constructed_count']} 个资料组未施工")
-            if item["archived_count"] < item["group_count"]:
-                blockers.append(f"{item['group_count'] - item['archived_count']} 个资料组未归档")
-            if item["cache_ready_count"] < item["archived_count"]:
-                blockers.append(f"{item['archived_count'] - item['cache_ready_count']} 个已归档资料组缓存未就绪")
-            item["status"] = "ready" if item["group_count"] > 0 and not blockers else "blocked"
-            item["blockers"] = blockers
-            items.append(item)
-        offset = (page - 1) * page_size
-        return {"page": page, "page_size": page_size, "total": len(items), "items": items[offset : offset + page_size]}
-
     def list_export_jobs(self, *, page: int = 1, page_size: int = 20, job_type: str = "") -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         page_size = export_center.normalize_export_page_size(page_size)
@@ -8745,15 +8705,31 @@ class PostgresStateRepository(StateRepository):
                 MaterialGroup.installation_address.label("address"),
                 MaterialGroup.status.label("status"),
                 MaterialGroup.raw_data.label("group_raw"),
+                GroupBarcodeVerification.auto_archive_status.label("auto_archive_status"),
+                GroupBarcodeVerification.status.label("barcode_status"),
+                GroupBarcodeVerification.evidence_fingerprint.label("barcode_evidence_fingerprint"),
                 Photo.id.label("photo_id"),
                 Photo.legacy_id.label("photo_legacy_id"),
                 Photo.is_active.label("photo_is_active"),
                 Photo.upload_status.label("photo_upload_status"),
                 Photo.archive_status.label("photo_archive_status"),
                 Photo.category.label("photo_category"),
+                Photo.asset_no.label("photo_asset_no"),
+                Photo.collector.label("photo_collector"),
+                Photo.sha256.label("photo_sha256"),
+                Photo.original_filename.label("photo_original_filename"),
+                Photo.archived_at.label("photo_archived_at"),
+                Photo.client_batch_id.label("photo_client_batch_id"),
                 Photo.raw_data.label("photo_raw"),
             )
             .select_from(MaterialGroup)
+            .outerjoin(
+                GroupBarcodeVerification,
+                and_(
+                    GroupBarcodeVerification.group_id == MaterialGroup.id,
+                    GroupBarcodeVerification.team_id == team_id,
+                ),
+            )
             .outerjoin(Photo, and_(Photo.group_id == MaterialGroup.id, Photo.team_id == team_id, Photo.is_active.is_(True)))
             .where(MaterialGroup.team_id == team_id, MaterialGroup.terminal.is_not(None), MaterialGroup.terminal != "")
             .order_by(MaterialGroup.terminal, MaterialGroup.legacy_id, MaterialGroup.id, Photo.sort_order, Photo.created_at)
@@ -8778,7 +8754,18 @@ class PostgresStateRepository(StateRepository):
                     "archived_at": group_raw.get("archived_at") or "",
                     "module_asset_no": group_raw.get("module_asset_no") or group_raw.get("asset_no") or "",
                     "collector": group_raw.get("collector") or "",
+                    "construction_module_asset_no": group_raw.get("construction_module_asset_no") or "",
+                    "construction_collector": group_raw.get("construction_collector") or "",
+                    "replacement_old_meter_no": group_raw.get("replacement_old_meter_no") or "",
+                    "replacement_new_meter_no": group_raw.get("replacement_new_meter_no") or "",
+                    "auto_archive_source": group_raw.get("auto_archive_source") or "",
+                    "group_barcode_manual_confirmed": bool(group_raw.get("group_barcode_manual_confirmed")),
                     "client_completed_at": group_raw.get("client_completed_at") or "",
+                    "barcode_verification": {
+                        "auto_archive_status": row.auto_archive_status or "",
+                        "status": str(getattr(row.barcode_status, "value", row.barcode_status) or ""),
+                        "evidence_fingerprint": row.barcode_evidence_fingerprint or "",
+                    },
                     "photos": [],
                 },
             )
@@ -8791,8 +8778,18 @@ class PostgresStateRepository(StateRepository):
                         "upload_status": str(getattr(row.photo_upload_status, "value", row.photo_upload_status) or ""),
                         "archive_status": row.photo_archive_status if row.photo_archive_status is not None else photo_raw.get("archive_status", ""),
                         "category": row.photo_category or photo_raw.get("category") or "",
+                        "module_asset_no": row.photo_asset_no or photo_raw.get("module_asset_no") or photo_raw.get("asset_no") or "",
+                        "asset_no": row.photo_asset_no or photo_raw.get("asset_no") or "",
+                        "collector": row.photo_collector or photo_raw.get("collector") or "",
+                        "sha256": row.photo_sha256 or photo_raw.get("sha256") or "",
+                        "delivery_cache_content_sha256": photo_raw.get("delivery_cache_content_sha256") or "",
                         "delivery_cache_status": photo_raw.get("delivery_cache_status") or "",
                         "delivery_cache_path": photo_raw.get("delivery_cache_path") or "",
+                        "delivery_cache_version": photo_raw.get("delivery_cache_version") or "",
+                        "client_completed_at": photo_raw.get("client_completed_at") or "",
+                        "original_filename": row.photo_original_filename or photo_raw.get("original_filename") or "",
+                        "archived_at": row.photo_archived_at.isoformat() if row.photo_archived_at else "",
+                        "client_batch_id": row.photo_client_batch_id or "",
                     }
                 )
         return list(groups_by_id.values())
@@ -8876,6 +8873,68 @@ class PostgresStateRepository(StateRepository):
                     finished_at=None,
                 )
                 session.add(row)
+                if hasattr(session, "flush"):
+                    session.flush()
+                if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
+                    from app.services import delivery_package_queue
+
+                    filename = export_center.export_filename(job_type, "zip")
+                    try:
+                        package = delivery_package_queue.request_postgres_delivery_package(
+                            session,
+                            groups=snapshot_groups,
+                            team_id=local_simulation.current_team_id(),
+                            task_id=filters.get("task_id"),
+                            terminal=str(filters.get("terminal") or ""),
+                            review_scope=str(filters.get("review_scope") or "reviewed"),
+                            requested_by=actor,
+                            auto_commit=False,
+                        )
+                    except delivery_package_queue.DeliveryPackageNotReady as exc:
+                        params.update({"delivery_package_job_id": exc.job_id, "status": exc.status})
+                        row.status = JobStatus.PENDING
+                        row.file_name = filename
+                        row.params = {**filters, **params, "snapshot": snapshot}
+                    else:
+                        try:
+                            resolved = package.path.resolve(strict=True)
+                            params.update(
+                                {
+                                    "delivery_package_job_id": "",
+                                    "status": "succeeded",
+                                    "content_path": str(resolved),
+                                    "content_sha256": export_center.file_sha256_path(resolved),
+                                    "size_bytes": resolved.stat().st_size,
+                                }
+                            )
+                            row.status = JobStatus.SUCCEEDED
+                            row.file_name = filename
+                            row.content_path = params["content_path"]
+                            row.content_sha256 = params["content_sha256"]
+                            row.progress = 100
+                            row.params = {**filters, **params, "snapshot": snapshot}
+                            row.finished_at = now
+                        finally:
+                            package.release()
+                    session.commit()
+                    return _export_job_payload(
+                        {
+                            "id": row.id,
+                            "job_type": row.job_type,
+                            "status": row.status,
+                            "file_name": row.file_name,
+                            "row_count": row.row_count,
+                            "progress": row.progress,
+                            "error_message": row.error_message,
+                            "filter_snapshot": row.filter_snapshot,
+                            "request_key": row.request_key,
+                            "created_by": actor,
+                            "created_at": row.created_at.isoformat() if row.created_at else None,
+                            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                            "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                            "created": True,
+                        }
+                    )
                 session.commit()
             except IntegrityError:
                 session.rollback()

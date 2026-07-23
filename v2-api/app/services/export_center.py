@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
+import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
-from pathlib import Path, PurePosixPath
-from typing import Any, Iterable, Mapping
+from pathlib import Path
+from typing import Any, Iterable, Iterator, Mapping
 from uuid import uuid4
 
 from app.services import local_simulation
-from app.services.delivery_package_queue import DeliveryPackageNotReady
-from app.services.final_delivery_export import LeasedDeliveryPackage
+from app.services.final_delivery_export import LeasedDeliveryPackage, delivery_group_readiness
 
 
 SUPPORTED_EXPORT_JOB_PAGE_SIZES = {20, 50, 100}
@@ -56,72 +59,19 @@ def _text(value: object) -> str:
     return str(value or "").strip()
 
 
-def _is_invalid_photo(photo: Mapping[str, Any]) -> bool:
-    status = _text(photo.get("upload_status") or photo.get("status")).lower()
-    return status == "invalid"
-
-
-def _active_valid_photos(group: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    return [
-        photo
-        for photo in group.get("photos") or []
-        if isinstance(photo, Mapping) and photo.get("is_active") is not False and not _is_invalid_photo(photo)
-    ]
-
-
-def _is_controlled_cache_path(value: object) -> bool:
-    text = _text(value).replace("\\", "/")
-    if not text or text.startswith("/"):
-        return False
-    path = PurePosixPath(text)
-    return not path.is_absolute() and ".." not in path.parts
-
-
 def terminal_delivery_preflight(group: Mapping[str, Any]) -> dict[str, Any]:
-    photos = _active_valid_photos(group)
-    constructed = len(photos) >= 4
-    photos_have_archive_status = any("archive_status" in photo for photo in photos)
-    if photos_have_archive_status:
-        archived = bool(photos) and all(_text(photo.get("archive_status")).lower() == "archived" for photo in photos)
-    else:
-        verification = group.get("barcode_verification") or {}
-        archived = (
-            _text(group.get("archive_status")).lower() == "archived"
-            or _text(group.get("status")).lower() == "archived"
-            or bool(group.get("archived_at"))
-            or _text(verification.get("auto_archive_status")).lower() == "archived"
-        )
-    has_uncontrolled_cache_path = any(
-        _text(photo.get("delivery_cache_path")) and not _is_controlled_cache_path(photo.get("delivery_cache_path"))
-        for photo in photos
-    )
-    cache_ready = (
-        constructed
-        and archived
-        and all(_text(photo.get("delivery_cache_status")).lower() == "ready" for photo in photos)
-        and not has_uncontrolled_cache_path
-        and all(_text(photo.get("delivery_cache_path")) for photo in photos)
-    )
-    cache_path_uncontrolled = constructed and archived and has_uncontrolled_cache_path
-    cache_pending = archived and not cache_ready and not cache_path_uncontrolled
-    return {
-        "constructed": constructed,
-        "archived": archived,
-        "cache_ready": cache_ready,
-        "cache_pending": cache_pending,
-        "cache_path_uncontrolled": cache_path_uncontrolled,
-        "valid_photo_count": len(photos),
-    }
+    return delivery_group_readiness(group)
 
 
-def _terminal_readiness_item(terminal: str, groups: list[Mapping[str, Any]]) -> dict[str, Any]:
-    preflights = [terminal_delivery_preflight(group) for group in groups]
+def terminal_readiness_item(terminal: str, groups: list[Mapping[str, Any]]) -> dict[str, Any]:
+    preflights = [delivery_group_readiness(group) for group in groups]
     group_count = len(groups)
     constructed_count = sum(1 for item in preflights if item["constructed"])
     archived_count = sum(1 for item in preflights if item["archived"])
     cache_ready_count = sum(1 for item in preflights if item["cache_ready"])
     cache_pending_count = sum(1 for item in preflights if item["cache_pending"])
     cache_path_uncontrolled_count = sum(1 for item in preflights if item["cache_path_uncontrolled"])
+    identity_blocked_count = sum(1 for item in preflights if not item["identity_ready"])
     blockers: list[str] = []
     if constructed_count < group_count:
         blockers.append(f"{group_count - constructed_count} \u4e2a\u8d44\u6599\u7ec4\u672a\u65bd\u5de5")
@@ -131,6 +81,8 @@ def _terminal_readiness_item(terminal: str, groups: list[Mapping[str, Any]]) -> 
         blockers.append(f"{cache_pending_count} \u4e2a\u8d44\u6599\u7ec4\u4ea4\u4ed8\u7f13\u5b58\u672a\u5c31\u7eea")
     if cache_path_uncontrolled_count:
         blockers.append(f"{cache_path_uncontrolled_count} \u4e2a\u8d44\u6599\u7ec4\u4ea4\u4ed8\u7f13\u5b58\u8def\u5f84\u4e0d\u53d7\u63a7")
+    if identity_blocked_count:
+        blockers.append(f"{identity_blocked_count} \u4e2a\u8d44\u6599\u7ec4\u6b63\u5f0f\u4ea4\u4ed8\u8eab\u4efd\u4e0d\u5b8c\u6574")
     return {
         "terminal": terminal,
         "group_count": group_count,
@@ -159,7 +111,7 @@ def build_terminal_readiness_page(
             continue
         groups_by_terminal.setdefault(terminal, []).append(group)
     items = [
-        _terminal_readiness_item(terminal, terminal_groups)
+        terminal_readiness_item(terminal, terminal_groups)
         for terminal, terminal_groups in sorted(groups_by_terminal.items(), key=lambda item: item[0])
     ]
     offset = (page - 1) * page_size
@@ -181,7 +133,14 @@ def stable_export_snapshot(groups: Iterable[Mapping[str, Any]]) -> list[dict[str
                     "archive_status": _text(photo.get("archive_status")).lower(),
                     "delivery_cache_status": _text(photo.get("delivery_cache_status")).lower(),
                     "delivery_cache_path": _text(photo.get("delivery_cache_path")),
+                    "delivery_cache_content_sha256": _text(photo.get("delivery_cache_content_sha256")),
+                    "delivery_cache_version": _text(photo.get("delivery_cache_version")),
+                    "sha256": _text(photo.get("sha256")),
                     "category": _text(photo.get("category")),
+                    "module_asset_no": _text(photo.get("module_asset_no") or photo.get("asset_no")),
+                    "collector": _text(photo.get("collector")),
+                    "client_completed_at": _text(photo.get("client_completed_at")),
+                    "original_filename": _text(photo.get("original_filename")),
                 }
             )
         photos.sort(key=lambda item: (item["id"], item["category"], item["delivery_cache_path"]))
@@ -197,6 +156,15 @@ def stable_export_snapshot(groups: Iterable[Mapping[str, Any]]) -> list[dict[str
                 "archive_status": _text(group.get("archive_status")).lower(),
                 "archived_at": _text(group.get("archived_at")),
                 "client_completed_at": _text(group.get("client_completed_at")),
+                "barcode_verification": {
+                    "auto_archive_status": _text((group.get("barcode_verification") or {}).get("auto_archive_status")).lower(),
+                    "status": _text((group.get("barcode_verification") or {}).get("status")).lower(),
+                    "evidence_fingerprint": _text((group.get("barcode_verification") or {}).get("evidence_fingerprint")),
+                },
+                "replacement_old_meter_no": _text(group.get("replacement_old_meter_no")),
+                "replacement_new_meter_no": _text(group.get("replacement_new_meter_no")),
+                "construction_collector": _text(group.get("construction_collector")),
+                "construction_module_asset_no": _text(group.get("construction_module_asset_no")),
                 "photos": photos,
             }
         )
@@ -332,11 +300,95 @@ def write_export_content(content: bytes, *, job_id: str, filename: str) -> tuple
 
 def validated_export_file(path_value: str) -> Path:
     root = local_simulation.delivery_cache_root().resolve()
-    candidate = Path(path_value).resolve(strict=True)
-    candidate.relative_to(root)
+    try:
+        candidate = Path(path_value).resolve(strict=True)
+        candidate.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise FileNotFoundError(path_value) from exc
     if candidate.is_dir():
         raise FileNotFoundError(path_value)
     return candidate
+
+
+@dataclass
+class OpenedExportStream:
+    path: Path
+    file_name: str
+    media_type: str
+    fd: int
+    size_bytes: int
+    handle: Any | None = None
+
+    def iter_bytes(self, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
+        try:
+            if self.handle is not None:
+                handle = self.handle
+                self.handle = None
+                should_close = True
+            else:
+                handle = os.fdopen(self.fd, "rb", closefd=True)
+                self.fd = -1
+                should_close = True
+            try:
+                while True:
+                    chunk = handle.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                if should_close:
+                    handle.close()
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self.handle is not None:
+            self.handle.close()
+            self.handle = None
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+
+def open_validated_export_stream(path_value: str | Path, *, filename: str = "", media_type: str = "") -> OpenedExportStream:
+    root = local_simulation.delivery_cache_root().resolve()
+    original = Path(path_value)
+    if original.is_symlink():
+        raise FileNotFoundError(str(path_value))
+    try:
+        candidate = original.resolve(strict=True)
+        candidate.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise FileNotFoundError(str(path_value)) from exc
+    if candidate.is_dir() or candidate.is_symlink():
+        raise FileNotFoundError(str(path_value))
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(candidate, flags)
+    except OSError as exc:
+        raise FileNotFoundError(str(path_value)) from exc
+    try:
+        info = os.fstat(fd)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+            raise FileNotFoundError(str(path_value))
+        stable_handle = None
+        if os.name == "nt":
+            stable_handle = tempfile.TemporaryFile()
+            with os.fdopen(os.dup(fd), "rb", closefd=True) as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    stable_handle.write(chunk)
+            stable_handle.seek(0)
+        return OpenedExportStream(
+            path=candidate,
+            file_name=filename or candidate.name,
+            media_type=media_type or media_type_for_filename(filename or candidate.name),
+            fd=fd,
+            size_bytes=info.st_size,
+            handle=stable_handle,
+        )
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def media_type_for_filename(filename: str) -> str:
@@ -384,6 +436,8 @@ def build_inline_export_content(repository: Any, *, job_type: str, filters: Mapp
 def request_background_export(repository: Any, *, job_type: str, filters: Mapping[str, Any], actor: str) -> dict[str, Any]:
     if job_type != "final_delivery":
         raise ValueError(f"Unsupported background export job type: {job_type}")
+    from app.services.delivery_package_queue import DeliveryPackageNotReady
+
     try:
         package: LeasedDeliveryPackage = repository.request_final_delivery_export(
             task_id=filters.get("task_id"),

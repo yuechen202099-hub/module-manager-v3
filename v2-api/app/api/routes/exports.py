@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from app.core.security import decode_access_token
 from app.core.responses import ok
@@ -227,25 +227,23 @@ def download_export_job(job_id: str, request: Request, auth: dict = Depends(requ
     repository = state_repository()
     try:
         download = repository.open_export_job_download(job_id, actor=actor)
-        if "content" in download:
-            repository.append_audit_event(
-                "export_job_downloaded",
-                actor,
-                {
-                    "job_id": job_id,
-                    "job_type": download.get("job_type") or "",
-                    "file_name": download.get("file_name") or "",
-                },
-            )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Export job not found") from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail="Export job is not ready") from exc
     if "path" in download:
-        return FileResponse(
+        opened = export_center.open_validated_export_stream(
             download["path"],
             media_type=download.get("media_type") or "application/octet-stream",
             filename=download["file_name"],
+        )
+        return StreamingResponse(
+            opened.iter_bytes(),
+            media_type=opened.media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{opened.file_name}"',
+                "Content-Length": str(opened.size_bytes),
+            },
         )
     return Response(
         content=download["content"],

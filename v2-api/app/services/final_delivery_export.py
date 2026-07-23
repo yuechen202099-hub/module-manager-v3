@@ -200,6 +200,33 @@ def _is_controlled_cache_path(value: Any) -> bool:
     return not path.is_absolute() and ".." not in path.parts
 
 
+def delivery_group_readiness(group: Mapping[str, Any]) -> dict[str, Any]:
+    identity = _group_identity(group)
+    photos = _active_photos(group)
+    constructed = len(photos) == 4
+    archived = group_is_formally_archived(group)
+    cache_path_uncontrolled = any(
+        _text(photo.get("delivery_cache_path")) and not _is_controlled_cache_path(photo.get("delivery_cache_path"))
+        for photo in photos
+    )
+    cache_ready = (
+        constructed
+        and archived
+        and not cache_path_uncontrolled
+        and all(_text(photo.get("delivery_cache_status")) == "ready" for photo in photos)
+        and all(_is_controlled_cache_path(photo.get("delivery_cache_path")) for photo in photos)
+    )
+    return {
+        "constructed": constructed,
+        "archived": archived,
+        "cache_ready": cache_ready,
+        "cache_pending": archived and not cache_ready and not cache_path_uncontrolled,
+        "cache_path_uncontrolled": archived and cache_path_uncontrolled,
+        "identity_ready": all(identity.values()),
+        "valid_photo_count": len(photos),
+    }
+
+
 def _error(group_id: str, code: str, field: str, message: str) -> dict[str, str]:
     return {"group_id": group_id, "code": code, "field": field, "message": message}
 

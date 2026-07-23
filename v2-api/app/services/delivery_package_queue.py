@@ -176,6 +176,39 @@ def request_json_delivery_package(
     requested_by: str,
 ) -> LeasedDeliveryPackage:
     team_id = local_simulation.current_team_id()
+    transaction = local_simulation.begin_authoritative_json_write(team_id)
+    token = local_simulation.activate_authoritative_json_write(transaction)
+    try:
+        package = stage_json_delivery_package(
+            transaction,
+            groups=groups,
+            task_id=task_id,
+            terminal=terminal,
+            review_scope=review_scope,
+            requested_by=requested_by,
+        )
+        local_simulation.finish_authoritative_json_write(transaction, token)
+        return package
+    except DeliveryPackageNotReady:
+        if not transaction.closed:
+            local_simulation.finish_authoritative_json_write(transaction, token)
+        raise
+    except BaseException:
+        if not transaction.closed:
+            local_simulation.abort_authoritative_json_write(transaction, token)
+        raise
+
+
+def stage_json_delivery_package(
+    transaction: local_simulation.AuthoritativeJsonWrite,
+    *,
+    groups: Iterable[Mapping[str, Any]],
+    task_id: int | None,
+    terminal: str,
+    review_scope: str,
+    requested_by: str,
+) -> LeasedDeliveryPackage:
+    team_id = transaction.team_id
     _candidates, fingerprint, group_ids = prepare_delivery_request(
         groups,
         archived_only=review_scope == "reviewed",
@@ -186,74 +219,64 @@ def request_json_delivery_package(
         terminal=terminal,
         review_scope=review_scope,
     )
-    transaction = local_simulation.begin_authoritative_json_write(team_id)
-    token = local_simulation.activate_authoritative_json_write(transaction)
-    try:
-        jobs = transaction.working_state.setdefault("delivery_package_jobs", [])
-        job = next(
-            (
-                item
-                for item in jobs
-                if str(item.get("scope_hash") or "") == scope_hash
-                and str(item.get("evidence_fingerprint") or "") == fingerprint
-            ),
-            None,
+    jobs = transaction.working_state.setdefault("delivery_package_jobs", [])
+    job = next(
+        (
+            item
+            for item in jobs
+            if str(item.get("scope_hash") or "") == scope_hash
+            and str(item.get("evidence_fingerprint") or "") == fingerprint
+        ),
+        None,
+    )
+    if job is not None and str(job.get("status") or "") == "ready":
+        package = _ready_package(
+            job.get("package_path"),
+            evidence_fingerprint=job.get("evidence_fingerprint"),
+            content_sha256=job.get("content_sha256"),
+            size_bytes=job.get("size_bytes"),
         )
-        if job is not None and str(job.get("status") or "") == "ready":
-            package = _ready_package(
-                job.get("package_path"),
-                evidence_fingerprint=job.get("evidence_fingerprint"),
-                content_sha256=job.get("content_sha256"),
-                size_bytes=job.get("size_bytes"),
-            )
-            if package is not None:
-                local_simulation.abort_authoritative_json_write(transaction, token)
-                return package
-        if job is not None and str(job.get("status") or "") not in {"ready", "stale"}:
-            status = str(job.get("status") or "pending")
-            job_id = str(job.get("id") or "")
-            local_simulation.abort_authoritative_json_write(transaction, token)
-            raise DeliveryPackageNotReady(job_id=job_id, status=status)
-        now = datetime.now(UTC).isoformat()
-        if job is None:
-            job = {
-                "id": str(uuid4()),
-                "team_id": team_id,
-                "scope": scope,
-                "scope_hash": scope_hash,
-                "scope_payload": scope_payload,
-                "group_ids": group_ids,
-                "evidence_fingerprint": fingerprint,
-                "attempt_count": 0,
-                "created_at": now,
-            }
-            jobs.append(job)
-        if str(job.get("status") or "") not in {"pending", "processing"}:
-            job["attempt_count"] = 0
-        job.update(
-            {
-                "status": "pending",
-                "scope": scope,
-                "scope_payload": scope_payload,
-                "group_ids": group_ids,
-                "lease_owner": None,
-                "lease_token": None,
-                "lease_expires_at": None,
-                "package_path": None,
-                "content_sha256": None,
-                "size_bytes": None,
-                "requested_by": requested_by,
-                "request_reason": "formal_delivery_requested",
-                "last_error": "",
-                "completed_at": None,
-                "updated_at": now,
-            }
-        )
-        local_simulation.finish_authoritative_json_write(transaction, token)
-    except BaseException:
-        if not transaction.closed:
-            local_simulation.abort_authoritative_json_write(transaction, token)
-        raise
+        if package is not None:
+            return package
+    if job is not None and str(job.get("status") or "") not in {"ready", "stale"}:
+        status = str(job.get("status") or "pending")
+        job_id = str(job.get("id") or "")
+        raise DeliveryPackageNotReady(job_id=job_id, status=status)
+    now = datetime.now(UTC).isoformat()
+    if job is None:
+        job = {
+            "id": str(uuid4()),
+            "team_id": team_id,
+            "scope": scope,
+            "scope_hash": scope_hash,
+            "scope_payload": scope_payload,
+            "group_ids": group_ids,
+            "evidence_fingerprint": fingerprint,
+            "attempt_count": 0,
+            "created_at": now,
+        }
+        jobs.append(job)
+    if str(job.get("status") or "") not in {"pending", "processing"}:
+        job["attempt_count"] = 0
+    job.update(
+        {
+            "status": "pending",
+            "scope": scope,
+            "scope_payload": scope_payload,
+            "group_ids": group_ids,
+            "lease_owner": None,
+            "lease_token": None,
+            "lease_expires_at": None,
+            "package_path": None,
+            "content_sha256": None,
+            "size_bytes": None,
+            "requested_by": requested_by,
+            "request_reason": "formal_delivery_requested",
+            "last_error": "",
+            "completed_at": None,
+            "updated_at": now,
+        }
+    )
     raise DeliveryPackageNotReady(job_id=str(job["id"]), status=str(job["status"]))
 
 
