@@ -66,6 +66,11 @@ def main() -> None:
         ["EXPORT_CENTER_PAGE_SIZES", "tab", "page_size", "router.replace", "AbortController", "requestSerial"],
         "useExportCenterQuery",
     )
+    contains_all(
+        query_composable,
+        ["terminal_page", "terminal_page_size", "job_page", "job_page_size"],
+        "useExportCenterQuery dual pagination URL keys",
+    )
     ensure("50" in query_composable and "100" in query_composable, "useExportCenterQuery missing supported page sizes")
     ensure("Number.isFinite" in query_composable, "useExportCenterQuery must strictly parse page numbers")
     ensure("MAX_EXPORT_CENTER_PAGE" in query_composable, "useExportCenterQuery missing page upper bound")
@@ -74,8 +79,16 @@ def main() -> None:
         "fetchExportJobs({" in query_composable and "category:" in query_composable,
         "useExportCenterQuery must request server-side job filters",
     )
+    ensure(
+        "terminalRequestSerial" in query_composable and "jobsRequestSerial" in query_composable,
+        "useExportCenterQuery must track stale terminal/job requests independently",
+    )
+    ensure(
+        "terminalController" in query_composable and "jobsController" in query_composable,
+        "useExportCenterQuery must abort terminal/job requests independently",
+    )
 
-    contains_all(terminal_tab, ["阻断", "最近生成", "操作", "blockers"], "TerminalDeliveryTab")
+    contains_all(terminal_tab, ["阻断", "最近生成", "操作", "blockers", "latestGeneratedAt"], "TerminalDeliveryTab")
     ensure(
         "final_delivery" in exports_view or "final_delivery" in services,
         "final_delivery launch flow missing",
@@ -99,7 +112,7 @@ def main() -> None:
         services,
         [
             "fetchExportCatalog",
-            "fetchTasks",
+            "fetchExportTaskOptions",
             "fetchTerminalReadinessPage",
             "fetchExportJobs",
             "createExportJob",
@@ -108,7 +121,8 @@ def main() -> None:
         "export-center services",
     )
     ensure("required_filters" in services or "requiredFilters" in types, "export center task filters metadata missing")
-    ensure("task_id" in exports_view and "fetchTasks" in exports_view, "task_detail task selector missing")
+    ensure("task_id" in exports_view and "fetchExportTaskOptions" in exports_view, "task_detail task selector missing")
+    ensure("remote-method" in catalog_tab or "remoteMethod" in exports_view, "task_detail selector must remote search")
     ensure("createExportJob(item.key, {})" not in exports_view, "task_detail launch must not submit empty filters")
     ensure(
         "terminals: [terminal]" in exports_view or "terminals: [payload.terminal]" in exports_view,

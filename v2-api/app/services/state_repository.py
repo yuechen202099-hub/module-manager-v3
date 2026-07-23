@@ -2281,11 +2281,77 @@ def _export_job_payload(job: Mapping[str, Any]) -> dict[str, Any]:
         "error_message": str(job.get("error_message") or ""),
         "filters": deepcopy(dict(job.get("filter_snapshot") or job.get("params") or {})),
         "request_key": str(job.get("request_key") or ""),
-        "created_by": str(job.get("created_by") or ""),
+        "created_by": _export_job_created_by(job),
         "created_at": job.get("created_at"),
         "updated_at": job.get("updated_at"),
         "finished_at": job.get("finished_at"),
         "created": bool(job.get("created", False)),
+    }
+
+
+def _export_job_created_by(job: Mapping[str, Any]) -> str:
+    params = job.get("params") or {}
+    if isinstance(params, Mapping):
+        created_by = params.get("created_by")
+        if created_by:
+            return str(created_by)
+    return str(job.get("created_by") or "")
+
+
+def _export_job_terminal(job: Mapping[str, Any]) -> str:
+    for key in ("filter_snapshot", "filters", "params"):
+        filters = job.get(key) or {}
+        if isinstance(filters, Mapping):
+            terminal = str(filters.get("terminal") or "").strip()
+            if terminal:
+                return terminal
+    return ""
+
+
+def _latest_generated_at_by_terminal(jobs: list[Mapping[str, Any]]) -> dict[str, str]:
+    latest_by_terminal: dict[str, str] = {}
+    for job in jobs:
+        if str(job.get("job_type") or "") != "final_delivery":
+            continue
+        terminal = _export_job_terminal(job)
+        created_at = str(job.get("created_at") or "")
+        if not terminal or not created_at:
+            continue
+        previous = latest_by_terminal.get(terminal, "")
+        if created_at > previous:
+            latest_by_terminal[terminal] = created_at
+    return latest_by_terminal
+
+
+def _with_latest_generated_at(page: Mapping[str, Any], latest_by_terminal: Mapping[str, str]) -> dict[str, Any]:
+    items = []
+    for item in page.get("items") or []:
+        row = dict(item)
+        row["latest_generated_at"] = str(latest_by_terminal.get(str(row.get("terminal") or ""), "") or "")
+        items.append(row)
+    return {
+        "page": int(page.get("page") or 1),
+        "page_size": int(page.get("page_size") or 20),
+        "total": int(page.get("total") or 0),
+        "items": items,
+    }
+
+
+def _task_option_label(task_id: object, terminal: object, title: object) -> str:
+    task_text = str(task_id or "").strip()
+    parts = [str(terminal or "").strip() or "-", f"#{task_text}"]
+    name = str(title or "").strip()
+    if name:
+        parts.append(name)
+    return " / ".join(parts)
+
+
+def _task_option_payload(task_id: object, terminal: object, status: object, title: object) -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "terminal": str(terminal or ""),
+        "status": str(getattr(status, "value", status) or ""),
+        "label": _task_option_label(task_id, terminal, title),
     }
 
 
@@ -2779,6 +2845,10 @@ class StateRepository(ABC):
         job_types: Iterable[object] | None = None,
         status: Iterable[object] | None = None,
     ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_export_task_options(self, *, query: str = "", limit: int = 20) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     @abstractmethod
@@ -3963,12 +4033,16 @@ class JsonStateRepository(StateRepository):
         return event
 
     def list_terminal_delivery_readiness(self, *, page: int = 1, page_size: int = 20, query: str = "") -> dict[str, Any]:
-        return export_center.build_terminal_readiness_page(
+        readiness_page = export_center.build_terminal_readiness_page(
             deepcopy(local_simulation.get_state().get("groups", [])),
             page=page,
             page_size=page_size,
             query=query,
         )
+        latest_by_terminal = _latest_generated_at_by_terminal(
+            list(local_simulation.get_state().get("export_jobs", []))
+        )
+        return _with_latest_generated_at(readiness_page, latest_by_terminal)
 
     def list_export_jobs(
         self,
@@ -4001,6 +4075,22 @@ class JsonStateRepository(StateRepository):
             "items": [_export_job_payload(job) for job in jobs[offset : offset + page_size]],
         }
 
+    def list_export_task_options(self, *, query: str = "", limit: int = 20) -> list[dict[str, Any]]:
+        query_text = str(query or "").strip().lower()
+        safe_limit = max(1, min(int(limit or 20), 50))
+        items: list[dict[str, Any]] = []
+        for task in local_simulation.get_state().get("tasks", []):
+            task_id = task.get("id")
+            terminal = str(task.get("terminal") or "")
+            title = str(task.get("name") or task.get("title") or "")
+            status = str(task.get("status") or "")
+            haystack = " ".join((str(task_id or ""), terminal, title, status)).lower()
+            if query_text and query_text not in haystack:
+                continue
+            items.append(_task_option_payload(task_id, terminal, status, title))
+        items.sort(key=lambda item: (str(item.get("terminal") or ""), str(item.get("task_id") or "")))
+        return items[:safe_limit]
+
     def create_export_job(self, *, job_type: str, filters: dict[str, Any], actor: str) -> dict[str, Any]:
         job_type = str(job_type or "").strip()
         if job_type not in export_center.CATALOG_BY_KEY:
@@ -4014,7 +4104,7 @@ class JsonStateRepository(StateRepository):
         size_bytes = None
         status = "pending"
         progress = 0
-        params: dict[str, Any] = {}
+        params: dict[str, Any] = {"created_by": actor}
         inline_generated = False
         is_background = export_center.CATALOG_BY_KEY[job_type]["mode"] == "background"
         if not is_background:
@@ -8736,8 +8826,8 @@ class PostgresStateRepository(StateRepository):
                         "progress": row.progress,
                         "error_message": row.error_message,
                         "filter_snapshot": row.filter_snapshot,
+                        "params": row.params,
                         "request_key": row.request_key,
-                        "created_by": row.created_by,
                         "created_at": row.created_at.isoformat() if row.created_at else None,
                         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
                         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
@@ -8746,6 +8836,30 @@ class PostgresStateRepository(StateRepository):
                 for row in rows
             ],
         }
+
+    def list_export_task_options(self, *, query: str = "", limit: int = 20) -> list[dict[str, Any]]:
+        team_id = local_simulation.current_team_id()
+        query_text = str(query or "").strip()
+        safe_limit = max(1, min(int(limit or 20), 50))
+        statement = (
+            select(Task.legacy_id.label("task_id"), Task.terminal, Task.title, Task.status)
+            .where(Task.team_id == team_id, Task.legacy_id.is_not(None))
+            .order_by(Task.terminal, Task.legacy_id, Task.id)
+            .limit(safe_limit)
+        )
+        if query_text:
+            pattern = f"%{query_text}%"
+            statement = statement.where(
+                or_(
+                    Task.terminal.ilike(pattern),
+                    Task.title.ilike(pattern),
+                    cast(Task.legacy_id, String).ilike(pattern),
+                    cast(Task.status, String).ilike(pattern),
+                )
+            )
+        with self._session() as session:
+            rows = session.execute(statement).all()
+        return [_task_option_payload(row.task_id, row.terminal, row.status, row.title) for row in rows]
 
     def _export_center_lightweight_groups(self, *, query: str = "") -> list[dict[str, Any]]:
         team_id = local_simulation.current_team_id()
@@ -8849,11 +8963,33 @@ class PostgresStateRepository(StateRepository):
         return list(groups_by_id.values())
 
     def list_terminal_delivery_readiness(self, *, page: int = 1, page_size: int = 20, query: str = "") -> dict[str, Any]:
-        return export_center.build_terminal_readiness_page(
+        readiness_page = export_center.build_terminal_readiness_page(
             self._export_center_lightweight_groups(query=query),
             page=page,
             page_size=page_size,
         )
+        terminals = [str(item.get("terminal") or "") for item in readiness_page.get("items", []) if str(item.get("terminal") or "")]
+        if not terminals:
+            return _with_latest_generated_at(readiness_page, {})
+        team_id = local_simulation.current_team_id()
+        terminal_expr = func.coalesce(ExportJob.filter_snapshot["terminal"].astext, ExportJob.params["terminal"].astext)
+        statement = (
+            select(terminal_expr.label("terminal"), func.max(ExportJob.created_at).label("latest_generated_at"))
+            .where(
+                ExportJob.team_id == team_id,
+                ExportJob.job_type == "final_delivery",
+                terminal_expr.in_(terminals),
+            )
+            .group_by(terminal_expr)
+        )
+        with self._session() as session:
+            rows = session.execute(statement).all()
+        latest_by_terminal = {
+            str(row.terminal or ""): row.latest_generated_at.isoformat()
+            for row in rows
+            if row.terminal and row.latest_generated_at
+        }
+        return _with_latest_generated_at(readiness_page, latest_by_terminal)
 
     def _export_project_id(self, session: Session):
         project = session.scalar(
@@ -8881,7 +9017,7 @@ class PostgresStateRepository(StateRepository):
         size_bytes = None
         status = JobStatus.PENDING
         progress = 0
-        params: dict[str, Any] = {}
+        params: dict[str, Any] = {"created_by": actor}
         now = datetime.now(UTC)
         inline_generated = False
         if is_background:
@@ -8927,8 +9063,8 @@ class PostgresStateRepository(StateRepository):
                         "progress": existing.progress,
                         "error_message": existing.error_message,
                         "filter_snapshot": existing.filter_snapshot,
+                        "params": existing.params,
                         "request_key": existing.request_key,
-                        "created_by": actor,
                         "created_at": existing.created_at.isoformat() if existing.created_at else None,
                         "updated_at": existing.updated_at.isoformat() if existing.updated_at else None,
                         "finished_at": existing.finished_at.isoformat() if existing.finished_at else None,
@@ -9007,8 +9143,8 @@ class PostgresStateRepository(StateRepository):
                             "progress": row.progress,
                             "error_message": row.error_message,
                             "filter_snapshot": row.filter_snapshot,
+                            "params": row.params,
                             "request_key": row.request_key,
-                            "created_by": actor,
                             "created_at": row.created_at.isoformat() if row.created_at else None,
                             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
                             "finished_at": row.finished_at.isoformat() if row.finished_at else None,
@@ -9026,8 +9162,8 @@ class PostgresStateRepository(StateRepository):
                         "progress": row.progress,
                         "error_message": row.error_message,
                         "filter_snapshot": row.filter_snapshot,
+                        "params": row.params,
                         "request_key": row.request_key,
-                        "created_by": actor,
                         "created_at": row.created_at.isoformat() if row.created_at else None,
                         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
                         "finished_at": row.finished_at.isoformat() if row.finished_at else None,

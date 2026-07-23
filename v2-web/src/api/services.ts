@@ -20,6 +20,7 @@ import type {
   ExportCenterPageSize,
   ExportJob,
   ExportJobPage,
+  ExportTaskOption,
   TerminalReadinessItem,
   TerminalReadinessPage,
   GroupBarcodeManualConfirmation,
@@ -127,6 +128,13 @@ type BackendExportCatalogItem = {
   }>
 }
 
+type BackendExportTaskOption = {
+  task_id?: string | number
+  terminal?: string
+  status?: string
+  label?: string
+}
+
 type BackendTerminalReadinessItem = {
   terminal?: string
   group_count?: number
@@ -135,6 +143,7 @@ type BackendTerminalReadinessItem = {
   cache_ready_count?: number
   status?: 'ready' | 'blocked'
   blockers?: string[]
+  latest_generated_at?: string
 }
 
 type BackendTerminalReadinessPage = {
@@ -1096,6 +1105,15 @@ function mapExportCatalogItem(raw: BackendExportCatalogItem): ExportCatalogItem 
   }
 }
 
+function mapExportTaskOption(raw: BackendExportTaskOption): ExportTaskOption {
+  return {
+    taskId: String(raw.task_id || ''),
+    terminal: String(raw.terminal || ''),
+    status: String(raw.status || ''),
+    label: String(raw.label || ''),
+  }
+}
+
 function mapTerminalReadinessItem(raw: BackendTerminalReadinessItem): TerminalReadinessItem {
   return {
     terminal: String(raw.terminal || ''),
@@ -1105,6 +1123,7 @@ function mapTerminalReadinessItem(raw: BackendTerminalReadinessItem): TerminalRe
     cacheReadyCount: Number(raw.cache_ready_count || 0),
     status: raw.status === 'ready' ? 'ready' : 'blocked',
     blockers: mapStringArray(raw.blockers),
+    latestGeneratedAt: String(raw.latest_generated_at || ''),
   }
 }
 
@@ -3046,6 +3065,19 @@ async function createResponseError(response: Response, fallbackMessage: string):
 export async function fetchExportCatalog(signal?: AbortSignal): Promise<ExportCatalogItem[]> {
   const data = await api<{ items?: BackendExportCatalogItem[] }>('/exports/catalog', { signal })
   return (data.items || []).map(mapExportCatalogItem)
+}
+
+export async function fetchExportTaskOptions(
+  query = '',
+  limit = 20,
+  signal?: AbortSignal,
+): Promise<ExportTaskOption[]> {
+  const params = new URLSearchParams({
+    query: query.trim(),
+    limit: String(Math.max(1, Math.min(50, Math.floor(Number(limit) || 20)))),
+  })
+  const data = await api<{ items?: BackendExportTaskOption[] }>(`/exports/task-options?${params.toString()}`, { signal })
+  return (data.items || []).map(mapExportTaskOption)
 }
 
 export async function fetchTerminalReadinessPage(query: TerminalReadinessQuery): Promise<TerminalReadinessPage> {

@@ -156,6 +156,16 @@ def export_catalog(request: Request, auth: dict = Depends(require_admin)):
     return ok(request, {"items": list(export_center.EXPORT_CATALOG)})
 
 
+@router.get("/task-options")
+def export_task_options(
+    request: Request,
+    query: str = "",
+    limit: int = Query(default=20, ge=1, le=50),
+    auth: dict = Depends(require_admin),
+):
+    return ok(request, {"items": state_repository().list_export_task_options(query=query, limit=limit)})
+
+
 @router.get("/terminal-readiness")
 def terminal_readiness(
     request: Request,

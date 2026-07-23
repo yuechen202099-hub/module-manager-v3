@@ -108,3 +108,27 @@
   - `cd v2-web && npm exec vue-tsc -- --noEmit` -> `0`
   - `cd v2-web && MODULE_MANAGER_VUE_OUT_DIR=.tmp/task6-build npm run build` -> `0`（仅既有 Rollup chunk / PURE comment warnings）
   - `git diff --name-only 74989e7..HEAD -- v2-api/app/static/vue` -> 空输出
+
+## 2026-07-23 Review Fixes Round 2
+
+- 修复第二轮审阅的 1 Critical + 2 Important + 1 Minor：
+  - `PostgresStateRepository.list_export_jobs()` 不再访问不存在的 `ExportJob.created_by` ORM 属性；创建导出任务时把 actor 写入 `params["created_by"]`，列表返回统一从 `params` 安全读取，避免真实 PG 环境 500。
+  - `JsonStateRepository` / `PostgresStateRepository` 都补充 `latest_generated_at`，终端页“最近生成”只使用 `terminal-readiness` 返回值，不再从当前 jobs 页倒推。
+  - 新增 admin-only `GET /exports/task-options?query=&limit<=50`，JSON / PostgreSQL 都走轻量 task options 查询，只返回 `task_id / terminal / status / label`，支持服务端关键字过滤与稳定排序。
+  - `useExportCenterQuery.ts` 拆分为两套 URL / 分页状态：`terminal_page` / `terminal_page_size` 与 `job_page` / `job_page_size`，并为 terminal/jobs 请求分别维护独立 `requestSerial` 与 `AbortController`。
+  - 业务清单的 `task_detail` 选择器改为 `el-select` remote search + debounce，前端不再 `fetchTasks({ summary: true })` 全量预载。
+- 更新验证：
+  - `v2-api/tests/test_export_center.py`
+    - 新增 / 维持 `test_postgres_export_jobs_include_created_by`
+    - 新增 `test_terminal_readiness_route_includes_latest_generated_at`
+    - 新增 `test_json_terminal_readiness_includes_latest_generated_at_from_export_jobs`
+    - 新增 `test_export_task_options_are_admin_only`
+    - 新增 `test_json_export_task_options_filter_and_limit`
+    - 同步更新 shared preflight 两个 readiness 测试，使其显式断言 `latest_generated_at`
+  - `scripts/verify_v3_2_0_export_center_ui.py` 增补 dual pagination URL keys、independent stale request handling、remote task selector、`latestGeneratedAt` 检查。
+- 本次验证（Thursday, July 23, 2026）：
+  - `python -m pytest v2-api/tests/test_export_center.py -q` -> `43 passed, 1 warning`
+  - `python scripts/verify_v3_2_0_export_center_ui.py` -> `OK`
+  - `cd v2-web && npm exec vue-tsc -- --noEmit` -> `0`
+  - `cd v2-web && MODULE_MANAGER_VUE_OUT_DIR=.tmp/task6-build npm run build` -> `0`（仅既有 Rollup `PURE` comment / chunk size warnings）
+  - `git diff --name-only 74989e7..HEAD -- v2-api/app/static/vue` -> 空输出

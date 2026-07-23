@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { Download, FolderOpened, Refresh } from '@element-plus/icons-vue'
 
-import type { ExportJob, TerminalReadinessItem } from '@/api/types'
+import type { TerminalReadinessItem } from '@/api/types'
 
 const props = defineProps<{
   items: TerminalReadinessItem[]
-  latestJobs: Record<string, ExportJob | undefined>
   loading?: boolean
   launchingKey?: string
   downloadingJobId?: string
@@ -21,13 +20,6 @@ function statusType(value: TerminalReadinessItem['status']) {
   return value === 'ready' ? 'success' : 'danger'
 }
 
-function jobStatusType(value: string) {
-  if (value === 'succeeded') return 'success'
-  if (value === 'failed') return 'danger'
-  if (value === 'pending' || value === 'processing') return 'warning'
-  return 'info'
-}
-
 function formatDateTime(value = '') {
   if (!value) return '-'
   const parsed = new Date(value)
@@ -37,10 +29,6 @@ function formatDateTime(value = '') {
 
 function blockerText(row: TerminalReadinessItem) {
   return row.blockers.length ? row.blockers.join('；') : '-'
-}
-
-function latestJobOf(terminal: string) {
-  return props.latestJobs[terminal]
 }
 
 function launchKey(terminal: string, reviewScope: 'reviewed' | 'all') {
@@ -69,20 +57,7 @@ function launchKey(terminal: string, reviewScope: 'reviewed' | 'all') {
     </el-table-column>
     <el-table-column label="最近生成" min-width="240">
       <template #default="{ row }">
-        <template v-if="latestJobOf(row.terminal)">
-          <div class="stack-cell">
-            <div class="stack-line">
-              <el-tag size="small" effect="plain" :type="jobStatusType(latestJobOf(row.terminal)?.status || '')">
-                {{ latestJobOf(row.terminal)?.status || '-' }}
-              </el-tag>
-              <span>{{ formatDateTime(latestJobOf(row.terminal)?.createdAt || '') }}</span>
-            </div>
-            <div class="stack-subtle">
-              {{ latestJobOf(row.terminal)?.filters?.review_scope === 'all' ? '全部' : '已审阅' }}
-            </div>
-          </div>
-        </template>
-        <span v-else>-</span>
+        <span>{{ formatDateTime(row.latestGeneratedAt) }}</span>
       </template>
     </el-table-column>
     <el-table-column label="操作" width="154" fixed="right">
@@ -138,19 +113,4 @@ function launchKey(terminal: string, reviewScope: 'reviewed' | 'all') {
   gap: 8px;
 }
 
-.stack-cell {
-  display: grid;
-  gap: 4px;
-}
-
-.stack-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.stack-subtle {
-  color: var(--v2-text-muted);
-  font-size: 12px;
-}
 </style>

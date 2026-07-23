@@ -29,15 +29,19 @@ const EXPORT_CENTER_JOB_STATUS_FILTERS = new Set(['pending', 'processing', 'succ
 
 export interface ExportCenterRouteQuery {
   tab: ExportCenterTab
-  page: number
-  pageSize: ExportCenterPageSize
+  terminalPage: number
+  terminalPageSize: ExportCenterPageSize
+  jobPage: number
+  jobPageSize: ExportCenterPageSize
   filter: string
 }
 
 const DEFAULT_QUERY: ExportCenterRouteQuery = {
   tab: 'terminal',
-  page: 1,
-  pageSize: 20,
+  terminalPage: 1,
+  terminalPageSize: 20,
+  jobPage: 1,
+  jobPageSize: 20,
   filter: '',
 }
 
@@ -53,7 +57,7 @@ function parsePositiveInteger(value: unknown, fallback: number, max: number): nu
   return Math.min(parsed, max)
 }
 
-function pageSize(value: unknown): ExportCenterPageSize {
+function parsePageSize(value: unknown): ExportCenterPageSize {
   const parsed = Number(first(value))
   return EXPORT_CENTER_PAGE_SIZES.includes(parsed as ExportCenterPageSize) ? (parsed as ExportCenterPageSize) : 20
 }
@@ -66,8 +70,10 @@ function normalizeTab(value: unknown): ExportCenterTab {
 function routeQueryToState(query: Record<string, unknown>): ExportCenterRouteQuery {
   return {
     tab: normalizeTab(query.tab),
-    page: parsePositiveInteger(query.page, 1, MAX_EXPORT_CENTER_PAGE),
-    pageSize: pageSize(query.page_size || query.pageSize),
+    terminalPage: parsePositiveInteger(query.terminal_page || query.page, 1, MAX_EXPORT_CENTER_PAGE),
+    terminalPageSize: parsePageSize(query.terminal_page_size || query.page_size || query.pageSize),
+    jobPage: parsePositiveInteger(query.job_page, 1, MAX_EXPORT_CENTER_PAGE),
+    jobPageSize: parsePageSize(query.job_page_size),
     filter: first(query.filter || query.query),
   }
 }
@@ -75,8 +81,10 @@ function routeQueryToState(query: Record<string, unknown>): ExportCenterRouteQue
 function serializeQuery(state: ExportCenterRouteQuery) {
   const query: Record<string, string> = {}
   if (state.tab !== DEFAULT_QUERY.tab) query.tab = state.tab
-  if (state.page !== DEFAULT_QUERY.page) query.page = String(state.page)
-  if (state.pageSize !== DEFAULT_QUERY.pageSize) query.page_size = String(state.pageSize)
+  if (state.terminalPage !== DEFAULT_QUERY.terminalPage) query.terminal_page = String(state.terminalPage)
+  if (state.terminalPageSize !== DEFAULT_QUERY.terminalPageSize) query.terminal_page_size = String(state.terminalPageSize)
+  if (state.jobPage !== DEFAULT_QUERY.jobPage) query.job_page = String(state.jobPage)
+  if (state.jobPageSize !== DEFAULT_QUERY.jobPageSize) query.job_page_size = String(state.jobPageSize)
   if (state.filter) query.filter = state.filter
   return query
 }
@@ -103,8 +111,8 @@ function buildJobHistoryQuery(state: ExportCenterRouteQuery) {
   const filter = state.filter.trim().toLowerCase()
   const allowedJobTypes = EXPORT_CENTER_JOB_TYPES_BY_TAB[state.tab]
   return {
-    page: state.page,
-    pageSize: state.pageSize,
+    page: state.jobPage,
+    pageSize: state.jobPageSize,
     category: state.tab,
     jobTypes: allowedJobTypes.includes(filter) ? [filter] : undefined,
     status: EXPORT_CENTER_JOB_STATUS_FILTERS.has(filter) ? [filter] : undefined,
@@ -116,71 +124,113 @@ export function useExportCenterQuery() {
   const router = useRouter()
   const query = reactive<ExportCenterRouteQuery>(routeQueryToState(route.query as Record<string, unknown>))
   const catalog = ref<ExportCatalogItem[]>([])
-  const terminalPage = ref<TerminalReadinessPage>(emptyTerminalPage(query.page, query.pageSize))
-  const jobsPage = ref<ExportJobPage>(emptyJobsPage(query.page, query.pageSize))
+  const terminalPage = ref<TerminalReadinessPage>(emptyTerminalPage(query.terminalPage, query.terminalPageSize))
+  const jobsPage = ref<ExportJobPage>(emptyJobsPage(query.jobPage, query.jobPageSize))
   const loading = ref(false)
   const jobsLoading = ref(false)
   const errorMessage = ref('')
-  let requestSerial = 0
-  let controller: AbortController | null = null
+  // requestSerial is split into terminalRequestSerial and jobsRequestSerial.
+  let terminalRequestSerial = 0
+  let jobsRequestSerial = 0
+  let terminalController: AbortController | null = null
+  let jobsController: AbortController | null = null
 
   function replace(next: ExportCenterRouteQuery) {
     return router.replace({ query: serializeQuery(next) })
   }
 
   function setTab(tab: ExportCenterTab) {
-    return replace({ ...query, tab, page: 1 })
+    return replace({ ...query, tab, terminalPage: 1, jobPage: 1 })
   }
 
-  function setPage(page: number) {
-    return replace({ ...query, page: parsePositiveInteger(page, 1, MAX_EXPORT_CENTER_PAGE) })
+  function setTerminalPage(page: number) {
+    return replace({ ...query, terminalPage: parsePositiveInteger(page, 1, MAX_EXPORT_CENTER_PAGE) })
   }
 
-  function setPageSize(size: ExportCenterPageSize) {
-    return replace({ ...query, page: 1, pageSize: size })
+  function setTerminalPageSize(size: ExportCenterPageSize) {
+    return replace({ ...query, terminalPage: 1, terminalPageSize: parsePageSize(size) })
+  }
+
+  function setJobPage(page: number) {
+    return replace({ ...query, jobPage: parsePositiveInteger(page, 1, MAX_EXPORT_CENTER_PAGE) })
+  }
+
+  function setJobPageSize(size: ExportCenterPageSize) {
+    return replace({ ...query, jobPage: 1, jobPageSize: parsePageSize(size) })
   }
 
   function setFilter(filter: string) {
-    return replace({ ...query, page: 1, filter: String(filter || '').trim() })
+    return replace({ ...query, terminalPage: 1, jobPage: 1, filter: String(filter || '').trim() })
   }
 
-  async function loadData() {
-    const serial = requestSerial + 1
-    requestSerial = serial
-    controller?.abort()
-    controller = new AbortController()
+  async function loadCatalog() {
+    catalog.value = await fetchExportCatalog()
+  }
+
+  async function loadTerminalPage() {
+    const serial = terminalRequestSerial + 1
+    terminalRequestSerial = serial
+    terminalController?.abort()
+    terminalController = new AbortController()
+    if (query.tab !== 'terminal') {
+      terminalPage.value = emptyTerminalPage(query.terminalPage, query.terminalPageSize)
+      loading.value = false
+      return
+    }
     loading.value = true
-    jobsLoading.value = true
-    errorMessage.value = ''
     try {
-      const [catalogItems, exportJobsPage, readinessPage] = await Promise.all([
-        fetchExportCatalog(controller.signal),
-        fetchExportJobs({ ...buildJobHistoryQuery(query), signal: controller.signal }),
-        query.tab === 'terminal'
-          ? fetchTerminalReadinessPage({
-              page: query.page,
-              pageSize: query.pageSize,
-              filter: query.filter,
-              signal: controller.signal,
-            })
-          : Promise.resolve(emptyTerminalPage(query.page, query.pageSize)),
-      ])
-      if (serial !== requestSerial) return
-      catalog.value = catalogItems
-      jobsPage.value = exportJobsPage
+      const readinessPage = await fetchTerminalReadinessPage({
+        page: query.terminalPage,
+        pageSize: query.terminalPageSize,
+        filter: query.filter,
+        signal: terminalController.signal,
+      })
+      if (serial !== terminalRequestSerial) return
       terminalPage.value = readinessPage
     } catch (error) {
-      if (serial !== requestSerial || (error instanceof DOMException && error.name === 'AbortError')) return
+      if (serial !== terminalRequestSerial || (error instanceof DOMException && error.name === 'AbortError')) return
       errorMessage.value = error instanceof Error ? error.message : '导出中心加载失败'
-      terminalPage.value = emptyTerminalPage(query.page, query.pageSize)
-      jobsPage.value = emptyJobsPage(query.page, query.pageSize)
-      catalog.value = []
+      terminalPage.value = emptyTerminalPage(query.terminalPage, query.terminalPageSize)
     } finally {
-      if (serial === requestSerial) {
+      if (serial === terminalRequestSerial) {
         loading.value = false
+      }
+    }
+  }
+
+  async function loadJobsPage() {
+    const serial = jobsRequestSerial + 1
+    jobsRequestSerial = serial
+    jobsController?.abort()
+    jobsController = new AbortController()
+    jobsLoading.value = true
+    try {
+      const exportJobsPage = await fetchExportJobs({
+        ...buildJobHistoryQuery(query),
+        signal: jobsController.signal,
+      })
+      if (serial !== jobsRequestSerial) return
+      jobsPage.value = exportJobsPage
+    } catch (error) {
+      if (serial !== jobsRequestSerial || (error instanceof DOMException && error.name === 'AbortError')) return
+      errorMessage.value = error instanceof Error ? error.message : '导出中心加载失败'
+      jobsPage.value = emptyJobsPage(query.jobPage, query.jobPageSize)
+    } finally {
+      if (serial === jobsRequestSerial) {
         jobsLoading.value = false
       }
     }
+  }
+
+  async function loadData() {
+    errorMessage.value = ''
+    try {
+      await loadCatalog()
+    } catch (error) {
+      errorMessage.value = error instanceof Error ? error.message : '导出中心加载失败'
+      catalog.value = []
+    }
+    await Promise.all([loadTerminalPage(), loadJobsPage()])
   }
 
   function refresh() {
@@ -205,8 +255,10 @@ export function useExportCenterQuery() {
     jobsLoading,
     errorMessage,
     setTab,
-    setPage,
-    setPageSize,
+    setTerminalPage,
+    setTerminalPageSize,
+    setJobPage,
+    setJobPageSize,
     setFilter,
     refresh,
   }

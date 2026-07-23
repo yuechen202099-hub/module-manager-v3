@@ -251,20 +251,19 @@ def test_export_jobs_reject_unsupported_page_size(monkeypatch: pytest.MonkeyPatc
 
 def test_postgres_export_jobs_include_created_by() -> None:
     repository = PostgresStateRepository()
-    row = SimpleNamespace(
-        id="job-1",
+    row = models.ExportJob(
+        id=uuid4(),
+        team_id="north-team-01",
+        project_id=uuid4(),
         job_type="device_terminal",
-        status="succeeded",
+        status=models.JobStatus.SUCCEEDED,
         file_name="terminal-devices.xlsx",
+        filter_snapshot={"terminal": "T-1"},
+        request_key="request-1",
         row_count=12,
         progress=100,
         error_message="",
-        filter_snapshot={"terminal": "T-1"},
-        request_key="request-1",
-        created_by="root-admin",
-        created_at=None,
-        updated_at=None,
-        finished_at=None,
+        params={"created_by": "root-admin"},
     )
 
     class FakeScalars:
@@ -289,6 +288,37 @@ def test_postgres_export_jobs_include_created_by() -> None:
     page = repository.list_export_jobs(page=1, page_size=20)
 
     assert page["items"][0]["created_by"] == "root-admin"
+
+
+def test_terminal_readiness_route_includes_latest_generated_at(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    class ReadinessRepository:
+        def list_terminal_delivery_readiness(self, *, page: int, page_size: int, query: str = "") -> dict:
+            return {
+                "page": page,
+                "page_size": page_size,
+                "total": 1,
+                "items": [
+                    {
+                        "terminal": "T-1",
+                        "group_count": 2,
+                        "constructed_count": 2,
+                        "archived_count": 2,
+                        "cache_ready_count": 2,
+                        "status": "ready",
+                        "blockers": [],
+                        "latest_generated_at": "2026-07-23T08:09:10+00:00",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(export_routes, "state_repository", lambda: ReadinessRepository())
+
+    response = client.get("/exports/terminal-readiness", headers=headers["admin"])
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["latest_generated_at"] == "2026-07-23T08:09:10+00:00"
 
 
 def test_json_export_jobs_filter_by_category_job_types_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -373,6 +403,30 @@ def test_json_export_jobs_filter_by_category_job_types_and_status(monkeypatch: p
     assert [item["id"] for item in page["items"]] == ["job-business-match"]
 
 
+def test_json_terminal_readiness_includes_latest_generated_at_from_export_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = "team-export-readiness-latest-generated"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [formal_group("group-a", terminal="T-1", archive_status="archived")]
+    state["export_jobs"] = [
+        {
+            "id": "job-1",
+            "job_type": "final_delivery",
+            "status": "succeeded",
+            "file_name": "final-delivery.zip",
+            "filter_snapshot": {"terminal": "T-1"},
+            "created_at": "2026-07-23T12:00:00+00:00",
+        }
+    ]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        page = JsonStateRepository().list_terminal_delivery_readiness(page=1, page_size=20)
+    finally:
+        local_simulation.reset_current_team(token)
+
+    assert page["items"][0]["latest_generated_at"] == "2026-07-23T12:00:00+00:00"
+
+
 def test_export_catalog_marks_task_detail_required_filters(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
 
@@ -381,6 +435,39 @@ def test_export_catalog_marks_task_detail_required_filters(monkeypatch: pytest.M
     assert response.status_code == 200
     task_detail = next(item for item in response.json()["data"]["items"] if item["key"] == "task_detail")
     assert task_detail["required_filters"] == [{"key": "task_id", "label": "任务", "kind": "task"}]
+
+
+def test_export_task_options_are_admin_only(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    response = client.get("/exports/task-options?query=T-1&limit=20", headers=headers["constructor"])
+
+    assert response.status_code == 403
+
+
+def test_json_export_task_options_filter_and_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = "team-export-task-options"
+    state = local_simulation.blank_state(team_id)
+    state["tasks"] = [
+        {"id": 12, "terminal": "T-200", "name": "终端 T-200", "status": "approved"},
+        {"id": 11, "terminal": "T-100", "name": "终端 T-100", "status": "pending"},
+        {"id": 13, "terminal": "Z-300", "name": "其他", "status": "released"},
+    ]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        items = JsonStateRepository().list_export_task_options(query="T-", limit=1)
+    finally:
+        local_simulation.reset_current_team(token)
+
+    assert items == [
+        {
+            "task_id": 11,
+            "terminal": "T-100",
+            "status": "pending",
+            "label": "T-100 / #11 / 终端 T-100",
+        }
+    ]
 
 
 def test_task_detail_export_job_requires_positive_task_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -610,7 +697,11 @@ def test_json_terminal_readiness_matches_shared_preflight(monkeypatch: pytest.Mo
     finally:
         local_simulation.reset_current_team(token)
 
-    assert repository_page == pure_page
+    assert repository_page["page"] == pure_page["page"]
+    assert repository_page["page_size"] == pure_page["page_size"]
+    assert repository_page["total"] == pure_page["total"]
+    assert [{k: v for k, v in item.items() if k != "latest_generated_at"} for item in repository_page["items"]] == pure_page["items"]
+    assert repository_page["items"][0]["latest_generated_at"] == ""
 
 
 def test_pg_terminal_readiness_matches_shared_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -621,10 +712,26 @@ def test_pg_terminal_readiness_matches_shared_preflight(monkeypatch: pytest.Monk
     repository = PostgresStateRepository()
     monkeypatch.setattr(repository, "_export_center_lightweight_groups", lambda query="": groups)
 
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *_args, **_kwargs):
+            return SimpleNamespace(all=lambda: [])
+
+    repository._session = lambda: FakeSession()
+
     repository_page = repository.list_terminal_delivery_readiness(page=1, page_size=20)
     pure_page = export_center_service.build_terminal_readiness_page(groups, page=1, page_size=20)
 
-    assert repository_page == pure_page
+    assert repository_page["page"] == pure_page["page"]
+    assert repository_page["page_size"] == pure_page["page_size"]
+    assert repository_page["total"] == pure_page["total"]
+    assert [{k: v for k, v in item.items() if k != "latest_generated_at"} for item in repository_page["items"]] == pure_page["items"]
+    assert repository_page["items"][0]["latest_generated_at"] == ""
 
 
 def test_pg_lightweight_readiness_query_includes_barcode_verification() -> None:

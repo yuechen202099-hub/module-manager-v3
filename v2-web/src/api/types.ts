@@ -369,6 +369,13 @@ export type ExportCatalogItem = {
   requiredFilters?: ExportCatalogRequiredFilter[]
 }
 
+export type ExportTaskOption = {
+  taskId: string
+  terminal: string
+  status: string
+  label: string
+}
+
 export type TerminalReadinessItem = {
   terminal: string
   groupCount: number
@@ -377,6 +384,7 @@ export type TerminalReadinessItem = {
   cacheReadyCount: number
   status: 'ready' | 'blocked'
   blockers: string[]
+  latestGeneratedAt: string
 }
 
 export type TerminalReadinessPage = {

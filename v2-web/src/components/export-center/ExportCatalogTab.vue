@@ -1,20 +1,21 @@
 <script setup lang="ts">
 import { Download } from '@element-plus/icons-vue'
 
-import type { ExportCatalogItem } from '@/api/types'
+import type { ExportCatalogItem, ExportTaskOption } from '@/api/types'
 
 const props = defineProps<{
   items: ExportCatalogItem[]
   loading?: boolean
   launchingKey?: string
   selectedTaskId?: string
-  taskOptions?: Array<{ value: string; label: string }>
+  taskOptions?: ExportTaskOption[]
   taskLoading?: boolean
 }>()
 
 const emit = defineEmits<{
   launch: [item: ExportCatalogItem]
   'update:selected-task-id': [value: string]
+  'task-query': [value: string]
 }>()
 
 function modeLabel(mode: ExportCatalogItem['mode']) {
@@ -40,13 +41,15 @@ function canLaunch(row: ExportCatalogItem) {
         <el-select
           v-if="requiresTask(row)"
           :model-value="selectedTaskId"
+          remote
           filterable
           clearable
           :loading="taskLoading"
           placeholder="选择任务"
+          :remote-method="(value: string) => emit('task-query', value)"
           @update:model-value="emit('update:selected-task-id', String($event || ''))"
         >
-          <el-option v-for="item in taskOptions || []" :key="item.value" :label="item.label" :value="item.value" />
+          <el-option v-for="item in taskOptions || []" :key="item.taskId" :label="item.label" :value="item.taskId" />
         </el-select>
         <span v-else>-</span>
       </template>
