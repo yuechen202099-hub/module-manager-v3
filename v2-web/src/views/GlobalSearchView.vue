@@ -23,9 +23,9 @@ const {
 } = useDataCenterQuery()
 
 function statusType(value: string) {
-  if (['archived', 'passed', 'manual', 'complete', 'completed'].includes(value)) return 'success'
+  if (['archived', 'passed', 'manual', 'manual_confirmed', 'complete', 'completed'].includes(value)) return 'success'
   if (['pending', 'in_progress', 'unreadable'].includes(value)) return 'warning'
-  if (['mismatched', 'open', 'incomplete'].includes(value)) return 'danger'
+  if (['mismatched', 'failed', 'open', 'incomplete'].includes(value)) return 'danger'
   return 'info'
 }
 
@@ -44,7 +44,9 @@ const archiveLabels: Record<string, string> = {
 const barcodeLabels: Record<string, string> = {
   passed: '通过',
   manual: '人工',
+  manual_confirmed: '人工确认',
   mismatched: '不一致',
+  failed: '失败',
   unreadable: '不可读',
   ineligible: '不适用',
 }
@@ -107,13 +109,17 @@ function handlePageSize(size: number) {
         @reset="setFilters({
           dataType: 'all',
           constructionStatus: 'all',
+          terminalStatus: 'all',
           archiveStatus: 'all',
           barcodeStatus: 'all',
           classificationStatus: 'all',
           exceptionStatus: '',
           installer: '',
+          hasPhotos: false,
           dateFrom: '',
           dateTo: '',
+          activityDateFrom: '',
+          activityDateTo: '',
           terminal: '',
           keyword: '',
           sort: 'updated_desc',

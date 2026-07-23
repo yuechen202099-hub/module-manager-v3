@@ -40,8 +40,8 @@ function withContext(
   const terminal = String(context.terminal || '').trim()
   const keyword = String(context.keyword || '').trim()
   if (installer) next.installer = installer
-  if (dateFrom) next.date_from = dateFrom
-  if (dateTo) next.date_to = dateTo
+  if (dateFrom) next.activity_date_from = dateFrom
+  if (dateTo) next.activity_date_to = dateTo
   if (terminal) next.terminal = terminal
   if (keyword) next.keyword = keyword
   return next
@@ -52,32 +52,28 @@ const BUILDERS: Record<
   (context: DataCenterDrilldownContext) => DataCenterDrilldownQuery
 > = {
   groups: () => ({ ...BASE_GROUP_QUERY }),
-  scanned_groups: () => ({ ...BASE_GROUP_QUERY, construction_status: 'in_progress' }),
+  scanned_groups: () => ({ ...BASE_GROUP_QUERY, has_photos: '1' }),
   archived_groups: () => ({ ...BASE_GROUP_QUERY, archive_status: 'archived' }),
   barcode_eligible: () => ({ ...BASE_GROUP_QUERY, classification_status: 'complete' }),
   barcode_passed: () => ({
     ...BASE_GROUP_QUERY,
     classification_status: 'complete',
-    barcode_status: 'passed',
+    barcode_status: 'verified',
   }),
   barcode_manual_queue: () => ({
     ...BASE_GROUP_QUERY,
     classification_status: 'complete',
-    barcode_status: 'manual',
+    barcode_status: 'needs_review',
   }),
   barcode_ineligible: () => ({ ...BASE_GROUP_QUERY, barcode_status: 'ineligible' }),
   unmatched_records: () => ({ data_type: 'unmatched' }),
   exception_missing_photo: () => ({ ...BASE_GROUP_QUERY, exception_status: 'open' }),
   unconstructed_unscanned: () => ({ ...BASE_GROUP_QUERY, construction_status: 'unconstructed' }),
   terminal_all: () => ({ ...BASE_GROUP_QUERY }),
-  terminal_completed: () => ({ ...BASE_GROUP_QUERY, construction_status: 'completed' }),
-  terminal_incomplete: () => ({ ...BASE_GROUP_QUERY, construction_status: 'in_progress' }),
-  terminal_pending_archive: () => ({
-    ...BASE_GROUP_QUERY,
-    construction_status: 'completed',
-    archive_status: 'pending',
-  }),
-  terminal_archived: () => ({ ...BASE_GROUP_QUERY, archive_status: 'archived' }),
+  terminal_completed: () => ({ ...BASE_GROUP_QUERY, terminal_status: 'completed' }),
+  terminal_incomplete: () => ({ ...BASE_GROUP_QUERY, terminal_status: 'incomplete' }),
+  terminal_pending_archive: () => ({ ...BASE_GROUP_QUERY, terminal_status: 'pending_archive' }),
+  terminal_archived: () => ({ ...BASE_GROUP_QUERY, terminal_status: 'archived' }),
   installer_completed: (context) => withContext(
     { ...BASE_GROUP_QUERY, construction_status: 'completed' },
     context,

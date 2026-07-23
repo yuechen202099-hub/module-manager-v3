@@ -299,6 +299,18 @@ export type GroupSearchResult = {
 
 export type DataCenterDataType = 'all' | 'group' | 'unmatched'
 export type DataCenterPageSize = 20 | 50 | 100
+export type DataCenterBarcodeFilterStatus =
+  | 'all'
+  | 'passed'
+  | 'manual'
+  | 'manual_confirmed'
+  | 'mismatched'
+  | 'failed'
+  | 'unreadable'
+  | 'ineligible'
+  | 'verified'
+  | 'needs_review'
+export type DataCenterTerminalFilterStatus = 'all' | 'completed' | 'incomplete' | 'pending_archive' | 'archived'
 
 export type DataCenterRow = {
   kind: 'group' | 'unmatched'

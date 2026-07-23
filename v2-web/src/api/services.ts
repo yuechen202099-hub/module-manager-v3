@@ -7,11 +7,13 @@ import type {
   ConstructionPriorityImportResult,
   ConstructionUploadPayload,
   CurrentUser,
+  DataCenterBarcodeFilterStatus,
   DataCenterDataType,
   DataCenterDetail,
   DataCenterPage,
   DataCenterPageSize,
   DataCenterRow,
+  DataCenterTerminalFilterStatus,
   GroupBarcodeManualConfirmation,
   GroupSearchResult,
   ImportJob,
@@ -1555,13 +1557,17 @@ export async function updateAdminGroupMetadata(
 export type DataCenterListQuery = {
   dataType?: DataCenterDataType
   constructionStatus?: string
+  terminalStatus?: DataCenterTerminalFilterStatus
   archiveStatus?: string
-  barcodeStatus?: string
+  barcodeStatus?: DataCenterBarcodeFilterStatus
   classificationStatus?: string
   exceptionStatus?: string
   installer?: string
+  hasPhotos?: boolean
   dateFrom?: string
   dateTo?: string
+  activityDateFrom?: string
+  activityDateTo?: string
   terminal?: string
   keyword?: string
   page?: number
@@ -1574,6 +1580,7 @@ export async function fetchDataCenterRows(query: DataCenterListQuery): Promise<D
   const params = new URLSearchParams({
     data_type: query.dataType || 'all',
     construction_status: query.constructionStatus || 'all',
+    terminal_status: query.terminalStatus || 'all',
     archive_status: query.archiveStatus || 'all',
     barcode_status: query.barcodeStatus || 'all',
     classification_status: query.classificationStatus || 'all',
@@ -1585,8 +1592,11 @@ export async function fetchDataCenterRows(query: DataCenterListQuery): Promise<D
     page_size: String(query.pageSize || 20),
     sort: query.sort || 'updated_desc',
   })
+  if (query.hasPhotos) params.set('has_photos', '1')
   if (query.dateFrom) params.set('date_from', query.dateFrom)
   if (query.dateTo) params.set('date_to', query.dateTo)
+  if (query.activityDateFrom) params.set('activity_date_from', query.activityDateFrom)
+  if (query.activityDateTo) params.set('activity_date_to', query.activityDateTo)
   const data = await api<BackendDataCenterPage>(`/groups/data-center?${params.toString()}`, {
     signal: query.signal,
   })

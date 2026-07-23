@@ -49,6 +49,12 @@ def date_bounds(query: DataCenterQuery) -> tuple[datetime | None, datetime | Non
     return start, end
 
 
+def activity_date_bounds(query: DataCenterQuery) -> tuple[datetime | None, datetime | None]:
+    start = datetime.combine(query.activity_date_from, time.min, tzinfo=UTC) if query.activity_date_from else None
+    end = datetime.combine(query.activity_date_to, time.max, tzinfo=UTC) if query.activity_date_to else None
+    return start, end
+
+
 def active_photos(group: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         dict(photo)
@@ -86,11 +92,13 @@ def barcode_status_from_group(group: Mapping[str, Any]) -> tuple[str, list[str],
     ).strip()
     manual = bool(group.get("group_barcode_manual_confirmed")) or raw_status == "manual_confirmed"
     if manual:
-        status = "manual"
+        status = "manual_confirmed"
     elif raw_status in {"passed", "pass", "matched"}:
         status = "passed"
-    elif raw_status in {"mismatch", "mismatched", "partial", "failed"}:
+    elif raw_status in {"mismatch", "mismatched", "partial"}:
         status = "mismatched"
+    elif raw_status == "failed":
+        status = "failed"
     elif raw_status in {"unreadable", "no_barcode"}:
         status = "unreadable"
     else:
@@ -132,7 +140,7 @@ def exception_status_from_group(group: Mapping[str, Any]) -> str:
 
 def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
     photos = active_photos(group)
-    photo_count = max(int(group.get("photo_count") or 0), len(photos))
+    photo_count = int(group.get("photo_count") or 0)
     classification = (
         dict(group.get("classification_progress") or {})
         if isinstance(group.get("classification_progress"), Mapping)
@@ -202,16 +210,38 @@ def row_matches_query(row: Mapping[str, Any], keyword: str) -> bool:
     return all(term in haystack for term in needle.split())
 
 
+def _matches_barcode_filter(actual: str, requested: str) -> bool:
+    if requested == "all":
+        return True
+    if requested == "verified":
+        return actual in {"passed", "manual_confirmed"}
+    if requested == "needs_review":
+        return actual in {"mismatched", "failed", "unreadable"}
+    return actual == requested
+
+
 def row_passes_filters(row: Mapping[str, Any], query: DataCenterQuery) -> bool:
     if query.data_type != "all" and row.get("kind") != query.data_type:
         return False
     for attr, requested in (
         ("construction_status", query.construction_status),
         ("archive_status", query.archive_status),
-        ("barcode_status", query.barcode_status),
         ("classification_status", query.classification_status),
     ):
         if requested != "all" and row.get(attr) != requested:
+            return False
+    if query.has_photos and int(row.get("photo_count") or 0) <= 0:
+        return False
+    actual_barcode_status = str(row.get("barcode_status") or "").strip()
+    if not _matches_barcode_filter(actual_barcode_status, query.barcode_status):
+        return False
+    requested_terminal_status = query.terminal_status
+    actual_terminal_status = str(row.get("_terminal_status") or row.get("terminal_status") or "").strip()
+    if requested_terminal_status != "all":
+        if requested_terminal_status == "completed":
+            if actual_terminal_status not in {"completed", "pending_archive", "archived"}:
+                return False
+        elif actual_terminal_status != requested_terminal_status:
             return False
     requested_exception = query.exception_status.strip()
     if requested_exception == "none":
@@ -231,6 +261,13 @@ def row_passes_filters(row: Mapping[str, Any], query: DataCenterQuery) -> bool:
         return False
     if end and (not updated or updated > end):
         return False
+    activity_start, activity_end = activity_date_bounds(query)
+    if activity_start or activity_end:
+        activity_at = coerce_datetime(row.get("_activity_at") or row.get("activity_at"))
+        if activity_start and (not activity_at or activity_at < activity_start):
+            return False
+        if activity_end and (not activity_at or activity_at > activity_end):
+            return False
     return True
 
 

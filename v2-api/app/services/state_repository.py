@@ -65,6 +65,15 @@ def construction_task_availability(stats: Mapping[str, Any]) -> tuple[bool, bool
     return total > 0 and uploaded < total, uploaded > 0 and unreviewed > 0
 
 
+def _photo_construction_source_filter():
+    return or_(
+        func.lower(func.coalesce(Photo.source, "")).like("%construction%"),
+        func.lower(func.coalesce(Photo.raw_data.op("->>")("upload_source"), "")).like("%construction%"),
+        func.lower(func.coalesce(Photo.raw_data.op("->>")("storage_source"), "")).like("%construction%"),
+        func.lower(func.coalesce(Photo.raw_data.op("->>")("source_file"), "")).like("%construction%"),
+    )
+
+
 def _construction_priority_import_counts(items: list[dict[str, Any]]) -> dict[str, int]:
     statuses = ("valid", "duplicate", "conflict", "unknown", "completed", "unchanged", "malformed")
     return {status: sum(1 for item in items if item["status"] == status) for status in statuses}
@@ -4766,6 +4775,12 @@ class PostgresStateRepository(StateRepository):
 
     def _data_center_source(self, team_id: str, query: DataCenterQuery):
         required_categories = sorted(data_center_service.REQUIRED_CLASSIFICATION_SLOTS)
+        photo_activity_at = func.coalesce(
+            func.nullif(Photo.raw_data.op("->>")("client_completed_at"), ""),
+            func.nullif(Photo.raw_data.op("->>")("construction_completed_at"), ""),
+            cast(Photo.created_at, String),
+        )
+        construction_photo_filter = _photo_construction_source_filter()
         active_photo_stats = (
             select(
                 Photo.group_id.label("group_id"),
@@ -4780,6 +4795,7 @@ class PostgresStateRepository(StateRepository):
                 func.count(
                     func.distinct(case((Photo.category.in_(required_categories), Photo.category), else_=None))
                 ).label("required_category_count"),
+                func.max(case((construction_photo_filter, photo_activity_at), else_=None)).label("activity_at"),
             )
             .where(
                 Photo.team_id == team_id,
@@ -4791,6 +4807,29 @@ class PostgresStateRepository(StateRepository):
             .subquery()
         )
         group_photo_count = func.coalesce(active_photo_stats.c.active_photo_count, 0)
+        terminal_stats = (
+            select(
+                MaterialGroup.terminal.label("terminal"),
+                func.count(MaterialGroup.id).label("total_group_count"),
+                func.coalesce(
+                    func.sum(case((func.coalesce(active_photo_stats.c.active_photo_count, 0) > 0, 1), else_=0)),
+                    0,
+                ).label("uploaded_group_count"),
+                func.coalesce(
+                    func.sum(case((func.coalesce(active_photo_stats.c.active_photo_count, 0) <= 0, 1), else_=0)),
+                    0,
+                ).label("unbuilt_group_count"),
+                func.coalesce(
+                    func.sum(case((MaterialGroup.status == GroupStatus.APPROVED, 1), else_=0)),
+                    0,
+                ).label("reviewed_group_count"),
+            )
+            .select_from(MaterialGroup)
+            .outerjoin(active_photo_stats, active_photo_stats.c.group_id == MaterialGroup.id)
+            .where(MaterialGroup.team_id == team_id)
+            .group_by(MaterialGroup.terminal)
+            .subquery()
+        )
         group_raw = MaterialGroup.raw_data
         group_installer = func.coalesce(
             func.nullif(func.trim(group_raw.op("->>")("installer")), ""),
@@ -4799,10 +4838,29 @@ class PostgresStateRepository(StateRepository):
             func.nullif(func.trim(Task.construction_claimed_by), ""),
             literal(""),
         )
+        group_terminal_status = case(
+            (
+                and_(
+                    func.coalesce(terminal_stats.c.uploaded_group_count, 0) > 0,
+                    func.coalesce(terminal_stats.c.reviewed_group_count, 0)
+                    >= func.coalesce(terminal_stats.c.total_group_count, 0),
+                ),
+                literal("archived"),
+            ),
+            (
+                and_(
+                    func.coalesce(terminal_stats.c.total_group_count, 0) > 0,
+                    func.coalesce(terminal_stats.c.unbuilt_group_count, 0) <= 0,
+                ),
+                literal("pending_archive"),
+            ),
+            else_=literal("incomplete"),
+        )
         group_barcode_status = case(
             (GroupBarcodeVerification.status == "passed", literal("passed")),
-            (GroupBarcodeVerification.status == "manual_confirmed", literal("manual")),
-            (GroupBarcodeVerification.status.in_(["mismatch", "partial", "failed"]), literal("mismatched")),
+            (GroupBarcodeVerification.status == "manual_confirmed", literal("manual_confirmed")),
+            (GroupBarcodeVerification.status.in_(["mismatch", "partial"]), literal("mismatched")),
+            (GroupBarcodeVerification.status == "failed", literal("failed")),
             (GroupBarcodeVerification.status == "unreadable", literal("unreadable")),
             else_=literal("ineligible"),
         )
@@ -4847,17 +4905,20 @@ class PostgresStateRepository(StateRepository):
                 group_photo_count.label("photo_count"),
                 group_classification_status.label("classification_status"),
                 group_construction_status.label("construction_status"),
+                group_terminal_status.label("terminal_status"),
                 group_archive_status.label("archive_status"),
                 group_barcode_status.label("barcode_status"),
                 func.coalesce(
                     func.nullif(func.trim(MaterialGroup.exception_status), ""),
                     case((MaterialGroup.status == GroupStatus.REJECTED, literal("open")), else_=literal("")),
                 ).label("exception_status"),
+                active_photo_stats.c.activity_at.label("activity_at"),
                 MaterialGroup.updated_at.label("updated_at"),
                 MaterialGroup.raw_data.label("raw_data"),
             )
             .select_from(MaterialGroup)
             .outerjoin(active_photo_stats, active_photo_stats.c.group_id == MaterialGroup.id)
+            .outerjoin(terminal_stats, terminal_stats.c.terminal == MaterialGroup.terminal)
             .outerjoin(Task, and_(Task.team_id == MaterialGroup.team_id, Task.id == MaterialGroup.task_id))
             .outerjoin(
                 GroupBarcodeVerification,
@@ -4895,9 +4956,11 @@ class PostgresStateRepository(StateRepository):
                 ),
                 else_=literal("unconstructed"),
             ).label("construction_status"),
+            literal("").label("terminal_status"),
             literal("unarchived").label("archive_status"),
             literal("ineligible").label("barcode_status"),
             UnmatchedRecord.status.label("exception_status"),
+            cast(UnmatchedRecord.updated_at, String).label("activity_at"),
             UnmatchedRecord.updated_at.label("updated_at"),
             UnmatchedRecord.payload.label("raw_data"),
         ).where(UnmatchedRecord.team_id == team_id)
@@ -4913,12 +4976,24 @@ class PostgresStateRepository(StateRepository):
         filters = []
         if query.construction_status != "all":
             filters.append(source.c.construction_status == query.construction_status)
+        if query.terminal_status != "all":
+            if query.terminal_status == "completed":
+                filters.append(source.c.terminal_status.in_(("pending_archive", "archived")))
+            else:
+                filters.append(source.c.terminal_status == query.terminal_status)
         if query.archive_status != "all":
             filters.append(source.c.archive_status == query.archive_status)
         if query.barcode_status != "all":
-            filters.append(source.c.barcode_status == query.barcode_status)
+            if query.barcode_status == "verified":
+                filters.append(source.c.barcode_status.in_(("passed", "manual_confirmed")))
+            elif query.barcode_status == "needs_review":
+                filters.append(source.c.barcode_status.in_(("mismatched", "failed", "unreadable")))
+            else:
+                filters.append(source.c.barcode_status == query.barcode_status)
         if query.classification_status != "all":
             filters.append(source.c.classification_status == query.classification_status)
+        if query.has_photos:
+            filters.append(source.c.photo_count > 0)
         requested_exception = query.exception_status.strip()
         if requested_exception == "none":
             filters.append(source.c.exception_status == "")
@@ -4947,6 +5022,44 @@ class PostgresStateRepository(StateRepository):
             filters.append(source.c.updated_at >= start)
         if end is not None:
             filters.append(source.c.updated_at <= end)
+        use_installer_activity_filter = query.installer.strip() and (
+            query.activity_date_from is not None or query.activity_date_to is not None
+        )
+        if query.activity_date_from is not None and not use_installer_activity_filter:
+            filters.append(func.substr(source.c.activity_at, 1, 10) >= query.activity_date_from.isoformat())
+        if query.activity_date_to is not None and not use_installer_activity_filter:
+            filters.append(func.substr(source.c.activity_at, 1, 10) <= query.activity_date_to.isoformat())
+        if use_installer_activity_filter:
+            aliases = tuple(local_simulation.installer_actor_aliases(query.installer.strip()))
+            if aliases:
+                photo_activity_at = func.coalesce(
+                    func.nullif(Photo.raw_data.op("->>")("client_completed_at"), ""),
+                    func.nullif(Photo.raw_data.op("->>")("construction_completed_at"), ""),
+                    cast(Photo.created_at, String),
+                )
+                installer_activity_filter = (
+                    select(literal(1))
+                    .select_from(Photo)
+                    .join(MaterialGroup, MaterialGroup.id == Photo.group_id)
+                    .where(
+                        Photo.team_id == team_id,
+                        Photo.is_active.is_(True),
+                        Photo.upload_status != PhotoUploadStatus.INVALID,
+                        MaterialGroup.team_id == team_id,
+                        MaterialGroup.legacy_id == source.c.legacy_id,
+                        func.trim(Photo.creator).in_(aliases),
+                        _photo_construction_source_filter(),
+                    )
+                )
+                if query.activity_date_from is not None:
+                    installer_activity_filter = installer_activity_filter.where(
+                        func.substr(photo_activity_at, 1, 10) >= query.activity_date_from.isoformat()
+                    )
+                if query.activity_date_to is not None:
+                    installer_activity_filter = installer_activity_filter.where(
+                        func.substr(photo_activity_at, 1, 10) <= query.activity_date_to.isoformat()
+                    )
+                filters.append(installer_activity_filter.exists())
         return source, filters
 
     @staticmethod

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Camera, Refresh, Search } from '@element-plus/icons-vue'
 
-import type { DataCenterDataType } from '@/api/types'
+import type { DataCenterBarcodeFilterStatus, DataCenterDataType } from '@/api/types'
 import type { DataCenterRouteQuery } from '@/composables/useDataCenterQuery'
 
 const props = defineProps<{
@@ -35,11 +35,14 @@ const archiveOptions = [
   { label: '已归档', value: 'archived' },
 ]
 
-const barcodeOptions = [
+const barcodeOptions: Array<{ label: string; value: DataCenterBarcodeFilterStatus }> = [
+  { label: '核验通过', value: 'verified' },
+  { label: '待人工', value: 'needs_review' },
   { label: '扫码', value: 'all' },
   { label: '通过', value: 'passed' },
-  { label: '人工', value: 'manual' },
+  { label: '人工确认', value: 'manual_confirmed' },
   { label: '不一致', value: 'mismatched' },
+  { label: '失败', value: 'failed' },
   { label: '不可读', value: 'unreadable' },
   { label: '不适用', value: 'ineligible' },
 ]
@@ -92,7 +95,7 @@ function update<K extends keyof DataCenterRouteQuery>(key: K, value: DataCenterR
     <el-select :model-value="props.modelValue.archiveStatus" @update:model-value="update('archiveStatus', String($event || 'all'))">
       <el-option v-for="item in archiveOptions" :key="item.value" :label="item.label" :value="item.value" />
     </el-select>
-    <el-select :model-value="props.modelValue.barcodeStatus" @update:model-value="update('barcodeStatus', String($event || 'all'))">
+    <el-select :model-value="props.modelValue.barcodeStatus" @update:model-value="update('barcodeStatus', ($event || 'all') as DataCenterBarcodeFilterStatus)">
       <el-option v-for="item in barcodeOptions" :key="item.value" :label="item.label" :value="item.value" />
     </el-select>
     <el-select :model-value="props.modelValue.classificationStatus" @update:model-value="update('classificationStatus', String($event || 'all'))">

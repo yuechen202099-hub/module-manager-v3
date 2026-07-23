@@ -66,3 +66,72 @@
    - `未完成施工` -> `construction_status=in_progress`
    现有 query 不能直接表达 `photo_count > 0` 或多状态并集。
 2. 数据中台页面当前仍是管理员路由，因此驾驶舱 drilldown 仅对管理员渲染为可点击按钮；非管理员继续看到静态汇总。
+---
+
+## Review Fix Addendum - Exact Data Center Drilldown Filters
+
+- Status: DONE_WITH_CONCERNS
+- Worktree: `C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
+- Branch: `production/V3/3.2.0`
+- Base HEAD: `d7acbf3`
+- Date: `2026-07-24 01:36 +08:00`
+
+### Rejection Addressed
+
+The first implementation used approximate dashboard drilldown mappings for scanned groups, terminal incomplete groups, barcode manual queues, and installer/date context. This pass replaces those approximations with explicit data-center query keys and backend filters.
+
+### RED First
+
+- Added failing backend coverage in `v2-api/tests/test_data_center.py` for:
+  - `has_photos=1` meaning exact `photo_count > 0`, not active-photo-list fallback.
+  - JSON repository count/list behavior for `has_photos`, `terminal_status`, `barcode_status`, and installer activity date.
+  - PG SQL compilation for `photo_count > 0`, terminal status, combined barcode `IN (...)`, and photo creator plus construction activity date filtering.
+- Verified RED with `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_data_center.py -k "precise_dashboard_filters" -q`.
+- Initial RED result: 2 failed, 1 passed. Failures were the expected `group-006` false-positive `has_photos` match and PG `verified` not expanding to `manual_confirmed`.
+
+### Implementation Summary
+
+1. Added precise `DataCenterQuery` fields end-to-end: `has_photos`, `terminal_status`, `activity_date_from`, `activity_date_to`, `verified`, `needs_review`, `manual_confirmed`, and `failed`.
+2. Updated JSON data-center filtering so `has_photos` uses exact row `photo_count > 0`; terminal drilldown uses `_terminal_status`; installer/date drilldown uses construction-photo `client_completed_at` / `construction_completed_at` / `created_at` filtered by effective photo creator aliases, with no generic `updated_at` fallback.
+3. Updated PG data-center filtering so `has_photos` compiles to `data_center_rows.photo_count > 0`; terminal status is exact; `verified` expands to `passed` plus `manual_confirmed`; `needs_review` expands to `mismatched` plus `failed` plus `unreadable`; installer/date filtering uses active construction-source photos by creator alias and activity date.
+4. Updated `useDataCenterQuery`, `fetchDataCenterRows`, data-center types, filters, global-search reset state, and `buildDataCenterDrilldown` to emit/parse the exact keys with `page=1&page_size=20`.
+5. Tightened verifiers so dashboard mappings are exact object comparisons and UI/backend checks require the exact keys and durable barcode statuses.
+6. Restored and cleaned `v2-api/app/static/vue/**` after build verification; no static Vue build output remains in the final diff.
+
+### Verification
+
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_data_center.py -q`
+  - PASS: 24 passed, 1 Starlette/httpx deprecation warning.
+- `.\.venv\Scripts\python.exe scripts\verify_v3_2_0_dashboard_drilldown.py`
+  - PASS: `[OK] V3.2.0 dashboard drilldown checks passed`.
+- `.\.venv\Scripts\python.exe scripts\verify_v3_2_0_data_center_ui.py`
+  - PASS: exit 0, verifier is silent on success.
+- `cd v2-web; .\node_modules\.bin\vue-tsc.cmd --noEmit`
+  - PASS.
+- `cd v2-web; npm run build`
+  - PASS: `vue-tsc --noEmit && vite build`.
+  - Warnings retained: two Rollup `/* #__PURE__ */` annotation warnings from `@vueuse/core`, plus the existing `element-components` chunk-size warning.
+- `git diff --check`
+  - PASS exit 0; only expected CRLF working-copy warnings were printed.
+- `git status --short v2-api/app/static/vue`
+  - PASS: no files listed after cleanup.
+
+### Self Review
+
+- Confirmed final file list contains no `v2-api/app/static/vue/**`.
+- Checked the rejected approximation strings in the drilldown helper: no `construction_status: 'in_progress'`, no `barcode_status: 'manual'`, and no installer `date_from/date_to` mapping.
+- Fixed a self-review finding where PG construction activity filtering needed an explicit construction-source SQL expression shared by source aggregation and installer/date EXISTS filtering.
+
+### Version Change
+
+- None. This is a V3.2.0 task fix in the current feature branch and did not change `APP_VERSION`.
+
+### Release Status
+
+- Local code, RED/GREEN tests, verifiers, type-check, build, static cleanup, and self-review complete.
+- Not released.
+
+### Concerns
+
+1. `npm run type-check` does not exist in `v2-web/package.json`; the required `vue-tsc` verification was run directly and also runs inside `npm run build`.
+2. Build warnings are unchanged dependency/chunk-size warnings, not introduced by this drilldown fix.

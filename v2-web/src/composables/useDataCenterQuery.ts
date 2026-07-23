@@ -2,7 +2,13 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { fetchDataCenterRows } from '@/api/services'
-import type { DataCenterDataType, DataCenterPageSize, DataCenterRow } from '@/api/types'
+import type {
+  DataCenterBarcodeFilterStatus,
+  DataCenterDataType,
+  DataCenterPageSize,
+  DataCenterRow,
+  DataCenterTerminalFilterStatus,
+} from '@/api/types'
 
 export const DATA_CENTER_PAGE_SIZES = [20, 50, 100] as const
 
@@ -11,13 +17,17 @@ export interface DataCenterRouteQuery {
   pageSize: 20 | 50 | 100
   dataType: DataCenterDataType
   constructionStatus: string
+  terminalStatus: DataCenterTerminalFilterStatus
   archiveStatus: string
-  barcodeStatus: string
+  barcodeStatus: DataCenterBarcodeFilterStatus
   classificationStatus: string
   exceptionStatus: string
   installer: string
+  hasPhotos: boolean
   dateFrom: string
   dateTo: string
+  activityDateFrom: string
+  activityDateTo: string
   terminal: string
   keyword: string
   sort: string
@@ -30,13 +40,17 @@ const DEFAULT_QUERY: DataCenterRouteQuery = {
   pageSize: 20,
   dataType: 'all',
   constructionStatus: 'all',
+  terminalStatus: 'all',
   archiveStatus: 'all',
   barcodeStatus: 'all',
   classificationStatus: 'all',
   exceptionStatus: '',
   installer: '',
+  hasPhotos: false,
   dateFrom: '',
   dateTo: '',
+  activityDateFrom: '',
+  activityDateTo: '',
   terminal: '',
   keyword: '',
   sort: 'updated_desc',
@@ -56,18 +70,28 @@ function pageSize(value: unknown): DataCenterPageSize {
 function routeQueryToState(query: Record<string, unknown>): DataCenterRouteQuery {
   const page = Math.max(1, Math.floor(Number(first(query.page)) || 1))
   const dataType = first(query.data_type || query.dataType)
+  const terminalStatus = first(query.terminal_status || query.terminalStatus)
+  const barcodeStatus = first(query.barcode_status || query.barcodeStatus)
   return {
     page,
     pageSize: pageSize(query.page_size || query.pageSize),
     dataType: ['all', 'group', 'unmatched'].includes(dataType) ? dataType as DataCenterDataType : 'all',
     constructionStatus: first(query.construction_status || query.constructionStatus) || 'all',
+    terminalStatus: ['all', 'completed', 'incomplete', 'pending_archive', 'archived'].includes(terminalStatus)
+      ? terminalStatus as DataCenterTerminalFilterStatus
+      : 'all',
     archiveStatus: first(query.archive_status || query.archiveStatus) || 'all',
-    barcodeStatus: first(query.barcode_status || query.barcodeStatus) || 'all',
+    barcodeStatus: ['all', 'passed', 'manual', 'manual_confirmed', 'mismatched', 'failed', 'unreadable', 'ineligible', 'verified', 'needs_review'].includes(barcodeStatus)
+      ? barcodeStatus as DataCenterBarcodeFilterStatus
+      : 'all',
     classificationStatus: first(query.classification_status || query.classificationStatus) || 'all',
     exceptionStatus: first(query.exception_status || query.exceptionStatus),
     installer: first(query.installer),
+    hasPhotos: first(query.has_photos || query.hasPhotos) === '1',
     dateFrom: first(query.date_from || query.dateFrom),
     dateTo: first(query.date_to || query.dateTo),
+    activityDateFrom: first(query.activity_date_from || query.activityDateFrom),
+    activityDateTo: first(query.activity_date_to || query.activityDateTo),
     terminal: first(query.terminal),
     keyword: first(query.keyword || query.query),
     sort: first(query.sort) || 'updated_desc',
@@ -83,6 +107,7 @@ function serializeQuery(state: DataCenterRouteQuery) {
     ['pageSize', 'page_size', state.pageSize],
     ['dataType', 'data_type', state.dataType],
     ['constructionStatus', 'construction_status', state.constructionStatus],
+    ['terminalStatus', 'terminal_status', state.terminalStatus],
     ['archiveStatus', 'archive_status', state.archiveStatus],
     ['barcodeStatus', 'barcode_status', state.barcodeStatus],
     ['classificationStatus', 'classification_status', state.classificationStatus],
@@ -90,6 +115,8 @@ function serializeQuery(state: DataCenterRouteQuery) {
     ['installer', 'installer', state.installer],
     ['dateFrom', 'date_from', state.dateFrom],
     ['dateTo', 'date_to', state.dateTo],
+    ['activityDateFrom', 'activity_date_from', state.activityDateFrom],
+    ['activityDateTo', 'activity_date_to', state.activityDateTo],
     ['terminal', 'terminal', state.terminal],
     ['keyword', 'keyword', state.keyword],
     ['sort', 'sort', state.sort],
@@ -98,6 +125,7 @@ function serializeQuery(state: DataCenterRouteQuery) {
   for (const [key, serialized, value] of entries) {
     if (value !== DEFAULT_QUERY[key] && value !== '') query[serialized] = String(value)
   }
+  if (state.hasPhotos) query.has_photos = '1'
   if (state.review) query.review = '1'
   return query
 }
@@ -178,13 +206,17 @@ export function useDataCenterQuery() {
       const page = await fetchDataCenterRows({
         dataType: query.dataType,
         constructionStatus: query.constructionStatus,
+        terminalStatus: query.terminalStatus,
         archiveStatus: query.archiveStatus,
         barcodeStatus: query.barcodeStatus,
         classificationStatus: query.classificationStatus,
         exceptionStatus: query.exceptionStatus,
         installer: query.installer,
+        hasPhotos: query.hasPhotos,
         dateFrom: query.dateFrom,
         dateTo: query.dateTo,
+        activityDateFrom: query.activityDateFrom,
+        activityDateTo: query.activityDateTo,
         terminal: query.terminal,
         keyword: query.keyword,
         page: query.page,

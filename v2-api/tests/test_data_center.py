@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -72,6 +72,32 @@ def test_data_center_route_requires_admin(monkeypatch: pytest.MonkeyPatch) -> No
     assert client.get("/groups/data-center").status_code == 401
 
 
+def test_data_center_route_accepts_precise_dashboard_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = RecordingRepository()
+    monkeypatch.setattr(group_routes, "state_repository", lambda: repo)
+
+    response = client.get(
+        (
+            "/groups/data-center"
+            "?data_type=group"
+            "&has_photos=1"
+            "&terminal_status=incomplete"
+            "&barcode_status=verified"
+            "&activity_date_from=2026-07-20"
+            "&activity_date_to=2026-07-20"
+        ),
+        headers=admin_headers(),
+    )
+
+    assert response.status_code == 200
+    recorded = repo.queries[-1]
+    assert getattr(recorded, "has_photos", False) is True
+    assert getattr(recorded, "terminal_status", "") == "incomplete"
+    assert recorded.barcode_status == "verified"
+    assert str(getattr(recorded, "activity_date_from", "")) == "2026-07-20"
+    assert str(getattr(recorded, "activity_date_to", "")) == "2026-07-20"
+
+
 def _group(
     index: int,
     *,
@@ -82,6 +108,8 @@ def _group(
     terminal: str = "T-01",
     updated_at: str | None = None,
     categories: list[str] | None = None,
+    photos: list[dict] | None = None,
+    photo_count: int | None = None,
 ) -> dict:
     updated = (
         updated_at
@@ -89,6 +117,18 @@ def _group(
         else (datetime(2026, 7, 23, 10, 0, tzinfo=UTC) + timedelta(minutes=index)).isoformat()
     )
     resolved_categories = categories or ["before_box", "module_meter", "after_box", "collector_barcode"]
+    resolved_photos = photos if photos is not None else [
+        {
+            "id": f"group-{index:03d}-photo-{slot}",
+            "category": category,
+            "archive_status": archive_status,
+            "image_url": f"https://example.test/signed/{index}/{slot}.jpg?token=secret",
+            "ocr_candidates": ["hidden"],
+            "binary_content": "hidden",
+            "is_active": True,
+        }
+        for slot, category in enumerate(resolved_categories, start=1)
+    ]
     return {
         "id": f"group-{index:03d}",
         "task_id": index,
@@ -108,18 +148,33 @@ def _group(
             "status": barcode_status,
             "result": {"missing_fields": [] if barcode_status == "passed" else ["module"]},
         },
-        "photos": [
-            {
-                "id": f"group-{index:03d}-photo-{slot}",
-                "category": category,
-                "archive_status": archive_status,
-                "image_url": f"https://example.test/signed/{index}/{slot}.jpg?token=secret",
-                "ocr_candidates": ["hidden"],
-                "binary_content": "hidden",
-                "is_active": True,
-            }
-            for slot, category in enumerate(resolved_categories, start=1)
-        ],
+        "group_barcode_manual_confirmed": barcode_status == "manual_confirmed",
+        "photo_count": len(resolved_photos) if photo_count is None else photo_count,
+        "photos": resolved_photos,
+    }
+
+
+def _construction_photo(
+    group_index: int,
+    slot: int,
+    *,
+    archive_status: str = "archived",
+    category: str = "before_box",
+    creator: str = "installer-a",
+    client_completed_at: str = "",
+    created_at: str = "",
+) -> dict:
+    return {
+        "id": f"group-{group_index:03d}-photo-{slot}",
+        "category": category,
+        "archive_status": archive_status,
+        "image_url": f"https://example.test/construction/{group_index}/{slot}.jpg",
+        "is_active": True,
+        "source": "construction-mobile",
+        "upload_source": "construction-mobile",
+        "creator": creator,
+        "client_completed_at": client_completed_at,
+        "created_at": created_at,
     }
 
 
@@ -159,6 +214,186 @@ def test_json_data_center_combines_filters_with_stable_server_pagination(
     assert page["total"] == 22
     assert len(page["items"]) == 2
     assert [row["id"] for row in page["items"]] == ["group-002", "group-001"]
+
+
+def test_json_data_center_precise_dashboard_filters_are_not_approximate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.schemas.data_center import DataCenterQuery
+
+    team_id = f"data-center-dashboard-filters-{uuid4()}"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [
+        _group(
+            1,
+            status="approved",
+            terminal="T-INCOMPLETE",
+            installer="installer-a",
+            updated_at="2026-07-23T10:00:00+00:00",
+            photos=[
+                _construction_photo(1, 1, category="before_box", client_completed_at="2026-07-20T09:30:00+08:00"),
+                _construction_photo(1, 2, category="module_meter", client_completed_at="2026-07-20T09:32:00+08:00"),
+                _construction_photo(1, 3, category="after_box", client_completed_at="2026-07-20T09:35:00+08:00"),
+                _construction_photo(1, 4, category="collector_barcode", client_completed_at="2026-07-20T09:38:00+08:00"),
+            ],
+        ),
+        _group(
+            2,
+            status="pending",
+            archive_status="unarchived",
+            barcode_status="ineligible",
+            terminal="T-INCOMPLETE",
+            installer="installer-a",
+            updated_at="2026-07-20T10:00:00+00:00",
+            photos=[],
+            photo_count=0,
+        ),
+        _group(
+            3,
+            status="approved",
+            archive_status="archived",
+            barcode_status="manual_confirmed",
+            terminal="T-PENDING",
+            installer="installer-a",
+            updated_at="2026-07-21T10:00:00+00:00",
+            photos=[
+                _construction_photo(3, 1, category="before_box", client_completed_at="2026-07-21T11:30:00+08:00"),
+                _construction_photo(3, 2, category="module_meter", client_completed_at="2026-07-21T11:32:00+08:00"),
+                _construction_photo(3, 3, category="after_box", client_completed_at="2026-07-21T11:35:00+08:00"),
+                _construction_photo(3, 4, category="collector_barcode", client_completed_at="2026-07-21T11:38:00+08:00"),
+            ],
+        ),
+        _group(
+            4,
+            status="pending",
+            archive_status="pending",
+            barcode_status="unreadable",
+            terminal="T-PENDING",
+            installer="installer-a",
+            updated_at="2026-07-21T12:00:00+00:00",
+            photos=[
+                _construction_photo(4, 1, category="before_box", client_completed_at="2026-07-21T12:30:00+08:00"),
+                _construction_photo(4, 2, category="module_meter", client_completed_at="2026-07-21T12:32:00+08:00"),
+                _construction_photo(4, 3, category="after_box", client_completed_at="2026-07-21T12:35:00+08:00"),
+                _construction_photo(4, 4, category="collector_barcode", client_completed_at="2026-07-21T12:38:00+08:00"),
+            ],
+        ),
+        _group(
+            5,
+            status="approved",
+            archive_status="archived",
+            barcode_status="passed",
+            terminal="T-ARCHIVED",
+            installer="installer-a",
+            updated_at="2026-07-22T08:00:00+00:00",
+            photos=[
+                _construction_photo(5, 1, category="before_box", client_completed_at="2026-07-22T08:30:00+08:00"),
+                _construction_photo(5, 2, category="module_meter", client_completed_at="2026-07-22T08:32:00+08:00"),
+                _construction_photo(5, 3, category="after_box", client_completed_at="2026-07-22T08:35:00+08:00"),
+                _construction_photo(5, 4, category="collector_barcode", client_completed_at="2026-07-22T08:38:00+08:00"),
+            ],
+        ),
+        _group(
+            6,
+            status="approved",
+            archive_status="archived",
+            barcode_status="passed",
+            terminal="T-ACTIVITY",
+            installer="installer-a",
+            updated_at="2026-07-20T08:00:00+00:00",
+            photo_count=0,
+            photos=[
+                _construction_photo(6, 1, category="before_box", created_at="2026-07-19T08:30:00+08:00"),
+                _construction_photo(6, 2, category="module_meter", created_at="2026-07-19T08:32:00+08:00"),
+                _construction_photo(6, 3, category="after_box", created_at="2026-07-19T08:35:00+08:00"),
+                _construction_photo(6, 4, category="collector_barcode", created_at="2026-07-19T08:38:00+08:00"),
+            ],
+        ),
+        _group(
+            7,
+            status="rejected",
+            archive_status="pending",
+            barcode_status="failed",
+            terminal="T-EXCEPTION",
+            installer="installer-b",
+            updated_at="2026-07-23T07:00:00+00:00",
+            photos=[
+                _construction_photo(7, 1, category="before_box", creator="installer-b", client_completed_at="2026-07-23T08:30:00+08:00"),
+                _construction_photo(7, 2, category="module_meter", creator="installer-b", client_completed_at="2026-07-23T08:32:00+08:00"),
+                _construction_photo(7, 3, category="after_box", creator="installer-b", client_completed_at="2026-07-23T08:35:00+08:00"),
+                _construction_photo(7, 4, category="collector_barcode", creator="installer-b", client_completed_at="2026-07-23T08:38:00+08:00"),
+            ],
+        ),
+    ]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+
+    repo = repository.JsonStateRepository()
+
+    has_photos_page = repo.list_data_center_rows(DataCenterQuery(data_type="group", has_photos=True, page=1, page_size=20))
+    assert {row["id"] for row in has_photos_page["items"]} == {
+        "group-001",
+        "group-003",
+        "group-004",
+        "group-005",
+        "group-007",
+    }
+
+    verified_page = repo.list_data_center_rows(DataCenterQuery(data_type="group", barcode_status="verified", page=1, page_size=20))
+    assert {row["id"] for row in verified_page["items"]} == {"group-001", "group-003", "group-005", "group-006"}
+
+    manual_confirmed_page = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", barcode_status="manual_confirmed", page=1, page_size=20)
+    )
+    assert {row["id"] for row in manual_confirmed_page["items"]} == {"group-003"}
+
+    needs_review_page = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", barcode_status="needs_review", page=1, page_size=20)
+    )
+    assert {row["id"] for row in needs_review_page["items"]} == {"group-004", "group-007"}
+
+    failed_page = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", barcode_status="failed", page=1, page_size=20)
+    )
+    assert {row["id"] for row in failed_page["items"]} == {"group-007"}
+
+    terminal_incomplete_page = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", terminal_status="incomplete", page=1, page_size=20)
+    )
+    assert {row["id"] for row in terminal_incomplete_page["items"]} == {"group-001", "group-002", "group-006"}
+
+    terminal_completed_page = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", terminal_status="completed", page=1, page_size=20)
+    )
+    assert {row["id"] for row in terminal_completed_page["items"]} == {
+        "group-003",
+        "group-004",
+        "group-005",
+        "group-007",
+    }
+
+    terminal_pending_archive_page = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", terminal_status="pending_archive", page=1, page_size=20)
+    )
+    assert {row["id"] for row in terminal_pending_archive_page["items"]} == {"group-003", "group-004", "group-007"}
+
+    terminal_archived_page = repo.list_data_center_rows(
+        DataCenterQuery(data_type="group", terminal_status="archived", page=1, page_size=20)
+    )
+    assert {row["id"] for row in terminal_archived_page["items"]} == {"group-005"}
+
+    installer_activity_page = repo.list_data_center_rows(
+        DataCenterQuery(
+            data_type="group",
+            installer="installer-a",
+            construction_status="completed",
+            activity_date_from=date(2026, 7, 20),
+            activity_date_to=date(2026, 7, 20),
+            page=1,
+            page_size=20,
+        )
+    )
+    assert [row["id"] for row in installer_activity_page["items"]] == ["group-001"]
 
 
 def test_data_center_list_is_lightweight_and_detail_is_lazy_loaded(
@@ -467,6 +702,97 @@ def test_postgres_data_center_list_filters_counts_and_returns_authoritative_barc
     assert "data_center_rows.barcode_status = 'ineligible'" in compiled[1]
     assert page["total"] == 1
     assert page["items"][0]["barcode_status"] == "ineligible"
+
+
+def test_postgres_data_center_compiles_precise_dashboard_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.schemas.data_center import DataCenterQuery
+
+    class ScalarResult:
+        def __init__(self, values):
+            self._values = values
+
+        def all(self):
+            return self._values
+
+    class RecordingSession:
+        def __init__(self):
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def scalar(self, statement):
+            self.statements.append(statement)
+            return 0
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return ScalarResult([])
+
+    session = RecordingSession()
+    repo = repository.PostgresStateRepository()
+    monkeypatch.setattr(repo, "_session", lambda: session)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "demo-team")
+
+    repo.list_data_center_rows(
+        DataCenterQuery(
+            data_type="group",
+            has_photos=True,
+            terminal_status="incomplete",
+            barcode_status="verified",
+            installer="installer-a",
+            activity_date_from=date(2026, 7, 20),
+            activity_date_to=date(2026, 7, 20),
+            page=1,
+            page_size=20,
+        )
+    )
+
+    compiled = [
+        str(statement.compile(compile_kwargs={"literal_binds": True})).lower()
+        for statement in session.statements
+    ]
+    assert "data_center_rows.photo_count > 0" in compiled[0]
+    assert "data_center_rows.photo_count > 0" in compiled[1]
+    assert "data_center_rows.terminal_status = 'incomplete'" in compiled[0]
+    assert "data_center_rows.terminal_status = 'incomplete'" in compiled[1]
+    assert "photos.creator" in compiled[0]
+    assert "photos.creator" in compiled[1]
+    assert "photos.raw_data ->> 'client_completed_at'" in compiled[0]
+    assert "photos.raw_data ->> 'client_completed_at'" in compiled[1]
+    assert "substr(coalesce(nullif(photos.raw_data ->> 'client_completed_at'" in compiled[0]
+    assert "substr(coalesce(nullif(photos.raw_data ->> 'client_completed_at'" in compiled[1]
+    assert "like '%construction%'" in compiled[0]
+    assert "like '%construction%'" in compiled[1]
+    assert "material_groups.updated_at, 1, 10) >= '2026-07-20'" not in compiled[0]
+    assert "material_groups.updated_at, 1, 10) >= '2026-07-20'" not in compiled[1]
+    assert "data_center_rows.barcode_status in ('passed', 'manual_confirmed')" in compiled[0]
+    assert "data_center_rows.barcode_status in ('passed', 'manual_confirmed')" in compiled[1]
+    assert "data_center_rows.barcode_status = 'manual'" not in compiled[0]
+    assert "data_center_rows.barcode_status = 'manual'" not in compiled[1]
+    assert "data_center_rows.barcode_status = 'verified'" not in compiled[0]
+    assert "data_center_rows.barcode_status = 'verified'" not in compiled[1]
+
+    session.statements.clear()
+    repo.list_data_center_rows(
+        DataCenterQuery(
+            data_type="group",
+            barcode_status="needs_review",
+            page=1,
+            page_size=20,
+        )
+    )
+    needs_review_compiled = [
+        str(statement.compile(compile_kwargs={"literal_binds": True})).lower()
+        for statement in session.statements
+    ]
+    assert "data_center_rows.barcode_status in ('mismatched', 'failed', 'unreadable')" in needs_review_compiled[0]
+    assert "data_center_rows.barcode_status in ('mismatched', 'failed', 'unreadable')" in needs_review_compiled[1]
 
 
 def test_postgres_data_center_detail_derives_statuses_after_loading_photos(

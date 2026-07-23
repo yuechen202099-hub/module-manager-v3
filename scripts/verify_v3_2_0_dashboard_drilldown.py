@@ -33,6 +33,13 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
 
     cases = {
         "groups": {"context": {}, "expected": {"path": "/global-search", "query": {"data_type": "group", "page": "1", "page_size": "20"}}},
+        "scanned_groups": {
+            "context": {},
+            "expected": {
+                "path": "/global-search",
+                "query": {"data_type": "group", "has_photos": "1", "page": "1", "page_size": "20"},
+            },
+        },
         "archived_groups": {
             "context": {},
             "expected": {
@@ -54,7 +61,7 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
                 "query": {
                     "data_type": "group",
                     "classification_status": "complete",
-                    "barcode_status": "passed",
+                    "barcode_status": "verified",
                     "page": "1",
                     "page_size": "20",
                 },
@@ -67,7 +74,7 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
                 "query": {
                     "data_type": "group",
                     "classification_status": "complete",
-                    "barcode_status": "manual",
+                    "barcode_status": "needs_review",
                     "page": "1",
                     "page_size": "20",
                 },
@@ -105,14 +112,14 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
             "context": {},
             "expected": {
                 "path": "/global-search",
-                "query": {"data_type": "group", "construction_status": "completed", "page": "1", "page_size": "20"},
+                "query": {"data_type": "group", "terminal_status": "completed", "page": "1", "page_size": "20"},
             },
         },
         "terminal_incomplete": {
             "context": {},
             "expected": {
                 "path": "/global-search",
-                "query": {"data_type": "group", "construction_status": "in_progress", "page": "1", "page_size": "20"},
+                "query": {"data_type": "group", "terminal_status": "incomplete", "page": "1", "page_size": "20"},
             },
         },
         "terminal_pending_archive": {
@@ -121,8 +128,7 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
                 "path": "/global-search",
                 "query": {
                     "data_type": "group",
-                    "construction_status": "completed",
-                    "archive_status": "pending",
+                    "terminal_status": "pending_archive",
                     "page": "1",
                     "page_size": "20",
                 },
@@ -132,7 +138,7 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
             "context": {},
             "expected": {
                 "path": "/global-search",
-                "query": {"data_type": "group", "archive_status": "archived", "page": "1", "page_size": "20"},
+                "query": {"data_type": "group", "terminal_status": "archived", "page": "1", "page_size": "20"},
             },
         },
         "installer_completed": {
@@ -143,8 +149,8 @@ def transpile_and_run_drilldowns() -> dict[str, dict[str, object]]:
                     "data_type": "group",
                     "installer": "installer-a",
                     "construction_status": "completed",
-                    "date_from": "2026-07-01",
-                    "date_to": "2026-07-23",
+                    "activity_date_from": "2026-07-01",
+                    "activity_date_to": "2026-07-23",
                     "page": "1",
                     "page_size": "20",
                 },
@@ -209,6 +215,13 @@ def main() -> int:
     assert_contains(board_source, "type=\"button\"", "dashboard drilldown affordances must stay keyboard accessible")
     assert_contains(board_source, "openDashboardDrilldown('installer_completed'", "installer chart must drill into data center")
     assert_contains(board_source, "openDashboardDrilldown(item.drilldown", "summary/progress/risk/terminal cards must share the same drilldown entry")
+    assert_contains(utility_source, "has_photos", "dashboard drilldown utility must expose precise has_photos mapping")
+    assert_contains(utility_source, "terminal_status", "terminal drilldowns must use terminal_status keys")
+    assert_contains(utility_source, "activity_date_from", "installer drilldown must use activity-date keys")
+    assert_not_contains(utility_source, "barcode_status: 'manual'", "dashboard drilldown cannot use the legacy manual-only barcode filter")
+    assert_not_contains(utility_source, "construction_status: 'in_progress'", "dashboard drilldown cannot approximate scanned/incomplete with in_progress")
+    assert_not_contains(utility_source, "next.date_from = dateFrom", "installer drilldown cannot reuse generic updated_at start-date keys")
+    assert_not_contains(utility_source, "next.date_to = dateTo", "installer drilldown cannot reuse generic updated_at end-date keys")
     assert_contains(router_source, "data_type: 'unmatched'", "legacy unmatched entrypoint must route into the data center")
     assert_contains(router_source, "page_size: '20'", "legacy router redirects must pin dashboard drilldowns to 20 rows")
 

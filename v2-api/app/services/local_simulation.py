@@ -5208,8 +5208,57 @@ def list_groups(limit: int = 100, offset: int = 0, status: str | None = None) ->
     return {"total": len(groups), "items": groups[offset : offset + limit]}
 
 
+def _data_center_terminal_status_map(groups: list[dict[str, Any]]) -> dict[str, str]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for group in groups:
+        terminal = str(group.get("terminal") or "").strip()
+        if not terminal:
+            continue
+        grouped.setdefault(terminal, []).append(group)
+    statuses: dict[str, str] = {}
+    for terminal, items in grouped.items():
+        total = len(items)
+        uploaded = 0
+        unbuilt = 0
+        reviewed = 0
+        for item in items:
+            photo_count = int(item.get("photo_count") or 0)
+            if photo_count > 0:
+                uploaded += 1
+            else:
+                unbuilt += 1
+            if str(item.get("status") or "").strip() in {"approved", "completed"}:
+                reviewed += 1
+        if uploaded > 0 and reviewed >= total:
+            statuses[terminal] = "archived"
+        elif total > 0 and unbuilt <= 0:
+            statuses[terminal] = "pending_archive"
+        else:
+            statuses[terminal] = "incomplete"
+    return statuses
+
+
+def _data_center_activity_datetime(group: dict[str, Any], installer: str = "") -> datetime | None:
+    target = str(installer or "").strip()
+    aliases = installer_actor_aliases(target) if target else set()
+    photos = [
+        photo
+        for photo in group.get("photos", []) or []
+        if isinstance(photo, dict) and photo.get("is_active", True) is not False
+    ]
+    if aliases:
+        photos = [photo for photo in photos if str(photo.get("creator") or "").strip() in aliases]
+    construction_times = [_photo_work_datetime(photo) for photo in photos if _photo_is_construction_upload(photo)]
+    valid_construction_times = [value for value in construction_times if value is not None]
+    if valid_construction_times:
+        return max(valid_construction_times)
+    return None
+
+
 def list_data_center_rows(query) -> dict[str, Any]:
     state = get_state()
+    terminal_statuses = _data_center_terminal_status_map(state.get("groups", []))
+
     def candidates():
         for group in state.get("groups", []):
             yield "group", group
@@ -5219,10 +5268,21 @@ def list_data_center_rows(query) -> dict[str, Any]:
     def map_candidate(candidate):
         kind, raw = candidate
         if kind == "group":
-            return data_center_service.group_row(raw)
-        return data_center_service.unmatched_row(raw)
+            row = data_center_service.group_row(raw)
+            row["_terminal_status"] = terminal_statuses.get(str(row.get("terminal") or "").strip(), "incomplete")
+            row["_activity_at"] = _data_center_activity_datetime(raw, query.installer)
+            return row
+        row = data_center_service.unmatched_row(raw)
+        row["_terminal_status"] = ""
+        row["_activity_at"] = None
+        return row
 
-    return data_center_service.select_bounded_page(candidates(), query, map_candidate)
+    page = data_center_service.select_bounded_page(candidates(), query, map_candidate)
+    page["items"] = [
+        {key: value for key, value in row.items() if not key.startswith("_")}
+        for row in page["items"]
+    ]
+    return page
 
 
 def get_data_center_detail(*, kind: str, item_id: str) -> dict[str, Any] | None:

@@ -12,13 +12,28 @@ SUPPORTED_PAGE_SIZES = {20, 50, 100}
 class DataCenterQuery(BaseModel):
     data_type: Literal["all", "group", "unmatched"] = "all"
     construction_status: Literal["all", "unconstructed", "in_progress", "completed"] = "all"
+    terminal_status: Literal["all", "completed", "incomplete", "pending_archive", "archived"] = "all"
     archive_status: Literal["all", "unarchived", "pending", "archived"] = "all"
-    barcode_status: Literal["all", "passed", "manual", "mismatched", "unreadable", "ineligible"] = "all"
+    barcode_status: Literal[
+        "all",
+        "passed",
+        "manual",
+        "manual_confirmed",
+        "mismatched",
+        "failed",
+        "unreadable",
+        "ineligible",
+        "verified",
+        "needs_review",
+    ] = "all"
     classification_status: Literal["all", "complete", "incomplete"] = "all"
     exception_status: str = ""
     installer: str = ""
+    has_photos: bool = False
     date_from: date | None = None
     date_to: date | None = None
+    activity_date_from: date | None = None
+    activity_date_to: date | None = None
     terminal: str = ""
     query: str = ""
     page: int = Field(default=1, ge=1)
