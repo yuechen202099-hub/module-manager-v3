@@ -120,3 +120,92 @@ Result: exit `0`; only Git's existing CRLF conversion warnings were printed for 
 
 - The PostgreSQL data-center path is covered by SQL-shape tests rather than a live PostgreSQL integration dataset in this task run.
 - Test output includes an existing `StarletteDeprecationWarning` from FastAPI's `TestClient` importing deprecated `httpx` usage.
+
+## Blocking Review Fix - 2026-07-23
+
+### Findings Addressed
+
+- C1: `0013_data_center_query_indexes.py` downgrade now drops only the three indexes created by this migration, by explicit name.
+- I1: PostgreSQL list/archive filtering now derives `archive_status` from active `Photo.archive_status` aggregates, matching JSON photo-derived semantics instead of `MaterialGroup.raw_data`.
+- I2: PostgreSQL classification complete now requires all four required category slots, not `photo_count >= 4`.
+- I3: PostgreSQL detail now loads active photos first, then derives classification/archive statuses from those photos.
+- I4: PostgreSQL `updated_at` ordering now uses explicit `NULLS LAST`; JSON updated sort also keeps empty times at the tail for both asc and desc.
+- I5: JSON/DualWrite listing now uses `select_bounded_page` over iterators and retains at most `offset + page_size` mapped candidates while still counting all matches.
+
+### RED Added
+
+Command:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_data_center.py -q
+```
+
+Result before fix: failed with 4 blocking regressions:
+
+- JSON updated-desc placed an empty timestamp before a real timestamp.
+- `select_bounded_page` was missing.
+- PostgreSQL SQL shape did not reference `photos.archive_status` / `photos.category`.
+- PostgreSQL detail returned `archive_status=unarchived` after loading mixed archived/pending photos.
+
+Command:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_migrations.py -q
+```
+
+Result before fix: failed because `0013` downgrade still raised an irreversible RuntimeError.
+
+Additional RED during self-review:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_data_center.py -k "row_mapping_preserves" -q
+```
+
+Result before fix: failed because SQL-derived `archive_status=archived` was remapped to `unarchived`.
+
+### GREEN
+
+Data-center API/repository tests:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_data_center.py -q
+```
+
+Result: `18 passed, 1 warning`.
+
+Data-center state repository contract tests:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_state_repository.py -k "data_center" -q
+```
+
+Result: `1 passed, 245 deselected`.
+
+Migration tests:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_migrations.py -q
+```
+
+Result: `15 passed`.
+
+Syntax and whitespace:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m py_compile app\services\data_center.py app\services\local_simulation.py app\services\state_repository.py alembic\versions\0013_data_center_query_indexes.py tests\test_data_center.py tests\test_migrations.py
+git diff --check
+```
+
+Result: both exited `0`; `git diff --check` printed only CRLF conversion warnings.
+
+### Remaining Concerns
+
+- PostgreSQL behavior remains covered through compiled SQL-shape tests and focused fake-session detail tests, not a live PostgreSQL fixture with persisted sample rows.
+- The existing FastAPI `TestClient` deprecation warning remains unrelated to this fix.

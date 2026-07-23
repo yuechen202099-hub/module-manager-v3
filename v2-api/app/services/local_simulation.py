@@ -5210,9 +5210,19 @@ def list_groups(limit: int = 100, offset: int = 0, status: str | None = None) ->
 
 def list_data_center_rows(query) -> dict[str, Any]:
     state = get_state()
-    rows = [data_center_service.group_row(group) for group in state.get("groups", [])]
-    rows.extend(data_center_service.unmatched_row(record) for record in state.get("scan_unmatched", []))
-    return data_center_service.page_rows(rows, query)
+    def candidates():
+        for group in state.get("groups", []):
+            yield "group", group
+        for record in state.get("scan_unmatched", []):
+            yield "unmatched", record
+
+    def map_candidate(candidate):
+        kind, raw = candidate
+        if kind == "group":
+            return data_center_service.group_row(raw)
+        return data_center_service.unmatched_row(raw)
+
+    return data_center_service.select_bounded_page(candidates(), query, map_candidate)
 
 
 def get_data_center_detail(*, kind: str, item_id: str) -> dict[str, Any] | None:

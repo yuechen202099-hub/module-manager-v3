@@ -4037,8 +4037,22 @@ class PostgresStateRepository(StateRepository):
         return group
 
     def _data_center_source(self, team_id: str, query: DataCenterQuery):
-        active_photo_counts = (
-            select(Photo.group_id.label("group_id"), func.count(Photo.id).label("active_photo_count"))
+        required_categories = sorted(data_center_service.REQUIRED_CLASSIFICATION_SLOTS)
+        active_photo_stats = (
+            select(
+                Photo.group_id.label("group_id"),
+                func.count(Photo.id).label("active_photo_count"),
+                func.coalesce(func.sum(case((Photo.archive_status == "archived", 1), else_=0)), 0).label(
+                    "archived_photo_count"
+                ),
+                func.coalesce(
+                    func.sum(case((func.nullif(func.trim(Photo.archive_status), "").is_not(None), 1), else_=0)),
+                    0,
+                ).label("archive_state_count"),
+                func.count(
+                    func.distinct(case((Photo.category.in_(required_categories), Photo.category), else_=None))
+                ).label("required_category_count"),
+            )
             .where(
                 Photo.team_id == team_id,
                 Photo.is_active.is_(True),
@@ -4048,7 +4062,7 @@ class PostgresStateRepository(StateRepository):
             .group_by(Photo.group_id)
             .subquery()
         )
-        group_photo_count = func.coalesce(active_photo_counts.c.active_photo_count, MaterialGroup.photo_count, 0)
+        group_photo_count = func.coalesce(active_photo_stats.c.active_photo_count, 0)
         group_raw = MaterialGroup.raw_data
         group_installer = func.coalesce(
             func.nullif(func.trim(group_raw.op("->>")("installer")), ""),
@@ -4057,7 +4071,6 @@ class PostgresStateRepository(StateRepository):
             func.nullif(func.trim(Task.construction_claimed_by), ""),
             literal(""),
         )
-        group_archive = group_raw.op("->>")("archive_status")
         group_barcode_status = case(
             (GroupBarcodeVerification.status == "passed", literal("passed")),
             (GroupBarcodeVerification.status == "manual_confirmed", literal("manual")),
@@ -4069,6 +4082,24 @@ class PostgresStateRepository(StateRepository):
             (group_photo_count <= 0, literal("unconstructed")),
             (MaterialGroup.status.in_([GroupStatus.APPROVED, GroupStatus.REJECTED]), literal("completed")),
             else_=literal("in_progress"),
+        )
+        group_classification_status = case(
+            (
+                func.coalesce(active_photo_stats.c.required_category_count, 0) == len(required_categories),
+                literal("complete"),
+            ),
+            else_=literal("incomplete"),
+        )
+        group_archive_status = case(
+            (
+                and_(
+                    group_photo_count > 0,
+                    func.coalesce(active_photo_stats.c.archived_photo_count, 0) == group_photo_count,
+                ),
+                literal("archived"),
+            ),
+            (func.coalesce(active_photo_stats.c.archive_state_count, 0) > 0, literal("pending")),
+            else_=literal("unarchived"),
         )
         group_select = (
             select(
@@ -4086,14 +4117,9 @@ class PostgresStateRepository(StateRepository):
                 group_raw.op("->>")("construction_module_asset_no").label("construction_module_asset_no"),
                 group_installer.label("installer"),
                 group_photo_count.label("photo_count"),
-                case((group_photo_count >= 4, literal("complete")), else_=literal("incomplete")).label(
-                    "classification_status"
-                ),
+                group_classification_status.label("classification_status"),
                 group_construction_status.label("construction_status"),
-                case(
-                    (group_archive.in_(["unarchived", "pending", "archived"]), group_archive),
-                    else_=literal("unarchived"),
-                ).label("archive_status"),
+                group_archive_status.label("archive_status"),
                 group_barcode_status.label("barcode_status"),
                 func.coalesce(
                     func.nullif(func.trim(MaterialGroup.exception_status), ""),
@@ -4103,7 +4129,7 @@ class PostgresStateRepository(StateRepository):
                 MaterialGroup.raw_data.label("raw_data"),
             )
             .select_from(MaterialGroup)
-            .outerjoin(active_photo_counts, active_photo_counts.c.group_id == MaterialGroup.id)
+            .outerjoin(active_photo_stats, active_photo_stats.c.group_id == MaterialGroup.id)
             .outerjoin(Task, and_(Task.team_id == MaterialGroup.team_id, Task.id == MaterialGroup.task_id))
             .outerjoin(
                 GroupBarcodeVerification,
@@ -4195,10 +4221,10 @@ class PostgresStateRepository(StateRepository):
     @staticmethod
     def _data_center_order(source, sort: str):
         if sort == "updated_asc":
-            return (source.c.updated_at.asc(), source.c.legacy_id.asc())
+            return (source.c.updated_at.asc().nulls_last(), source.c.legacy_id.asc())
         if sort == "terminal_asc":
             return (source.c.terminal.asc(), source.c.legacy_id.asc())
-        return (source.c.updated_at.desc(), source.c.legacy_id.desc())
+        return (source.c.updated_at.desc().nulls_last(), source.c.legacy_id.desc())
 
     @staticmethod
     def _data_center_row_from_mapping(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -4225,7 +4251,11 @@ class PostgresStateRepository(StateRepository):
         }
         if row.get("kind") == "unmatched":
             return data_center_service.unmatched_row({**raw, **base, "unmatched_id": base["id"]})
-        return data_center_service.group_row({**raw, **base})
+        mapped = data_center_service.group_row({**raw, **base})
+        mapped["classification_status"] = base["classification_status"]
+        mapped["classification_progress"] = {"status": base["classification_status"]}
+        mapped["archive_status"] = base["archive_status"]
+        return mapped
 
     def list_data_center_rows(self, query: DataCenterQuery) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
@@ -4258,8 +4288,8 @@ class PostgresStateRepository(StateRepository):
                 )
                 if group is None:
                     return None
-                detail = data_center_service.group_row(_group_payload(session, group, include_photos=False))
-                detail["photos"] = [
+                base_payload = _group_payload(session, group, include_photos=False)
+                photos = [
                     _photo_payload(photo)
                     for photo in session.scalars(
                         select(Photo)
@@ -4267,6 +4297,8 @@ class PostgresStateRepository(StateRepository):
                         .order_by(Photo.sort_order, Photo.created_at, Photo.legacy_id)
                     ).all()
                 ]
+                detail = data_center_service.group_row({**base_payload, "photos": photos, "photo_count": len(photos)})
+                detail["photos"] = photos
                 detail["audit"] = [
                     {
                         "actor": audit.actor_username or "",

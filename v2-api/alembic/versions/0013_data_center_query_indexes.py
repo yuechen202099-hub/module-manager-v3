@@ -33,4 +33,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise RuntimeError("V3.2 data center query indexes are production-irreversible; downgrade is forbidden")
+    op.drop_index(
+        "ix_unmatched_records_data_center_team_status_updated",
+        table_name="unmatched_records",
+    )
+    op.drop_index(
+        "ix_material_groups_data_center_team_terminal_updated",
+        table_name="material_groups",
+    )
+    op.drop_index(
+        "ix_material_groups_data_center_team_status_updated",
+        table_name="material_groups",
+    )

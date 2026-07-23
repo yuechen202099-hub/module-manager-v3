@@ -59,7 +59,6 @@ def test_group_barcode_verification_upgrade_renders_postgresql_schema_contract()
         "0010_auto_archive_queue_state.py",
         "0011_delivery_package_jobs.py",
         "0012_delivery_package_group_ids_gin.py",
-        "0013_data_center_query_indexes.py",
     ],
 )
 def test_v3_1_migrations_reject_downgrade_before_any_ddl(filename: str) -> None:
@@ -141,3 +140,13 @@ def test_data_center_query_index_migration_is_chained_and_non_enum() -> None:
     assert "CREATE INDEX ix_material_groups_data_center_team_terminal_updated" in upgrade
     assert "CREATE INDEX ix_unmatched_records_data_center_team_status_updated" in upgrade
     assert "CREATE TYPE" not in upgrade
+
+
+def test_data_center_query_index_downgrade_drops_only_created_indexes() -> None:
+    downgrade = render_postgresql_ddl("downgrade", "0013_data_center_query_indexes.py")
+
+    assert "DROP INDEX ix_unmatched_records_data_center_team_status_updated" in downgrade
+    assert "DROP INDEX ix_material_groups_data_center_team_terminal_updated" in downgrade
+    assert "DROP INDEX ix_material_groups_data_center_team_status_updated" in downgrade
+    assert "DROP TABLE" not in downgrade
+    assert "DROP TYPE" not in downgrade

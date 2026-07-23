@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time
-from typing import Any, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from app.schemas.data_center import DataCenterQuery
 
@@ -27,6 +27,20 @@ def datetime_sort_value(value: Any) -> float:
     if result is None:
         return float("-inf")
     return result.timestamp()
+
+
+def _desc_text_key(value: Any) -> tuple[int, ...]:
+    return tuple(-ord(char) for char in str(value or ""))
+
+
+def row_order_key(row: Mapping[str, Any], sort: str) -> tuple[Any, ...]:
+    if sort == "updated_asc":
+        updated = coerce_datetime(row.get("updated_at"))
+        return (updated is None, updated.timestamp() if updated else 0, str(row.get("id") or ""))
+    if sort == "terminal_asc":
+        return (str(row.get("terminal") or ""), str(row.get("id") or ""))
+    updated = coerce_datetime(row.get("updated_at"))
+    return (updated is None, -(updated.timestamp() if updated else 0), _desc_text_key(row.get("id")))
 
 
 def date_bounds(query: DataCenterQuery) -> tuple[datetime | None, datetime | None]:
@@ -100,9 +114,6 @@ def construction_status_from_group(group: Mapping[str, Any], photo_count: int) -
 
 
 def archive_status_from_group(group: Mapping[str, Any], photos: list[Mapping[str, Any]]) -> str:
-    explicit = str(group.get("archive_status") or "").strip()
-    if explicit in {"unarchived", "pending", "archived"}:
-        return explicit
     if photos and all(str(photo.get("archive_status") or "").strip() == "archived" for photo in photos):
         return "archived"
     if any(str(photo.get("archive_status") or "").strip() for photo in photos):
@@ -220,23 +231,38 @@ def row_passes_filters(row: Mapping[str, Any], query: DataCenterQuery) -> bool:
 
 
 def sort_rows(rows: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
-    if sort == "updated_asc":
-        return sorted(rows, key=lambda row: (datetime_sort_value(row.get("updated_at")), row["id"]))
-    if sort == "terminal_asc":
-        return sorted(rows, key=lambda row: (row.get("terminal") or "", row["id"]))
-    return sorted(
-        rows,
-        key=lambda row: (datetime_sort_value(row.get("updated_at")), row["id"]),
-        reverse=True,
-    )
+    return sorted(rows, key=lambda row: row_order_key(row, sort))
+
+
+def select_bounded_page(
+    raw_items: Iterable[Any],
+    query: DataCenterQuery,
+    mapper: Callable[[Any], dict[str, Any]],
+    *,
+    on_retained_size: Callable[[int], None] | None = None,
+) -> dict[str, Any]:
+    start = (query.page - 1) * query.page_size
+    retained_limit = start + query.page_size
+    total = 0
+    retained: list[dict[str, Any]] = []
+    for raw_item in raw_items:
+        row = mapper(raw_item)
+        if not row_passes_filters(row, query):
+            continue
+        total += 1
+        retained.append(row)
+        retained.sort(key=lambda item: row_order_key(item, query.sort))
+        if len(retained) > retained_limit:
+            retained.pop()
+        if on_retained_size is not None:
+            on_retained_size(len(retained))
+    return {
+        "total": total,
+        "page": query.page,
+        "page_size": query.page_size,
+        "items": retained[start : start + query.page_size],
+    }
 
 
 def page_rows(rows: list[dict[str, Any]], query: DataCenterQuery) -> dict[str, Any]:
-    start = (query.page - 1) * query.page_size
-    items = sort_rows([row for row in rows if row_passes_filters(row, query)], query.sort)
-    return {
-        "total": len(items),
-        "page": query.page,
-        "page_size": query.page_size,
-        "items": items[start : start + query.page_size],
-    }
+    return select_bounded_page(rows, query, lambda row: row)
