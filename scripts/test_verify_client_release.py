@@ -358,6 +358,21 @@ def test_v3084_performance_verifiers_are_packaged_and_required() -> None:
     assert "verify-client-release.py $zipPath --expected-source-commit $sourceCommit" in acceptance_script
 
 
+def test_v31_release_requires_barcode_enqueue_unit_and_all_queue_migrations() -> None:
+    verifier = load_verifier()
+    required = {
+        "infra/module-manager-v2-photo-barcode-maintenance-enqueue.service",
+        "v2-api/alembic/versions/0006_group_barcode_verification.py",
+        "v2-api/alembic/versions/0007_group_barcode_verification_lease_token.py",
+        "v2-api/alembic/versions/0008_delivery_cache_jobs.py",
+        "v2-api/alembic/versions/0009_delivery_cache_fix3.py",
+        "v2-api/alembic/versions/0010_auto_archive_queue_state.py",
+        "v2-api/alembic/versions/0011_delivery_package_jobs.py",
+    }
+
+    assert required <= verifier.REQUIRED_FILES
+
+
 def test_release_builder_stops_when_smoke_check_fails() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     smoke_block = build_script.split("Running release smoke check before packaging...", maxsplit=1)[1]

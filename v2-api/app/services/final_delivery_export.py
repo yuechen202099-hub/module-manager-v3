@@ -14,7 +14,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 from zoneinfo import ZoneInfo
 
 
@@ -1103,6 +1103,19 @@ def cleanup_delivery_cache(
     }
 
 
+def _delivery_package_is_reusable(path: Path, current: datetime) -> bool:
+    try:
+        if not path.is_file():
+            return False
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+        if current.astimezone(UTC) - modified > PACKAGE_TTL:
+            return False
+        with ZipFile(path) as archive:
+            return bool(archive.infolist()) and archive.testzip() is None
+    except (BadZipFile, EOFError, OSError, RuntimeError, ValueError):
+        return False
+
+
 def get_or_build_delivery_package(
     scope: str,
     evidence_fingerprint: str,
@@ -1142,13 +1155,11 @@ def get_or_build_delivery_package(
             raise RuntimeError("Unable to lock delivery package path")
         try:
             with _CACHE_PATH_CONDITION:
-                if target.is_file():
-                    modified = datetime.fromtimestamp(target.stat().st_mtime, tz=UTC)
-                    if current.astimezone(UTC) - modified <= PACKAGE_TTL:
-                        _reserve_delivery_cache_key_locked(target_key)
-                        package = LeasedDeliveryPackage(target, target_key, file_lock=file_lock)
-                        file_lock = None
-                        return package
+                if _delivery_package_is_reusable(target, current):
+                    _reserve_delivery_cache_key_locked(target_key)
+                    package = LeasedDeliveryPackage(target, target_key, file_lock=file_lock)
+                    file_lock = None
+                    return package
         finally:
             if file_lock is not None:
                 file_lock.release()
@@ -1171,13 +1182,11 @@ def get_or_build_delivery_package(
                 raise RuntimeError("Unable to lock delivery package path")
             try:
                 with _CACHE_PATH_CONDITION:
-                    if target.is_file():
-                        modified = datetime.fromtimestamp(target.stat().st_mtime, tz=UTC)
-                        if current.astimezone(UTC) - modified <= PACKAGE_TTL:
-                            _reserve_delivery_cache_key_locked(target_key)
-                            package = LeasedDeliveryPackage(target, target_key, file_lock=file_lock)
-                            file_lock = None
-                            return package
+                    if _delivery_package_is_reusable(target, current):
+                        _reserve_delivery_cache_key_locked(target_key)
+                        package = LeasedDeliveryPackage(target, target_key, file_lock=file_lock)
+                        file_lock = None
+                        return package
                 package_dir.mkdir(parents=True, exist_ok=True)
                 temporary = target.with_suffix(f".zip.tmp-{uuid4().hex}")
                 try:

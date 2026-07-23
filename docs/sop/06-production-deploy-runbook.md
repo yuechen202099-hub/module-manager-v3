@@ -51,11 +51,35 @@ mkdir -p "$REL"
 unzip -q /tmp/module-manager-v2-server-$VERSION.zip -d "$REL"
 cp -a "$APP/.env" "$REL/.env"
 $APP/venv/bin/python -m pip install -r "$REL/v2-api/requirements.txt"
+
+# Keep background maintenance stopped until the new API and schema pass health checks.
+systemctl stop module-manager-v2-photo-barcode-maintenance.service 2>/dev/null || true
+
+# V3.1.0 requires the complete 20260721_0005 -> 20260723_0011 upgrade chain.
+set -a
+. "$APP/.env"
+set +a
+cd "$REL/v2-api"
+$APP/venv/bin/python -m alembic upgrade head
+$APP/venv/bin/python -m alembic current | grep -q "20260723_0011"
+
+install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance.service" \
+  /etc/systemd/system/module-manager-v2-photo-barcode-maintenance.service
+install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance-enqueue.service" \
+  /etc/systemd/system/module-manager-v2-photo-barcode-maintenance-enqueue.service
+install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance.timer" \
+  /etc/systemd/system/module-manager-v2-photo-barcode-maintenance.timer
+
 ln -sfn "$REL" "$APP/current"
+systemctl daemon-reload
+systemctl enable module-manager-v2-photo-barcode-maintenance.service
+systemctl enable module-manager-v2-photo-barcode-maintenance.timer
 systemctl restart module-manager-v2.service
 systemctl is-active module-manager-v2.service
 systemctl is-active nginx
 ```
+
+The `0006` through `0011` migrations are forward-only in this release. A code rollback must keep the database at `20260723_0011`; do not run `alembic downgrade` in production.
 
 ## Post-Deploy Health Check
 
@@ -70,6 +94,25 @@ Run the production security audit against the real server `.env`:
 APP=/opt/module-manager-v2
 SECURITY_ENV_PATH="$APP/.env" "$APP/venv/bin/python" "$APP/current/scripts/audit_production_security.py"
 ```
+
+Only after the main service, pages, and security audit pass, resume and start the low-load serial worker and the midnight enqueue timer:
+
+```bash
+APP=/opt/module-manager-v2
+cd "$APP/current/v2-api"
+"$APP/venv/bin/python" - <<'PY'
+from app.services.barcode_maintenance_worker import set_maintenance_paused
+
+print(set_maintenance_paused(False, "production-deploy"))
+PY
+systemctl start module-manager-v2-photo-barcode-maintenance.service
+systemctl start module-manager-v2-photo-barcode-maintenance.timer
+systemctl is-active module-manager-v2-photo-barcode-maintenance.service
+systemctl is-active module-manager-v2-photo-barcode-maintenance.timer
+systemctl status module-manager-v2-photo-barcode-maintenance-enqueue.service --no-pager || true
+```
+
+The worker must remain one process, use batches of at most 20 groups, process serially, and pause 5 seconds after every full batch.
 
 `PHOTO_PROXY_ALLOWED_HOSTS` must list the real external photo source domains. If it is empty, the production image proxy will reject external photo fallback requests under the explicit allowlist policy.
 

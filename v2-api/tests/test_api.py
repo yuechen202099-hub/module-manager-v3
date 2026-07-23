@@ -4926,6 +4926,36 @@ def test_construction_upload_rejects_placeholder_group_id_before_file_save() -> 
         f"/local-test/construction/tasks/{task['id']}/groups?limit=1&summary=true",
         headers=constructor_headers,
     ).json()["data"]["items"][0]
+    zero_terminal_group = local_simulation.get_group(group["id"])
+    assert zero_terminal_group is not None
+    original_terminal = zero_terminal_group["terminal"]
+    zero_terminal_group["terminal"] = "00000000"
+
+    before_files = saved_upload_files()
+    placeholder_terminal_upload = client.post(
+        f"/local-test/construction/groups/{group['id']}/upload-batch",
+        headers=constructor_headers,
+        data={
+            "actor": "constructor",
+            "client_batch_id": "batch-placeholder-terminal",
+            "client_completed_at": "2026-06-08T09:35:00",
+            "collector": "collector-api",
+            "module_asset_no": "module-api",
+            "photo_slots": ["before_box", "module_meter", "after_box"],
+            "client_photo_ids": ["photo-a", "photo-b", "photo-c"],
+        },
+        files=[
+            ("files", ("before.jpg", b"placeholder-terminal-before", "image/jpeg")),
+            ("files", ("meter.jpg", b"placeholder-terminal-meter", "image/jpeg")),
+            ("files", ("after.jpg", b"placeholder-terminal-after", "image/jpeg")),
+        ],
+    )
+
+    assert placeholder_terminal_upload.status_code == 400
+    assert "00000000" in placeholder_terminal_upload.json()["detail"]
+    assert saved_upload_files() == before_files
+    zero_terminal_group["terminal"] = original_terminal
+
     rejected_placeholder_update = client.patch(
         f"/local-test/groups/{group['id']}/metadata",
         headers=admin_headers,

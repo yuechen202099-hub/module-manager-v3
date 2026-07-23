@@ -4311,6 +4311,26 @@ def test_json_duplicate_construction_identity_change_invalidates_once_and_rolls_
     assert local_simulation.get_state() == before_failed_commit
 
 
+def test_json_construction_upload_rejects_zero_terminal_before_mutation(synthetic_state: dict) -> None:
+    group = synthetic_state["groups"][0]
+    task = next(item for item in synthetic_state["tasks"] if item["id"] == group["task_id"])
+    task["construction_claimed_by"] = "constructor-a"
+    group["terminal"] = "00000000"
+    before = deepcopy(local_simulation.get_state())
+
+    with pytest.raises(ValueError, match="00000000"):
+        JsonStateRepository().upload_construction_group_batch(
+            group["id"],
+            actor="constructor-a",
+            client_batch_id="zero-terminal-json",
+            collector="collector-a",
+            module_asset_no="module-a",
+            photos=[],
+        )
+
+    assert local_simulation.get_state() == before
+
+
 def test_json_photo_category_correction_audit_is_complete_and_redacted(synthetic_state: dict) -> None:
     group = synthetic_state["groups"][0]
     seed_passed_group_verification(group)

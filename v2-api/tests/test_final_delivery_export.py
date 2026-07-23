@@ -362,6 +362,47 @@ def test_get_or_build_delivery_package_rebuilds_after_ttl_or_fingerprint_change(
         rebuilt.release()
 
 
+def test_get_or_build_delivery_package_rebuilds_fresh_corrupt_zip(tmp_path: Path) -> None:
+    group = delivery_group()
+    builds = 0
+
+    def counting_builder(groups, reader) -> bytes:
+        nonlocal builds
+        builds += 1
+        return build_delivery_package(groups, reader)
+
+    now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    first = get_or_build_delivery_package(
+        "task-corrupt",
+        "c" * 64,
+        groups=[group],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now,
+        package_builder=counting_builder,
+    )
+    package_path = first.path
+    first.release()
+    package_path.write_bytes(b"not-a-zip")
+
+    rebuilt = get_or_build_delivery_package(
+        "task-corrupt",
+        "c" * 64,
+        groups=[group],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now + timedelta(hours=1),
+        package_builder=counting_builder,
+    )
+
+    try:
+        assert builds == 2
+        with ZipFile(rebuilt.path) as archive:
+            assert archive.testzip() is None
+    finally:
+        rebuilt.release()
+
+
 def test_cached_package_never_bypasses_current_group_validation(tmp_path: Path) -> None:
     group = delivery_group()
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
@@ -931,7 +972,10 @@ def test_concurrent_same_key_builders_share_one_package_lock(tmp_path: Path) -> 
         builds += 1
         started.set()
         assert release.wait(5)
-        return b"one-package"
+        output = BytesIO()
+        with ZipFile(output, "w") as archive:
+            archive.writestr("delivery.txt", b"one-package")
+        return output.getvalue()
 
     def build() -> None:
         paths.append(

@@ -1969,6 +1969,16 @@ def _enqueue_json_verifications(group_ids: list[str], *, actor: str, team_id: st
                 skipped.append({"group_id": group_id, "reason": eligibility.reason or "not_eligible"})
                 continue
             current = dict(group.get("barcode_verification") or {})
+            current_status = str(current.get("status") or "")
+            evidence_unchanged = bool(eligibility.evidence_fingerprint) and str(
+                current.get("evidence_fingerprint") or ""
+            ) == str(eligibility.evidence_fingerprint)
+            if evidence_unchanged and (
+                current_status in {"pending", "processing", "passed", "manual_confirmed"}
+                or str(current.get("auto_archive_status") or "") == "completed"
+            ):
+                skipped.append({"group_id": group_id, "reason": "evidence_unchanged"})
+                continue
             next_verification = invalidate_group_verification(
                 current,
                 reason="admin_enqueued",
@@ -1994,12 +2004,20 @@ def _enqueue_json_verifications(group_ids: list[str], *, actor: str, team_id: st
         raise
 
 
-def _enqueue_postgres_verifications(group_ids: list[str], *, actor: str, team_id: str) -> dict[str, Any]:
+def _enqueue_postgres_verifications(
+    group_ids: list[str],
+    *,
+    actor: str,
+    team_id: str,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    after_group_id: UUID | None = None,
+) -> dict[str, Any]:
     from app.services import state_repository
 
+    limit = min(DEFAULT_BATCH_SIZE, max(1, int(batch_size)))
     repository = state_repository.PostgresStateRepository()
     with repository._session() as session:
-        statement = select(MaterialGroup).where(MaterialGroup.team_id == team_id).order_by(MaterialGroup.id).with_for_update()
+        statement = select(MaterialGroup).where(MaterialGroup.team_id == team_id)
         if group_ids:
             parsed_ids = [_postgres_group_id(group_id) for group_id in group_ids]
             statement = statement.where(
@@ -2008,26 +2026,76 @@ def _enqueue_postgres_verifications(group_ids: list[str], *, actor: str, team_id
                     MaterialGroup.id.in_([value for value in parsed_ids if value is not None]),
                 )
             )
+        elif after_group_id is not None:
+            statement = statement.where(MaterialGroup.id > after_group_id)
+        statement = (
+            statement.order_by(MaterialGroup.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True, of=MaterialGroup)
+        )
         groups = list(session.scalars(statement).all())
+        database_group_ids = [group.id for group in groups]
+        photos = (
+            list(
+                session.scalars(
+                    select(Photo).where(
+                        Photo.team_id == team_id,
+                        Photo.group_id.in_(database_group_ids),
+                        Photo.is_active.is_(True),
+                    )
+                ).all()
+            )
+            if database_group_ids
+            else []
+        )
+        photos_by_group: dict[UUID, list[Any]] = {}
+        for photo in photos:
+            photos_by_group.setdefault(photo.group_id, []).append(photo)
+        verification_rows = (
+            list(
+                session.scalars(
+                    select(GroupBarcodeVerification)
+                    .where(
+                        GroupBarcodeVerification.team_id == team_id,
+                        GroupBarcodeVerification.group_id.in_(database_group_ids),
+                    )
+                    .with_for_update(skip_locked=True)
+                ).all()
+            )
+            if database_group_ids
+            else []
+        )
+        verifications_by_group = {verification.group_id: verification for verification in verification_rows}
         enqueued = 0
         skipped: list[dict[str, str]] = []
         found: set[str] = set()
         for group in groups:
             identifier = str(group.legacy_id or group.id)
             found.update({identifier, str(group.id)})
-            payload = state_repository._verification_group_payload(session, group)
+            payload = state_repository._verification_group_payload(
+                None,
+                group,
+                prefetched_photos=photos_by_group.get(group.id, []),
+            )
             eligibility = evaluate_group_eligibility(payload)
             if eligibility.status != "pending":
                 skipped.append({"group_id": identifier, "reason": eligibility.reason or "not_eligible"})
                 continue
-            verification = session.scalar(
-                select(GroupBarcodeVerification)
-                .where(GroupBarcodeVerification.team_id == team_id, GroupBarcodeVerification.group_id == group.id)
-                .with_for_update()
-            )
+            verification = verifications_by_group.get(group.id)
             if verification is None:
                 verification = GroupBarcodeVerification(team_id=team_id, group_id=group.id, evidence_version=0)
                 session.add(verification)
+            else:
+                current_status = str(verification.status or "")
+                evidence_unchanged = bool(eligibility.evidence_fingerprint) and str(
+                    verification.evidence_fingerprint or ""
+                ) == str(eligibility.evidence_fingerprint)
+                if evidence_unchanged and (
+                    current_status in {"pending", "processing", "passed", "manual_confirmed"}
+                    or str(verification.auto_archive_status or "") == "completed"
+                ):
+                    skipped.append({"group_id": identifier, "reason": "evidence_unchanged"})
+                    continue
             verification.status = "pending"
             verification.evidence_fingerprint = eligibility.evidence_fingerprint
             verification.evidence_version = int(verification.evidence_version or 0) + 1
@@ -2035,15 +2103,35 @@ def _enqueue_postgres_verifications(group_ids: list[str], *, actor: str, team_id
             verification.lease_owner = None
             verification.lease_token = None
             verification.lease_expires_at = None
+            verification.meter_matched = None
+            verification.module_matched = None
+            verification.collector_matched = None
+            verification.recognition_source = None
             verification.auto_archive_status = None
+            verification.auto_archive_attempt_count = 0
+            verification.auto_archive_lease_owner = None
+            verification.auto_archive_lease_token = None
+            verification.auto_archive_lease_expires_at = None
             verification.auto_archive_error = None
             enqueued += 1
         skipped.extend({"group_id": value, "reason": "not_found"} for value in group_ids if value not in found)
         session.commit()
-        return {"team_id": team_id, "enqueued": enqueued, "skipped": skipped}
+        return {
+            "team_id": team_id,
+            "scanned": len(groups),
+            "enqueued": enqueued,
+            "skipped": skipped,
+            "has_more": not group_ids and len(groups) == limit,
+            "next_cursor": str(groups[-1].id) if groups else "",
+        }
 
 
-def enqueue_verification_jobs(group_ids: list[str] | None = None, actor: str = WORKER_ACTOR) -> dict[str, Any]:
+def enqueue_verification_jobs(
+    group_ids: list[str] | None = None,
+    actor: str = WORKER_ACTOR,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> dict[str, Any]:
     clean_ids = list(dict.fromkeys(str(value).strip() for value in (group_ids or []) if str(value).strip()))
     backend = _backend()
     team_id = local_simulation.current_team_id()
@@ -2051,7 +2139,38 @@ def enqueue_verification_jobs(group_ids: list[str] | None = None, actor: str = W
     if backend == "json":
         return _enqueue_json_verifications(clean_ids, actor=actor, team_id=team_id)
     if backend == "postgres":
-        return _enqueue_postgres_verifications(clean_ids, actor=actor, team_id=team_id)
+        limit = min(DEFAULT_BATCH_SIZE, max(1, int(batch_size)))
+        aggregate = {"team_id": team_id, "scanned": 0, "enqueued": 0, "skipped": []}
+        if clean_ids:
+            batches = [clean_ids[index : index + limit] for index in range(0, len(clean_ids), limit)]
+            for batch in batches:
+                report = _enqueue_postgres_verifications(
+                    batch,
+                    actor=actor,
+                    team_id=team_id,
+                    batch_size=limit,
+                )
+                aggregate["scanned"] += int(report.get("scanned") or 0)
+                aggregate["enqueued"] += int(report.get("enqueued") or 0)
+                aggregate["skipped"].extend(report.get("skipped") or [])
+            return aggregate
+        cursor: UUID | None = None
+        while True:
+            report = _enqueue_postgres_verifications(
+                [],
+                actor=actor,
+                team_id=team_id,
+                batch_size=limit,
+                after_group_id=cursor,
+            )
+            aggregate["scanned"] += int(report.get("scanned") or 0)
+            aggregate["enqueued"] += int(report.get("enqueued") or 0)
+            aggregate["skipped"].extend(report.get("skipped") or [])
+            next_cursor = _postgres_group_id(str(report.get("next_cursor") or ""))
+            if not report.get("has_more") or next_cursor is None or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        return aggregate
     from app.services.state_repository import StateBackendNotReady
 
     raise StateBackendNotReady("Dual maintenance enqueue is disabled until queue cutover is complete")
@@ -2086,7 +2205,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.env_file:
         _load_env(args.env_file)
     if args.enqueue:
-        report = enqueue_verification_jobs(actor=WORKER_ACTOR)
+        report = enqueue_verification_jobs(
+            actor=WORKER_ACTOR,
+            batch_size=min(DEFAULT_BATCH_SIZE, max(1, int(args.batch_size))),
+        )
         print(report)
         return 0
     while True:

@@ -2759,12 +2759,142 @@ def test_dual_auto_archive_refuses_before_backends_or_cache_queue_mutate(
     assert local_simulation._team_states[team_id]["delivery_cache_jobs"] == []
 
 
+def test_json_daily_enqueue_preserves_manual_confirmation_and_completed_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    group = eligible_group("manual-preserved", verification_status="manual_confirmed")
+    group["archive_status"] = "archived"
+    group["barcode_verification"].update(
+        {
+            "auto_archive_status": "completed",
+            "auto_archive_attempt_count": 1,
+            "auto_archive_error": None,
+        }
+    )
+    team_id = install_json_queue(monkeypatch, [group])
+    before = deepcopy(local_simulation._team_states[team_id]["groups"][0])
+
+    report = worker._enqueue_json_verifications([], actor="daily-enqueue", team_id=team_id)
+
+    persisted = local_simulation._team_states[team_id]["groups"][0]
+    assert report["enqueued"] == 0
+    assert persisted == before
+    assert persisted["barcode_verification"]["status"] == "manual_confirmed"
+    assert persisted["barcode_verification"]["auto_archive_status"] == "completed"
+    assert persisted["archive_status"] == "archived"
+
+
+def test_json_daily_enqueue_invalidates_manual_confirmation_only_after_evidence_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    group = eligible_group("manual-evidence-changed", verification_status="manual_confirmed")
+    group["barcode_verification"]["auto_archive_status"] = "completed"
+    group["photos"][0]["sha256"] = "f" * 64
+    team_id = install_json_queue(monkeypatch, [group])
+
+    report = worker._enqueue_json_verifications([], actor="daily-enqueue", team_id=team_id)
+
+    verification = local_simulation._team_states[team_id]["groups"][0]["barcode_verification"]
+    assert report["enqueued"] == 1
+    assert verification["status"] == "pending"
+    assert verification["auto_archive_status"] is None
+
+
+def test_postgres_verification_enqueue_batch_is_bounded_and_bulk_preloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import GroupBarcodeVerification
+    from app.services import barcode_maintenance_worker as worker
+    from app.services import state_repository
+
+    groups = [
+        SimpleNamespace(
+            id=uuid4(),
+            legacy_id=f"enqueue-{index:02d}",
+            team_id="team-enqueue",
+            terminal=f"T-{index:02d}",
+            display_meter_no=f"METER-{index:02d}",
+            raw_data={
+                "construction_collector": f"COLLECTOR-{index:02d}",
+                "construction_module_asset_no": f"MODULE-{index:02d}",
+            },
+        )
+        for index in range(25)
+    ]
+    groups.sort(key=lambda item: item.id)
+    photos = [photo for group in groups[:20] for photo in postgres_eligible_photos(group)]
+    statements: list[str] = []
+    staged: list[GroupBarcodeVerification] = []
+
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalars(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            statements.append(sql)
+            if "FROM material_groups" in sql:
+                return Rows(groups[:20])
+            if "FROM photos" in sql:
+                return Rows(photos)
+            if "FROM group_barcode_verifications" in sql:
+                return Rows([])
+            pytest.fail(f"unexpected enqueue statement: {sql}")
+
+        def scalar(self, _statement):
+            pytest.fail("verification enqueue must not issue per-group scalar queries")
+
+        def add(self, value):
+            staged.append(value)
+
+        def commit(self):
+            return None
+
+    class Repository:
+        def _session(self):
+            return Session()
+
+    monkeypatch.setattr(state_repository, "PostgresStateRepository", Repository)
+
+    report = worker._enqueue_postgres_verifications(
+        [],
+        actor="daily-enqueue",
+        team_id="team-enqueue",
+        batch_size=20,
+    )
+
+    assert report["scanned"] == 20
+    assert report["enqueued"] == 20
+    assert report["has_more"] is True
+    assert len(staged) == 20
+    assert len(statements) == 3
+    assert "LIMIT 20" in statements[0]
+    assert "FOR UPDATE OF material_groups SKIP LOCKED" in statements[0]
+    assert "group_id IN" in statements[1]
+    assert "group_id IN" in statements[2]
+
+
 def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
     root = Path(__file__).resolve().parents[2]
     worker_unit = (root / "infra" / "module-manager-v2-photo-barcode-maintenance.service").read_text(encoding="utf-8")
     enqueue_unit = (root / "infra" / "module-manager-v2-photo-barcode-maintenance-enqueue.service").read_text(encoding="utf-8")
     timer = (root / "infra" / "module-manager-v2-photo-barcode-maintenance.timer").read_text(encoding="utf-8")
     runner = (root / "scripts" / "run_photo_barcode_maintenance_slice.sh").read_text(encoding="utf-8")
+    runbook = (root / "docs" / "sop" / "06-production-deploy-runbook.md").read_text(encoding="utf-8")
 
     assert "Type=simple" in worker_unit
     assert "BARCODE_MAINTENANCE_BATCH_SIZE=20" in worker_unit
@@ -2780,3 +2910,15 @@ def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
     assert "--enqueue" in enqueue_unit
     assert "--serve" in runner
     assert "recompute_photo_barcode_checks.py" not in runner
+    assert "alembic upgrade head" in runbook
+    assert "20260723_0011" in runbook
+    assert "module-manager-v2-photo-barcode-maintenance-enqueue.service" in runbook
+    assert "systemctl daemon-reload" in runbook
+    env_index = runbook.index('. "$APP/.env"')
+    migration_index = runbook.index("alembic upgrade head")
+    assert env_index < migration_index
+    health_index = runbook.index("production_health_check.py")
+    resume_index = runbook.index('set_maintenance_paused(False, "production-deploy")')
+    assert health_index < resume_index
+    assert "systemctl is-active module-manager-v2-photo-barcode-maintenance.service" in runbook
+    assert "systemctl is-active module-manager-v2-photo-barcode-maintenance.timer" in runbook

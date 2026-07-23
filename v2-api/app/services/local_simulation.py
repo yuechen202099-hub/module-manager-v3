@@ -4443,12 +4443,14 @@ def is_all_zero_construction_code(value: Any) -> bool:
 def is_placeholder_construction_group_identity(
     *,
     group_id: Any = "",
+    terminal: Any = "",
     meter_no: Any = "",
     meter_match_key: Any = "",
     address: Any = "",
 ) -> bool:
     return (
         is_placeholder_formal_identity_value(group_id)
+        or is_placeholder_formal_identity_value(terminal)
         or is_placeholder_formal_identity_value(meter_no)
         or is_placeholder_formal_identity_value(meter_match_key)
         or PLACEHOLDER_CONSTRUCTION_ADDRESS_MARKER in str(address or "")
@@ -4458,12 +4460,14 @@ def is_placeholder_construction_group_identity(
 def assert_not_placeholder_construction_group(
     *,
     group_id: Any = "",
+    terminal: Any = "",
     meter_no: Any = "",
     meter_match_key: Any = "",
     address: Any = "",
 ) -> None:
     if is_placeholder_construction_group_identity(
         group_id=group_id,
+        terminal=terminal,
         meter_no=meter_no,
         meter_match_key=meter_match_key,
         address=address,
@@ -6317,6 +6321,7 @@ def upload_construction_group_batch(
         raise KeyError(group_id)
     assert_not_placeholder_construction_group(
         group_id=group.get("id"),
+        terminal=group.get("terminal"),
         meter_no=group.get("meter_no") or group.get("barcode"),
         meter_match_key=group.get("meter_match_key"),
         address=group.get("address"),

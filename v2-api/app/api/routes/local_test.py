@@ -336,6 +336,7 @@ def validate_construction_upload_group_before_file_save(group_id: str) -> None:
     try:
         assert_not_placeholder_construction_group(
             group_id=group.get("id") or group_id,
+            terminal=group.get("terminal"),
             meter_no=group.get("meter_no"),
             meter_match_key=group.get("meter_match_key"),
             address=group.get("address"),

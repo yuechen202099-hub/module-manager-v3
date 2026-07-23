@@ -2858,6 +2858,47 @@ def test_postgres_duplicate_construction_identity_change_invalidates_once_and_ro
     assert vars(verification) == {"status": "passed", "evidence_fingerprint": "old", "evidence_version": 7}
 
 
+def test_postgres_construction_upload_rejects_zero_terminal_before_mutation() -> None:
+    group = SimpleNamespace(
+        legacy_id="g-zero-terminal",
+        id="group-uuid",
+        task_id="task-uuid",
+        display_meter_no="120000000001",
+        meter_match_key="0000000001",
+        installation_address="test address",
+    )
+    task = SimpleNamespace(terminal="00000000", construction_claimed_by="another-constructor")
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalar(self, _statement):
+            return task
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert group_id == "g-zero-terminal"
+            assert lock is True
+            return group
+
+    with pytest.raises(ValueError, match="00000000"):
+        TestPostgresRepository().upload_construction_group_batch(
+            "g-zero-terminal",
+            actor="constructor-a",
+            client_batch_id="zero-terminal-postgres",
+            collector="collector-a",
+            module_asset_no="module-a",
+            photos=[],
+        )
+
+
 def test_json_task_reads_mask_stale_priority_without_mutating_persisted_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

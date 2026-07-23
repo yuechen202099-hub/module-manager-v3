@@ -438,7 +438,12 @@ def _stage_transactional_audit(
     return event
 
 
-def _verification_group_payload(session: Session | None, group: Any) -> dict[str, Any]:
+def _verification_group_payload(
+    session: Session | None,
+    group: Any,
+    *,
+    prefetched_photos: list[Any] | None = None,
+) -> dict[str, Any]:
     if isinstance(group, Mapping):
         payload = dict(group)
         construction_collector = str(payload.get("construction_collector") or "").strip()
@@ -449,8 +454,8 @@ def _verification_group_payload(session: Session | None, group: Any) -> dict[str
             payload["module_asset_no"] = construction_module_asset_no
         return payload
     raw = dict(getattr(group, "raw_data", None) or {})
-    photos = []
-    if session is not None:
+    photos = list(prefetched_photos or [])
+    if prefetched_photos is None and session is not None:
         photos = list(
             session.scalars(
                 select(Photo).where(
@@ -8360,14 +8365,17 @@ class PostgresStateRepository(StateRepository):
             raise ValueError("Client batch id is required")
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
+            task = session.scalar(select(Task).where(Task.id == group.task_id).with_for_update())
+            if task is None:
+                raise ValueError("Construction task must be claimed by the current constructor before upload")
             local_simulation.assert_not_placeholder_construction_group(
                 group_id=group.legacy_id or str(group.id),
+                terminal=task.terminal,
                 meter_no=group.display_meter_no,
                 meter_match_key=group.meter_match_key or "",
                 address=group.installation_address,
             )
-            task = session.scalar(select(Task).where(Task.id == group.task_id).with_for_update())
-            if task is None or task.construction_claimed_by != actor:
+            if task.construction_claimed_by != actor:
                 raise ValueError("Construction task must be claimed by the current constructor before upload")
             if client_completed_at:
                 for photo in photos:
