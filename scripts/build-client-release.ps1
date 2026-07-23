@@ -33,6 +33,8 @@ $v320ReleaseInputs = @(
     "v2-web\src\components\export-center\ExportCatalogTab.vue",
     "v2-web\src\components\export-center\ExportJobsTable.vue",
     "v2-web\src\components\export-center\TerminalDeliveryTab.vue",
+    "v2-web\src\views\GlobalSearchView.vue",
+    "v2-web\src\views\ExportsView.vue",
     "v2-web\src\composables\useDataCenterQuery.ts",
     "v2-web\src\composables\useExportCenterQuery.ts",
     "v2-web\src\utils\dataCenterDrilldown.ts",
@@ -159,7 +161,6 @@ function Copy-ReleaseItem {
 Copy-ReleaseItem "README.md" "README.md"
 Copy-ReleaseItem "AGENTS.md" "AGENTS.md"
 Copy-ReleaseItem ".gitattributes" ".gitattributes"
-Copy-ReleaseItem ".env.example" ".env.example"
 Copy-ReleaseItem "docker-compose.yml" "docker-compose.yml"
 
 Copy-ReleaseItem "docs\CLIENT_ACCEPTANCE_REPORT.md" "docs\CLIENT_ACCEPTANCE_REPORT.md"
@@ -246,24 +247,54 @@ $forbiddenReleaseDirectoryNames = @(
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
-    "htmlcov"
+    "coverage",
+    "htmlcov",
+    "test-results",
+    "playwright-report",
+    ".nyc_output"
 )
-Get-ChildItem -LiteralPath $staging -Recurse -Directory -Force |
-    Where-Object { $_.Name -in $forbiddenReleaseDirectoryNames } |
-    Sort-Object { $_.FullName.Length } -Descending |
-    ForEach-Object {
-        if (Test-Path -LiteralPath $_.FullName) {
-            Remove-Item -Recurse -Force -LiteralPath $_.FullName
-        }
-    }
 
 $forbiddenReleaseFileNames = @(".coverage", "coverage.xml", "junit.xml")
-Get-ChildItem -LiteralPath $staging -Recurse -File -Force |
-    Where-Object {
-        $_.Name -in $forbiddenReleaseFileNames -or
-        $_.Extension -in @(".db", ".sqlite", ".sqlite3", ".log", ".pyc", ".pyo")
-    } |
-    Remove-Item -Force
+$forbiddenReleaseFileSuffixes = @(
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".sql",
+    ".dump",
+    ".sqlite",
+    ".sqlite3",
+    ".db",
+    ".log",
+    ".pyc",
+    ".pyo"
+)
+
+function Remove-ForbiddenReleaseItems {
+    Get-ChildItem -LiteralPath $staging -Recurse -Directory -Force |
+        Where-Object {
+            $_.Name.ToLowerInvariant() -in $forbiddenReleaseDirectoryNames
+        } |
+        Sort-Object { $_.FullName.Length } -Descending |
+        ForEach-Object {
+            if (Test-Path -LiteralPath $_.FullName) {
+                Remove-Item -Recurse -Force -LiteralPath $_.FullName
+            }
+        }
+
+    Get-ChildItem -LiteralPath $staging -Recurse -File -Force |
+        Where-Object {
+            $normalizedName = $_.Name.ToLowerInvariant()
+            $normalizedExtension = $_.Extension.ToLowerInvariant()
+            $normalizedName -eq ".env" -or
+            $normalizedName.StartsWith(".env.") -or
+            $normalizedName -in $forbiddenReleaseFileNames -or
+            $normalizedExtension -in $forbiddenReleaseFileSuffixes
+        } |
+        Remove-Item -Force
+}
+
+Remove-ForbiddenReleaseItems
 
 $stagedStaticDir = Join-Path $staging "v2-api\app\static"
 if (Test-Path $stagedStaticDir) {
@@ -306,13 +337,7 @@ foreach ($versionArtifact in $versionArtifacts) {
     }
 }
 
-Get-ChildItem -LiteralPath $staging -Recurse -Directory -Force |
-    Where-Object { $_.Name -in @("__pycache__", ".pytest_cache") } |
-    Remove-Item -Recurse -Force
-
-Get-ChildItem -LiteralPath $staging -Recurse -File -Force |
-    Where-Object { $_.Extension -in @(".pyc", ".pyo") } |
-    Remove-Item -Force
+Remove-ForbiddenReleaseItems
 
 # Normalize server shell scripts to LF so Linux bash can execute release helpers.
 Get-ChildItem -LiteralPath $staging -Recurse -File -Filter "*.sh" -Force |

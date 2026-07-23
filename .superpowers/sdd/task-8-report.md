@@ -92,3 +92,39 @@ python scripts\test_verify_release_sop.py
 - Task 9 仍需执行完整后端 pytest、独立全分支复审、正式打包验包、SHA256、生产备份、迁移、切换和线上验收。
 - Vite 构建保留既有 VueUse `/* #__PURE__ */` 注释 warning 与大于 500 kB chunk warning；构建成功，未发现本任务新增阻断。
 - 聚焦 API 测试保留既有 Starlette/httpx deprecation warning。
+
+---
+
+## Independent Review Remediation
+
+### RED
+
+- 先扩展 `scripts/test_verify_client_release.py`，加入 env 变体、密钥证书、数据库/dump 和 coverage/test 目录的大小写回归样例，并要求两个 V3.2.0 主页面源码。
+- `python -m pytest scripts\test_verify_client_release.py -q`：exit 1，`18 failed, 210 passed, 1 warning`；失败准确覆盖两个主页面缺失及 17 个原先会被验包器接受的禁止路径，混合大小写 `__PyCaChE__/*.pyc` 已由旧后缀规则拒绝。
+- 同步先扩展 `scripts\verify_v3_2_0_release.py` 后运行；exit 1，准确报告主页面、`V3.x.y` 正式生产命名空间、V3.2.0 签收段，以及打包/验包对称排除规则缺失。
+
+### 修复
+
+- `scripts/build-client-release.ps1` 与 `scripts/verify-client-release.py` 统一使用大小写归一化规则排除 `.env`/`.env.*`、`pem/key/p12/pfx`、`sql/dump/sqlite/sqlite3/db`，以及任意层级的 coverage/test 产物目录；源码复制后和 Vue 构建后均执行清理。
+- `.env.example` 不再进入正式包的复制清单或必需文件清单。
+- 两个门禁均强制包含 `v2-web/src/views/GlobalSearchView.vue` 和 `v2-web/src/views/ExportsView.vue`。
+- `AGENTS.md` 正式生产命名空间改为 `V3.x.y`，保留 `MP-V1.0.xx` 与 `PM-V1.0.xx` 独立规则。
+- `docs/CLIENT_SIGNOFF_CHECKLIST.md` 候选验证和生产记录改为 V3.2.0，Task 9 证据继续使用待填占位。
+- `scripts/verify_v3_2_0_release.py` 锁定上述全部复审要求。
+
+### GREEN
+
+- `python -m pytest scripts\test_verify_client_release.py -q`：`228 passed, 1 warning`；warning 为重复 ZIP entry 安全回归的预期构造。
+- 五个 V3.2.0 功能专项门禁：全部通过。
+- `python scripts\verify_v3_2_0_release.py`：通过。
+- `python scripts\test_verify_release_sop.py`：`283 passed`。
+- `python scripts\verify-client-release.py --help`：exit 0。
+- PowerShell parser：`scripts/build-client-release.ps1` 语法通过。
+- `npm run type-check`：通过。
+- `npm run build`：通过，`1679 modules transformed`；正式静态产物保持 V3.2.0 且无内容差异。
+- `git diff --check`：通过。
+
+### Remediation Concerns
+
+- Task 9 仍需在干净提交上执行正式服务器打包/验包并填写真实包路径、SHA256、备份/release 目录和线上健康证据。
+- Vite 仅保留既有 VueUse PURE 注释与大 chunk warning，无本轮新增阻断。

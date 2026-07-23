@@ -19,7 +19,6 @@ REQUIRED_FILES = {
     "README.md",
     "AGENTS.md",
     ".gitattributes",
-    ".env.example",
     "RELEASE_MANIFEST.md",
     "docs/CLIENT_ACCEPTANCE_REPORT.md",
     "docs/CLIENT_FINAL_AUDIT.md",
@@ -177,6 +176,8 @@ REQUIRED_FILES = {
     "v2-web/src/components/export-center/ExportCatalogTab.vue",
     "v2-web/src/components/export-center/ExportJobsTable.vue",
     "v2-web/src/components/export-center/TerminalDeliveryTab.vue",
+    "v2-web/src/views/GlobalSearchView.vue",
+    "v2-web/src/views/ExportsView.vue",
     "v2-web/src/composables/useDataCenterQuery.ts",
     "v2-web/src/composables/useExportCenterQuery.ts",
     "v2-web/src/utils/dataCenterDrilldown.ts",
@@ -237,11 +238,21 @@ FORBIDDEN_PARTS = {
     "uploads",
     "node_modules",
     "dist",
+    "coverage",
     "htmlcov",
+    "test-results",
+    "playwright-report",
+    ".nyc_output",
     "build",
 }
 
 FORBIDDEN_SUFFIXES = {
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".sql",
+    ".dump",
     ".db",
     ".log",
     ".pyc",
@@ -568,17 +579,23 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
 
     forbidden_hits: list[str] = []
     for name in names:
-        if PurePosixPath(name).name in FORBIDDEN_NAMES:
+        normalized_name = name.casefold()
+        normalized_path = PurePosixPath(normalized_name)
+        leaf_name = normalized_path.name
+        if leaf_name == ".env" or leaf_name.startswith(".env."):
             forbidden_hits.append(name)
             continue
-        if any(name.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
+        if leaf_name in FORBIDDEN_NAMES:
             forbidden_hits.append(name)
             continue
-        parts = set(Path(name).parts)
+        if any(normalized_name.startswith(prefix) for prefix in FORBIDDEN_PREFIXES):
+            forbidden_hits.append(name)
+            continue
+        parts = set(normalized_path.parts)
         if parts & FORBIDDEN_PARTS:
             forbidden_hits.append(name)
             continue
-        if Path(name).suffix in FORBIDDEN_SUFFIXES:
+        if normalized_path.suffix in FORBIDDEN_SUFFIXES:
             forbidden_hits.append(name)
     if forbidden_hits:
         fail("Forbidden local/cache files found in release: " + ", ".join(sorted(forbidden_hits)[:20]))

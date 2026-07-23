@@ -41,7 +41,31 @@ PACKAGE_FILES = (
     "v2-web/src/components/export-center/ExportCatalogTab.vue",
     "v2-web/src/components/export-center/ExportJobsTable.vue",
     "v2-web/src/components/export-center/TerminalDeliveryTab.vue",
+    "v2-web/src/views/GlobalSearchView.vue",
+    "v2-web/src/views/ExportsView.vue",
     "ops/releases/V3.2.0.md",
+)
+
+FORBIDDEN_RELEASE_DIRECTORIES = (
+    "coverage",
+    "htmlcov",
+    "test-results",
+    "playwright-report",
+    ".nyc_output",
+    ".pytest_cache",
+    "__pycache__",
+)
+
+FORBIDDEN_RELEASE_SUFFIXES = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".sql",
+    ".dump",
+    ".sqlite",
+    ".sqlite3",
+    ".db",
 )
 
 
@@ -194,8 +218,25 @@ def verify_release_record(failures: list[str]) -> None:
         "导出中心",
         "MP-V1.0.xx",
         "PM-V1.0.xx",
+        "正式生产 `V3.x.y`",
     ):
         require_contains(agents, marker, "AGENTS.md", failures)
+    if "正式生产 `V3.0.xx`" in agents:
+        failures.append("AGENTS.md: obsolete formal production namespace V3.0.xx remains")
+
+    signoff_path = "docs/CLIENT_SIGNOFF_CHECKLIST.md"
+    signoff = read_text(signoff_path, failures)
+    for marker in (
+        "V3.2.0 候选生产验证",
+        "ops/releases/V3.2.0.md",
+    ):
+        require_contains(signoff, marker, signoff_path, failures)
+    for stale_marker in (
+        "V3.1.1 生产验证",
+        "ops/releases/V3.1.1.md",
+    ):
+        if stale_marker in signoff:
+            failures.append(f"{signoff_path}: stale candidate signoff marker {stale_marker!r}")
 
 
 def verify_feature_files_and_routes(failures: list[str]) -> None:
@@ -288,6 +329,53 @@ def verify_package_gates(failures: list[str]) -> None:
             marker,
             "scripts/verify_release_sop.py",
             failures,
+        )
+
+    for directory_name in FORBIDDEN_RELEASE_DIRECTORIES:
+        for relative_path, content in (
+            ("scripts/build-client-release.ps1", build_script),
+            ("scripts/verify-client-release.py", package_verifier),
+        ):
+            require_contains(content, directory_name, relative_path, failures)
+    for suffix in FORBIDDEN_RELEASE_SUFFIXES:
+        for relative_path, content in (
+            ("scripts/build-client-release.ps1", build_script),
+            ("scripts/verify-client-release.py", package_verifier),
+        ):
+            require_contains(content, suffix, relative_path, failures)
+    for marker in (
+        "$_.Name.ToLowerInvariant() -in $forbiddenReleaseDirectoryNames",
+        "$normalizedExtension = $_.Extension.ToLowerInvariant()",
+        '$normalizedName -eq ".env"',
+        '$normalizedName.StartsWith(".env.")',
+    ):
+        require_contains(
+            build_script,
+            marker,
+            "scripts/build-client-release.ps1",
+            failures,
+        )
+    for marker in (
+        "normalized_name = name.casefold()",
+        'leaf_name == ".env"',
+        'leaf_name.startswith(".env.")',
+        "parts = set(normalized_path.parts)",
+        "normalized_path.suffix in FORBIDDEN_SUFFIXES",
+    ):
+        require_contains(
+            package_verifier,
+            marker,
+            "scripts/verify-client-release.py",
+            failures,
+        )
+    if build_script.count("Remove-ForbiddenReleaseItems") < 3:
+        failures.append(
+            "scripts/build-client-release.ps1: forbidden cleanup must run "
+            "after source copy and after Vue build"
+        )
+    if 'Copy-ReleaseItem ".env.example"' in build_script:
+        failures.append(
+            "scripts/build-client-release.ps1: .env.example must not be copied"
         )
 
 

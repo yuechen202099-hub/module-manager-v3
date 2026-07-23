@@ -44,14 +44,14 @@ build/server-release/module-manager-v2-server-3.2.0.zip
 .\scripts\run-client-acceptance-gate.ps1
 ```
 
-V3.1.1 生产验证：
+V3.2.0 候选生产验证：
 
-- 本轮完整测试：`1656 passed, 13 skipped`
+- 本轮完整测试：Task 8 发布门禁通过，Task 9 上线后补填最终统计
 - 静态页面校验：通过
-- 部署样例校验：通过
-- `SOURCE_COMMIT=f0181977ed734844382c9837b53b1b0e87618ae0`
-- 发布包 SHA256 `02F642ECDB4CE0BBCA7FCE3EA28AF5C190E4D9C3863D9A7E61F7CF59B9BF7DE8`
-- 生产记录：`ops/releases/V3.1.1.md`
+- 部署样例校验：Task 9 上线后补填
+- `SOURCE_COMMIT=PENDING_TASK_9`
+- 发布包 SHA256 `PENDING_TASK_9`
+- 生产记录：`ops/releases/V3.2.0.md`
 
 回滚基线 V3.1.0 历史证据：
 

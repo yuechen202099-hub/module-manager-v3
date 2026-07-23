@@ -387,6 +387,8 @@ def test_v320_release_inputs_are_packaged_and_required() -> None:
         "v2-web/src/components/export-center/ExportCatalogTab.vue",
         "v2-web/src/components/export-center/ExportJobsTable.vue",
         "v2-web/src/components/export-center/TerminalDeliveryTab.vue",
+        "v2-web/src/views/GlobalSearchView.vue",
+        "v2-web/src/views/ExportsView.vue",
         "ops/releases/V3.2.0.md",
     }
 
@@ -1212,4 +1214,43 @@ def test_archive_rejects_case_colliding_member(tmp_path: Path) -> None:
         archive.writestr("V2-API/app/static/vue/assets/app.js", "collision\n")
 
     with pytest.raises(AssertionError, match="case-insensitive file names"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        ".ENV",
+        "config/.Env.production",
+        "certificates/client.PEM",
+        "certificates/private.Key",
+        "certificates/signing.P12",
+        "certificates/signing.PfX",
+        "database/production.SQL",
+        "database/production.DuMp",
+        "database/local.SQLite",
+        "database/local.SQLITE3",
+        "database/local.DB",
+        "artifacts/Coverage/index.html",
+        "artifacts/HTMLCOV/index.html",
+        "artifacts/Test-Results/results.json",
+        "artifacts/Playwright-Report/index.html",
+        "artifacts/.NYC_OUTPUT/coverage.json",
+        "artifacts/.PyTeSt_CaChE/state",
+        "artifacts/__PyCaChE__/module.pyc",
+    ],
+)
+def test_archive_rejects_sensitive_and_test_artifacts_case_insensitively(
+    tmp_path: Path,
+    member_name: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "forbidden-release-artifact.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={member_name: "must not ship\n"},
+    )
+
+    with pytest.raises(AssertionError, match="Forbidden local/cache files"):
         verifier.verify_package(archive_path)
