@@ -30,7 +30,16 @@ const router = createRouter({
       redirect: (to) => {
         const page = String(to.query.page || 'project-board')
         if (page === 'construction-cache') return { path: '/construction', query: {} }
-        if (page === 'unmatched') return { path: '/global-search', query: { review: '1' } }
+        if (page === 'unmatched') {
+          return {
+            path: '/global-search',
+            query: {
+              data_type: 'unmatched',
+              page: '1',
+              page_size: '20',
+            },
+          }
+        }
         return `/${page}`
       },
     },
@@ -81,7 +90,8 @@ const router = createRouter({
         },
         {
           path: 'review/:groupId',
-          redirect: (to) => `/global-search?group_id=${encodeURIComponent(String(to.params.groupId || ''))}&review=1`,
+          redirect: (to) =>
+            `/global-search?page=1&page_size=20&group_id=${encodeURIComponent(String(to.params.groupId || ''))}&review=1`,
         },
       ],
     },
