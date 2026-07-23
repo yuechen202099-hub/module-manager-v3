@@ -84,6 +84,7 @@ REQUIRED_FILES = {
     "v2-api/alembic/versions/0009_delivery_cache_fix3.py",
     "v2-api/alembic/versions/0010_auto_archive_queue_state.py",
     "v2-api/alembic/versions/0011_delivery_package_jobs.py",
+    "v2-api/alembic/versions/0012_delivery_package_group_ids_gin.py",
     "scripts/production_backup.sh",
     "scripts/cleanup_old_releases.sh",
     "scripts/production_health_check.py",

@@ -368,6 +368,7 @@ def test_v31_release_requires_barcode_enqueue_unit_and_all_queue_migrations() ->
         "v2-api/alembic/versions/0009_delivery_cache_fix3.py",
         "v2-api/alembic/versions/0010_auto_archive_queue_state.py",
         "v2-api/alembic/versions/0011_delivery_package_jobs.py",
+        "v2-api/alembic/versions/0012_delivery_package_group_ids_gin.py",
     }
 
     assert required <= verifier.REQUIRED_FILES

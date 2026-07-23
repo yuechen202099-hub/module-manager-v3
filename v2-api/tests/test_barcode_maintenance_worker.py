@@ -79,6 +79,25 @@ def eligible_group(group_id: str, *, verification_status: str = "pending") -> di
     return group
 
 
+def test_worker_batch_processes_durable_storage_cleanup_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    assert hasattr(worker, "process_storage_cleanup_jobs")
+    monkeypatch.setattr(worker, "_maintenance_can_claim", lambda: True)
+    monkeypatch.setattr(worker, "_claim_next_work", lambda _worker_id: None)
+    monkeypatch.setattr(worker, "run_delivery_cache_cleanup_if_due", lambda: {"status": "skipped"})
+    monkeypatch.setattr(worker, "reconcile_delivery_cache_jobs", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        worker,
+        "process_storage_cleanup_jobs",
+        lambda **_kwargs: {"processed": 1, "completed": 1, "failed": 0},
+    )
+
+    report = worker.run_worker_batch(batch_size=20, batch_pause_seconds=0)
+
+    assert report["storage_cleanup"] == {"processed": 1, "completed": 1, "failed": 0}
+
+
 def postgres_eligible_photos(group) -> list[SimpleNamespace]:
     return [
         SimpleNamespace(
@@ -2890,11 +2909,21 @@ def test_postgres_verification_enqueue_batch_is_bounded_and_bulk_preloads(
 
 def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
     root = Path(__file__).resolve().parents[2]
+    api_unit = (root / "infra" / "module-manager-v2.service").read_text(encoding="utf-8")
     worker_unit = (root / "infra" / "module-manager-v2-photo-barcode-maintenance.service").read_text(encoding="utf-8")
     enqueue_unit = (root / "infra" / "module-manager-v2-photo-barcode-maintenance-enqueue.service").read_text(encoding="utf-8")
     timer = (root / "infra" / "module-manager-v2-photo-barcode-maintenance.timer").read_text(encoding="utf-8")
     runner = (root / "scripts" / "run_photo_barcode_maintenance_slice.sh").read_text(encoding="utf-8")
     runbook = (root / "docs" / "sop" / "06-production-deploy-runbook.md").read_text(encoding="utf-8")
+    rollback = (root / "docs" / "sop" / "07-rollback-and-incident-review.md").read_text(encoding="utf-8")
+
+    for unit in (api_unit, worker_unit, enqueue_unit):
+        assert "User=modulemgr" in unit
+        assert "Group=modulemgr" in unit
+        assert "UMask=0077" in unit
+        assert "EnvironmentFile=/opt/module-manager-v2/.env" in unit
+    assert "WorkingDirectory=/opt/module-manager-v2/current/v2-api" in api_unit
+    assert "ExecStart=/opt/module-manager-v2/venv/bin/uvicorn" in api_unit
 
     assert "Type=simple" in worker_unit
     assert "BARCODE_MAINTENANCE_BATCH_SIZE=20" in worker_unit
@@ -2911,8 +2940,12 @@ def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
     assert "--serve" in runner
     assert "recompute_photo_barcode_checks.py" not in runner
     assert "alembic upgrade head" in runbook
-    assert "20260723_0011" in runbook
+    assert "20260723_0012" in runbook
     assert "module-manager-v2-photo-barcode-maintenance-enqueue.service" in runbook
+    assert "id -u modulemgr" in runbook
+    assert "useradd --system" in runbook
+    assert "chown -R modulemgr:modulemgr" in runbook
+    assert 'install -m 0644 "$REL/infra/module-manager-v2.service"' in runbook
     assert "systemctl daemon-reload" in runbook
     env_index = runbook.index('. "$APP/.env"')
     migration_index = runbook.index("alembic upgrade head")
@@ -2922,3 +2955,16 @@ def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
     assert health_index < resume_index
     assert "systemctl is-active module-manager-v2-photo-barcode-maintenance.service" in runbook
     assert "systemctl is-active module-manager-v2-photo-barcode-maintenance.timer" in runbook
+    stop_worker_index = runbook.index("systemctl stop module-manager-v2-photo-barcode-maintenance.service")
+    stop_timer_index = runbook.index("systemctl stop module-manager-v2-photo-barcode-maintenance.timer")
+    switch_index = runbook.index('ln -sfn "$REL" "$APP/current"')
+    assert stop_worker_index < switch_index
+    assert stop_timer_index < switch_index
+
+    rollback_stop_worker = rollback.index("systemctl stop module-manager-v2-photo-barcode-maintenance.service")
+    rollback_stop_timer = rollback.index("systemctl stop module-manager-v2-photo-barcode-maintenance.timer")
+    rollback_switch = rollback.index('ln -sfn "$PREVIOUS" "$APP/current"')
+    rollback_health = rollback.index("curl -fsS http://127.0.0.1/health")
+    assert rollback_stop_worker < rollback_switch
+    assert rollback_stop_timer < rollback_switch
+    assert rollback_switch < rollback_health

@@ -4,13 +4,16 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/module-manager-v2/v2-api
+WorkingDirectory=/opt/module-manager-v2/current/v2-api
 EnvironmentFile=/opt/module-manager-v2/.env
-ExecStart=/opt/module-manager-v2/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+Environment=PYTHONUNBUFFERED=1
+Environment=STORAGE_CLEANUP_QUEUE_PATH=/opt/module-manager-v2/shared/storage-cleanup-jobs
+ExecStart=/opt/module-manager-v2/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 User=modulemgr
 Group=modulemgr
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

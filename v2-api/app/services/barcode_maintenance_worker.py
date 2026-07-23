@@ -56,6 +56,7 @@ from app.services.final_delivery_export import (
     acquire_delivery_cache_file_lock,
     cleanup_delivery_cache,
 )
+from app.services.photo_storage import process_storage_cleanup_jobs
 
 
 MAX_VERIFICATION_ATTEMPTS = 3
@@ -1829,10 +1830,15 @@ def run_worker_batch(
     processed = 0
     failed = 0
     cleanup_report: dict[str, Any] | None = None
+    storage_cleanup_report: dict[str, Any] | None = None
     try:
         if not can_continue():
             return {"processed": 0, "failed": 0, "status": "complete"}
         if claim_next is None:
+            try:
+                storage_cleanup_report = process_storage_cleanup_jobs(limit=limit)
+            except Exception as exc:
+                storage_cleanup_report = {"processed": 0, "completed": 0, "failed": 1, "error": str(exc)[:500]}
             try:
                 cleanup_report = run_delivery_cache_cleanup_if_due()
             except Exception as exc:
@@ -1855,6 +1861,8 @@ def run_worker_batch(
         report = {"processed": processed, "failed": failed, "status": "complete"}
         if cleanup_report is not None:
             report["cleanup"] = cleanup_report
+        if storage_cleanup_report is not None:
+            report["storage_cleanup"] = storage_cleanup_report
         return report
     finally:
         _batch_lock.release()

@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from sqlalchemy import and_, exists, literal, or_, select
+from sqlalchemy.dialects.postgresql import array
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -329,7 +330,7 @@ def sync_postgres_delivery_cache_job_for_group(
     return job
 
 
-def invalidate_postgres_delivery_cache_for_review(
+def invalidate_postgres_delivery_cache_for_group_change(
     session: Session,
     group: MaterialGroup,
     *,
@@ -381,6 +382,12 @@ def invalidate_postgres_delivery_cache_for_review(
             "delivery_cache_retryable": False,
             "delivery_cache_invalidated_at": invalidated_at,
             "delivery_cache_invalidated_by": actor,
+            "delivery_package_invalidation_epoch": int(
+                raw.get("delivery_package_invalidation_epoch") or 0
+            )
+            + 1,
+            "delivery_package_invalidated_at": invalidated_at,
+            "delivery_package_invalidated_by": actor,
         }
     )
     group.raw_data = raw
@@ -412,6 +419,118 @@ def invalidate_postgres_delivery_cache_for_review(
         package_job.last_error = reason
         package_job.completed_at = None
     session.flush()
+
+
+def invalidate_postgres_delivery_cache_for_group_changes(
+    session: Session,
+    groups: list[MaterialGroup],
+    *,
+    actor: str,
+    reason: str,
+) -> None:
+    unique_groups = list({group.id: group for group in groups}.values())
+    if not unique_groups:
+        return
+    team_ids = {str(group.team_id) for group in unique_groups}
+    if len(team_ids) != 1:
+        raise ValueError("Delivery cache batch invalidation requires one team")
+    team_id = unique_groups[0].team_id
+    group_ids = [group.id for group in unique_groups]
+    package_group_ids = list(
+        dict.fromkeys(
+            value
+            for group in unique_groups
+            for value in (str(group.id), str(getattr(group, "legacy_id", "") or "").strip())
+            if value
+        )
+    )
+    photos = list(
+        session.scalars(
+            select(Photo)
+            .where(
+                Photo.team_id == team_id,
+                Photo.group_id.in_(group_ids),
+                Photo.is_active.is_(True),
+            )
+            .with_for_update()
+        ).all()
+    )
+    jobs = list(
+        session.scalars(
+            select(DeliveryCacheJob)
+            .where(
+                DeliveryCacheJob.team_id == team_id,
+                DeliveryCacheJob.group_id.in_(group_ids),
+            )
+            .with_for_update()
+        ).all()
+    )
+    package_jobs = list(
+        session.scalars(
+            select(DeliveryPackageJob)
+            .where(
+                DeliveryPackageJob.team_id == team_id,
+                DeliveryPackageJob.group_ids.op("?|")(array(package_group_ids)),
+                DeliveryPackageJob.status.in_(("pending", "processing", "ready", "failed")),
+            )
+            .with_for_update()
+        ).all()
+    )
+    invalidated_at = _now_iso()
+    photos_by_group: dict[Any, list[Photo]] = {}
+    for photo in photos:
+        photos_by_group.setdefault(photo.group_id, []).append(photo)
+    jobs_by_group = {job.group_id: job for job in jobs}
+    for group in unique_groups:
+        raw = dict(group.raw_data or {})
+        raw.update(
+            {
+                "delivery_cache_status": "stale",
+                "delivery_cache_error": reason,
+                "delivery_cache_retryable": False,
+                "delivery_cache_invalidated_at": invalidated_at,
+                "delivery_cache_invalidated_by": actor,
+                "delivery_package_invalidation_epoch": int(
+                    raw.get("delivery_package_invalidation_epoch") or 0
+                )
+                + 1,
+                "delivery_package_invalidated_at": invalidated_at,
+                "delivery_package_invalidated_by": actor,
+            }
+        )
+        group.raw_data = raw
+        for photo in photos_by_group.get(group.id, []):
+            photo_raw = dict(photo.raw_data or {})
+            photo_raw.update(
+                {
+                    "delivery_cache_status": "stale",
+                    "delivery_cache_error": reason,
+                    "delivery_cache_invalidated_at": invalidated_at,
+                }
+            )
+            photo.raw_data = photo_raw
+        job = jobs_by_group.get(group.id)
+        if job is not None:
+            job.status = "not_eligible"
+            job.evidence_version = int(getattr(job, "evidence_version", 0) or 0) + 1
+            job.lease_owner = None
+            job.lease_token = None
+            job.lease_expires_at = None
+            job.requested_by = actor
+            job.request_reason = reason
+            job.last_error = reason
+            job.completed_at = None
+    for package_job in package_jobs:
+        package_job.status = "stale"
+        package_job.lease_owner = None
+        package_job.lease_token = None
+        package_job.lease_expires_at = None
+        package_job.last_error = reason
+        package_job.completed_at = None
+    session.flush()
+
+
+invalidate_postgres_delivery_cache_for_review = invalidate_postgres_delivery_cache_for_group_change
 
 
 def build_postgres_delivery_claim_statement(*, team_id: str, now: datetime):

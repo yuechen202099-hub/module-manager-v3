@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
+import json
 import mimetypes
+import os
 import socket
+import urllib.request
 from copy import deepcopy
+from datetime import UTC, datetime
+from functools import partial
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -16,6 +22,7 @@ from app.core.config import settings
 
 ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 MAX_REASONABLE_IMAGE_BYTES = 80 * 1024 * 1024
+MAX_STORAGE_CLEANUP_ATTEMPTS = 5
 
 
 def static_upload_root() -> Path:
@@ -94,9 +101,15 @@ def validate_remote_image_url(
     allowed_hosts: Iterable[str] | None = None,
     app_env: str | None = None,
     resolver: Callable[[str], list[str]] | None = None,
-) -> None:
+) -> tuple[str, ...]:
     parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         raise ValueError("Invalid image URL")
     hostname = parsed.hostname.lower().rstrip(".")
     if hostname == "localhost" or is_blocked_remote_image_address(hostname):
@@ -109,8 +122,126 @@ def validate_remote_image_url(
         raise ValueError("Photo proxy host is not allowed")
     resolve = resolver or resolve_remote_image_host_addresses
     resolved_addresses = [hostname] if _is_ip_literal(hostname) else resolve(hostname)
-    if any(is_blocked_remote_image_address(address) for address in resolved_addresses):
+    validated_addresses: list[str] = []
+    for raw_address in resolved_addresses:
+        try:
+            address = ipaddress.ip_address(str(raw_address)).compressed
+        except ValueError as exc:
+            raise ValueError("Photo proxy host is not allowed") from exc
+        if is_blocked_remote_image_address(address):
+            raise ValueError("Photo proxy host is not allowed")
+        if address not in validated_addresses:
+            validated_addresses.append(address)
+    if not validated_addresses:
         raise ValueError("Photo proxy host is not allowed")
+    return tuple(validated_addresses)
+
+
+class _PinnedConnectionMixin:
+    _pinned_addresses: tuple[str, ...]
+
+    def _connect_to_pinned_address(self):  # noqa: ANN202
+        last_error: OSError | None = None
+        for address in self._pinned_addresses:
+            try:
+                sock = self._create_connection(
+                    (address, self.port),
+                    self.timeout,
+                    self.source_address,
+                )
+                peer_address = str(sock.getpeername()[0])
+                if (
+                    is_blocked_remote_image_address(peer_address)
+                    or ipaddress.ip_address(peer_address) != ipaddress.ip_address(address)
+                ):
+                    sock.close()
+                    raise OSError("Remote image peer address changed")
+                return sock
+            except OSError as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise OSError("Remote image host has no validated address")
+
+
+class _PinnedHTTPConnection(_PinnedConnectionMixin, http.client.HTTPConnection):
+    def __init__(self, host: str, *, pinned_addresses: tuple[str, ...], **kwargs: Any) -> None:
+        self._pinned_addresses = pinned_addresses
+        super().__init__(host, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = self._connect_to_pinned_address()
+        if self._tunnel_host:
+            self._tunnel()
+
+
+class _PinnedHTTPSConnection(_PinnedConnectionMixin, http.client.HTTPSConnection):
+    def __init__(self, host: str, *, pinned_addresses: tuple[str, ...], **kwargs: Any) -> None:
+        self._pinned_addresses = pinned_addresses
+        super().__init__(host, **kwargs)
+
+    def connect(self) -> None:
+        self.sock = self._connect_to_pinned_address()
+        server_hostname = self.host
+        if self._tunnel_host:
+            self._tunnel()
+            server_hostname = self._tunnel_host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=server_hostname)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, pinned_addresses: tuple[str, ...]) -> None:
+        super().__init__()
+        self._pinned_addresses = pinned_addresses
+
+    def http_open(self, request):  # noqa: ANN001, ANN201
+        connection = partial(_PinnedHTTPConnection, pinned_addresses=self._pinned_addresses)
+        return self.do_open(connection, request)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, pinned_addresses: tuple[str, ...]) -> None:
+        super().__init__()
+        self._pinned_addresses = pinned_addresses
+
+    def https_open(self, request):  # noqa: ANN001, ANN201
+        connection = partial(_PinnedHTTPSConnection, pinned_addresses=self._pinned_addresses)
+        return self.do_open(
+            connection,
+            request,
+            context=self._context,
+            check_hostname=self._check_hostname,
+        )
+
+
+class _NoRemoteImageRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def open_validated_remote_image_url(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: int | float = 30,
+    allowed_hosts: Iterable[str] | None = None,
+    app_env: str | None = None,
+    resolver: Callable[[str], list[str]] | None = None,
+):  # noqa: ANN201
+    pinned_addresses = validate_remote_image_url(
+        url,
+        allowed_hosts=allowed_hosts,
+        app_env=app_env,
+        resolver=resolver,
+    )
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRemoteImageRedirectHandler(),
+        _PinnedHTTPHandler(pinned_addresses),
+        _PinnedHTTPSHandler(pinned_addresses),
+    )
+    request = urllib.request.Request(url, headers=headers or {})
+    return opener.open(request, timeout=timeout)
 
 
 def validate_image_content(content: bytes, content_type: str = "", source: str = "image") -> None:
@@ -213,6 +344,7 @@ def save_image_bytes(
     team_id: str = "",
     group_id: str = "",
     key_hint: str = "",
+    cleanup_safe: bool = False,
 ) -> dict[str, Any]:
     if not content:
         raise ValueError("Uploaded image is empty")
@@ -225,7 +357,20 @@ def save_image_bytes(
     backend = active_storage_backend()
 
     if backend == "oss":
-        key = oss_object_key(scope, filename, sha256, team_id=team_id, group_id=group_id, key_hint=key_hint)
+        if cleanup_safe:
+            prefix = settings.oss_prefix.strip().strip("/") or "module-manager-v2"
+            unique_name = key_hint or uuid4().hex
+            key = "/".join(
+                [
+                    prefix,
+                    sanitize_part(team_id, "default-team"),
+                    "photos",
+                    scope,
+                    f"{sanitize_part(unique_name)}-{sha256[:16]}{suffix}",
+                ]
+            )
+        else:
+            key = oss_object_key(scope, filename, sha256, team_id=team_id, group_id=group_id, key_hint=key_hint)
         bucket = require_oss_client()
         headers = {"Content-Type": content_type}
         bucket.put_object(key, content, headers=headers)
@@ -238,6 +383,7 @@ def save_image_bytes(
             "storage_bucket": oss_bucket_name(),
             "storage_source": f"{scope}-oss-upload",
             "content_type": content_type,
+            "created_new": bool(cleanup_safe),
         }
 
     filename_part = key_hint or f"{uuid4().hex}-{sha256[:16]}"
@@ -245,7 +391,8 @@ def save_image_bytes(
     target_dir = static_upload_root() / scope
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / target_name
-    if not target.exists():
+    created_new = not target.exists()
+    if created_new:
         target.write_bytes(content)
     storage_key = f"{scope}/{target.name}"
     return {
@@ -256,6 +403,161 @@ def save_image_bytes(
         "storage_bucket": "",
         "storage_source": f"{scope}-local-upload",
         "content_type": content_type,
+        "created_new": created_new,
+    }
+
+
+def delete_saved_image(stored: dict[str, Any]) -> bool:
+    if not bool(stored.get("created_new")):
+        return False
+    storage_type = str(stored.get("storage_type") or "").strip().lower()
+    storage_key = str(stored.get("storage_key") or "").strip().lstrip("/")
+    if not storage_key:
+        return False
+    if storage_type == "oss":
+        bucket_name = str(stored.get("storage_bucket") or "").strip()
+        if bucket_name and bucket_name != oss_bucket_name():
+            return False
+        require_oss_client().delete_object(storage_key)
+        return True
+    if storage_type == "local_upload":
+        root = static_upload_root().resolve()
+        target = (root / storage_key).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            return False
+        target.unlink(missing_ok=True)
+        return True
+    return False
+
+
+def storage_cleanup_queue_root() -> Path:
+    configured = str(getattr(settings, "storage_cleanup_queue_path", "") or "").strip()
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parents[2] / "data" / "storage_cleanup_jobs"
+
+
+def _storage_cleanup_job_id(stored: dict[str, Any]) -> str:
+    identity = "|".join(
+        (
+            str(stored.get("storage_type") or "").strip().lower(),
+            str(stored.get("storage_bucket") or "").strip(),
+            str(stored.get("storage_key") or "").strip().lstrip("/"),
+        )
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _write_storage_cleanup_job(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.stem}.{os.getpid()}.{uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def enqueue_storage_cleanup_retry(
+    stored: dict[str, Any],
+    *,
+    reason: str,
+    error: str,
+) -> dict[str, Any] | None:
+    storage_type = str(stored.get("storage_type") or "").strip().lower()
+    storage_key = str(stored.get("storage_key") or "").strip().lstrip("/")
+    if not bool(stored.get("created_new")) or storage_type not in {"oss", "local_upload"} or not storage_key:
+        return None
+    job_id = _storage_cleanup_job_id(stored)
+    path = storage_cleanup_queue_root() / f"{job_id}.json"
+    existing: dict[str, Any] = {}
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        existing = {}
+    now = datetime.now(UTC).isoformat()
+    payload = {
+        "id": job_id,
+        "status": "pending",
+        "attempt_count": int(existing.get("attempt_count") or 0),
+        "reason": str(reason or "cleanup_failed")[:128],
+        "last_error": str(error or "cleanup failed")[:500],
+        "requested_at": existing.get("requested_at") or now,
+        "updated_at": now,
+        "stored": {
+            "url": str(stored.get("url") or ""),
+            "storage_type": storage_type,
+            "storage_bucket": str(stored.get("storage_bucket") or ""),
+            "storage_key": storage_key,
+            "created_new": True,
+        },
+    }
+    _write_storage_cleanup_job(path, payload)
+    return payload
+
+
+def process_storage_cleanup_jobs(limit: int = 20) -> dict[str, int]:
+    root = storage_cleanup_queue_root()
+    bounded = max(0, min(20, int(limit or 0)))
+    if bounded == 0 or not root.exists():
+        return {"processed": 0, "completed": 0, "failed": 0, "manual_required": 0}
+    processed = 0
+    completed = 0
+    failed = 0
+    manual_required = 0
+    for source in sorted(root.glob("*.json")):
+        if processed >= bounded:
+            break
+        try:
+            if json.loads(source.read_text(encoding="utf-8")).get("status") == "manual_required":
+                continue
+        except (json.JSONDecodeError, OSError):
+            pass
+        claimed = root / f"{source.stem}.processing-{os.getpid()}-{uuid4().hex}.json"
+        try:
+            source.replace(claimed)
+        except FileNotFoundError:
+            continue
+        processed += 1
+        payload: dict[str, Any] = {}
+        try:
+            payload = json.loads(claimed.read_text(encoding="utf-8"))
+            canonical = root / f"{source.stem}.json"
+            if payload.get("status") == "manual_required":
+                _write_storage_cleanup_job(canonical, payload)
+                manual_required += 1
+                continue
+            if not delete_saved_image(dict(payload.get("stored") or {})):
+                raise RuntimeError("Stored object was not eligible for cleanup")
+            completed += 1
+        except Exception as exc:
+            attempts = int(payload.get("attempt_count") or 0) + 1
+            payload.update(
+                {
+                    "attempt_count": attempts,
+                    "status": "pending" if attempts < MAX_STORAGE_CLEANUP_ATTEMPTS else "manual_required",
+                    "last_error": str(exc)[:500],
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            canonical = root / f"{source.stem}.json"
+            _write_storage_cleanup_job(canonical, payload)
+            failed += 1
+            if payload["status"] == "manual_required":
+                manual_required += 1
+        finally:
+            claimed.unlink(missing_ok=True)
+    return {
+        "processed": processed,
+        "completed": completed,
+        "failed": failed,
+        "manual_required": manual_required,
     }
 
 

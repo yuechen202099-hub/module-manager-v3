@@ -47,21 +47,44 @@ APP=/opt/module-manager-v2
 VERSION=<version>
 STAMP=$(date +%Y%m%d_%H%M%S)
 REL=$APP/releases/v$VERSION-$STAMP
+if ! id -u modulemgr >/dev/null 2>&1; then
+  useradd --system --home-dir "$APP" --no-create-home --shell /usr/sbin/nologin modulemgr
+fi
+install -d -o modulemgr -g modulemgr -m 0750 "$APP/data" "$APP/uploads" "$APP/data/delivery_cache"
+install -d -o modulemgr -g modulemgr -m 0750 "$APP/shared"
+chown -R modulemgr:modulemgr "$APP/data" "$APP/uploads" "$APP/shared"
+chown root:modulemgr "$APP/.env"
+chmod 0640 "$APP/.env"
 mkdir -p "$REL"
 unzip -q /tmp/module-manager-v2-server-$VERSION.zip -d "$REL"
+UPLOAD_LINK="$REL/v2-api/app/static/uploads"
+if [ -L "$UPLOAD_LINK" ]; then
+  rm "$UPLOAD_LINK"
+elif [ -d "$UPLOAD_LINK" ]; then
+  rmdir "$REL/v2-api/app/static/uploads" || {
+    echo "Release package unexpectedly contains files under static/uploads" >&2
+    exit 1
+  }
+elif [ -e "$UPLOAD_LINK" ]; then
+  echo "Release package contains a non-directory static/uploads entry" >&2
+  exit 1
+fi
+ln -s "$APP/uploads" "$REL/v2-api/app/static/uploads"
 cp -a "$APP/.env" "$REL/.env"
 $APP/venv/bin/python -m pip install -r "$REL/v2-api/requirements.txt"
 
 # Keep background maintenance stopped until the new API and schema pass health checks.
 systemctl stop module-manager-v2-photo-barcode-maintenance.service 2>/dev/null || true
+systemctl stop module-manager-v2-photo-barcode-maintenance.timer 2>/dev/null || true
+systemctl stop module-manager-v2-photo-barcode-maintenance-enqueue.service 2>/dev/null || true
 
-# V3.1.0 requires the complete 20260721_0005 -> 20260723_0011 upgrade chain.
+# V3.1.0 requires the complete 20260721_0005 -> 20260723_0012 upgrade chain.
 set -a
 . "$APP/.env"
 set +a
 cd "$REL/v2-api"
 $APP/venv/bin/python -m alembic upgrade head
-$APP/venv/bin/python -m alembic current | grep -q "20260723_0011"
+$APP/venv/bin/python -m alembic current | grep -q "20260723_0012"
 
 install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance.service" \
   /etc/systemd/system/module-manager-v2-photo-barcode-maintenance.service
@@ -69,17 +92,21 @@ install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance-enqueue.
   /etc/systemd/system/module-manager-v2-photo-barcode-maintenance-enqueue.service
 install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance.timer" \
   /etc/systemd/system/module-manager-v2-photo-barcode-maintenance.timer
+install -m 0644 "$REL/infra/module-manager-v2.service" \
+  /etc/systemd/system/module-manager-v2.service
 
 ln -sfn "$REL" "$APP/current"
 systemctl daemon-reload
+systemctl enable module-manager-v2.service
 systemctl enable module-manager-v2-photo-barcode-maintenance.service
 systemctl enable module-manager-v2-photo-barcode-maintenance.timer
 systemctl restart module-manager-v2.service
 systemctl is-active module-manager-v2.service
 systemctl is-active nginx
+systemctl show module-manager-v2.service -p User -p Group -p WorkingDirectory -p ExecStart
 ```
 
-The `0006` through `0011` migrations are forward-only in this release. A code rollback must keep the database at `20260723_0011`; do not run `alembic downgrade` in production.
+The `0006` through `0012` migrations are forward-only in this release. A code rollback must keep the database at `20260723_0012`; do not run `alembic downgrade` in production. The API, worker, and enqueue service must all report `modulemgr` as their configured user before the worker is resumed.
 
 ## Post-Deploy Health Check
 

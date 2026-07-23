@@ -933,12 +933,16 @@ def test_remote_barcode_download_blocks_redirect_before_fetch(monkeypatch) -> No
         no_redirect_requests.append(url)
         raise HTTPError(url, 302, "Found", {"Location": "http://127.0.0.1/private.jpg"}, None)
 
+    def pinned_open(url: str, **_kwargs):
+        validate_url(url)
+        return fake_no_redirect_open(url, timeout=8)
+
     monkeypatch.setattr(photo_barcode_check, "validate_remote_image_url", validate_url)
     monkeypatch.setattr(photo_barcode_check.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(
         photo_barcode_check,
-        "_REMOTE_IMAGE_NO_REDIRECT_OPENER",
-        SimpleNamespace(open=fake_no_redirect_open),
+        "open_validated_remote_image_url",
+        pinned_open,
         raising=False,
     )
 
@@ -948,6 +952,39 @@ def test_remote_barcode_download_blocks_redirect_before_fetch(monkeypatch) -> No
     assert automatic_redirect_requests == []
     assert no_redirect_requests == ["https://cdn.example.test/photo.jpg"]
     assert validated_urls == ["https://cdn.example.test/photo.jpg", "http://127.0.0.1/private.jpg"]
+
+
+def test_remote_barcode_download_uses_dns_pinned_opener(monkeypatch) -> None:
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit):
+            return tiny_jpeg_bytes()
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "open_validated_remote_image_url",
+        lambda url, **_kwargs: calls.append(url) or FakeResponse(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        photo_barcode_check,
+        "_REMOTE_IMAGE_NO_REDIRECT_OPENER",
+        SimpleNamespace(open=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy opener must not run"))),
+        raising=False,
+    )
+
+    content = photo_barcode_check._download_photo_content(
+        {"image_url": "https://cdn.example.test/photo.jpg"}
+    )
+
+    assert content == tiny_jpeg_bytes()
+    assert calls == ["https://cdn.example.test/photo.jpg"]
 
 
 def test_scan_photo_region_crops_exif_corrected_image_and_prefers_barcode(monkeypatch) -> None:

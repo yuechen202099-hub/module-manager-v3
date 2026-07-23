@@ -490,6 +490,7 @@ class DeliveryPackageJob(Base, TimestampMixin):
         ),
         Index("ix_delivery_package_jobs_pending", "team_id", "status", "updated_at"),
         Index("ix_delivery_package_jobs_lease", "team_id", "lease_expires_at"),
+        Index("ix_delivery_package_jobs_group_ids_gin", "group_ids", postgresql_using="gin"),
     )
 
     id: Mapped[uuid.UUID] = uuid_column()

@@ -16,11 +16,27 @@ Rollback immediately if any of these occur after release:
 ```bash
 APP=/opt/module-manager-v2
 PREVIOUS=/opt/module-manager-v2/releases/<previous-release>
+systemctl stop module-manager-v2-photo-barcode-maintenance.service 2>/dev/null || true
+systemctl stop module-manager-v2-photo-barcode-maintenance.timer 2>/dev/null || true
+systemctl stop module-manager-v2-photo-barcode-maintenance-enqueue.service 2>/dev/null || true
+UNIT_BEFORE=$(mktemp)
+UNIT_AFTER=$(mktemp)
+trap 'rm -f "$UNIT_BEFORE" "$UNIT_AFTER"' EXIT
+systemctl show module-manager-v2.service -p User -p Group -p WorkingDirectory -p ExecStart -p EnvironmentFiles > "$UNIT_BEFORE"
+grep -Fx 'User=modulemgr' "$UNIT_BEFORE"
+grep -Fx 'Group=modulemgr' "$UNIT_BEFORE"
+grep -Fx 'WorkingDirectory=/opt/module-manager-v2/current/v2-api' "$UNIT_BEFORE"
+grep -F 'ExecStart={ path=/opt/module-manager-v2/venv/bin/uvicorn ;' "$UNIT_BEFORE"
+grep -F '/opt/module-manager-v2/.env' "$UNIT_BEFORE"
 ln -sfn "$PREVIOUS" "$APP/current"
+systemctl show module-manager-v2.service -p User -p Group -p WorkingDirectory -p ExecStart -p EnvironmentFiles > "$UNIT_AFTER"
+diff -u "$UNIT_BEFORE" "$UNIT_AFTER"
 systemctl restart module-manager-v2.service
 systemctl is-active module-manager-v2.service
 curl -fsS http://127.0.0.1/health
 ```
+
+Keep the worker and enqueue timer stopped until the previous release is confirmed compatible with the current forward-only database revision. Resume them only after an explicit compatibility check; never run an Alembic downgrade during this rollback.
 
 If data changed after deployment, do not restore database/uploads automatically. Stop and confirm the restore plan with the user.
 

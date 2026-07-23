@@ -140,6 +140,37 @@ def test_v3_1_runtime_version_sources_and_release_notes_are_aligned() -> None:
         assert required_text in release_notes
 
 
+def test_v3_1_release_manifest_marks_every_migration_through_0012_irreversible() -> None:
+    manifest = read("RELEASE_MANIFEST.md")
+
+    assert "V3.1 migrations `0006` through `0012` are production-irreversible" in manifest
+
+
+def test_v3_1_deploy_runbook_prepares_writable_persistent_runtime_directories() -> None:
+    runbook = read("docs/sop/06-production-deploy-runbook.md")
+
+    assert 'install -d -o modulemgr -g modulemgr -m 0750 "$APP/shared"' in runbook
+    assert 'rmdir "$REL/v2-api/app/static/uploads"' in runbook
+    assert 'ln -s "$APP/uploads" "$REL/v2-api/app/static/uploads"' in runbook
+    assert runbook.index('ln -s "$APP/uploads" "$REL/v2-api/app/static/uploads"') < runbook.index(
+        'ln -sfn "$REL" "$APP/current"'
+    )
+
+
+def test_v3_1_rollback_keeps_verified_unit_and_checks_runtime_contract_around_symlink_switch() -> None:
+    rollback = read("docs/sop/07-rollback-and-incident-review.md")
+
+    assert '$PREVIOUS/infra/module-manager-v2.service' not in rollback
+    assert rollback.count(
+        "systemctl show module-manager-v2.service -p User -p Group -p WorkingDirectory -p ExecStart -p EnvironmentFiles"
+    ) >= 2
+    assert 'diff -u "$UNIT_BEFORE" "$UNIT_AFTER"' in rollback
+    before_capture = rollback.index('EnvironmentFiles > "$UNIT_BEFORE"')
+    switch = rollback.index('ln -sfn "$PREVIOUS" "$APP/current"')
+    after_capture = rollback.index('EnvironmentFiles > "$UNIT_AFTER"')
+    assert before_capture < switch < after_capture
+
+
 def test_v3_1_preview_defaults_to_read_only_preview() -> None:
     preview = read("v2-api/scripts/preview_v3_1_backfill.py")
     assert "--preview" in preview

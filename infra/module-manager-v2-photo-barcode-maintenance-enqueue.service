@@ -5,6 +5,7 @@ After=network.target postgresql.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/module-manager-v2/current
+EnvironmentFile=/opt/module-manager-v2/.env
 Environment=BARCODE_MAINTENANCE_BATCH_SIZE=20
 Environment=BARCODE_MAINTENANCE_BATCH_PAUSE_SECONDS=5
 Nice=19
@@ -12,4 +13,7 @@ IOSchedulingClass=idle
 IOSchedulingPriority=7
 CPUQuota=20%
 MemoryMax=512M
+User=modulemgr
+Group=modulemgr
+UMask=0077
 ExecStart=/bin/bash /opt/module-manager-v2/current/scripts/run_photo_barcode_maintenance_slice.sh /opt/module-manager-v2 --enqueue

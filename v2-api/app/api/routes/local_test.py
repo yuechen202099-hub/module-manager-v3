@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import mimetypes
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
@@ -20,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.core.config import settings
 from app.core.responses import ok
@@ -46,8 +47,11 @@ from app.services.account_store import get_user
 from app.services.project_board_cache import project_board_summary_cache
 from app.services.task_snapshot_cache import build_task_snapshot, task_snapshot_cache
 from app.services.photo_storage import (
+    delete_saved_image,
+    enqueue_storage_cleanup_retry,
     is_blocked_remote_image_address,
     normalize_suffix,
+    open_validated_remote_image_url,
     parse_oss_image_url,
     resolve_group_collection_for_response,
     resolve_group_for_response,
@@ -79,6 +83,9 @@ from app.services.final_delivery_export import (
 )
 from app.services.local_simulation import (
     CONSTRUCTION_SLOT_CATEGORIES,
+    abort_authoritative_json_write,
+    activate_authoritative_json_write,
+    active_authoritative_json_write,
     add_photo_urls_to_group,
     assign_construction_task,
     bootstrap_local_simulation,
@@ -97,11 +104,14 @@ from app.services.local_simulation import (
     delete_unmatched_record,
     delivery_cache_root,
     build_photo_record,
+    begin_authoritative_json_write,
     expand_detail_pages_for_rows,
+    finish_authoritative_json_write,
     get_group,
     get_delivery_cached_photo_path,
     get_task_progress,
     get_state,
+    invalidate_json_delivery_artifacts,
     assert_not_placeholder_construction_group,
     is_all_zero_construction_code,
     group_target_summary,
@@ -176,6 +186,7 @@ async def use_team_context(request: Request):
 
 
 router = APIRouter(prefix="/local-test", dependencies=[Depends(use_team_context)])
+logger = logging.getLogger(__name__)
 BOARD_EVENT_INTERVAL_SECONDS = 15 * 60
 ALLOWED_UPLOAD_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 DANGEROUS_UPLOAD_SUFFIXES = {".html", ".svg", ".js", ".exe", ".bat", ".cmd", ".ps1"}
@@ -343,6 +354,44 @@ def validate_construction_upload_group_before_file_save(group_id: str) -> None:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def validate_group_photo_upload_before_file_save(repository: Any, group_id: str) -> dict[str, Any]:
+    group = repository.get_group(group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+    try:
+        assert_not_placeholder_construction_group(
+            group_id=group.get("id") or group_id,
+            terminal=group.get("terminal"),
+            meter_no=group.get("meter_no") or group.get("display_meter_no"),
+            meter_match_key=group.get("meter_match_key"),
+            address=group.get("address") or group.get("installation_address"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return group
+
+
+def cleanup_saved_images_quietly(saved_objects: list[dict[str, Any]]) -> None:
+    for stored in reversed(saved_objects):
+        try:
+            deleted = delete_saved_image(stored)
+            if bool(stored.get("created_new")) and not deleted:
+                enqueue_storage_cleanup_retry(
+                    stored,
+                    reason="request_rollback",
+                    error="Stored object was not eligible for immediate cleanup",
+                )
+        except Exception as exc:
+            try:
+                enqueue_storage_cleanup_retry(
+                    stored,
+                    reason="request_rollback",
+                    error=str(exc),
+                )
+            except Exception:
+                logger.exception("Failed to persist storage cleanup retry for %s", stored.get("storage_key"))
 
 
 def request_auth_payload(request: Request) -> dict:
@@ -791,37 +840,69 @@ def _stable_photo_sha(photo: dict) -> str:
 
 
 def _postgres_import_scan_records(records: list[dict], progress_callback=None) -> dict:
+    from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_changes
+
     team_id = current_team_id()
     processed_photos = 0
     applied = 0
     skipped_duplicates = 0
     groups_matched: set[str] = set()
     groups_existing: set[str] = set()
+    changed_groups: dict[str, MaterialGroup] = {}
     groups_unmatched = 0
     unmatched_records = 0
     now = datetime.now(UTC)
 
     with SessionLocal() as session:
         project = _postgres_project_for_team(session, team_id)
+        incoming_match_keys = sorted(
+            {
+                str(record.get("meter_match_key") or "").strip()
+                for record in records
+                if str(record.get("meter_match_key") or "").strip()
+            }
+        )
+        locked_groups = (
+            session.scalars(
+                select(MaterialGroup)
+                .where(
+                    MaterialGroup.team_id == team_id,
+                    MaterialGroup.meter_match_key.in_(incoming_match_keys),
+                )
+                .order_by(MaterialGroup.id)
+                .with_for_update()
+            ).all()
+            if incoming_match_keys
+            else []
+        )
         groups_by_key = {
             str(group.meter_match_key or ""): group
-            for group in session.scalars(select(MaterialGroup).where(MaterialGroup.team_id == team_id)).all()
+            for group in locked_groups
             if group.meter_match_key
         }
+        locked_group_ids = [group.id for group in locked_groups]
+        existing_photos = (
+            session.scalars(
+                select(Photo)
+                .where(
+                    Photo.team_id == team_id,
+                    Photo.group_id.in_(locked_group_ids),
+                )
+                .order_by(Photo.group_id, Photo.id)
+                .with_for_update()
+            ).all()
+            if locked_group_ids
+            else []
+        )
         existing_photo_keys = {
             (str(photo.group_id), str(photo.source_fingerprint or ""))
-            for photo in session.scalars(
-                select(Photo).where(
-                    Photo.team_id == team_id,
-                    Photo.is_active.is_(True),
-                    Photo.source_fingerprint.is_not(None),
-                    Photo.source_fingerprint != "",
-                )
-            ).all()
+            for photo in existing_photos
+            if photo.is_active and photo.source_fingerprint
         }
         existing_photo_shas = {
             (str(photo.group_id), str(photo.sha256 or ""))
-            for photo in session.scalars(select(Photo).where(Photo.team_id == team_id, Photo.sha256.is_not(None), Photo.sha256 != "")).all()
+            for photo in existing_photos
+            if photo.sha256
         }
         existing_unmatched_records = list(
             session.scalars(select(UnmatchedRecord).where(UnmatchedRecord.team_id == team_id)).all()
@@ -877,7 +958,18 @@ def _postgres_import_scan_records(records: list[dict], progress_callback=None) -
                     continue
                 photo = build_photo_record(active_count + 1, row)
                 fingerprint = str(photo.get("source_fingerprint") or "").strip()
-                sha256 = str(photo.get("sha256") or "") or _stable_photo_sha(photo)
+                declared_sha256 = str(photo.get("sha256") or "").strip()
+                if declared_sha256:
+                    sha256 = declared_sha256
+                else:
+                    source_url = str(photo.get("source_url") or photo.get("image_url") or "").strip()
+                    sha256 = (
+                        hashlib.sha256(source_url.encode("utf-8")).hexdigest()
+                        if source_url
+                        else _stable_photo_sha(photo)
+                    )
+                    photo["sha256"] = sha256
+                    photo["sha256_source"] = "image_url" if source_url else "source_identity"
                 if (
                     (fingerprint and (str(group.id), fingerprint) in existing_photo_keys)
                     or (str(group.id), sha256) in existing_photo_shas
@@ -975,7 +1067,21 @@ def _postgres_import_scan_records(records: list[dict], progress_callback=None) -
                     }
                 )
                 group.raw_data = raw_data
+                changed_groups[str(group.id)] = group
 
+        for group in changed_groups.values():
+            invalidate_verification_for_group(
+                session,
+                group,
+                actor="scan-import",
+                reason="scan_import_changed",
+            )
+        invalidate_postgres_delivery_cache_for_group_changes(
+            session,
+            list(changed_groups.values()),
+            actor="scan-import",
+            reason="scan_import_changed",
+        )
         session.commit()
 
     if progress_callback:
@@ -1625,8 +1731,6 @@ def _read_remote_image(
     url_validator: Callable[[str], None] | None = None,
     follow_redirects: bool = True,
 ) -> tuple[bytes, str]:
-    if url_validator is not None:
-        url_validator(url)
     try:
         upstream_request = UrlRequest(
             url,
@@ -1635,22 +1739,30 @@ def _read_remote_image(
                 "Accept": "image/*,*/*;q=0.8",
             },
         )
-        allow_auto_redirects = follow_redirects and url_validator is None
-        opener = urlopen if allow_auto_redirects else _NO_REDIRECT_OPENER.open
-        with opener(upstream_request, timeout=30) as upstream:
-            final_url = upstream.geturl()
-            if url_validator is not None:
-                url_validator(final_url)
+        secure_remote = url_validator is not None
+        allow_auto_redirects = follow_redirects and not secure_remote
+        upstream_context = (
+            open_validated_remote_image_url(
+                url,
+                headers=dict(upstream_request.header_items()),
+                timeout=30,
+            )
+            if secure_remote
+            else urlopen(upstream_request, timeout=30)
+        )
+        with upstream_context as upstream:
             content_type = upstream.headers.get("Content-Type") or "application/octet-stream"
             expected_length = upstream.headers.get("Content-Length", "")
             content = upstream.read(max_bytes + 1)
     except HTTPError as exc:
-        if not allow_auto_redirects and 300 <= exc.code < 400:
+        if secure_remote and 300 <= exc.code < 400:
             location = exc.headers.get("Location") or ""
             if location and url_validator is not None:
                 url_validator(urljoin(url, location))
             raise HTTPException(status_code=400, detail="Photo proxy redirects are not allowed") from exc
         raise HTTPException(status_code=502, detail=f"Image download failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=502, detail=f"Image download failed: {exc}") from exc
     if len(content) > max_bytes:
@@ -1676,39 +1788,64 @@ def _source_url_for_photo(photo: dict) -> str:
 def _persist_repaired_photo_storage(group_id: str, photo: dict) -> None:
     backend = settings.state_backend.lower()
     if backend in {"json", "dual"}:
-        json_group = get_group(group_id)
-        if json_group is not None:
-            invalidate_verification_for_group(
+        team_id = current_team_id()
+        transaction = active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = begin_authoritative_json_write(team_id)
+            token = activate_authoritative_json_write(transaction)
+        try:
+            json_group = get_group(group_id)
+            if json_group is None:
+                raise KeyError(group_id)
+            photo_id = str(photo.get("id") or "").strip()
+            if not photo_id:
+                raise ValueError("Repaired photo id is required")
+            json_photo = next(
+                (item for item in json_group.get("photos", []) if str(item.get("id") or "") == photo_id),
                 None,
-                json_group,
+            )
+            if json_photo is None:
+                raise KeyError(photo_id)
+            json_photo.update(deepcopy(photo))
+            invalidate_json_delivery_artifacts(
                 actor="photo-storage-repair",
                 reason="photo_replaced",
+                group=json_group,
+                verification_changed=True,
             )
+            if owns_transaction:
+                finish_authoritative_json_write(transaction, token, persist=save_all_team_states)
+        except BaseException:
+            if owns_transaction and transaction is not None and not transaction.closed:
+                abort_authoritative_json_write(transaction, token)
+            raise
     if backend not in {"postgres", "dual"}:
         return
     photo_id = str(photo.get("id") or "").strip()
     if not photo_id:
-        return
+        raise ValueError("Repaired photo id is required")
     try:
         with SessionLocal() as session:
             group = session.scalar(
                 select(MaterialGroup).where(
                     MaterialGroup.team_id == current_team_id(),
                     MaterialGroup.legacy_id == group_id,
-                )
+                ).with_for_update()
             )
             if group is None:
-                return
+                raise KeyError(group_id)
             record = session.scalar(
                 select(Photo).where(
                     Photo.team_id == current_team_id(),
                     Photo.group_id == group.id,
                     Photo.legacy_id == photo_id,
                     Photo.is_active.is_(True),
-                )
+                ).with_for_update()
             )
             if record is None:
-                return
+                raise KeyError(photo_id)
             record.image_url = str(photo.get("image_url") or "")
             record.storage_type = str(photo.get("storage_type") or "")
             record.storage_bucket = str(photo.get("storage_bucket") or "")
@@ -1742,11 +1879,51 @@ def _persist_repaired_photo_storage(group_id: str, photo: dict) -> None:
                 actor="photo-storage-repair",
                 reason="photo_replaced",
             )
+            from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor="photo-storage-repair",
+                reason="photo_replaced",
+            )
             session.commit()
     except Exception:
-        # Preview repair must not take down the review page. The current request
-        # still returns the recovered image; persistence can be retried later.
-        return
+        raise
+
+
+def _saved_photo_storage_is_referenced(stored: dict[str, Any]) -> bool:
+    storage_key = str(stored.get("storage_key") or "").strip()
+    image_url = str(stored.get("url") or "").strip()
+    backend = settings.state_backend.lower()
+    if backend in {"json", "dual"}:
+        for group in get_state().get("groups", []):
+            photos = list(group.get("photos", [])) + list(group.get("deleted_photos", []))
+            if any(
+                str(photo.get("storage_key") or "").strip() == storage_key
+                or str(photo.get("image_url") or "").strip() == image_url
+                for photo in photos
+            ):
+                return True
+    if backend not in {"postgres", "dual"}:
+        return False
+    try:
+        with SessionLocal() as session:
+            predicates = []
+            if storage_key:
+                predicates.extend((Photo.storage_key == storage_key, Photo.object_key == storage_key))
+            if image_url:
+                predicates.append(Photo.image_url == image_url)
+            if not predicates:
+                return True
+            return session.scalar(
+                select(Photo.id).where(
+                    Photo.team_id == current_team_id(),
+                    or_(*predicates),
+                ).limit(1)
+            ) is not None
+    except Exception:
+        return True
 
 
 def _replace_photo_storage_from_source(group_id: str, photo: dict, source_url: str) -> tuple[bytes, str]:
@@ -1759,20 +1936,22 @@ def _replace_photo_storage_from_source(group_id: str, photo: dict, source_url: s
         content_type=media_type,
         team_id=current_team_id(),
         group_id=group_id,
-        key_hint=str(photo.get("id") or ""),
+        key_hint=f"{str(photo.get('id') or 'photo')}-{uuid4().hex[:16]}",
+        cleanup_safe=True,
     )
     now = datetime.now(UTC).isoformat()
-    raw_data = photo.setdefault("raw_data", {})
+    repaired_photo = deepcopy(photo)
+    raw_data = repaired_photo.setdefault("raw_data", {})
     if isinstance(raw_data, dict):
         raw_data.update(
             {
                 "repair_source_url": source_url,
-                "repair_previous_image_url": photo.get("image_url", ""),
-                "repair_previous_storage_key": photo.get("storage_key", ""),
+                "repair_previous_image_url": repaired_photo.get("image_url", ""),
+                "repair_previous_storage_key": repaired_photo.get("storage_key", ""),
                 "repaired_at": now,
             }
         )
-    photo.update(
+    repaired_photo.update(
         {
             "image_url": saved["url"],
             "storage_type": saved.get("storage_type", ""),
@@ -1788,7 +1967,29 @@ def _replace_photo_storage_from_source(group_id: str, photo: dict, source_url: s
             "repaired_at": now,
         }
     )
-    _persist_repaired_photo_storage(group_id, photo)
+    try:
+        _persist_repaired_photo_storage(group_id, repaired_photo)
+    except Exception as exc:
+        if not _saved_photo_storage_is_referenced(saved):
+            try:
+                deleted = delete_saved_image(saved)
+                if bool(saved.get("created_new")) and not deleted:
+                    enqueue_storage_cleanup_retry(
+                        saved,
+                        reason="repair_persistence_failed",
+                        error="Stored object was not eligible for immediate cleanup",
+                    )
+            except Exception as cleanup_exc:
+                try:
+                    enqueue_storage_cleanup_retry(
+                        saved,
+                        reason="repair_persistence_failed",
+                        error=str(cleanup_exc),
+                    )
+                except Exception:
+                    logger.exception("Failed to persist repaired-photo cleanup retry for %s", saved.get("storage_key"))
+        raise HTTPException(status_code=503, detail="Repaired photo could not be persisted") from exc
+    photo.update(repaired_photo)
     return content, media_type
 
 
@@ -1945,7 +2146,6 @@ def _photo_content_response_from_source(
     parsed = urlparse(source_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=404, detail="Photo has no readable image source")
-    _validate_photo_proxy_url(source_url)
     content, media_type = _read_remote_image(
         source_url,
         url_validator=_validate_photo_proxy_url,
@@ -2009,7 +2209,6 @@ def group_photo_content(group_id: str, photo_id: str, request: Request, kind: st
 
 @router.get("/photo-proxy")
 def photo_proxy(url: str):
-    _validate_photo_proxy_url(url)
     try:
         content, media_type = _read_remote_image(
             url,
@@ -3003,8 +3202,10 @@ def change_group_metadata(group_id: str, payload: GroupMetadataRequest, request:
 @router.post("/groups/{group_id}/photos/import-urls")
 def import_group_photo_urls(group_id: str, payload: AddGroupPhotosRequest, request: Request):
     actor = bound_review_actor(request, payload.actor, fallback="admin")
+    repository = state_repository()
+    validate_group_photo_upload_before_file_save(repository, group_id)
     try:
-        result = state_repository().add_photo_urls_to_group(
+        result = repository.add_photo_urls_to_group(
             group_id,
             actor=actor,
             photo_urls=payload.photo_urls,
@@ -3014,6 +3215,8 @@ def import_group_photo_urls(group_id: str, payload: AddGroupPhotosRequest, reque
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     invalidate_task_snapshot()
     return ok(request, response_payload(result))
 
@@ -3029,14 +3232,17 @@ async def upload_group_photo_images(
     files: list[UploadFile] = File(default=[]),
 ):
     actor = bound_review_actor(request, actor, fallback="admin")
+    repository = state_repository()
+    validate_group_photo_upload_before_file_save(repository, group_id)
     if not files:
         raise HTTPException(status_code=400, detail="At least one image file is required")
     validated_files = await _read_validated_upload_files_before_save(files)
     saved_urls: list[str] = []
     photo_metadata: dict[str, dict] = {}
-    for _index, file, content in validated_files:
-        filename = file.filename or "manual-photo.jpg"
-        try:
+    saved_objects: list[dict[str, Any]] = []
+    try:
+        for _index, file, content in validated_files:
+            filename = file.filename or "manual-photo.jpg"
             stored = save_image_bytes(
                 scope="manual",
                 filename=filename,
@@ -3045,24 +3251,21 @@ async def upload_group_photo_images(
                 team_id=current_request_team(request),
                 group_id=group_id,
                 key_hint=f"{group_id}-{uuid4().hex[:16]}",
+                cleanup_safe=True,
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        url = stored["url"]
-        saved_urls.append(url)
-        photo_metadata[url] = {
-            "sha256": stored["sha256"],
-            "storage_type": stored["storage_type"],
-            "storage_key": stored["storage_key"],
-            "storage_bucket": stored.get("storage_bucket", ""),
-            "storage_source": stored["storage_source"],
-        }
-    if not saved_urls:
-        raise HTTPException(status_code=400, detail="Uploaded images are empty")
-    try:
-        result = state_repository().add_photo_urls_to_group(
+            saved_objects.append(stored)
+            url = stored["url"]
+            saved_urls.append(url)
+            photo_metadata[url] = {
+                "sha256": stored["sha256"],
+                "storage_type": stored["storage_type"],
+                "storage_key": stored["storage_key"],
+                "storage_bucket": stored.get("storage_bucket", ""),
+                "storage_source": stored["storage_source"],
+            }
+        if not saved_urls:
+            raise ValueError("Uploaded images are empty")
+        result = repository.add_photo_urls_to_group(
             group_id,
             actor=actor,
             photo_urls=saved_urls,
@@ -3072,7 +3275,24 @@ async def upload_group_photo_images(
             photo_metadata=photo_metadata,
         )
     except KeyError as exc:
+        cleanup_saved_images_quietly(saved_objects)
         raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ValueError as exc:
+        cleanup_saved_images_quietly(saved_objects)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        cleanup_saved_images_quietly(saved_objects)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        cleanup_saved_images_quietly(saved_objects)
+        raise
+    result = dict(result)
+    retained_photo_urls = result.pop("retained_photo_urls", None)
+    if retained_photo_urls is not None:
+        retained = {str(url) for url in retained_photo_urls}
+        cleanup_saved_images_quietly(
+            [stored for stored in saved_objects if str(stored.get("url") or "") not in retained]
+        )
     invalidate_task_snapshot()
     return ok(request, {**response_payload(result), "uploaded_urls": saved_urls})
 

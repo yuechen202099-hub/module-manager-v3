@@ -58,6 +58,7 @@ def test_group_barcode_verification_upgrade_renders_postgresql_schema_contract()
         "0009_delivery_cache_fix3.py",
         "0010_auto_archive_queue_state.py",
         "0011_delivery_package_jobs.py",
+        "0012_delivery_package_group_ids_gin.py",
     ],
 )
 def test_v3_1_migrations_reject_downgrade_before_any_ddl(filename: str) -> None:
@@ -113,3 +114,15 @@ def test_delivery_package_job_migration_is_persistent_and_chained() -> None:
     assert "CONSTRAINT uq_delivery_package_jobs_scope_fingerprint UNIQUE" in upgrade
     assert "CREATE INDEX ix_delivery_package_jobs_pending" in upgrade
     assert "CREATE INDEX ix_delivery_package_jobs_lease" in upgrade
+
+
+def test_delivery_package_group_ids_gin_migration_is_chained() -> None:
+    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0012_delivery_package_group_ids_gin.py"
+    assert path.exists()
+    migration = load_migration_module(path.name)
+    upgrade = render_postgresql_ddl("upgrade", path.name)
+
+    assert migration.revision == "20260723_0012"
+    assert migration.down_revision == "20260723_0011"
+    assert "CREATE INDEX ix_delivery_package_jobs_group_ids_gin" in upgrade
+    assert "USING gin (group_ids)" in upgrade

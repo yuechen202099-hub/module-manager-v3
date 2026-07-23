@@ -5,8 +5,10 @@ After=network.target postgresql.service module-manager-v2.service
 [Service]
 Type=simple
 WorkingDirectory=/opt/module-manager-v2/current
+EnvironmentFile=/opt/module-manager-v2/.env
 Environment=BARCODE_MAINTENANCE_BATCH_SIZE=20
 Environment=BARCODE_MAINTENANCE_BATCH_PAUSE_SECONDS=5
+Environment=STORAGE_CLEANUP_QUEUE_PATH=/opt/module-manager-v2/shared/storage-cleanup-jobs
 Nice=19
 IOSchedulingClass=idle
 IOSchedulingPriority=7
@@ -14,6 +16,9 @@ CPUQuota=20%
 MemoryMax=512M
 Restart=always
 RestartSec=5
+User=modulemgr
+Group=modulemgr
+UMask=0077
 ExecStart=/bin/bash /opt/module-manager-v2/current/scripts/run_photo_barcode_maintenance_slice.sh /opt/module-manager-v2 --serve
 
 [Install]

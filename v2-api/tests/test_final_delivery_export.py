@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -10,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from threading import Event, Thread
-from zipfile import ZipFile
+from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 import pytest
 from openpyxl import load_workbook
@@ -271,6 +272,7 @@ def test_delivery_package_rejects_an_empty_formal_scope() -> None:
 
 def test_get_or_build_delivery_package_reuses_same_fingerprint_for_seven_days(tmp_path: Path) -> None:
     group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
     reads = 0
     builds = 0
 
@@ -287,7 +289,7 @@ def test_get_or_build_delivery_package_reuses_same_fingerprint_for_seven_days(tm
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
     first = get_or_build_delivery_package(
         "team-a/task-1",
-        "a" * 64,
+        fingerprint,
         groups=[group],
         photo_reader=counting_reader,
         cache_root=tmp_path,
@@ -296,7 +298,7 @@ def test_get_or_build_delivery_package_reuses_same_fingerprint_for_seven_days(tm
     )
     second = get_or_build_delivery_package(
         "team-a/task-1",
-        "a" * 64,
+        fingerprint,
         groups=[group],
         photo_reader=counting_reader,
         cache_root=tmp_path,
@@ -314,8 +316,157 @@ def test_get_or_build_delivery_package_reuses_same_fingerprint_for_seven_days(tm
         second.release()
 
 
+def test_get_or_build_delivery_package_rejects_a_caller_supplied_stale_fingerprint(
+    tmp_path: Path,
+) -> None:
+    group = delivery_group()
+
+    with pytest.raises(ValueError, match="does not match current delivery evidence"):
+        get_or_build_delivery_package(
+            "task-stale-fingerprint",
+            "a" * 64,
+            groups=[group],
+            photo_reader=read_photo,
+            cache_root=tmp_path,
+            package_builder=lambda _groups, _reader: pytest.fail("stale fingerprint must fail before build"),
+        )
+
+
+def test_get_or_build_delivery_package_rebuilds_a_crc_valid_but_wrong_zip(tmp_path: Path) -> None:
+    group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
+    builds = 0
+
+    def counting_builder(groups, reader) -> bytes:
+        nonlocal builds
+        builds += 1
+        return build_delivery_package(groups, reader)
+
+    now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    original = get_or_build_delivery_package(
+        "task-valid-tamper",
+        fingerprint,
+        groups=[group],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now,
+        package_builder=counting_builder,
+    )
+    package_path = original.path
+    original.release()
+    with ZipFile(package_path, "w") as archive:
+        archive.writestr("unexpected.txt", b"crc-valid-but-wrong")
+
+    rebuilt = get_or_build_delivery_package(
+        "task-valid-tamper",
+        fingerprint,
+        groups=[group],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+        now=now + timedelta(hours=1),
+        package_builder=counting_builder,
+    )
+
+    try:
+        assert builds == 2
+        with ZipFile(rebuilt.path) as archive:
+            assert "unexpected.txt" not in archive.namelist()
+            assert archive.testzip() is None
+    finally:
+        rebuilt.release()
+
+
+def test_delivery_package_integrity_proof_binds_fingerprint_hash_size_and_members(tmp_path: Path) -> None:
+    group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
+    package = get_or_build_delivery_package(
+        "task-integrity-proof",
+        fingerprint,
+        groups=[group],
+        photo_reader=read_photo,
+        cache_root=tmp_path,
+    )
+
+    try:
+        proof_path = package.path.with_suffix(".zip.integrity.json")
+        proof = json.loads(proof_path.read_text(encoding="utf-8"))
+        with ZipFile(package.path) as archive:
+            members = archive.namelist()
+        assert proof == {
+            "schema_version": 1,
+            "evidence_fingerprint": fingerprint,
+            "package_sha256": hashlib.sha256(package.path.read_bytes()).hexdigest(),
+            "package_size": package.path.stat().st_size,
+            "members": members,
+        }
+    finally:
+        package.release()
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "/absolute/photo.jpg",
+        "../outside.jpg",
+        "folder/../../outside.jpg",
+        r"folder\outside.jpg",
+        "C:/outside.jpg",
+    ],
+)
+def test_delivery_package_member_validation_rejects_unsafe_paths(
+    tmp_path: Path,
+    member_name: str,
+) -> None:
+    package = tmp_path / "unsafe-path.zip"
+    with ZipFile(package, "w") as archive:
+        archive.writestr(member_name, b"photo")
+
+    assert final_delivery_export._verified_archive_members(package, [member_name]) is None
+
+
+def test_delivery_package_member_validation_rejects_duplicate_members(tmp_path: Path) -> None:
+    package = tmp_path / "duplicate-members.zip"
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with ZipFile(package, "w") as archive:
+            archive.writestr("duplicate.jpg", b"first")
+            archive.writestr("duplicate.jpg", b"second")
+
+    assert final_delivery_export._verified_archive_members(
+        package,
+        ["duplicate.jpg", "duplicate.jpg"],
+    ) is None
+
+
+def test_delivery_package_member_validation_rejects_symbolic_links(tmp_path: Path) -> None:
+    package = tmp_path / "symbolic-link.zip"
+    link = ZipInfo("photo-link.jpg")
+    link.create_system = 3
+    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with ZipFile(package, "w") as archive:
+        archive.writestr(link, "../outside.jpg")
+
+    assert final_delivery_export._verified_archive_members(package, ["photo-link.jpg"]) is None
+
+
+def test_delivery_package_member_validation_rejects_crc_corruption(tmp_path: Path) -> None:
+    package = tmp_path / "crc-corrupt.zip"
+    content = b"unique-crc-content"
+    with ZipFile(package, "w", compression=ZIP_STORED) as archive:
+        archive.writestr("photo.jpg", content)
+    damaged = bytearray(package.read_bytes())
+    content_offset = damaged.index(content)
+    damaged[content_offset] ^= 0xFF
+    package.write_bytes(damaged)
+
+    assert final_delivery_export._verified_archive_members(package, ["photo.jpg"]) is None
+
+
 def test_get_or_build_delivery_package_rebuilds_after_ttl_or_fingerprint_change(tmp_path: Path) -> None:
     group = delivery_group()
+    changed_group = delivery_group()
+    changed_group["export_remark"] = "changed-evidence"
+    fingerprint = delivery_evidence_fingerprint([group])
+    changed_fingerprint = delivery_evidence_fingerprint([changed_group])
     builds = 0
 
     def counting_builder(groups, reader) -> bytes:
@@ -326,7 +477,7 @@ def test_get_or_build_delivery_package_rebuilds_after_ttl_or_fingerprint_change(
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
     first = get_or_build_delivery_package(
         "task-1",
-        "a" * 64,
+        fingerprint,
         groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
@@ -335,8 +486,8 @@ def test_get_or_build_delivery_package_rebuilds_after_ttl_or_fingerprint_change(
     )
     changed = get_or_build_delivery_package(
         "task-1",
-        "b" * 64,
-        groups=[group],
+        changed_fingerprint,
+        groups=[changed_group],
         photo_reader=read_photo,
         cache_root=tmp_path,
         now=now + timedelta(hours=1),
@@ -345,7 +496,7 @@ def test_get_or_build_delivery_package_rebuilds_after_ttl_or_fingerprint_change(
     first.release()
     rebuilt = get_or_build_delivery_package(
         "task-1",
-        "a" * 64,
+        fingerprint,
         groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
@@ -364,6 +515,7 @@ def test_get_or_build_delivery_package_rebuilds_after_ttl_or_fingerprint_change(
 
 def test_get_or_build_delivery_package_rebuilds_fresh_corrupt_zip(tmp_path: Path) -> None:
     group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
     builds = 0
 
     def counting_builder(groups, reader) -> bytes:
@@ -374,7 +526,7 @@ def test_get_or_build_delivery_package_rebuilds_fresh_corrupt_zip(tmp_path: Path
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
     first = get_or_build_delivery_package(
         "task-corrupt",
-        "c" * 64,
+        fingerprint,
         groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
@@ -387,7 +539,7 @@ def test_get_or_build_delivery_package_rebuilds_fresh_corrupt_zip(tmp_path: Path
 
     rebuilt = get_or_build_delivery_package(
         "task-corrupt",
-        "c" * 64,
+        fingerprint,
         groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
@@ -405,10 +557,11 @@ def test_get_or_build_delivery_package_rebuilds_fresh_corrupt_zip(tmp_path: Path
 
 def test_cached_package_never_bypasses_current_group_validation(tmp_path: Path) -> None:
     group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
     path = get_or_build_delivery_package(
         "task-1",
-        "a" * 64,
+        fingerprint,
         groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
@@ -419,7 +572,7 @@ def test_cached_package_never_bypasses_current_group_validation(tmp_path: Path) 
     with pytest.raises(DeliveryPackageValidationError) as captured:
         get_or_build_delivery_package(
             "task-1",
-            "a" * 64,
+            fingerprint,
             groups=[group],
             photo_reader=lambda _photo: (_ for _ in ()).throw(AssertionError("must not read photos")),
             cache_root=tmp_path,
@@ -445,6 +598,15 @@ def test_identity_category_and_photo_changes_invalidate_delivery_fingerprint() -
     photo_changed = delivery_evidence_fingerprint([group])
 
     assert len({original, identity_changed, category_changed, photo_changed}) == 4
+
+
+def test_delivery_package_invalidation_epoch_prevents_old_zip_reuse_after_reapproval() -> None:
+    group = delivery_group()
+    original = delivery_evidence_fingerprint([group])
+
+    group["delivery_package_invalidation_epoch"] = 1
+
+    assert delivery_evidence_fingerprint([group]) != original
 
 
 @pytest.mark.parametrize(
@@ -619,6 +781,8 @@ def test_package_is_reserved_before_build_lock_releases_to_cleanup(
 ) -> None:
     original_lock = final_delivery_export._package_lock
     cleanup_ran = Event()
+    group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
 
     @contextmanager
     def cleanup_on_release(key: str):
@@ -636,8 +800,8 @@ def test_package_is_reserved_before_build_lock_releases_to_cleanup(
 
     package = get_or_build_delivery_package(
         "cleanup-gap",
-        "a" * 64,
-        groups=[delivery_group()],
+        fingerprint,
+        groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
     )
@@ -731,10 +895,12 @@ def test_fresh_package_validation_and_lease_are_atomic_with_cleanup(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
     original = get_or_build_delivery_package(
         "fresh-reserve-gap",
-        "a" * 64,
-        groups=[delivery_group()],
+        fingerprint,
+        groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
         now=now,
@@ -749,8 +915,8 @@ def test_fresh_package_validation_and_lease_are_atomic_with_cleanup(
     try:
         package = get_or_build_delivery_package(
             "fresh-reserve-gap",
-            "a" * 64,
-            groups=[delivery_group()],
+            fingerprint,
+            groups=[group],
             photo_reader=read_photo,
             cache_root=tmp_path,
             now=now + timedelta(hours=1),
@@ -775,10 +941,12 @@ def test_replacement_and_new_lease_are_atomic_with_cleanup(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
     original = get_or_build_delivery_package(
         "replacement-reserve-gap",
-        "b" * 64,
-        groups=[delivery_group()],
+        fingerprint,
+        groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
         now=now,
@@ -793,12 +961,12 @@ def test_replacement_and_new_lease_are_atomic_with_cleanup(
     try:
         package = get_or_build_delivery_package(
             "replacement-reserve-gap",
-            "b" * 64,
-            groups=[delivery_group()],
+            fingerprint,
+            groups=[group],
             photo_reader=read_photo,
             cache_root=tmp_path,
             now=now + timedelta(days=8),
-            package_builder=lambda _groups, _reader: b"replacement-package",
+            package_builder=build_delivery_package,
         )
         assert probe["hook_ran"].is_set()
         assert probe["cleanup_attempted"].is_set()
@@ -806,7 +974,8 @@ def test_replacement_and_new_lease_are_atomic_with_cleanup(
         assert probe["reports"][0]["deleted_packages"] == 0
         assert not probe["cleanup_completed"].is_set()
         assert package.path.is_file()
-        assert package.path.read_bytes() == b"replacement-package"
+        with ZipFile(package.path) as archive:
+            assert archive.testzip() is None
     finally:
         _finish_atomic_cleanup_probe(probe, package)
     assert probe["cleanup_completed"].is_set()
@@ -826,18 +995,20 @@ def test_package_is_reserved_before_build_lock_releases_to_expired_rebuild(
     rebuilt_packages = []
     rebuild_errors = []
     worker = None
+    group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
 
-    def replacement_builder(_groups, _reader) -> bytes:
+    def replacement_builder(groups, reader) -> bytes:
         rebuild_started.set()
-        return b"replacement"
+        return build_delivery_package(groups, reader)
 
     def rebuild() -> None:
         try:
             rebuilt_packages.append(
                 get_or_build_delivery_package(
                     "rebuild-gap",
-                    "b" * 64,
-                    groups=[delivery_group()],
+                    fingerprint,
+                    groups=[group],
                     photo_reader=read_photo,
                     cache_root=tmp_path,
                     now=datetime.now(UTC) + timedelta(days=8),
@@ -866,8 +1037,8 @@ def test_package_is_reserved_before_build_lock_releases_to_expired_rebuild(
     try:
         package = get_or_build_delivery_package(
             "rebuild-gap",
-            "b" * 64,
-            groups=[delivery_group()],
+            fingerprint,
+            groups=[group],
             photo_reader=read_photo,
             cache_root=tmp_path,
         )
@@ -884,15 +1055,17 @@ def test_package_is_reserved_before_build_lock_releases_to_expired_rebuild(
 
     assert rebuild_finished.is_set()
     assert rebuild_errors == []
-    assert rebuilt_packages[0].path.read_bytes() == b"replacement"
+    with ZipFile(rebuilt_packages[0].path) as archive:
+        assert archive.testzip() is None
 
 
 def test_expired_package_replacement_waits_for_active_download(tmp_path: Path) -> None:
     group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
     target = get_or_build_delivery_package(
         "active-download",
-        "a" * 64,
+        fingerprint,
         groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
@@ -904,16 +1077,16 @@ def test_expired_package_replacement_waits_for_active_download(tmp_path: Path) -
     finished = Event()
     rebuild_errors = []
 
-    def rebuilt_package(_groups, _reader) -> bytes:
+    def rebuilt_package(groups, reader) -> bytes:
         builder_started.set()
-        return b"replacement-package"
+        return build_delivery_package(groups, reader)
 
     def rebuild() -> None:
         rebuilt = None
         try:
             rebuilt = get_or_build_delivery_package(
                 "active-download",
-                "a" * 64,
+                fingerprint,
                 groups=[group],
                 photo_reader=read_photo,
                 cache_root=tmp_path,
@@ -939,17 +1112,19 @@ def test_expired_package_replacement_waits_for_active_download(tmp_path: Path) -
         worker.join(5)
         assert not worker.is_alive()
     assert rebuild_errors == []
-    assert target.read_bytes() == b"replacement-package"
+    with ZipFile(target.path) as archive:
+        assert archive.testzip() is None
 
 
 def test_package_lock_registry_is_bounded_after_key_churn(tmp_path: Path) -> None:
     group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
 
     for index in range(40):
         package = get_or_build_delivery_package(
             f"scope-{index}",
-            f"{index:064x}",
+            fingerprint,
             groups=[group],
             photo_reader=read_photo,
             cache_root=tmp_path,
@@ -962,26 +1137,24 @@ def test_package_lock_registry_is_bounded_after_key_churn(tmp_path: Path) -> Non
 
 def test_concurrent_same_key_builders_share_one_package_lock(tmp_path: Path) -> None:
     group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
     started = Event()
     release = Event()
     builds = 0
     paths: list[Path] = []
 
-    def package_builder(_groups, _reader) -> bytes:
+    def package_builder(groups, reader) -> bytes:
         nonlocal builds
         builds += 1
         started.set()
         assert release.wait(5)
-        output = BytesIO()
-        with ZipFile(output, "w") as archive:
-            archive.writestr("delivery.txt", b"one-package")
-        return output.getvalue()
+        return build_delivery_package(groups, reader)
 
     def build() -> None:
         paths.append(
             get_or_build_delivery_package(
                 "same-scope",
-                "f" * 64,
+                fingerprint,
                 groups=[group],
                 photo_reader=read_photo,
                 cache_root=tmp_path,
@@ -1041,14 +1214,18 @@ print(json.dumps(report, sort_keys=True))
 
 def test_package_download_lease_blocks_cleanup_in_another_process(tmp_path: Path) -> None:
     now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    group = delivery_group()
+    fingerprint = delivery_evidence_fingerprint([group])
     package = get_or_build_delivery_package(
         "cross-process-download",
-        "d" * 64,
-        groups=[delivery_group()],
+        fingerprint,
+        groups=[group],
         photo_reader=read_photo,
         cache_root=tmp_path,
         now=now,
     )
+    proof_path = package.path.with_suffix(".zip.integrity.json")
+    assert proof_path.is_file()
 
     first = _cleanup_in_subprocess(tmp_path, now + timedelta(days=8))
     assert first["deleted_packages"] == 0
@@ -1058,6 +1235,7 @@ def test_package_download_lease_blocks_cleanup_in_another_process(tmp_path: Path
     second = _cleanup_in_subprocess(tmp_path, now + timedelta(days=8))
     assert second["deleted_packages"] == 1
     assert not package.path.exists()
+    assert not proof_path.exists()
 
 
 def test_cached_photo_response_holds_cross_process_object_lease_until_send_finishes(

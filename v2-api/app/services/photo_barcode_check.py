@@ -17,6 +17,7 @@ from urllib.parse import urljoin, urlparse
 from app.services.barcode_verification_contract import normalize_legacy_evidence_value
 from app.services.matching import build_long_scan_match_key, build_total_catalog_match_key
 from app.services.photo_storage import (
+    open_validated_remote_image_url,
     parse_oss_image_url,
     sign_oss_server_url,
     static_upload_root,
@@ -1239,9 +1240,13 @@ def _download_photo_content(photo: dict[str, Any]) -> bytes | None:
     if not image_url:
         return None
     is_trusted_oss = _is_trusted_oss_photo(photo)
-    opener = urllib.request.urlopen if is_trusted_oss else _REMOTE_IMAGE_NO_REDIRECT_OPENER.open
     try:
-        with opener(image_url, timeout=8) as response:
+        response_context = (
+            urllib.request.urlopen(image_url, timeout=8)
+            if is_trusted_oss
+            else open_validated_remote_image_url(image_url, timeout=8)
+        )
+        with response_context as response:
             return response.read(8 * 1024 * 1024)
     except HTTPError as exc:
         if not is_trusted_oss and 300 <= exc.code < 400:
@@ -1277,9 +1282,5 @@ def _download_photo_url(photo: dict[str, Any]) -> str:
     for key in ("image_url", "source_url", "url", "preview_url", "delivery_cache_url", "thumbnail_url"):
         value = str(photo.get(key) or "").strip()
         if value.lower().startswith(("http://", "https://")):
-            try:
-                validate_remote_image_url(value)
-            except ValueError:
-                continue
             return value
     return ""

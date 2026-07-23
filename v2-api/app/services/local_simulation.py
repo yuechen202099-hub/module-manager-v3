@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import threading
+import urllib.error
 import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,12 +33,14 @@ from app.services.barcode_verification_contract import (
 from app.services import unmatched_review
 from app.services.photo_storage import (
     active_storage_backend,
+    open_validated_remote_image_url,
     parse_oss_image_url,
     resolve_photo_preview_url,
     save_image_bytes,
     sign_oss_server_url,
     static_upload_root,
     validate_image_content,
+    validate_remote_image_url,
 )
 
 
@@ -115,6 +118,14 @@ CONSTRUCTION_EXCEPTION_CATEGORIES = {
 }
 IMAGE_SRC_RE = re.compile(r"<img\b[^>]*(?:src|data-src)=['\"]([^'\"]+)['\"]", re.IGNORECASE)
 DEFAULT_TEAM_ID = "default-team"
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+_DELIVERY_CACHE_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
 
 
 @dataclass(frozen=True)
@@ -485,6 +496,12 @@ def clear_scan_data() -> dict[str, Any]:
         group["review_note"] = ""
         group["exception_note"] = ""
         group["reviewed_at"] = None
+        invalidate_json_delivery_artifacts(
+            group,
+            actor="system",
+            reason="clear_scan_data",
+            verification_changed=True,
+        )
     state["scan_unmatched"] = []
     state["photo_events"] = []
     state["summary"]["scan_rows"] = 0
@@ -575,6 +592,13 @@ def apply_synced_scan_records(
             group["review_note"] = ""
             group["exception_note"] = ""
             group["reviewed_at"] = None
+            invalidate_json_delivery_artifacts(
+                group,
+                actor="scan-import",
+                reason="scan_photos_changed",
+                verification_changed=True,
+            )
+            schedule_delivery_cache_build(group["id"], reason="scan_photos_changed")
     state["scan_unmatched"] = merge_unmatched_records(state.get("scan_unmatched", []), unmatched)
     state["summary"]["scan_rows"] = sum(group["photo_count"] for group in state["groups"]) + len(unmatched)
     refresh_summary()
@@ -1015,17 +1039,43 @@ def local_photo_candidates(photo: dict[str, Any]) -> list[Path]:
         str(photo.get("object_key") or ""),
     ]
     paths: list[Path] = []
-    root = static_upload_root()
+    root = static_upload_root().resolve()
     for value in values:
-        text = value.strip()
+        text = value.strip().split("?", 1)[0].split("#", 1)[0]
         if not text:
             continue
         if text.startswith("/static/uploads/"):
             text = text.removeprefix("/static/uploads/")
         text = text.lstrip("/").removeprefix("static/uploads/").removeprefix("uploads/")
-        if Path(text).suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        relative = Path(text)
+        if (
+            relative.is_absolute()
+            or relative.drive
+            or ".." in relative.parts
+            or relative.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+        ):
             continue
-        paths.append(root / text)
+        candidate = root / relative
+        cursor = root
+        symlink_found = False
+        for part in relative.parts:
+            cursor = cursor / part
+            try:
+                if cursor.is_symlink():
+                    symlink_found = True
+                    break
+            except OSError:
+                symlink_found = True
+                break
+        if symlink_found:
+            continue
+        try:
+            resolved = candidate.resolve(strict=False)
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if resolved not in paths:
+            paths.append(resolved)
     return paths
 
 
@@ -1218,7 +1268,7 @@ def photo_cache_download_url(photo: dict[str, Any]) -> str:
     storage_key = str(photo.get("storage_key") or "").strip()
     if storage_type == "oss" or image_url.startswith("oss://"):
         _, key = parse_oss_image_url(image_url)
-        return sign_oss_server_url(storage_key or key, settings.oss_preview_process)
+        return sign_oss_server_url(storage_key or key, "")
     return resolve_photo_preview_url(photo)
 
 
@@ -1227,10 +1277,15 @@ def download_delivery_photo_content(photo: dict[str, Any]) -> tuple[bytes, str, 
         if path.exists() and path.is_file():
             content = path.read_bytes()
             if content:
-                return content, Path(path).suffix.lower() or ".jpg", mimetypes.guess_type(path.name)[0] or "image/jpeg"
+                content_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+                validate_image_content(content, content_type, str(path))
+                return content, Path(path).suffix.lower() or ".jpg", content_type
     url = photo_cache_download_url(photo)
     if not url or url.startswith("/"):
         raise ValueError("Photo has no downloadable delivery cache source")
+    storage_type = str(photo.get("storage_type") or "").strip()
+    image_url = str(photo.get("image_url") or "").strip()
+    trusted_oss = storage_type == "oss" or image_url.startswith("oss://")
     request = urllib.request.Request(
         url,
         headers={
@@ -1238,10 +1293,27 @@ def download_delivery_photo_content(photo: dict[str, Any]) -> tuple[bytes, str, 
             "Accept": "image/*,*/*;q=0.8",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        content_type = response.headers.get("Content-Type", "") or "image/jpeg"
-        expected_length = response.headers.get("Content-Length", "")
-        content = response.read(OSS_SYNC_MAX_BYTES + 1)
+    try:
+        response_context = (
+            urllib.request.urlopen(request, timeout=30)
+            if trusted_oss
+            else open_validated_remote_image_url(
+                url,
+                headers=dict(request.header_items()),
+                timeout=30,
+            )
+        )
+        with response_context as response:
+            content_type = response.headers.get("Content-Type", "") or "image/jpeg"
+            expected_length = response.headers.get("Content-Length", "")
+            content = response.read(OSS_SYNC_MAX_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        if not trusted_oss and 300 <= exc.code < 400:
+            location = exc.headers.get("Location") or ""
+            if location:
+                validate_remote_image_url(urljoin(url, location))
+            raise ValueError("Delivery cache redirects are not allowed") from exc
+        raise
     if len(content) > OSS_SYNC_MAX_BYTES:
         raise ValueError("Photo exceeds delivery cache max size")
     if not content:
@@ -1290,6 +1362,64 @@ def mark_delivery_cache_stale(group: dict[str, Any], reason: str = "") -> None:
     for photo in group.get("photos", []):
         if photo.get("delivery_cache_path"):
             photo["delivery_cache_status"] = "stale"
+
+
+def invalidate_delivery_package_jobs_for_group(
+    group: dict[str, Any],
+    *,
+    actor: str,
+    reason: str,
+) -> None:
+    if not group:
+        return
+    now = now_iso()
+    group_id = str(group.get("id") or "").strip()
+    group["delivery_package_invalidation_epoch"] = int(
+        group.get("delivery_package_invalidation_epoch") or 0
+    ) + 1
+    group["delivery_package_invalidated_at"] = now
+    group["delivery_package_invalidated_by"] = actor
+    for job in state_for_team().setdefault("delivery_package_jobs", []):
+        if not isinstance(job, dict):
+            continue
+        group_ids = {str(item).strip() for item in job.get("group_ids", []) if str(item).strip()}
+        if group_id not in group_ids:
+            continue
+        job.update(
+            {
+                "status": "stale",
+                "lease_owner": None,
+                "lease_token": None,
+                "lease_expires_at": None,
+                "last_error": reason,
+                "completed_at": None,
+                "updated_at": now,
+            }
+        )
+
+
+def invalidate_json_delivery_artifacts(
+    group: dict[str, Any],
+    *,
+    actor: str,
+    reason: str,
+    verification_changed: bool,
+) -> None:
+    if verification_changed:
+        from app.services.state_repository import invalidate_verification_for_group
+
+        invalidate_verification_for_group(None, group, actor, reason)
+    else:
+        from app.services.delivery_cache import sync_json_delivery_cache_job_for_group
+
+        mark_delivery_cache_stale(group, reason)
+        sync_json_delivery_cache_job_for_group(
+            group,
+            team_id=current_team_id(),
+            actor=actor,
+            reason=reason,
+        )
+    invalidate_delivery_package_jobs_for_group(group, actor=actor, reason=reason)
 
 
 def build_delivery_cache_for_group(group_id: str, force: bool = False) -> dict[str, Any]:
@@ -2256,9 +2386,12 @@ def _finalize_unmatched_match_in_state(
         _reset_group_after_migrated_evidence(group)
     _apply_formal_group_barcode_check(group)
     if added or merged:
-        from app.services.state_repository import invalidate_verification_for_group
-
-        invalidate_verification_for_group(None, group, actor, "photo_restored_or_replaced")
+        invalidate_json_delivery_artifacts(
+            group,
+            actor=actor,
+            reason="photo_restored_or_replaced",
+            verification_changed=True,
+        )
         schedule_delivery_cache_build(group["id"], reason="photo_restored_or_replaced")
 
     result = {
@@ -3037,6 +3170,15 @@ def create_group_from_unmatched_record(
         existing_group["task_id"] = task["id"]
         if payload.get("address"):
             existing_group["address"] = str(payload.get("address") or "")
+        from app.services.state_repository import invalidate_verification_for_group
+
+        invalidate_verification_for_group(None, existing_group, actor, "unmatched_evidence_attached")
+        invalidate_delivery_package_jobs_for_group(
+            existing_group,
+            actor=actor,
+            reason="unmatched_evidence_attached",
+        )
+        schedule_delivery_cache_build(existing_group["id"], reason="unmatched_evidence_attached")
         delete_unmatched_record(
             unmatched_id,
             actor,
@@ -3145,6 +3287,11 @@ def update_group_terminal(group_id: str, terminal: str, actor: str) -> dict[str,
         from app.services.state_repository import invalidate_verification_for_group
 
         invalidate_verification_for_group(None, group, actor, "group_terminal_changed")
+        invalidate_delivery_package_jobs_for_group(
+            group,
+            actor=actor,
+            reason="group_terminal_changed",
+        )
         schedule_delivery_cache_build(group_id, reason="group_terminal_changed")
     append_audit_event(
         "update_group_terminal",
@@ -3214,9 +3361,9 @@ def update_group_metadata(
     changed_fields = sorted(
         field for field in allowed_group_fields.union(photo_field_map) if field in updates and previous.get(field) != group.get(field)
     )
-    cache_invalidated = False
+    cache_invalidation_reason = ""
     if changed_fields:
-        if set(changed_fields).intersection(
+        identity_changed = bool(set(changed_fields).intersection(
             {
                 "meter_no",
                 "terminal",
@@ -3225,11 +3372,17 @@ def update_group_metadata(
                 "construction_collector",
                 "construction_module_asset_no",
             }
-        ):
+        ))
+        if identity_changed:
             from app.services.state_repository import invalidate_verification_for_group
 
             invalidate_verification_for_group(None, group, actor, "group_identity_changed")
-            cache_invalidated = True
+        cache_invalidation_reason = "group_identity_changed" if identity_changed else "group_metadata_changed"
+        invalidate_delivery_package_jobs_for_group(
+            group,
+            actor=actor,
+            reason=cache_invalidation_reason,
+        )
         append_audit_event(
             audit_action,
             actor,
@@ -3241,8 +3394,8 @@ def update_group_metadata(
             },
         )
     refresh_summary()
-    if cache_invalidated:
-        schedule_delivery_cache_build(group_id, reason="group_identity_changed")
+    if cache_invalidation_reason:
+        schedule_delivery_cache_build(group_id, reason=cache_invalidation_reason)
     return {"group": group, "changed_fields": changed_fields}
 
 
@@ -3258,10 +3411,18 @@ def add_photo_urls_to_group(
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
+    assert_not_placeholder_construction_group(
+        group_id=group.get("id") or group_id,
+        terminal=group.get("terminal"),
+        meter_no=group.get("meter_no"),
+        meter_match_key=group.get("meter_match_key"),
+        address=group.get("address"),
+    )
     expanded_urls = expand_photo_urls(photo_urls)
     existing = {make_photo_unique_key(photo) for photo in group.get("photos", []) + group.get("deleted_photos", [])}
     added = 0
     skipped_duplicates = 0
+    retained_photo_urls: list[str] = []
     for url in expanded_urls:
         metadata = (photo_metadata or {}).get(url, {})
         source_url = normalized_photo_source_url(url)
@@ -3301,6 +3462,7 @@ def add_photo_urls_to_group(
         group["photos"].append(photo)
         existing.add(key)
         added += 1
+        retained_photo_urls.append(url)
     group["photo_count"] = len(group["photos"])
     if group["status"] in DONE_STATUSES or group["photo_count"] < 4:
         group["status"] = "incomplete"
@@ -3312,11 +3474,21 @@ def add_photo_urls_to_group(
         from app.services.state_repository import invalidate_verification_for_group
 
         invalidate_verification_for_group(None, group, actor, "photo_added")
+        invalidate_delivery_package_jobs_for_group(
+            group,
+            actor=actor,
+            reason="photo_added",
+        )
         schedule_delivery_cache_build(group_id, reason="photo_added")
     mark_delivery_cache_stale(group, "manual photos changed")
     append_audit_event("add_group_photos", actor, {"group_id": group_id, "added": added, "skipped_duplicates": skipped_duplicates})
     refresh_summary()
-    return {"group": group, "added": added, "skipped_duplicates": skipped_duplicates}
+    return {
+        "group": group,
+        "added": added,
+        "skipped_duplicates": skipped_duplicates,
+        "retained_photo_urls": retained_photo_urls,
+    }
 
 
 def append_audit_event(action: str, actor: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -6440,6 +6612,11 @@ def upload_construction_group_batch(
             actor,
             "construction_photos_changed" if added else "construction_identity_changed",
         )
+        invalidate_delivery_package_jobs_for_group(
+            group,
+            actor=actor,
+            reason="construction_photos_changed" if added else "construction_identity_changed",
+        )
     mark_delivery_cache_stale(group, "construction upload changed photos")
     append_audit_event(
         "construction_upload_batch",
@@ -6515,6 +6692,11 @@ def review_group(
     )
     if status != "approved":
         mark_delivery_cache_stale(group, f"review status changed to {status}")
+        invalidate_delivery_package_jobs_for_group(
+            group,
+            actor=reviewer,
+            reason=f"review_{status}",
+        )
     refresh_summary()
     if status == "approved":
         schedule_delivery_cache_build(group_id, current_team_id())
@@ -6715,6 +6897,11 @@ def submit_construction_exception_order(
     meter_no = str(updates.get("meter_no") or updates.get("barcode") or "").strip()
     collector = str(updates.get("collector") or "").strip()
     module_asset_no = str(updates.get("module_asset_no") or updates.get("asset_no") or "").strip()
+    previous_identity = (
+        str(group.get("meter_no") or "").strip(),
+        str(group.get("construction_collector") or "").strip(),
+        str(group.get("construction_module_asset_no") or "").strip(),
+    )
     if meter_no:
         group["meter_no"] = meter_no
     if collector:
@@ -6738,7 +6925,17 @@ def submit_construction_exception_order(
     group["exception_note"] = note.strip()
     group["has_archive_blocker"] = False
     group["reviewed_at"] = None
-    mark_delivery_cache_stale(group, "construction exception order submitted")
+    next_identity = (
+        str(group.get("meter_no") or "").strip(),
+        str(group.get("construction_collector") or "").strip(),
+        str(group.get("construction_module_asset_no") or "").strip(),
+    )
+    invalidate_json_delivery_artifacts(
+        group,
+        actor=actor,
+        reason="construction_exception_order_submitted",
+        verification_changed=next_identity != previous_identity,
+    )
     append_audit_event(
         "construction_exception_order_submit",
         actor,
@@ -6799,6 +6996,11 @@ def reset_group_to_unconstructed(group_id: str, actor: str, reason: str = "", fo
     from app.services.state_repository import invalidate_verification_for_group
 
     invalidate_verification_for_group(None, group, actor, "reset_to_unconstructed")
+    invalidate_delivery_package_jobs_for_group(
+        group,
+        actor=actor,
+        reason="reset_to_unconstructed",
+    )
     mark_delivery_cache_stale(group, "reset to unconstructed")
     append_audit_event(
         "group_reset_to_unconstructed",
@@ -6834,6 +7036,11 @@ def reset_group_to_unreviewed(group_id: str, actor: str, reason: str = "", force
     from app.services.state_repository import invalidate_verification_for_group
 
     invalidate_verification_for_group(None, group, actor, "reset_to_unreviewed")
+    invalidate_delivery_package_jobs_for_group(
+        group,
+        actor=actor,
+        reason="reset_to_unreviewed",
+    )
     mark_delivery_cache_stale(group, "reset to unreviewed")
     append_audit_event(
         "admin_group_reset_unreviewed",
@@ -6873,7 +7080,14 @@ def bulk_archive_groups(group_ids: list[str], actor: str, reason: str = "") -> d
             photo.update(photo_barcode_check.ensure_photo_barcode_check(photo, group))
         update_group_archive_status(group, actor)
         group["bulk_archive_reason"] = reason.strip()
-        mark_delivery_cache_stale(group, "admin bulk archive")
+        invalidate_json_delivery_artifacts(
+            group,
+            actor=actor,
+            reason="admin_bulk_archive",
+            verification_changed=True,
+        )
+        if group.get("status") == "approved":
+            schedule_delivery_cache_build(group["id"], reason="admin_bulk_archive")
         archived_groups.append(group)
     append_audit_event(
         "admin_groups_bulk_archive",
@@ -6919,7 +7133,12 @@ def return_group_to_exception_order(
     group["exception_reasons"] = reasons
     group["has_archive_blocker"] = True
     group["reviewed_at"] = None
-    mark_delivery_cache_stale(group, "returned to exception order")
+    invalidate_json_delivery_artifacts(
+        group,
+        actor=actor,
+        reason="returned_to_exception_order",
+        verification_changed=False,
+    )
     order = create_construction_exception_order(group, actor=actor, category=label, note=note)
     group["exception_work_order_id"] = order["id"]
     append_audit_event(
@@ -6942,6 +7161,11 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
     photo = next((item for item in group["photos"] if item["id"] == photo_id), None)
     if photo is None:
         raise KeyError(photo_id)
+    previous_archive = (
+        str(photo.get("archive_status") or ""),
+        str(photo.get("archive_filename") or ""),
+        str(photo.get("archived_at") or ""),
+    )
     if photo.get("download_status") != "downloaded":
         has_previewable_source = bool(
             str(photo.get("image_url") or "").strip()
@@ -6960,6 +7184,11 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
     photo["archive_filename"] = build_archive_filename(photo["category_label"], photo.get("image_url", ""))
     photo["archived_at"] = now_iso()
     photo.update(photo_barcode_check.check_photo_barcode(photo, group))
+    archive_changed = previous_archive != (
+        str(photo.get("archive_status") or ""),
+        str(photo.get("archive_filename") or ""),
+        str(photo.get("archived_at") or ""),
+    )
     state = get_state()
     state["photo_events"].append(
         {
@@ -6983,13 +7212,18 @@ def classify_photo(group_id: str, photo_id: str, category: str, reviewer: str) -
                 "invalidation_reason": "photo_category_changed",
             },
         )
-        from app.services.state_repository import invalidate_verification_for_group
-
-        invalidate_verification_for_group(None, group, reviewer, "photo_category_changed")
+    artifact_change_reason = "photo_category_changed" if previous != category else "photo_archive_changed"
+    if archive_changed:
+        invalidate_json_delivery_artifacts(
+            group,
+            actor=reviewer,
+            reason=artifact_change_reason,
+            verification_changed=previous != category,
+        )
     update_group_archive_status(group, reviewer)
     refresh_after_photo_classification(before_group, group, previous, category)
-    if previous != category:
-        schedule_delivery_cache_build(group_id, reason="photo_category_changed")
+    if archive_changed:
+        schedule_delivery_cache_build(group_id, reason=artifact_change_reason)
     return photo
 
 
@@ -7002,9 +7236,13 @@ def rescan_photo_barcode(group_id: str, photo_id: str, reviewer: str, category: 
     if photo is None:
         raise KeyError(photo_id)
     now = now_iso()
-    from app.services.state_repository import invalidate_verification_for_group
-
-    verification = invalidate_verification_for_group(None, group, reviewer, "group_barcode_rescan_requested")
+    invalidate_json_delivery_artifacts(
+        group,
+        actor=reviewer,
+        reason="group_barcode_rescan_requested",
+        verification_changed=True,
+    )
+    verification = dict(group.get("barcode_verification") or {})
     photo["barcode_rescan_requested_by"] = reviewer
     photo["barcode_rescan_requested_at"] = now
     state = get_state()
@@ -7068,6 +7306,12 @@ def confirm_group_barcode_manually(
     ):
         raise ValueError("人工确认照片证据无效")
     meter_match_key = build_total_catalog_match_key(formal_values["meter_no"])
+    previous_identity = (
+        str(group.get("meter_no") or ""),
+        str(group.get("module_asset_no") or group.get("construction_module_asset_no") or ""),
+        str(group.get("collector") or group.get("construction_collector") or ""),
+        str(group.get("meter_match_key") or ""),
+    )
     final_group = copy.deepcopy(group)
     final_group.update(formal_values)
     final_group["meter_match_key"] = meter_match_key
@@ -7134,6 +7378,19 @@ def confirm_group_barcode_manually(
     )
     verification = mark_auto_archive_pending(verification)
     group["barcode_verification"] = verification
+    identity_changed = previous_identity != (
+        formal_values["meter_no"],
+        formal_values["module_asset_no"],
+        formal_values["collector"],
+        meter_match_key,
+    )
+    if identity_changed:
+        invalidate_json_delivery_artifacts(
+            group,
+            actor=actor,
+            reason="manual_barcode_identity_changed",
+            verification_changed=False,
+        )
     after = _manual_confirmation_audit_snapshot(group, verification)
     after.update({"actor": actor, "reason": reason, "photo_ids": selected_ids})
     append_audit_event(
@@ -7151,6 +7408,8 @@ def confirm_group_barcode_manually(
         },
     )
     refresh_summary()
+    if identity_changed:
+        schedule_delivery_cache_build(group_id, reason="manual_barcode_identity_changed")
     return {"group": group_target_summary(group, include_photos=True)}
 
 
@@ -7274,6 +7533,11 @@ def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str,
     from app.services.state_repository import invalidate_verification_for_group
 
     invalidate_verification_for_group(None, group, reviewer, "photo_deleted")
+    invalidate_delivery_package_jobs_for_group(
+        group,
+        actor=reviewer,
+        reason="photo_deleted",
+    )
     state = get_state()
     state["photo_events"].append(
         {

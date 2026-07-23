@@ -9,7 +9,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, NoReturn
+from typing import Any, Callable, Mapping, NoReturn
 from uuid import UUID, uuid4
 
 from sqlalchemy import String, Text, and_, case, cast, func, literal, or_, select
@@ -1641,6 +1641,9 @@ def _group_payload(
         "delivery_cache_built_at",
         "delivery_cache_error",
         "delivery_cache_retryable",
+        "delivery_package_invalidation_epoch",
+        "delivery_package_invalidated_at",
+        "delivery_package_invalidated_by",
     ):
         if key in raw and key not in payload:
             payload[key] = raw[key]
@@ -2718,6 +2721,24 @@ class StateRepository(ABC):
 
 
 class JsonStateRepository(StateRepository):
+    def _authoritative_mutation(self, operation: Callable[[], Any]) -> Any:
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            result = operation()
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction and transaction is not None and not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        return result
+
     def summary(self) -> dict[str, Any]:
         state = local_simulation.get_state()
         return {"summary": state["summary"], "paths": state["paths"]}
@@ -2770,7 +2791,7 @@ class JsonStateRepository(StateRepository):
         return {"summary": state["summary"], "paths": state["paths"]}
 
     def clear_scan_data(self) -> dict[str, Any]:
-        state = local_simulation.clear_scan_data()
+        state = self._authoritative_mutation(local_simulation.clear_scan_data)
         return {"summary": state["summary"], "paths": state["paths"]}
 
     def sync_photos_to_oss(self, *, team_id: str = "", progress_callback=None) -> dict[str, Any]:
@@ -3255,11 +3276,13 @@ class JsonStateRepository(StateRepository):
         updates: dict[str, Any] | None = None,
         note: str = "",
     ) -> dict[str, Any]:
-        return local_simulation.submit_construction_exception_order(
-            order_id,
-            actor=actor,
-            updates=updates,
-            note=note,
+        return self._authoritative_mutation(
+            lambda: local_simulation.submit_construction_exception_order(
+                order_id,
+                actor=actor,
+                updates=updates,
+                note=note,
+            )
         )
 
     def assign_construction_exception_order(
@@ -3665,7 +3688,14 @@ class JsonStateRepository(StateRepository):
         reason: str = "",
         force: bool = False,
     ) -> dict[str, Any]:
-        return local_simulation.reset_group_to_unconstructed(group_id, actor=actor, reason=reason, force=force)
+        return self._authoritative_mutation(
+            lambda: local_simulation.reset_group_to_unconstructed(
+                group_id,
+                actor=actor,
+                reason=reason,
+                force=force,
+            )
+        )
 
     def reset_group_to_unreviewed(
         self,
@@ -3675,10 +3705,19 @@ class JsonStateRepository(StateRepository):
         reason: str = "",
         force: bool = False,
     ) -> dict[str, Any]:
-        return local_simulation.reset_group_to_unreviewed(group_id, actor=actor, reason=reason, force=force)
+        return self._authoritative_mutation(
+            lambda: local_simulation.reset_group_to_unreviewed(
+                group_id,
+                actor=actor,
+                reason=reason,
+                force=force,
+            )
+        )
 
     def bulk_archive_groups(self, group_ids: list[str], *, actor: str, reason: str = "") -> dict[str, Any]:
-        return local_simulation.bulk_archive_groups(group_ids, actor=actor, reason=reason)
+        return self._authoritative_mutation(
+            lambda: local_simulation.bulk_archive_groups(group_ids, actor=actor, reason=reason)
+        )
 
     def return_group_to_exception_order(
         self,
@@ -3689,12 +3728,14 @@ class JsonStateRepository(StateRepository):
         note: str,
         force: bool = False,
     ) -> dict[str, Any]:
-        return local_simulation.return_group_to_exception_order(
-            group_id,
-            actor=actor,
-            category=category,
-            note=note,
-            force=force,
+        return self._authoritative_mutation(
+            lambda: local_simulation.return_group_to_exception_order(
+                group_id,
+                actor=actor,
+                category=category,
+                note=note,
+                force=force,
+            )
         )
 
 
@@ -4637,6 +4678,8 @@ class PostgresStateRepository(StateRepository):
         return self.summary()
 
     def clear_scan_data(self) -> dict[str, Any]:
+        from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
         team_id = local_simulation.current_team_id()
         now = datetime.now(UTC)
         with self._session() as session:
@@ -4663,6 +4706,18 @@ class PostgresStateRepository(StateRepository):
                     {"photo_count": 0, "status": "pending", "reviewer": "", "review_note": "", "exception_note": ""}
                 )
                 group.raw_data = raw_data
+                invalidate_verification_for_group(
+                    session,
+                    group,
+                    actor="system",
+                    reason="clear_scan_data",
+                )
+                invalidate_postgres_delivery_cache_for_group_change(
+                    session,
+                    group,
+                    actor="system",
+                    reason="clear_scan_data",
+                )
             for record in session.scalars(select(UnmatchedRecord).where(UnmatchedRecord.team_id == team_id)).all():
                 record.status = "cleared"
             session.commit()
@@ -6291,7 +6346,7 @@ class PostgresStateRepository(StateRepository):
         audit_action: str = "update_group_metadata",
     ) -> dict[str, Any]:
         updates = local_simulation.validate_formal_identity_updates(updates)
-        requeue_delivery_cache = False
+        requeue_delivery_cache_reason = ""
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             before = _group_payload(session, group, include_photos=False)
@@ -6402,7 +6457,7 @@ class PostgresStateRepository(StateRepository):
                 field for field in comparable_fields if field in updates and str(before.get(field) or "") != str(after.get(field) or "")
             )
             if changed_fields:
-                if set(changed_fields).intersection(
+                identity_changed = bool(set(changed_fields).intersection(
                     {
                         "meter_no",
                         "terminal",
@@ -6411,14 +6466,27 @@ class PostgresStateRepository(StateRepository):
                         "construction_collector",
                         "construction_module_asset_no",
                     }
-                ):
+                ))
+                if identity_changed:
                     invalidate_verification_for_group(
                         session,
                         group,
                         actor=actor,
                         reason="group_identity_changed",
                     )
-                    requeue_delivery_cache = True
+                requeue_delivery_cache_reason = (
+                    "group_identity_changed" if identity_changed else "group_metadata_changed"
+                )
+                from app.services.delivery_cache import (
+                    invalidate_postgres_delivery_cache_for_group_change,
+                )
+
+                invalidate_postgres_delivery_cache_for_group_change(
+                    session,
+                    group,
+                    actor=actor,
+                    reason=requeue_delivery_cache_reason,
+                )
                 _stage_transactional_audit(
                     session,
                     team_id=local_simulation.current_team_id(),
@@ -6433,11 +6501,11 @@ class PostgresStateRepository(StateRepository):
             session.commit()
             session.refresh(group)
             result = {"group": _group_payload(session, group), "changed_fields": changed_fields}
-        if requeue_delivery_cache:
+        if requeue_delivery_cache_reason:
             self._enqueue_delivery_cache_after_commit(
                 group_id,
                 actor=actor,
-                reason="group_identity_changed",
+                reason=requeue_delivery_cache_reason,
                 require_eligible=True,
             )
         return result
@@ -7021,6 +7089,20 @@ class PostgresStateRepository(StateRepository):
             group.raw_data = raw
             order.status = ExceptionStatus.RESOLVED
             order.resolved_at = now
+            invalidate_verification_for_group(
+                session,
+                group,
+                actor=actor,
+                reason="construction_exception_submitted",
+            )
+            from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor=actor,
+                reason="construction_exception_submitted",
+            )
             session.commit()
             session.refresh(order)
             session.refresh(group)
@@ -7221,9 +7303,11 @@ class PostgresStateRepository(StateRepository):
             raw_data.update({"status": status, "reviewer": reviewer, "review_note": note, "exception_note": exception_note})
             group.raw_data = raw_data
             if status != "approved":
-                from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_review
+                from app.services.delivery_cache import (
+                    invalidate_postgres_delivery_cache_for_group_change,
+                )
 
-                invalidate_postgres_delivery_cache_for_review(
+                invalidate_postgres_delivery_cache_for_group_change(
                     session,
                     group,
                     actor=reviewer,
@@ -7243,7 +7327,7 @@ class PostgresStateRepository(StateRepository):
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
         if category not in local_simulation.PHOTO_CATEGORIES:
             raise ValueError(f"Unsupported photo category: {category}")
-        category_changed = False
+        artifact_change_reason = ""
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, reviewer)
@@ -7253,11 +7337,16 @@ class PostgresStateRepository(StateRepository):
                     Photo.group_id == group.id,
                     Photo.legacy_id == photo_id,
                     Photo.is_active.is_(True),
-                )
+                ).with_for_update()
             )
             if photo is None:
                 raise KeyError(photo_id)
             previous_category = str(photo.category or "unclassified")
+            previous_archive = (
+                str(photo.archive_status or ""),
+                str(photo.archive_filename or ""),
+                photo.archived_at.isoformat() if photo.archived_at else "",
+            )
             category_label = local_simulation.PHOTO_CATEGORIES.get(
                 category,
                 local_simulation.PHOTO_CATEGORIES["unclassified"],
@@ -7293,8 +7382,12 @@ class PostgresStateRepository(StateRepository):
                 )
             )
             photo.raw_data = raw_data
+            archive_changed = previous_archive != (
+                str(photo.archive_status or ""),
+                str(photo.archive_filename or ""),
+                photo.archived_at.isoformat() if photo.archived_at else "",
+            )
             if previous_category != category:
-                category_changed = True
                 _stage_transactional_audit(
                     session,
                     team_id=group.team_id,
@@ -7318,14 +7411,26 @@ class PostgresStateRepository(StateRepository):
                     actor=reviewer,
                     reason="photo_category_changed",
                 )
+            if archive_changed:
+                artifact_change_reason = (
+                    "photo_category_changed" if previous_category != category else "photo_archive_changed"
+                )
+                from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
+                invalidate_postgres_delivery_cache_for_group_change(
+                    session,
+                    group,
+                    actor=reviewer,
+                    reason=artifact_change_reason,
+                )
             session.commit()
             session.refresh(photo)
             result = _photo_payload(photo)
-        if category_changed:
+        if artifact_change_reason:
             self._enqueue_delivery_cache_after_commit(
                 group_id,
                 actor=reviewer,
-                reason="photo_category_changed",
+                reason=artifact_change_reason,
                 require_eligible=True,
             )
         return result
@@ -7360,6 +7465,14 @@ class PostgresStateRepository(StateRepository):
             )
             photo.raw_data = raw_data
             verification = invalidate_verification_for_group(
+                session,
+                group,
+                actor=reviewer,
+                reason="group_barcode_rescan_requested",
+            )
+            from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
+            invalidate_postgres_delivery_cache_for_group_change(
                 session,
                 group,
                 actor=reviewer,
@@ -7528,6 +7641,7 @@ class PostgresStateRepository(StateRepository):
     ) -> dict[str, Any]:
         from app.services.group_barcode_verification import evaluate_group_eligibility
 
+        identity_changed = False
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, actor)
@@ -7560,6 +7674,12 @@ class PostgresStateRepository(StateRepository):
                 raise ValueError("人工确认照片证据无效")
             now = datetime.now(UTC)
             raw_data = dict(group.raw_data or {})
+            previous_identity = (
+                str(group.display_meter_no or ""),
+                str(raw_data.get("module_asset_no") or raw_data.get("construction_module_asset_no") or ""),
+                str(raw_data.get("collector") or raw_data.get("construction_collector") or ""),
+                str(group.meter_match_key or raw_data.get("meter_match_key") or ""),
+            )
             verification = session.scalar(
                 select(GroupBarcodeVerification)
                 .where(
@@ -7687,6 +7807,21 @@ class PostgresStateRepository(StateRepository):
             }
             raw_data["barcode_verification"] = next_verification
             group.raw_data = raw_data
+            identity_changed = previous_identity != (
+                formal_values["meter_no"],
+                formal_values["module_asset_no"],
+                formal_values["collector"],
+                build_total_catalog_match_key(formal_values["meter_no"]),
+            )
+            if identity_changed:
+                from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
+                invalidate_postgres_delivery_cache_for_group_change(
+                    session,
+                    group,
+                    actor=actor,
+                    reason="manual_barcode_identity_changed",
+                )
             after_data = local_simulation._manual_confirmation_audit_snapshot(
                 {**raw_data, "meter_no": formal_values["meter_no"]},
                 next_verification,
@@ -7715,7 +7850,15 @@ class PostgresStateRepository(StateRepository):
             )
             session.commit()
             session.refresh(group)
-            return {"group": _group_target_summary(_group_payload(session, group, include_photos=True), include_photos=True)}
+            result = {"group": _group_target_summary(_group_payload(session, group, include_photos=True), include_photos=True)}
+        if identity_changed:
+            self._enqueue_delivery_cache_after_commit(
+                group_id,
+                actor=actor,
+                reason="manual_barcode_identity_changed",
+                require_eligible=True,
+            )
+        return result
 
     def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
         with self._session() as session:
@@ -7755,6 +7898,16 @@ class PostgresStateRepository(StateRepository):
             group.raw_data = raw_data
             _apply_photo_quality_exception_status(session, group, exclude_photo_id=photo.id)
             invalidate_verification_for_group(session, group, actor=reviewer, reason="photo_deleted")
+            from app.services.delivery_cache import (
+                invalidate_postgres_delivery_cache_for_group_change,
+            )
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor=reviewer,
+                reason="photo_deleted",
+            )
             session.commit()
             session.refresh(group)
             result = {"group": _group_payload(session, group), "deleted_photo": deleted_payload}
@@ -8093,18 +8246,32 @@ class PostgresStateRepository(StateRepository):
     def update_group_terminal(self, group_id: str, *, terminal: str, actor: str) -> dict[str, Any]:
         terminal_value = local_simulation.validate_real_formal_identity_value(terminal, "terminal")
         team_id = local_simulation.current_team_id()
+        terminal_changed = False
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
+            previous_terminal = str(group.terminal or "")
             task = self._ensure_task_for_terminal(session, team_id, terminal_value)
             raw = dict(group.raw_data or {})
-            raw["previous_terminal"] = group.terminal or ""
+            raw["previous_terminal"] = previous_terminal
             raw["stage_terminal"] = terminal_value
             raw["terminal_updated_by"] = actor
             group.raw_data = raw
             group.terminal = terminal_value
             group.legacy_task_id = task.legacy_id
             group.task_id = task.id
-            invalidate_verification_for_group(session, group, actor=actor, reason="group_terminal_changed")
+            terminal_changed = previous_terminal != terminal_value
+            if terminal_changed:
+                invalidate_verification_for_group(session, group, actor=actor, reason="group_terminal_changed")
+                from app.services.delivery_cache import (
+                    invalidate_postgres_delivery_cache_for_group_change,
+                )
+
+                invalidate_postgres_delivery_cache_for_group_change(
+                    session,
+                    group,
+                    actor=actor,
+                    reason="group_terminal_changed",
+                )
             session.commit()
             session.refresh(group)
             session.refresh(task)
@@ -8112,12 +8279,13 @@ class PostgresStateRepository(StateRepository):
                 "group": _group_payload(session, group),
                 "task": _construction_task_payload(task, self._task_payload_stats(session, task)),
             }
-        self._enqueue_delivery_cache_after_commit(
-            group_id,
-            actor=actor,
-            reason="group_terminal_changed",
-            require_eligible=True,
-        )
+        if terminal_changed:
+            self._enqueue_delivery_cache_after_commit(
+                group_id,
+                actor=actor,
+                reason="group_terminal_changed",
+                require_eligible=True,
+            )
         return result
 
     def save_exception_note(self, group_id: str, *, reviewer: str, note: str) -> dict[str, Any]:
@@ -8174,6 +8342,7 @@ class PostgresStateRepository(StateRepository):
         merged_duplicates = 0
         reactivated_duplicates = 0
         skipped_duplicates = 0
+        retained_photo_urls: list[str] = []
         active_count = session.scalar(
             select(func.count(Photo.id)).where(
                 Photo.team_id == group.team_id,
@@ -8284,6 +8453,7 @@ class PostgresStateRepository(StateRepository):
             if storage_type and storage_key:
                 register_duplicate(existing_by_storage, (storage_type, storage_key), photo)
             added += 1
+            retained_photo_urls.append(image_url)
         if source == "unmatched-review-finalize" and (added or merged_duplicates):
             group.photo_count = int(active_count)
             _reset_group_after_photo_evidence_change(session, group)
@@ -8307,6 +8477,16 @@ class PostgresStateRepository(StateRepository):
                 "unmatched-review-finalize": "photo_restored_or_replaced",
             }.get(source, "photo_added")
             invalidate_verification_for_group(session, group, actor=actor, reason=reason)
+            from app.services.delivery_cache import (
+                invalidate_postgres_delivery_cache_for_group_change,
+            )
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor=actor,
+                reason=reason,
+            )
         result = {
             "added": added,
             "skipped_duplicates": skipped_duplicates,
@@ -8314,6 +8494,8 @@ class PostgresStateRepository(StateRepository):
         }
         if reactivated_duplicates:
             result["reactivated_duplicates"] = reactivated_duplicates
+        if source == "manual-photo-import":
+            result["retained_photo_urls"] = retained_photo_urls
         return result
 
     def add_photo_urls_to_group(
@@ -8329,6 +8511,13 @@ class PostgresStateRepository(StateRepository):
     ) -> dict[str, Any]:
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
+            local_simulation.assert_not_placeholder_construction_group(
+                group_id=group.legacy_id or str(group.id),
+                terminal=group.terminal,
+                meter_no=group.display_meter_no,
+                meter_match_key=group.meter_match_key or "",
+                address=group.installation_address,
+            )
             photo_items = []
             for url in photo_urls:
                 metadata = (photo_metadata or {}).get(url, {})
@@ -8343,9 +8532,10 @@ class PostgresStateRepository(StateRepository):
                 creator=creator,
                 source="manual-photo-import",
             )
+            session.flush()
+            response = {"group": _group_payload(session, group), **result}
             session.commit()
-            session.refresh(group)
-            return {"group": _group_payload(session, group), **result}
+            return response
 
     def upload_construction_group_batch(
         self,
@@ -8414,6 +8604,16 @@ class PostgresStateRepository(StateRepository):
             )
             if identity_changed and not evidence_changed:
                 invalidate_verification_for_group(
+                    session,
+                    group,
+                    actor=actor,
+                    reason="construction_identity_changed",
+                )
+                from app.services.delivery_cache import (
+                    invalidate_postgres_delivery_cache_for_group_change,
+                )
+
+                invalidate_postgres_delivery_cache_for_group_change(
                     session,
                     group,
                     actor=actor,
@@ -8723,6 +8923,16 @@ class PostgresStateRepository(StateRepository):
             group.has_archive_blocker = False
             group.reviewed_at = None
             invalidate_verification_for_group(session, group, actor=actor, reason="reset_to_unconstructed")
+            from app.services.delivery_cache import (
+                invalidate_postgres_delivery_cache_for_group_change,
+            )
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor=actor,
+                reason="reset_to_unconstructed",
+            )
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),
@@ -8786,6 +8996,16 @@ class PostgresStateRepository(StateRepository):
             group.has_archive_blocker = False
             group.reviewed_at = None
             invalidate_verification_for_group(session, group, actor=actor, reason="reset_to_unreviewed")
+            from app.services.delivery_cache import (
+                invalidate_postgres_delivery_cache_for_group_change,
+            )
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor=actor,
+                reason="reset_to_unreviewed",
+            )
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),
@@ -8807,10 +9027,13 @@ class PostgresStateRepository(StateRepository):
             return {"group": _group_payload(session, group)}
 
     def bulk_archive_groups(self, group_ids: list[str], *, actor: str, reason: str = "") -> dict[str, Any]:
+        from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
         unique_ids = list(dict.fromkeys(str(item).strip() for item in group_ids if str(item).strip()))
         if not unique_ids:
             raise ValueError("At least one group is required")
         archived_groups: list[MaterialGroup] = []
+        approved_group_ids: list[str] = []
         skipped: list[dict[str, str]] = []
         now = datetime.now(UTC)
         with self._session() as session:
@@ -8895,6 +9118,20 @@ class PostgresStateRepository(StateRepository):
                     raw_data["review_note"] = group.review_note
                     raw_data["exception_note"] = ""
                 group.raw_data = raw_data
+                invalidate_verification_for_group(
+                    session,
+                    group,
+                    actor=actor,
+                    reason="bulk_archive_completed",
+                )
+                invalidate_postgres_delivery_cache_for_group_change(
+                    session,
+                    group,
+                    actor=actor,
+                    reason="bulk_archive_completed",
+                )
+                if not reasons:
+                    approved_group_ids.append(str(group.legacy_id or group.id))
                 archived_groups.append(group)
                 _stage_transactional_audit(
                     session,
@@ -8923,11 +9160,18 @@ class PostgresStateRepository(StateRepository):
             session.commit()
             for group in archived_groups:
                 session.refresh(group)
-            return {
+            result = {
                 "archived_count": len(archived_groups),
                 "skipped": skipped,
                 "groups": [_group_target_summary(_group_payload(session, group, include_photos=True), include_photos=True) for group in archived_groups],
             }
+        for group_id in approved_group_ids:
+            self._enqueue_delivery_cache_after_commit(
+                group_id,
+                actor=actor,
+                reason="bulk_archive_completed",
+            )
+        return result
 
     def return_group_to_exception_order(
         self,
@@ -8965,6 +9209,20 @@ class PostgresStateRepository(StateRepository):
                 status=ExceptionStatus.OPEN,
             )
             session.add(order)
+            invalidate_verification_for_group(
+                session,
+                group,
+                actor=actor,
+                reason="returned_to_exception_order",
+            )
+            from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor=actor,
+                reason="returned_to_exception_order",
+            )
             session.commit()
             session.refresh(group)
             session.refresh(order)

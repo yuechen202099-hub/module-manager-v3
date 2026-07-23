@@ -6,6 +6,8 @@ from io import BytesIO
 from pathlib import Path
 from importlib.util import find_spec
 from threading import Event, Thread
+from types import SimpleNamespace
+from urllib.error import HTTPError
 from urllib.parse import quote
 
 import pytest
@@ -1249,6 +1251,63 @@ def test_manual_barcode_confirmation_syncs_formal_identity_photos_and_complete_r
     assert "storage_key" not in str(event["payload"])
 
 
+def test_manual_barcode_identity_change_revokes_old_delivery_artifacts(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = local_simulation.get_state()
+    group = state["groups"][0]
+    group.update(
+        {
+            "status": "approved",
+            "meter_no": "110000288055",
+            "meter_match_key": "00000288055",
+            "collector": "COLLECTOROLD",
+            "module_asset_no": "MODOLD",
+            "delivery_cache_status": "ready",
+            "photos": [
+                {
+                    "id": f"manual-cache-{index}",
+                    "category": category,
+                    "sha256": f"{index:x}" * 64,
+                    "image_url": f"https://example.test/manual-cache-{index}.jpg",
+                    "storage_type": "external_url",
+                    "delivery_cache_status": "ready",
+                    "delivery_cache_path": f"objects/manual-cache-{index}.jpg",
+                }
+                for index, category in enumerate(
+                    ("before_box", "collector_barcode", "module_meter", "after_box"),
+                    start=1,
+                )
+            ],
+        }
+    )
+    claim_task(group["task_id"], "alice")
+    cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "manual-identity")
+    scheduled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        local_simulation,
+        "schedule_delivery_cache_build",
+        lambda group_id, **kwargs: scheduled.append((group_id, kwargs["reason"])),
+    )
+
+    confirm_group_barcode_manually(
+        group["id"],
+        actor="alice",
+        meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        reason="现场核验",
+        photo_ids=[photo["id"] for photo in group["photos"]],
+    )
+
+    assert group["barcode_verification"]["status"] == "manual_confirmed"
+    assert group["delivery_cache_status"] in {"stale", "retry_pending"}
+    assert all(photo["delivery_cache_status"] == "stale" for photo in group["photos"])
+    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    assert scheduled == [(group["id"], "manual_barcode_identity_changed")]
+
+
 def test_json_manual_confirmation_recomputes_final_fingerprint_for_auto_archive(
     synthetic_state: dict,
 ) -> None:
@@ -1417,6 +1476,49 @@ def test_downloaded_photo_can_be_classified(synthetic_state: dict) -> None:
     assert synthetic_state["summary"]["unclassified_photos"] == 4
 
 
+def test_reclassifying_same_category_revokes_delivery_cache_and_package(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = local_simulation.get_state()
+    group = state["groups"][0]
+    photo = group["photos"][0]
+    claim_task(group["task_id"], reviewer="alice")
+    group["status"] = "approved"
+    group["delivery_cache_status"] = "ready"
+    photo.update(
+        {
+            "category": "collector_barcode",
+            "category_label": local_simulation.PHOTO_CATEGORIES["collector_barcode"],
+            "archive_status": "archived",
+            "archive_filename": "old-name.jpg",
+            "archived_at": "2026-07-22T00:00:00+00:00",
+            "delivery_cache_status": "ready",
+            "delivery_cache_path": "objects/old/photo.jpg",
+        }
+    )
+    cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "same-category")
+    scheduled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        local_simulation,
+        "schedule_delivery_cache_build",
+        lambda group_id, **kwargs: scheduled.append((group_id, kwargs["reason"])),
+    )
+
+    classified = classify_photo(
+        group["id"],
+        photo["id"],
+        "collector_barcode",
+        reviewer="alice",
+    )
+
+    assert classified["archived_at"] != "2026-07-22T00:00:00+00:00"
+    assert group["delivery_cache_status"] in {"stale", "retry_pending"}
+    assert photo["delivery_cache_status"] == "stale"
+    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    assert scheduled == [(group["id"], "photo_archive_changed")]
+
+
 def test_classifying_photo_runs_barcode_check_and_updates_accuracy_summary(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
@@ -1533,6 +1635,178 @@ def test_delivery_cache_builds_for_approved_group(
     assert result["status"] == "ready"
     assert first_photo["delivery_cache_url"].startswith(f"/local-test/delivery-cache/{group['id']}/")
     assert cached_path.read_bytes().startswith(b"cached-")
+
+
+def test_delivery_cache_rejects_local_path_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    (tmp_path / "secret.jpg").write_bytes(b"outside-upload-root")
+    monkeypatch.setattr(local_simulation, "static_upload_root", lambda: upload_root)
+
+    with pytest.raises(ValueError, match="no downloadable delivery cache source"):
+        local_simulation.download_delivery_photo_content(
+            {
+                "id": "photo-traversal",
+                "storage_type": "local_upload",
+                "storage_key": "../secret.jpg",
+                "image_url": "/static/uploads/../secret.jpg",
+            }
+        )
+
+
+def test_delivery_cache_rejects_local_symlink_escape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"outside-upload-root")
+    link = upload_root / "linked.jpg"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+    monkeypatch.setattr(local_simulation, "static_upload_root", lambda: upload_root)
+
+    with pytest.raises(ValueError, match="no downloadable delivery cache source"):
+        local_simulation.download_delivery_photo_content(
+            {
+                "id": "photo-symlink",
+                "storage_type": "local_upload",
+                "storage_key": "linked.jpg",
+                "image_url": "/static/uploads/linked.jpg",
+            }
+        )
+
+
+def test_delivery_cache_rejects_private_external_photo_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        local_simulation.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("private URL must not be fetched")),
+    )
+
+    with pytest.raises(ValueError, match="Photo proxy host is not allowed"):
+        local_simulation.download_delivery_photo_content(
+            {
+                "id": "photo-private-url",
+                "storage_type": "external_url",
+                "image_url": "http://127.0.0.1/private.jpg",
+            }
+        )
+
+
+def test_delivery_cache_blocks_redirect_to_private_photo_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    redirect = HTTPError(
+        "https://public.example/photo.jpg",
+        302,
+        "Found",
+        {"Location": "http://127.0.0.1/private.jpg"},
+        None,
+    )
+    monkeypatch.setattr(
+        local_simulation,
+        "_DELIVERY_CACHE_NO_REDIRECT_OPENER",
+        SimpleNamespace(open=lambda *_args, **_kwargs: (_ for _ in ()).throw(redirect)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        local_simulation.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("redirecting URL must use guarded opener")),
+    )
+    monkeypatch.setattr(
+        local_simulation,
+        "validate_remote_image_url",
+        lambda url: (_ for _ in ()).throw(ValueError("Photo proxy host is not allowed"))
+        if "127.0.0.1" in url
+        else None,
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="Photo proxy host is not allowed"):
+        local_simulation.download_delivery_photo_content(
+            {
+                "id": "photo-private-redirect",
+                "storage_type": "external_url",
+                "image_url": "https://public.example/photo.jpg",
+            }
+        )
+
+
+def test_delivery_cache_external_url_uses_dns_pinned_opener(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        headers = {"Content-Type": "image/jpeg", "Content-Length": "4"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def geturl(self) -> str:
+            return "https://public.example/photo.jpg"
+
+        def read(self, _limit: int) -> bytes:
+            return b"test"
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        local_simulation,
+        "open_validated_remote_image_url",
+        lambda url, **_kwargs: calls.append(url) or Response(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        local_simulation,
+        "validate_image_content",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        local_simulation,
+        "_DELIVERY_CACHE_NO_REDIRECT_OPENER",
+        SimpleNamespace(open=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy opener must not run"))),
+        raising=False,
+    )
+
+    content, suffix, content_type = local_simulation.download_delivery_photo_content(
+        {
+            "id": "photo-rebind",
+            "storage_type": "external_url",
+            "image_url": "https://public.example/photo.jpg",
+        }
+    )
+
+    assert content == b"test"
+    assert suffix == ".jpg"
+    assert content_type == "image/jpeg"
+    assert calls == ["https://public.example/photo.jpg"]
+
+
+def test_delivery_cache_oss_url_uses_unprocessed_server_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(local_simulation.settings, "oss_preview_process", "image/resize,w_1600")
+    monkeypatch.setattr(
+        local_simulation,
+        "sign_oss_server_url",
+        lambda key, process="": calls.append((key, process)) or "https://oss-internal.example/original.jpg",
+    )
+
+    result = local_simulation.photo_cache_download_url(
+        {
+            "id": "photo-oss-original",
+            "storage_type": "oss",
+            "storage_key": "photos/original.jpg",
+            "image_url": "oss://bucket/photos/original.jpg",
+        }
+    )
+
+    assert result == "https://oss-internal.example/original.jpg"
+    assert calls == [("photos/original.jpg", "")]
 
 
 def test_photo_can_be_classified_as_unmatched_data_group(synthetic_state: dict) -> None:
@@ -2810,6 +3084,174 @@ def test_json_state_repository_finalizes_unmatched_match_from_server_candidate(s
     assert local_simulation.get_unmatched_record(unmatched_id) is None
 
 
+def _seed_processing_delivery_artifacts(state: dict, group: dict, suffix: str) -> tuple[dict, dict]:
+    group["delivery_package_invalidation_epoch"] = 7
+    cache_job = {
+        "id": f"cache-{suffix}",
+        "group_id": group["id"],
+        "status": "processing",
+        "evidence_version": 7,
+        "evidence_fingerprint": "stale-evidence",
+        "lease_owner": "cache-worker",
+        "lease_token": "cache-lease",
+        "lease_expires_at": "2026-07-23T12:00:00+00:00",
+        "completed_at": "2026-07-23T11:00:00+00:00",
+    }
+    package_job = {
+        "id": f"package-{suffix}",
+        "group_ids": [group["id"]],
+        "status": "processing",
+        "lease_owner": "package-worker",
+        "lease_token": "package-lease",
+        "lease_expires_at": "2026-07-23T12:00:00+00:00",
+        "completed_at": "2026-07-23T11:00:00+00:00",
+    }
+    state["delivery_cache_jobs"] = [cache_job]
+    state["delivery_package_jobs"] = [package_job]
+    return cache_job, package_job
+
+
+def _assert_delivery_artifacts_revoked(group: dict, cache_job: dict, package_job: dict) -> None:
+    assert group["delivery_package_invalidation_epoch"] == 8
+    assert cache_job["status"] != "processing"
+    assert cache_job["lease_owner"] is None
+    assert cache_job["lease_token"] is None
+    assert cache_job["lease_expires_at"] is None
+    assert cache_job["completed_at"] is None
+    assert package_job["status"] == "stale"
+    assert package_job["lease_owner"] is None
+    assert package_job["lease_token"] is None
+    assert package_job["lease_expires_at"] is None
+    assert package_job["completed_at"] is None
+
+
+def test_json_exception_submit_and_return_revoke_old_delivery_workers(synthetic_state: dict) -> None:
+    state = local_simulation.get_state()
+    group = state["groups"][0]
+    claim_task(group["task_id"], "alice")
+    assign_construction_task(group["task_id"], actor="admin", constructor="constructor")
+    cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "return-exception")
+
+    returned = return_group_to_exception_order(
+        group["id"],
+        actor="alice",
+        category="module_error",
+        note="模块号错误",
+    )
+
+    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    seed_passed_group_verification(group)
+    cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "submit-exception")
+
+    submit_construction_exception_order(
+        returned["order"]["id"],
+        actor="constructor",
+        updates={"collector": "collector-new", "module_asset_no": "module-new"},
+        note="现场已修正",
+    )
+
+    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    assert group["barcode_verification"]["status"] != "passed"
+
+
+def test_json_bulk_archive_requeues_only_after_revoking_old_delivery_workers(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = local_simulation.get_state()
+    group = state["groups"][0]
+    seed_passed_group_verification(group)
+    cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "bulk-archive")
+    scheduled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        local_simulation,
+        "schedule_delivery_cache_build",
+        lambda group_id, *_args, **kwargs: scheduled.append((group_id, kwargs.get("reason", ""))),
+    )
+
+    result = bulk_archive_groups([group["id"]], actor="admin", reason="人工归档")
+
+    assert result["archived_count"] == 1
+    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    assert group["barcode_verification"]["status"] != "passed"
+    if group["status"] == "approved":
+        assert (group["id"], "admin_bulk_archive") in scheduled
+
+
+def test_json_scan_import_and_clear_revoke_old_delivery_workers(synthetic_state: dict) -> None:
+    state = local_simulation.get_state()
+    group = state["groups"][0]
+    cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "scan-import")
+
+    apply_synced_scan_records(
+        [
+            {
+                "file_id": "scan-invalidation",
+                "source_file": "scan-invalidation",
+                "barcode": group["meter_no"],
+                "meter_no": group["meter_no"],
+                "meter_match_key": group["meter_match_key"],
+                "terminal": group["terminal"],
+                "image_urls": ["https://example.test/new-scan-evidence.jpg"],
+            }
+        ]
+    )
+
+    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "scan-clear")
+
+    clear_scan_data()
+
+    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+
+
+def test_json_unmatched_finalization_revokes_existing_group_delivery_workers(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = JsonStateRepository()
+    state = local_simulation.get_state()
+    state["total_catalog"] = []
+    catalog = add_unmatched_match_catalog_row(terminal="T-FINAL-INVALIDATE")
+    existing = {
+        **deepcopy(state["groups"][0]),
+        "id": "g-final-invalidate",
+        "terminal": catalog["terminal"],
+        "stage_terminal": catalog["terminal"],
+        "meter_no": catalog["meter_no"],
+        "meter_match_key": catalog["meter_match_key"],
+        "photos": [],
+        "photo_count": 0,
+    }
+    state["groups"].append(existing)
+    cache_job, package_job = _seed_processing_delivery_artifacts(state, existing, "unmatched-finalize")
+    unmatched_id = seed_unmatched_review_record(manual_confirmed=True)
+    candidate = repository.list_unmatched_match_candidates(unmatched_id)["items"][0]
+    candidate = {**candidate, "target_group_id": ""}
+    monkeypatch.setattr(
+        local_simulation,
+        "list_unmatched_match_candidates",
+        lambda checked_id: {"total": 1, "items": [candidate]}
+        if checked_id == unmatched_id
+        else {"total": 0, "items": []},
+    )
+
+    result = repository.finalize_unmatched_match(
+        unmatched_id,
+        actor="admin-finalize",
+        candidate_key=candidate["candidate_key"],
+        expected_version=1,
+    )
+
+    assert result["attached"] is True
+    assert result["group"]["id"] == existing["id"]
+    committed_state = local_simulation.get_state()
+    committed_group = next(item for item in committed_state["groups"] if item["id"] == existing["id"])
+    committed_cache_job = committed_state["delivery_cache_jobs"][0]
+    committed_package_job = committed_state["delivery_package_jobs"][0]
+    _assert_delivery_artifacts_revoked(committed_group, committed_cache_job, committed_package_job)
+
+
 def test_json_repository_reselects_compatible_formal_meter_identity_before_mutation(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
@@ -3919,6 +4361,65 @@ def test_unmatched_record_attaches_to_existing_terminal_group(synthetic_state: d
     assert audits["items"][0]["action"] == "attach_unmatched_to_existing_group"
 
 
+@pytest.mark.parametrize("operation", ["associate", "create-existing"])
+def test_json_unmatched_merge_invalidates_existing_delivery_package(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    target = synthetic_state["groups"][0]
+    target["delivery_package_invalidation_epoch"] = 7
+    package_job = {
+        "id": f"package-{operation}",
+        "group_ids": [target["id"]],
+        "status": "processing",
+        "lease_owner": "package-worker",
+        "lease_token": "package-lease",
+        "lease_expires_at": "2026-07-23T12:00:00+00:00",
+        "completed_at": "2026-07-23T11:00:00+00:00",
+    }
+    synthetic_state["delivery_package_jobs"] = [package_job]
+    synthetic_state["scan_unmatched"].append(
+        {
+            "unmatched_id": f"unmatched-{operation}",
+            "barcode": target["meter_no"],
+            "meter_no": target["meter_no"],
+            "meter_match_key": target["meter_match_key"],
+            "terminal": target["terminal"],
+            "collector": "collector-unmatched",
+            "module_asset_no": "module-unmatched",
+            "image_urls": [f"https://example.test/{operation}.jpg"],
+        }
+    )
+    scheduled = []
+    monkeypatch.setattr(
+        local_simulation,
+        "schedule_delivery_cache_build",
+        lambda group_id, **kwargs: scheduled.append((group_id, kwargs["reason"])),
+    )
+
+    if operation == "associate":
+        local_simulation.associate_unmatched_record(
+            f"unmatched-{operation}",
+            actor="admin-a",
+            target_group_id=target["id"],
+        )
+    else:
+        create_group_from_unmatched_record(
+            f"unmatched-{operation}",
+            actor="admin-a",
+            terminal=target["terminal"],
+        )
+
+    assert target["delivery_package_invalidation_epoch"] == 8
+    assert package_job["status"] == "stale"
+    assert package_job["lease_owner"] is None
+    assert package_job["lease_token"] is None
+    assert package_job["lease_expires_at"] is None
+    assert package_job["completed_at"] is None
+    assert scheduled and scheduled[-1][0] == target["id"]
+
+
 def test_replacement_rematch_adds_delivery_export_remark(synthetic_state: dict) -> None:
     target = synthetic_state["groups"][0]
     claim_task(target["task_id"], "alice")
@@ -4023,6 +4524,29 @@ def test_admin_can_create_empty_group_and_import_missing_photos(synthetic_state:
     assert imported["group"]["photos"][0]["creator"] == "installer-manual"
     assert any(task["terminal"] == "T-MANUAL" and task["can_claim"] for task in tasks)
     assert audits["items"][0]["action"] == "add_group_photos"
+
+
+def test_json_manual_photo_import_rejects_placeholder_group_without_write(synthetic_state: dict) -> None:
+    group = synthetic_state["groups"][0]
+    group.update(
+        {
+            "id": "00000000",
+            "terminal": "00000000",
+            "meter_no": "00000000",
+            "meter_match_key": "00000000",
+            "address": "待导入总清单地址",
+        }
+    )
+    before = deepcopy(group)
+
+    with pytest.raises(ValueError, match="00000000"):
+        add_photo_urls_to_group(
+            group["id"],
+            actor="admin",
+            photo_urls=["https://example.test/unsafe.jpg"],
+        )
+
+    assert group == before
 
 
 @pytest.mark.parametrize(
@@ -4174,6 +4698,18 @@ def test_json_evidence_writes_invalidate_current_group_verification(
     group = synthetic_state["groups"][0]
     seed_passed_group_verification(group)
     claim_task(group["task_id"], reviewer="alice")
+    group["delivery_package_invalidation_epoch"] = 7
+    package_job = {
+        "id": "package-job-1",
+        "group_ids": [group["id"]],
+        "status": "processing",
+        "lease_owner": "package-worker",
+        "lease_token": "package-lease",
+        "lease_expires_at": "2026-07-23T12:00:00+00:00",
+        "last_error": "",
+        "completed_at": "2026-07-23T11:00:00+00:00",
+    }
+    synthetic_state["delivery_package_jobs"] = [package_job]
 
     if operation == "photo_added":
         add_photo_urls_to_group(
@@ -4205,8 +4741,91 @@ def test_json_evidence_writes_invalidate_current_group_verification(
     assert verification["collector_matched"] is None
     assert verification["recognition_source"] is None
     assert group["group_barcode_manual_confirmed"] is False
+    assert group["delivery_package_invalidation_epoch"] == 8
+    assert package_job["status"] == "stale"
+    assert package_job["lease_owner"] is None
+    assert package_job["lease_token"] is None
+    assert package_job["lease_expires_at"] is None
+    assert package_job["completed_at"] is None
     assert any(event["action"] == "group_barcode_verification_passed" for event in synthetic_state["audit_events"])
     assert any(event["action"] == "group_barcode_verification_invalidated" for event in synthetic_state["audit_events"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("address", "updated delivery address"),
+        ("status", "approved"),
+        ("reviewer", "reviewer-b"),
+        ("review_note", "updated review note"),
+        ("exception_note", "updated exception note"),
+    ],
+)
+def test_json_delivery_metadata_changes_invalidate_existing_delivery_package(
+    synthetic_state: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+) -> None:
+    group = synthetic_state["groups"][0]
+    group["delivery_package_invalidation_epoch"] = 7
+    package_job = {
+        "id": f"package-{field}",
+        "group_ids": [group["id"]],
+        "status": "ready",
+        "lease_owner": "package-worker",
+        "lease_token": "package-lease",
+        "lease_expires_at": "2026-07-23T12:00:00+00:00",
+        "completed_at": "2026-07-23T11:00:00+00:00",
+    }
+    synthetic_state["delivery_package_jobs"] = [package_job]
+    scheduled = []
+    monkeypatch.setattr(
+        local_simulation,
+        "schedule_delivery_cache_build",
+        lambda group_id, **kwargs: scheduled.append((group_id, kwargs["reason"])),
+    )
+
+    update_group_metadata(group["id"], actor="admin-a", updates={field: value})
+
+    assert group["delivery_package_invalidation_epoch"] == 8
+    assert package_job["status"] == "stale"
+    assert package_job["lease_owner"] is None
+    assert package_job["lease_token"] is None
+    assert package_job["lease_expires_at"] is None
+    assert package_job["completed_at"] is None
+    assert scheduled and scheduled[-1][0] == group["id"]
+
+
+def test_json_barcode_rescan_invalidates_existing_delivery_package(
+    synthetic_state: dict,
+) -> None:
+    group = synthetic_state["groups"][0]
+    claim_task(group["task_id"], reviewer="alice")
+    group["delivery_package_invalidation_epoch"] = 7
+    package_job = {
+        "id": "package-rescan",
+        "group_ids": [group["id"]],
+        "status": "ready",
+        "lease_owner": "package-worker",
+        "lease_token": "package-lease",
+        "lease_expires_at": "2026-07-23T12:00:00+00:00",
+        "completed_at": "2026-07-23T11:00:00+00:00",
+    }
+    synthetic_state["delivery_package_jobs"] = [package_job]
+
+    local_simulation.rescan_photo_barcode(
+        group["id"],
+        group["photos"][0]["id"],
+        reviewer="alice",
+    )
+
+    assert group["delivery_package_invalidation_epoch"] == 8
+    assert package_job["status"] == "stale"
+    assert package_job["lease_owner"] is None
+    assert package_job["lease_token"] is None
+    assert package_job["lease_expires_at"] is None
+    assert package_job["completed_at"] is None
 
 
 @pytest.mark.parametrize("operation", ["photo_added", "photo_deleted"])

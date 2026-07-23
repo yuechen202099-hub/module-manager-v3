@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import threading
 from collections import deque
 from contextlib import contextmanager
@@ -11,7 +12,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
@@ -38,6 +39,7 @@ STANDARD_PHOTO_CATEGORIES = {
 }
 STANDARD_PHOTO_ORDER = tuple(STANDARD_PHOTO_CATEGORIES)
 PACKAGE_TTL = timedelta(days=7)
+PACKAGE_INTEGRITY_SCHEMA_VERSION = 1
 MAX_DELIVERY_PHOTO_BYTES = 32 * 1024 * 1024
 MAX_DELIVERY_PACKAGE_INPUT_BYTES = 8 * 1024 * 1024 * 1024
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -587,6 +589,7 @@ def delivery_evidence_fingerprint(groups: Iterable[Mapping[str, Any]]) -> str:
         payload.append(
             {
                 "id": _text(group.get("id")),
+                "invalidation_epoch": int(group.get("delivery_package_invalidation_epoch") or 0),
                 "workbook_rows": _workbook_rows(group),
                 "photos": sorted(
                     (
@@ -606,6 +609,85 @@ def delivery_evidence_fingerprint(groups: Iterable[Mapping[str, Any]]) -> str:
             }
         )
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _expected_delivery_package_members(groups: Sequence[Mapping[str, Any]]) -> list[str]:
+    return ["设备清单.xlsx", *(member["path"] for member in _delivery_photo_members(groups))]
+
+
+def _delivery_package_integrity_path(path: Path) -> Path:
+    return path.with_suffix(f"{path.suffix}.integrity.json")
+
+
+def _package_file_sha256(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as package_file:
+        while chunk := package_file.read(1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    return digest.hexdigest(), size
+
+
+def _safe_archive_member(info: Any) -> bool:
+    name = _text(info.filename)
+    member = PurePosixPath(name)
+    unix_mode = (int(info.external_attr) >> 16) & 0xFFFF
+    return bool(
+        name
+        and "\\" not in name
+        and not name.startswith("/")
+        and re.match(r"^[A-Za-z]:", name) is None
+        and not info.is_dir()
+        and all(part not in {"", ".", ".."} for part in member.parts)
+        and not (unix_mode and stat.S_ISLNK(unix_mode))
+    )
+
+
+def _verified_archive_members(path: Path, expected_members: Sequence[str]) -> list[str] | None:
+    try:
+        with ZipFile(path) as archive:
+            infos = archive.infolist()
+            members = [info.filename for info in infos]
+            if (
+                members != list(expected_members)
+                or len(members) != len(set(members))
+                or not all(_safe_archive_member(info) for info in infos)
+                or archive.testzip() is not None
+            ):
+                return None
+            return members
+    except (BadZipFile, EOFError, OSError, RuntimeError, ValueError):
+        return None
+
+
+def _delivery_package_integrity_payload(
+    path: Path,
+    fingerprint: str,
+    expected_members: Sequence[str],
+) -> dict[str, Any] | None:
+    members = _verified_archive_members(path, expected_members)
+    if members is None:
+        return None
+    try:
+        package_sha256, package_size = _package_file_sha256(path)
+    except OSError:
+        return None
+    return {
+        "schema_version": PACKAGE_INTEGRITY_SCHEMA_VERSION,
+        "evidence_fingerprint": fingerprint,
+        "package_sha256": package_sha256,
+        "package_size": package_size,
+        "members": members,
+    }
+
+
+def _write_delivery_package_integrity_proof(path: Path, payload: Mapping[str, Any]) -> None:
+    with path.open("x", encoding="utf-8", newline="\n") as proof_file:
+        json.dump(dict(payload), proof_file, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        proof_file.write("\n")
+        proof_file.flush()
+        os.fsync(proof_file.fileno())
 
 
 def _windows_overlapped() -> Any:
@@ -1083,6 +1165,7 @@ def cleanup_delivery_cache(
                             modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
                             if modified < expires_before:
                                 path.unlink()
+                                _delivery_package_integrity_path(path).unlink(missing_ok=True)
                                 deleted_packages += 1
                         except FileNotFoundError:
                             continue
@@ -1103,16 +1186,24 @@ def cleanup_delivery_cache(
     }
 
 
-def _delivery_package_is_reusable(path: Path, current: datetime) -> bool:
+def _delivery_package_is_reusable(
+    path: Path,
+    current: datetime,
+    fingerprint: str,
+    expected_members: Sequence[str],
+) -> bool:
     try:
         if not path.is_file():
             return False
         modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
         if current.astimezone(UTC) - modified > PACKAGE_TTL:
             return False
-        with ZipFile(path) as archive:
-            return bool(archive.infolist()) and archive.testzip() is None
-    except (BadZipFile, EOFError, OSError, RuntimeError, ValueError):
+        proof = json.loads(_delivery_package_integrity_path(path).read_text(encoding="utf-8"))
+        if not isinstance(proof, dict):
+            return False
+        expected_proof = _delivery_package_integrity_payload(path, fingerprint, expected_members)
+        return expected_proof is not None and proof == expected_proof
+    except (BadZipFile, EOFError, OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
         return False
 
 
@@ -1136,9 +1227,13 @@ def get_or_build_delivery_package(
     current = now or datetime.now(UTC)
     if current.tzinfo is None:
         current = current.replace(tzinfo=UTC)
-    fingerprint = _text(evidence_fingerprint).lower()
-    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+    provided_fingerprint = _text(evidence_fingerprint).lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", provided_fingerprint):
         raise ValueError("Invalid delivery evidence fingerprint")
+    fingerprint = delivery_evidence_fingerprint(validated_groups)
+    if provided_fingerprint != fingerprint:
+        raise ValueError("Delivery evidence fingerprint does not match current delivery evidence")
+    expected_members = _expected_delivery_package_members(validated_groups)
     scope_hash = hashlib.sha256(_text(scope).encode("utf-8")).hexdigest()[:24]
     package_dir = Path(cache_root).resolve() / "packages" / scope_hash
     target = package_dir / f"{fingerprint}.zip"
@@ -1155,7 +1250,7 @@ def get_or_build_delivery_package(
             raise RuntimeError("Unable to lock delivery package path")
         try:
             with _CACHE_PATH_CONDITION:
-                if _delivery_package_is_reusable(target, current):
+                if _delivery_package_is_reusable(target, current, fingerprint, expected_members):
                     _reserve_delivery_cache_key_locked(target_key)
                     package = LeasedDeliveryPackage(target, target_key, file_lock=file_lock)
                     file_lock = None
@@ -1182,13 +1277,15 @@ def get_or_build_delivery_package(
                 raise RuntimeError("Unable to lock delivery package path")
             try:
                 with _CACHE_PATH_CONDITION:
-                    if _delivery_package_is_reusable(target, current):
+                    if _delivery_package_is_reusable(target, current, fingerprint, expected_members):
                         _reserve_delivery_cache_key_locked(target_key)
                         package = LeasedDeliveryPackage(target, target_key, file_lock=file_lock)
                         file_lock = None
                         return package
                 package_dir.mkdir(parents=True, exist_ok=True)
                 temporary = target.with_suffix(f".zip.tmp-{uuid4().hex}")
+                integrity_target = _delivery_package_integrity_path(target)
+                integrity_temporary = package_dir / f".integrity-{uuid4().hex}.tmp"
                 try:
                     try:
                         if package_file_builder is not None:
@@ -1202,7 +1299,18 @@ def get_or_build_delivery_package(
                                 output.write(content)
                                 output.flush()
                                 os.fsync(output.fileno())
+                        integrity_payload = _delivery_package_integrity_payload(
+                            temporary,
+                            fingerprint,
+                            expected_members,
+                        )
+                        if integrity_payload is None:
+                            raise DeliveryPackageValidationError(
+                                [_error("", "delivery_package_invalid", "package", "Built delivery package is invalid")]
+                            )
+                        _write_delivery_package_integrity_proof(integrity_temporary, integrity_payload)
                         os.utime(temporary, (current.timestamp(), current.timestamp()))
+                        os.utime(integrity_temporary, (current.timestamp(), current.timestamp()))
                     finally:
                         if file_lock is not None:
                             file_lock.release()
@@ -1216,6 +1324,7 @@ def get_or_build_delivery_package(
                             while _cache_path_is_reserved(target_key):
                                 _CACHE_PATH_CONDITION.wait()
                             temporary.replace(target)
+                            integrity_temporary.replace(integrity_target)
                             _reserve_delivery_cache_key_locked(target_key)
                             replacement_lock.downgrade_to_shared()
                             package = LeasedDeliveryPackage(target, target_key, file_lock=replacement_lock)
@@ -1226,6 +1335,7 @@ def get_or_build_delivery_package(
                             replacement_lock.release()
                 finally:
                     temporary.unlink(missing_ok=True)
+                    integrity_temporary.unlink(missing_ok=True)
             finally:
                 if file_lock is not None:
                     file_lock.release()

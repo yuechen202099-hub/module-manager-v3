@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import html
 import importlib.util
 import inspect
@@ -1003,6 +1004,8 @@ class ApiReviewSession:
 
 
 def test_postgres_photo_storage_repair_invalidates_verification_before_commit(monkeypatch) -> None:
+    from app.services import delivery_cache
+
     group = SimpleNamespace(id=uuid4(), legacy_id="group-repair", team_id="team-repair")
     photo = SimpleNamespace(
         id=uuid4(),
@@ -1017,7 +1020,7 @@ def test_postgres_photo_storage_repair_invalidates_verification_before_commit(mo
         content_type="image/jpeg",
         raw_data={},
     )
-    tracker = {"commits": 0}
+    tracker = {"commits": 0, "row_locks": []}
 
     class RepairSession:
         def __enter__(self):
@@ -1027,12 +1030,14 @@ def test_postgres_photo_storage_repair_invalidates_verification_before_commit(mo
             return False
 
         def scalar(self, statement):
+            tracker["row_locks"].append(statement._for_update_arg is not None)
             return group if "material_groups" in str(statement) else photo
 
         def commit(self):
             tracker["commits"] += 1
 
     invalidations = []
+    package_invalidations = []
     monkeypatch.setattr(local_test.settings, "state_backend", "postgres")
     monkeypatch.setattr(local_test, "SessionLocal", lambda: RepairSession())
     monkeypatch.setattr(local_test, "current_team_id", lambda: "team-repair")
@@ -1043,6 +1048,13 @@ def test_postgres_photo_storage_repair_invalidates_verification_before_commit(mo
             (session, changed_group, actor, reason, tracker["commits"])
         ),
         raising=False,
+    )
+    monkeypatch.setattr(
+        delivery_cache,
+        "invalidate_postgres_delivery_cache_for_group_change",
+        lambda session, changed_group, *, actor, reason: package_invalidations.append(
+            (session, changed_group, actor, reason, tracker["commits"])
+        ),
     )
 
     local_test._persist_repaired_photo_storage(
@@ -1065,16 +1077,28 @@ def test_postgres_photo_storage_repair_invalidates_verification_before_commit(mo
     assert actor == "photo-storage-repair"
     assert reason == "photo_replaced"
     assert commits_before_invalidation == 0
+    assert len(package_invalidations) == 1
+    _session, changed_group, actor, reason, commits_before_invalidation = package_invalidations[0]
+    assert changed_group is group
+    assert actor == "photo-storage-repair"
+    assert reason == "photo_replaced"
+    assert commits_before_invalidation == 0
     assert tracker["commits"] == 1
+    assert tracker["row_locks"] == [True, True]
 
 
-def test_json_photo_storage_repair_invalidates_verification(monkeypatch) -> None:
-    group = {"id": "group-repair", "photos": []}
+def test_json_photo_storage_repair_persists_for_restart_and_invalidates_verification(monkeypatch) -> None:
+    group = {
+        "id": "group-repair",
+        "photos": [{"id": "photo-repair", "image_url": "https://old.example/photo.jpg"}],
+    }
     invalidations = []
+    persisted = []
     monkeypatch.setattr(local_test.settings, "state_backend", "json")
     monkeypatch.setattr(local_test, "get_group", lambda group_id: group if group_id == "group-repair" else None)
+    monkeypatch.setattr(local_test, "save_all_team_states", lambda: persisted.append(deepcopy(group)))
     monkeypatch.setattr(
-        local_test,
+        state_repository,
         "invalidate_verification_for_group",
         lambda session, changed_group, actor, reason: invalidations.append(
             (session, changed_group, actor, reason)
@@ -1082,9 +1106,308 @@ def test_json_photo_storage_repair_invalidates_verification(monkeypatch) -> None
         raising=False,
     )
 
-    local_test._persist_repaired_photo_storage("group-repair", {"id": "photo-repair"})
+    local_test._persist_repaired_photo_storage(
+        "group-repair",
+        {"id": "photo-repair", "image_url": "https://new.example/photo.jpg", "sha256": "b" * 64},
+    )
 
     assert invalidations == [(None, group, "photo-storage-repair", "photo_replaced")]
+    assert persisted[0]["photos"][0]["image_url"] == "https://new.example/photo.jpg"
+    group["photos"][0]["image_url"] = "https://mutated-after-save.example/photo.jpg"
+    assert persisted[0]["photos"][0]["image_url"] == "https://new.example/photo.jpg"
+
+
+def test_json_photo_storage_repair_persistence_failure_does_not_mutate_live_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_id = f"json-photo-repair-rollback-{uuid4()}"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [
+        {
+            "id": "group-repair",
+            "photos": [
+                {
+                    "id": "photo-repair",
+                    "image_url": "https://old.example/photo.jpg",
+                    "sha256": "a" * 64,
+                }
+            ],
+        }
+    ]
+    before = deepcopy(state)
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(local_test.settings, "state_backend", "json")
+    monkeypatch.setattr(local_test, "current_team_id", lambda: team_id)
+    monkeypatch.setattr(
+        local_test,
+        "save_all_team_states",
+        lambda: (_ for _ in ()).throw(RuntimeError("injected repair persistence failure")),
+    )
+
+    token = local_simulation.set_current_team(team_id)
+    try:
+        with pytest.raises(RuntimeError, match="injected repair persistence failure"):
+            local_test._persist_repaired_photo_storage(
+                "group-repair",
+                {
+                    "id": "photo-repair",
+                    "image_url": "https://new.example/photo.jpg",
+                    "sha256": "b" * 64,
+                },
+            )
+    finally:
+        local_simulation.reset_current_team(token)
+
+    assert local_simulation._team_states[team_id] == before
+
+
+@pytest.mark.parametrize("missing", ["group", "photo"])
+def test_postgres_photo_storage_repair_rejects_concurrently_deleted_target(
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+) -> None:
+    group = SimpleNamespace(id=uuid4(), legacy_id="group-repair", team_id="team-repair")
+
+    class RepairSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            if "material_groups" in str(statement):
+                return None if missing == "group" else group
+            return None
+
+    monkeypatch.setattr(local_test.settings, "state_backend", "postgres")
+    monkeypatch.setattr(local_test, "SessionLocal", lambda: RepairSession())
+    monkeypatch.setattr(local_test, "current_team_id", lambda: "team-repair")
+
+    with pytest.raises(KeyError, match="group-repair|photo-repair"):
+        local_test._persist_repaired_photo_storage("group-repair", {"id": "photo-repair"})
+
+
+def test_postgres_photo_storage_repair_commit_failure_is_not_reported_as_success(monkeypatch) -> None:
+    from app.services import delivery_cache
+
+    group = SimpleNamespace(id=uuid4(), legacy_id="group-repair", team_id="team-repair")
+    photo = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="photo-repair",
+        image_url="https://old.example/photo.jpg",
+        storage_type="oss",
+        storage_bucket="old-bucket",
+        storage_key="old-key",
+        sha256="a" * 64,
+        object_key="old-key",
+        byte_size=1,
+        content_type="image/jpeg",
+        raw_data={},
+    )
+
+    class FailingRepairSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            return group if "material_groups" in str(statement) else photo
+
+        def commit(self):
+            raise RuntimeError("injected repair commit failure")
+
+    monkeypatch.setattr(local_test.settings, "state_backend", "postgres")
+    monkeypatch.setattr(local_test, "SessionLocal", lambda: FailingRepairSession())
+    monkeypatch.setattr(local_test, "current_team_id", lambda: "team-repair")
+    monkeypatch.setattr(local_test, "invalidate_verification_for_group", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        delivery_cache,
+        "invalidate_postgres_delivery_cache_for_group_change",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(RuntimeError, match="injected repair commit failure"):
+        local_test._persist_repaired_photo_storage("group-repair", {"id": "photo-repair"})
+
+
+def test_photo_storage_repair_cleans_unreferenced_new_object_when_persistence_fails(monkeypatch) -> None:
+    stored = {
+        "url": "oss://bucket/repaired/photo.jpg",
+        "storage_type": "oss",
+        "storage_bucket": "bucket",
+        "storage_key": "repaired/photo.jpg",
+        "sha256": "b" * 64,
+        "storage_source": "repaired-photos-oss-upload",
+        "content_type": "image/jpeg",
+        "created_new": True,
+    }
+    deleted: list[dict] = []
+    monkeypatch.setattr(local_test, "_read_remote_image", lambda *_args, **_kwargs: (b"repaired", "image/jpeg"))
+    monkeypatch.setattr(local_test, "save_image_bytes", lambda **_kwargs: stored)
+    monkeypatch.setattr(
+        local_test,
+        "_persist_repaired_photo_storage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("persistence failed")),
+    )
+    monkeypatch.setattr(local_test, "_saved_photo_storage_is_referenced", lambda _stored: False, raising=False)
+    monkeypatch.setattr(local_test, "delete_saved_image", lambda value: deleted.append(value) or True)
+
+    with pytest.raises(local_test.HTTPException) as exc_info:
+        local_test._replace_photo_storage_from_source(
+            "group-repair",
+            {"id": "photo-repair", "raw_data": {}},
+            "https://source.example/photo.jpg",
+        )
+
+    assert exc_info.value.status_code == 503
+    assert deleted == [stored]
+
+
+def test_failed_saved_image_cleanup_is_durably_queued(monkeypatch: pytest.MonkeyPatch) -> None:
+    stored = {
+        "url": "oss://bucket/orphan/photo.jpg",
+        "storage_type": "oss",
+        "storage_bucket": "bucket",
+        "storage_key": "orphan/photo.jpg",
+        "created_new": True,
+    }
+    queued: list[tuple[dict, str, str]] = []
+    monkeypatch.setattr(
+        local_test,
+        "delete_saved_image",
+        lambda _stored: (_ for _ in ()).throw(RuntimeError("temporary OSS failure")),
+    )
+    monkeypatch.setattr(
+        local_test,
+        "enqueue_storage_cleanup_retry",
+        lambda item, *, reason, error: queued.append((item, reason, error)),
+        raising=False,
+    )
+
+    local_test.cleanup_saved_images_quietly([stored])
+
+    assert queued == [(stored, "request_rollback", "temporary OSS failure")]
+
+
+def test_storage_cleanup_retry_queue_survives_failure_and_completes_on_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    assert hasattr(photo_storage, "enqueue_storage_cleanup_retry")
+    assert hasattr(photo_storage, "process_storage_cleanup_jobs")
+    monkeypatch.setattr(photo_storage.settings, "storage_cleanup_queue_path", str(tmp_path), raising=False)
+    stored = {
+        "url": "oss://bucket/orphan/photo.jpg",
+        "storage_type": "oss",
+        "storage_bucket": "bucket",
+        "storage_key": "orphan/photo.jpg",
+        "created_new": True,
+    }
+    photo_storage.enqueue_storage_cleanup_retry(
+        stored,
+        reason="repair_persistence_failed",
+        error="temporary OSS failure",
+    )
+    queued_files = list(tmp_path.glob("*.json"))
+    assert len(queued_files) == 1
+
+    monkeypatch.setattr(
+        photo_storage,
+        "delete_saved_image",
+        lambda _stored: (_ for _ in ()).throw(RuntimeError("still unavailable")),
+    )
+    first = photo_storage.process_storage_cleanup_jobs(limit=20)
+    assert first["failed"] == 1
+    persisted = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+    assert persisted["attempt_count"] == 1
+    assert persisted["status"] == "pending"
+
+    monkeypatch.setattr(photo_storage, "delete_saved_image", lambda _stored: True)
+    second = photo_storage.process_storage_cleanup_jobs(limit=20)
+    assert second["completed"] == 1
+    assert list(tmp_path.glob("*.json")) == []
+
+
+def test_storage_cleanup_manual_jobs_do_not_starve_pending_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(photo_storage.settings, "storage_cleanup_queue_path", str(tmp_path), raising=False)
+    for index in range(20):
+        job_id = f"manual-{index:02d}"
+        (tmp_path / f"{job_id}.json").write_text(
+            json.dumps({"id": job_id, "status": "manual_required", "stored": {}}),
+            encoding="utf-8",
+        )
+    pending_id = "zz-pending"
+    (tmp_path / f"{pending_id}.json").write_text(
+        json.dumps(
+            {
+                "id": pending_id,
+                "status": "pending",
+                "attempt_count": 0,
+                "stored": {
+                    "url": "oss://bucket/orphan/photo.jpg",
+                    "storage_type": "oss",
+                    "storage_bucket": "bucket",
+                    "storage_key": "orphan/photo.jpg",
+                    "created_new": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        photo_storage,
+        "delete_saved_image",
+        lambda stored: deleted.append(str(stored["storage_key"])) or True,
+    )
+
+    result = photo_storage.process_storage_cleanup_jobs(limit=20)
+
+    assert result == {"processed": 1, "completed": 1, "failed": 0, "manual_required": 0}
+    assert deleted == ["orphan/photo.jpg"]
+    assert not (tmp_path / f"{pending_id}.json").exists()
+    assert len(list(tmp_path.glob("manual-*.json"))) == 20
+
+
+def test_postgres_scan_import_uses_one_set_based_delivery_invalidation() -> None:
+    source = inspect.getsource(local_test._postgres_import_scan_records)
+
+    assert "invalidate_postgres_delivery_cache_for_group_changes(" in source
+    assert "invalidate_postgres_delivery_cache_for_group_change(" not in source
+
+
+def test_photo_url_import_rejects_placeholder_before_repository_write(monkeypatch) -> None:
+    class PlaceholderRepository:
+        def get_group(self, group_id: str):
+            return {
+                "id": group_id,
+                "terminal": "00000000",
+                "meter_no": "00000000",
+                "meter_match_key": "00000000",
+                "address": "",
+            }
+
+        def add_photo_urls_to_group(self, *_args, **_kwargs):
+            raise AssertionError("placeholder route must reject before repository write")
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: PlaceholderRepository())
+    login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
+    headers = {"Authorization": f"bearer {login.json()['data']['access_token']}"}
+
+    response = client.post(
+        "/local-test/groups/00000000/photos/import-urls",
+        headers=headers,
+        json={"actor": "admin", "photo_urls": ["https://example.test/photo.jpg"]},
+    )
+
+    assert response.status_code == 400
+    assert "00000000" in response.json()["detail"]
 
 
 def postgres_review_record() -> SimpleNamespace:
@@ -2124,6 +2447,15 @@ def test_production_group_image_upload_checks_role_before_storage(monkeypatch, t
     class FakeRepository:
         add_calls = []
 
+        def get_group(self, group_id):
+            return {
+                "id": group_id,
+                "terminal": "TERMINAL-001",
+                "meter_no": "METER-001",
+                "meter_match_key": "METER-001",
+                "address": "valid address",
+            }
+
         def add_photo_urls_to_group(self, group_id, **kwargs):
             self.add_calls.append({"group_id": group_id, **kwargs})
             return {"id": group_id, **kwargs}
@@ -2163,6 +2495,213 @@ def test_production_group_image_upload_checks_role_before_storage(monkeypatch, t
     assert allowed.status_code == 200
     assert len(storage_calls) == 1
     assert repository.add_calls[0]["actor"] == "reviewer-a"
+
+
+def test_manual_group_photo_upload_rejects_placeholder_identity_before_storage(monkeypatch) -> None:
+    storage_calls = []
+
+    class FakeRepository:
+        def get_group(self, group_id):
+            return {
+                "id": group_id,
+                "terminal": "00000000",
+                "meter_no": "00000000",
+                "meter_match_key": "00000000",
+                "address": "待导入总清单地址",
+            }
+
+        def add_photo_urls_to_group(self, *_args, **_kwargs):
+            pytest.fail("placeholder group must fail before repository write")
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+    monkeypatch.setattr(local_test, "save_image_bytes", lambda **kwargs: storage_calls.append(kwargs))
+
+    response = client.post(
+        "/local-test/groups/00000000/photos/upload-images",
+        files={"files": ("photo.jpg", tiny_jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert response.status_code == 400
+    assert "00000000" in response.json()["detail"]
+    assert storage_calls == []
+
+
+def test_manual_group_photo_upload_cleans_new_storage_object_when_repository_rejects(monkeypatch) -> None:
+    stored = {
+        "url": "/static/uploads/manual/new.jpg",
+        "sha256": "a" * 64,
+        "storage_type": "local_upload",
+        "storage_key": "manual/new.jpg",
+        "storage_bucket": "",
+        "storage_source": "manual-local-upload",
+        "created_new": True,
+    }
+    cleaned = []
+
+    class FakeRepository:
+        def get_group(self, group_id):
+            return {
+                "id": group_id,
+                "terminal": "TERMINAL-001",
+                "meter_no": "METER-001",
+                "meter_match_key": "METER-001",
+                "address": "valid address",
+            }
+
+        def add_photo_urls_to_group(self, *_args, **_kwargs):
+            raise KeyError("group disappeared")
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+    monkeypatch.setattr(local_test, "save_image_bytes", lambda **_kwargs: dict(stored))
+    monkeypatch.setattr(
+        local_test,
+        "delete_saved_image",
+        lambda payload: cleaned.append(dict(payload)) or True,
+        raising=False,
+    )
+
+    response = client.post(
+        "/local-test/groups/group-1/photos/upload-images",
+        files={"files": ("photo.jpg", tiny_jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert response.status_code == 404
+    assert cleaned == [stored]
+
+
+def test_manual_group_photo_upload_cleans_only_unreferenced_duplicate_objects(monkeypatch) -> None:
+    stored = [
+        {
+            "url": "/static/uploads/manual/retained.jpg",
+            "sha256": "a" * 64,
+            "storage_type": "local_upload",
+            "storage_key": "manual/retained.jpg",
+            "storage_bucket": "",
+            "storage_source": "manual-local-upload",
+            "created_new": True,
+        },
+        {
+            "url": "/static/uploads/manual/duplicate.jpg",
+            "sha256": "b" * 64,
+            "storage_type": "local_upload",
+            "storage_key": "manual/duplicate.jpg",
+            "storage_bucket": "",
+            "storage_source": "manual-local-upload",
+            "created_new": True,
+        },
+    ]
+    cleaned = []
+
+    class FakeRepository:
+        def get_group(self, group_id):
+            return {
+                "id": group_id,
+                "terminal": "TERMINAL-001",
+                "meter_no": "METER-001",
+                "meter_match_key": "METER-001",
+                "address": "valid address",
+            }
+
+        def add_photo_urls_to_group(self, *_args, **_kwargs):
+            return {
+                "group": {"id": "group-1"},
+                "added": 1,
+                "skipped_duplicates": 1,
+                "retained_photo_urls": [stored[0]["url"]],
+            }
+
+    stored_iter = iter(stored)
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+    monkeypatch.setattr(local_test, "save_image_bytes", lambda **_kwargs: dict(next(stored_iter)))
+    monkeypatch.setattr(
+        local_test,
+        "delete_saved_image",
+        lambda payload: cleaned.append(dict(payload)) or True,
+        raising=False,
+    )
+
+    response = client.post(
+        "/local-test/groups/group-1/photos/upload-images",
+        files=[
+            ("files", ("retained.jpg", tiny_jpeg_bytes(), "image/jpeg")),
+            ("files", ("duplicate.jpg", tiny_jpeg_bytes(), "image/jpeg")),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert cleaned == [stored[1]]
+    assert "retained_photo_urls" not in response.json()["data"]
+
+
+def test_manual_group_photo_upload_does_not_delete_committed_objects_when_response_build_fails(monkeypatch) -> None:
+    stored = {
+        "url": "/static/uploads/manual/committed.jpg",
+        "sha256": "c" * 64,
+        "storage_type": "local_upload",
+        "storage_key": "manual/committed.jpg",
+        "storage_bucket": "",
+        "storage_source": "manual-local-upload",
+        "created_new": True,
+    }
+    cleaned = []
+
+    class FakeRepository:
+        def get_group(self, group_id):
+            return {
+                "id": group_id,
+                "terminal": "TERMINAL-001",
+                "meter_no": "METER-001",
+                "meter_match_key": "METER-001",
+                "address": "valid address",
+            }
+
+        def add_photo_urls_to_group(self, *_args, **_kwargs):
+            return {
+                "group": {"id": "group-1"},
+                "added": 1,
+                "skipped_duplicates": 0,
+                "retained_photo_urls": [stored["url"]],
+            }
+
+    monkeypatch.setattr(local_test, "state_repository", lambda: FakeRepository())
+    monkeypatch.setattr(local_test, "save_image_bytes", lambda **_kwargs: dict(stored))
+    monkeypatch.setattr(local_test, "response_payload", lambda _result: (_ for _ in ()).throw(RuntimeError("response failed")))
+    monkeypatch.setattr(
+        local_test,
+        "delete_saved_image",
+        lambda payload: cleaned.append(dict(payload)) or True,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="response failed"):
+        client.post(
+            "/local-test/groups/group-1/photos/upload-images",
+            files={"files": ("committed.jpg", tiny_jpeg_bytes(), "image/jpeg")},
+        )
+
+    assert cleaned == []
+
+
+def test_delete_saved_local_image_removes_only_new_file_inside_upload_root(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    upload_root = tmp_path / "uploads"
+    target = upload_root / "manual" / "new.jpg"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"new photo")
+    monkeypatch.setattr(photo_storage, "static_upload_root", lambda: upload_root)
+
+    deleted = photo_storage.delete_saved_image(
+        {
+            "created_new": True,
+            "storage_type": "local_upload",
+            "storage_key": "manual/new.jpg",
+        }
+    )
+
+    assert deleted is True
+    assert not target.exists()
 
 
 def test_production_placeholder_review_routes_reject_constructor(monkeypatch, tmp_path) -> None:
@@ -5845,10 +6384,6 @@ def test_upload_rejects_too_many_files(monkeypatch) -> None:
 
 
 def test_photo_proxy_rejects_localhost(monkeypatch) -> None:
-    from app.api.routes import local_test
-
-    monkeypatch.setattr(local_test, "_read_remote_image", lambda *args, **kwargs: (b"image", "image/jpeg"))
-
     response = client.get("/local-test/photo-proxy", params={"url": "http://localhost/private.jpg"})
 
     assert response.status_code == 400
@@ -5857,14 +6392,11 @@ def test_photo_proxy_rejects_localhost(monkeypatch) -> None:
 
 def test_photo_proxy_requires_allowlist_in_production(monkeypatch) -> None:
     from app.api.routes import local_test
+    from app.services import photo_storage
 
     production_settings = production_test_settings(app_env="production", photo_proxy_hosts=set())
     monkeypatch.setattr(local_test, "settings", production_settings)
-    monkeypatch.setattr(
-        local_test,
-        "_read_remote_image",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("proxy fetch should be blocked")),
-    )
+    monkeypatch.setattr(photo_storage, "settings", production_settings)
 
     response = client.get("/local-test/photo-proxy", params={"url": "https://example.test/photo.jpg"})
 
@@ -5873,12 +6405,11 @@ def test_photo_proxy_requires_allowlist_in_production(monkeypatch) -> None:
 
 
 def test_photo_proxy_rejects_private_dns(monkeypatch) -> None:
-    from app.api.routes import local_test
+    from app.services import photo_storage
 
-    monkeypatch.setattr(local_test, "_read_remote_image", lambda *args, **kwargs: (b"image", "image/jpeg"))
     monkeypatch.setattr(
-        local_test,
-        "_resolve_photo_proxy_host_addresses",
+        photo_storage,
+        "resolve_remote_image_host_addresses",
         lambda hostname: ["10.0.0.5"],
         raising=False,
     )
@@ -5904,10 +6435,10 @@ def test_read_remote_image_with_validator_blocks_redirect_before_fetch(monkeypat
         automatic_redirect_requests.append(str(getattr(_request, "full_url", _request)))
         raise AssertionError("validated remote image reads must not auto-follow redirects")
 
-    def no_redirect_fetch(_request, timeout: int):
-        no_redirect_requests.append(str(getattr(_request, "full_url", _request)))
+    def no_redirect_fetch(url: str, **_kwargs):
+        no_redirect_requests.append(url)
         raise HTTPError(
-            str(getattr(_request, "full_url", _request)),
+            url,
             302,
             "Found",
             {"Location": "http://127.0.0.1/private.jpg"},
@@ -5915,7 +6446,7 @@ def test_read_remote_image_with_validator_blocks_redirect_before_fetch(monkeypat
         )
 
     monkeypatch.setattr(local_test, "urlopen", automatic_redirect_fetch)
-    monkeypatch.setattr(local_test._NO_REDIRECT_OPENER, "open", no_redirect_fetch)
+    monkeypatch.setattr(local_test, "open_validated_remote_image_url", no_redirect_fetch)
 
     try:
         local_test._read_remote_image("https://cdn.example.test/photo.jpg", url_validator=validator)
@@ -5925,6 +6456,93 @@ def test_read_remote_image_with_validator_blocks_redirect_before_fetch(monkeypat
         assert "redirect" in str(exc.detail).lower() or "not allowed" in str(exc.detail).lower()
     assert automatic_redirect_requests == []
     assert no_redirect_requests == ["https://cdn.example.test/photo.jpg"]
+
+
+def test_read_remote_image_with_validator_uses_dns_pinned_opener(monkeypatch) -> None:
+    from app.api.routes import local_test
+
+    class Response:
+        headers = {"Content-Type": "image/jpeg", "Content-Length": "5"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def geturl(self) -> str:
+            return "https://cdn.example.test/photo.jpg"
+
+        def read(self, _limit: int) -> bytes:
+            return b"image"
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        local_test,
+        "open_validated_remote_image_url",
+        lambda url, **_kwargs: calls.append(url) or Response(),
+        raising=False,
+    )
+    monkeypatch.setattr(local_test, "validate_image_content", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        local_test._NO_REDIRECT_OPENER,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy opener must not run")),
+    )
+
+    content, content_type = local_test._read_remote_image(
+        "https://cdn.example.test/photo.jpg",
+        url_validator=lambda _url: None,
+    )
+
+    assert content == b"image"
+    assert content_type == "image/jpeg"
+    assert calls == ["https://cdn.example.test/photo.jpg"]
+
+
+@pytest.mark.parametrize("entrypoint", ["photo-proxy", "group-photo-source"])
+def test_external_photo_routes_resolve_source_host_once(monkeypatch, entrypoint: str) -> None:
+    from app.api.routes import local_test
+
+    class Response:
+        headers = {"Content-Type": "image/jpeg", "Content-Length": "5"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def geturl(self) -> str:
+            return "https://cdn.example.test/photo.jpg"
+
+        def read(self, _limit: int) -> bytes:
+            return b"image"
+
+    dns_calls: list[str] = []
+
+    def resolver(hostname: str) -> list[str]:
+        dns_calls.append(hostname)
+        return ["93.184.216.34"]
+
+    def pinned_open(url: str, **_kwargs):
+        local_test.validate_remote_image_url(url, resolver=resolver)
+        return Response()
+
+    monkeypatch.setattr(local_test, "_resolve_photo_proxy_host_addresses", resolver)
+    monkeypatch.setattr(local_test, "open_validated_remote_image_url", pinned_open)
+    monkeypatch.setattr(local_test, "validate_image_content", lambda *_args, **_kwargs: None)
+
+    if entrypoint == "photo-proxy":
+        local_test.photo_proxy("https://cdn.example.test/photo.jpg")
+    else:
+        local_test._photo_content_response_from_source(
+            "https://cdn.example.test/photo.jpg",
+            request=None,
+            variant="preview",
+        )
+
+    assert dns_calls == ["cdn.example.test"]
 
 
 def test_request_size_limit_returns_413(monkeypatch) -> None:
@@ -6495,3 +7113,114 @@ def test_group_detail_uses_local_data_without_legacy_sync(monkeypatch) -> None:
     payload = response.json()["data"]
     assert payload["id"] == first_group["id"]
     assert "photos" in payload
+
+
+def test_postgres_scan_import_invalidates_group_delivery_artifacts_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="postgres-scan-group",
+        team_id="scan-team",
+        meter_match_key="meter-key-001",
+        photo_count=0,
+        raw_data={"status": "approved", "delivery_cache_status": "ready"},
+        status=state_repository.GroupStatus.APPROVED,
+        reviewer="reviewer-a",
+        review_note="ready",
+        exception_note="",
+        exception_reasons=[],
+        exception_status=None,
+        has_archive_blocker=False,
+        reviewed_at=datetime.now(),
+        last_photo_imported_at=None,
+        updated_at=None,
+    )
+    project = SimpleNamespace(updated_at=None)
+    events: list[object] = []
+    statements: list[str] = []
+    staged: list[object] = []
+
+    class Scalars:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalars(self, statement):
+            sql = str(statement)
+            statements.append(sql)
+            if "FROM material_groups" in sql:
+                return Scalars([group])
+            if "FROM photos" in sql or "FROM unmatched_records" in sql:
+                return Scalars([])
+            raise AssertionError(sql)
+
+        def add(self, value):
+            staged.append(value)
+
+        def commit(self):
+            events.append("commit")
+
+    monkeypatch.setattr(local_test, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(local_test, "current_team_id", lambda: group.team_id)
+    monkeypatch.setattr(local_test, "_postgres_project_for_team", lambda _session, _team: project)
+    monkeypatch.setattr(local_test, "_unmatched_duplicate_keys", lambda _records: set())
+    monkeypatch.setattr(
+        local_test,
+        "scan_record_to_photo_rows",
+        lambda _record, _index: [{"has_image": True}],
+    )
+    monkeypatch.setattr(
+        local_test,
+        "build_photo_record",
+        lambda _index, _row: {
+            "id": "postgres-scan-photo",
+            "source_fingerprint": "scan-photo-fingerprint",
+            "sha256": "",
+            "storage_key": "photos/postgres-scan-photo.jpg",
+            "image_url": "/static/uploads/postgres-scan-photo.jpg",
+            "source_url": "/static/uploads/postgres-scan-photo.jpg",
+            "source_file": "scan-import.xlsx",
+            "barcode": "M-001",
+            "collector": "C-001",
+            "asset_no": "MOD-001",
+            "creator": "installer-a",
+            "download_status": "ready",
+            "category_label": "unclassified",
+        },
+    )
+    monkeypatch.setattr(
+        local_test,
+        "invalidate_verification_for_group",
+        lambda *_args, **_kwargs: events.append("verification"),
+    )
+    monkeypatch.setattr(
+        delivery_cache,
+        "invalidate_postgres_delivery_cache_for_group_changes",
+        lambda *_args, **_kwargs: events.append("package"),
+    )
+
+    result = local_test._postgres_import_scan_records(
+        [{"meter_match_key": group.meter_match_key, "barcode": "M-001"}]
+    )
+
+    assert result["photos_new"] == 1
+    assert events == ["verification", "package", "commit"]
+    imported_photo = next(item for item in staged if isinstance(item, local_test.Photo))
+    assert imported_photo.raw_data["sha256_source"] == "image_url"
+    assert imported_photo.sha256 == hashlib.sha256(imported_photo.image_url.encode("utf-8")).hexdigest()
+    group_statements = [statement for statement in statements if "FROM material_groups" in statement]
+    photo_statements = [statement for statement in statements if "FROM photos" in statement]
+    assert group_statements and all("FOR UPDATE" in statement for statement in group_statements)
+    assert photo_statements and all("FOR UPDATE" in statement for statement in photo_statements)
