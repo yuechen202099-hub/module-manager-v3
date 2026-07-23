@@ -18,6 +18,7 @@ Standardize the production deployment path for `/opt/module-manager-v2`.
 Run on server before deployment:
 
 ```bash
+set -euo pipefail
 APP=/opt/module-manager-v2
 bash "$APP/current/scripts/production_backup.sh" "$APP" V<version>
 ```
@@ -43,6 +44,7 @@ The server hash must equal the local hash.
 ## Deploy
 
 ```bash
+set -euo pipefail
 APP=/opt/module-manager-v2
 VERSION=<version>
 STAMP=$(date +%Y%m%d_%H%M%S)
@@ -72,6 +74,13 @@ fi
 ln -s "$APP/uploads" "$REL/v2-api/app/static/uploads"
 cp -a "$APP/.env" "$REL/.env"
 $APP/venv/bin/python -m pip install -r "$REL/v2-api/requirements.txt"
+chmod -R g-w,g+rX "$APP/venv"
+chgrp -R modulemgr "$APP/venv"
+if find "$APP/venv" \( -type f -o -type d \) -perm -g+w -print -quit | grep -q .; then
+  echo "Python runtime must not be group-writable" >&2
+  exit 1
+fi
+runuser -u modulemgr -- "$APP/venv/bin/python" -c "from PIL import Image"
 
 # Keep background maintenance stopped until the new API and schema pass health checks.
 systemctl stop module-manager-v2-photo-barcode-maintenance.service 2>/dev/null || true

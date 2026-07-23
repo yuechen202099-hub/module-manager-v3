@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 from collections import deque
@@ -2947,6 +2948,19 @@ def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
     assert "id -u modulemgr" in runbook
     assert "useradd --system" in runbook
     assert "chown -R modulemgr:modulemgr" in runbook
+    deploy_block = runbook.split("## Deploy", 1)[1].split("```bash", 1)[1].split("```", 1)[0]
+    assert deploy_block.lstrip().startswith("set -euo pipefail")
+    pip_positions = [
+        match.start()
+        for match in re.finditer(r"(?m)^[^#\n]*(?:(?:-m\s+pip)|pip3?)\s+install\b", deploy_block)
+    ]
+    assert pip_positions
+    venv_mode_index = deploy_block.index('chmod -R g-w,g+rX "$APP/venv"')
+    venv_group_index = deploy_block.index('chgrp -R modulemgr "$APP/venv"')
+    pip_index = max(pip_positions)
+    assert pip_index < venv_mode_index < venv_group_index
+    assert 'find "$APP/venv" \\( -type f -o -type d \\) -perm -g+w -print -quit' in deploy_block
+    assert 'runuser -u modulemgr -- "$APP/venv/bin/python" -c "from PIL import Image"' in deploy_block
     assert 'install -m 0644 "$REL/infra/module-manager-v2.service"' in runbook
     assert "systemctl daemon-reload" in runbook
     env_index = runbook.index('. "$APP/.env"')
