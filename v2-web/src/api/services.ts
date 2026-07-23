@@ -7,6 +7,11 @@ import type {
   ConstructionPriorityImportResult,
   ConstructionUploadPayload,
   CurrentUser,
+  DataCenterDataType,
+  DataCenterDetail,
+  DataCenterPage,
+  DataCenterPageSize,
+  DataCenterRow,
   GroupBarcodeManualConfirmation,
   GroupSearchResult,
   ImportJob,
@@ -65,6 +70,39 @@ type ApiEnvelope<T> = {
   data?: T
   error?: { message?: string }
   detail?: string
+}
+
+type BackendDataCenterRow = {
+  kind?: 'group' | 'unmatched'
+  id?: string
+  terminal?: string
+  meter_no?: string
+  meter_match_key?: string
+  address?: string
+  collector?: string
+  module_asset_no?: string
+  construction_collector?: string
+  construction_module_asset_no?: string
+  installer?: string
+  photo_count?: number
+  classification_status?: string
+  classification_progress?: Record<string, unknown>
+  barcode_status?: string
+  barcode_progress?: Record<string, unknown>
+  group_barcode_missing_fields?: string[]
+  construction_status?: string
+  archive_status?: string
+  exception_status?: string
+  updated_at?: string
+  photos?: BackendPhoto[]
+  audit?: Array<Record<string, unknown>>
+}
+
+type BackendDataCenterPage = {
+  total?: number
+  page?: number
+  page_size?: number
+  items?: BackendDataCenterRow[]
 }
 
 type LegacySession = {
@@ -947,6 +985,40 @@ function mapGroup(raw: BackendGroup): MaterialGroup {
   }
 }
 
+function mapDataCenterRow(raw: BackendDataCenterRow): DataCenterRow {
+  return {
+    kind: raw.kind === 'unmatched' ? 'unmatched' : 'group',
+    id: String(raw.id || ''),
+    terminal: raw.terminal || '',
+    meterNo: raw.meter_no || '',
+    meterMatchKey: raw.meter_match_key || '',
+    address: raw.address || '',
+    collector: raw.collector || '',
+    moduleAssetNo: raw.module_asset_no || '',
+    constructionCollector: raw.construction_collector || '',
+    constructionModuleAssetNo: raw.construction_module_asset_no || '',
+    installer: raw.installer || '',
+    photoCount: Number(raw.photo_count || raw.photos?.length || 0),
+    classificationStatus: raw.classification_status || 'incomplete',
+    classificationProgress: raw.classification_progress || {},
+    barcodeStatus: raw.barcode_status || 'ineligible',
+    barcodeProgress: raw.barcode_progress || {},
+    groupBarcodeMissingFields: mapStringArray(raw.group_barcode_missing_fields),
+    constructionStatus: raw.construction_status || 'unconstructed',
+    archiveStatus: raw.archive_status || 'unarchived',
+    exceptionStatus: raw.exception_status || '',
+    updatedAt: raw.updated_at || '',
+  }
+}
+
+function mapDataCenterDetail(raw: BackendDataCenterRow): DataCenterDetail {
+  return {
+    ...mapDataCenterRow(raw),
+    photos: (raw.photos || []).map(mapPhoto),
+    audit: raw.audit || [],
+  }
+}
+
 function normalizeBarcodeVerificationStatus(value: unknown): BarcodeVerificationStatus | undefined {
   const status = String(value || '')
   if (
@@ -1478,6 +1550,135 @@ export async function updateAdminGroupMetadata(
     group: mapGroup(data.group || ({} as BackendGroup)),
     changedFields: (data.changed_fields || []).map(String),
   }
+}
+
+export type DataCenterListQuery = {
+  dataType?: DataCenterDataType
+  constructionStatus?: string
+  archiveStatus?: string
+  barcodeStatus?: string
+  classificationStatus?: string
+  exceptionStatus?: string
+  installer?: string
+  dateFrom?: string
+  dateTo?: string
+  terminal?: string
+  keyword?: string
+  page?: number
+  pageSize?: DataCenterPageSize
+  sort?: string
+  signal?: AbortSignal
+}
+
+export async function fetchDataCenterRows(query: DataCenterListQuery): Promise<DataCenterPage> {
+  const params = new URLSearchParams({
+    data_type: query.dataType || 'all',
+    construction_status: query.constructionStatus || 'all',
+    archive_status: query.archiveStatus || 'all',
+    barcode_status: query.barcodeStatus || 'all',
+    classification_status: query.classificationStatus || 'all',
+    exception_status: query.exceptionStatus || '',
+    installer: query.installer || '',
+    terminal: query.terminal || '',
+    query: query.keyword || '',
+    page: String(query.page || 1),
+    page_size: String(query.pageSize || 20),
+    sort: query.sort || 'updated_desc',
+  })
+  if (query.dateFrom) params.set('date_from', query.dateFrom)
+  if (query.dateTo) params.set('date_to', query.dateTo)
+  const data = await api<BackendDataCenterPage>(`/groups/data-center?${params.toString()}`, {
+    signal: query.signal,
+  })
+  const pageSize = [20, 50, 100].includes(Number(data.page_size)) ? Number(data.page_size) as DataCenterPageSize : 20
+  return {
+    total: Number(data.total || 0),
+    page: Number(data.page || query.page || 1),
+    pageSize,
+    items: (data.items || []).map(mapDataCenterRow),
+  }
+}
+
+export async function fetchDataCenterDetail(
+  kind: DataCenterRow['kind'],
+  itemId: string,
+  signal?: AbortSignal,
+): Promise<DataCenterDetail> {
+  const data = await api<BackendDataCenterRow>(
+    `/groups/data-center/${encodeURIComponent(kind)}/${encodeURIComponent(itemId)}`,
+    { signal },
+  )
+  return mapDataCenterDetail(data)
+}
+
+export async function updateDataCenterGroup(
+  groupId: string,
+  patch: Record<string, unknown>,
+  reason = '',
+): Promise<{ group?: MaterialGroup; changedFields: string[]; archiveStatus: string; barcodeStatus: string }> {
+  const data = await api<{
+    group?: BackendGroup
+    changed_fields?: string[]
+    archive_status?: string
+    barcode_status?: string
+  }>(`/groups/data-center/groups/${encodeURIComponent(groupId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ patch, reason, source_page: 'data_center' }),
+  })
+  return {
+    group: data.group ? mapGroup(data.group) : undefined,
+    changedFields: (data.changed_fields || []).map(String),
+    archiveStatus: data.archive_status || '',
+    barcodeStatus: data.barcode_status || '',
+  }
+}
+
+export async function confirmDataCenterGroupBarcode(
+  groupId: string,
+  payload: GroupBarcodeManualConfirmation,
+): Promise<{ group?: MaterialGroup; archiveStatus: string; barcodeStatus: string; deliveryPackageJobStatus: string }> {
+  const data = await api<{
+    group?: BackendGroup
+    archive_status?: string
+    barcode_status?: string
+    delivery_package_job_status?: string
+  }>(`/groups/data-center/groups/${encodeURIComponent(groupId)}/barcode-manual-confirm`, {
+    method: 'POST',
+    body: JSON.stringify({
+      meter_no: payload.meterNo,
+      module_asset_no: payload.moduleAssetNo,
+      collector: payload.collector,
+      reason: payload.reason,
+      photo_ids: payload.photoIds,
+      source_page: 'data_center',
+    }),
+  })
+  return {
+    group: data.group ? mapGroup(data.group) : undefined,
+    archiveStatus: data.archive_status || '',
+    barcodeStatus: data.barcode_status || '',
+    deliveryPackageJobStatus: data.delivery_package_job_status || '',
+  }
+}
+
+export async function finalizeDataCenterUnmatchedToGroup(
+  unmatchedId: string,
+  payload: { terminal: string; meterNo: string; candidateKey: string; expectedVersion: number },
+): Promise<{ groupId: string }> {
+  const data = await api<{ group?: { id?: string } }>(
+    `/groups/data-center/unmatched/${encodeURIComponent(unmatchedId)}/finalize-to-group`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        terminal: payload.terminal,
+        meter_no: payload.meterNo,
+        candidate_key: payload.candidateKey,
+        expected_version: payload.expectedVersion,
+        source_page: 'data_center',
+      }),
+    },
+  )
+  return { groupId: data.group?.id ? String(data.group.id) : '' }
 }
 
 export async function resetAdminGroupToUnreviewed(

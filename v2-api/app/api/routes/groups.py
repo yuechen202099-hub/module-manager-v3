@@ -29,6 +29,29 @@ class GroupBulkArchiveRequest(BaseModel):
     reason: str = ""
 
 
+class DataCenterGroupPatchRequest(BaseModel):
+    patch: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+    source_page: str = "data_center"
+
+
+class DataCenterManualConfirmRequest(BaseModel):
+    meter_no: str = ""
+    module_asset_no: str = ""
+    collector: str = ""
+    reason: str = ""
+    photo_ids: list[str] = Field(default_factory=list)
+    source_page: str = "data_center"
+
+
+class DataCenterUnmatchedFinalizeRequest(BaseModel):
+    terminal: str = ""
+    meter_no: str = ""
+    candidate_key: str = ""
+    expected_version: int = 1
+    source_page: str = "data_center"
+
+
 def state_repository():
     try:
         return get_state_repository()
@@ -163,6 +186,89 @@ def data_center_detail(
     if result is None:
         raise HTTPException(status_code=404, detail="Data center item not found")
     return ok(request, result)
+
+
+@router.patch("/data-center/groups/{group_id}")
+def update_data_center_group(
+    group_id: str,
+    payload: DataCenterGroupPatchRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().update_data_center_group(
+            group_id,
+            patch=payload.patch,
+            actor=_admin_actor(admin_payload),
+            reason=payload.reason,
+            source_page=payload.source_page,
+        )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
+
+
+@router.post("/data-center/groups/{group_id}/barcode-manual-confirm")
+def manual_confirm_data_center_group_barcode(
+    group_id: str,
+    payload: DataCenterManualConfirmRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().manual_confirm_group_barcode(
+            group_id,
+            actor=_admin_actor(admin_payload),
+            reason=payload.reason,
+            source_page=payload.source_page,
+            meter_no=payload.meter_no,
+            module_asset_no=payload.module_asset_no,
+            collector=payload.collector,
+            photo_ids=payload.photo_ids,
+        )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
+
+
+@router.post("/data-center/unmatched/{unmatched_id}/finalize-to-group")
+def finalize_data_center_unmatched_to_group(
+    unmatched_id: str,
+    payload: DataCenterUnmatchedFinalizeRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().finalize_unmatched_to_group(
+            unmatched_id,
+            actor=_admin_actor(admin_payload),
+            terminal=payload.terminal,
+            meter_no=payload.meter_no,
+            candidate_key=payload.candidate_key,
+            expected_version=payload.expected_version,
+            source_page=payload.source_page,
+        )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unmatched record not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
 
 
 @router.patch("/{group_id}/metadata")

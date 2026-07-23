@@ -297,6 +297,45 @@ export type GroupSearchResult = {
   items: MaterialGroup[]
 }
 
+export type DataCenterDataType = 'all' | 'group' | 'unmatched'
+export type DataCenterPageSize = 20 | 50 | 100
+
+export type DataCenterRow = {
+  kind: 'group' | 'unmatched'
+  id: string
+  terminal: string
+  meterNo: string
+  meterMatchKey: string
+  address: string
+  collector: string
+  moduleAssetNo: string
+  constructionCollector: string
+  constructionModuleAssetNo: string
+  installer: string
+  photoCount: number
+  classificationStatus: string
+  classificationProgress: Record<string, unknown>
+  barcodeStatus: string
+  barcodeProgress: Record<string, unknown>
+  groupBarcodeMissingFields: string[]
+  constructionStatus: string
+  archiveStatus: string
+  exceptionStatus: string
+  updatedAt: string
+}
+
+export type DataCenterPage = {
+  total: number
+  page: number
+  pageSize: DataCenterPageSize
+  items: DataCenterRow[]
+}
+
+export type DataCenterDetail = DataCenterRow & {
+  photos: ReviewPhoto[]
+  audit: Array<Record<string, unknown>>
+}
+
 export type ReviewPhoto = {
   id: string
   url: string

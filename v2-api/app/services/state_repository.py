@@ -84,10 +84,129 @@ INSUFFICIENT_GROUP_PHOTO_REASON = "\u8d44\u6599\u7ec4\u7167\u7247\u4e0d\u8db3 4 
 MISSING_COLLECTOR_INFO_REASON = "\u7f3a\u5c11\u91c7\u96c6\u5668\u4fe1\u606f"
 MODULE_DUPLICATE_REASON_PREFIX = "\u6a21\u5757\u53f7\u91cd\u590d"
 FINALIZATION_REPLAY_KEY = "finalization_replay"
+DATA_CENTER_IDENTITY_FIELDS = {
+    "meter_no",
+    "terminal",
+    "collector",
+    "module_asset_no",
+    "construction_collector",
+    "construction_module_asset_no",
+}
 
 
 class StateBackendNotReady(RuntimeError):
     """Raised when the selected state backend cannot safely serve the operation."""
+
+
+def _data_center_archive_status(group: Mapping[str, Any]) -> str:
+    return str(data_center_service.group_row(group).get("archive_status") or "unarchived")
+
+
+def _data_center_barcode_status(group: Mapping[str, Any]) -> str:
+    row_status = str(data_center_service.group_row(group).get("barcode_status") or "ineligible")
+    return "manual_passed" if row_status == "manual" else row_status
+
+
+def _data_center_group_result(
+    group: Mapping[str, Any],
+    *,
+    changed_fields: list[str] | None = None,
+    delivery_package_job_status: str = "",
+    archive_result: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    row = data_center_service.group_row(group)
+    return {
+        "group": deepcopy(dict(group)),
+        "changed_fields": changed_fields or [],
+        "archive_status": row.get("archive_status", "unarchived"),
+        "barcode_status": _data_center_barcode_status(group),
+        "construction_status": row.get("construction_status", "unconstructed"),
+        "classification_status": row.get("classification_status", "incomplete"),
+        "delivery_package_job_status": delivery_package_job_status,
+        "archive_result": dict(archive_result or {}),
+    }
+
+
+def _reject_placeholder_or_ambiguous_data_center_target(*, terminal: str, meter_no: str, candidate_key: str) -> None:
+    values = [terminal, meter_no, candidate_key]
+    if any(str(value or "").strip() == "00000000" for value in values):
+        raise ValueError("数据中台未匹配归并必须选择唯一真实资料组，禁止使用 00000000")
+
+
+def _json_mark_data_center_archive_invalidated(group: dict[str, Any], *, actor: str, reason: str) -> None:
+    previous_archive = _data_center_archive_status(group)
+    if previous_archive != "archived":
+        return
+    for photo in group.get("photos", []) or []:
+        if not isinstance(photo, dict) or photo.get("is_active", True) is False:
+            continue
+        photo["archive_status"] = "pending"
+        photo["archived_at"] = ""
+        photo["archive_filename"] = ""
+    group["archive_status"] = "pending"
+    group["status"] = "pending"
+    group["reviewer"] = ""
+    group["review_note"] = ""
+    group["reviewed_at"] = None
+    local_simulation.mark_delivery_cache_stale(group, reason)
+    local_simulation.append_audit_event(
+        "data_center_archive_invalidated",
+        actor,
+        {"group_id": group.get("id"), "previous_archive_status": previous_archive, "reason": reason},
+    )
+
+
+def _json_request_data_center_delivery_package(group: Mapping[str, Any], *, actor: str) -> str:
+    from app.services.delivery_package_queue import DeliveryPackageNotReady, request_json_delivery_package
+    from app.services.final_delivery_export import DeliveryPackageValidationError
+
+    try:
+        request_json_delivery_package(
+            groups=[dict(group)],
+            task_id=int(group.get("task_id") or 0) or None,
+            terminal=str(group.get("terminal") or ""),
+            review_scope="reviewed",
+            requested_by=actor,
+        )
+        return "ready"
+    except DeliveryPackageNotReady as exc:
+        return exc.status
+    except DeliveryPackageValidationError as exc:
+        now = datetime.now(UTC).isoformat()
+        state = local_simulation.get_state()
+        group_id = str(group.get("id") or "")
+        jobs = state.setdefault("delivery_package_jobs", [])
+        job = next(
+            (
+                item
+                for item in jobs
+                if group_id in {str(value) for value in item.get("group_ids", [])}
+                and str(item.get("status") or "") not in {"ready", "pending", "processing"}
+            ),
+            None,
+        )
+        if job is None:
+            job = {
+                "id": str(uuid4()),
+                "team_id": str(state.get("team_id") or local_simulation.current_team_id()),
+                "group_ids": [group_id],
+                "created_at": now,
+            }
+            jobs.append(job)
+        job.update(
+            {
+                "status": "pending",
+                "requested_by": actor,
+                "request_reason": "data_center_auto_archive",
+                "last_error": str(exc),
+                "lease_owner": None,
+                "lease_token": None,
+                "lease_expires_at": None,
+                "completed_at": None,
+                "updated_at": now,
+            }
+        )
+        return "pending"
 
 
 def _status_value(value: Any) -> str:
@@ -2366,6 +2485,47 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def update_data_center_group(
+        self,
+        group_id: str,
+        *,
+        patch: dict[str, Any],
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def manual_confirm_group_barcode(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        reason: str,
+        source_page: str = "data_center",
+        meter_no: str,
+        module_asset_no: str,
+        collector: str,
+        photo_ids: list[str],
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def finalize_unmatched_to_group(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        terminal: str,
+        meter_no: str,
+        candidate_key: str,
+        expected_version: int,
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -3120,6 +3280,98 @@ class JsonStateRepository(StateRepository):
                 local_simulation.abort_authoritative_json_write(transaction, token)
             raise
         return result
+
+    def update_data_center_group(
+        self,
+        group_id: str,
+        *,
+        patch: dict[str, Any],
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        result = self.update_group_metadata(
+            group_id,
+            actor=actor,
+            updates=patch,
+            audit_action="data_center_group_updated",
+        )
+        group = local_simulation.get_group(group_id)
+        if group is None:
+            raise KeyError(group_id)
+        changed_fields = list(result.get("changed_fields") or [])
+        if changed_fields and set(changed_fields).intersection(DATA_CENTER_IDENTITY_FIELDS):
+            _json_mark_data_center_archive_invalidated(
+                group,
+                actor=actor,
+                reason=reason or "data_center_identity_changed",
+            )
+            local_simulation.refresh_summary()
+        return _data_center_group_result(group, changed_fields=changed_fields)
+
+    def manual_confirm_group_barcode(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        reason: str,
+        source_page: str = "data_center",
+        meter_no: str,
+        module_asset_no: str,
+        collector: str,
+        photo_ids: list[str],
+    ) -> dict[str, Any]:
+        self.confirm_group_barcode_manually(
+            group_id,
+            actor=actor,
+            meter_no=meter_no,
+            module_asset_no=module_asset_no,
+            collector=collector,
+            reason=reason,
+            photo_ids=photo_ids,
+        )
+        from app.services.barcode_maintenance_worker import _auto_archive_json_in_state
+
+        state = local_simulation.get_state()
+        archive_result = _auto_archive_json_in_state(
+            state,
+            group_id,
+            actor=actor,
+        )
+        group = local_simulation.get_group(group_id)
+        if group is None:
+            raise KeyError(group_id)
+        package_status = ""
+        if archive_result.get("archived") or _data_center_archive_status(group) == "archived":
+            package_status = _json_request_data_center_delivery_package(group, actor=actor)
+        return _data_center_group_result(
+            group,
+            delivery_package_job_status=package_status,
+            archive_result=archive_result,
+        )
+
+    def finalize_unmatched_to_group(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        terminal: str,
+        meter_no: str,
+        candidate_key: str,
+        expected_version: int,
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        _reject_placeholder_or_ambiguous_data_center_target(
+            terminal=terminal,
+            meter_no=meter_no,
+            candidate_key=candidate_key,
+        )
+        return self.finalize_unmatched_match(
+            unmatched_id,
+            actor=actor,
+            candidate_key=candidate_key,
+            expected_version=expected_version,
+        )
 
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         return local_simulation.claim_task(task_id, reviewer)
@@ -6830,6 +7082,140 @@ class PostgresStateRepository(StateRepository):
             )
         return result
 
+    def update_data_center_group(
+        self,
+        group_id: str,
+        *,
+        patch: dict[str, Any],
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        result = self.update_group_metadata(
+            group_id,
+            actor=actor,
+            updates=patch,
+            audit_action="data_center_group_updated",
+        )
+        changed_fields = list(result.get("changed_fields") or [])
+        if changed_fields and set(changed_fields).intersection(DATA_CENTER_IDENTITY_FIELDS):
+            with self._session() as session:
+                group = self._group_by_legacy_id(session, group_id, lock=True)
+                photos = session.scalars(
+                    select(Photo).where(
+                        Photo.team_id == group.team_id,
+                        Photo.group_id == group.id,
+                        Photo.is_active.is_(True),
+                    )
+                ).all()
+                if photos and all(str(photo.archive_status or "") == "archived" for photo in photos):
+                    now = datetime.now(UTC)
+                    for photo in photos:
+                        raw = dict(photo.raw_data or {})
+                        photo.archive_status = "pending"
+                        photo.archived_at = None
+                        raw.update({"archive_status": "pending", "archived_at": ""})
+                        photo.raw_data = raw
+                    raw_data = dict(group.raw_data or {})
+                    raw_data.update(
+                        {
+                            "archive_status": "pending",
+                            "status": "pending",
+                            "reviewer": "",
+                            "review_note": "",
+                            "reviewed_at": "",
+                        }
+                    )
+                    group.status = GroupStatus.UNREVIEWED
+                    group.reviewer = None
+                    group.review_note = ""
+                    group.reviewed_at = None
+                    group.raw_data = raw_data
+                    group.updated_at = now
+                    _stage_transactional_audit(
+                        session,
+                        team_id=local_simulation.current_team_id(),
+                        actor=actor,
+                        action="data_center_archive_invalidated",
+                        entity_type="material_group",
+                        entity_id=group.id,
+                        payload={
+                            "group_id": group.legacy_id or str(group.id),
+                            "previous_archive_status": "archived",
+                            "reason": reason or "data_center_identity_changed",
+                        },
+                    )
+                    session.commit()
+        group_payload = self.get_group(group_id) or result.get("group") or {}
+        return _data_center_group_result(group_payload, changed_fields=changed_fields)
+
+    def manual_confirm_group_barcode(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        reason: str,
+        source_page: str = "data_center",
+        meter_no: str,
+        module_asset_no: str,
+        collector: str,
+        photo_ids: list[str],
+    ) -> dict[str, Any]:
+        self.confirm_group_barcode_manually(
+            group_id,
+            actor=actor,
+            meter_no=meter_no,
+            module_asset_no=module_asset_no,
+            collector=collector,
+            reason=reason,
+            photo_ids=photo_ids,
+        )
+        from app.services.barcode_maintenance_worker import auto_archive_verified_group
+        from app.services.delivery_package_queue import DeliveryPackageNotReady
+
+        archive_result = auto_archive_verified_group(group_id, actor=actor)
+        group_payload = self.get_group(group_id) or {}
+        package_status = ""
+        if archive_result.get("archived") or _data_center_archive_status(group_payload) == "archived":
+            try:
+                self.request_final_delivery_export(
+                    task_id=int(group_payload.get("task_id") or 0) or None,
+                    terminal=str(group_payload.get("terminal") or ""),
+                    review_scope="reviewed",
+                    requested_by=actor,
+                )
+                package_status = "ready"
+            except DeliveryPackageNotReady as exc:
+                package_status = exc.status
+        return _data_center_group_result(
+            group_payload,
+            delivery_package_job_status=package_status,
+            archive_result=archive_result,
+        )
+
+    def finalize_unmatched_to_group(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        terminal: str,
+        meter_no: str,
+        candidate_key: str,
+        expected_version: int,
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        _reject_placeholder_or_ambiguous_data_center_target(
+            terminal=terminal,
+            meter_no=meter_no,
+            candidate_key=candidate_key,
+        )
+        return self.finalize_unmatched_match(
+            unmatched_id,
+            actor=actor,
+            candidate_key=candidate_key,
+            expected_version=expected_version,
+        )
+
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         with self._session() as session:
             task = self._task_by_legacy_id(session, task_id, lock=True)
@@ -9790,6 +10176,69 @@ class DualWriteStateRepository(JsonStateRepository):
         result = super().update_group_metadata(group_id, actor=actor, updates=updates, audit_action=audit_action)
         self._mirror_write("update_group_metadata", group_id, actor=actor, updates=updates, audit_action=audit_action)
         return result
+
+    def update_data_center_group(
+        self,
+        group_id: str,
+        *,
+        patch: dict[str, Any],
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        result = super().update_data_center_group(
+            group_id,
+            patch=patch,
+            actor=actor,
+            reason=reason,
+            source_page=source_page,
+        )
+        self._mirror_write(
+            "update_data_center_group",
+            group_id,
+            patch=patch,
+            actor=actor,
+            reason=reason,
+            source_page=source_page,
+        )
+        return result
+
+    def manual_confirm_group_barcode(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        reason: str,
+        source_page: str = "data_center",
+        meter_no: str,
+        module_asset_no: str,
+        collector: str,
+        photo_ids: list[str],
+    ) -> dict[str, Any]:
+        self._reject_uncoordinated_dual_write("manual_confirm_group_barcode")
+
+    def finalize_unmatched_to_group(
+        self,
+        unmatched_id: str,
+        *,
+        actor: str,
+        terminal: str,
+        meter_no: str,
+        candidate_key: str,
+        expected_version: int,
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        _reject_placeholder_or_ambiguous_data_center_target(
+            terminal=terminal,
+            meter_no=meter_no,
+            candidate_key=candidate_key,
+        )
+        return super().finalize_unmatched_match(
+            unmatched_id,
+            actor=actor,
+            candidate_key=candidate_key,
+            expected_version=expected_version,
+        )
 
     def reset_group_to_unconstructed(
         self,

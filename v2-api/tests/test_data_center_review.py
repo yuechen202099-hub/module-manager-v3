@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from uuid import uuid4
+
+import pytest
+
+from app.services import local_simulation
+from app.services import state_repository as repository
+
+
+def _photo(photo_id: str, category: str, sha: str, *, archive_status: str = "pending") -> dict:
+    return {
+        "id": photo_id,
+        "category": category,
+        "archive_status": archive_status,
+        "sha256": sha * 64,
+        "upload_status": "uploaded",
+        "image_url": f"https://example.test/{photo_id}.jpg",
+        "is_active": True,
+    }
+
+
+def _review_state(team_id: str, *, archived: bool = False) -> dict:
+    archive_status = "archived" if archived else "pending"
+    state = local_simulation.blank_state(team_id)
+    state["barcode_maintenance_control"]["paused"] = False
+    state["tasks"] = [
+        {
+            "id": 1,
+            "terminal": "120000000001",
+            "claimed_by": "admin-a",
+            "total_groups": 1,
+            "uploaded_count": 1,
+        }
+    ]
+    state["groups"] = [
+        {
+            "id": "g-1",
+            "task_id": 1,
+            "terminal": "120000000001",
+            "meter_no": "110000288056",
+            "meter_match_key": "0000288056",
+            "address": "A road",
+            "status": "approved" if archived else "pending",
+            "photo_count": 4,
+            "collector": "COLLECTOR001",
+            "module_asset_no": "MOD001",
+            "construction_collector": "COLLECTOR001",
+            "construction_module_asset_no": "MOD001",
+            "archive_status": archive_status,
+            "delivery_cache_status": "ready" if archived else "pending",
+            "delivery_package_invalidation_epoch": 7,
+            "barcode_verification": {
+                "status": "passed",
+                "evidence_version": 7,
+                "meter_matched": True,
+                "module_matched": True,
+                "collector_matched": True,
+                "recognition_source": "machine_barcode",
+                "result": {"passed_count": 3, "matched_fields": ["meter", "module", "collector"], "missing_fields": []},
+            },
+            "group_barcode_manual_confirmed": False,
+            "photos": [
+                _photo("p1", "before_box", "a", archive_status=archive_status),
+                _photo("p2", "collector_barcode", "b", archive_status=archive_status),
+                _photo("p3", "module_meter", "c", archive_status=archive_status),
+                _photo("p4", "after_box", "d", archive_status=archive_status),
+            ],
+        }
+    ]
+    state["delivery_package_jobs"] = [
+        {
+            "id": "package-job-1",
+            "group_ids": ["g-1"],
+            "status": "processing",
+            "lease_owner": "package-worker",
+            "lease_token": "package-lease",
+            "lease_expires_at": "2026-07-23T12:00:00+00:00",
+            "completed_at": "2026-07-23T11:00:00+00:00",
+        }
+    ]
+    return state
+
+
+@pytest.fixture()
+def json_review_repo(monkeypatch: pytest.MonkeyPatch) -> repository.JsonStateRepository:
+    team_id = f"data-center-review-{uuid4()}"
+    state = _review_state(team_id)
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+    return repository.JsonStateRepository()
+
+
+def _latest_group() -> dict:
+    return local_simulation.get_state()["groups"][0]
+
+
+def _audit_has_before_after(action: str, field: str) -> bool:
+    for event in local_simulation.get_state()["audit_events"]:
+        if event.get("action") != action:
+            continue
+        payload = event.get("payload") or {}
+        previous = payload.get("previous") or payload.get("before") or {}
+        updates = payload.get("updates") or payload.get("after") or {}
+        if field in previous and field in updates:
+            return True
+    return False
+
+
+def test_data_center_edit_invalidates_barcode_archive_and_delivery_cache(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    result = json_review_repo.update_data_center_group(
+        group_id="g-1",
+        patch={"module_asset_no": "MOD002"},
+        actor="admin-a",
+        reason="更正模块号",
+        source_page="data_center",
+    )
+    group = _latest_group()
+    package_job = local_simulation.get_state()["delivery_package_jobs"][0]
+
+    assert result["archive_status"] != "archived"
+    assert group["barcode_verification"]["status"] == "pending"
+    assert group["delivery_package_invalidation_epoch"] == 8
+    assert package_job["status"] == "stale"
+    assert _audit_has_before_after("data_center_group_updated", "module_asset_no")
+
+
+def test_manual_confirmation_requires_reason_and_auto_archives_when_ready(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    with pytest.raises(ValueError, match="原因"):
+        json_review_repo.manual_confirm_group_barcode(
+            "g-1",
+            actor="admin-a",
+            reason="",
+            source_page="data_center",
+            meter_no="110000288056",
+            module_asset_no="MOD001",
+            collector="COLLECTOR001",
+            photo_ids=["p1", "p2", "p3", "p4"],
+        )
+
+    result = json_review_repo.manual_confirm_group_barcode(
+        "g-1",
+        actor="admin-a",
+        reason="现场照片与台账一致",
+        source_page="data_center",
+        meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        photo_ids=["p1", "p2", "p3", "p4"],
+    )
+    group = _latest_group()
+    package_statuses = {str(job.get("status") or "") for job in local_simulation.get_state()["delivery_package_jobs"]}
+
+    assert result["barcode_status"] == "manual_passed"
+    assert result["archive_status"] == "archived"
+    assert group["status"] == "approved"
+    assert package_statuses & {"pending", "ready"}
+
+
+def test_unmatched_finalize_rejects_placeholder_or_ambiguous_target(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    before = deepcopy(local_simulation.get_state())
+
+    with pytest.raises(ValueError, match="唯一"):
+        json_review_repo.finalize_unmatched_to_group(
+            unmatched_id="unmatched-1",
+            actor="admin-a",
+            terminal="00000000",
+            meter_no="00000000",
+            candidate_key="manual:00000000",
+            expected_version=1,
+            source_page="data_center",
+        )
+
+    assert local_simulation.get_state() == before
