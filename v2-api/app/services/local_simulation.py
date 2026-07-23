@@ -4803,7 +4803,7 @@ def is_valid_photo_evidence(photo: Any) -> bool:
         is_active = getattr(photo, "is_active", True)
         upload_status = getattr(photo, "upload_status", "uploaded")
     status_value = str(getattr(upload_status, "value", upload_status) or "").strip().lower()
-    return bool(is_active) and status_value != "invalid"
+    return bool(is_active) and status_value == "uploaded"
 
 
 def group_photo_slots(group: dict[str, Any]) -> set[str]:
@@ -5457,30 +5457,38 @@ def build_final_delivery_package_from_groups(
         if not cache_ready:
             group["delivery_cache_status"] = "pending"
 
-    def read_completed_cache(photo: dict[str, Any]) -> bytes:
-        from app.services.final_delivery_export import release_delivery_cache_path, reserve_delivery_cache_path
-
+    def read_completed_cache_path(photo: dict[str, Any]) -> Path:
         group_id = str(photo.get("_delivery_group_id") or "")
         group = groups_by_id[group_id]
-        candidate = delivery_cache_file_for_photo(group, photo)
-        if candidate is None:
-            raise DeliveryCacheFileValidationError(str(photo.get("id") or ""))
-        lease = reserve_delivery_cache_path(candidate)
-        try:
-            path = get_delivery_cached_photo_path_from_payload(group, photo)
-            return path.read_bytes()
-        finally:
-            release_delivery_cache_path(lease)
+        return get_delivery_cached_photo_path_from_payload(group, photo)
 
     fingerprint = delivery_evidence_fingerprint(candidates)
+    from app.services.final_delivery_export import (
+        acquire_delivery_cache_file_lock,
+        build_delivery_package_file,
+    )
+
+    cache_root = delivery_cache_root()
+    object_tree_lock = acquire_delivery_cache_file_lock(
+        cache_root,
+        cache_root / "objects",
+        blocking=True,
+        exclusive=False,
+    )
+    if object_tree_lock is None:  # pragma: no cover - blocking acquisition returns a lock or raises
+        raise RuntimeError("Unable to lock completed delivery cache")
     try:
-        return get_or_build_delivery_package(
-            scope,
-            fingerprint,
-            groups=candidates,
-            photo_reader=read_completed_cache,
-            cache_root=delivery_cache_root(),
-        )
+        try:
+            return get_or_build_delivery_package(
+                scope,
+                fingerprint,
+                groups=candidates,
+                photo_reader=read_completed_cache_path,
+                cache_root=cache_root,
+                package_file_builder=build_delivery_package_file,
+            )
+        finally:
+            object_tree_lock.release()
     except DeliveryPackageValidationError as exc:
         invalid_group_ids = sorted(
             {

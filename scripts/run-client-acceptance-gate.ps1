@@ -104,7 +104,7 @@ if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the full Git source commit for release acceptance."
 }
 
-$performanceOutput = Join-Path $root "outputs\performance\v$Version-task-review.json"
+$performanceOutput = Join-Path $root "build\release-evidence\v$Version-task-review.json"
 Invoke-Step "Verify task and review performance" {
     .\.venv\Scripts\python.exe .\v2-api\scripts\verify_task_review_performance.py `
         --base-url "http://127.0.0.1:$Port" `

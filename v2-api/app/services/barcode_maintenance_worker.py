@@ -1042,6 +1042,15 @@ def _auto_archive_postgres(
             verification.auto_archive_lease_token = None
             verification.auto_archive_lease_expires_at = None
             verification.auto_archive_error = reason
+            state_repository._stage_transactional_audit(
+                session,
+                team_id=team_id,
+                actor=actor,
+                action="group_barcode_auto_archive_blocked",
+                entity_type="material_group",
+                entity_id=group.id,
+                payload={"group_id": group_id, "reason": reason},
+            )
             session.commit()
             return {"archived": False, "group_id": group_id, "reason": reason}
         now = datetime.now(UTC)

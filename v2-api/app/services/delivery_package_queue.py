@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from uuid import UUID, uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -27,6 +27,7 @@ from app.services.final_delivery_export import (
 
 MAX_DELIVERY_PACKAGE_ATTEMPTS = 3
 DEFAULT_LEASE_SECONDS = 900
+MAX_EXPIRED_DELIVERY_PACKAGE_LEASES = 20
 
 
 class DeliveryPackageNotReady(RuntimeError):
@@ -63,6 +64,29 @@ def delivery_scope(
         f"review_scope={review_scope}"
     )
     return scope, hashlib.sha256(scope.encode("utf-8")).hexdigest(), payload
+
+
+def delivery_package_advisory_lock_key(team_id: str, scope_hash: str, fingerprint: str) -> int:
+    digest = hashlib.sha256(
+        f"delivery-package\0{team_id}\0{scope_hash}\0{fingerprint}".encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def delivery_package_lease_expiry(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def prepare_delivery_request(
@@ -222,6 +246,8 @@ def request_postgres_delivery_package(
         terminal=terminal,
         review_scope=review_scope,
     )
+    lock_key = delivery_package_advisory_lock_key(team_id, scope_hash, fingerprint)
+    session.scalar(select(func.pg_advisory_xact_lock(lock_key)))
     job = session.scalar(
         select(DeliveryPackageJob)
         .where(
@@ -287,6 +313,42 @@ def build_postgres_delivery_package_claim_statement(*, team_id: str, now: dateti
     )
 
 
+def build_postgres_expired_delivery_package_statement(*, team_id: str, now: datetime):
+    return (
+        select(DeliveryPackageJob)
+        .where(
+            DeliveryPackageJob.team_id == team_id,
+            DeliveryPackageJob.status == "processing",
+            DeliveryPackageJob.attempt_count >= MAX_DELIVERY_PACKAGE_ATTEMPTS,
+            DeliveryPackageJob.lease_expires_at < now,
+        )
+        .order_by(DeliveryPackageJob.lease_expires_at, DeliveryPackageJob.id)
+        .limit(MAX_EXPIRED_DELIVERY_PACKAGE_LEASES)
+        .with_for_update(skip_locked=True)
+    )
+
+
+def terminalize_expired_postgres_delivery_package_leases(
+    session: Session,
+    *,
+    team_id: str,
+    now: datetime,
+) -> int:
+    jobs = list(
+        session.scalars(
+            build_postgres_expired_delivery_package_statement(team_id=team_id, now=now)
+        ).all()
+    )
+    for job in jobs:
+        job.status = "failed"
+        job.lease_owner = None
+        job.lease_token = None
+        job.lease_expires_at = None
+        job.last_error = "delivery package lease expired after maximum attempts"
+        job.updated_at = now
+    return len(jobs)
+
+
 def claim_json_delivery_package_job(
     *,
     worker_id: str,
@@ -298,11 +360,12 @@ def claim_json_delivery_package_job(
     token = local_simulation.activate_authoritative_json_write(transaction)
     try:
         candidates = []
+        terminalized = 0
         for job in transaction.working_state.setdefault("delivery_package_jobs", []):
             status = str(job.get("status") or "")
             attempts = int(job.get("attempt_count") or 0)
-            expires_at = local_simulation._datetime_from_value(job.get("lease_expires_at"))
-            expired = expires_at is not None and expires_at.replace(tzinfo=expires_at.tzinfo or UTC) < now
+            expires_at = delivery_package_lease_expiry(job.get("lease_expires_at"))
+            expired = expires_at is not None and expires_at < now.astimezone(UTC)
             if status == "processing" and expired and attempts >= MAX_DELIVERY_PACKAGE_ATTEMPTS:
                 job.update(
                     {
@@ -311,8 +374,10 @@ def claim_json_delivery_package_job(
                         "lease_token": None,
                         "lease_expires_at": None,
                         "last_error": "delivery package lease expired after maximum attempts",
+                        "updated_at": now.isoformat(),
                     }
                 )
+                terminalized += 1
                 continue
             if (
                 status == "pending"
@@ -321,7 +386,10 @@ def claim_json_delivery_package_job(
             ):
                 candidates.append(job)
         if not candidates:
-            local_simulation.abort_authoritative_json_write(transaction, token)
+            if terminalized:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+            else:
+                local_simulation.abort_authoritative_json_write(transaction, token)
             return None
         job = sorted(candidates, key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")))[0]
         lease_token = str(uuid4())
@@ -368,9 +436,17 @@ def claim_postgres_delivery_package_job(
         if control is None or control.paused:
             session.rollback()
             return None
+        terminalized = terminalize_expired_postgres_delivery_package_leases(
+            session,
+            team_id=team_id,
+            now=now,
+        )
         job = session.scalar(build_postgres_delivery_package_claim_statement(team_id=team_id, now=now))
         if job is None:
-            session.rollback()
+            if terminalized:
+                session.commit()
+            else:
+                session.rollback()
             return None
         lease_token = str(uuid4())
         job.status = "processing"

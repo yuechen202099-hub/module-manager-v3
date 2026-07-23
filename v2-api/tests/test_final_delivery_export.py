@@ -431,8 +431,9 @@ def test_delivery_fingerprint_includes_every_workbook_visible_remark(mutation) -
     [
         lambda photo: photo.update(is_active=False),
         lambda photo: photo.update(upload_status="invalid"),
+        lambda photo: photo.update(upload_status="pending"),
     ],
-    ids=["inactive", "invalid-upload"],
+    ids=["inactive", "invalid-upload", "pending-upload"],
 )
 def test_invalid_photo_evidence_cannot_satisfy_formal_four_photo_contract(mutation) -> None:
     group = delivery_group()
@@ -456,6 +457,48 @@ def test_delivery_package_converts_invalid_cached_bytes_to_group_error(content: 
 
     assert captured.value.errors[0]["group_id"] == group["id"]
     assert {error["code"] for error in captured.value.errors} == {"delivery_cache_invalid"}
+
+
+def test_delivery_package_file_streams_cached_paths_directly_to_disk(tmp_path: Path) -> None:
+    group = delivery_group("streamed-package")
+    paths: dict[str, Path] = {}
+    for photo in group["photos"]:
+        path = tmp_path / f"{photo['id']}.jpg"
+        path.write_bytes(photo["_content"])
+        paths[photo["id"]] = path
+    target = tmp_path / "formal-delivery.zip"
+
+    assert hasattr(final_delivery_export, "build_delivery_package_file")
+    result = final_delivery_export.build_delivery_package_file(
+        target,
+        [group],
+        lambda photo: paths[photo["id"]],
+    )
+
+    assert result == target
+    with ZipFile(target) as archive:
+        assert len(archive.namelist()) == 5
+
+
+def test_delivery_package_enforces_individual_and_aggregate_input_limits() -> None:
+    group = delivery_group("bounded-package")
+    one_photo_size = len(group["photos"][0]["_content"])
+
+    with pytest.raises(DeliveryPackageValidationError) as individual:
+        build_delivery_package(
+            [group],
+            lambda photo: photo["_content"],
+            max_photo_bytes=one_photo_size - 1,
+        )
+    assert {error["code"] for error in individual.value.errors} == {"delivery_photo_too_large"}
+
+    with pytest.raises(DeliveryPackageValidationError) as aggregate:
+        build_delivery_package(
+            [group],
+            lambda photo: photo["_content"],
+            max_total_input_bytes=one_photo_size * 2,
+        )
+    assert {error["code"] for error in aggregate.value.errors} == {"delivery_package_too_large"}
 
 
 def test_windows_casefold_collision_assignment_is_stable_and_suffixes_every_member() -> None:
@@ -1044,6 +1087,49 @@ def test_cleanup_scan_is_hard_bounded_per_cache_tree(tmp_path: Path) -> None:
     assert report["scanned_package_entries"] <= 3
     assert len(list((tmp_path / "objects").rglob("*.jpg"))) >= 7
     assert len(list((tmp_path / "packages").rglob("*.zip"))) >= 7
+
+
+def test_cleanup_cursor_eventually_reaches_entries_behind_permanently_protected_prefix(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 22, 8, tzinfo=UTC)
+    object_dir = tmp_path / "objects" / "00"
+    object_dir.mkdir(parents=True)
+    protected_paths = [object_dir / f"00-protected-{index}.jpg" for index in range(2)]
+    removable_paths = [object_dir / f"99-removable-{index}.jpg" for index in range(4)]
+    for path in [*protected_paths, *removable_paths]:
+        path.write_bytes(path.name.encode())
+        old = (now - timedelta(days=8)).timestamp()
+        import os
+
+        os.utime(path, (old, old))
+    group = {
+        "id": "protected-prefix",
+        "delivery_cache_status": "ready",
+        "photos": [
+            {
+                "id": f"protected-{index}",
+                "is_active": True,
+                "upload_status": "uploaded",
+                "delivery_cache_status": "ready",
+                "delivery_cache_path": str(path.relative_to(tmp_path)).replace("\\", "/"),
+            }
+            for index, path in enumerate(protected_paths)
+        ],
+    }
+
+    reports = [
+        cleanup_delivery_cache(
+            tmp_path,
+            max_object_bytes=0,
+            groups=[group],
+            now=now,
+            max_scan_entries=3,
+        )
+        for _ in range(8)
+    ]
+
+    assert all(path.is_file() for path in protected_paths)
+    assert not any(path.exists() for path in removable_paths)
+    assert sum(report["deleted_objects"] for report in reports) == len(removable_paths)
 
 
 def test_delivery_lru_keeps_referenced_and_active_paths(tmp_path: Path) -> None:

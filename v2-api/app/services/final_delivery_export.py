@@ -38,6 +38,8 @@ STANDARD_PHOTO_CATEGORIES = {
 }
 STANDARD_PHOTO_ORDER = tuple(STANDARD_PHOTO_CATEGORIES)
 PACKAGE_TTL = timedelta(days=7)
+MAX_DELIVERY_PHOTO_BYTES = 32 * 1024 * 1024
+MAX_DELIVERY_PACKAGE_INPUT_BYTES = 8 * 1024 * 1024 * 1024
 LOCAL_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 _INVALID_WINDOWS_PART = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -461,46 +463,122 @@ def _delivery_photo_members(groups: Sequence[Mapping[str, Any]]) -> list[dict[st
     )
 
 
-def build_delivery_package(
+def _write_delivery_package_archive(
+    output: Any,
     groups: Iterable[Mapping[str, Any]],
-    photo_reader: Callable[[dict[str, Any]], bytes],
-) -> bytes:
+    photo_reader: Callable[[dict[str, Any]], bytes | Path],
+    *,
+    max_photo_bytes: int,
+    max_total_input_bytes: int,
+) -> None:
     validated = sorted(validate_delivery_groups(groups), key=lambda item: _text(item.get("id")))
     members = _delivery_photo_members(validated)
     errors: list[dict[str, str]] = []
-    for member in members:
-        photo = member["photo"]
-        group_id = member["group_id"]
-        try:
-            content = photo_reader(photo)
-        except DeliveryPackageValidationError as exc:
-            errors.extend(exc.errors)
-            continue
-        except Exception:
-            errors.append(
-                _error(group_id, "delivery_cache_invalid", "photos", "Completed photo cache could not be read")
-            )
-            continue
-        expected_sha256 = _text(photo.get("delivery_cache_content_sha256")).lower()
-        if (
-            not isinstance(content, bytes)
-            or not content
-            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
-            or hashlib.sha256(content).hexdigest() != expected_sha256
-        ):
-            errors.append(
-                _error(group_id, "delivery_cache_invalid", "photos", "Completed photo cache failed integrity verification")
-            )
-            continue
-        member["content"] = content
-    if errors:
-        raise DeliveryPackageValidationError(errors)
-    output = BytesIO()
+    photo_limit = max(1, int(max_photo_bytes))
+    aggregate_limit = max(1, int(max_total_input_bytes))
+    total_input_bytes = 0
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr("设备清单.xlsx", build_delivery_workbook(validated))
         for member in members:
-            archive.writestr(member["path"], member["content"])
+            photo = member["photo"]
+            group_id = member["group_id"]
+            expected_sha256 = _text(photo.get("delivery_cache_content_sha256")).lower()
+            try:
+                source = photo_reader(photo)
+                if isinstance(source, bytes):
+                    size = len(source)
+                    actual_sha256 = hashlib.sha256(source).hexdigest()
+                elif isinstance(source, Path):
+                    source = source.resolve(strict=True)
+                    size = source.stat().st_size
+                    digest = hashlib.sha256()
+                    with source.open("rb") as cached_photo:
+                        while chunk := cached_photo.read(1024 * 1024):
+                            digest.update(chunk)
+                    actual_sha256 = digest.hexdigest()
+                else:
+                    raise TypeError("Unsupported completed photo source")
+            except DeliveryPackageValidationError as exc:
+                errors.extend(exc.errors)
+                continue
+            except Exception:
+                errors.append(
+                    _error(group_id, "delivery_cache_invalid", "photos", "Completed photo cache could not be read")
+                )
+                continue
+            if size > photo_limit:
+                errors.append(
+                    _error(group_id, "delivery_photo_too_large", "photos", "Completed photo exceeds package limit")
+                )
+                continue
+            if total_input_bytes + size > aggregate_limit:
+                errors.append(
+                    _error(group_id, "delivery_package_too_large", "photos", "Delivery package input exceeds limit")
+                )
+                continue
+            total_input_bytes += size
+            if (
+                size <= 0
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+                or actual_sha256 != expected_sha256
+            ):
+                errors.append(
+                    _error(
+                        group_id,
+                        "delivery_cache_invalid",
+                        "photos",
+                        "Completed photo cache failed integrity verification",
+                    )
+                )
+                continue
+            if isinstance(source, bytes):
+                archive.writestr(member["path"], source)
+            else:
+                archive.write(source, arcname=member["path"])
+    if errors:
+        raise DeliveryPackageValidationError(errors)
+
+
+def build_delivery_package(
+    groups: Iterable[Mapping[str, Any]],
+    photo_reader: Callable[[dict[str, Any]], bytes | Path],
+    *,
+    max_photo_bytes: int = MAX_DELIVERY_PHOTO_BYTES,
+    max_total_input_bytes: int = MAX_DELIVERY_PACKAGE_INPUT_BYTES,
+) -> bytes:
+    output = BytesIO()
+    _write_delivery_package_archive(
+        output,
+        groups,
+        photo_reader,
+        max_photo_bytes=max_photo_bytes,
+        max_total_input_bytes=max_total_input_bytes,
+    )
     return output.getvalue()
+
+
+def build_delivery_package_file(
+    target: Path,
+    groups: Iterable[Mapping[str, Any]],
+    photo_reader: Callable[[dict[str, Any]], bytes | Path],
+    *,
+    max_photo_bytes: int = MAX_DELIVERY_PHOTO_BYTES,
+    max_total_input_bytes: int = MAX_DELIVERY_PACKAGE_INPUT_BYTES,
+) -> Path:
+    destination = Path(target)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _write_delivery_package_archive(
+            destination,
+            groups,
+            photo_reader,
+            max_photo_bytes=max_photo_bytes,
+            max_total_input_bytes=max_total_input_bytes,
+        )
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+    return destination
 
 
 def delivery_evidence_fingerprint(groups: Iterable[Mapping[str, Any]]) -> str:
@@ -704,40 +782,192 @@ def _cache_path_is_reserved(key: str) -> bool:
     )
 
 
+def _fresh_cleanup_cursor() -> dict[str, Any]:
+    return {"pending_directories": ["."], "current_directory": None, "after_name": ""}
+
+
+def _normalized_cleanup_cursor(value: Any) -> dict[str, Any]:
+    source = dict(value) if isinstance(value, Mapping) else {}
+    pending = [
+        str(item)
+        for item in source.get("pending_directories", [])
+        if isinstance(item, str) and item
+    ]
+    current = source.get("current_directory")
+    if not isinstance(current, str) or not current:
+        current = None
+    if current is None and not pending:
+        pending = ["."]
+    return {
+        "pending_directories": pending,
+        "current_directory": current,
+        "after_name": str(source.get("after_name") or ""),
+        "cycle_bytes": max(0, int(source.get("cycle_bytes") or 0)),
+        "known_total_bytes": max(0, int(source.get("known_total_bytes") or 0)),
+    }
+
+
+def _load_cleanup_cursors(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        payload = {}
+    return {
+        "objects": _normalized_cleanup_cursor(payload.get("objects")),
+        "packages": _normalized_cleanup_cursor(payload.get("packages")),
+    }
+
+
+def _save_cleanup_cursors(path: Path, cursors: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f".tmp-{uuid4().hex}")
+    try:
+        temporary.write_text(
+            json.dumps(cursors, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _bounded_cache_files(
     root: Path,
     *,
     max_entries: int,
     suffix: str | None = None,
-) -> tuple[list[Path], int, bool]:
+    cursor: Mapping[str, Any] | None = None,
+) -> tuple[list[Path], int, bool, dict[str, Any]]:
     limit = max(0, int(max_entries))
+    state = _normalized_cleanup_cursor(cursor)
     if limit == 0 or not root.exists():
-        return [], 0, root.exists()
-    pending: deque[Path] = deque([root])
+        return [], 0, root.exists(), state
+    pending = deque(state["pending_directories"])
+    current_directory = state["current_directory"]
+    after_name = state["after_name"]
     files: list[Path] = []
     scanned = 0
-    truncated = False
-    while pending and scanned < limit:
-        directory = pending.popleft()
+    completed_cycle = False
+    while scanned < limit:
+        if current_directory is None:
+            if not pending:
+                completed_cycle = True
+                break
+            current_directory = pending.popleft()
+            after_name = ""
+        directory = root if current_directory == "." else root / current_directory
         try:
             with os.scandir(directory) as entries:
-                for entry in entries:
-                    if scanned >= limit:
-                        truncated = True
-                        break
-                    scanned += 1
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            pending.append(Path(entry.path))
-                        elif entry.is_file(follow_symlinks=False):
-                            path = Path(entry.path)
-                            if suffix is None or path.suffix.casefold() == suffix.casefold():
-                                files.append(path)
-                    except FileNotFoundError:
-                        continue
+                ordered = sorted(entries, key=lambda entry: (entry.name.casefold(), entry.name))
         except FileNotFoundError:
+            current_directory = None
+            after_name = ""
             continue
-    return files, scanned, truncated or bool(pending)
+        remaining = [
+            entry
+            for entry in ordered
+            if not after_name or (entry.name.casefold(), entry.name) > (after_name.casefold(), after_name)
+        ]
+        if not remaining:
+            current_directory = None
+            after_name = ""
+            continue
+        processed = 0
+        for entry in remaining:
+            if scanned >= limit:
+                break
+            scanned += 1
+            processed += 1
+            after_name = entry.name
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    child = Path(entry.path).relative_to(root)
+                    pending.append(str(child).replace("\\", "/"))
+                elif entry.is_file(follow_symlinks=False):
+                    path = Path(entry.path)
+                    if suffix is None or path.suffix.casefold() == suffix.casefold():
+                        files.append(path)
+            except FileNotFoundError:
+                continue
+        if processed == len(remaining):
+            current_directory = None
+            after_name = ""
+    if current_directory is None and not pending:
+        completed_cycle = True
+    if completed_cycle:
+        pending = deque(["."])
+        current_directory = None
+        after_name = ""
+    state.update(
+        {
+            "pending_directories": list(pending),
+            "current_directory": current_directory,
+            "after_name": after_name,
+        }
+    )
+    return files, scanned, not completed_cycle, state
+
+
+def _scan_cache_tree_with_cursor(
+    cache_root: Path,
+    tree_name: str,
+    tree_root: Path,
+    *,
+    max_entries: int,
+    suffix: str | None = None,
+    track_bytes: bool = False,
+) -> tuple[list[Path], int, bool, int]:
+    cursor_path = cache_root / ".delivery-cleanup-cursor.json"
+    cursor_lock = acquire_delivery_cache_file_lock(
+        cache_root,
+        cursor_path,
+        blocking=True,
+    )
+    if cursor_lock is None:  # pragma: no cover - blocking acquisition returns a lock or raises
+        raise RuntimeError("Unable to lock delivery cleanup cursor")
+    try:
+        cursors = _load_cleanup_cursors(cursor_path)
+        files, scanned, truncated, state = _bounded_cache_files(
+            tree_root,
+            max_entries=max_entries,
+            suffix=suffix,
+            cursor=cursors.get(tree_name),
+        )
+        if track_bytes:
+            scanned_bytes = 0
+            for path in files:
+                try:
+                    scanned_bytes += path.stat().st_size
+                except FileNotFoundError:
+                    continue
+            state["cycle_bytes"] = int(state.get("cycle_bytes") or 0) + scanned_bytes
+            if not truncated:
+                state["known_total_bytes"] = int(state["cycle_bytes"])
+                state["cycle_bytes"] = 0
+        cursors[tree_name] = state
+        _save_cleanup_cursors(cursor_path, cursors)
+        return files, scanned, truncated, int(state.get("known_total_bytes") or 0)
+    finally:
+        cursor_lock.release()
+
+
+def _reduce_cleanup_known_bytes(cache_root: Path, tree_name: str, removed_bytes: int) -> None:
+    removed = max(0, int(removed_bytes))
+    if removed == 0:
+        return
+    cursor_path = cache_root / ".delivery-cleanup-cursor.json"
+    cursor_lock = acquire_delivery_cache_file_lock(cache_root, cursor_path, blocking=True)
+    if cursor_lock is None:  # pragma: no cover - blocking acquisition returns a lock or raises
+        raise RuntimeError("Unable to lock delivery cleanup cursor")
+    try:
+        cursors = _load_cleanup_cursors(cursor_path)
+        state = _normalized_cleanup_cursor(cursors.get(tree_name))
+        state["known_total_bytes"] = max(0, int(state["known_total_bytes"]) - removed)
+        state["cycle_bytes"] = max(0, int(state["cycle_bytes"]) - removed)
+        cursors[tree_name] = state
+        _save_cleanup_cursors(cursor_path, cursors)
+    finally:
+        cursor_lock.release()
 
 
 def cleanup_delivery_cache(
@@ -775,18 +1005,24 @@ def cleanup_delivery_cache(
     scanned_object_entries = 0
     object_scan_truncated = False
     object_tree_busy = 0
+    known_object_bytes = 0
     object_lock = None
     if cleanup_objects and object_root.exists():
         object_lock = acquire_delivery_cache_file_lock(root, object_root, blocking=False)
         if object_lock is None:
             object_tree_busy = 1
         else:
-            object_files, scanned_object_entries, object_scan_truncated = _bounded_cache_files(
+            object_files, scanned_object_entries, object_scan_truncated, known_object_bytes = _scan_cache_tree_with_cursor(
+                root,
+                "objects",
                 object_root,
                 max_entries=max_scan_entries,
+                track_bytes=True,
             )
-    total_bytes = sum(path.stat().st_size for path in object_files)
+    scanned_object_bytes = sum(path.stat().st_size for path in object_files if path.exists())
+    total_bytes = max(scanned_object_bytes, known_object_bytes)
     deleted_objects = 0
+    deleted_object_bytes = 0
     protected_objects = 0
     try:
         for path in sorted(object_files, key=lambda item: (item.stat().st_mtime, str(item))):
@@ -807,9 +1043,11 @@ def cleanup_delivery_cache(
                     continue
                 total_bytes -= size
                 deleted_objects += 1
+                deleted_object_bytes += size
     finally:
         if object_lock is not None:
             object_lock.release()
+    _reduce_cleanup_known_bytes(root, "objects", deleted_object_bytes)
 
     deleted_packages = 0
     scanned_package_entries = 0
@@ -817,7 +1055,9 @@ def cleanup_delivery_cache(
     package_root = root / "packages"
     if package_root.exists():
         expires_before = current.astimezone(UTC) - PACKAGE_TTL
-        package_files, scanned_package_entries, package_scan_truncated = _bounded_cache_files(
+        package_files, scanned_package_entries, package_scan_truncated, _known_package_bytes = _scan_cache_tree_with_cursor(
+            root,
+            "packages",
             package_root,
             max_entries=max_scan_entries,
             suffix=".zip",
@@ -868,12 +1108,16 @@ def get_or_build_delivery_package(
     evidence_fingerprint: str,
     *,
     groups: Iterable[Mapping[str, Any]],
-    photo_reader: Callable[[dict[str, Any]], bytes],
+    photo_reader: Callable[[dict[str, Any]], bytes | Path],
     cache_root: Path,
     now: datetime | None = None,
     package_builder: Callable[
-        [Iterable[Mapping[str, Any]], Callable[[dict[str, Any]], bytes]], bytes
+        [Iterable[Mapping[str, Any]], Callable[[dict[str, Any]], bytes | Path]], bytes
     ] = build_delivery_package,
+    package_file_builder: Callable[
+        [Path, Iterable[Mapping[str, Any]], Callable[[dict[str, Any]], bytes | Path]], Path
+    ]
+    | None = None,
 ) -> LeasedDeliveryPackage:
     validated_groups = validate_delivery_groups(groups)
     current = now or datetime.now(UTC)
@@ -934,15 +1178,21 @@ def get_or_build_delivery_package(
                             package = LeasedDeliveryPackage(target, target_key, file_lock=file_lock)
                             file_lock = None
                             return package
-                content = package_builder(validated_groups, photo_reader)
                 package_dir.mkdir(parents=True, exist_ok=True)
                 temporary = target.with_suffix(f".zip.tmp-{uuid4().hex}")
                 try:
                     try:
-                        with temporary.open("xb") as output:
-                            output.write(content)
-                            output.flush()
-                            os.fsync(output.fileno())
+                        if package_file_builder is not None:
+                            package_file_builder(temporary, validated_groups, photo_reader)
+                            with temporary.open("rb+") as output:
+                                output.flush()
+                                os.fsync(output.fileno())
+                        else:
+                            content = package_builder(validated_groups, photo_reader)
+                            with temporary.open("xb") as output:
+                                output.write(content)
+                                output.flush()
+                                os.fsync(output.fileno())
                         os.utime(temporary, (current.timestamp(), current.timestamp()))
                     finally:
                         if file_lock is not None:

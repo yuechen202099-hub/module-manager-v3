@@ -721,6 +721,11 @@ def test_json_review_cache_enqueue_failure_preserves_review_and_records_retry(
     assert committed["groups"][0]["status"] == "approved"
     assert committed["groups"][0]["delivery_cache_status"] == "retry_pending"
     assert committed["delivery_cache_jobs"] == []
+    assert any(
+        event.get("action") == "delivery_cache_submission_failed"
+        and event.get("payload", {}).get("group_id") == "group-json-barcode"
+        for event in committed["audit_events"]
+    )
 
 
 def test_dual_review_group_fails_before_either_backend_or_cache_queue_mutates(
@@ -1110,6 +1115,9 @@ def test_postgres_review_enqueues_cache_job_after_review_commit(
         def refresh(self, _value):
             events.append("refresh")
 
+        def add(self, value):
+            events.append(value)
+
     session = Session()
 
     class TestRepository(repository.PostgresStateRepository):
@@ -1172,6 +1180,9 @@ def test_postgres_review_cache_enqueue_failure_preserves_review_and_records_retr
         def refresh(self, _value):
             events.append("refresh")
 
+        def add(self, value):
+            events.append(value)
+
     session = Session()
 
     class TestRepository(repository.PostgresStateRepository):
@@ -1206,7 +1217,67 @@ def test_postgres_review_cache_enqueue_failure_preserves_review_and_records_retr
     assert group.status == repository.GroupStatus.APPROVED
     assert group.raw_data["delivery_cache_status"] == "retry_pending"
     assert group.raw_data["delivery_cache_retryable"] is True
-    assert events == ["begin", "commit", "refresh", "begin", "begin", "commit"]
+    audits = [event for event in events if isinstance(event, AuditLog)]
+    assert len(audits) == 1
+    assert audits[0].action == "delivery_cache_submission_failed"
+    assert audits[0].entity_id == group.id
+    assert audits[0].payload["group_id"] == group.legacy_id
+    assert [event for event in events if isinstance(event, str)] == [
+        "begin",
+        "commit",
+        "refresh",
+        "begin",
+        "begin",
+        "commit",
+    ]
+
+
+def test_postgres_delivery_package_request_takes_transaction_lock_before_scope_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_package_queue
+
+    statements: list[str] = []
+    job = SimpleNamespace(
+        id=uuid4(),
+        status="pending",
+        attempt_count=0,
+        lease_owner=None,
+        lease_token=None,
+        lease_expires_at=None,
+        package_path=None,
+    )
+
+    class Session:
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            statements.append(sql)
+            if "pg_advisory_xact_lock" in sql:
+                return 0
+            return job
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(
+        delivery_package_queue,
+        "prepare_delivery_request",
+        lambda *_args, **_kwargs: ([], "f" * 64, ["group-a"]),
+    )
+
+    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady):
+        delivery_package_queue.request_postgres_delivery_package(
+            Session(),
+            groups=[],
+            team_id="team-a",
+            task_id=17,
+            terminal="",
+            review_scope="reviewed",
+            requested_by="admin-a",
+        )
+
+    assert "pg_advisory_xact_lock" in statements[0]
+    assert "FROM delivery_package_jobs" in statements[1]
 
 
 @pytest.mark.parametrize("legacy_url_hash", [False, True])

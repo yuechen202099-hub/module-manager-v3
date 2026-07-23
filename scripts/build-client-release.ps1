@@ -279,7 +279,7 @@ $manifest = @"
 
 .\scripts\run-client-acceptance-gate.ps1
 
-.\scripts\build-client-release.ps1 -Version $Version -PerformanceReport .\outputs\performance\v$Version-task-review.json
+.\scripts\build-client-release.ps1 -Version $Version -PerformanceReport .\build\release-evidence\v$Version-task-review.json
 
 .\.venv\Scripts\python.exe .\scripts\smoke-client-demo.py
 

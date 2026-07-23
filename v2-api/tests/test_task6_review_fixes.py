@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from io import BytesIO
 import os
+from threading import Barrier
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
@@ -15,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import (
     GroupBarcodeVerification,
+    DeliveryPackageJob,
     MaterialGroup,
     Photo,
     PhotoUploadStatus,
@@ -24,6 +27,7 @@ from app.models import (
     Team,
 )
 from app.services import photo_barcode_check
+from app.services import delivery_package_queue
 from app.services import local_simulation
 from app.services import state_repository as repository
 from app.services.barcode_verification_contract import LEGACY_EVIDENCE_WHITESPACE
@@ -782,6 +786,54 @@ def isolated_task6_postgres(monkeypatch: pytest.MonkeyPatch):
         with admin_engine.begin() as connection:
             connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         admin_engine.dispose()
+
+
+def test_concurrent_postgres_delivery_package_requests_reuse_one_durable_job(
+    isolated_task6_postgres,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = isolated_task6_postgres
+    team_id = f"package-race-{uuid4().hex[:12]}"
+    fingerprint = "f" * 64
+    start = Barrier(2)
+    monkeypatch.setattr(
+        delivery_package_queue,
+        "prepare_delivery_request",
+        lambda *_args, **_kwargs: ([], fingerprint, ["group-a"]),
+    )
+    with session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Delivery package concurrency test"))
+
+    def request_package(actor: str) -> tuple[str, str]:
+        with session_factory() as session:
+            start.wait(timeout=5)
+            try:
+                delivery_package_queue.request_postgres_delivery_package(
+                    session,
+                    groups=[],
+                    team_id=team_id,
+                    task_id=17,
+                    terminal="",
+                    review_scope="reviewed",
+                    requested_by=actor,
+                )
+            except delivery_package_queue.DeliveryPackageNotReady as exc:
+                return exc.job_id, exc.status
+        raise AssertionError("delivery package request must remain asynchronous")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(request_package, ("admin-a", "admin-b")))
+
+    assert len({job_id for job_id, _status in results}) == 1
+    assert {status for _job_id, status in results} == {"pending"}
+    with session_factory() as session:
+        jobs = list(
+            session.scalars(
+                select(DeliveryPackageJob).where(DeliveryPackageJob.team_id == team_id)
+            ).all()
+        )
+    assert len(jobs) == 1
+    assert jobs[0].scope_payload == {"task_id": 17, "terminal": "", "review_scope": "reviewed"}
 
 
 def test_postgres_review_repository_executes_eligibility_and_pagination_rules(

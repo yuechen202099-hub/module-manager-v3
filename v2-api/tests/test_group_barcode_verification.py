@@ -392,15 +392,26 @@ def test_active_invalid_upload_photos_are_not_eligible_evidence() -> None:
     assert result.reason == "invalid_photo_evidence"
 
 
+def test_active_pending_upload_photos_are_not_eligible_evidence() -> None:
+    group = eligible_group()
+    group["photos"][0]["upload_status"] = "pending"
+
+    result = evaluate_group_eligibility(group)
+
+    assert result.status == "not_eligible"
+    assert result.reason == "invalid_photo_count"
+
+
 @pytest.mark.parametrize(
     "historical_photo",
     [
         {"id": "p-inactive", "sha256": "e" * 64, "category": "other", "is_active": False},
         {"id": "p-invalid", "sha256": "e" * 64, "category": "other", "upload_status": "invalid"},
+        {"id": "p-pending", "sha256": "e" * 64, "category": "other", "upload_status": "pending"},
     ],
-    ids=["inactive", "invalid"],
+    ids=["inactive", "invalid", "pending"],
 )
-def test_inactive_or_invalid_historical_photos_do_not_count_against_four_valid_evidence(historical_photo: dict) -> None:
+def test_nonuploaded_historical_photos_do_not_count_against_four_valid_evidence(historical_photo: dict) -> None:
     group = eligible_group()
     group["photos"].append(historical_photo)
     result = evaluate_group_eligibility(group)

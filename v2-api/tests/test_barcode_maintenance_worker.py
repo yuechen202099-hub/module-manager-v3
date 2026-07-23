@@ -443,6 +443,74 @@ def test_postgres_delivery_package_claim_uses_skip_locked_and_persistent_lease_s
     assert "delivery_package_jobs.lease_expires_at" in sql
 
 
+def test_postgres_delivery_package_claim_terminalizes_expired_exhausted_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_package_queue
+
+    now = datetime(2026, 7, 23, 2, 0, tzinfo=UTC)
+    exhausted = SimpleNamespace(
+        id=uuid4(),
+        status="processing",
+        attempt_count=delivery_package_queue.MAX_DELIVERY_PACKAGE_ATTEMPTS,
+        lease_owner="stopped-worker",
+        lease_token="stopped-token",
+        lease_expires_at=now - timedelta(seconds=1),
+        last_error=None,
+    )
+    statements: list[str] = []
+
+    class Rows:
+        def all(self):
+            return [exhausted]
+
+    class Session:
+        committed = False
+        rolled_back = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            sql = str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+            statements.append(sql)
+            if "FROM barcode_maintenance_controls" in sql:
+                return SimpleNamespace(paused=False)
+            return None
+
+        def scalars(self, statement):
+            statements.append(str(statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})))
+            return Rows()
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            self.rolled_back = True
+
+    session = Session()
+    monkeypatch.setattr(delivery_package_queue, "SessionLocal", lambda: session)
+
+    claim = delivery_package_queue.claim_postgres_delivery_package_job(
+        worker_id="new-worker",
+        team_id="team-expired-package",
+        now=now,
+    )
+
+    assert claim is None
+    assert exhausted.status == "failed"
+    assert exhausted.lease_owner is None
+    assert exhausted.lease_token is None
+    assert exhausted.lease_expires_at is None
+    assert "maximum attempts" in exhausted.last_error
+    assert session.committed is True
+    assert session.rolled_back is False
+    assert any("delivery_package_jobs.status = 'processing'" in sql for sql in statements)
+
+
 def test_json_delivery_package_job_is_claimed_once_and_completed_by_serial_worker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -527,6 +595,127 @@ def test_json_delivery_package_failures_stop_after_retry_limit(
     assert job["attempt_count"] == worker.MAX_DELIVERY_PACKAGE_ATTEMPTS
     assert job["lease_owner"] is None
     assert worker.claim_next_delivery_package_job(worker_id="package-worker-final", now=now) is None
+
+
+def test_json_delivery_package_expired_exhausted_lease_is_persistently_terminalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    team_id = install_json_queue(monkeypatch, [])
+    now = datetime(2026, 7, 23, 2, 10, tzinfo=UTC)
+    local_simulation._team_states[team_id]["delivery_package_jobs"] = [
+        {
+            "id": "expired-exhausted-package",
+            "team_id": team_id,
+            "scope_payload": {"task_id": 17, "terminal": "", "review_scope": "reviewed"},
+            "evidence_fingerprint": "c" * 64,
+            "status": "processing",
+            "attempt_count": worker.MAX_DELIVERY_PACKAGE_ATTEMPTS,
+            "lease_owner": "stopped-worker",
+            "lease_token": "stopped-token",
+            "lease_expires_at": (now - timedelta(seconds=1)).isoformat(),
+            "updated_at": "2026-07-23T02:00:00+00:00",
+        }
+    ]
+
+    claim = worker.claim_next_delivery_package_job(worker_id="replacement-worker", now=now)
+
+    assert claim is None
+    job = local_simulation._team_states[team_id]["delivery_package_jobs"][0]
+    assert job["status"] == "failed"
+    assert job["lease_owner"] is None
+    assert job["lease_token"] is None
+    assert job["lease_expires_at"] is None
+    assert "maximum attempts" in job["last_error"]
+
+
+def test_postgres_auto_archive_block_records_transactional_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import AuditLog, GroupStatus
+    from app.services import barcode_maintenance_worker as worker
+    from app.services import state_repository
+
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="postgres-blocked-archive",
+        status=GroupStatus.UNREVIEWED,
+        raw_data={},
+    )
+    verification = SimpleNamespace(
+        status="partial",
+        evidence_fingerprint="fingerprint",
+        evidence_version=1,
+        meter_matched=False,
+        module_matched=False,
+        collector_matched=False,
+        recognition_source="machine_barcode",
+        auto_archive_status="pending",
+        auto_archive_lease_owner=None,
+        auto_archive_lease_token=None,
+        auto_archive_lease_expires_at=None,
+        auto_archive_error=None,
+    )
+    staged: list[object] = []
+
+    class Rows:
+        def all(self):
+            return []
+
+    class Session:
+        committed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, _statement):
+            return verification
+
+        def scalars(self, _statement):
+            return Rows()
+
+        def add(self, value):
+            staged.append(value)
+
+        def commit(self):
+            self.committed = True
+
+    session = Session()
+
+    class Repository:
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, checked_session, group_id, lock=False):
+            assert checked_session is session
+            assert group_id == group.legacy_id
+            assert lock is True
+            return group
+
+    monkeypatch.setattr(state_repository, "PostgresStateRepository", Repository)
+    monkeypatch.setattr(
+        state_repository,
+        "_verification_group_payload",
+        lambda *_args, **_kwargs: {"id": group.legacy_id, "photos": [], "status": "unreviewed"},
+    )
+
+    result = worker._auto_archive_postgres(
+        group.legacy_id,
+        actor="barcode-maintenance",
+        team_id="postgres-audit-team",
+    )
+
+    assert result["reason"] == "verification_not_passed"
+    audits = [value for value in staged if isinstance(value, AuditLog)]
+    assert len(audits) == 1
+    assert audits[0].action == "group_barcode_auto_archive_blocked"
+    assert audits[0].entity_id == group.id
+    assert audits[0].payload == {"group_id": group.legacy_id, "reason": "verification_not_passed"}
+    assert session.committed is True
 
 
 @pytest.mark.parametrize("status", ["partial", "unreadable", "mismatch", "failed"])

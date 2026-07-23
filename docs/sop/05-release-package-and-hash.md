@@ -20,9 +20,9 @@ Generate the report only against an isolated service listening on `localhost` or
 
 ```powershell
 $sourceCommit = (git rev-parse HEAD).Trim().ToLowerInvariant()
-.\.venv\Scripts\python.exe .\v2-api\scripts\verify_task_review_performance.py --base-url http://127.0.0.1:<port> --output .\outputs\performance\v<version>-task-review.json --source-commit $sourceCommit
-.\.venv\Scripts\python.exe .\v2-api\scripts\verify_v3_1_release.py --repo-root . --performance-report .\outputs\performance\v<version>-task-review.json --expected-source-commit $sourceCommit
-powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version <version> -PerformanceReport .\outputs\performance\v<version>-task-review.json
+.\.venv\Scripts\python.exe .\v2-api\scripts\verify_task_review_performance.py --base-url http://127.0.0.1:<port> --output .\build\release-evidence\v<version>-task-review.json --source-commit $sourceCommit
+.\.venv\Scripts\python.exe .\v2-api\scripts\verify_v3_1_release.py --repo-root . --performance-report .\build\release-evidence\v<version>-task-review.json --expected-source-commit $sourceCommit
+powershell -ExecutionPolicy Bypass -File .\scripts\build-client-release.ps1 -Version <version> -PerformanceReport .\build\release-evidence\v<version>-task-review.json
 ```
 
 Missing evidence, a non-local URL, empty route data, invalid pagination or serialization evidence, less than 60 seconds of sampling, a changed cache instance, failed thresholds, or a source commit mismatch blocks both acceptance and packaging.

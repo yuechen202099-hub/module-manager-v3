@@ -573,6 +573,8 @@ def test_v3_1_acceptance_gate_wires_source_bound_performance_evidence() -> None:
     assert "--performance-report $performanceOutput" in acceptance
     assert "--expected-source-commit $sourceCommit" in acceptance
     assert "build-client-release.ps1 -Version $Version -PerformanceReport $performanceOutput" in acceptance
+    assert 'build\\release-evidence\\v$Version-task-review.json' in acceptance
+    assert 'outputs\\performance\\v$Version-task-review.json' not in acceptance
 
 
 def test_v3_1_package_builder_blocks_without_verified_performance_evidence() -> None:
@@ -585,3 +587,7 @@ def test_v3_1_package_builder_blocks_without_verified_performance_evidence() -> 
     assert "--performance-report $performanceReportPath" in builder
     assert "--expected-source-commit $sourceCommit" in builder
     assert "-PerformanceReport" in package_sop
+    assert "build\\release-evidence" in builder
+    assert "build\\release-evidence" in package_sop
+    assert "outputs\\performance" not in builder
+    assert "outputs\\performance" not in package_sop

@@ -7163,6 +7163,19 @@ class PostgresStateRepository(StateRepository):
                         }
                     )
                     group.raw_data = raw_data
+                    _stage_transactional_audit(
+                        session,
+                        team_id=group.team_id,
+                        actor="system",
+                        action="delivery_cache_submission_failed",
+                        entity_type="material_group",
+                        entity_id=group.id,
+                        payload={
+                            "group_id": group.legacy_id,
+                            "retryable": True,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
                     session.commit()
             except Exception:
                 logger.exception("Failed to persist delivery-cache retry state for group %s", group_id)
