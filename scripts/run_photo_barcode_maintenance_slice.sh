@@ -34,7 +34,7 @@ WORKER_ARGS=(
 
 if [ "$MODE" = "--serve" ]; then
   mkdir -p "$(dirname "$LOCK_FILE")"
-  exec flock -n "$LOCK_FILE" -- "$PYTHON" "${WORKER_ARGS[@]}"
+  exec flock -n "$LOCK_FILE" "$PYTHON" "${WORKER_ARGS[@]}"
 fi
 
 exec "$PYTHON" "${WORKER_ARGS[@]}"

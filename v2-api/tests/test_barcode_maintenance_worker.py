@@ -2398,8 +2398,10 @@ def test_runner_executes_with_flock_and_fixed_batch_limits_despite_hostile_env(t
     fake_flock = fake_bin / "flock"
     fake_flock.write_text(
         '#!/usr/bin/env bash\nprintf "called\\n" > "$BARCODE_FLOCK_FILE"\n'
-        'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
-        'shift\nexec "$@"\n',
+        '[ "$1" = "-n" ] || exit 64\n'
+        'shift\nshift\n'
+        '[ "${1:-}" != "--" ] || { echo "flock: failed to execute --" >&2; exit 69; }\n'
+        'exec "$@"\n',
         encoding="utf-8",
     )
     python_path.chmod(0o755)
