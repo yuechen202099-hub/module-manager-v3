@@ -5,9 +5,9 @@
 - Package: `build/server-release/module-manager-v2-server-3.1.1.zip`
 - Name: `module-manager-v2-server-3.1.1.zip`
 - Version: 3.1.1
-- Generated at: pending
-- Size: pending
-- SHA256: pending
+- Generated at: 2026-07-23 17:07:29 +08:00
+- Size: 1709215 bytes
+- SHA256: 02F642ECDB4CE0BBCA7FCE3EA28AF5C190E4D9C3863D9A7E61F7CF59B9BF7DE8
 - 记录口径：当前工作树文件为部署后发布账本；ZIP 内副本为打包时清单，不包含压缩包自身哈希。
 
 ## Included
