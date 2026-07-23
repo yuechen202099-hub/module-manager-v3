@@ -8688,6 +8688,8 @@ def test_postgres_summary_installer_pairs_use_only_valid_construction_photos() -
     assert "photos.upload_status != 'invalid'" in compiled
     assert "like '%%construction%%'" in compiled
     assert "photos.group_id is not null" in compiled
+    assert "photos.creator is not null" in compiled
+    assert "nullif(trim(photos.creator), '') is not null" in compiled
 
 
 def test_installer_distribution_displays_account_name(monkeypatch: pytest.MonkeyPatch) -> None:

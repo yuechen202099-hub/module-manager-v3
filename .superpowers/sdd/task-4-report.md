@@ -214,6 +214,69 @@ The first implementation used approximate dashboard drilldown mappings for scann
 
 ---
 
+## Review Fix Addendum - PG Installer Blank Creator Filter
+
+- Status: DONE
+- Worktree: `C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
+- Branch: `production/V3/3.2.0`
+- Base HEAD: `feb6ff7`
+- Date: `2026-07-24 02:18 +08:00`
+
+### Finding Addressed
+
+- Important: PG installer summary no longer emits a blank/NULL creator bucket that becomes `未填写`, matching JSON behavior and keeping dashboard drilldown matchable.
+
+### RED First
+
+- Extended `test_postgres_summary_installer_pairs_use_only_valid_construction_photos` to require:
+  - `photos.creator IS NOT NULL`
+  - `NULLIF(TRIM(photos.creator), '') IS NOT NULL`
+- Initial RED failed because `installer_pairs` filtered active, non-INVALID, construction-source photos but still accepted NULL/blank creators.
+
+### Implementation Summary
+
+1. Added `Photo.creator.is_not(None)` to PG `installer_pairs`.
+2. Added `func.nullif(func.trim(Photo.creator), "").is_not(None)` to drop blank/whitespace creators before summary aggregation.
+3. Updated the data-center UI verifier to assert both PG blank-creator guards.
+
+### Verification
+
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_state_repository.py -k "summary_installer_pairs_use_only_valid_construction_photos" -q`
+  - PASS: 1 passed, 251 deselected.
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_data_center.py -q`
+  - PASS: 27 passed, 1 Starlette/httpx deprecation warning.
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_local_simulation.py -k "summary_installer_distribution" -q`
+  - PASS: 2 passed, 216 deselected, 1 Starlette/httpx deprecation warning.
+- `.\.venv\Scripts\python.exe scripts\verify_v3_2_0_dashboard_drilldown.py`
+  - PASS: `[OK] V3.2.0 dashboard drilldown checks passed`.
+- `.\.venv\Scripts\python.exe scripts\verify_v3_2_0_data_center_ui.py`
+  - PASS: exit 0, verifier is silent on success.
+- `git diff --check`
+  - PASS exit 0; only expected CRLF working-copy warnings were printed.
+- `git diff --name-only 8af1f0e..HEAD -- v2-api/app/static/vue`
+  - PASS: no output.
+
+### Self Review
+
+- No frontend source or query contract changes.
+- No static Vue build output in the Task4 net diff.
+- PG and JSON installer summaries now both skip blank creators.
+
+### Version Change
+
+- None. This is a V3.2.0 task review fix and did not change `APP_VERSION`.
+
+### Release Status
+
+- Local focused fix, RED/GREEN test, related tests, verifier checks, static diff check, report update, and self-review complete.
+- Not released.
+
+### Concerns
+
+1. Existing Starlette/httpx deprecation warning remains in backend tests; not introduced by this fix.
+
+---
+
 ## Review Fix Addendum - Summary/Drilldown Metric Parity
 
 - Status: DONE

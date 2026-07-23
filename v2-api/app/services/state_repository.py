@@ -4608,6 +4608,8 @@ class PostgresStateRepository(StateRepository):
                     Photo.is_active.is_(True),
                     Photo.upload_status != PhotoUploadStatus.INVALID,
                     Photo.group_id.is_not(None),
+                    Photo.creator.is_not(None),
+                    func.nullif(func.trim(Photo.creator), "").is_not(None),
                     _photo_construction_source_filter(),
                 )
             ).all()

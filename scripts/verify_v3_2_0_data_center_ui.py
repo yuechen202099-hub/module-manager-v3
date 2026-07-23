@@ -189,6 +189,16 @@ def main() -> None:
     )
     assert_contains(
         state_repository,
+        "Photo.creator.is_not(None)",
+        "PG installer distribution must not create an unmatched blank-installer row",
+    )
+    assert_contains(
+        state_repository,
+        'func.nullif(func.trim(Photo.creator), "").is_not(None)',
+        "PG installer distribution must trim and drop blank creators",
+    )
+    assert_contains(
+        state_repository,
         'source.c.durable_barcode_status == "not_eligible"',
         "PG ineligible barcode drilldown must union durable not_eligible",
     )
