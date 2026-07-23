@@ -7,6 +7,7 @@ import { assignConstructionTask, fetchTaskSnapshot, fetchUserAccounts, setConstr
 import ConstructionPriorityImportDialog from '@/components/ConstructionPriorityImportDialog.vue'
 import type { ReviewTask, UserAccount } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
+import { createMutationGuardedRequestGate, isAbortError } from '@/utils/latestRequestGate.mjs'
 
 const TASK_STATUS_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 
@@ -29,6 +30,11 @@ const searchQuery = ref('')
 const taskFilter = ref<TaskFilter>('all')
 
 let refreshInterval = 0
+let taskMutationVersion = 0
+
+const taskLoadGate = createMutationGuardedRequestGate((nextLoading) => {
+  loading.value = nextLoading
+})
 
 const isAdmin = computed(() => auth.user?.role === 'admin' || auth.user?.roles?.includes('admin'))
 const userByUsername = computed(() => {
@@ -189,15 +195,18 @@ async function loadAccounts() {
 }
 
 async function loadTasks(force = false) {
-  loading.value = true
+  const request = taskLoadGate.begin(taskMutationVersion)
   errorMessage.value = ''
   try {
-    const snapshot = await fetchTaskSnapshot(force)
+    const snapshot = await fetchTaskSnapshot({ force, signal: request.signal })
+    if (!request.isCurrent(taskMutationVersion)) return
     tasks.value = snapshot.items
   } catch (error) {
+    if (isAbortError(error)) return
+    if (!request.isCurrent(taskMutationVersion)) return
     errorMessage.value = error instanceof Error ? error.message : '任务加载失败'
   } finally {
-    loading.value = false
+    request.finish()
   }
 }
 
@@ -207,6 +216,8 @@ function refreshTasks() {
 
 function handleConstructionPriorityImported() {
   constructionPriorityImportVisible.value = false
+  taskMutationVersion += 1
+  taskLoadGate.invalidate()
   void loadTasks(true)
 }
 
@@ -231,6 +242,8 @@ async function submitAssignment() {
   errorMessage.value = ''
   try {
     const updated = await assignConstructionTask(task.id, constructor)
+    taskMutationVersion += 1
+    taskLoadGate.invalidate()
     tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
     assignmentDialogVisible.value = false
     ElMessage.success(`已指派给 ${userDisplayLabel(constructor)}`)
@@ -248,6 +261,8 @@ async function updateConstructionPriority(task: ReviewTask, priority: boolean) {
   errorMessage.value = ''
   try {
     const updated = await setConstructionTaskPriority(task.id, priority)
+    taskMutationVersion += 1
+    taskLoadGate.invalidate()
     tasks.value = tasks.value.map((item) => (item.id === task.id ? updated : item))
     ElMessage.success(priority ? '已设为优先施工' : '已取消优先施工')
   } catch (error) {
@@ -272,6 +287,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('message', handleExternalRefresh)
+  taskLoadGate.cancel()
   if (refreshInterval) window.clearInterval(refreshInterval)
   refreshInterval = 0
 })

@@ -35,3 +35,33 @@ export function createLatestRequestGate(setLoading = () => {}) {
 
   return { begin, cancel }
 }
+
+export function createMutationGuardedRequestGate(setLoading = () => {}) {
+  const latest = createLatestRequestGate(setLoading)
+  let serial = 0
+
+  return {
+    begin(mutationVersion = 0) {
+      const request = latest.begin()
+      const requestSerial = ++serial
+      const requestMutationVersion = Number(mutationVersion || 0)
+      return {
+        signal: request.signal,
+        serial: requestSerial,
+        mutationVersion: requestMutationVersion,
+        isCurrent(currentMutationVersion) {
+          return request.isCurrent() && Number(currentMutationVersion || 0) === requestMutationVersion
+        },
+        finish() {
+          request.finish()
+        },
+      }
+    },
+    invalidate() {
+      latest.cancel()
+    },
+    cancel() {
+      latest.cancel()
+    },
+  }
+}

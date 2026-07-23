@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DataBoard, FolderChecked, List, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
+import { DataBoard, FolderChecked, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -21,7 +21,6 @@ const navigation = computed(() => {
   const iconMap = {
     'project-board': DataBoard,
     'claim-tasks': Tickets,
-    'task-hall': List,
     'global-search': Search,
     construction: FolderChecked,
     'account-management': UserFilled,
@@ -29,7 +28,7 @@ const navigation = computed(() => {
     'sync-config': DataBoard,
   }
   return staticPages
-    .filter((page) => !['sync-config', 'task-hall'].includes(page.key))
+    .filter((page) => page.key !== 'sync-config')
     .filter((page) => !page.roles.length || page.roles.includes(role) || role === 'admin')
     .map((page) => ({ ...page, icon: iconMap[page.key] }))
 })

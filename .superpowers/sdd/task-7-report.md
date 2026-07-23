@@ -96,3 +96,58 @@ npm run build
   - 500 kB 以上 chunk 警告。
 - 这些警告在 2026-07-23 的本次构建中仍存在，但不影响 `vue-tsc` 和 `vite build` 成功退出。
 - `task-hall` 作为迁移 registry 兼容 key 仍保留；当前真实旧地址通过路由重定向进入 `claim-tasks`，后续如果迁移门禁规则调整，可再评估是否完全移除该 key。
+
+## 2026-07-23 审阅修复追加
+
+本节覆盖上文里已经过时的 `task-hall registry` 说明。
+
+### 修复内容
+
+- 完全移除了 `staticPages` 中的 `task-hall` registry key。
+- 完全移除了前端 router `nativePageComponents` 对 `TaskHallView.vue` 的动态 import。
+- 保留且仅保留显式旧地址重定向：`/task-hall -> /global-search`。
+- `ClaimTasksView.vue` 恢复任务列表请求世代保护：
+  - load 请求经 `createMutationGuardedRequestGate()` 分配独立 serial 与 `AbortController`；
+  - load 开始时记录当前 `taskMutationVersion`；
+  - 仅当请求仍是最新且 `taskMutationVersion` 未变化时才允许覆盖 `tasks`；
+  - 指派施工、改派施工、优先施工、批量优先导入成功后都会递增 `taskMutationVersion` 并使在途 load 失效。
+- `claimTasksState.mjs/.d.mts` 仅保留生产真实引用的 `priorityRequestBody()`。
+- `verify_v3_2_0_single_export_entry.py` 升级为递归扫描 `v2-web/src/**/*.vue`：
+  - 业务导出 API / 业务导出按钮只允许 `v2-web/src/views/ExportsView.vue`；
+  - `downloadConstructionPriorityTemplate` 仅允许 `ConstructionPriorityImportDialog.vue`；
+  - 同时断言无 `task-hall-legacy`、无旧审阅文案泄漏到任务派发页与活动路由注册面。
+
+### 新增/更新测试
+
+- `scripts/test_latest_request_gate.mjs`
+- `scripts/test_claim_tasks_state.mjs`
+- `scripts/verify_claim_tasks_load_guard.js`
+- `scripts/verify_v3_2_0_single_export_entry.py`
+- `scripts/verify_v3_2_0_role_routes.py`
+- `scripts/verify_vue_migration_gate.py`
+
+### 本轮验证
+
+已于 2026-07-23 重新执行并通过：
+
+```powershell
+python scripts\verify_v3_2_0_single_export_entry.py
+python scripts\verify_v3_2_0_role_routes.py
+python scripts\verify_vue_migration_gate.py --strict-native
+python scripts\verify_v3_2_0_dashboard_drilldown.py
+python scripts\verify_v3_2_0_data_center_ui.py
+python scripts\verify_v3_2_0_export_center_ui.py
+node scripts\test_latest_request_gate.mjs
+node scripts\test_claim_tasks_state.mjs
+node scripts\verify_claim_tasks_load_guard.js
+cd v2-web
+npx vue-tsc --noEmit
+$env:MODULE_MANAGER_VUE_OUT_DIR='C:\Users\Administrator\AppData\Local\Temp\module-manager-v3-task7-build'; npm run build
+git diff --name-only 61a7025..HEAD -- v2-api/app/static/vue
+```
+
+结果：
+
+- 所有 verifier / node 测试 / `vue-tsc` / build 均通过。
+- build 使用隔离 outDir，未改动 `v2-api/app/static/vue`。
+- `git diff --name-only 61a7025..HEAD -- v2-api/app/static/vue` 输出为空。

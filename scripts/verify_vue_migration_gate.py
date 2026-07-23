@@ -14,7 +14,6 @@ REGISTRY = VUE_DIR / "src" / "router" / "staticPages.ts"
 LEGACY_PRODUCTION_STATIC_PAGES = {
     "project_board.html": "project-board",
     "claim_tasks.html": "claim-tasks",
-    "task_hall.html": "task-hall",
     "construction.html": "construction",
     "sync_config.html": "sync-config",
 }
@@ -32,6 +31,7 @@ CANCELLED_STATIC_PAGE_ROUTES = {
 COMPATIBILITY_STATIC_PAGES = {
     "app_shell.html",
     "login.html",
+    "task_hall.html",
     "v201.html",
 }
 
@@ -106,6 +106,8 @@ def main() -> int:
     missing = sorted(set(LEGACY_PRODUCTION_STATIC_PAGES.values()) - set(entries))
     if missing:
         fail("Vue static page registry is missing production pages: " + ", ".join(missing))
+    if "task-hall" in entries:
+        fail("Vue static page registry must not register task-hall after redirect retirement")
 
     unknown_static = sorted(
         path.name

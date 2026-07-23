@@ -4,6 +4,30 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+VUE_SRC = ROOT / "v2-web" / "src"
+ALLOWED_EXPORT_VUE_PATHS = {
+    "v2-web/src/views/ExportsView.vue",
+}
+ALLOWED_TEMPLATE_USAGE = {
+    "downloadConstructionPriorityTemplate": {
+        "v2-web/src/components/ConstructionPriorityImportDialog.vue",
+    },
+}
+BUSINESS_EXPORT_APIS = {
+    "createExportJob",
+    "downloadExportJob",
+    "exportTaskDetail",
+    "exportExceptionMeters",
+    "exportProjectOutsideConstruction",
+}
+BUSINESS_EXPORT_LABELS = {
+    "导出项目外施工",
+    "导出异常表计",
+    "导出明细",
+    "导出终端包",
+    "导出范围",
+    "导出任务",
+}
 
 
 def read(relative_path: str) -> str:
@@ -26,6 +50,21 @@ def not_contains(text: str, needle: str, context: str) -> None:
     ensure(needle not in text, f"{context} must remove `{needle}`")
 
 
+def scan_vue_source() -> None:
+    for path in sorted(VUE_SRC.rglob("*.vue")):
+        relative_path = path.relative_to(ROOT).as_posix()
+        text = path.read_text(encoding="utf-8")
+        for api_name in BUSINESS_EXPORT_APIS:
+            if api_name in text and relative_path not in ALLOWED_EXPORT_VUE_PATHS:
+                raise AssertionError(f"{relative_path} must not reference business export API `{api_name}`")
+        for label in BUSINESS_EXPORT_LABELS:
+            if label in text and relative_path not in ALLOWED_EXPORT_VUE_PATHS:
+                raise AssertionError(f"{relative_path} must not render business export action `{label}`")
+        for api_name, allowed_paths in ALLOWED_TEMPLATE_USAGE.items():
+            if api_name in text and relative_path not in allowed_paths:
+                raise AssertionError(f"{relative_path} must not reference `{api_name}`")
+
+
 def main() -> None:
     claim_tasks = read("v2-web/src/views/ClaimTasksView.vue")
     task_hall = read("v2-web/src/views/TaskHallView.vue")
@@ -37,20 +76,23 @@ def main() -> None:
     exports_view = read("v2-web/src/views/ExportsView.vue")
     priority_import_dialog = read("v2-web/src/components/ConstructionPriorityImportDialog.vue")
 
+    scan_vue_source()
+
     contains(static_pages, "title: '任务派发'", "staticPages task dispatch entry")
     contains(static_pages, "title: '数据中台'", "staticPages data center entry")
     contains(static_pages, "title: '导出中心'", "staticPages export center entry")
-    contains(static_pages, "key: 'task-hall'", "staticPages legacy task-hall registry")
-    contains(static_pages, "routePath: '/task-hall-legacy'", "staticPages legacy task-hall retired route")
+    not_contains(static_pages, "key: 'task-hall'", "staticPages legacy task-hall registry")
+    not_contains(static_pages, "task-hall-legacy", "staticPages legacy task-hall route")
     not_contains(static_pages, "title: '任务领取'", "staticPages legacy claim title")
     not_contains(static_pages, "title: '任务大厅'", "staticPages legacy hall title")
-    not_contains(static_pages, "routePath: '/task-hall'", "staticPages legacy task-hall visible route")
+    not_contains(static_pages, "审阅工作台", "staticPages legacy review title")
 
     contains(router_source, "'claim-tasks': () => import('@/views/ClaimTasksView.vue')", "router task dispatch component")
     contains(router_source, "path: 'task-hall'", "router legacy task-hall redirect")
     contains(router_source, "redirect: '/global-search'", "router legacy hall redirect")
     contains(router_source, "path: 'tasks'", "router legacy tasks redirect")
-    not_contains(router_source, "'task-hall': () => import('@/views/GlobalSearchView.vue')", "router legacy hall mapping")
+    not_contains(router_source, "TaskHallView", "router legacy hall component")
+    not_contains(router_source, "task-hall-legacy", "router legacy hall route")
     not_contains(router_source, "path: 'task-hall',\n          redirect: '/claim-tasks'", "router legacy task-hall claim redirect")
 
     contains(claim_tasks, "任务派发", "ClaimTasksView dispatch title")
@@ -101,7 +143,8 @@ def main() -> None:
         "shellExportActive",
     ]:
         not_contains(app_layout, forbidden, "AppLayout")
-    contains(app_layout, "!['sync-config', 'task-hall'].includes(page.key)", "AppLayout hidden legacy task-hall nav")
+    not_contains(app_layout, "'task-hall': List", "AppLayout legacy task-hall icon")
+    not_contains(app_layout, "task-hall", "AppLayout legacy task-hall nav")
 
     contains(exports_view, "createExportJob", "ExportsView single export entry")
     contains(exports_view, "downloadExportJob", "ExportsView download flow")

@@ -1463,9 +1463,13 @@ export async function fetchTasks(options: { summary?: boolean } = {}): Promise<R
   return (data.items || []).map(mapTask)
 }
 
-export async function fetchTaskSnapshot(force = false): Promise<TaskSnapshot> {
+export async function fetchTaskSnapshot(
+  options: boolean | { force?: boolean; signal?: AbortSignal } = false,
+): Promise<TaskSnapshot> {
+  const force = typeof options === 'boolean' ? options : Boolean(options.force)
+  const signal = typeof options === 'boolean' ? undefined : options.signal
   const suffix = force ? '?refresh=true' : ''
-  const data = await api<BackendTaskSnapshot>(`/local-test/tasks/snapshot${suffix}`)
+  const data = await api<BackendTaskSnapshot>(`/local-test/tasks/snapshot${suffix}`, { signal })
   return {
     teamId: data.team_id || '',
     items: (data.items || []).map(mapTask),

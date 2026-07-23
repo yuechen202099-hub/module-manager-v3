@@ -19,8 +19,11 @@ def main() -> int:
     auth_store_source = read_text("v2-web/src/stores/auth.ts")
 
     assert "'reviewer'" not in user_role_type
-    assert "task-hall" in router_source
-    assert "path: '/global-search'" in router_source
+    assert "key: 'task-hall'" not in static_pages
+    assert "task-hall-legacy" not in static_pages
+    assert "'task-hall': () => import('@/views/TaskHallView.vue')" not in router_source
+    assert "path: 'task-hall'" in router_source
+    assert "redirect: '/global-search'" in router_source
     assert "/global-search?group_id=" in router_source
     assert "value: 'reviewer'" not in account_page
     assert "function invalidateLegacySession" in services_source
