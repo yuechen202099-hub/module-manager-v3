@@ -107,6 +107,14 @@ def _data_center_barcode_status(group: Mapping[str, Any]) -> str:
     return "manual_passed" if row_status == "manual" else row_status
 
 
+def _data_center_state_audit_snapshot(group: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "archive_status": str(group.get("archive_status") or _data_center_archive_status(group)),
+        "barcode_status": str(group.get("barcode_status") or _data_center_barcode_status(group)),
+        "delivery_cache_status": str(group.get("delivery_cache_status") or ""),
+    }
+
+
 def _data_center_group_result(
     group: Mapping[str, Any],
     *,
@@ -2549,6 +2557,7 @@ class StateRepository(ABC):
         actor: str,
         updates: dict[str, Any],
         audit_action: str = "update_group_metadata",
+        audit_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -3384,6 +3393,7 @@ class JsonStateRepository(StateRepository):
         actor: str,
         updates: dict[str, Any],
         audit_action: str = "update_group_metadata",
+        audit_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         transaction = local_simulation.active_authoritative_json_write(team_id)
@@ -7396,6 +7406,7 @@ class PostgresStateRepository(StateRepository):
         actor: str,
         updates: dict[str, Any],
         audit_action: str = "update_group_metadata",
+        audit_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         updates = local_simulation.validate_formal_identity_updates(updates)
         requeue_delivery_cache_reason = ""
@@ -7509,6 +7520,22 @@ class PostgresStateRepository(StateRepository):
                 field for field in comparable_fields if field in updates and str(before.get(field) or "") != str(after.get(field) or "")
             )
             if changed_fields:
+                audit_before = {field: before.get(field) for field in changed_fields}
+                audit_after = {field: after.get(field) for field in changed_fields}
+                audit_payload: dict[str, Any] = {
+                    "group_id": group.legacy_id or str(group.id),
+                    "changed_fields": changed_fields,
+                }
+                if audit_context is not None:
+                    audit_payload.update(
+                        _data_center_audit_payload(
+                            source_page=str(audit_context.get("source_page") or "data_center"),
+                            actor=str(audit_context.get("actor") or actor),
+                            reason=str(audit_context.get("reason") or audit_action),
+                            before=audit_before,
+                            after=audit_after,
+                        )
+                    )
                 identity_changed = bool(set(changed_fields).intersection(
                     {
                         "meter_no",
@@ -7546,9 +7573,9 @@ class PostgresStateRepository(StateRepository):
                     action=audit_action,
                     entity_type="material_group",
                     entity_id=group.id,
-                    before_data={field: before.get(field) for field in changed_fields},
-                    after_data={field: after.get(field) for field in changed_fields},
-                    payload={"group_id": group.legacy_id or str(group.id), "changed_fields": changed_fields},
+                    before_data=audit_before,
+                    after_data=audit_after,
+                    payload=audit_payload,
                 )
             session.commit()
             session.refresh(group)
@@ -7571,11 +7598,17 @@ class PostgresStateRepository(StateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
+        before_data_center_state = _data_center_state_audit_snapshot(self.get_group(group_id) or {})
         result = self.update_group_metadata(
             group_id,
             actor=actor,
             updates=patch,
             audit_action="data_center_group_updated",
+            audit_context={
+                "source_page": source_page,
+                "actor": actor,
+                "reason": reason or "data_center_group_updated",
+            },
         )
         changed_fields = list(result.get("changed_fields") or [])
         if changed_fields and set(changed_fields).intersection(DATA_CENTER_IDENTITY_FIELDS):
@@ -7589,6 +7622,8 @@ class PostgresStateRepository(StateRepository):
                     )
                 ).all()
                 if photos and all(str(photo.archive_status or "") == "archived" for photo in photos):
+                    before = dict(before_data_center_state)
+                    before["archive_status"] = before.get("archive_status") or "archived"
                     now = datetime.now(UTC)
                     for photo in photos:
                         raw = dict(photo.raw_data or {})
@@ -7612,6 +7647,12 @@ class PostgresStateRepository(StateRepository):
                     group.reviewed_at = None
                     group.raw_data = raw_data
                     group.updated_at = now
+                    after = _data_center_state_audit_snapshot(
+                        {
+                            **_group_payload(session, group, include_photos=False),
+                            "archive_status": "pending",
+                        }
+                    )
                     _stage_transactional_audit(
                         session,
                         team_id=local_simulation.current_team_id(),
@@ -7619,11 +7660,17 @@ class PostgresStateRepository(StateRepository):
                         action="data_center_archive_invalidated",
                         entity_type="material_group",
                         entity_id=group.id,
-                        payload={
-                            "group_id": group.legacy_id or str(group.id),
-                            "previous_archive_status": "archived",
-                            "reason": reason or "data_center_identity_changed",
-                        },
+                        before_data=before,
+                        after_data=after,
+                        payload=_data_center_audit_payload(
+                            source_page=source_page,
+                            actor=actor,
+                            reason=reason or "data_center_identity_changed",
+                            before=before,
+                            after=after,
+                            group_id=group.legacy_id or str(group.id),
+                            previous_archive_status="archived",
+                        ),
                     )
                     session.commit()
         group_payload = self.get_group(group_id) or result.get("group") or {}
@@ -11162,9 +11209,23 @@ class DualWriteStateRepository(JsonStateRepository):
         actor: str,
         updates: dict[str, Any],
         audit_action: str = "update_group_metadata",
+        audit_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        result = super().update_group_metadata(group_id, actor=actor, updates=updates, audit_action=audit_action)
-        self._mirror_write("update_group_metadata", group_id, actor=actor, updates=updates, audit_action=audit_action)
+        result = super().update_group_metadata(
+            group_id,
+            actor=actor,
+            updates=updates,
+            audit_action=audit_action,
+            audit_context=audit_context,
+        )
+        self._mirror_write(
+            "update_group_metadata",
+            group_id,
+            actor=actor,
+            updates=updates,
+            audit_action=audit_action,
+            audit_context=audit_context,
+        )
         return result
 
     def update_data_center_group(

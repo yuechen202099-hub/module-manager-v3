@@ -148,3 +148,33 @@
 
 - `request_postgres_delivery_package(auto_commit=False)` 复用现有 request 逻辑来 stage durable row；它会在外层事务内 `flush()` 以提前暴露 enqueue/约束失败，但最终 commit 仍由 data-center 分类事务统一控制。
 - 构建警告为既有第三方注释和 chunk 体积警告，未在本轮复审范围内处理。
+
+---
+
+## 第三轮复审最小修复追加
+
+### 修复项
+
+- Important：`update_group_metadata` 增加兼容旧调用的可选 `audit_context`，Postgres data-center wrapper 传入 actor、reason、source_page；底层 `data_center_group_updated` 审计 payload 现在包含 `source/source_page/actor/reason/before/after`，其中 `before/after` 仅记录实际变更字段。
+- Important：Postgres `data_center_archive_invalidated` 审计 payload 复用 data-center 审计结构，包含 `source/source_page/actor/reason/before/after`；身份变更失效前快照覆盖 archive、barcode、delivery cache 状态，失效后快照覆盖对应 after 状态。
+
+### RED 记录
+
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_state_repository.py -k "data_center_group_update_audits_source_reason_and_state_snapshots" -q`
+  - 首次 RED：`KeyError: 'source'`，证明 Postgres 底层 `data_center_group_updated` payload 缺 `source`。
+  - 收紧 RED：`delivery_cache_status` before 为 `stale` 而不是身份变更前的 `ready`，证明失效审计未保留变更前状态快照。
+
+### 验证结果
+
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_state_repository.py -k "data_center_group_update_audits_source_reason_and_state_snapshots" -q`
+  - 1 passed, 250 deselected
+- `.\.venv\Scripts\python.exe -m pytest v2-api\tests\test_data_center_review.py v2-api\tests\test_state_repository.py -k "data_center or auto_archive or reset_group or unmatched" -q`
+  - 68 passed, 189 deselected
+- `.\.venv\Scripts\python.exe -m py_compile v2-api\app\services\state_repository.py v2-api\tests\test_state_repository.py`
+  - passed
+- `git diff --check`
+  - passed；仅输出工作区 CRLF 提示，非 whitespace error。
+
+### 剩余疑虑
+
+- 本轮按复审要求做最小后端审计修复；未运行前端 verifier、vue-tsc 或 build，因为本轮没有触碰前端。

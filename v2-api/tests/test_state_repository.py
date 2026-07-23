@@ -7988,6 +7988,176 @@ def test_postgres_delivery_metadata_changes_invalidate_and_requeue_after_commit(
     )
 
 
+def test_postgres_data_center_group_update_audits_source_reason_and_state_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="postgres-data-center-audit",
+        team_id="postgres-data-center-team",
+        display_meter_no="M-001",
+        meter_match_key="M-001",
+        terminal="T-001",
+        installation_address="delivery road",
+        status=repository.GroupStatus.APPROVED,
+        reviewer="reviewer-a",
+        review_note="ready",
+        reviewed_at=datetime(2026, 7, 23, 12, 0, tzinfo=UTC),
+        exception_note="",
+        exception_reasons=[],
+        has_archive_blocker=False,
+        exception_status=None,
+        raw_data={
+            "status": "approved",
+            "archive_status": "archived",
+            "delivery_cache_status": "ready",
+            "barcode_verification": {"status": "passed"},
+        },
+        updated_at=None,
+    )
+    photos = [
+        SimpleNamespace(
+            id=uuid4(),
+            legacy_id=f"p-{index}",
+            team_id=group.team_id,
+            group_id=group.id,
+            is_active=True,
+            collector="C-001",
+            asset_no="MOD-001",
+            creator="installer-a",
+            raw_data={"module_asset_no": "MOD-001"},
+            archive_status="archived",
+            archived_at=datetime(2026, 7, 23, 12, 0, tzinfo=UTC),
+            archive_filename=f"{index}.jpg",
+        )
+        for index in range(2)
+    ]
+    staged_audits = []
+
+    class ScalarResult:
+        def all(self):
+            return photos
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalars(self, _statement):
+            return ScalarResult()
+
+        def commit(self):
+            return None
+
+        def refresh(self, _value):
+            return None
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return Session()
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert group_id == group.legacy_id
+            assert lock is True
+            return group
+
+        def _enqueue_delivery_cache_after_commit(self, *_args, **_kwargs) -> None:
+            return None
+
+        def get_group(self, group_id: str):
+            assert group_id == group.legacy_id
+            return payload(None, group, include_photos=True)
+
+    def payload(_session, value, include_photos=False, **_kwargs):
+        photo_items = photos if include_photos else []
+        status = value.status.value if hasattr(value.status, "value") else str(value.status)
+        archived = photo_items and all(str(photo.archive_status or "") == "archived" for photo in photo_items)
+        return {
+            "id": value.legacy_id,
+            "meter_no": value.display_meter_no,
+            "meter_match_key": value.meter_match_key,
+            "terminal": value.terminal,
+            "address": value.installation_address,
+            "status": status,
+            "archive_status": "archived" if archived else str(value.raw_data.get("archive_status") or "pending"),
+            "delivery_cache_status": str(value.raw_data.get("delivery_cache_status") or ""),
+            "barcode_status": str((value.raw_data.get("barcode_verification") or {}).get("status") or ""),
+            "reviewer": value.reviewer,
+            "review_note": value.review_note,
+            "exception_note": value.exception_note,
+            "collector": photos[0].collector,
+            "module_asset_no": photos[0].asset_no,
+            "creator": photos[0].creator,
+            "construction_collector": "C-001",
+            "construction_module_asset_no": "MOD-001",
+            "photos": [
+                {
+                    "id": photo.legacy_id,
+                    "archive_status": photo.archive_status,
+                    "module_asset_no": photo.asset_no,
+                }
+                for photo in photo_items
+            ],
+        }
+
+    def capture_audit(_session, **kwargs):
+        staged_audits.append(kwargs)
+
+    def invalidate_cache(_session, group_value, *, actor: str, reason: str):
+        raw = dict(group_value.raw_data or {})
+        raw["delivery_cache_status"] = "stale"
+        group_value.raw_data = raw
+
+    monkeypatch.setattr(repository, "_group_payload", payload)
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: group.team_id)
+    monkeypatch.setattr(repository.local_simulation, "validate_group_archive", lambda _group: [])
+    monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(repository, "_stage_transactional_audit", capture_audit)
+    monkeypatch.setattr(
+        delivery_cache,
+        "invalidate_postgres_delivery_cache_for_group_change",
+        invalidate_cache,
+    )
+
+    TestRepository().update_data_center_group(
+        group.legacy_id,
+        patch={"module_asset_no": "MOD-002"},
+        actor="admin-a",
+        reason="更正模块号",
+        source_page="data_center",
+    )
+
+    update_audit = next(item for item in staged_audits if item["action"] == "data_center_group_updated")
+    update_payload = update_audit["payload"]
+    assert update_payload["source"] == "data_center"
+    assert update_payload["source_page"] == "data_center"
+    assert update_payload["actor"] == "admin-a"
+    assert update_payload["reason"] == "更正模块号"
+    assert update_payload["before"] == {"module_asset_no": "MOD-001"}
+    assert update_payload["after"] == {"module_asset_no": "MOD-002"}
+
+    invalidation_audit = next(item for item in staged_audits if item["action"] == "data_center_archive_invalidated")
+    invalidation_payload = invalidation_audit["payload"]
+    assert invalidation_payload["source"] == "data_center"
+    assert invalidation_payload["source_page"] == "data_center"
+    assert invalidation_payload["actor"] == "admin-a"
+    assert invalidation_payload["reason"] == "更正模块号"
+    assert invalidation_payload["before"] == {
+        "archive_status": "archived",
+        "barcode_status": "passed",
+        "delivery_cache_status": "ready",
+    }
+    assert invalidation_payload["after"] == {
+        "archive_status": "pending",
+        "barcode_status": "passed",
+        "delivery_cache_status": "stale",
+    }
+
+
 def test_postgres_manual_photo_upload_builds_response_before_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
