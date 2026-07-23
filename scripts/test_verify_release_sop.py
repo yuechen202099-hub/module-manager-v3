@@ -28,7 +28,7 @@ def test_parses_current_deployed_baseline_and_release_candidate_markers() -> Non
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert verifier.deployed_production_baseline(agents) == "V3.0.84"
+    assert verifier.deployed_production_baseline(agents) == "V3.1.0"
     assert verifier.release_candidate(agents) == "V3.1.0"
 
 
@@ -260,7 +260,7 @@ def test_v3082_release_record_passes_the_deployed_baseline_gate() -> None:
     ("english_marker", "replacement", "parser_name"),
     [
         (
-            "- Deployed production baseline: `V3.0.84`.",
+            "- Deployed production baseline: `V3.1.0`.",
             "- Deployed production baseline: `V3.0.82`.",
             "deployed_production_baseline",
         ),

@@ -5,10 +5,10 @@
 - Package: `build/server-release/module-manager-v2-server-3.1.0.zip`
 - Name: `module-manager-v2-server-3.1.0.zip`
 - Version: 3.1.0
-- Generated at: pending candidate packaging
-- Size: pending candidate packaging
-- SHA256: pending candidate packaging
-- 记录口径：当前工作树为候选发布账本；ZIP 生成、SHA256 和 SOURCE_COMMIT 绑定验证由 Task 8 记录，不伪造生产证据。
+- Generated at: 2026-07-23 15:38:32 +08:00
+- Size: 1704559 bytes (1.63 MiB)
+- SHA256: 2D939298EA2E8A072E3D6C9EB2AB3040DA2E0BA555473F3330A630A08A1B259A
+- 记录口径：当前工作树文件为部署后发布账本；ZIP 内副本为打包时清单，不包含压缩包自身哈希。
 
 ## Included
 

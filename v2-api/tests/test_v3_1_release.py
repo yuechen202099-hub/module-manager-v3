@@ -555,19 +555,23 @@ def test_v3_1_release_verifier_checks_migration_and_model_paused_defaults() -> N
     assert defaults == {"migration_paused": True, "model_paused": True}
 
 
-def test_v3_1_documents_keep_task8_package_hash_and_online_evidence_pending() -> None:
+def test_v3_1_documents_record_completed_task8_package_and_online_evidence() -> None:
     signoff = read("docs/CLIENT_SIGNOFF_CHECKLIST.md")
     acceptance = read("docs/CLIENT_ACCEPTANCE_REPORT.md")
     final_audit = read("docs/CLIENT_FINAL_AUDIT.md")
     release_record = read("ops/releases/V3.1.0.md")
 
     assert "126 个必需文件齐全" not in signoff
-    assert "待构建" in signoff and "待验包" in signoff
-    assert "待 Task 8" in acceptance
-    assert "待 Task 8" in final_audit
-    assert "- Package: pending" in release_record
-    assert "- Production Deployment: pending" in release_record
-    assert "- Production Reconciliation: pending" in release_record
+    for document in (signoff, acceptance, final_audit, release_record):
+        assert "待 Task 8" not in document
+    assert "待构建" not in signoff and "待验包" not in signoff
+    assert "- Package: pending" not in release_record
+    assert "- Production Deployment: pending" not in release_record
+    assert "- Production Reconciliation: pending" not in release_record
+    assert "2D939298EA2E8A072E3D6C9EB2AB3040DA2E0BA555473F3330A630A08A1B259A" in signoff
+    assert "Status: reviewed, packaged, deployed, and verified in production" in release_record
+    assert "/opt/module-manager-v2/backups/V3.1.0-pre-20260723_150202" in release_record
+    assert "/opt/module-manager-v2/releases/v3.1.0-20260723_153935" in release_record
 
 
 def test_task_review_performance_cli_description_is_not_bound_to_v3084() -> None:

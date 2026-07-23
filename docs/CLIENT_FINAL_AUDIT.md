@@ -22,7 +22,7 @@ V3.1.0 完成生产部署后，客户侧功能、发布包、生产备份、独�
 | 甲方签收清单 | `docs/CLIENT_SIGNOFF_CHECKLIST.md`，列出可现场确认并签字的验收项 | 已完成 |
 | 页面高级感 | 登录页重做，主页面固定导航清理，统一工作台视觉语言 | 已完成，需人眼最终确认 |
 | 服务器部署准备 | `docs/SERVER_DEPLOYMENT_PREP.md`、Nginx 配置、systemd 服务、生产账号注意事项 | 已完成 |
-| 发布包 | `build/server-release/module-manager-v2-server-3.1.0.zip` | 待 Task 8 从最终审阅提交构建并验包 |
+| 发布包 | `build/server-release/module-manager-v2-server-3.1.0.zip` | 已从最终审阅提交构建、验包并部署 |
 
 ## 已运行验证
 
@@ -61,7 +61,7 @@ cd .\v2-api
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py .\build\server-release\module-manager-v2-server-3.1.0.zip
 ```
 
-结果：待 Task 8 从最终审阅提交构建；实际大小、SHA256 和验包结论届时写入 `ops/releases/V3.1.0.md`。
+结果：已从最终审阅提交 `b48221e98b012002d94df3a652adce85d99dc74a` 构建；实际大小、SHA256 和验包结论已写入 `ops/releases/V3.1.0.md`。
 
 ## 发布包
 
@@ -82,7 +82,7 @@ build/server-release/module-manager-v2-server-3.1.0.zip
 
 ## 剩余风险
 
-- V3.1.0 只有在生产备份、部署、健康检查和页面验收全部完成后才可标记为公网生产基线。
+- V3.1.0 已完成生产备份、部署、健康检查和页面验收，已标记为公网生产基线。
 - 生产账号、密钥、HTTPS 和数据库备份已纳入生产配置与安全审计，后续变更必须按生产 SOP 执行。
 - 人工补图长期存储仍建议接 OSS/S3，减少对本地静态目录的依赖。
 - 页面视觉高级感已做代码层打磨，但最终仍应以负责人现场浏览器观感为准。
