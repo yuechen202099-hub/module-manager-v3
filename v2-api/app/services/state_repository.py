@@ -4255,6 +4255,8 @@ class PostgresStateRepository(StateRepository):
         mapped["classification_status"] = base["classification_status"]
         mapped["classification_progress"] = {"status": base["classification_status"]}
         mapped["archive_status"] = base["archive_status"]
+        mapped["barcode_status"] = base["barcode_status"]
+        mapped["barcode_progress"] = {"status": base["barcode_status"]}
         return mapped
 
     def list_data_center_rows(self, query: DataCenterQuery) -> dict[str, Any]:
@@ -4289,14 +4291,21 @@ class PostgresStateRepository(StateRepository):
                 if group is None:
                     return None
                 base_payload = _group_payload(session, group, include_photos=False)
-                photos = [
-                    _photo_payload(photo)
+                photo_rows = [
+                    photo
                     for photo in session.scalars(
                         select(Photo)
-                        .where(Photo.team_id == team_id, Photo.group_id == group.id, Photo.is_active.is_(True))
+                        .where(
+                            Photo.team_id == team_id,
+                            Photo.group_id == group.id,
+                            Photo.is_active.is_(True),
+                            Photo.upload_status != PhotoUploadStatus.INVALID,
+                        )
                         .order_by(Photo.sort_order, Photo.created_at, Photo.legacy_id)
                     ).all()
+                    if _status_value(getattr(photo, "upload_status", "")) != PhotoUploadStatus.INVALID.value
                 ]
+                photos = [_photo_payload(photo) for photo in photo_rows]
                 detail = data_center_service.group_row({**base_payload, "photos": photos, "photo_count": len(photos)})
                 detail["photos"] = photos
                 detail["audit"] = [

@@ -209,3 +209,77 @@ Result: both exited `0`; `git diff --check` printed only CRLF conversion warning
 
 - PostgreSQL behavior remains covered through compiled SQL-shape tests and focused fake-session detail tests, not a live PostgreSQL fixture with persisted sample rows.
 - The existing FastAPI `TestClient` deprecation warning remains unrelated to this fix.
+
+## Second Review Fix - 2026-07-23
+
+### Findings Addressed
+
+- I1: PostgreSQL data-center list row mapping now treats the SQL verification-table derived `barcode_status` as authoritative. `raw_data.barcode_verification` and legacy `group_barcode_check_status` no longer override the SQL-derived value in PostgreSQL list responses; JSON fallback order is unchanged.
+- I1: Added list-level SQL-shape coverage proving the same `data_center_rows.barcode_status = 'ineligible'` filter is used by both count and row statements, and that a row with raw_data `passed` still returns SQL-derived `ineligible`.
+- I2: PostgreSQL detail photo loading now uses the same effective photo collection as the list aggregate: same team/group, `is_active = true`, and `upload_status != invalid`. Detail `photo_count`, classification, archive status, and returned photos are derived from that filtered collection.
+
+### RED
+
+Command:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_data_center.py -k "authoritative_sql_barcode_status or excludes_invalid_upload_photos" -q
+```
+
+Result before fix: `2 failed, 18 deselected, 1 warning`.
+
+- SQL row mapping returned `barcode_status=passed` because raw_data overrode authoritative SQL `ineligible`.
+- PostgreSQL detail returned `photo_count=5` because active invalid photos were still included.
+
+### GREEN
+
+Focused regression tests:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_data_center.py -q
+```
+
+Result: `21 passed, 1 warning`.
+
+State repository data-center tests:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_state_repository.py -k "data_center" -q
+```
+
+Result: `1 passed, 245 deselected`.
+
+Migration tests:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m pytest tests/test_migrations.py -q
+```
+
+Result: `15 passed`.
+
+Syntax and whitespace:
+
+```powershell
+cd v2-api
+..\.venv\Scripts\python.exe -m py_compile app\services\state_repository.py tests\test_data_center.py
+cd ..
+git diff --check
+```
+
+Result: both exited `0`; `git diff --check` printed only the existing CRLF conversion warnings for modified files.
+
+### Self-review
+
+- Confirmed changed files are limited to backend repository logic, backend tests, and this report.
+- Confirmed PostgreSQL list filters/count/row mapping now use the same SQL-derived barcode status value.
+- Confirmed PostgreSQL detail excludes invalid upload photos before computing `photo_count`, `classification_status`, and `archive_status`.
+- No frontend files, production data, `.env`, uploads, OSS objects, or PostgreSQL production data were touched.
+
+### Remaining Concerns
+
+- PostgreSQL list/detail behavior is still covered by SQL-shape and fake-session tests rather than a live PostgreSQL fixture seeded with the exact review data.
+- The existing FastAPI `TestClient` deprecation warning remains unrelated to this fix.

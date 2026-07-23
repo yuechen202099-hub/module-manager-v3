@@ -363,6 +363,112 @@ def test_postgres_data_center_row_mapping_preserves_sql_derived_statuses() -> No
     assert row["archive_status"] == "archived"
 
 
+def test_postgres_data_center_row_mapping_uses_authoritative_sql_barcode_status() -> None:
+    row = repository.PostgresStateRepository._data_center_row_from_mapping(
+        {
+            "kind": "group",
+            "legacy_id": "sql-barcode-001",
+            "terminal": "T-01",
+            "meter_no": "M-001",
+            "meter_match_key": "001",
+            "address": "Address",
+            "collector": "C-001",
+            "module_asset_no": "MOD-001",
+            "construction_collector": "CC-001",
+            "construction_module_asset_no": "CM-001",
+            "installer": "installer-a",
+            "photo_count": 4,
+            "classification_status": "complete",
+            "construction_status": "completed",
+            "archive_status": "archived",
+            "barcode_status": "ineligible",
+            "exception_status": "",
+            "updated_at": "2026-07-23T10:00:00+00:00",
+            "raw_data": {
+                "barcode_verification": {"status": "passed", "result": {"missing_fields": []}},
+                "group_barcode_check_status": "passed",
+            },
+        }
+    )
+
+    assert row["barcode_status"] == "ineligible"
+    assert row["barcode_progress"]["status"] == "ineligible"
+
+
+def test_postgres_data_center_list_filters_counts_and_returns_authoritative_barcode_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.schemas.data_center import DataCenterQuery
+
+    class ScalarResult:
+        def __init__(self, values):
+            self._values = values
+
+        def all(self):
+            return self._values
+
+    class RecordingSession:
+        def __init__(self):
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def scalar(self, statement):
+            self.statements.append(statement)
+            return 1
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return ScalarResult(
+                [
+                    {
+                        "kind": "group",
+                        "legacy_id": "sql-barcode-001",
+                        "terminal": "T-01",
+                        "meter_no": "M-001",
+                        "meter_match_key": "001",
+                        "address": "Address",
+                        "collector": "C-001",
+                        "module_asset_no": "MOD-001",
+                        "construction_collector": "CC-001",
+                        "construction_module_asset_no": "CM-001",
+                        "installer": "installer-a",
+                        "photo_count": 4,
+                        "classification_status": "complete",
+                        "construction_status": "completed",
+                        "archive_status": "archived",
+                        "barcode_status": "ineligible",
+                        "exception_status": "",
+                        "updated_at": "2026-07-23T10:00:00+00:00",
+                        "raw_data": {
+                            "barcode_verification": {"status": "passed", "result": {"missing_fields": []}},
+                            "group_barcode_check_status": "passed",
+                        },
+                    }
+                ]
+            )
+
+    session = RecordingSession()
+    repo = repository.PostgresStateRepository()
+    monkeypatch.setattr(repo, "_session", lambda: session)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "demo-team")
+
+    page = repo.list_data_center_rows(DataCenterQuery(data_type="group", barcode_status="ineligible"))
+
+    compiled = [
+        str(statement.compile(compile_kwargs={"literal_binds": True})).lower()
+        for statement in session.statements
+    ]
+    assert "data_center_rows.barcode_status = 'ineligible'" in compiled[0]
+    assert "data_center_rows.barcode_status = 'ineligible'" in compiled[1]
+    assert page["total"] == 1
+    assert page["items"][0]["barcode_status"] == "ineligible"
+
+
 def test_postgres_data_center_detail_derives_statuses_after_loading_photos(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -416,6 +522,68 @@ def test_postgres_data_center_detail_derives_statuses_after_loading_photos(
     assert len(detail["photos"]) == 4
 
 
+def test_postgres_data_center_detail_excludes_invalid_upload_photos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group_id = uuid4()
+    group = _model_group(group_id, legacy_id="detail-valid-photos", photo_count=5)
+    photos = [
+        _model_photo(group_id, "p1", "before_box", "archived"),
+        _model_photo(group_id, "p2", "module_meter", "archived"),
+        _model_photo(group_id, "p3", "after_box", "archived"),
+        _model_photo(group_id, "p4", "collector_barcode", "archived"),
+        _model_photo(group_id, "p5", "before_box", "pending", upload_status=PhotoUploadStatus.INVALID),
+    ]
+
+    class ScalarRows:
+        def __init__(self, values):
+            self.values = values
+
+        def all(self):
+            return self.values
+
+    class DetailSession:
+        def __init__(self):
+            self.scalar_calls = 0
+            self.scalars_calls = 0
+            self.photo_statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            return None
+
+        def scalar(self, *_args, **_kwargs):
+            self.scalar_calls += 1
+            return group if self.scalar_calls == 1 else None
+
+        def scalars(self, statement, *_args, **_kwargs):
+            self.scalars_calls += 1
+            if self.scalars_calls == 1:
+                self.photo_statements.append(statement)
+                return ScalarRows(photos)
+            return ScalarRows([])
+
+    session = DetailSession()
+    repo = repository.PostgresStateRepository()
+    monkeypatch.setattr(repo, "_session", lambda: session)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "demo-team")
+
+    detail = repo.get_data_center_detail(kind="group", item_id="detail-valid-photos")
+
+    assert detail is not None
+    assert detail["photo_count"] == 4
+    assert [photo["id"] for photo in detail["photos"]] == ["p1", "p2", "p3", "p4"]
+    assert detail["classification_status"] == "complete"
+    assert detail["archive_status"] == "archived"
+    compiled = str(session.photo_statements[0].compile(compile_kwargs={"literal_binds": True})).lower()
+    assert "photos.upload_status != 'invalid'" in compiled
+
+
 def _model_group(group_id, *, legacy_id: str, photo_count: int):
     from types import SimpleNamespace
 
@@ -441,7 +609,14 @@ def _model_group(group_id, *, legacy_id: str, photo_count: int):
     )
 
 
-def _model_photo(group_id, legacy_id: str, category: str, archive_status: str):
+def _model_photo(
+    group_id,
+    legacy_id: str,
+    category: str,
+    archive_status: str,
+    *,
+    upload_status: PhotoUploadStatus = PhotoUploadStatus.UPLOADED,
+):
     from types import SimpleNamespace
 
     return SimpleNamespace(
@@ -463,7 +638,7 @@ def _model_photo(group_id, legacy_id: str, category: str, archive_status: str):
         storage_key="",
         sha256="a" * 64,
         original_filename="",
-        upload_status=PhotoUploadStatus.UPLOADED,
+        upload_status=upload_status,
         category=category,
         archive_status=archive_status,
         archive_filename="",
