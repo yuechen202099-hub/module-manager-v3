@@ -22,6 +22,7 @@ class GroupMetadataUpdateRequest(BaseModel):
 
 class GroupResetRequest(BaseModel):
     reason: str = ""
+    source_page: str = ""
 
 
 class GroupBulkArchiveRequest(BaseModel):
@@ -31,6 +32,25 @@ class GroupBulkArchiveRequest(BaseModel):
 
 class DataCenterGroupPatchRequest(BaseModel):
     patch: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+    source_page: str = "data_center"
+
+
+class DataCenterPhotoClassifyRequest(BaseModel):
+    category: str = ""
+    reason: str = ""
+    source_page: str = "data_center"
+
+
+class DataCenterPhotoBarcodeRescanRequest(BaseModel):
+    category: str = ""
+    reason: str = ""
+    source_page: str = "data_center"
+
+
+class DataCenterPhotoRegionScanRequest(BaseModel):
+    barcode_type: Literal["meter", "collector", "module"]
+    region: dict[str, Any] = Field(default_factory=dict)
     reason: str = ""
     source_page: str = "data_center"
 
@@ -214,6 +234,91 @@ def update_data_center_group(
     return ok(request, resolve_group_collection_for_response(result))
 
 
+@router.post("/data-center/groups/{group_id}/photos/{photo_id}/classify")
+def classify_data_center_group_photo(
+    group_id: str,
+    photo_id: str,
+    payload: DataCenterPhotoClassifyRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().classify_data_center_group_photo(
+            group_id,
+            photo_id,
+            payload.category,
+            actor=_admin_actor(admin_payload),
+            reason=payload.reason,
+            source_page=payload.source_page,
+        )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Photo or group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
+
+
+@router.post("/data-center/groups/{group_id}/photos/{photo_id}/barcode-rescan")
+def rescan_data_center_group_photo_barcode(
+    group_id: str,
+    photo_id: str,
+    payload: DataCenterPhotoBarcodeRescanRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().rescan_data_center_group_photo_barcode(
+            group_id,
+            photo_id,
+            actor=_admin_actor(admin_payload),
+            category=payload.category,
+            reason=payload.reason,
+            source_page=payload.source_page,
+        )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Photo or group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
+
+
+@router.post("/data-center/groups/{group_id}/photos/{photo_id}/region-scan")
+def scan_data_center_group_photo_region(
+    group_id: str,
+    photo_id: str,
+    payload: DataCenterPhotoRegionScanRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().scan_data_center_group_photo_region(
+            group_id,
+            photo_id,
+            barcode_type=payload.barcode_type,
+            region=payload.region,
+            actor=_admin_actor(admin_payload),
+            reason=payload.reason,
+            source_page=payload.source_page,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Photo or group not found") from exc
+    except ValueError as exc:
+        detail = "Image recognition unavailable" if "unavailable" in str(exc).lower() else str(exc)
+        raise HTTPException(status_code=422, detail=detail) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, result)
+
+
 @router.post("/data-center/groups/{group_id}/barcode-manual-confirm")
 def manual_confirm_data_center_group_barcode(
     group_id: str,
@@ -310,6 +415,7 @@ def reset_group_unconstructed(
             actor=_admin_actor(admin_payload),
             reason=payload.reason,
             force=True,
+            source_page=payload.source_page,
         )
         invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
     except KeyError as exc:
@@ -335,6 +441,7 @@ def reset_group_unreviewed(
             actor=_admin_actor(admin_payload),
             reason=payload.reason,
             force=True,
+            source_page=payload.source_page,
         )
         invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
     except KeyError as exc:

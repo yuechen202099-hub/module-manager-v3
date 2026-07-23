@@ -1661,6 +1661,64 @@ export async function confirmDataCenterGroupBarcode(
   }
 }
 
+export async function classifyDataCenterGroupPhoto(
+  groupId: string,
+  photoId: string,
+  category: string,
+  reason = '数据中台照片分类',
+): Promise<{ group?: MaterialGroup; archiveStatus: string; barcodeStatus: string; deliveryPackageJobStatus: string }> {
+  const data = await api<{
+    group?: BackendGroup
+    archive_status?: string
+    barcode_status?: string
+    delivery_package_job_status?: string
+  }>(
+    `/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/classify`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ category, reason, source_page: 'data_center' }),
+    },
+  )
+  return {
+    group: data.group ? mapGroup(data.group) : undefined,
+    archiveStatus: data.archive_status || '',
+    barcodeStatus: data.barcode_status || '',
+    deliveryPackageJobStatus: data.delivery_package_job_status || '',
+  }
+}
+
+export async function rescanDataCenterGroupPhotoBarcode(
+  groupId: string,
+  photoId: string,
+  category = '',
+  reason = '数据中台重新扫码',
+): Promise<{ photo: ReviewPhoto }> {
+  const data = await api<BackendPhoto>(
+    `/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/barcode-rescan`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ category, reason, source_page: 'data_center' }),
+    },
+  )
+  return { photo: mapPhoto(data) }
+}
+
+export async function scanDataCenterGroupPhotoRegion(
+  groupId: string,
+  photoId: string,
+  request: RegionScanRequest,
+  reason = '数据中台框选扫码',
+): Promise<RegionScanResult> {
+  const data = await api<BackendRegionScanResult>(
+    `/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}/region-scan`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ ...regionScanRequestBody(request), reason, source_page: 'data_center' }),
+    },
+  )
+  return mapRegionScanResult(data)
+}
+
 export async function finalizeDataCenterUnmatchedToGroup(
   unmatchedId: string,
   payload: { terminal: string; meterNo: string; candidateKey: string; expectedVersion: number },
@@ -1689,7 +1747,7 @@ export async function resetAdminGroupToUnreviewed(
     `/groups/${encodeURIComponent(groupId)}/reset-unreviewed`,
     {
       method: 'PATCH',
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify({ reason, source_page: 'data_center' }),
     },
   )
   return { group: mapGroup(data.group || ({} as BackendGroup)) }
@@ -1703,7 +1761,7 @@ export async function resetAdminGroupToUnconstructed(
     `/groups/${encodeURIComponent(groupId)}/reset-unconstructed`,
     {
       method: 'PATCH',
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify({ reason, source_page: 'data_center' }),
     },
   )
   return {
@@ -2668,9 +2726,10 @@ export async function fetchGroupPhotoObjectUrl(
   photoId: string,
   kind: 'thumbnail' | 'preview' | 'original' = 'preview',
   version = '',
+  signal?: AbortSignal,
 ): Promise<string> {
   const url = `${groupPhotoContentUrl(groupId, photoId, kind)}${version ? `&v=${encodeURIComponent(version)}` : ''}`
-  const response = await fetchWithAuth(url, { headers: formHeaders() })
+  const response = await fetchWithAuth(url, { headers: formHeaders(), signal })
   if (!response.ok) {
     throw new Error(response.statusText || `HTTP ${response.status}`)
   }

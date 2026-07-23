@@ -7,6 +7,7 @@ import pytest
 
 from app.services import local_simulation
 from app.services import state_repository as repository
+from app.services.group_barcode_verification import evaluate_group_eligibility
 
 
 def _photo(photo_id: str, category: str, sha: str, *, archive_status: str = "pending") -> dict:
@@ -108,9 +109,49 @@ def _audit_has_before_after(action: str, field: str) -> bool:
     return False
 
 
+def _audit_payload(action: str) -> dict:
+    for event in reversed(local_simulation.get_state()["audit_events"]):
+        if event.get("action") == action:
+            return event.get("payload") or {}
+    raise AssertionError(f"missing audit action {action}")
+
+
+def _mark_future_authoritative_barcode_pass(group: dict, *, photo_id: str, category: str) -> None:
+    future = deepcopy(group)
+    photo = next(item for item in future["photos"] if item["id"] == photo_id)
+    photo["category"] = category
+    eligibility = evaluate_group_eligibility(future)
+    assert eligibility.status == "pending"
+    assert eligibility.evidence_fingerprint
+    verification = group["barcode_verification"]
+    verification.update(
+        {
+            "status": "passed",
+            "evidence_fingerprint": eligibility.evidence_fingerprint,
+            "meter_matched": True,
+            "module_matched": True,
+            "collector_matched": True,
+            "recognition_source": "machine_barcode",
+            "auto_archive_status": "pending",
+            "result": {
+                "passed_count": 3,
+                "matched_fields": ["meter", "module", "collector"],
+                "missing_fields": [],
+                "machine_barcode_values": ["110000288056", "MOD001", "COLLECTOR001"],
+            },
+        }
+    )
+
+
 def test_data_center_edit_invalidates_barcode_archive_and_delivery_cache(
     json_review_repo: repository.JsonStateRepository,
 ) -> None:
+    group = _latest_group()
+    group["status"] = "approved"
+    group["archive_status"] = "archived"
+    group["delivery_cache_status"] = "ready"
+    for photo in group["photos"]:
+        photo["archive_status"] = "archived"
     result = json_review_repo.update_data_center_group(
         group_id="g-1",
         patch={"module_asset_no": "MOD002"},
@@ -126,6 +167,66 @@ def test_data_center_edit_invalidates_barcode_archive_and_delivery_cache(
     assert group["delivery_package_invalidation_epoch"] == 8
     assert package_job["status"] == "stale"
     assert _audit_has_before_after("data_center_group_updated", "module_asset_no")
+    update_payload = _audit_payload("data_center_group_updated")
+    invalidation_payload = _audit_payload("data_center_archive_invalidated")
+    for payload in (update_payload, invalidation_payload):
+        assert payload["source_page"] == "data_center"
+        assert payload["source"] == "data_center"
+        assert payload["actor"] == "admin-a"
+        assert payload["reason"]
+        assert "before" in payload
+        assert "after" in payload
+
+
+def test_json_data_center_classifies_final_photo_then_auto_archives_and_queues_delivery(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    state = local_simulation.get_state()
+    group = state["groups"][0]
+    state["tasks"][0]["claimed_by"] = "other-reviewer"
+    group["status"] = "pending"
+    group["archive_status"] = "pending"
+    for photo in group["photos"]:
+        photo["storage_type"] = "oss"
+        photo["storage_bucket"] = "module-manager-test"
+        photo["storage_key"] = f"groups/g-1/{photo['id']}.jpg"
+    for photo in group["photos"][:3]:
+        label = local_simulation.PHOTO_CATEGORIES[str(photo["category"])]
+        photo["archive_filename"] = local_simulation.build_archive_filename(label, photo["image_url"])
+        photo["archived_at"] = "2026-07-23T10:00:00+00:00"
+    group["photos"][3]["category"] = "unclassified"
+    group["photos"][3]["archive_status"] = "pending"
+    group["delivery_cache_status"] = "pending"
+    state["delivery_package_jobs"] = []
+    _mark_future_authoritative_barcode_pass(group, photo_id="p4", category="after_box")
+
+    result = json_review_repo.classify_data_center_group_photo(
+        "g-1",
+        "p4",
+        "after_box",
+        actor="admin-a",
+        reason="补齐最后一张分类",
+        source_page="data_center",
+    )
+
+    committed_state = local_simulation.get_state()
+    group = committed_state["groups"][0]
+    delivery_jobs = committed_state["delivery_cache_jobs"]
+    package_jobs = committed_state["delivery_package_jobs"]
+
+    assert result["archive_status"] == "archived"
+    assert group["status"] == "approved"
+    assert group["barcode_verification"]["auto_archive_status"] == "archived"
+    assert all(photo["archive_status"] == "archived" for photo in group["photos"])
+    assert delivery_jobs, "auto archive must enqueue delivery cache"
+    assert package_jobs, "auto archive must enqueue delivery package"
+    payload = _audit_payload("data_center_photo_classified")
+    assert payload["source_page"] == "data_center"
+    assert payload["source"] == "data_center"
+    assert payload["actor"] == "admin-a"
+    assert payload["reason"] == "补齐最后一张分类"
+    assert payload["before"]["category"] == "unclassified"
+    assert payload["after"]["category"] == "after_box"
 
 
 def test_manual_confirmation_requires_reason_and_auto_archives_when_ready(
@@ -160,6 +261,13 @@ def test_manual_confirmation_requires_reason_and_auto_archives_when_ready(
     assert result["archive_status"] == "archived"
     assert group["status"] == "approved"
     assert package_statuses & {"pending", "ready"}
+    payload = _audit_payload("group_barcode_manual_confirmed")
+    assert payload["source_page"] == "data_center"
+    assert payload["source"] == "data_center"
+    assert payload["actor"] == "admin-a"
+    assert payload["reason"] == "现场照片与台账一致"
+    assert "before" in payload
+    assert "after" in payload
 
 
 def test_unmatched_finalize_rejects_placeholder_or_ambiguous_target(

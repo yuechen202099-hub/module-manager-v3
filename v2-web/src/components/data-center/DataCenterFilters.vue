@@ -50,6 +50,12 @@ const classificationOptions = [
   { label: '缺失', value: 'incomplete' },
 ]
 
+const exceptionOptions = [
+  { label: '异常', value: '' },
+  { label: '有异常', value: 'open' },
+  { label: '无异常', value: 'none' },
+]
+
 const sortOptions = [
   { label: '最近更新', value: 'updated_desc' },
   { label: '最早更新', value: 'updated_asc' },
@@ -92,6 +98,9 @@ function update<K extends keyof DataCenterRouteQuery>(key: K, value: DataCenterR
     <el-select :model-value="props.modelValue.classificationStatus" @update:model-value="update('classificationStatus', String($event || 'all'))">
       <el-option v-for="item in classificationOptions" :key="item.value" :label="item.label" :value="item.value" />
     </el-select>
+    <el-select :model-value="props.modelValue.exceptionStatus" @update:model-value="update('exceptionStatus', String($event || ''))">
+      <el-option v-for="item in exceptionOptions" :key="item.value" :label="item.label" :value="item.value" />
+    </el-select>
     <el-input
       :model-value="props.modelValue.installer"
       clearable
@@ -125,7 +134,7 @@ function update<K extends keyof DataCenterRouteQuery>(key: K, value: DataCenterR
 <style scoped>
 .data-center-filters {
   display: grid;
-  grid-template-columns: minmax(220px, 1.3fr) repeat(6, minmax(112px, 0.7fr)) minmax(120px, 0.7fr) repeat(3, minmax(116px, 0.7fr)) auto;
+  grid-template-columns: minmax(220px, 1.3fr) repeat(7, minmax(104px, 0.7fr)) minmax(120px, 0.7fr) repeat(3, minmax(116px, 0.7fr)) auto;
   gap: 8px;
   align-items: center;
 }

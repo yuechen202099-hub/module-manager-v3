@@ -65,3 +65,45 @@
 
 - 未发布。
 - 未修改生产 `.env`、data、uploads、OSS 或数据库。
+
+---
+
+## 审阅未通过修复追加
+
+### 修复项
+
+- Critical：新增数据中台分类专用链路，JSON/Postgres 在分类最后一张后于可靠写链路内判断分类完整、权威条码通过和正式身份有效，自动归档并排队交付缓存；JSON 同步排队交付包。
+- Important 1：新增 `/groups/data-center/groups/{group_id}/photos/{photo_id}/classify|barcode-rescan|region-scan` 管理员端点和前端 typed services，正式组弹窗不再调用 `/local-test/*` 分类/重扫/框选扫码，也不依赖 review claim。
+- Important 2：数据中台字段修正、人工确认、分类、重扫、未匹配归并、回退审计补 `source_page/source=data_center`，并包含 actor、reason、before、after。
+- Important 3：`?group_id=X&review=1` 直达 URL 现在默认构造 formal group fallback；仅 `data_type=unmatched` 时按未匹配打开。
+- Minor 1：`DataCenterFilters` 增加异常状态筛选并同步 URL。
+- Minor 2：`fetchGroupPhotoObjectUrl` 接受 `AbortSignal`；弹窗关闭或重载时 abort detail/photo fetch 并 revoke 已创建 object URL。
+
+### RED 记录
+
+- 后端 RED：`4 failed, 110 passed, 354 deselected`，失败点覆盖缺少数据中台分类方法、分类后自动归档/排队、审计 source 字段缺失。
+- UI verifier RED：失败于 `data center filters must expose exception status options`。
+
+### 验证结果
+
+- `..\.venv\Scripts\python.exe -m pytest tests/test_data_center_review.py tests/test_local_simulation.py tests/test_state_repository.py -k "data_center or auto_archive or reset_group or unmatched" -q`
+  - 114 passed, 354 deselected, 1 warning
+- `.\.venv\Scripts\python.exe .\scripts\verify_v3_2_0_data_center_ui.py`
+  - passed
+- `npm exec vue-tsc -- --noEmit`
+  - passed
+- `npm run build`
+  - passed
+  - warnings: Rollup removed third-party `#__PURE__` annotations in `@vueuse/core`; `element-components` chunk remains larger than 500 kB.
+- `git diff --check`
+  - passed
+
+### 构建产物处理
+
+- 已运行构建用于验证。
+- 已恢复并清理 `v2-api/app/static/vue` hashed static churn，提交不包含本次构建产物。
+
+### 剩余疑虑
+
+- 未匹配弹窗仍复用既有 `UnmatchedReviewDialog` 视觉和交互；本轮补了数据中台 finalize wrapper 审计 source 与 `00000000` 拒绝，但未单独重做未匹配弹窗。
+- 构建警告为既有 vendor/chunk 体积与第三方注释警告，未在本任务范围内处理。

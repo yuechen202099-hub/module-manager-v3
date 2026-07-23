@@ -4,15 +4,15 @@ import { CircleCheck, FolderChecked, Refresh, Warning } from '@element-plus/icon
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
-  classifyPhotoWithGroup,
+  classifyDataCenterGroupPhoto,
   confirmDataCenterGroupBarcode,
   fetchDataCenterDetail,
   fetchGroupPhotoObjectUrl,
-  rescanPhotoBarcode,
+  rescanDataCenterGroupPhotoBarcode,
   resetAdminGroupToUnconstructed,
   resetAdminGroupToUnreviewed,
   returnGroupToException,
-  scanGroupPhotoRegion,
+  scanDataCenterGroupPhotoRegion,
   updateDataCenterGroup,
 } from '@/api/services'
 import type { DataCenterDetail, DataCenterRow, RegionScanResult, ReviewPhoto } from '@/api/types'
@@ -39,6 +39,7 @@ const errorMessage = ref('')
 const inspector = ref<InstanceType<typeof ReviewImageInspector> | null>(null)
 const photoObjectUrls = reactive(new Map<string, string>())
 let detailAbortController: AbortController | null = null
+let photoAbortController: AbortController | null = null
 let detailSerial = 0
 let photoSerial = 0
 
@@ -73,6 +74,8 @@ function cleanupDetail() {
   photoSerial += 1
   detailAbortController?.abort()
   detailAbortController = null
+  photoAbortController?.abort()
+  photoAbortController = null
   photoObjectUrls.forEach(URL.revokeObjectURL)
   photoObjectUrls.clear()
   detail.value = null
@@ -112,6 +115,9 @@ async function loadDetail() {
 
 async function loadPhotoObjectUrls(next: DataCenterDetail, ownerSerial: number) {
   const current = ++photoSerial
+  photoAbortController?.abort()
+  photoAbortController = new AbortController()
+  const signal = photoAbortController.signal
   imageLoading.value = true
   photoObjectUrls.forEach(URL.revokeObjectURL)
   photoObjectUrls.clear()
@@ -120,13 +126,14 @@ async function loadPhotoObjectUrls(next: DataCenterDetail, ownerSerial: number) 
       next.photos.map(async (photo) => {
         let objectUrl = ''
         try {
-          objectUrl = await fetchGroupPhotoObjectUrl(next.id, photo.id, 'preview')
+          objectUrl = await fetchGroupPhotoObjectUrl(next.id, photo.id, 'preview', '', signal)
           if (current !== photoSerial || ownerSerial !== detailSerial || props.row?.id !== next.id) {
             URL.revokeObjectURL(objectUrl)
             return
           }
           photoObjectUrls.set(photo.id, objectUrl)
-        } catch {
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') return
           if (objectUrl) URL.revokeObjectURL(objectUrl)
         }
       }),
@@ -163,7 +170,7 @@ async function classifyActivePhoto(category: string) {
   if (!detail.value || !activePhoto.value) return
   saving.value = true
   try {
-    await classifyPhotoWithGroup(detail.value.id, activePhoto.value.id, category)
+    await classifyDataCenterGroupPhoto(detail.value.id, activePhoto.value.id, category, form.reason.trim() || '数据中台照片分类')
     ElMessage.success('已分类')
     await reloadAfterMutation()
   } catch (error) {
@@ -177,7 +184,12 @@ async function rescanActivePhoto() {
   if (!detail.value || !activePhoto.value) return
   saving.value = true
   try {
-    await rescanPhotoBarcode(detail.value.id, activePhoto.value.id, activePhoto.value.category || '')
+    await rescanDataCenterGroupPhotoBarcode(
+      detail.value.id,
+      activePhoto.value.id,
+      activePhoto.value.category || '',
+      form.reason.trim() || '数据中台重新扫码',
+    )
     ElMessage.success('重新扫码完成')
     await reloadAfterMutation()
   } catch (error) {
@@ -195,7 +207,12 @@ async function handleRegionScan(request: { barcodeType: RegionScanResult['barcod
   if (!detail.value || !activePhoto.value) return
   saving.value = true
   try {
-    const result = await scanGroupPhotoRegion(detail.value.id, activePhoto.value.id, request)
+    const result = await scanDataCenterGroupPhotoRegion(
+      detail.value.id,
+      activePhoto.value.id,
+      request,
+      form.reason.trim() || '数据中台框选扫码',
+    )
     const value = (result.normalizedValues[0] || result.values[0] || '').trim()
     if (!value) {
       ElMessage.warning('当前选区未识别到可用内容')

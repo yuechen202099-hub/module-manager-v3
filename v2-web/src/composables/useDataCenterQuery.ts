@@ -116,9 +116,10 @@ export function useDataCenterQuery() {
   const activeRow = computed<DataCenterRow | null>(() => {
     const matched = rows.value.find((row) => row.id === query.groupId)
     if (matched) return matched
-    if (!query.review || !query.groupId || query.dataType === 'all') return null
+    if (!query.review || !query.groupId) return null
+    const fallbackKind = query.dataType === 'unmatched' ? 'unmatched' : 'group'
     return {
-      kind: query.dataType,
+      kind: fallbackKind,
       id: query.groupId,
       terminal: '',
       meterNo: '',

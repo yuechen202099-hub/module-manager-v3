@@ -133,10 +133,63 @@ def _reject_placeholder_or_ambiguous_data_center_target(*, terminal: str, meter_
         raise ValueError("数据中台未匹配归并必须选择唯一真实资料组，禁止使用 00000000")
 
 
+def _data_center_audit_payload(
+    *,
+    source_page: str,
+    actor: str,
+    reason: str = "",
+    before: Mapping[str, Any] | None = None,
+    after: Mapping[str, Any] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    source = source_page.strip() or "data_center"
+    payload = {
+        "source_page": source,
+        "source": source,
+        "actor": actor,
+        "reason": reason.strip() or source,
+        "before": dict(before or {}),
+        "after": dict(after or {}),
+    }
+    payload.update(extra)
+    return payload
+
+
+def _json_enrich_latest_audit_payload(
+    action: str,
+    *,
+    source_page: str,
+    actor: str,
+    reason: str = "",
+) -> None:
+    state = local_simulation.get_state()
+    for event in reversed(state.get("audit_events", [])):
+        if event.get("action") != action:
+            continue
+        payload = event.setdefault("payload", {})
+        before = payload.get("before") or payload.get("previous") or {}
+        after = payload.get("after") or payload.get("updates") or {}
+        payload.update(
+            _data_center_audit_payload(
+                source_page=source_page,
+                actor=actor,
+                reason=reason or str(payload.get("reason") or ""),
+                before=before if isinstance(before, Mapping) else {},
+                after=after if isinstance(after, Mapping) else {},
+            )
+        )
+        return
+
+
 def _json_mark_data_center_archive_invalidated(group: dict[str, Any], *, actor: str, reason: str) -> None:
     previous_archive = _data_center_archive_status(group)
     if previous_archive != "archived":
         return
+    before = {
+        "archive_status": previous_archive,
+        "status": str(group.get("status") or ""),
+        "delivery_cache_status": str(group.get("delivery_cache_status") or ""),
+    }
     for photo in group.get("photos", []) or []:
         if not isinstance(photo, dict) or photo.get("is_active", True) is False:
             continue
@@ -152,7 +205,19 @@ def _json_mark_data_center_archive_invalidated(group: dict[str, Any], *, actor: 
     local_simulation.append_audit_event(
         "data_center_archive_invalidated",
         actor,
-        {"group_id": group.get("id"), "previous_archive_status": previous_archive, "reason": reason},
+        _data_center_audit_payload(
+            source_page="data_center",
+            actor=actor,
+            reason=reason,
+            before=before,
+            after={
+                "archive_status": group.get("archive_status"),
+                "status": group.get("status"),
+                "delivery_cache_status": group.get("delivery_cache_status"),
+            },
+            group_id=group.get("id"),
+            previous_archive_status=previous_archive,
+        ),
     )
 
 
@@ -2358,6 +2423,7 @@ class StateRepository(ABC):
         actor: str,
         candidate_key: str,
         expected_version: int,
+        source_page: str = "",
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -2490,6 +2556,46 @@ class StateRepository(ABC):
         group_id: str,
         *,
         patch: dict[str, Any],
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def classify_data_center_group_photo(
+        self,
+        group_id: str,
+        photo_id: str,
+        category: str,
+        *,
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def rescan_data_center_group_photo_barcode(
+        self,
+        group_id: str,
+        photo_id: str,
+        *,
+        actor: str,
+        category: str = "",
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def scan_data_center_group_photo_region(
+        self,
+        group_id: str,
+        photo_id: str,
+        *,
+        barcode_type: str,
+        region: Mapping[str, Any],
         actor: str,
         reason: str = "",
         source_page: str = "data_center",
@@ -2694,6 +2800,7 @@ class StateRepository(ABC):
         collector: str,
         reason: str,
         photo_ids: list[str],
+        source_page: str = "",
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -2841,6 +2948,7 @@ class StateRepository(ABC):
         actor: str,
         reason: str = "",
         force: bool = False,
+        source_page: str = "",
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -2852,6 +2960,7 @@ class StateRepository(ABC):
         actor: str,
         reason: str = "",
         force: bool = False,
+        source_page: str = "",
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -3087,6 +3196,7 @@ class JsonStateRepository(StateRepository):
         actor: str,
         candidate_key: str,
         expected_version: int,
+        source_page: str = "",
     ) -> dict[str, Any]:
         return local_simulation.finalize_unmatched_match(
             unmatched_id,
@@ -3290,24 +3400,284 @@ class JsonStateRepository(StateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
+        before_group = deepcopy(local_simulation.get_group(group_id) or {})
         result = self.update_group_metadata(
             group_id,
             actor=actor,
             updates=patch,
             audit_action="data_center_group_updated",
         )
+        _json_enrich_latest_audit_payload(
+            "data_center_group_updated",
+            source_page=source_page,
+            actor=actor,
+            reason=reason or "data_center_group_updated",
+        )
         group = local_simulation.get_group(group_id)
         if group is None:
             raise KeyError(group_id)
         changed_fields = list(result.get("changed_fields") or [])
         if changed_fields and set(changed_fields).intersection(DATA_CENTER_IDENTITY_FIELDS):
+            had_archived_before_update = _data_center_archive_status(before_group) == "archived"
             _json_mark_data_center_archive_invalidated(
                 group,
                 actor=actor,
                 reason=reason or "data_center_identity_changed",
             )
+            if had_archived_before_update and not any(
+                event.get("action") == "data_center_archive_invalidated"
+                for event in local_simulation.get_state().get("audit_events", [])
+            ):
+                local_simulation.append_audit_event(
+                    "data_center_archive_invalidated",
+                    actor,
+                    _data_center_audit_payload(
+                        source_page=source_page,
+                        actor=actor,
+                        reason=reason or "data_center_identity_changed",
+                        before={
+                            "archive_status": _data_center_archive_status(before_group),
+                            "status": before_group.get("status", ""),
+                            "delivery_cache_status": before_group.get("delivery_cache_status", ""),
+                        },
+                        after={
+                            "archive_status": _data_center_archive_status(group),
+                            "status": group.get("status", ""),
+                            "delivery_cache_status": group.get("delivery_cache_status", ""),
+                        },
+                        group_id=group_id,
+                        previous_archive_status="archived",
+                    ),
+                )
             local_simulation.refresh_summary()
         return _data_center_group_result(group, changed_fields=changed_fields)
+
+    def classify_data_center_group_photo(
+        self,
+        group_id: str,
+        photo_id: str,
+        category: str,
+        *,
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        from app.services.barcode_maintenance_worker import _auto_archive_json_in_state
+        from app.services.group_barcode_verification import evaluate_group_eligibility
+
+        if category not in local_simulation.PHOTO_CATEGORIES:
+            raise ValueError(f"Unsupported photo category: {category}")
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            state = local_simulation.get_state()
+            group = local_simulation.get_group(group_id)
+            if group is None:
+                raise KeyError(group_id)
+            photo = next(
+                (
+                    item
+                    for item in group.get("photos", [])
+                    if str(item.get("id") or "") == photo_id and item.get("is_active", True) is not False
+                ),
+                None,
+            )
+            if photo is None:
+                raise KeyError(photo_id)
+            before = {
+                "category": str(photo.get("category") or "unclassified"),
+                "archive_status": str(photo.get("archive_status") or ""),
+                "archive_filename": str(photo.get("archive_filename") or ""),
+            }
+            if photo.get("download_status") != "downloaded":
+                has_previewable_source = bool(
+                    str(photo.get("image_url") or "").strip()
+                    or str(photo.get("storage_key") or "").strip()
+                    or str(photo.get("storage_type") or "").strip() in {"oss", "local_upload", "external_url"}
+                )
+                if not has_previewable_source:
+                    raise ValueError("Photo must have an image URL before classification")
+                photo["download_status"] = "downloaded"
+            category_label = local_simulation.PHOTO_CATEGORIES[category]
+            now = local_simulation.now_iso()
+            photo["category"] = category
+            photo["category_label"] = category_label
+            photo["classified_by"] = actor
+            photo["classified_at"] = now
+            photo["archive_status"] = "archived"
+            photo["archive_filename"] = local_simulation.build_archive_filename(
+                category_label,
+                str(photo.get("image_url") or ""),
+            )
+            photo["archived_at"] = now
+            photo.update(photo_barcode_check.check_photo_barcode(photo, group))
+            after = {
+                "category": str(photo.get("category") or ""),
+                "archive_status": str(photo.get("archive_status") or ""),
+                "archive_filename": str(photo.get("archive_filename") or ""),
+            }
+            state.setdefault("photo_events", []).append(
+                {
+                    "group_id": group_id,
+                    "photo_id": photo_id,
+                    "previous_category": before["category"],
+                    "next_category": category,
+                    "reviewer": actor,
+                    "event": "data_center_photo_classified",
+                    "created_at": now,
+                }
+            )
+            local_simulation.append_audit_event(
+                "data_center_photo_classified",
+                actor,
+                _data_center_audit_payload(
+                    source_page=source_page,
+                    actor=actor,
+                    reason=reason or "data_center_photo_classified",
+                    before=before,
+                    after=after,
+                    group_id=group_id,
+                    photo_id=photo_id,
+                    previous_category=before["category"],
+                    next_category=category,
+                ),
+            )
+            package_status = ""
+            eligibility = evaluate_group_eligibility(group)
+            verification = dict(group.get("barcode_verification") or {})
+            fingerprint = str(verification.get("evidence_fingerprint") or "")
+            current_fingerprint = str(eligibility.evidence_fingerprint or "")
+            authoritative = (
+                eligibility.status == "pending"
+                and str(verification.get("status") or "") in {"passed", "manual_confirmed"}
+                and (not fingerprint or fingerprint == current_fingerprint)
+            )
+            if authoritative:
+                archive_result = _auto_archive_json_in_state(state, group_id, actor=actor)
+                if archive_result.get("archived") or _data_center_archive_status(group) == "archived":
+                    package_status = _json_request_data_center_delivery_package(group, actor=actor)
+            else:
+                archive_result = {"archived": False, "group_id": group_id, "reason": "not_authoritative_ready"}
+                local_simulation.schedule_delivery_cache_build(group_id, reason="data_center_photo_classified")
+            local_simulation.refresh_summary()
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction and transaction is not None and not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        group = local_simulation.get_group(group_id)
+        if group is None:
+            raise KeyError(group_id)
+        return _data_center_group_result(
+            group,
+            changed_fields=["photo.category"],
+            delivery_package_job_status=package_status,
+            archive_result=archive_result,
+        )
+
+    def rescan_data_center_group_photo_barcode(
+        self,
+        group_id: str,
+        photo_id: str,
+        *,
+        actor: str,
+        category: str = "",
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        group = local_simulation.get_group(group_id)
+        if group is None:
+            raise KeyError(group_id)
+        photo = next(
+            (
+                item
+                for item in group.get("photos", [])
+                if str(item.get("id") or "") == photo_id and item.get("is_active", True) is not False
+            ),
+            None,
+        )
+        if photo is None:
+            raise KeyError(photo_id)
+        now = local_simulation.now_iso()
+        before = {
+            "barcode_rescan_requested_at": str(photo.get("barcode_rescan_requested_at") or ""),
+            "barcode_verification_status": str((group.get("barcode_verification") or {}).get("status") or ""),
+        }
+        local_simulation.invalidate_json_delivery_artifacts(
+            group,
+            actor=actor,
+            reason="group_barcode_rescan_requested",
+            verification_changed=True,
+        )
+        verification = dict(group.get("barcode_verification") or {})
+        photo["barcode_rescan_requested_by"] = actor
+        photo["barcode_rescan_requested_at"] = now
+        if category:
+            photo["category"] = category
+        local_simulation.get_state().setdefault("photo_events", []).append(
+            {
+                "group_id": group_id,
+                "photo_id": photo_id,
+                "category": str(photo.get("category") or "unclassified"),
+                "reviewer": actor,
+                "event": "group_barcode_rescan_requested",
+                "status": verification.get("status", "pending"),
+                "created_at": now,
+            }
+        )
+        after = {
+            "barcode_rescan_requested_at": now,
+            "barcode_verification_status": str((group.get("barcode_verification") or {}).get("status") or ""),
+        }
+        local_simulation.append_audit_event(
+            "group_barcode_rescan_requested",
+            actor,
+            _data_center_audit_payload(
+                source_page=source_page,
+                actor=actor,
+                reason=reason or "group_barcode_rescan_requested",
+                before=before,
+                after=after,
+                group_id=group_id,
+                photo_id=photo_id,
+                status=after["barcode_verification_status"],
+                should_enqueue=bool((group.get("barcode_verification") or {}).get("should_enqueue")),
+            ),
+        )
+        local_simulation.refresh_summary()
+        return photo
+
+    def scan_data_center_group_photo_region(
+        self,
+        group_id: str,
+        photo_id: str,
+        *,
+        barcode_type: str,
+        region: Mapping[str, Any],
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        group = local_simulation.get_group(group_id)
+        if group is None:
+            raise KeyError(group_id)
+        photo = next(
+            (
+                item
+                for item in group.get("photos", [])
+                if str(item.get("id") or "") == photo_id and item.get("is_active", True) is not False
+            ),
+            None,
+        )
+        if photo is None:
+            raise KeyError(photo_id)
+        return photo_barcode_check.scan_photo_region(photo, barcode_type, dict(region))
 
     def manual_confirm_group_barcode(
         self,
@@ -3329,6 +3699,12 @@ class JsonStateRepository(StateRepository):
             collector=collector,
             reason=reason,
             photo_ids=photo_ids,
+        )
+        _json_enrich_latest_audit_payload(
+            "group_barcode_manual_confirmed",
+            source_page=source_page,
+            actor=actor,
+            reason=reason,
         )
         from app.services.barcode_maintenance_worker import _auto_archive_json_in_state
 
@@ -3366,12 +3742,20 @@ class JsonStateRepository(StateRepository):
             meter_no=meter_no,
             candidate_key=candidate_key,
         )
-        return self.finalize_unmatched_match(
+        result = self.finalize_unmatched_match(
             unmatched_id,
             actor=actor,
             candidate_key=candidate_key,
             expected_version=expected_version,
+            source_page=source_page,
         )
+        _json_enrich_latest_audit_payload(
+            "unmatched_review_finalized",
+            source_page=source_page,
+            actor=actor,
+            reason="data_center_unmatched_finalize",
+        )
+        return result
 
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
         return local_simulation.claim_task(task_id, reviewer)
@@ -3702,6 +4086,7 @@ class JsonStateRepository(StateRepository):
         collector: str,
         reason: str,
         photo_ids: list[str],
+        source_page: str = "",
     ) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         transaction = local_simulation.active_authoritative_json_write(team_id)
@@ -3937,8 +4322,9 @@ class JsonStateRepository(StateRepository):
         actor: str,
         reason: str = "",
         force: bool = False,
+        source_page: str = "",
     ) -> dict[str, Any]:
-        return self._authoritative_mutation(
+        result = self._authoritative_mutation(
             lambda: local_simulation.reset_group_to_unconstructed(
                 group_id,
                 actor=actor,
@@ -3946,6 +4332,14 @@ class JsonStateRepository(StateRepository):
                 force=force,
             )
         )
+        if source_page:
+            _json_enrich_latest_audit_payload(
+                "group_reset_to_unconstructed",
+                source_page=source_page,
+                actor=actor,
+                reason=reason or "reset_to_unconstructed",
+            )
+        return result
 
     def reset_group_to_unreviewed(
         self,
@@ -3954,8 +4348,9 @@ class JsonStateRepository(StateRepository):
         actor: str,
         reason: str = "",
         force: bool = False,
+        source_page: str = "",
     ) -> dict[str, Any]:
-        return self._authoritative_mutation(
+        result = self._authoritative_mutation(
             lambda: local_simulation.reset_group_to_unreviewed(
                 group_id,
                 actor=actor,
@@ -3963,6 +4358,14 @@ class JsonStateRepository(StateRepository):
                 force=force,
             )
         )
+        if source_page:
+            _json_enrich_latest_audit_payload(
+                "admin_group_reset_unreviewed",
+                source_page=source_page,
+                actor=actor,
+                reason=reason or "reset_to_unreviewed",
+            )
+        return result
 
     def bulk_archive_groups(self, group_ids: list[str], *, actor: str, reason: str = "") -> dict[str, Any]:
         return self._authoritative_mutation(
@@ -6156,6 +6559,7 @@ class PostgresStateRepository(StateRepository):
         actor: str,
         candidate_key: str,
         expected_version: int,
+        source_page: str = "",
     ) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         with self._session() as session:
@@ -6217,6 +6621,8 @@ class PostgresStateRepository(StateRepository):
                     "associated_by": actor,
                     "associated_group_id": group.legacy_id,
                 }
+                before = {"unmatched_id": unmatched_id, "review_version": expected_version}
+                after = {"group_id": group.legacy_id, "terminal": candidate["terminal"]}
                 _stage_transactional_audit(
                     session,
                     team_id=team_id,
@@ -6224,9 +6630,17 @@ class PostgresStateRepository(StateRepository):
                     action="unmatched_review_finalized",
                     entity_type="unmatched_record",
                     entity_id=record.id,
-                    before_data={"unmatched_id": unmatched_id, "review_version": expected_version},
-                    after_data={"group_id": group.legacy_id, "terminal": candidate["terminal"]},
-                    payload={"candidate_key": candidate_key, "attached": attached},
+                    before_data=before,
+                    after_data=after,
+                    payload=_data_center_audit_payload(
+                        source_page=source_page or "admin",
+                        actor=actor,
+                        reason="unmatched_review_finalized",
+                        before=before,
+                        after=after,
+                        candidate_key=candidate_key,
+                        attached=attached,
+                    ),
                 )
                 result = {
                     "group": _group_payload(session, group),
@@ -7149,6 +7563,328 @@ class PostgresStateRepository(StateRepository):
         group_payload = self.get_group(group_id) or result.get("group") or {}
         return _data_center_group_result(group_payload, changed_fields=changed_fields)
 
+    def classify_data_center_group_photo(
+        self,
+        group_id: str,
+        photo_id: str,
+        category: str,
+        *,
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        from app.services.group_barcode_verification import evaluate_group_eligibility
+
+        if category not in local_simulation.PHOTO_CATEGORIES:
+            raise ValueError(f"Unsupported photo category: {category}")
+        should_enqueue = False
+        group_payload: dict[str, Any] = {}
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=True)
+            photo = session.scalar(
+                select(Photo).where(
+                    Photo.team_id == local_simulation.current_team_id(),
+                    Photo.group_id == group.id,
+                    Photo.legacy_id == photo_id,
+                    Photo.is_active.is_(True),
+                ).with_for_update()
+            )
+            if photo is None:
+                raise KeyError(photo_id)
+            before = {
+                "category": str(photo.category or "unclassified"),
+                "archive_status": str(photo.archive_status or ""),
+                "archive_filename": str(photo.archive_filename or ""),
+            }
+            category_label = local_simulation.PHOTO_CATEGORIES.get(
+                category,
+                local_simulation.PHOTO_CATEGORIES["unclassified"],
+            )
+            now = datetime.now(UTC)
+            image_url = photo.image_url or photo.source_url or ""
+            photo.category = category
+            photo.classified_by = actor
+            photo.classified_at = now
+            photo.archive_status = "archived"
+            photo.archive_filename = local_simulation.build_archive_filename(category_label, image_url)
+            photo.archived_at = now
+            raw_data = dict(photo.raw_data or {})
+            raw_data.update(
+                {
+                    "category": category,
+                    "category_label": category_label,
+                    "classified_by": actor,
+                    "archive_status": "archived",
+                    "archive_filename": photo.archive_filename,
+                    "archived_at": photo.archived_at.isoformat(),
+                }
+            )
+            raw_data.update(
+                photo_barcode_check.check_photo_barcode(
+                    {
+                        **_photo_payload(photo),
+                        "category": category,
+                        "category_label": category_label,
+                        "image_url": image_url,
+                    },
+                    _group_barcode_context(group),
+                )
+            )
+            photo.raw_data = raw_data
+            photos = list(
+                session.scalars(
+                    select(Photo)
+                    .where(Photo.team_id == group.team_id, Photo.group_id == group.id, Photo.is_active.is_(True))
+                    .with_for_update()
+                ).all()
+            )
+            eligibility = evaluate_group_eligibility(
+                _verification_group_payload(session, group, prefetched_photos=photos)
+            )
+            verification = session.scalar(
+                select(GroupBarcodeVerification)
+                .where(
+                    GroupBarcodeVerification.team_id == group.team_id,
+                    GroupBarcodeVerification.group_id == group.id,
+                )
+                .with_for_update()
+            )
+            persisted = dict((group.raw_data or {}).get("barcode_verification") or {})
+            verification_result = dict(persisted.get("result") or getattr(verification, "result", None) or {})
+            verification_payload = {
+                **persisted,
+                "status": getattr(verification, "status", persisted.get("status", "")),
+                "evidence_fingerprint": getattr(
+                    verification,
+                    "evidence_fingerprint",
+                    persisted.get("evidence_fingerprint"),
+                ),
+                "evidence_version": getattr(verification, "evidence_version", persisted.get("evidence_version", 0)),
+                "meter_matched": getattr(verification, "meter_matched", persisted.get("meter_matched")),
+                "module_matched": getattr(verification, "module_matched", persisted.get("module_matched")),
+                "collector_matched": getattr(verification, "collector_matched", persisted.get("collector_matched")),
+                "recognition_source": getattr(
+                    verification,
+                    "recognition_source",
+                    persisted.get("recognition_source", ""),
+                ),
+                "result": verification_result,
+            }
+            authoritative = (
+                verification is not None
+                and eligibility.status == "pending"
+                and str(verification_payload.get("status") or "") in {"passed", "manual_confirmed"}
+                and str(verification_payload.get("evidence_fingerprint") or "")
+                == str(eligibility.evidence_fingerprint or "")
+                and verification_payload.get("meter_matched") is True
+                and verification_payload.get("module_matched") is True
+                and verification_payload.get("collector_matched") is True
+                and int(verification_result.get("passed_count") or 0) == 3
+                and str(verification_payload.get("recognition_source") or "")
+                in {"machine_barcode", "machine_qr", "manual_confirmed", "manual"}
+                and _legacy_group_status(group) in {"", "pending", "unreviewed", "in_review", "incomplete"}
+                and not bool(getattr(group, "has_archive_blocker", False))
+            )
+            from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor=actor,
+                reason="data_center_photo_classified",
+            )
+            if authoritative:
+                archive_now = datetime.now(UTC)
+                for item in photos:
+                    item.archive_status = "archived"
+                    item.archived_at = archive_now
+                    item.classified_by = item.classified_by or actor
+                    item_raw = dict(item.raw_data or {})
+                    item_raw.update(
+                        {
+                            "archive_status": "archived",
+                            "archived_at": archive_now.isoformat(),
+                            "classified_by": item.classified_by,
+                        }
+                    )
+                    item.raw_data = item_raw
+                group.status = GroupStatus.APPROVED
+                group.reviewer = actor
+                group.review_note = "barcode verification auto archive"
+                group.reviewed_at = archive_now
+                group_raw = dict(group.raw_data or {})
+                next_verification = {
+                    **verification_payload,
+                    "auto_archive_status": "archived",
+                    "auto_archived_at": archive_now.isoformat(),
+                    "auto_archive_lease_owner": None,
+                    "auto_archive_lease_token": None,
+                    "auto_archive_lease_expires_at": None,
+                    "auto_archive_error": "",
+                }
+                group_raw.update(
+                    {
+                        "status": "approved",
+                        "archive_status": "archived",
+                        "reviewer": actor,
+                        "review_note": "barcode verification auto archive",
+                        "reviewed_at": archive_now.isoformat(),
+                        "barcode_verification": next_verification,
+                    }
+                )
+                group.raw_data = group_raw
+                verification.auto_archive_status = "archived"
+                verification.auto_archived_at = archive_now
+                verification.auto_archive_lease_owner = None
+                verification.auto_archive_lease_token = None
+                verification.auto_archive_lease_expires_at = None
+                verification.auto_archive_error = None
+                should_enqueue = True
+            after = {
+                "category": str(photo.category or ""),
+                "archive_status": str(photo.archive_status or ""),
+                "archive_filename": str(photo.archive_filename or ""),
+            }
+            _stage_transactional_audit(
+                session,
+                team_id=group.team_id,
+                actor=actor,
+                action="data_center_photo_classified",
+                entity_type="photo",
+                entity_id=photo.id,
+                before_data=before,
+                after_data=after,
+                payload=_data_center_audit_payload(
+                    source_page=source_page,
+                    actor=actor,
+                    reason=reason or "data_center_photo_classified",
+                    before=before,
+                    after=after,
+                    group_id=str(group.legacy_id or group.id),
+                    photo_id=str(photo.legacy_id or photo.id),
+                    auto_archived=should_enqueue,
+                ),
+            )
+            session.commit()
+            session.refresh(photo)
+            group_payload = _group_payload(session, group, verification=verification)
+        if should_enqueue:
+            self._enqueue_delivery_cache_after_commit(
+                group_id,
+                actor=actor,
+                reason="data_center_auto_archive",
+            )
+        return _data_center_group_result(
+            group_payload,
+            changed_fields=["photo.category"],
+            archive_result={"archived": should_enqueue, "group_id": group_id},
+        )
+
+    def rescan_data_center_group_photo_barcode(
+        self,
+        group_id: str,
+        photo_id: str,
+        *,
+        actor: str,
+        category: str = "",
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=True)
+            photo = session.scalar(
+                select(Photo).where(
+                    Photo.team_id == local_simulation.current_team_id(),
+                    Photo.group_id == group.id,
+                    Photo.legacy_id == photo_id,
+                    Photo.is_active.is_(True),
+                )
+            )
+            if photo is None:
+                raise KeyError(photo_id)
+            now = datetime.now(UTC)
+            before = {
+                "barcode_rescan_requested_at": str((photo.raw_data or {}).get("barcode_rescan_requested_at") or ""),
+            }
+            raw_data = dict(photo.raw_data or {})
+            raw_data.update(
+                {
+                    "barcode_rescan_requested_by": actor,
+                    "barcode_rescan_requested_at": now.isoformat(),
+                }
+            )
+            if category:
+                photo.category = category
+                raw_data["category"] = category
+            photo.raw_data = raw_data
+            verification = invalidate_verification_for_group(
+                session,
+                group,
+                actor=actor,
+                reason="group_barcode_rescan_requested",
+            )
+            from app.services.delivery_cache import invalidate_postgres_delivery_cache_for_group_change
+
+            invalidate_postgres_delivery_cache_for_group_change(
+                session,
+                group,
+                actor=actor,
+                reason="group_barcode_rescan_requested",
+            )
+            after = {
+                "barcode_rescan_requested_at": now.isoformat(),
+                "barcode_verification_status": verification.get("status"),
+            }
+            _stage_transactional_audit(
+                session,
+                team_id=group.team_id,
+                actor=actor,
+                action="group_barcode_rescan_requested",
+                entity_type="photo",
+                entity_id=photo.id,
+                before_data=before,
+                after_data=after,
+                payload=_data_center_audit_payload(
+                    source_page=source_page,
+                    actor=actor,
+                    reason=reason or "group_barcode_rescan_requested",
+                    before=before,
+                    after=after,
+                    group_id=str(group.legacy_id or group.id),
+                    photo_id=str(photo.legacy_id or photo.id),
+                    status=verification.get("status", "pending"),
+                    should_enqueue=bool(verification.get("should_enqueue")),
+                ),
+            )
+            session.commit()
+            session.refresh(photo)
+            return _photo_payload(photo)
+
+    def scan_data_center_group_photo_region(
+        self,
+        group_id: str,
+        photo_id: str,
+        *,
+        barcode_type: str,
+        region: Mapping[str, Any],
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=False)
+            photo = session.scalar(
+                select(Photo).where(
+                    Photo.team_id == local_simulation.current_team_id(),
+                    Photo.group_id == group.id,
+                    Photo.legacy_id == photo_id,
+                    Photo.is_active.is_(True),
+                )
+            )
+            if photo is None:
+                raise KeyError(photo_id)
+            return photo_barcode_check.scan_photo_region(_photo_payload(photo), barcode_type, dict(region))
+
     def manual_confirm_group_barcode(
         self,
         group_id: str,
@@ -7169,6 +7905,7 @@ class PostgresStateRepository(StateRepository):
             collector=collector,
             reason=reason,
             photo_ids=photo_ids,
+            source_page=source_page,
         )
         from app.services.barcode_maintenance_worker import auto_archive_verified_group
         from app.services.delivery_package_queue import DeliveryPackageNotReady
@@ -7214,6 +7951,7 @@ class PostgresStateRepository(StateRepository):
             actor=actor,
             candidate_key=candidate_key,
             expected_version=expected_version,
+            source_page=source_page,
         )
 
     def claim_task(self, task_id: int, reviewer: str) -> dict[str, Any]:
@@ -8344,6 +9082,7 @@ class PostgresStateRepository(StateRepository):
         collector: str,
         reason: str,
         photo_ids: list[str],
+        source_page: str = "",
     ) -> dict[str, Any]:
         from app.services.group_barcode_verification import evaluate_group_eligibility
 
@@ -8541,18 +9280,20 @@ class PostgresStateRepository(StateRepository):
                 entity_id=group.id,
                 before_data=before_data,
                 after_data=after_data,
-                payload={
-                    "group_id": group.legacy_id or str(group.id),
-                    "fields": raw_data["group_barcode_manual_confirmed_fields"],
-                    "confirmed_at": raw_data["group_barcode_manual_confirmed_at"],
-                    "reason": reason,
-                    "photo_ids": selected_ids,
-                    "formal_values": {
+                payload=_data_center_audit_payload(
+                    source_page=source_page or "admin",
+                    actor=actor,
+                    reason=reason,
+                    before=before_data,
+                    after=after_data,
+                    group_id=group.legacy_id or str(group.id),
+                    fields=raw_data["group_barcode_manual_confirmed_fields"],
+                    confirmed_at=raw_data["group_barcode_manual_confirmed_at"],
+                    photo_ids=selected_ids,
+                    formal_values={
                         field: _mask_barcode_audit_value(value) for field, value in formal_values.items()
                     },
-                    "before": before_data,
-                    "after": after_data,
-                },
+                ),
             )
             session.commit()
             session.refresh(group)
@@ -9582,6 +10323,7 @@ class PostgresStateRepository(StateRepository):
         actor: str,
         reason: str = "",
         force: bool = False,
+        source_page: str = "",
     ) -> dict[str, Any]:
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
@@ -9639,6 +10381,18 @@ class PostgresStateRepository(StateRepository):
                 actor=actor,
                 reason="reset_to_unconstructed",
             )
+            after = {
+                "status": "pending",
+                "photo_count": 0,
+                "reviewer": "",
+                "review_note": "",
+                "exception_note": "",
+                "collector": "",
+                "module_asset_no": "",
+                "construction_collector": "",
+                "construction_module_asset_no": "",
+                "group_barcode_manual_confirmed": False,
+            }
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),
@@ -9647,23 +10401,16 @@ class PostgresStateRepository(StateRepository):
                 entity_type="material_group",
                 entity_id=group.id,
                 before_data=before,
-                after_data={
-                    "status": "pending",
-                    "photo_count": 0,
-                    "reviewer": "",
-                    "review_note": "",
-                    "exception_note": "",
-                    "collector": "",
-                    "module_asset_no": "",
-                    "construction_collector": "",
-                    "construction_module_asset_no": "",
-                    "group_barcode_manual_confirmed": False,
-                },
-                payload={
-                    "group_id": group.legacy_id or str(group.id),
-                    "soft_deleted_photos": len(photos),
-                    "reason": reason,
-                },
+                after_data=after,
+                payload=_data_center_audit_payload(
+                    source_page=source_page or "admin",
+                    actor=actor,
+                    reason=reason or "reset_to_unconstructed",
+                    before=before,
+                    after=after,
+                    group_id=group.legacy_id or str(group.id),
+                    soft_deleted_photos=len(photos),
+                ),
             )
             session.commit()
             session.refresh(group)
@@ -9676,6 +10423,7 @@ class PostgresStateRepository(StateRepository):
         actor: str,
         reason: str = "",
         force: bool = False,
+        source_page: str = "",
     ) -> dict[str, Any]:
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
@@ -9712,6 +10460,12 @@ class PostgresStateRepository(StateRepository):
                 actor=actor,
                 reason="reset_to_unreviewed",
             )
+            after = {
+                "status": "pending",
+                "reviewer": "",
+                "review_note": "",
+                "exception_note": "",
+            }
             _stage_transactional_audit(
                 session,
                 team_id=local_simulation.current_team_id(),
@@ -9720,13 +10474,15 @@ class PostgresStateRepository(StateRepository):
                 entity_type="material_group",
                 entity_id=group.id,
                 before_data=before,
-                after_data={
-                    "status": "pending",
-                    "reviewer": "",
-                    "review_note": "",
-                    "exception_note": "",
-                },
-                payload={"group_id": group.legacy_id or str(group.id), "reason": reason},
+                after_data=after,
+                payload=_data_center_audit_payload(
+                    source_page=source_page or "admin",
+                    actor=actor,
+                    reason=reason or "reset_to_unreviewed",
+                    before=before,
+                    after=after,
+                    group_id=group.legacy_id or str(group.id),
+                ),
             )
             session.commit()
             session.refresh(group)
@@ -10099,6 +10855,7 @@ class DualWriteStateRepository(JsonStateRepository):
         actor: str,
         candidate_key: str,
         expected_version: int,
+        source_page: str = "",
     ) -> dict[str, Any]:
         return self._strict_unmatched_review_write(
             "finalize_unmatched_match",
@@ -10106,6 +10863,7 @@ class DualWriteStateRepository(JsonStateRepository):
             actor=actor,
             candidate_key=candidate_key,
             expected_version=expected_version,
+            source_page=source_page,
         )
 
     def review_group(
@@ -10157,6 +10915,7 @@ class DualWriteStateRepository(JsonStateRepository):
         collector: str,
         reason: str,
         photo_ids: list[str],
+        source_page: str = "",
     ) -> dict[str, Any]:
         self._reject_uncoordinated_dual_write("confirm_group_barcode_manually")
 
@@ -10203,6 +10962,85 @@ class DualWriteStateRepository(JsonStateRepository):
         )
         return result
 
+    def classify_data_center_group_photo(
+        self,
+        group_id: str,
+        photo_id: str,
+        category: str,
+        *,
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        result = super().classify_data_center_group_photo(
+            group_id,
+            photo_id,
+            category,
+            actor=actor,
+            reason=reason,
+            source_page=source_page,
+        )
+        self._mirror_write(
+            "classify_data_center_group_photo",
+            group_id,
+            photo_id,
+            category,
+            actor=actor,
+            reason=reason,
+            source_page=source_page,
+        )
+        return result
+
+    def rescan_data_center_group_photo_barcode(
+        self,
+        group_id: str,
+        photo_id: str,
+        *,
+        actor: str,
+        category: str = "",
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        result = super().rescan_data_center_group_photo_barcode(
+            group_id,
+            photo_id,
+            actor=actor,
+            category=category,
+            reason=reason,
+            source_page=source_page,
+        )
+        self._mirror_write(
+            "rescan_data_center_group_photo_barcode",
+            group_id,
+            photo_id,
+            actor=actor,
+            category=category,
+            reason=reason,
+            source_page=source_page,
+        )
+        return result
+
+    def scan_data_center_group_photo_region(
+        self,
+        group_id: str,
+        photo_id: str,
+        *,
+        barcode_type: str,
+        region: Mapping[str, Any],
+        actor: str,
+        reason: str = "",
+        source_page: str = "data_center",
+    ) -> dict[str, Any]:
+        return super().scan_data_center_group_photo_region(
+            group_id,
+            photo_id,
+            barcode_type=barcode_type,
+            region=region,
+            actor=actor,
+            reason=reason,
+            source_page=source_page,
+        )
+
     def manual_confirm_group_barcode(
         self,
         group_id: str,
@@ -10238,6 +11076,7 @@ class DualWriteStateRepository(JsonStateRepository):
             actor=actor,
             candidate_key=candidate_key,
             expected_version=expected_version,
+            source_page=source_page,
         )
 
     def reset_group_to_unconstructed(
@@ -10247,9 +11086,23 @@ class DualWriteStateRepository(JsonStateRepository):
         actor: str,
         reason: str = "",
         force: bool = False,
+        source_page: str = "",
     ) -> dict[str, Any]:
-        result = super().reset_group_to_unconstructed(group_id, actor=actor, reason=reason, force=force)
-        self._mirror_write("reset_group_to_unconstructed", group_id, actor=actor, reason=reason, force=force)
+        result = super().reset_group_to_unconstructed(
+            group_id,
+            actor=actor,
+            reason=reason,
+            force=force,
+            source_page=source_page,
+        )
+        self._mirror_write(
+            "reset_group_to_unconstructed",
+            group_id,
+            actor=actor,
+            reason=reason,
+            force=force,
+            source_page=source_page,
+        )
         return result
 
     def reset_group_to_unreviewed(
@@ -10259,9 +11112,23 @@ class DualWriteStateRepository(JsonStateRepository):
         actor: str,
         reason: str = "",
         force: bool = False,
+        source_page: str = "",
     ) -> dict[str, Any]:
-        result = super().reset_group_to_unreviewed(group_id, actor=actor, reason=reason, force=force)
-        self._mirror_write("reset_group_to_unreviewed", group_id, actor=actor, reason=reason, force=force)
+        result = super().reset_group_to_unreviewed(
+            group_id,
+            actor=actor,
+            reason=reason,
+            force=force,
+            source_page=source_page,
+        )
+        self._mirror_write(
+            "reset_group_to_unreviewed",
+            group_id,
+            actor=actor,
+            reason=reason,
+            force=force,
+            source_page=source_page,
+        )
         return result
 
     def bulk_archive_groups(self, group_ids: list[str], *, actor: str, reason: str = "") -> dict[str, Any]:
