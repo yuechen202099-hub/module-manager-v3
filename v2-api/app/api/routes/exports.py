@@ -198,21 +198,23 @@ def export_jobs(
 @router.post("/jobs")
 def create_export_job(payload: ExportJobCreateRequest, request: Request, auth: dict = Depends(require_admin)):
     actor = actor_from_auth(auth)
+    repository = state_repository()
     try:
-        job = state_repository().create_export_job(
+        job = repository.create_export_job(
             job_type=payload.job_type,
             filters=payload.filters,
             actor=actor,
         )
-        state_repository().append_audit_event(
-            "export_job_created",
-            actor,
-            {
-                "job_id": job["id"],
-                "job_type": payload.job_type,
-                "filters": payload.filters,
-            },
-        )
+        if job.get("created", True):
+            repository.append_audit_event(
+                "export_job_created",
+                actor,
+                {
+                    "job_id": job["id"],
+                    "job_type": payload.job_type,
+                    "filters": payload.filters,
+                },
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     data = {key: value for key, value in job.items() if key != "content"}
@@ -222,21 +224,29 @@ def create_export_job(payload: ExportJobCreateRequest, request: Request, auth: d
 @router.get("/jobs/{job_id}/download")
 def download_export_job(job_id: str, request: Request, auth: dict = Depends(require_admin)):
     actor = actor_from_auth(auth)
+    repository = state_repository()
     try:
-        download = state_repository().open_export_job_download(job_id, actor=actor)
-        state_repository().append_audit_event(
-            "export_job_downloaded",
-            actor,
-            {
-                "job_id": job_id,
-                "job_type": download.get("job_type") or "",
-                "file_name": download.get("file_name") or "",
-            },
-        )
+        download = repository.open_export_job_download(job_id, actor=actor)
+        if "content" in download:
+            repository.append_audit_event(
+                "export_job_downloaded",
+                actor,
+                {
+                    "job_id": job_id,
+                    "job_type": download.get("job_type") or "",
+                    "file_name": download.get("file_name") or "",
+                },
+            )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Export job not found") from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail="Export job is not ready") from exc
+    if "path" in download:
+        return FileResponse(
+            download["path"],
+            media_type=download.get("media_type") or "application/octet-stream",
+            filename=download["file_name"],
+        )
     return Response(
         content=download["content"],
         media_type=download.get("media_type") or "application/octet-stream",

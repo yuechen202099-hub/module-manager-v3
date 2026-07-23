@@ -2,20 +2,26 @@ from __future__ import annotations
 
 from copy import deepcopy
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
+from sqlalchemy.exc import IntegrityError
 
 import app.main as main_module
+from app import models
 from app.api.routes import auth, exports as export_routes, local_test
 from app.core import security
-from app.services import account_store, local_simulation
+from app.services import account_store, export_center as export_center_service, local_simulation
+from app.services.delivery_package_queue import DeliveryPackageNotReady
 from app.services.export_center import (
     SUPPORTED_EXPORT_JOB_PAGE_SIZES,
     build_device_workbook,
 )
+from app.services.state_repository import JsonStateRepository, PostgresStateRepository
 
 
 def production_test_settings(**overrides) -> SimpleNamespace:
@@ -243,3 +249,314 @@ def test_export_create_and_download_are_audited(monkeypatch: pytest.MonkeyPatch,
             {"job_id": "job-1", "job_type": "device_terminal", "file_name": "terminal-devices.xlsx"},
         ),
     ]
+
+
+def formal_group(
+    group_id: str,
+    *,
+    terminal: str = "T-1",
+    status: str = "pending",
+    archive_status: str = "",
+    active_count: int = 4,
+    invalid_count: int = 0,
+    cache_status: str = "ready",
+    cache_path_prefix: str = "team/group",
+) -> dict:
+    categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
+    photos = []
+    for index, category in enumerate(categories, start=1):
+        upload_status = "invalid" if index <= invalid_count else "uploaded"
+        photos.append(
+            {
+                "id": f"{group_id}-photo-{index}",
+                "category": category,
+                "is_active": index <= active_count + invalid_count,
+                "upload_status": upload_status,
+                "archive_status": archive_status,
+                "delivery_cache_status": cache_status,
+                "delivery_cache_path": f"{cache_path_prefix}/{group_id}-{index}.jpg",
+            }
+        )
+    return {
+        "id": group_id,
+        "task_id": 1,
+        "terminal": terminal,
+        "meter_no": f"000000000{group_id[-1]}",
+        "module_asset_no": f"000000010{group_id[-1]}",
+        "collector": f"000000020{group_id[-1]}",
+        "address": f"Address {group_id}",
+        "client_completed_at": "2026-07-24T08:00:00Z",
+        "status": status,
+        "archive_status": archive_status,
+        "photo_count": 99,
+        "photos": photos,
+    }
+
+
+def test_terminal_readiness_uses_formal_delivery_preflight_and_active_uploaded_photos() -> None:
+    approved_without_archive = formal_group("group-1", status="approved", archive_status="archived")
+    for photo in approved_without_archive["photos"]:
+        photo["archive_status"] = ""
+    invalid_photo_group = formal_group("group-2", archive_status="archived", invalid_count=1)
+    missing_cache_path = formal_group("group-3", archive_status="archived")
+    missing_cache_path["photos"][0]["delivery_cache_path"] = ""
+    traversal_cache_path = formal_group("group-4", archive_status="archived")
+    traversal_cache_path["photos"][0]["delivery_cache_path"] = "../escape.jpg"
+    ready = formal_group("group-5", archive_status="archived")
+
+    page = export_center_service.build_terminal_readiness_page(
+        [approved_without_archive, invalid_photo_group, missing_cache_path, traversal_cache_path, ready],
+        page=1,
+        page_size=20,
+    )
+
+    item = page["items"][0]
+    assert item["terminal"] == "T-1"
+    assert item["group_count"] == 5
+    assert item["constructed_count"] == 4
+    assert item["archived_count"] == 4
+    assert item["cache_ready_count"] == 1
+    assert item["status"] == "blocked"
+    assert item["blockers"] == [
+        "1 个资料组未施工",
+        "1 个资料组未归档",
+        "2 个资料组交付缓存未就绪",
+        "1 个资料组交付缓存路径不受控",
+    ]
+
+
+def test_json_terminal_readiness_matches_shared_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = "team-export-readiness"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [
+        formal_group("group-a", terminal="T-1", archive_status="archived"),
+        formal_group("group-b", terminal="T-1", archive_status=""),
+    ]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        repository_page = JsonStateRepository().list_terminal_delivery_readiness(page=1, page_size=20)
+        pure_page = export_center_service.build_terminal_readiness_page(state["groups"], page=1, page_size=20)
+    finally:
+        local_simulation.reset_current_team(token)
+
+    assert repository_page == pure_page
+
+
+def test_pg_terminal_readiness_matches_shared_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    groups = [
+        formal_group("group-a", terminal="T-1", archive_status="archived"),
+        formal_group("group-b", terminal="T-1", archive_status=""),
+    ]
+    repository = PostgresStateRepository()
+    monkeypatch.setattr(repository, "_export_center_lightweight_groups", lambda query="": groups)
+
+    repository_page = repository.list_terminal_delivery_readiness(page=1, page_size=20)
+    pure_page = export_center_service.build_terminal_readiness_page(groups, page=1, page_size=20)
+
+    assert repository_page == pure_page
+
+
+def test_download_route_streams_validated_path_and_repository_owns_download_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    client, headers = production_rbac_client(monkeypatch, tmp_path)
+    export_file = tmp_path / "terminal-devices.xlsx"
+    export_file.write_bytes(b"streamed-workbook")
+    events: list[tuple[str, str, dict]] = []
+
+    class JobRepository:
+        def open_export_job_download(self, job_id: str, *, actor: str) -> dict:
+            events.append(("export_job_downloaded", actor, {"job_id": job_id}))
+            return {
+                "id": job_id,
+                "job_type": "device_terminal",
+                "file_name": "terminal-devices.xlsx",
+                "path": export_file,
+                "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            }
+
+        def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
+            pytest.fail("download audit must be written by open_export_job_download")
+
+    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
+    monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail("download route must not read whole file"))
+
+    response = client.get("/exports/jobs/job-1/download", headers=headers["admin"])
+
+    assert response.status_code == 200
+    assert response.content == b"streamed-workbook"
+    assert events == [("export_job_downloaded", "root-admin", {"job_id": "job-1"})]
+
+
+def test_json_export_job_create_reuses_same_request_key_and_changes_on_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = "team-export-dedupe"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [formal_group("group-1", archive_status="archived")]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        repository = JsonStateRepository()
+        first = repository.create_export_job(job_type="device_terminal", filters={"terminal": "T-1"}, actor="root-admin")
+        second = repository.create_export_job(job_type="device_terminal", filters={"terminal": "T-1"}, actor="root-admin")
+        state["groups"].append(formal_group("group-2", archive_status="archived"))
+        third = repository.create_export_job(job_type="device_terminal", filters={"terminal": "T-1"}, actor="root-admin")
+    finally:
+        local_simulation.reset_current_team(token)
+
+    assert first["id"] == second["id"]
+    assert first["created"] is True
+    assert second["created"] is False
+    assert third["id"] != first["id"]
+    assert len(state["export_jobs"]) == 2
+    assert all(job.get("request_key") for job in state["export_jobs"])
+
+
+def test_export_create_audits_only_new_jobs(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    client, headers = production_rbac_client(monkeypatch, tmp_path)
+    events: list[tuple[str, str, dict]] = []
+    created = True
+
+    class JobRepository:
+        def create_export_job(self, *, job_type: str, filters: dict, actor: str) -> dict:
+            nonlocal created
+            result = {
+                "id": "job-1",
+                "job_type": job_type,
+                "status": "pending",
+                "file_name": "final-delivery.zip",
+                "created": created,
+            }
+            created = False
+            return result
+
+        def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
+            events.append((action, actor, deepcopy(payload)))
+            return {"id": f"audit-{len(events)}", "action": action, "actor": actor, "payload": payload}
+
+    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
+
+    first = client.post(
+        "/exports/jobs",
+        headers=headers["admin"],
+        json={"job_type": "final_delivery", "filters": {"terminal": "T-1", "review_scope": "reviewed"}},
+    )
+    second = client.post(
+        "/exports/jobs",
+        headers=headers["admin"],
+        json={"job_type": "final_delivery", "filters": {"terminal": "T-1", "review_scope": "reviewed"}},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert events == [
+        (
+            "export_job_created",
+            "root-admin",
+            {
+                "job_id": "job-1",
+                "job_type": "final_delivery",
+                "filters": {"terminal": "T-1", "review_scope": "reviewed"},
+            },
+        )
+    ]
+
+
+def test_final_delivery_request_key_reuses_existing_delivery_package_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = "team-final-delivery-dedupe"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [formal_group("group-1", archive_status="archived")]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    token = local_simulation.set_current_team(team_id)
+    calls = 0
+
+    def not_ready(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise DeliveryPackageNotReady(job_id="delivery-job-1", status="pending")
+
+    monkeypatch.setattr(JsonStateRepository, "request_final_delivery_export", not_ready)
+    try:
+        repository = JsonStateRepository()
+        first = repository.create_export_job(
+            job_type="final_delivery",
+            filters={"terminal": "T-1", "review_scope": "reviewed"},
+            actor="root-admin",
+        )
+        second = repository.create_export_job(
+            job_type="final_delivery",
+            filters={"terminal": "T-1", "review_scope": "reviewed"},
+            actor="root-admin",
+        )
+    finally:
+        local_simulation.reset_current_team(token)
+
+    assert first["id"] == second["id"]
+    assert calls == 1
+    assert len(state["export_jobs"]) == 1
+
+
+def test_pg_export_job_integrity_error_reuses_existing_job_without_background_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PostgresStateRepository()
+    request_key_holder: dict[str, str] = {}
+    existing_id = uuid4()
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            if not request_key_holder:
+                return None
+            return SimpleNamespace(
+                id=existing_id,
+                job_type="final_delivery",
+                status="pending",
+                file_name="final-delivery.zip",
+                row_count=0,
+                progress=0,
+                error_message="",
+                filter_snapshot={"terminal": "T-1"},
+                request_key=request_key_holder["value"],
+                created_at=None,
+                updated_at=None,
+                finished_at=None,
+            )
+
+        def add(self, row):
+            request_key_holder["value"] = row.request_key
+
+        def commit(self):
+            raise IntegrityError("duplicate request_key", {}, Exception("duplicate"))
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr(repository, "_session", lambda: FakeSession())
+    monkeypatch.setattr(repository, "_export_project_id", lambda session: uuid4())
+    monkeypatch.setattr(repository, "_export_center_lightweight_groups", lambda: [formal_group("group-1", archive_status="archived")])
+    monkeypatch.setattr(
+        export_center_service,
+        "request_background_export",
+        lambda *_args, **_kwargs: pytest.fail("dedupe conflict must not enqueue final delivery again"),
+    )
+
+    result = repository.create_export_job(
+        job_type="final_delivery",
+        filters={"terminal": "T-1"},
+        actor="root-admin",
+    )
+
+    assert result["id"] == str(existing_id)
+    assert result["created"] is False
+
+
+def test_export_job_types_are_catalog_strings_without_runtime_enum() -> None:
+    assert not hasattr(models, "ExportJobType")
+    assert "final_delivery" in export_center_service.CATALOG_BY_KEY

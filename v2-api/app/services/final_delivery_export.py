@@ -192,6 +192,14 @@ def group_is_formally_archived(group: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_controlled_cache_path(value: Any) -> bool:
+    text = _text(value).replace("\\", "/")
+    if not text or text.startswith("/"):
+        return False
+    path = PurePosixPath(text)
+    return not path.is_absolute() and ".." not in path.parts
+
+
 def _error(group_id: str, code: str, field: str, message: str) -> dict[str, str]:
     return {"group_id": group_id, "code": code, "field": field, "message": message}
 
@@ -272,7 +280,9 @@ def collect_delivery_validation_errors(
                         _error(group_id, "delivery_cache_invalid", "photos", "Completed photo cache is invalid")
                     )
                     break
-                if _text(photo.get("delivery_cache_status")) != "ready" or not _text(photo.get("delivery_cache_path")):
+                if _text(photo.get("delivery_cache_status")) != "ready" or not _is_controlled_cache_path(
+                    photo.get("delivery_cache_path")
+                ):
                     errors.append(
                         _error(group_id, "delivery_cache_pending", "photos", "Completed original photo cache is required")
                     )
