@@ -17,7 +17,7 @@ const checks = [
   ['scanner can decode selected image fallback', source.includes('decodeFromImageElement') || source.includes('decodeFromImageUrl')],
   [
     'scanner cleans up on component unmount',
-    /onUnmounted\(\(\)\s*=>\s*\{\s*stopScanner\(\)/m.test(source),
+    /onUnmounted\(\(\)\s*=>\s*\{[\s\S]*?stopScanner\(\)[\s\S]*?\}\)/m.test(source),
   ],
   ['scanner file input is visually hidden instead of display none', source.includes('position: absolute') && !source.includes('display: none')],
 ]

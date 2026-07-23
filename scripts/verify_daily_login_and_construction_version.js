@@ -26,13 +26,13 @@ assert.match(services, /downloadExcel[\s\S]*fetchWithAuth/, 'export fetch must r
 assert.match(services, /exportExceptionMeters[\s\S]*fetchWithAuth/, 'exception export fetch must redirect on expired login')
 assert.match(
   services,
-  /const response = sameOrigin[\s\S]*\? await fetchWithAuth\(requestUrl\.href,\s*\{\s*headers:\s*formHeaders\(\)\s*\}\)[\s\S]*: await fetch\(requestUrl\.href\)/,
-  'cross-origin image fetch must not clear the app login session on third-party 401',
+  /function\s+groupPhotoContentUrl[\s\S]*return `\/local-test\/groups\/\$\{encodeURIComponent\(groupId\)\}\/photos\/\$\{encodeURIComponent\(photoId\)\}\/content/,
+  'group photos must load through the same-origin authenticated content endpoint',
 )
 assert.match(
   services,
-  /fetchWithAuth\(`\/local-test\/photo-proxy\?url=/,
-  'same-origin image proxy fallback must still redirect on expired login',
+  /fetchGroupPhotoObjectUrl[\s\S]*fetchWithAuth\(url,\s*\{\s*headers:\s*formHeaders\(\)\s*\}\)/,
+  'group photo content fetch must redirect on an expired app login',
 )
 
 const constructionView = read('v2-web/src/views/ConstructionView.vue')

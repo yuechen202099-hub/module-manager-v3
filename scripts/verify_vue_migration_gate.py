@@ -122,7 +122,13 @@ def main() -> int:
         fail("Cancelled static HTML pages are still registered in Vue: " + ", ".join(cancelled_registered))
 
     vite_config = read(VUE_DIR / "vite.config.ts")
-    if "outDir: '../v2-api/app/static/vue'" not in vite_config:
+    default_out_dir = "../v2-api/app/static/vue"
+    has_fixed_out_dir = f"outDir: '{default_out_dir}'" in vite_config
+    has_isolated_out_dir = (
+        "process.env.MODULE_MANAGER_VUE_OUT_DIR" in vite_config
+        and f"outDir: configuredOutDir || '{default_out_dir}'" in vite_config
+    )
+    if not (has_fixed_out_dir or has_isolated_out_dir):
         fail("Vite build output must target v2-api/app/static/vue")
     if "base: '/vue/'" not in vite_config:
         fail("Vite base must be /vue/ for FastAPI hosting")
