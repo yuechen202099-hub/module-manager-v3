@@ -207,14 +207,14 @@
         <div class="mark">V2.6.5</div>
         <div>
           <h1 id="pageTitle">项目看板</h1>
-          <p>V2.6.5 生产环境，异常处理已并入审阅工作台</p>
+          <p>V2.6.5 生产环境，异常处理已并入数据中台</p>
         </div>
       </div>
       <div class="actions">
         <nav class="page-nav" aria-label="页面切换">
           <button class="button active" type="button" data-page="project-board">项目看板</button>
           <button class="button" type="button" data-page="claim-tasks">任务领取</button>
-          <button class="button" type="button" data-page="task-hall">审阅工作台</button>
+          <button class="button" type="button" data-page="global-search">数据中台</button>
           <button class="button" type="button" data-page="construction">施工采集</button>
         </nav>
         <span class="user-pill" id="sessionUser">未登录</span>
@@ -241,13 +241,13 @@
       const pageMeta = {
         "project-board": { title: "项目看板", src: embeddedSrc("/project-board") },
         "claim-tasks": { title: "任务领取", src: embeddedSrc("/claim-tasks") },
-        "task-hall": { title: "审阅工作台", src: embeddedSrc("/task-hall") },
+        "global-search": { title: "数据中台", src: embeddedSrc("/global-search") },
         construction: { title: "施工采集", src: embeddedSrc("/construction") },
       };
       const pageRoles = {
         "project-board": ["admin", "reviewer"],
         "claim-tasks": ["admin", "reviewer"],
-        "task-hall": ["admin", "reviewer"],
+        "global-search": ["admin"],
         construction: ["admin", "constructor"],
       };
       function canOpenPage(page) {
@@ -258,7 +258,7 @@
         ? "construction"
         : roles.includes("admin")
         ? "project-board"
-        : "task-hall";
+        : "project-board";
       const params = new URLSearchParams(location.search);
       const requestedPage = params.get("page");
       const initialPage = pageMeta[requestedPage] && canOpenPage(requestedPage) ? requestedPage : defaultPage;

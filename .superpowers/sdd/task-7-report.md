@@ -226,3 +226,58 @@ npm run build
 
 - 无阻断项。
 - build 和测试仍有上述既有 warning；本次未修改依赖或 chunk 拆分。
+
+## 2026-07-24 Review Round 2 追加
+
+### 修复结果
+
+- 保留的非 Vue 静态页不再显示、链接或注册“审阅工作台”/`task-hall`。
+- `app_shell.html` 的静态嵌入入口改为 `global-search`/`数据中台`；数据中台权限与 Vue 保持一致为 admin，reviewer 的静态兼容默认页改为项目看板。
+- `claim_tasks.html`、`construction.html`、`project_board.html`、`sync_config.html` 的旧入口改为 `数据中台`/`/global-search`。
+- `v201.html` 的 meta refresh、标题、正文、链接和 JavaScript 重定向全部改为数据中台。
+- `verify-static-pages.py` 现在扫描全部保留 HTML，解码 HTML 实体和 JavaScript Unicode 转义后禁止 `审阅工作台`、`/task-hall` 和 `task-hall` key。
+- `verify_v3_2_0_single_export_entry.py` 显式覆盖 7 个保留静态 HTML 和静态页 verifier，防止 V3.2.0 release gate 回归。
+- Vue Router 未修改，继续保留 `/task-hall -> /global-search`。
+
+### Changed files
+
+- `.superpowers/sdd/task-7-report.md`
+- `scripts/verify-static-pages.py`
+- `scripts/verify_v3_2_0_single_export_entry.py`
+- `v2-api/app/static/app_shell.html`
+- `v2-api/app/static/claim_tasks.html`
+- `v2-api/app/static/construction.html`
+- `v2-api/app/static/project_board.html`
+- `v2-api/app/static/sync_config.html`
+- `v2-api/app/static/v201.html`
+
+### RED 证据
+
+- `python scripts\verify-static-pages.py`：先失败于 `app_shell.html still advertises retired review workbench marker: 审阅工作台`。
+- `python scripts\verify_v3_2_0_single_export_entry.py`：先失败于 `v2-api/app/static/app_shell.html must remove 审阅工作台`。
+- 首轮 HTML 替换后，静态页 verifier 又捕获到 `sync_config.html` 中 HTML 实体编码的“审阅工作台”；清理该隐藏残留后转绿。
+
+### Required verification
+
+```powershell
+python scripts\verify-static-pages.py
+python scripts\verify_v3_2_0_single_export_entry.py
+python scripts\verify_v3_2_0_role_routes.py
+python scripts\verify_vue_migration_gate.py --strict-native
+cd v2-api
+python -m pytest tests/test_api.py -k "static_page or app_shell_page or global_search_page" -q
+```
+
+结果：
+
+- `verify-static-pages.py`：通过；全部 7 个保留 HTML 通过旧语义全局扫描，5 个登记静态页通过文本、导航、乱码和内联脚本验证。
+- `verify_v3_2_0_single_export_entry.py`：通过，`verify_v3_2_0_single_export_entry: OK`。
+- `verify_v3_2_0_role_routes.py`：通过，`[OK] V3.2.0 role and legacy route checks passed`。
+- `verify_vue_migration_gate.py --strict-native`：通过；7 个注册页面，0 个 legacy bridge 页面。
+- 聚焦 backend pytest：项目 `.venv` 中按上述命令通过，`3 passed, 201 deselected`；有 1 条既有 Starlette/httpx deprecation warning。
+- `git status --short -- v2-api/app/static/vue` 输出为空；`git diff --exit-code -- v2-api/app/static/vue` exit 0。
+
+### Concerns
+
+- 无阻断项。
+- 仅保留既有 Starlette/httpx deprecation warning。

@@ -16,13 +16,14 @@ STATIC_ROOT = ROOT / "v2-api" / "app" / "static"
 
 STATIC_PAGES = {
     "login.html": ["模块更换项目管理器", "登录系统"],
-    "app_shell.html": ["模块更换项目管理器", "项目看板", "任务领取", "审阅工作台"],
+    "app_shell.html": ["模块更换项目管理器", "项目看板", "任务领取", "数据中台"],
     "project_board.html": ["项目看板", "项目进度总览", "导入总清单", "导入扫码表格", "安装人员资料组占比", "导出异常表计"],
     "claim_tasks.html": ["任务领取", "可领取终端"],
     "sync_config.html": ["同步方案已停用", "表格导入", "供应商 API 不可用"],
 }
 
-NAV_TEXT = ["项目看板", "任务领取", "审阅工作台"]
+NAV_TEXT = ["项目看板", "任务领取", "数据中台"]
+RETIRED_REVIEW_WORKBENCH_MARKERS = ("审阅工作台", "/task-hall", "task-hall")
 UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 MOJIBAKE_FRAGMENTS = [
     "\u599e\u3085\u6e71\u5a32\u4f34\u60c7\u7023\ue0a3\u7df2",
@@ -158,11 +159,21 @@ def verify_page(page_name: str, required_text: list[str], node: Path | None) -> 
     check_script_syntax(node, page_name, extract_inline_scripts(source))
 
 
+def verify_retired_review_workbench_is_absent() -> None:
+    for page_path in sorted(STATIC_ROOT.glob("*.html")):
+        source = page_path.read_text(encoding="utf-8")
+        rendered = decode_js_unicode_escapes(html.unescape(source))
+        for marker in RETIRED_REVIEW_WORKBENCH_MARKERS:
+            if marker in rendered:
+                fail(f"{page_path.name} still advertises retired review workbench marker: {marker}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify static demo HTML pages and inline script syntax.")
     parser.add_argument("--node", type=str, default=None, help="Explicit Node.js executable path.")
     args = parser.parse_args()
     node = resolve_node(args.node)
+    verify_retired_review_workbench_is_absent()
     for page_name, required_text in STATIC_PAGES.items():
         verify_page(page_name, required_text, node)
         print(f"[OK] {page_name}")

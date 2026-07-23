@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+import re
 from pathlib import Path
 
 
@@ -29,6 +31,20 @@ BUSINESS_EXPORT_LABELS = {
     "导出范围",
     "导出任务",
 }
+RETAINED_STATIC_HTML_PATHS = (
+    "v2-api/app/static/app_shell.html",
+    "v2-api/app/static/claim_tasks.html",
+    "v2-api/app/static/construction.html",
+    "v2-api/app/static/login.html",
+    "v2-api/app/static/project_board.html",
+    "v2-api/app/static/sync_config.html",
+    "v2-api/app/static/v201.html",
+)
+DATA_CENTER_STATIC_HTML_PATHS = set(RETAINED_STATIC_HTML_PATHS) - {
+    "v2-api/app/static/login.html",
+}
+RETIRED_REVIEW_WORKBENCH_MARKERS = ("审阅工作台", "/task-hall", "task-hall")
+UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 
 def read(relative_path: str) -> str:
@@ -49,6 +65,10 @@ def contains(text: str, needle: str, context: str) -> None:
 
 def not_contains(text: str, needle: str, context: str) -> None:
     ensure(needle not in text, f"{context} must remove `{needle}`")
+
+
+def decoded_static_html(text: str) -> str:
+    return UNICODE_ESCAPE_RE.sub(lambda match: chr(int(match.group(1), 16)), html.unescape(text))
 
 
 def scan_vue_source() -> None:
@@ -75,6 +95,7 @@ def main() -> None:
     router_source = read("v2-web/src/router/index.ts")
     exports_view = read("v2-web/src/views/ExportsView.vue")
     priority_import_dialog = read("v2-web/src/components/ConstructionPriorityImportDialog.vue")
+    static_page_verifier = read("scripts/verify-static-pages.py")
 
     scan_vue_source()
 
@@ -85,6 +106,31 @@ def main() -> None:
     ensure(
         not (ROOT / "v2-api/app/static/task_hall.html").exists(),
         "obsolete task_hall.html must be deleted",
+    )
+    for relative_path in RETAINED_STATIC_HTML_PATHS:
+        source = read(relative_path)
+        ensure(bool(source), f"retained static page missing: {relative_path}")
+        rendered = decoded_static_html(source)
+        for marker in RETIRED_REVIEW_WORKBENCH_MARKERS:
+            not_contains(rendered, marker, relative_path)
+        if relative_path in DATA_CENTER_STATIC_HTML_PATHS:
+            contains(rendered, "数据中台", relative_path)
+            contains(source, "/global-search", relative_path)
+
+    contains(
+        static_page_verifier,
+        'NAV_TEXT = ["项目看板", "任务领取", "数据中台"]',
+        "static page verifier navigation",
+    )
+    contains(
+        static_page_verifier,
+        "verify_retired_review_workbench_is_absent",
+        "static page verifier retired-workbench gate",
+    )
+    contains(
+        static_page_verifier,
+        'STATIC_ROOT.glob("*.html")',
+        "static page verifier retained-page scan",
     )
 
     contains(static_pages, "title: '任务派发'", "staticPages task dispatch entry")
