@@ -2294,11 +2294,13 @@ def _file_download_payload(job: Mapping[str, Any]) -> dict[str, Any]:
     content = job.get("content")
     if isinstance(content, bytes):
         path: Path | None = None
+        relative_path = ""
     else:
         path_value = str(job.get("content_path") or job.get("object_key") or "")
         if not path_value:
             raise FileNotFoundError(str(job.get("id") or ""))
         path = export_center.validated_export_file(path_value)
+        relative_path = export_center.export_relative_path(path)
     filename = str(job.get("file_name") or f"{job.get('job_type') or 'export'}.bin")
     media_type = str(job.get("media_type") or export_center.media_type_for_filename(filename))
     return {
@@ -2306,7 +2308,7 @@ def _file_download_payload(job: Mapping[str, Any]) -> dict[str, Any]:
         "job_type": str(job.get("job_type") or ""),
         "file_name": filename,
         "media_type": media_type,
-        **({"content": content} if isinstance(content, bytes) else {"path": path}),
+        **({"content": content} if isinstance(content, bytes) else {"path": path, "relative_path": relative_path}),
     }
 
 
@@ -3981,7 +3983,8 @@ class JsonStateRepository(StateRepository):
         progress = 0
         params: dict[str, Any] = {}
         inline_generated = False
-        if export_center.CATALOG_BY_KEY[job_type]["mode"] != "background":
+        is_background = export_center.CATALOG_BY_KEY[job_type]["mode"] == "background"
+        if not is_background:
             content, filename, _media_type = export_center.build_inline_export_content(
                 self,
                 job_type=job_type,
@@ -4001,9 +4004,18 @@ class JsonStateRepository(StateRepository):
         token = local_simulation.activate_authoritative_json_write(transaction)
         try:
             working_state = transaction.working_state
-            scoped_groups = export_center.scope_export_groups(working_state.get("groups", []), filters)
-            snapshot = export_center.stable_export_snapshot(scoped_groups)
-            request_key = export_center.export_request_key(job_type=job_type, filters=filters, snapshot=snapshot)
+            scoped_groups: list[Mapping[str, Any]] = []
+            snapshot: list[dict[str, Any]] = []
+            if is_background:
+                scoped_groups = export_center.scope_export_groups(working_state.get("groups", []), filters)
+                snapshot = export_center.stable_export_snapshot(scoped_groups)
+                request_key = export_center.export_request_key(job_type=job_type, filters=filters, snapshot=snapshot)
+            else:
+                request_key = export_center.inline_export_request_key(
+                    job_type=job_type,
+                    filters=filters,
+                    content_sha256=content_sha256,
+                )
             existing = next(
                 (
                     dict(job)
@@ -4018,7 +4030,7 @@ class JsonStateRepository(StateRepository):
                 existing["created"] = False
                 local_simulation.abort_authoritative_json_write(transaction, token)
                 return _export_job_payload(existing)
-            if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
+            if is_background:
                 filename = export_center.export_filename(job_type, "zip")
             job = {
                 "id": job_id,
@@ -4028,7 +4040,7 @@ class JsonStateRepository(StateRepository):
                 "file_name": filename,
                 "filter_snapshot": filters,
                 "request_key": request_key,
-                "params": {**filters, **params, "snapshot": snapshot},
+                "params": {**filters, **params, **({"snapshot": snapshot} if is_background else {})},
                 "content_path": content_path,
                 "content_sha256": content_sha256,
                 "size_bytes": size_bytes,
@@ -4042,7 +4054,7 @@ class JsonStateRepository(StateRepository):
                 "created": True,
             }
             working_state.setdefault("export_jobs", []).append(job)
-            if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
+            if is_background:
                 from app.services.delivery_package_queue import DeliveryPackageNotReady, stage_json_delivery_package
 
                 try:
@@ -4105,13 +4117,7 @@ class JsonStateRepository(StateRepository):
             raise KeyError(job_id)
         if str(job.get("status") or "") != "succeeded":
             raise FileNotFoundError(job_id)
-        payload = _file_download_payload(job)
-        self.append_audit_event(
-            "export_job_downloaded",
-            actor,
-            {"job_id": payload["id"], "job_type": payload["job_type"], "file_name": payload["file_name"]},
-        )
-        return payload
+        return _file_download_payload(job)
 
     def list_construction_tasks(self, *, actor: str = "", include_closed: bool = False) -> list[dict[str, Any]]:
         return local_simulation.list_construction_tasks(actor=actor, include_closed=include_closed)
@@ -8817,9 +8823,9 @@ class PostgresStateRepository(StateRepository):
         if job_type not in export_center.CATALOG_BY_KEY:
             raise ValueError(f"Unsupported export job type: {job_type}")
         filters = deepcopy(dict(filters or {}))
-        snapshot_groups = export_center.scope_export_groups(self._export_center_lightweight_groups(), filters)
-        snapshot = export_center.stable_export_snapshot(snapshot_groups)
-        request_key = export_center.export_request_key(job_type=job_type, filters=filters, snapshot=snapshot)
+        is_background = export_center.CATALOG_BY_KEY[job_type]["mode"] == "background"
+        snapshot_groups: list[Mapping[str, Any]] = []
+        snapshot: list[dict[str, Any]] = []
         job_id = export_center.new_export_job_id()
         filename = ""
         content_path = ""
@@ -8829,6 +8835,30 @@ class PostgresStateRepository(StateRepository):
         progress = 0
         params: dict[str, Any] = {}
         now = datetime.now(UTC)
+        inline_generated = False
+        if is_background:
+            snapshot_groups = export_center.scope_export_groups(self._export_center_lightweight_groups(), filters)
+            snapshot = export_center.stable_export_snapshot(snapshot_groups)
+            request_key = export_center.export_request_key(job_type=job_type, filters=filters, snapshot=snapshot)
+        else:
+            content, filename, _media_type = export_center.build_inline_export_content(
+                self,
+                job_type=job_type,
+                filters=filters,
+            )
+            content_path, content_sha256, size_bytes = export_center.write_export_content(
+                content,
+                job_id=job_id,
+                filename=filename,
+            )
+            request_key = export_center.inline_export_request_key(
+                job_type=job_type,
+                filters=filters,
+                content_sha256=content_sha256,
+            )
+            status = JobStatus.SUCCEEDED
+            progress = 100
+            inline_generated = True
         with self._session() as session:
             existing = session.scalar(
                 select(ExportJob).where(
@@ -8837,6 +8867,8 @@ class PostgresStateRepository(StateRepository):
                 )
             )
             if existing is not None:
+                if inline_generated:
+                    _remove_orphan_export_content(content_path)
                 return _export_job_payload(
                     {
                         "id": existing.id,
@@ -8861,21 +8893,21 @@ class PostgresStateRepository(StateRepository):
                     team_id=local_simulation.current_team_id(),
                     project_id=self._export_project_id(session),
                     job_type=job_type,
-                    status=JobStatus.PENDING,
-                    file_name="",
+                    status=status,
+                    file_name=filename,
                     filter_snapshot=filters,
                     request_key=request_key,
-                    content_path="",
-                    content_sha256="",
+                    content_path=content_path,
+                    content_sha256=content_sha256,
                     row_count=0,
-                    progress=0,
-                    params={**filters, "snapshot": snapshot},
-                    finished_at=None,
+                    progress=progress,
+                    params={**filters, **params, **({"snapshot": snapshot} if is_background else {"size_bytes": size_bytes})},
+                    finished_at=now if status == JobStatus.SUCCEEDED else None,
                 )
                 session.add(row)
                 if hasattr(session, "flush"):
                     session.flush()
-                if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
+                if is_background:
                     from app.services import delivery_package_queue
 
                     filename = export_center.export_filename(job_type, "zip")
@@ -8936,8 +8968,28 @@ class PostgresStateRepository(StateRepository):
                         }
                     )
                 session.commit()
+                return _export_job_payload(
+                    {
+                        "id": row.id,
+                        "job_type": row.job_type,
+                        "status": row.status,
+                        "file_name": row.file_name,
+                        "row_count": row.row_count,
+                        "progress": row.progress,
+                        "error_message": row.error_message,
+                        "filter_snapshot": row.filter_snapshot,
+                        "request_key": row.request_key,
+                        "created_by": actor,
+                        "created_at": row.created_at.isoformat() if row.created_at else None,
+                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                        "created": True,
+                    }
+                )
             except IntegrityError:
                 session.rollback()
+                if inline_generated:
+                    _remove_orphan_export_content(content_path)
                 existing = session.scalar(
                     select(ExportJob).where(
                         ExportJob.team_id == local_simulation.current_team_id(),
@@ -8964,61 +9016,6 @@ class PostgresStateRepository(StateRepository):
                         "created": False,
                     }
                 )
-        if export_center.CATALOG_BY_KEY[job_type]["mode"] == "background":
-            params.update(export_center.request_background_export(self, job_type=job_type, filters=filters, actor=actor))
-            status = JobStatus.SUCCEEDED if params.get("status") == "succeeded" else JobStatus.PENDING
-            progress = 100 if status == JobStatus.SUCCEEDED else 0
-            content_path = str(params.get("content_path") or "")
-            content_sha256 = str(params.get("content_sha256") or "")
-            size_bytes = params.get("size_bytes")
-            filename = export_center.export_filename(job_type, "zip")
-        else:
-            content, filename, _media_type = export_center.build_inline_export_content(
-                self,
-                job_type=job_type,
-                filters=filters,
-            )
-            content_path, content_sha256, size_bytes = export_center.write_export_content(
-                content,
-                job_id=job_id,
-                filename=filename,
-            )
-            status = JobStatus.SUCCEEDED
-            progress = 100
-        with self._session() as session:
-            try:
-                row = session.get(ExportJob, UUID(job_id))
-                if row is None:
-                    raise KeyError(job_id)
-                row.status = status
-                row.file_name = filename
-                row.content_path = content_path
-                row.content_sha256 = content_sha256
-                row.progress = progress
-                row.params = {**filters, **params, "size_bytes": size_bytes, "snapshot": snapshot}
-                row.finished_at = now if status == JobStatus.SUCCEEDED else None
-                session.commit()
-                return _export_job_payload(
-                    {
-                        "id": row.id,
-                        "job_type": row.job_type,
-                        "status": row.status,
-                        "file_name": row.file_name,
-                        "row_count": row.row_count,
-                        "progress": row.progress,
-                        "error_message": row.error_message,
-                        "filter_snapshot": row.filter_snapshot,
-                        "request_key": row.request_key,
-                        "created_by": actor,
-                        "created_at": row.created_at.isoformat() if row.created_at else None,
-                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-                        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
-                        "created": True,
-                    }
-                )
-            except Exception:
-                session.rollback()
-                raise
 
     def open_export_job_download(self, job_id: str, *, actor: str) -> dict[str, Any]:
         try:
@@ -9043,11 +9040,6 @@ class PostgresStateRepository(StateRepository):
                     "file_name": row.file_name,
                     "content_path": row.content_path or row.object_key,
                 }
-            )
-            self.append_audit_event(
-                "export_job_downloaded",
-                actor,
-                {"job_id": payload["id"], "job_type": payload["job_type"], "file_name": payload["file_name"]},
             )
             return payload
 

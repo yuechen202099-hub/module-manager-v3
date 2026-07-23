@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator, Mapping
 from uuid import uuid4
 
@@ -195,6 +195,20 @@ def export_request_key(*, job_type: str, filters: Mapping[str, Any], snapshot: I
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def canonical_export_filters(filters: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(sorted((str(key), value) for key, value in dict(filters or {}).items()))
+
+
+def inline_export_request_key(*, job_type: str, filters: Mapping[str, Any], content_sha256: str) -> str:
+    payload = {
+        "job_type": _text(job_type),
+        "filters": canonical_export_filters(filters),
+        "content_sha256": _text(content_sha256).lower(),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def build_device_workbook(
     *,
     kind: str,
@@ -310,6 +324,29 @@ def validated_export_file(path_value: str) -> Path:
     return candidate
 
 
+def export_relative_path(path_value: str | Path) -> str:
+    root = local_simulation.delivery_cache_root().resolve()
+    try:
+        candidate = Path(path_value).resolve(strict=True)
+        candidate.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise FileNotFoundError(str(path_value)) from exc
+    if candidate.is_dir():
+        raise FileNotFoundError(str(path_value))
+    return candidate.relative_to(root).as_posix()
+
+
+def _safe_relative_parts(relative_path: str | Path) -> tuple[str, ...]:
+    text = os.fspath(relative_path).replace("\\", "/")
+    path = PurePosixPath(text)
+    if not text or path.is_absolute():
+        raise FileNotFoundError(text)
+    parts = path.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise FileNotFoundError(text)
+    return tuple(parts)
+
+
 @dataclass
 class OpenedExportStream:
     path: Path
@@ -350,9 +387,69 @@ class OpenedExportStream:
             self.fd = -1
 
 
+def _open_export_stream_posix(
+    *,
+    root: Path,
+    relative_path: str | Path,
+    filename: str = "",
+    media_type: str = "",
+) -> OpenedExportStream:
+    parts = _safe_relative_parts(relative_path)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    dir_flags = os.O_RDONLY | directory | nofollow
+    file_flags = os.O_RDONLY | nofollow
+    dir_fds: list[int] = []
+    file_fd = -1
+    try:
+        current_fd = os.open(root, dir_flags)
+        dir_fds.append(current_fd)
+        for part in parts[:-1]:
+            current_fd = os.open(part, dir_flags, dir_fd=current_fd)
+            dir_fds.append(current_fd)
+        file_fd = os.open(parts[-1], file_flags, dir_fd=dir_fds[-1])
+        info = os.fstat(file_fd)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+            raise FileNotFoundError(os.fspath(relative_path))
+        for fd in reversed(dir_fds):
+            os.close(fd)
+        dir_fds.clear()
+        return OpenedExportStream(
+            path=root / Path(*parts),
+            file_name=filename or parts[-1],
+            media_type=media_type or media_type_for_filename(filename or parts[-1]),
+            fd=file_fd,
+            size_bytes=info.st_size,
+        )
+    except BaseException as exc:
+        if file_fd >= 0:
+            try:
+                os.close(file_fd)
+            except OSError:
+                pass
+        for fd in reversed(dir_fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if isinstance(exc, FileNotFoundError):
+            raise
+        raise FileNotFoundError(os.fspath(relative_path)) from exc
+
+
 def open_validated_export_stream(path_value: str | Path, *, filename: str = "", media_type: str = "") -> OpenedExportStream:
     root = local_simulation.delivery_cache_root().resolve()
+    if os.name == "posix":
+        return _open_export_stream_posix(
+            root=root,
+            relative_path=path_value,
+            filename=filename,
+            media_type=media_type,
+        )
     original = Path(path_value)
+    if not original.is_absolute():
+        parts = _safe_relative_parts(path_value)
+        original = root.joinpath(*parts)
     if original.is_symlink():
         raise FileNotFoundError(str(path_value))
     try:

@@ -3,6 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 
 from app.core.security import decode_access_token
 from app.core.responses import ok
@@ -231,20 +232,46 @@ def download_export_job(job_id: str, request: Request, auth: dict = Depends(requ
         raise HTTPException(status_code=404, detail="Export job not found") from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail="Export job is not ready") from exc
-    if "path" in download:
-        opened = export_center.open_validated_export_stream(
-            download["path"],
-            media_type=download.get("media_type") or "application/octet-stream",
-            filename=download["file_name"],
-        )
+    if "relative_path" in download or "path" in download:
+        try:
+            opened = export_center.open_validated_export_stream(
+                download.get("relative_path") or download["path"],
+                media_type=download.get("media_type") or "application/octet-stream",
+                filename=download["file_name"],
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail="Export job is not ready") from exc
+        try:
+            repository.append_audit_event(
+                "export_job_downloaded",
+                actor,
+                {
+                    "job_id": download.get("id") or job_id,
+                    "job_type": download.get("job_type") or "",
+                    "file_name": download.get("file_name") or "",
+                },
+            )
+        except BaseException:
+            opened.close()
+            raise
         return StreamingResponse(
             opened.iter_bytes(),
-            media_type=opened.media_type,
+            media_type=download.get("media_type") or "application/octet-stream",
             headers={
                 "Content-Disposition": f'attachment; filename="{opened.file_name}"',
                 "Content-Length": str(opened.size_bytes),
             },
+            background=BackgroundTask(opened.close),
         )
+    repository.append_audit_event(
+        "export_job_downloaded",
+        actor,
+        {
+            "job_id": download.get("id") or job_id,
+            "job_type": download.get("job_type") or "",
+            "file_name": download.get("file_name") or "",
+        },
+    )
     return Response(
         content=download["content"],
         media_type=download.get("media_type") or "application/octet-stream",

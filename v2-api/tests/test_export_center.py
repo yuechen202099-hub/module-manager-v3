@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import threading
 import inspect
 from copy import deepcopy
@@ -217,11 +218,6 @@ def test_export_create_and_download_are_audited(monkeypatch: pytest.MonkeyPatch,
 
         def open_export_job_download(self, job_id: str, *, actor: str) -> dict:
             assert job_id == "job-1"
-            self.append_audit_event(
-                "export_job_downloaded",
-                actor,
-                {"job_id": "job-1", "job_type": "device_terminal", "file_name": "terminal-devices.xlsx"},
-            )
             return {
                 "id": "job-1",
                 "job_type": "device_terminal",
@@ -427,7 +423,7 @@ def test_pg_lightweight_readiness_query_includes_barcode_verification() -> None:
     assert "auto_archive_status" in source
 
 
-def test_download_route_streams_validated_path_and_repository_owns_download_audit(
+def test_download_route_streams_validated_path_after_success_audit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -441,17 +437,17 @@ def test_download_route_streams_validated_path_and_repository_owns_download_audi
 
     class JobRepository:
         def open_export_job_download(self, job_id: str, *, actor: str) -> dict:
-            events.append(("export_job_downloaded", actor, {"job_id": job_id}))
             return {
                 "id": job_id,
                 "job_type": "device_terminal",
                 "file_name": "terminal-devices.xlsx",
-                "path": export_file,
+                "relative_path": "terminal-devices.xlsx",
                 "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             }
 
         def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
-            pytest.fail("download audit must be written by open_export_job_download")
+            events.append((action, actor, deepcopy(payload)))
+            return {"id": "audit-1", "action": action, "actor": actor, "payload": payload}
 
     monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
     monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail("download route must not read whole file"))
@@ -461,7 +457,160 @@ def test_download_route_streams_validated_path_and_repository_owns_download_audi
 
     assert response.status_code == 200
     assert response.content == b"streamed-workbook"
-    assert events == [("export_job_downloaded", "root-admin", {"job_id": "job-1"})]
+    assert events == [
+        (
+            "export_job_downloaded",
+            "root-admin",
+            {"job_id": "job-1", "job_type": "device_terminal", "file_name": "terminal-devices.xlsx"},
+        )
+    ]
+
+
+def test_download_route_opens_safe_stream_before_success_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    client, headers = production_rbac_client(monkeypatch, tmp_path)
+    events: list[tuple[str, str, dict]] = []
+
+    class JobRepository:
+        def open_export_job_download(self, job_id: str, *, actor: str) -> dict:
+            return {
+                "id": job_id,
+                "job_type": "device_terminal",
+                "file_name": "terminal-devices.xlsx",
+                "relative_path": "exports/missing.xlsx",
+                "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            }
+
+        def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
+            events.append((action, actor, deepcopy(payload)))
+            return {"id": "audit-1", "action": action, "actor": actor, "payload": payload}
+
+    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
+    monkeypatch.setattr(
+        export_center_service,
+        "open_validated_export_stream",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing")),
+    )
+
+    response = client.get("/exports/jobs/job-1/download", headers=headers["admin"])
+
+    assert response.status_code == 409
+    assert events == []
+
+
+def test_download_route_closes_opened_stream_when_audit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    client, headers = production_rbac_client(monkeypatch, tmp_path)
+    closed: list[str] = []
+
+    class FakeOpened:
+        media_type = "application/octet-stream"
+        file_name = "terminal-devices.xlsx"
+        size_bytes = 7
+
+        def iter_bytes(self):
+            yield b"content"
+
+        def close(self):
+            closed.append("closed")
+
+    class JobRepository:
+        def open_export_job_download(self, job_id: str, *, actor: str) -> dict:
+            return {
+                "id": job_id,
+                "job_type": "device_terminal",
+                "file_name": "terminal-devices.xlsx",
+                "relative_path": "exports/job.xlsx",
+                "media_type": "application/octet-stream",
+            }
+
+        def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
+            raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
+    monkeypatch.setattr(export_center_service, "open_validated_export_stream", lambda *_args, **_kwargs: FakeOpened())
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        client.get("/exports/jobs/job-1/download", headers=headers["admin"])
+
+    assert closed == ["closed"]
+
+
+def test_posix_export_stream_uses_openat_without_following_parent_symlinks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    root.mkdir()
+    monkeypatch.setattr(local_simulation, "delivery_cache_root", lambda: root)
+    monkeypatch.setattr(export_center_service.os, "O_DIRECTORY", 0x10000, raising=False)
+    monkeypatch.setattr(export_center_service.os, "O_NOFOLLOW", 0x20000, raising=False)
+    calls: list[tuple[str, int, int | None]] = []
+    closed: list[int] = []
+    next_fd = iter([10, 11, 12])
+
+    def fake_open(path, flags, *, dir_fd=None):
+        calls.append((os.fspath(path), flags, dir_fd))
+        return next(next_fd)
+
+    def fake_fstat(fd):
+        assert fd == 12
+        return SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_size=17)
+
+    monkeypatch.setattr(export_center_service.os, "open", fake_open)
+    monkeypatch.setattr(export_center_service.os, "fstat", fake_fstat)
+    monkeypatch.setattr(export_center_service.os, "close", lambda fd: closed.append(fd))
+
+    opened = export_center_service._open_export_stream_posix(
+        root=root,
+        relative_path="exports/job.xlsx",
+        filename="job.xlsx",
+        media_type="application/octet-stream",
+    )
+    opened.close()
+
+    assert calls == [
+        (os.fspath(root), os.O_RDONLY | 0x10000 | 0x20000, None),
+        ("exports", os.O_RDONLY | 0x10000 | 0x20000, 10),
+        ("job.xlsx", os.O_RDONLY | 0x20000, 11),
+    ]
+    assert closed == [11, 10, 12]
+
+
+def test_posix_export_stream_closes_parent_fds_when_final_open_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cache"
+    root.mkdir()
+    monkeypatch.setattr(local_simulation, "delivery_cache_root", lambda: root)
+    monkeypatch.setattr(export_center_service.os, "O_DIRECTORY", 0x10000, raising=False)
+    monkeypatch.setattr(export_center_service.os, "O_NOFOLLOW", 0x20000, raising=False)
+    closed: list[int] = []
+
+    def fake_open(path, flags, *, dir_fd=None):
+        if os.fspath(path) == os.fspath(root):
+            return 20
+        if os.fspath(path) == "exports":
+            return 21
+        raise OSError("symlink or missing")
+
+    monkeypatch.setattr(export_center_service.os, "open", fake_open)
+    monkeypatch.setattr(export_center_service.os, "close", lambda fd: closed.append(fd))
+
+    with pytest.raises(FileNotFoundError):
+        export_center_service._open_export_stream_posix(
+            root=root,
+            relative_path="exports/job.xlsx",
+            filename="job.xlsx",
+            media_type="application/octet-stream",
+        )
+
+    assert closed == [21, 20]
 
 
 def test_open_validated_export_stream_holds_original_file_after_path_replacement(
@@ -501,11 +650,20 @@ def test_open_validated_export_stream_rejects_symlink(
         export_center_service.open_validated_export_stream(link)
 
 
-def test_json_export_job_create_reuses_same_request_key_and_changes_on_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_json_inline_export_job_request_key_reuses_same_content_despite_state_change(monkeypatch: pytest.MonkeyPatch) -> None:
     team_id = "team-export-dedupe"
     state = local_simulation.blank_state(team_id)
     state["groups"] = [formal_group("group-1", archive_status="archived")]
     monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(
+        export_center_service,
+        "build_inline_export_content",
+        lambda *_args, **_kwargs: (
+            b"stable-workbook",
+            "device-terminal.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    )
     token = local_simulation.set_current_team(team_id)
     try:
         repository = JsonStateRepository()
@@ -519,9 +677,38 @@ def test_json_export_job_create_reuses_same_request_key_and_changes_on_snapshot(
     assert first["id"] == second["id"]
     assert first["created"] is True
     assert second["created"] is False
-    assert third["id"] != first["id"]
+    assert third["id"] == first["id"]
+    assert third["created"] is False
+    assert len(state["export_jobs"]) == 1
+    assert state["export_jobs"][0]["request_key"] == export_center_service.inline_export_request_key(
+        job_type="device_terminal",
+        filters={"terminal": "T-1"},
+        content_sha256=state["export_jobs"][0]["content_sha256"],
+    )
+
+
+def test_json_inline_export_job_request_key_changes_when_content_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = "team-export-content-key"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [formal_group("group-1", archive_status="archived")]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    contents = iter([b"first-workbook", b"second-workbook"])
+
+    def build_content(*_args, **_kwargs):
+        return next(contents), "device-terminal.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    monkeypatch.setattr(export_center_service, "build_inline_export_content", build_content)
+    token = local_simulation.set_current_team(team_id)
+    try:
+        repository = JsonStateRepository()
+        first = repository.create_export_job(job_type="device_terminal", filters={"terminal": "T-1"}, actor="root-admin")
+        second = repository.create_export_job(job_type="device_terminal", filters={"terminal": "T-1"}, actor="root-admin")
+    finally:
+        local_simulation.reset_current_team(token)
+
+    assert first["id"] != second["id"]
     assert len(state["export_jobs"]) == 2
-    assert all(job.get("request_key") for job in state["export_jobs"])
+    assert state["export_jobs"][0]["request_key"] != state["export_jobs"][1]["request_key"]
 
 
 def test_json_export_job_concurrent_create_rechecks_request_key_under_lock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -739,6 +926,73 @@ def test_pg_final_delivery_export_job_links_delivery_job_in_same_transaction(
     assert captured["auto_commit"] is False
     assert export_row_holder["row"].params["delivery_package_job_id"] == "delivery-job-pg"
     assert commits == 1
+
+
+def test_pg_inline_export_request_key_uses_content_hash_not_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PostgresStateRepository()
+    project_id = uuid4()
+    rows: list[object] = []
+    snapshots = [
+        [formal_group("group-1", archive_status="archived")],
+        [formal_group("group-1", archive_status="archived"), formal_group("group-2", archive_status="archived")],
+    ]
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, statement):
+            expected_key = export_center_service.inline_export_request_key(
+                job_type="device_terminal",
+                filters={"terminal": "T-1"},
+                content_sha256=export_center_service.file_sha256(b"same-workbook"),
+            )
+            return next((row for row in rows if row.request_key == expected_key), None)
+
+        def add(self, row):
+            rows.append(row)
+
+        def flush(self):
+            pass
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def get(self, model, row_id):
+            return next((row for row in rows if row.id == row_id), None)
+
+    monkeypatch.setattr(repository, "_session", lambda: FakeSession())
+    monkeypatch.setattr(repository, "_export_project_id", lambda session: project_id)
+    monkeypatch.setattr(repository, "_export_center_lightweight_groups", lambda: snapshots.pop(0))
+    monkeypatch.setattr(
+        export_center_service,
+        "build_inline_export_content",
+        lambda *_args, **_kwargs: (
+            b"same-workbook",
+            "device-terminal.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    )
+
+    first = repository.create_export_job(job_type="device_terminal", filters={"terminal": "T-1"}, actor="root-admin")
+    second = repository.create_export_job(job_type="device_terminal", filters={"terminal": "T-1"}, actor="root-admin")
+
+    assert first["id"] == second["id"]
+    assert second["created"] is False
+    assert len(rows) == 1
+    assert rows[0].request_key == export_center_service.inline_export_request_key(
+        job_type="device_terminal",
+        filters={"terminal": "T-1"},
+        content_sha256=rows[0].content_sha256,
+    )
 
 
 def test_pg_export_job_integrity_error_reuses_existing_job_without_background_enqueue(
