@@ -290,6 +290,71 @@ def test_postgres_export_jobs_include_created_by() -> None:
     assert page["items"][0]["created_by"] == "root-admin"
 
 
+def test_postgres_create_export_job_integrity_fallback_keeps_existing_created_by(monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = PostgresStateRepository()
+    existing = models.ExportJob(
+        id=uuid4(),
+        team_id="north-team-01",
+        project_id=uuid4(),
+        job_type="device_terminal",
+        status=models.JobStatus.SUCCEEDED,
+        file_name="terminal-devices.xlsx",
+        filter_snapshot={"terminal": "T-1"},
+        request_key="request-1",
+        row_count=12,
+        progress=100,
+        error_message="",
+        params={"created_by": "other-admin", "terminal": "T-1", "size_bytes": 3},
+    )
+
+    class FakeSession:
+        def __init__(self):
+            self.scalar_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, *_args, **_kwargs):
+            self.scalar_calls += 1
+            return None if self.scalar_calls == 1 else existing
+
+        def add(self, _row):
+            return None
+
+        def flush(self):
+            raise IntegrityError("insert into export_jobs", {}, Exception("duplicate"))
+
+        def rollback(self):
+            return None
+
+    monkeypatch.setattr(repository, "_session", lambda: FakeSession())
+    monkeypatch.setattr(repository, "_export_project_id", lambda _session: uuid4())
+    monkeypatch.setattr(
+        export_center_service,
+        "build_inline_export_content",
+        lambda *_args, **_kwargs: (b"xlsx", "terminal-devices.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    )
+    monkeypatch.setattr(export_center_service, "write_export_content", lambda *_args, **_kwargs: ("temp/export.xlsx", "sha256", 3))
+    orphaned_paths: list[str] = []
+    monkeypatch.setattr(
+        "app.services.state_repository._remove_orphan_export_content",
+        lambda path: orphaned_paths.append(str(path)),
+    )
+
+    job = repository.create_export_job(
+        job_type="device_terminal",
+        filters={"terminal": "T-1"},
+        actor="current-admin",
+    )
+
+    assert job["created"] is False
+    assert job["created_by"] == "other-admin"
+    assert orphaned_paths == ["temp/export.xlsx"]
+
+
 def test_terminal_readiness_route_includes_latest_generated_at(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
 

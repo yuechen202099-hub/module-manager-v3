@@ -132,3 +132,16 @@
   - `cd v2-web && npm exec vue-tsc -- --noEmit` -> `0`
   - `cd v2-web && MODULE_MANAGER_VUE_OUT_DIR=.tmp/task6-build npm run build` -> `0`（仅既有 Rollup `PURE` comment / chunk size warnings）
   - `git diff --name-only 74989e7..HEAD -- v2-api/app/static/vue` -> 空输出
+
+## 2026-07-23 Review Fixes Round 3
+
+- 修复剩余 1 个 Minor：
+  - `PostgresStateRepository.create_export_job()` 的 `IntegrityError` fallback 现在在返回 existing export job payload 时显式带上 `params: existing.params`，由 `_export_job_payload()` 从原始 `params["created_by"]` 读取创建人，不再误写当前 actor。
+- 新增 focused regression：
+  - `test_postgres_create_export_job_integrity_fallback_keeps_existing_created_by`
+    - 模拟并发冲突导致的 `IntegrityError`
+    - existing export job 的 `params["created_by"]` 与当前 actor 不同
+    - 断言 fallback 返回 `created_by` 保持 existing actor，且 orphan inline 文件仍被清理
+- 本次验证（Thursday, July 23, 2026）：
+  - `python -m pytest v2-api/tests/test_export_center.py -k "postgres_export_jobs_include_created_by or integrity_fallback_keeps_existing_created_by" -q` -> `2 passed, 42 deselected, 1 warning`
+  - `git diff --check` -> 通过
