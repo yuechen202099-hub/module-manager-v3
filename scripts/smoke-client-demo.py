@@ -87,13 +87,12 @@ def main() -> int:
     bad = login("admin", "bad-password")
     auth_config = client.get("/auth/config")
     check("demo admin login", admin.status_code == 200)
-    check("demo reviewer login", reviewer.status_code == 200)
+    check("retired demo reviewer rejected", reviewer.status_code == 401)
     check("demo constructor login", constructor.status_code == 200)
     check("bad password rejected", bad.status_code == 401)
     check("auth config route", auth_config.status_code == 200)
-    check("auth config exposes local demo accounts", {item["username"] for item in auth_config.json()["data"]["demo_accounts"]} == {"admin", "reviewer", "constructor"})
+    check("auth config exposes local demo accounts", {item["username"] for item in auth_config.json()["data"]["demo_accounts"]} == {"admin", "constructor"})
     check("admin opens app shell", admin.json()["data"]["user"]["home"] == "/app")
-    check("reviewer opens app shell", reviewer.json()["data"]["user"]["home"] == "/app")
     check("constructor opens construction page", constructor.json()["data"]["user"]["home"] == "/app?page=construction")
 
     vue_routes = [
@@ -121,8 +120,8 @@ def main() -> int:
         check(f"{path} only serves Vue shell for client-side redirect", '<div id="app"></div>' in text)
 
     cancelled_routes = {
-        "/unmatched": "/task-hall",
-        "/unmatched?embedded=1": "/task-hall",
+        "/unmatched": "/global-search?review=1",
+        "/unmatched?embedded=1": "/global-search?review=1",
         "/construction-cache": "/construction",
         "/construction-cache?embedded=1": "/construction",
     }

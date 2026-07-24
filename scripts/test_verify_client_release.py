@@ -536,6 +536,15 @@ def test_smoke_check_validates_current_server_release_signoff_package() -> None:
     assert 'ROOT / "v2-web" / "src" / "version.json"' in smoke_check
     assert 'f"module-manager-v2-server-{release_version}.zip"' in smoke_check
     assert "module-manager-v2-client-demo-final-delivery-ready.zip" not in smoke_check
+    assert 'check("retired demo reviewer rejected", reviewer.status_code == 401)' in smoke_check
+    assert (
+        '{"admin", "constructor"}'
+        in smoke_check
+    )
+    assert 'check("demo reviewer login", reviewer.status_code == 200)' not in smoke_check
+    assert 'reviewer.json()["data"]["user"]["home"]' not in smoke_check
+    assert '"/unmatched": "/global-search?review=1"' in smoke_check
+    assert '"/unmatched?embedded=1": "/global-search?review=1"' in smoke_check
 
 
 def test_archive_missing_manifest_version_fails_verification(tmp_path: Path) -> None:
