@@ -6,11 +6,10 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, NoReturn
+from typing import Any, Callable, Mapping, NoReturn
 from uuid import UUID, uuid4
 
 from sqlalchemy import String, Text, and_, case, cast, func, literal, or_, select, union_all
@@ -2400,19 +2399,27 @@ def _remove_orphan_export_content(path_value: str) -> None:
         return
 
 
-@contextmanager
-def _cleanup_uncommitted_export_content(path_value: str) -> Iterator[Callable[[], None]]:
-    cleanup_pending = bool(str(path_value or "").strip())
+class _UncommittedExportContentGuard:
+    def __init__(self) -> None:
+        self._path = ""
 
-    def mark_committed() -> None:
-        nonlocal cleanup_pending
-        cleanup_pending = False
+    def register(self, path_value: str) -> None:
+        self._path = str(path_value or "").strip()
 
-    try:
-        yield mark_committed
-    finally:
-        if cleanup_pending:
+    def mark_committed(self) -> None:
+        self._path = ""
+
+    def cleanup(self) -> None:
+        path_value = self._path
+        self._path = ""
+        if path_value:
             _remove_orphan_export_content(path_value)
+
+    def __enter__(self) -> _UncommittedExportContentGuard:
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.cleanup()
 
 
 def _sync_json_state_reference(team_id: str, live_state_reference: dict[str, Any]) -> None:
@@ -9035,32 +9042,35 @@ class PostgresStateRepository(StateRepository):
         progress = 0
         params: dict[str, Any] = {"created_by": actor}
         now = datetime.now(UTC)
-        inline_generated = False
-        if is_background:
-            snapshot_groups = export_center.scope_export_groups(self._export_center_lightweight_groups(), filters)
-            snapshot = export_center.stable_export_snapshot(snapshot_groups)
-            request_key = export_center.export_request_key(job_type=job_type, filters=filters, snapshot=snapshot)
-        else:
-            content, filename, _media_type = export_center.build_inline_export_content(
-                self,
-                job_type=job_type,
-                filters=filters,
-            )
-            content_path, content_sha256, size_bytes = export_center.write_export_content(
-                content,
-                job_id=job_id,
-                filename=filename,
-            )
-            request_key = export_center.inline_export_request_key(
-                job_type=job_type,
-                filters=filters,
-                content_sha256=content_sha256,
-            )
-            status = JobStatus.SUCCEEDED
-            progress = 100
-            inline_generated = True
-        inline_content_guard = _cleanup_uncommitted_export_content(content_path if inline_generated else "")
-        with inline_content_guard as mark_inline_content_committed, self._session() as session:
+        inline_content_guard = _UncommittedExportContentGuard()
+        try:
+            if is_background:
+                snapshot_groups = export_center.scope_export_groups(self._export_center_lightweight_groups(), filters)
+                snapshot = export_center.stable_export_snapshot(snapshot_groups)
+                request_key = export_center.export_request_key(job_type=job_type, filters=filters, snapshot=snapshot)
+            else:
+                content, filename, _media_type = export_center.build_inline_export_content(
+                    self,
+                    job_type=job_type,
+                    filters=filters,
+                )
+                content_path, content_sha256, size_bytes = export_center.write_export_content(
+                    content,
+                    job_id=job_id,
+                    filename=filename,
+                )
+                inline_content_guard.register(content_path)
+                request_key = export_center.inline_export_request_key(
+                    job_type=job_type,
+                    filters=filters,
+                    content_sha256=content_sha256,
+                )
+                status = JobStatus.SUCCEEDED
+                progress = 100
+        except BaseException:
+            inline_content_guard.cleanup()
+            raise
+        with inline_content_guard, self._session() as session:
             existing = session.scalar(
                 select(ExportJob).where(
                     ExportJob.team_id == local_simulation.current_team_id(),
@@ -9148,7 +9158,7 @@ class PostgresStateRepository(StateRepository):
                         finally:
                             package.release()
                     session.commit()
-                    mark_inline_content_committed()
+                    inline_content_guard.mark_committed()
                     return _export_job_payload(
                         {
                             "id": row.id,
@@ -9168,7 +9178,7 @@ class PostgresStateRepository(StateRepository):
                         }
                     )
                 session.commit()
-                mark_inline_content_committed()
+                inline_content_guard.mark_committed()
                 return _export_job_payload(
                     {
                         "id": row.id,

@@ -355,14 +355,12 @@ def test_postgres_create_export_job_integrity_fallback_keeps_existing_created_by
     assert orphaned_paths == ["temp/export.xlsx"]
 
 
-def test_pg_inline_export_commit_error_removes_only_new_orphan_content(
+def test_pg_inline_export_commit_error_removes_orphan_content_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     repository = PostgresStateRepository()
     generated_path = tmp_path / "new-inline-export.xlsx"
-    reused_path = tmp_path / "reused-inline-export.xlsx"
-    reused_path.write_bytes(b"existing export")
     transaction_error = RuntimeError("commit failed")
 
     class FakeSession:
@@ -424,7 +422,151 @@ def test_pg_inline_export_commit_error_removes_only_new_orphan_content(
     assert exc_info.traceback[-1].name == "commit"
     assert removed_paths == [generated_path]
     assert not generated_path.exists()
-    assert reused_path.read_bytes() == b"existing export"
+
+
+def test_pg_inline_export_request_key_error_removes_orphan_content_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = PostgresStateRepository()
+    generated_path = tmp_path / "request-key-orphan.xlsx"
+    request_key_error = RuntimeError("request key failed")
+
+    monkeypatch.setattr(
+        export_center_service,
+        "build_inline_export_content",
+        lambda *_args, **_kwargs: (
+            b"request key export",
+            generated_path.name,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    )
+
+    def write_inline_content(content: bytes, **_kwargs):
+        generated_path.write_bytes(content)
+        return str(generated_path), "sha256", len(content)
+
+    def raise_request_key_error(**_kwargs):
+        raise request_key_error
+
+    monkeypatch.setattr(export_center_service, "write_export_content", write_inline_content)
+    monkeypatch.setattr(export_center_service, "inline_export_request_key", raise_request_key_error)
+    monkeypatch.setattr(
+        repository,
+        "_session",
+        lambda: pytest.fail("request-key failure must happen before opening a session"),
+    )
+    removed_paths: list[Path] = []
+
+    def remove_orphan_content(path_value: str) -> None:
+        path = Path(path_value)
+        removed_paths.append(path)
+        path.unlink(missing_ok=True)
+
+    monkeypatch.setattr(
+        "app.services.state_repository._remove_orphan_export_content",
+        remove_orphan_content,
+    )
+
+    with pytest.raises(RuntimeError, match="request key failed") as exc_info:
+        repository.create_export_job(
+            job_type="device_terminal",
+            filters={"terminal": "T-1"},
+            actor="root-admin",
+        )
+
+    assert exc_info.value is request_key_error
+    assert exc_info.traceback[-1].name == "raise_request_key_error"
+    assert removed_paths == [generated_path]
+    assert not generated_path.exists()
+
+
+def test_pg_inline_export_existing_job_removes_only_new_duplicate_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = PostgresStateRepository()
+    content = b"existing export bytes"
+    content_sha256 = export_center_service.file_sha256(content)
+    generated_path = tmp_path / "new-duplicate-export.xlsx"
+    reused_path = tmp_path / "reused-inline-export.xlsx"
+    reused_path.write_bytes(content)
+    existing = models.ExportJob(
+        id=uuid4(),
+        team_id="north-team-01",
+        project_id=uuid4(),
+        job_type="device_terminal",
+        status=models.JobStatus.SUCCEEDED,
+        file_name=reused_path.name,
+        filter_snapshot={"terminal": "T-1"},
+        request_key=export_center_service.inline_export_request_key(
+            job_type="device_terminal",
+            filters={"terminal": "T-1"},
+            content_sha256=content_sha256,
+        ),
+        content_path=str(reused_path),
+        content_sha256=content_sha256,
+        row_count=1,
+        progress=100,
+        error_message="",
+        params={"created_by": "original-admin", "terminal": "T-1", "size_bytes": len(content)},
+    )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, *_args, **_kwargs):
+            return existing
+
+        def add(self, _row):
+            pytest.fail("existing request key must not add a new export job")
+
+        def commit(self):
+            pytest.fail("existing request key must not commit a new export job")
+
+    monkeypatch.setattr(repository, "_session", lambda: FakeSession())
+    monkeypatch.setattr(
+        export_center_service,
+        "build_inline_export_content",
+        lambda *_args, **_kwargs: (
+            content,
+            generated_path.name,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    )
+
+    def write_inline_content(content_value: bytes, **_kwargs):
+        generated_path.write_bytes(content_value)
+        return str(generated_path), content_sha256, len(content_value)
+
+    monkeypatch.setattr(export_center_service, "write_export_content", write_inline_content)
+    removed_paths: list[Path] = []
+
+    def remove_orphan_content(path_value: str) -> None:
+        path = Path(path_value)
+        removed_paths.append(path)
+        path.unlink(missing_ok=True)
+
+    monkeypatch.setattr(
+        "app.services.state_repository._remove_orphan_export_content",
+        remove_orphan_content,
+    )
+
+    job = repository.create_export_job(
+        job_type="device_terminal",
+        filters={"terminal": "T-1"},
+        actor="root-admin",
+    )
+
+    assert job["id"] == str(existing.id)
+    assert job["created"] is False
+    assert removed_paths == [generated_path]
+    assert not generated_path.exists()
+    assert reused_path.read_bytes() == content
 
 
 def test_terminal_readiness_route_includes_latest_generated_at(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
