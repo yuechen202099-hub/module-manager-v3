@@ -6,10 +6,11 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, NoReturn
+from typing import Any, Callable, Iterator, Mapping, NoReturn
 from uuid import UUID, uuid4
 
 from sqlalchemy import String, Text, and_, case, cast, func, literal, or_, select, union_all
@@ -2397,6 +2398,21 @@ def _remove_orphan_export_content(path_value: str) -> None:
         export_center.validated_export_file(path_value).unlink(missing_ok=True)
     except (FileNotFoundError, OSError, ValueError):
         return
+
+
+@contextmanager
+def _cleanup_uncommitted_export_content(path_value: str) -> Iterator[Callable[[], None]]:
+    cleanup_pending = bool(str(path_value or "").strip())
+
+    def mark_committed() -> None:
+        nonlocal cleanup_pending
+        cleanup_pending = False
+
+    try:
+        yield mark_committed
+    finally:
+        if cleanup_pending:
+            _remove_orphan_export_content(path_value)
 
 
 def _sync_json_state_reference(team_id: str, live_state_reference: dict[str, Any]) -> None:
@@ -9043,7 +9059,8 @@ class PostgresStateRepository(StateRepository):
             status = JobStatus.SUCCEEDED
             progress = 100
             inline_generated = True
-        with self._session() as session:
+        inline_content_guard = _cleanup_uncommitted_export_content(content_path if inline_generated else "")
+        with inline_content_guard as mark_inline_content_committed, self._session() as session:
             existing = session.scalar(
                 select(ExportJob).where(
                     ExportJob.team_id == local_simulation.current_team_id(),
@@ -9051,8 +9068,6 @@ class PostgresStateRepository(StateRepository):
                 )
             )
             if existing is not None:
-                if inline_generated:
-                    _remove_orphan_export_content(content_path)
                 return _export_job_payload(
                     {
                         "id": existing.id,
@@ -9133,6 +9148,7 @@ class PostgresStateRepository(StateRepository):
                         finally:
                             package.release()
                     session.commit()
+                    mark_inline_content_committed()
                     return _export_job_payload(
                         {
                             "id": row.id,
@@ -9152,6 +9168,7 @@ class PostgresStateRepository(StateRepository):
                         }
                     )
                 session.commit()
+                mark_inline_content_committed()
                 return _export_job_payload(
                     {
                         "id": row.id,
@@ -9172,8 +9189,6 @@ class PostgresStateRepository(StateRepository):
                 )
             except IntegrityError:
                 session.rollback()
-                if inline_generated:
-                    _remove_orphan_export_content(content_path)
                 existing = session.scalar(
                     select(ExportJob).where(
                         ExportJob.team_id == local_simulation.current_team_id(),

@@ -355,6 +355,78 @@ def test_postgres_create_export_job_integrity_fallback_keeps_existing_created_by
     assert orphaned_paths == ["temp/export.xlsx"]
 
 
+def test_pg_inline_export_commit_error_removes_only_new_orphan_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = PostgresStateRepository()
+    generated_path = tmp_path / "new-inline-export.xlsx"
+    reused_path = tmp_path / "reused-inline-export.xlsx"
+    reused_path.write_bytes(b"existing export")
+    transaction_error = RuntimeError("commit failed")
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalar(self, *_args, **_kwargs):
+            return None
+
+        def add(self, _row):
+            return None
+
+        def flush(self):
+            return None
+
+        def commit(self):
+            raise transaction_error
+
+    monkeypatch.setattr(repository, "_session", lambda: FakeSession())
+    monkeypatch.setattr(repository, "_export_project_id", lambda _session: uuid4())
+    monkeypatch.setattr(
+        export_center_service,
+        "build_inline_export_content",
+        lambda *_args, **_kwargs: (
+            b"new export",
+            generated_path.name,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
+    )
+
+    def write_inline_content(content: bytes, **_kwargs):
+        generated_path.write_bytes(content)
+        return str(generated_path), "sha256", len(content)
+
+    monkeypatch.setattr(export_center_service, "write_export_content", write_inline_content)
+    removed_paths: list[Path] = []
+
+    def remove_orphan_content(path_value: str) -> None:
+        path = Path(path_value)
+        removed_paths.append(path)
+        path.unlink(missing_ok=True)
+
+    monkeypatch.setattr(
+        "app.services.state_repository._remove_orphan_export_content",
+        remove_orphan_content,
+    )
+
+    with pytest.raises(RuntimeError, match="commit failed") as exc_info:
+        repository.create_export_job(
+            job_type="device_terminal",
+            filters={"terminal": "T-1"},
+            actor="root-admin",
+        )
+
+    assert exc_info.value is transaction_error
+    assert exc_info.traceback[-1].name == "commit"
+    assert removed_paths == [generated_path]
+    assert not generated_path.exists()
+    assert reused_path.read_bytes() == b"existing export"
+
+
 def test_terminal_readiness_route_includes_latest_generated_at(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
 
@@ -1403,6 +1475,7 @@ def test_pg_export_job_integrity_error_reuses_existing_job_without_background_en
                 progress=0,
                 error_message="",
                 filter_snapshot={"terminal": "T-1"},
+                params={"created_by": "root-admin", "terminal": "T-1"},
                 request_key=request_key_holder["value"],
                 created_at=None,
                 updated_at=None,
