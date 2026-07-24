@@ -562,7 +562,7 @@ def verify_release_record(failures: list[str]) -> None:
         "PostgreSQL",
         "rollback",
         "/health",
-        "/system/status/version",
+        "/local-test/system/status",
         "verify_v3_2_0_role_routes.py",
         "verify_v3_2_0_data_center_ui.py",
         "verify_v3_2_0_dashboard_drilldown.py",

@@ -413,6 +413,15 @@ def test_v320_release_inputs_are_packaged_and_required() -> None:
         assert f'"{path}"' in release_verifier
 
 
+def test_v320_release_verifies_the_real_admin_system_status_route() -> None:
+    release_verifier = (ROOT / "scripts" / "verify_v3_2_0_release.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"/local-test/system/status"' in release_verifier
+    assert '"/system/status/version"' not in release_verifier
+
+
 def test_release_builder_stops_when_smoke_check_fails() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     smoke_block = build_script.split("Running release smoke check before packaging...", maxsplit=1)[1]
