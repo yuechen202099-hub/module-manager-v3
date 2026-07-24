@@ -5836,7 +5836,7 @@ def test_construction_tasks_include_meter_search_text_for_task_picker() -> None:
 
 
 def test_direct_workspace_routes_redirect_to_app_shell() -> None:
-    for path in ["/project-board", "/claim-tasks", "/construction", "/account-management", "/sync-config"]:
+    for path in ["/project-board", "/claim-tasks", "/construction", "/account-management", "/sync-config", "/exports"]:
         assert_vue_shell_response(client.get(path, follow_redirects=False))
     response = client.get("/construction-cache", follow_redirects=False)
     assert response.status_code == 307
@@ -5844,6 +5844,16 @@ def test_direct_workspace_routes_redirect_to_app_shell() -> None:
     response = client.get("/unmatched", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"] == "/global-search?review=1"
+
+
+def test_production_exports_page_is_admin_only_and_serves_vue(monkeypatch, tmp_path) -> None:
+    production_client, headers = production_rbac_client(monkeypatch, tmp_path)
+
+    assert production_client.get("/exports").status_code == 401
+    assert production_client.get("/exports", headers=headers["reviewer"]).status_code == 403
+    assert production_client.get("/exports", headers=headers["constructor"]).status_code == 403
+    assert_vue_shell_response(production_client.get("/exports", headers=headers["admin"]))
+
 
 def test_project_board_page_is_available() -> None:
     assert_vue_shell_response(client.get("/project-board"))

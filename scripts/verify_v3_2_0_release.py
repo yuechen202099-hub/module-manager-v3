@@ -490,6 +490,11 @@ def verify_version_surfaces(failures: list[str]) -> None:
     main_py = read_text("v2-api/app/main.py", failures)
     if not re.search(rf'\bversion\s*=\s*"{re.escape(VERSION)}"', main_py):
         failures.append(f"v2-api/app/main.py: FastAPI version must be exactly {VERSION}")
+    for marker in (
+        '@app.get("/exports")',
+        "Depends(require_production_reviewer_or_admin)",
+    ):
+        require_contains(main_py, marker, "v2-api/app/main.py", failures)
 
     ops_status = read_text("v2-api/app/services/ops_status.py", failures)
     require_contains(

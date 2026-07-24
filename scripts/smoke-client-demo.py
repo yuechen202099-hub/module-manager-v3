@@ -104,6 +104,7 @@ def main() -> int:
         "/project-board",
         "/claim-tasks",
         "/task-hall",
+        "/exports",
         "/construction",
         "/sync-config",
     ]

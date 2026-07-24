@@ -2,7 +2,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
@@ -11,6 +11,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from app.api.router import api_router
+from app.api.routes.auth import require_production_reviewer_or_admin
 from app.core.config import settings
 from app.core.request_id import RequestIdMiddleware
 from app.core.responses import error_response, ok
@@ -276,6 +277,10 @@ def create_app() -> FastAPI:
 
     @app.get("/global-search")
     def global_search_page():
+        return vue_index_response()
+
+    @app.get("/exports")
+    def exports_page(_admin: dict = Depends(require_production_reviewer_or_admin)):
         return vue_index_response()
 
     @app.get("/account-management")
