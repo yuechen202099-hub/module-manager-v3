@@ -7,12 +7,54 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "3.2.0"
 DISPLAY_VERSION = f"V{VERSION}"
+SOURCE_COMMIT = "fe527eb84064096321e727abf9ccbdc981e10b7e"
+PACKAGE_SHA256 = "9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF"
+BACKUP_DIRECTORY = "/opt/module-manager-v2/backups/V3.2.0-pre-20260724_105349"
+RELEASE_DIRECTORY = "/opt/module-manager-v2/releases/v3.2.0-20260724_105649"
+ROLLBACK_DIRECTORY = "/opt/module-manager-v2/releases/v3.2.0-20260724_095503"
+PACKAGE_SIZE = "1621627 bytes"
+DATABASE_MIGRATION_HEAD = "20260724_0014 (head)"
+PUBLIC_HEALTH_CHECK = "https://www.sgcc.online/health passed"
+FULL_TEST_RESULT = "1782 passed, 13 skipped"
+REQUIRED_FILE_COUNT = "167"
+INDEPENDENT_REVIEW = "Critical 0 / Important 0 / Minor 1，结论可发布"
+
+EXPECTED_LIFECYCLE_FIELDS = {
+    "Status": "reviewed, packaged, deployed, and verified in production",
+    "Local Verification": "passed",
+    "Package": "verified",
+    "Production Deployment": "deployed",
+    "Production Reconciliation": "completed",
+    "Rollback target": ROLLBACK_DIRECTORY,
+}
+
+EXPECTED_EVIDENCE_FIELDS = {
+    "Artifact": "build/server-release/module-manager-v2-server-3.2.0.zip",
+    "Size": PACKAGE_SIZE,
+    "SHA256": PACKAGE_SHA256,
+    "Source commit": SOURCE_COMMIT,
+    "Backup directory": BACKUP_DIRECTORY,
+    "Release directory": RELEASE_DIRECTORY,
+    "Database migration head": DATABASE_MIGRATION_HEAD,
+    "Public health check": PUBLIC_HEALTH_CHECK,
+    "Full test result": FULL_TEST_RESULT,
+    "Required files": REQUIRED_FILE_COUNT,
+    "Independent review": INDEPENDENT_REVIEW,
+}
+
+FORBIDDEN_DEPLOYED_RECORD_MARKERS = (
+    "pending_task_9",
+    "task 9 待",
+    "v3.2.0 候选生产验证",
+    "v3.2.0 候选服务器发布包",
+)
 
 RELEASE_ITEMS = (
     "数据中台统一审阅",
@@ -151,6 +193,75 @@ def require_contains(
 ) -> None:
     if marker not in text:
         failures.append(f"{relative_path}: missing {marker!r}")
+
+
+def normalize_markdown_value(value: str) -> str:
+    normalized = value.strip()
+    if len(normalized) >= 2 and normalized.startswith("`") and normalized.endswith("`"):
+        normalized = normalized[1:-1].strip()
+    return normalized
+
+
+def bullet_field_values(text: str, field: str) -> list[str]:
+    pattern = re.compile(
+        rf"(?im)^\s*(?:[-*+]\s*)?{re.escape(field)}\s*[:：]\s*(.*?)\s*$"
+    )
+    return [normalize_markdown_value(match.group(1)) for match in pattern.finditer(text)]
+
+
+def table_field_values(text: str, field: str) -> list[str]:
+    values: list[str] = []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 2 or normalize_markdown_value(cells[0]) != field:
+            continue
+        values.append(normalize_markdown_value(cells[1]))
+    return values
+
+
+def require_exact_field(
+    values: list[str],
+    field: str,
+    expected: str,
+    relative_path: str,
+    failures: list[str],
+) -> None:
+    if values != [expected]:
+        failures.append(
+            f"{relative_path}: {field} must equal {expected!r} exactly once; "
+            f"got {values!r}"
+        )
+
+
+def verify_deployed_release_evidence(
+    release_record: str,
+    failures: list[str],
+    relative_path: str = "ops/releases/V3.2.0.md",
+) -> None:
+    for field, expected in EXPECTED_LIFECYCLE_FIELDS.items():
+        require_exact_field(
+            bullet_field_values(release_record, field),
+            field,
+            expected,
+            relative_path,
+            failures,
+        )
+    for field, expected in EXPECTED_EVIDENCE_FIELDS.items():
+        require_exact_field(
+            table_field_values(release_record, field),
+            field,
+            expected,
+            relative_path,
+            failures,
+        )
+    normalized_record = unicodedata.normalize("NFKC", release_record).casefold()
+    for marker in FORBIDDEN_DEPLOYED_RECORD_MARKERS:
+        if marker in normalized_record:
+            failures.append(
+                f"{relative_path}: stale pending marker remains {marker!r}"
+            )
 
 
 def powershell_string_array(
@@ -556,6 +667,7 @@ def verify_version_surfaces(failures: list[str]) -> None:
 def verify_release_record(failures: list[str]) -> None:
     release_path = "ops/releases/V3.2.0.md"
     release_record = read_text(release_path, failures)
+    verify_deployed_release_evidence(release_record, failures, release_path)
     required_markers = (
         "V3.1.1",
         "0013_data_center_query_indexes",
@@ -578,7 +690,6 @@ def verify_release_record(failures: list[str]) -> None:
         "npm run type-check",
         "npm run build",
         "SHA256",
-        "PENDING_TASK_9",
     )
     for marker in required_markers:
         require_contains(release_record, marker, release_path, failures)
@@ -593,7 +704,7 @@ def verify_release_record(failures: list[str]) -> None:
 
     agents = read_text("AGENTS.md", failures)
     for marker in (
-        "- Deployed production baseline: `V3.1.1`.",
+        "- Deployed production baseline: `V3.2.0`.",
         "- Release candidate: `V3.2.0`.",
         "- Release-candidate maintenance branch: `production/V3/3.2.0`.",
         "codebase-memory-mcp",
@@ -611,16 +722,33 @@ def verify_release_record(failures: list[str]) -> None:
     signoff_path = "docs/CLIENT_SIGNOFF_CHECKLIST.md"
     signoff = read_text(signoff_path, failures)
     for marker in (
-        "V3.2.0 候选生产验证",
+        "V3.2.0 生产验证",
+        SOURCE_COMMIT,
+        PACKAGE_SHA256,
         "ops/releases/V3.2.0.md",
     ):
         require_contains(signoff, marker, signoff_path, failures)
     for stale_marker in (
+        "V3.2.0 候选生产验证",
+        "PENDING_TASK_9",
+        "Task 9 上线后",
         "V3.1.1 生产验证",
         "ops/releases/V3.1.1.md",
     ):
         if stale_marker in signoff:
             failures.append(f"{signoff_path}: stale candidate signoff marker {stale_marker!r}")
+
+    acceptance_path = "docs/CLIENT_ACCEPTANCE_REPORT.md"
+    acceptance = read_text(acceptance_path, failures)
+    for stale_marker in (
+        "V3.2.0 候选服务器发布包",
+        "Task 9 待",
+        "当前公网生产基线保持 V3.1.1",
+    ):
+        if stale_marker in acceptance:
+            failures.append(
+                f"{acceptance_path}: stale candidate marker {stale_marker!r}"
+            )
 
 
 def verify_feature_files_and_routes(failures: list[str]) -> None:

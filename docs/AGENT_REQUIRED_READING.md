@@ -5,12 +5,13 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.1.1`
-- 当前生产应用基线：`V3.1.1`
-- 当前发布候选版本：`V3.1.1`
-- 当前生产 release：`/opt/module-manager-v2/releases/v3.1.1-20260723_171150`
-- 当前回滚 release：`/opt/module-manager-v2/releases/v3.1.0-20260723_153935`
-- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.1.1`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
+- 生产维护分支：`production/V3/3.2.0`
+- 当前生产应用基线：`V3.2.0`
+- 当前发布候选版本：`V3.2.0`
+- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.0-20260724_105649`
+- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.0-20260724_095503`
+- 当前生产提交：`fe527eb84064096321e727abf9ccbdc981e10b7e`
+- 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.2.0`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
 - worktree 路径里的 `production-v3.0.24` 是创建时名称，不代表当前线上版本。
 
@@ -73,7 +74,7 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest v2-api/tests
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.1.1
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.0
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py --help
 cd v2-web; npm run build
 ```
@@ -105,7 +106,8 @@ git diff --cached --name-only
 ## 当前维护重点
 
 - 生产线以线上稳定为最高优先级，不混入开发环境 `3.0.56` 之类内容。
-- 数据中台、项目驾驶舱、审阅工作台、施工采集页是当前高频维护页面。
+- 数据中台、项目驾驶舱、导出中心、任务领取页和施工采集页是当前高频维护页面。
+- 审阅工作台与 reviewer-only 角色已在 V3.2.0 下线；审阅能力统一收口到管理员数据中台，不得恢复旧入口。
 - 图片扫码准确率、人工确认、分类完成状态、自动归档和后台慢速维护任务是当前重点链路。
 - 登录有效期为当天有效；过期后任何操作应跳转登录页。
 - 任务领取页进度 100% 后按钮应显示 `已施工` / `已审阅` 且不可用。

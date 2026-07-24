@@ -5,10 +5,11 @@
 - Package: `build/server-release/module-manager-v2-server-3.2.0.zip`
 - Name: `module-manager-v2-server-3.2.0.zip`
 - Version: 3.2.0
-- Generated at: PENDING_TASK_9
-- Size: PENDING_TASK_9
-- SHA256: PENDING_TASK_9
-- 记录口径：Task 8 仅建立候选清单；Task 9 生成并验证 ZIP 后填写时间、大小和 SHA256。
+- Generated at: 2026-07-24 10:33:21 +08:00
+- Size: 1621627 bytes
+- SHA256: `9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF`
+- Source commit: `fe527eb84064096321e727abf9ccbdc981e10b7e`
+- Production release: `/opt/module-manager-v2/releases/v3.2.0-20260724_105649`
 
 ## Included
 
@@ -75,3 +76,5 @@
 - V3.1 migrations `0006` through `0012` are production-irreversible; never run Alembic downgrade. Application rollback keeps the forward schema, and data rollback requires a validated pre-upgrade PostgreSQL backup.
 - Use `build/server-release/` packages for production deployment
 - Record each production release under `ops/releases/`
+- V3.2.0 发布前备份：`/opt/module-manager-v2/backups/V3.2.0-pre-20260724_105349`
+- V3.2.0 回滚 release：`/opt/module-manager-v2/releases/v3.2.0-20260724_095503`

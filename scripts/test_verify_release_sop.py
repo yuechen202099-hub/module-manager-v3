@@ -28,7 +28,7 @@ def test_parses_current_deployed_baseline_and_release_candidate_markers() -> Non
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert verifier.deployed_production_baseline(agents) == "V3.1.1"
+    assert verifier.deployed_production_baseline(agents) == "V3.2.0"
     assert verifier.release_candidate(agents) == "V3.2.0"
 
 
@@ -249,11 +249,27 @@ def test_v320_manifest_records_the_release_candidate_package() -> None:
     assert "- Version: 3.2.0" in manifest
 
 
-def test_v320_pending_release_record_contains_required_release_evidence_contract() -> None:
+def test_v320_deployed_release_record_contains_required_release_evidence_contract() -> None:
     verifier = load_verifier()
     record = (ROOT / "ops" / "releases" / "V3.2.0.md").read_text(encoding="utf-8")
 
-    verifier.candidate_release_record_is_pending(record, "V3.2.0", "V3.1.1")
+    verifier.deployed_release_record_is_verified(record, "V3.2.0")
+    evidence = verifier.release_record_evidence(record)
+    assert verifier.release_record_status(record) == (
+        "reviewed, packaged, deployed, and verified in production"
+    )
+    assert evidence["SHA256"] == [
+        "9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF"
+    ]
+    assert evidence["Backup directory"] == [
+        "/opt/module-manager-v2/backups/V3.2.0-pre-20260724_105349"
+    ]
+    assert evidence["Release directory"] == [
+        "/opt/module-manager-v2/releases/v3.2.0-20260724_105649"
+    ]
+    assert evidence["Public health check"] == [
+        "https://www.sgcc.online/health passed"
+    ]
     for marker in (
         "数据中台统一审阅",
         "驾驶舱下钻",
@@ -262,7 +278,7 @@ def test_v320_pending_release_record_contains_required_release_evidence_contract
         "明细分页支持 20/50/100",
         "0013_data_center_query_indexes",
         "0014_export_center_jobs",
-        "PENDING_TASK_9",
+        "fe527eb84064096321e727abf9ccbdc981e10b7e",
     ):
         assert marker in record
 
@@ -278,7 +294,7 @@ def test_v3082_release_record_passes_the_deployed_baseline_gate() -> None:
     ("english_marker", "replacement", "parser_name"),
     [
         (
-            "- Deployed production baseline: `V3.1.1`.",
+            "- Deployed production baseline: `V3.2.0`.",
             "- Deployed production baseline: `V3.0.82`.",
             "deployed_production_baseline",
         ),

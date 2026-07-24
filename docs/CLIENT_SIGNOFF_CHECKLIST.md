@@ -2,7 +2,7 @@
 
 本清单用于甲方第一版演示结束后的现场确认。签收范围是“模块更换项目管理器 V2.0 本地交付演示版”，不等同于公网生产部署版。
 
-## V3.2.0 候选生产包路径
+## V3.2.0 生产包路径
 
 ```text
 build/server-release/module-manager-v2-server-3.2.0.zip
@@ -44,13 +44,13 @@ build/server-release/module-manager-v2-server-3.2.0.zip
 .\scripts\run-client-acceptance-gate.ps1
 ```
 
-V3.2.0 候选生产验证：
+V3.2.0 生产验证：
 
-- 本轮完整测试：Task 8 发布门禁通过，Task 9 上线后补填最终统计
+- 本轮完整测试：`1782 passed, 13 skipped`
 - 静态页面校验：通过
-- 部署样例校验：Task 9 上线后补填
-- `SOURCE_COMMIT=PENDING_TASK_9`
-- 发布包 SHA256 `PENDING_TASK_9`
+- 部署与线上页面/API 校验：通过
+- `SOURCE_COMMIT=fe527eb84064096321e727abf9ccbdc981e10b7e`
+- 发布包 SHA256 `9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF`
 - 生产记录：`ops/releases/V3.2.0.md`
 
 回滚基线 V3.1.0 历史证据：

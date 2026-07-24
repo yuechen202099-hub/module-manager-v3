@@ -422,6 +422,135 @@ def test_v320_release_verifies_the_real_admin_system_status_route() -> None:
     assert '"/system/status/version"' not in release_verifier
 
 
+def test_v320_deployed_evidence_gate_accepts_the_recorded_production_values() -> None:
+    verifier = load_v320_release_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.2.0.md").read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_deployed_release_evidence(record, failures)
+
+    assert failures == []
+
+
+@pytest.mark.parametrize(
+    ("field", "original", "replacement", "correct_value"),
+    [
+        (
+            "Package",
+            "- Package: verified",
+            "- Package: pending",
+            "verified",
+        ),
+        (
+            "Production Deployment",
+            "- Production Deployment: deployed",
+            "- Production Deployment: pending",
+            "deployed",
+        ),
+        (
+            "SHA256",
+            "| SHA256 | 9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF |",
+            f"| SHA256 | {'0' * 64} |",
+            "9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF",
+        ),
+        (
+            "Source commit",
+            "| Source commit | `fe527eb84064096321e727abf9ccbdc981e10b7e` |",
+            f"| Source commit | `{'0' * 40}` |",
+            "fe527eb84064096321e727abf9ccbdc981e10b7e",
+        ),
+        (
+            "Backup directory",
+            "| Backup directory | /opt/module-manager-v2/backups/V3.2.0-pre-20260724_105349 |",
+            "| Backup directory | /opt/module-manager-v2/backups/wrong-backup |",
+            "/opt/module-manager-v2/backups/V3.2.0-pre-20260724_105349",
+        ),
+        (
+            "Release directory",
+            "| Release directory | /opt/module-manager-v2/releases/v3.2.0-20260724_105649 |",
+            "| Release directory | /opt/module-manager-v2/releases/missing-release |",
+            "/opt/module-manager-v2/releases/v3.2.0-20260724_105649",
+        ),
+        (
+            "Rollback target",
+            "- Rollback target: `/opt/module-manager-v2/releases/v3.2.0-20260724_095503`",
+            "- Rollback target: `/opt/module-manager-v2/releases/missing-rollback`",
+            "/opt/module-manager-v2/releases/v3.2.0-20260724_095503",
+        ),
+        (
+            "Full test result",
+            "| Full test result | 1782 passed, 13 skipped |",
+            "| Full test result | 1 passed |",
+            "1782 passed, 13 skipped",
+        ),
+        (
+            "Required files",
+            "| Required files | 167 |",
+            "| Required files | 166 |",
+            "167",
+        ),
+        (
+            "Independent review",
+            "| Independent review | Critical 0 / Important 0 / Minor 1，结论可发布 |",
+            "| Independent review | Critical 0 / Important 2 / Minor 0，结论不可发布 |",
+            "Critical 0 / Important 0 / Minor 1，结论可发布",
+        ),
+    ],
+)
+def test_v320_deployed_evidence_gate_binds_values_to_their_fields(
+    field: str,
+    original: str,
+    replacement: str,
+    correct_value: str,
+) -> None:
+    verifier = load_v320_release_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.2.0.md").read_text(encoding="utf-8")
+    assert original in record
+    mutated = record.replace(original, replacement, 1)
+    mutated += f"\nUnstructured note containing the old value: {correct_value}\n"
+    failures: list[str] = []
+
+    verifier.verify_deployed_release_evidence(mutated, failures)
+
+    assert any(field in failure for failure in failures)
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "PENDING_TASK_9",
+        "Task 9 待完成",
+        "* Package: pending",
+        "- Package： pending",
+        "Package: pending",
+        "V3.2.0 候选生产验证",
+    ],
+)
+def test_v320_deployed_evidence_gate_rejects_stale_or_contradictory_markers(
+    marker: str,
+) -> None:
+    verifier = load_v320_release_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.2.0.md").read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_deployed_release_evidence(f"{record}\n{marker}\n", failures)
+
+    assert failures
+
+
+def test_v320_deployed_evidence_gate_requires_independent_review_exactly_once() -> None:
+    verifier = load_v320_release_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.2.0.md").read_text(encoding="utf-8")
+    duplicate = (
+        f"{record}\n| Independent review | {verifier.INDEPENDENT_REVIEW} |\n"
+    )
+    failures: list[str] = []
+
+    verifier.verify_deployed_release_evidence(duplicate, failures)
+
+    assert any("Independent review" in failure for failure in failures)
+
+
 def test_release_builder_stops_when_smoke_check_fails() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     smoke_block = build_script.split("Running release smoke check before packaging...", maxsplit=1)[1]
