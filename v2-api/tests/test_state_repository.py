@@ -4417,9 +4417,18 @@ def test_dual_backend_mirrors_core_writes_after_json_success(monkeypatch: pytest
         (
             "update_group_metadata",
             ("g-1",),
-            {"actor": "reviewer-a", "updates": {"collector": "c"}, "audit_action": "update_group_metadata"},
+            {
+                "actor": "reviewer-a",
+                "updates": {"collector": "c"},
+                "audit_action": "update_group_metadata",
+                "audit_context": None,
+            },
         ),
-        ("reset_group_to_unconstructed", ("g-1",), {"actor": "reviewer-a", "reason": "wrong", "force": True}),
+        (
+            "reset_group_to_unconstructed",
+            ("g-1",),
+            {"actor": "reviewer-a", "reason": "wrong", "force": True, "source_page": ""},
+        ),
         (
             "record_construction_activity_event",
             (),
@@ -7681,7 +7690,7 @@ def test_postgres_data_center_manual_confirm_bypasses_review_claim_and_audits_so
         photo_ids=[photo.legacy_id for photo in photos],
     )
 
-    assert result["barcode_status"] == "manual_passed"
+    assert result["barcode_status"] == "manual_confirmed"
     audit = staged_audits[0]
     assert audit["payload"]["source_page"] == "data_center"
     assert audit["payload"]["source"] == "data_center"

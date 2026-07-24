@@ -181,6 +181,7 @@ def test_data_center_edit_invalidates_barcode_archive_and_delivery_cache(
 
 def test_json_data_center_classifies_final_photo_then_auto_archives_and_queues_delivery(
     json_review_repo: repository.JsonStateRepository,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = local_simulation.get_state()
     group = state["groups"][0]
@@ -200,6 +201,17 @@ def test_json_data_center_classifies_final_photo_then_auto_archives_and_queues_d
     group["delivery_cache_status"] = "pending"
     state["delivery_package_jobs"] = []
     _mark_future_authoritative_barcode_pass(group, photo_id="p4", category="after_box")
+    original_begin = local_simulation.begin_authoritative_json_write
+    nested_begin_attempts = 0
+
+    def fail_on_nested_write(team_id: str | None = None):
+        nonlocal nested_begin_attempts
+        if local_simulation.active_authoritative_json_write(team_id) is not None:
+            nested_begin_attempts += 1
+            raise AssertionError("delivery package request must reuse the active JSON write")
+        return original_begin(team_id)
+
+    monkeypatch.setattr(local_simulation, "begin_authoritative_json_write", fail_on_nested_write)
 
     result = json_review_repo.classify_data_center_group_photo(
         "g-1",
@@ -221,6 +233,7 @@ def test_json_data_center_classifies_final_photo_then_auto_archives_and_queues_d
     assert all(photo["archive_status"] == "archived" for photo in group["photos"])
     assert delivery_jobs, "auto archive must enqueue delivery cache"
     assert package_jobs, "auto archive must enqueue delivery package"
+    assert nested_begin_attempts == 0
     payload = _audit_payload("data_center_photo_classified")
     assert payload["source_page"] == "data_center"
     assert payload["source"] == "data_center"
@@ -258,7 +271,7 @@ def test_manual_confirmation_requires_reason_and_auto_archives_when_ready(
     group = _latest_group()
     package_statuses = {str(job.get("status") or "") for job in local_simulation.get_state()["delivery_package_jobs"]}
 
-    assert result["barcode_status"] == "manual_passed"
+    assert result["barcode_status"] == "manual_confirmed"
     assert result["archive_status"] == "archived"
     assert group["status"] == "approved"
     assert package_statuses & {"pending", "ready"}

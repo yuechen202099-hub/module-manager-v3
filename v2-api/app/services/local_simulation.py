@@ -2943,7 +2943,7 @@ def associate_unmatched_record(
 def ensure_construction_task_fields(
     task: dict[str, Any], stats: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    from app.services.state_repository import construction_task_availability
+    from app.services.construction_task_rules import construction_task_availability
 
     task.setdefault("construction_enabled", False)
     task.setdefault("construction_claimed_by", None)

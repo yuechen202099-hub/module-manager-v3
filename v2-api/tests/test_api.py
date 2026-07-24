@@ -974,12 +974,12 @@ def test_group_region_scan_resolves_trusted_photo_without_mutating_state(monkeyp
     }
     response = production_client.post(
         "/local-test/groups/group-1/photos/photo-1/region-scan",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json=body,
     )
     untrusted_source = production_client.post(
         "/local-test/groups/group-1/photos/photo-1/region-scan",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={**body, "url": "http://127.0.0.1/private"},
     )
     missing = production_client.post(
@@ -1595,6 +1595,7 @@ def test_production_unmatched_review_role_matrix(monkeypatch, tmp_path) -> None:
     ]
     for method, path, body in requests:
         assert production_client.request(method.upper(), path, json=body).status_code == 401
+        assert production_client.request(method.upper(), path, headers=headers["reviewer"], json=body).status_code == 403
         assert production_client.request(method.upper(), path, headers=headers["constructor"], json=body).status_code == 403
 
     assert production_client.post(finalize_path, json=finalize_body).status_code == 401
@@ -1603,11 +1604,10 @@ def test_production_unmatched_review_role_matrix(monkeypatch, tmp_path) -> None:
     assert repository.calls == []
 
     for method, path, body in requests:
-        assert production_client.request(method.upper(), path, headers=headers["reviewer"], json=body).status_code == 200
         assert production_client.request(method.upper(), path, headers=headers["admin"], json=body).status_code == 200
     assert production_client.post(finalize_path, headers=headers["admin"], json=finalize_body).status_code == 200
     candidate_calls = [call for call in repository.calls if call["method"] == "candidates"]
-    assert {call["actor"] for call in candidate_calls} == {"reviewer-a", "root-admin"}
+    assert {call["actor"] for call in candidate_calls} == {"root-admin"}
 
 
 def test_unmatched_candidate_compatibility_route_uses_same_audited_handler(monkeypatch, tmp_path) -> None:
@@ -2090,14 +2090,14 @@ def test_production_unmatched_review_routes_use_postgres_repository_transactions
 
     detail = production_client.get(
         "/local-test/unmatched/unmatched-1/review",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
     )
     assert detail.status_code == 200
     photo_id = detail.json()["data"]["review"]["photos"][0]["id"]
 
     saved = production_client.patch(
         "/local-test/unmatched/unmatched-1/review",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={
             "expected_version": 1,
             "metadata": {"collector": "C002"},
@@ -2112,7 +2112,7 @@ def test_production_unmatched_review_routes_use_postgres_repository_transactions
     session_count = len(tracker["sessions"])
     invalid_state = production_client.patch(
         "/local-test/unmatched/unmatched-1/review",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={"expected_version": 2, "state": "invalid"},
     )
     assert invalid_state.status_code == 400
@@ -2121,7 +2121,7 @@ def test_production_unmatched_review_routes_use_postgres_repository_transactions
 
     invalid_category = production_client.post(
         f"/local-test/unmatched/unmatched-1/photos/{photo_id}/rescan",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={"expected_version": 2, "category": "not-a-category"},
     )
     assert invalid_category.status_code == 400
@@ -2129,7 +2129,7 @@ def test_production_unmatched_review_routes_use_postgres_repository_transactions
 
     rescanned = production_client.post(
         f"/local-test/unmatched/unmatched-1/photos/{photo_id}/rescan",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={"expected_version": 2, "category": "collector_barcode"},
     )
     assert rescanned.status_code == 200
@@ -2139,7 +2139,7 @@ def test_production_unmatched_review_routes_use_postgres_repository_transactions
 
     confirmed = production_client.post(
         "/local-test/unmatched/unmatched-1/confirm",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={"expected_version": 3, "confirmed": True},
     )
     assert confirmed.status_code == 200
@@ -2182,25 +2182,25 @@ def test_production_unmatched_review_maps_repository_errors(monkeypatch, tmp_pat
     repository = FakeUnmatchedReviewRepository()
     monkeypatch.setattr(local_test, "state_repository", lambda: repository)
 
-    assert production_client.get("/local-test/unmatched/missing/review", headers=headers["reviewer"]).status_code == 404
+    assert production_client.get("/local-test/unmatched/missing/review", headers=headers["admin"]).status_code == 404
     assert production_client.patch(
         "/local-test/unmatched/unmatched-1/review",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={"expected_version": 1},
     ).status_code == 409
     assert production_client.patch(
         "/local-test/unmatched/unmatched-1/review",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={"expected_version": 2, "state": "invalid"},
     ).status_code == 400
     assert production_client.post(
         "/local-test/unmatched/unmatched-1/photos/missing/rescan",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={"expected_version": 2, "category": "collector_barcode"},
     ).status_code == 404
     assert production_client.post(
         "/local-test/unmatched/unmatched-1/confirm",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={"expected_version": 1},
     ).status_code == 409
     assert production_client.post(
@@ -2252,7 +2252,7 @@ def test_production_unmatched_photo_content_uses_server_source_and_rejects_ssrf(
     monkeypatch.setattr(local_test, "_read_remote_image", fake_read_remote_image)
     content = production_client.get(
         "/local-test/unmatched/unmatched-1/photos/photo-1/content?url=http://127.0.0.1/private.jpg",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
     )
     assert content.status_code == 200
     assert fetched_urls == ["https://cdn.allowed.test/server-photo.jpg"]
@@ -2260,7 +2260,7 @@ def test_production_unmatched_photo_content_uses_server_source_and_rejects_ssrf(
     repository.review["photos"][0]["source_url"] = "http://127.0.0.1/private.jpg"
     denied = production_client.get(
         "/local-test/unmatched/unmatched-1/photos/photo-1/content",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
     )
     assert denied.status_code == 400
     assert fetched_urls == ["https://cdn.allowed.test/server-photo.jpg"]
@@ -2273,7 +2273,7 @@ def test_production_unmatched_review_confirm_is_not_a_formal_scan_pass(monkeypat
 
     response = production_client.post(
         "/local-test/unmatched/unmatched-1/confirm",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={"expected_version": 2, "confirmed": True},
     )
 
@@ -2440,7 +2440,7 @@ def test_production_group_metadata_requires_reviewer_or_admin(monkeypatch, tmp_p
     )
     assert allowed.status_code == 200
     assert repository.update_calls == 1
-    assert repository.actors == ["admin-selected-reviewer"]
+    assert repository.actors == ["root-admin"]
 
 
 @pytest.mark.parametrize(
@@ -2534,7 +2534,7 @@ def test_production_barcode_endpoints_bind_effective_actor_to_token_subject(monk
     )
     confirmed = production_client.post(
         "/local-test/groups/group-1/barcode-manual-confirm",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         json={
             "actor": "forged-admin",
             "meter_no": "110000288056",
@@ -2547,7 +2547,7 @@ def test_production_barcode_endpoints_bind_effective_actor_to_token_subject(monk
 
     assert rescan.status_code == 200
     assert confirmed.status_code == 200
-    assert repository.calls == [("rescan", "root-admin"), ("confirm", "reviewer-a")]
+    assert repository.calls == [("rescan", "root-admin"), ("confirm", "root-admin")]
 
 
 def test_production_group_image_upload_checks_role_before_storage(monkeypatch, tmp_path) -> None:
@@ -2598,13 +2598,13 @@ def test_production_group_image_upload_checks_role_before_storage(monkeypatch, t
 
     allowed = production_client.post(
         "/local-test/groups/group-1/photos/upload-images",
-        headers=headers["reviewer"],
+        headers=headers["admin"],
         files={"files": ("photo.jpg", tiny_jpeg_bytes(), "image/jpeg")},
     )
 
     assert allowed.status_code == 200
     assert len(storage_calls) == 1
-    assert repository.add_calls[0]["actor"] == "reviewer-a"
+    assert repository.add_calls[0]["actor"] == "root-admin"
 
 
 def test_manual_group_photo_upload_rejects_placeholder_identity_before_storage(monkeypatch) -> None:
@@ -3651,15 +3651,14 @@ def test_login_page_and_demo_auth_are_available() -> None:
     assert 'value="admin123"' not in page.text
     assert config.status_code == 200
     assert config.json()["data"]["demo_auth_enabled"] is True
-    assert {item["username"] for item in config.json()["data"]["demo_accounts"]} == {"admin", "reviewer", "constructor"}
+    assert {item["username"] for item in config.json()["data"]["demo_accounts"]} == {"admin", "constructor"}
     assert {item["team_id"] for item in config.json()["data"]["demo_accounts"]} == {"demo-team"}
     assert admin.status_code == 200
     assert admin.json()["data"]["team_id"] == "demo-team"
     assert admin.json()["data"]["user"]["home"] == "/app"
     assert admin.json()["data"]["user"]["team_id"] == "demo-team"
     assert admin.json()["data"]["user"]["roles"] == ["admin"]
-    assert reviewer.status_code == 200
-    assert reviewer.json()["data"]["user"]["home"] == "/app"
+    assert reviewer.status_code == 401
     assert constructor.status_code == 200
     assert constructor.json()["data"]["user"]["roles"] == ["constructor"]
     assert constructor.json()["data"]["user"]["home"] == "/app?page=construction"
@@ -4047,10 +4046,10 @@ def test_production_group_mutations_invalidate_the_admin_team_snapshot(
         def update_group_metadata(self, group_id, *, actor, updates, audit_action):
             return {"group": {"id": group_id}, "actor": actor, "updates": updates, "audit_action": audit_action}
 
-        def reset_group_to_unconstructed(self, group_id, *, actor, reason, force):
+        def reset_group_to_unconstructed(self, group_id, *, actor, reason, force, source_page):
             return {"group": {"id": group_id}, "actor": actor, "reason": reason, "force": force}
 
-        def reset_group_to_unreviewed(self, group_id, *, actor, reason, force):
+        def reset_group_to_unreviewed(self, group_id, *, actor, reason, force, source_page):
             return {"group": {"id": group_id}, "actor": actor, "reason": reason, "force": force}
 
     invalidated: list[str] = []
@@ -5165,9 +5164,9 @@ def test_claim_tasks_page_exposes_admin_release_all_control() -> None:
 
 def test_admin_can_release_all_claimed_tasks() -> None:
     admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
-    reviewer_login = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
+    constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
     admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
-    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
+    constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
 
     client.post("/local-test/bootstrap", headers=admin_headers)
     tasks = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"]
@@ -5181,10 +5180,10 @@ def test_admin_can_release_all_claimed_tasks() -> None:
         )
         assert claim.status_code == 200
 
-    reviewer_denied = client.post(
+    constructor_denied = client.post(
         "/local-test/tasks/release-all",
-        headers=reviewer_headers,
-        json={"reviewer": "reviewer"},
+        headers=constructor_headers,
+        json={"reviewer": "constructor"},
     )
     released = client.post(
         "/local-test/tasks/release-all",
@@ -5192,7 +5191,7 @@ def test_admin_can_release_all_claimed_tasks() -> None:
         json={"reviewer": "admin"},
     )
 
-    assert reviewer_denied.status_code == 403
+    assert constructor_denied.status_code == 403
     assert released.status_code == 200
     assert released.json()["data"]["released"] == len(claimable)
     after = client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"]
@@ -5202,11 +5201,9 @@ def test_admin_can_release_all_claimed_tasks() -> None:
 
 def test_construction_task_open_claim_and_upload_batch() -> None:
     admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
-    reviewer_login = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
     constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
     constructor_name = constructor_login.json()["data"]["user"]["name"]
     admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
-    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
     constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
 
     client.post("/local-test/bootstrap", headers=admin_headers)
@@ -5366,15 +5363,15 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
 
     client.post(
         f"/local-test/tasks/{task['id']}/claim",
-        headers=reviewer_headers,
-        json={"reviewer": "reviewer"},
+        headers=admin_headers,
+        json={"reviewer": "admin"},
     )
     review_groups = client.get(
         f"/local-test/tasks/{task['id']}/groups?limit=1000&scan_only=false&summary=true",
-        headers=reviewer_headers,
+        headers=admin_headers,
     ).json()["data"]["items"]
     assert second_group["id"] in {item["id"] for item in review_groups}
-    review_detail = client.get(f"/local-test/groups/{second_group['id']}", headers=reviewer_headers).json()["data"]
+    review_detail = client.get(f"/local-test/groups/{second_group['id']}", headers=admin_headers).json()["data"]
     assert len(review_detail["photos"]) == 4
     assert all(photo["image_url"].startswith("/static/uploads/construction/") for photo in review_detail["photos"])
     assert all(photo["download_status"] == "downloaded" for photo in review_detail["photos"])
@@ -5385,13 +5382,13 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
         "after_box",
     }
 
-    repaired_detail = client.get(f"/local-test/groups/{group['id']}", headers=reviewer_headers).json()["data"]
+    repaired_detail = client.get(f"/local-test/groups/{group['id']}", headers=admin_headers).json()["data"]
     collector_photo = next(photo for photo in repaired_detail["photos"] if photo["construction_slot"] == "collector_barcode")
     deleted_collector = client.request(
         "DELETE",
         f"/local-test/groups/{group['id']}/photos/{collector_photo['id']}",
-        headers=reviewer_headers,
-        json={"reviewer": "reviewer"},
+        headers=admin_headers,
+        json={"reviewer": "admin"},
     )
     assert deleted_collector.status_code == 200
 
@@ -5399,7 +5396,7 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert deleted_group["status"] == "exception"
     assert deleted_group["exception_note"] == "缺采集器照片"
     assert "missing_collector_photo" in deleted_group["exception_reasons"]
-    exception_groups = client.get("/local-test/exception-groups", headers=reviewer_headers).json()["data"]["items"]
+    exception_groups = client.get("/local-test/exception-groups", headers=admin_headers).json()["data"]["items"]
     assert group["id"] in {item["id"] for item in exception_groups}
 
     released = client.post(
@@ -5650,25 +5647,23 @@ def test_construction_upload_rejects_placeholder_group_id_before_file_save() -> 
 
 def test_exception_group_assignment_is_visible_to_constructor() -> None:
     admin_login = client.post("/auth/login", json={"username": "admin", "password": "admin123"})
-    reviewer_login = client.post("/auth/login", json={"username": "reviewer", "password": "review123"})
     constructor_login = client.post("/auth/login", json={"username": "constructor", "password": "construct123"})
     admin_headers = {"Authorization": f"bearer {admin_login.json()['data']['access_token']}"}
-    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
     constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
 
     client.post("/local-test/bootstrap", headers=admin_headers)
     task = next(item for item in client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"] if item["can_claim"])
-    claim = client.post(f"/local-test/tasks/{task['id']}/claim", headers=reviewer_headers, json={"reviewer": "reviewer"})
+    claim = client.post(f"/local-test/tasks/{task['id']}/claim", headers=admin_headers, json={"reviewer": "admin"})
     assert claim.status_code == 200
     group = client.get(
         f"/local-test/tasks/{task['id']}/groups?limit=1&summary=true",
-        headers=reviewer_headers,
+        headers=admin_headers,
     ).json()["data"]["items"][0]
 
     returned = client.patch(
         f"/local-test/groups/{group['id']}/return-exception",
-        headers=reviewer_headers,
-        json={"actor": "reviewer", "category": "照片缺失", "note": "现场补缺失照片"},
+        headers=admin_headers,
+        json={"actor": "admin", "category": "照片缺失", "note": "现场补缺失照片"},
     )
     assert returned.status_code == 200
     order = returned.json()["data"]["order"]
@@ -5712,17 +5707,17 @@ def test_construction_exception_order_routes_reject_actor_spoofing() -> None:
     task = next(item for item in client.get("/local-test/tasks", headers=admin_headers).json()["data"]["items"] if item["can_claim"])
     claim = client.post(
         f"/local-test/tasks/{task['id']}/claim",
-        headers=reviewer_headers,
+        headers=admin_headers,
         json={"reviewer": "reviewer-a"},
     )
     assert claim.status_code == 200
     group = client.get(
         f"/local-test/tasks/{task['id']}/groups?limit=1&summary=true",
-        headers=reviewer_headers,
+        headers=admin_headers,
     ).json()["data"]["items"][0]
     returned = client.patch(
         f"/local-test/groups/{group['id']}/return-exception",
-        headers=reviewer_headers,
+        headers=admin_headers,
         json={"actor": "reviewer-a", "category": "照片缺失", "note": "现场补缺失照片"},
     )
     assert returned.status_code == 200
@@ -5960,28 +5955,28 @@ def test_admin_global_group_search_is_admin_only(monkeypatch, tmp_path) -> None:
         "/auth/users",
         headers=admin_headers,
         json={
-            "username": "reviewer-a",
-            "password": "ReviewPass12345",
-            "name": "Reviewer A",
-            "roles": ["reviewer"],
+            "username": "constructor-a",
+            "password": "ConstructPass12345",
+            "name": "Constructor A",
+            "roles": ["constructor"],
             "team_id": "global-search-team",
             "status": "active",
         },
     )
     assert created.status_code == 200
-    reviewer_login = production_client.post(
+    constructor_login = production_client.post(
         "/auth/login",
-        json={"username": "reviewer-a", "password": "ReviewPass12345"},
+        json={"username": "constructor-a", "password": "ConstructPass12345"},
     )
-    assert reviewer_login.status_code == 200
-    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
+    assert constructor_login.status_code == 200
+    constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
 
     bootstrap = production_client.post("/local-test/bootstrap", headers=admin_headers)
     assert bootstrap.status_code == 200
 
-    forbidden = production_client.get("/groups/search?query=350&limit=5", headers=reviewer_headers)
+    forbidden = production_client.get("/groups/search?query=350&limit=5", headers=constructor_headers)
     assert forbidden.status_code == 403
-    legacy_forbidden = production_client.get("/local-test/group-targets?query=350&limit=5", headers=reviewer_headers)
+    legacy_forbidden = production_client.get("/local-test/group-targets?query=350&limit=5", headers=constructor_headers)
     assert legacy_forbidden.status_code == 403
 
     blank = production_client.get("/groups/search", headers=admin_headers)
@@ -6075,40 +6070,40 @@ def test_admin_group_backoffice_edit_and_resets_are_audited(monkeypatch, tmp_pat
         "/auth/users",
         headers=admin_headers,
         json={
-            "username": "reviewer-a",
-            "password": "ReviewPass12345",
-            "name": "Reviewer A",
-            "roles": ["reviewer"],
+            "username": "constructor-a",
+            "password": "ConstructPass12345",
+            "name": "Constructor A",
+            "roles": ["constructor"],
             "team_id": "group-admin-team",
             "status": "active",
         },
     )
     assert created.status_code == 200
-    reviewer_login = production_client.post(
+    constructor_login = production_client.post(
         "/auth/login",
-        json={"username": "reviewer-a", "password": "ReviewPass12345"},
+        json={"username": "constructor-a", "password": "ConstructPass12345"},
     )
-    assert reviewer_login.status_code == 200
-    reviewer_headers = {"Authorization": f"bearer {reviewer_login.json()['data']['access_token']}"}
+    assert constructor_login.status_code == 200
+    constructor_headers = {"Authorization": f"bearer {constructor_login.json()['data']['access_token']}"}
 
     assert production_client.post("/local-test/bootstrap", headers=admin_headers).status_code == 200
     group = production_client.get("/groups/search?query=350&limit=1", headers=admin_headers).json()["data"]["items"][0]
 
     forbidden = production_client.patch(
         f"/groups/{group['id']}/metadata",
-        headers=reviewer_headers,
-        json={"updates": {"address": "reviewer should not edit"}},
+        headers=constructor_headers,
+        json={"updates": {"address": "constructor should not edit"}},
     )
     assert forbidden.status_code == 403
     legacy_privileged_forbidden = production_client.patch(
         f"/local-test/groups/{group['id']}/metadata",
-        headers=reviewer_headers,
+        headers=constructor_headers,
         json={"actor": "forged-admin", "updates": {"status": "approved", "reviewer": "forged-admin"}},
     )
     assert legacy_privileged_forbidden.status_code == 403
     legacy_terminal_forbidden = production_client.patch(
         f"/local-test/groups/{group['id']}/terminal",
-        headers=reviewer_headers,
+        headers=constructor_headers,
         json={"actor": "forged-admin", "terminal": "FORGED-TERM"},
     )
     assert legacy_terminal_forbidden.status_code == 403

@@ -380,6 +380,9 @@ def test_v31_release_requires_barcode_enqueue_unit_and_all_queue_migrations() ->
 def test_v320_release_inputs_are_packaged_and_required() -> None:
     verifier = load_verifier()
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    release_verifier = (ROOT / "scripts" / "verify_v3_2_0_release.py").read_text(
+        encoding="utf-8"
+    )
     required = {
         "scripts/verify_v3_2_0_role_routes.py",
         "scripts/verify_v3_2_0_data_center_ui.py",
@@ -391,6 +394,7 @@ def test_v320_release_inputs_are_packaged_and_required() -> None:
         "v2-api/alembic/versions/0014_export_center_jobs.py",
         "v2-api/app/schemas/data_center.py",
         "v2-api/app/schemas/export_center.py",
+        "v2-api/app/services/construction_task_rules.py",
         "v2-api/app/services/data_center.py",
         "v2-api/app/services/export_center.py",
         "v2-web/src/components/data-center/DataCenterFilters.vue",
@@ -406,6 +410,7 @@ def test_v320_release_inputs_are_packaged_and_required() -> None:
     assert required <= verifier.REQUIRED_FILES
     for path in required:
         assert path.replace("/", "\\") in build_script
+        assert f'"{path}"' in release_verifier
 
 
 def test_release_builder_stops_when_smoke_check_fails() -> None:

@@ -57,15 +57,9 @@ from app.services.barcode_verification_contract import (
     summarize_durable_accuracy,
     verification_compatibility_fields,
 )
+from app.services.construction_task_rules import construction_task_availability
 from app.services.final_delivery_export import LeasedDeliveryPackage
 from app.services.matching import build_total_catalog_match_key
-
-
-def construction_task_availability(stats: Mapping[str, Any]) -> tuple[bool, bool]:
-    total = max(0, int(stats.get("total_groups") or 0))
-    uploaded = max(0, int(stats.get("uploaded_count") or 0))
-    unreviewed = max(0, int(stats.get("unreviewed_count") or 0))
-    return total > 0 and uploaded < total, uploaded > 0 and unreviewed > 0
 
 
 def _photo_construction_source_filter():

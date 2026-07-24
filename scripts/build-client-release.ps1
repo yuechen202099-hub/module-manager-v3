@@ -26,6 +26,7 @@ $v320ReleaseInputs = @(
     "v2-api\app\api\routes\exports.py",
     "v2-api\app\schemas\data_center.py",
     "v2-api\app\schemas\export_center.py",
+    "v2-api\app\services\construction_task_rules.py",
     "v2-api\app\services\data_center.py",
     "v2-api\app\services\export_center.py",
     "v2-web\src\components\data-center\DataCenterFilters.vue",

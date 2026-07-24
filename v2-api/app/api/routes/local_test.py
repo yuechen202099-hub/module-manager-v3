@@ -437,8 +437,7 @@ def request_actor(request: Request, fallback: str = "admin") -> str:
 def bound_review_actor(request: Request, reviewer: str, fallback: str = "local-reviewer") -> str:
     if settings.app_env.lower() in {"prod", "production"}:
         require_request_roles(request, {"admin"}, detail="Administrator role required")
-        clean_reviewer = str(reviewer or "").strip()
-        return clean_reviewer or request_actor(request, "admin")
+        return request_actor(request, "admin")
     require_request_roles(
         request,
         {"reviewer", "admin"},
@@ -461,8 +460,7 @@ def bound_review_actor(request: Request, reviewer: str, fallback: str = "local-r
 def bound_sensitive_barcode_actor(request: Request, requested_actor: str, fallback: str = "local-reviewer") -> str:
     if settings.app_env.lower() in {"prod", "production"}:
         require_request_roles(request, {"admin"}, detail="Administrator role required")
-        clean_actor = str(requested_actor or "").strip()
-        return clean_actor or request_actor(request, "admin")
+        return request_actor(request, "admin")
     require_request_roles(
         request,
         {"reviewer", "admin"},

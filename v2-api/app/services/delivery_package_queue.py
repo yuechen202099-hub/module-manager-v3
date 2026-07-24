@@ -176,6 +176,16 @@ def request_json_delivery_package(
     requested_by: str,
 ) -> LeasedDeliveryPackage:
     team_id = local_simulation.current_team_id()
+    active_transaction = local_simulation.active_authoritative_json_write(team_id)
+    if active_transaction is not None:
+        return stage_json_delivery_package(
+            active_transaction,
+            groups=groups,
+            task_id=task_id,
+            terminal=terminal,
+            review_scope=review_scope,
+            requested_by=requested_by,
+        )
     transaction = local_simulation.begin_authoritative_json_write(team_id)
     token = local_simulation.activate_authoritative_json_write(transaction)
     try:
