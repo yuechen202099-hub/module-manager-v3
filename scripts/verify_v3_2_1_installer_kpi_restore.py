@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 UTILITY = ROOT / "v2-web/src/utils/installerKpi.ts"
+COMPONENT = ROOT / "v2-web/src/components/InstallerKpiDialog.vue"
 TYPESCRIPT = ROOT / "v2-web/node_modules/typescript/lib/typescript.js"
 
 
@@ -96,8 +97,43 @@ process.stdout.write(JSON.stringify({{
         return json.loads(completed.stdout)
 
 
+def run_component_contract() -> None:
+    component = COMPONENT.read_text(encoding="utf-8") if COMPONENT.exists() else ""
+    assert component, "InstallerKpiDialog.vue must exist"
+    for marker in [
+        "fetchInstallerWorkload",
+        "createInstallerKpiRequestGate",
+        "filterInstallerKpiRows",
+        "buildInstallerKpiCsv",
+        "update:modelValue",
+        "open-data-center",
+        "每日工作量",
+        "导出 KPI CSV",
+        "查看原始资料",
+        "2 小时效率分布",
+        "地址清单",
+        "异常明细",
+    ]:
+        assert marker in component, f"InstallerKpiDialog missing {marker}"
+    for forbidden in ["useRouter", "useAuthStore", "createExportJob", "downloadExportJob"]:
+        assert forbidden not in component, f"InstallerKpiDialog must not use {forbidden}"
+    for marker in [
+        'v-if="loadError"',
+        '@click="loadWorkload"',
+        "requestGate.invalidate()",
+        "resetDrilldowns()",
+        "function clearWorkload()",
+        "clearWorkload()",
+        ':disabled="!row.timepointCount"',
+        ':disabled="!row.exceptionCount"',
+    ]:
+        assert marker in component, f"InstallerKpiDialog missing lifecycle behavior {marker}"
+    assert component.count("append-to-body") >= 3, "InstallerKpiDialog nested dialogs must append-to-body"
+
+
 def main() -> None:
     actual = run_utility_contract()
+    run_component_contract()
     assert actual["day"] == ["2026-07-06"]
     assert actual["week"] == ["2026-07-06"]
     assert actual["month"] == ["2026-07-01", "2026-07-06", "2026-07-31"]
