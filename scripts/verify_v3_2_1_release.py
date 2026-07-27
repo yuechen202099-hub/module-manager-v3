@@ -67,57 +67,178 @@ KPI_ALLOWED_IMPORT_SOURCES = {
     },
     "v2-web/src/utils/installerKpi.ts": {"@/api/types"},
 }
+REGEX_PREFIX_KEYWORDS = frozenset(
+    {
+        "await",
+        "case",
+        "delete",
+        "do",
+        "else",
+        "in",
+        "instanceof",
+        "of",
+        "return",
+        "throw",
+        "typeof",
+        "void",
+        "yield",
+    }
+)
+CONTROL_HEAD_KEYWORDS = frozenset({"catch", "for", "if", "switch", "while", "with"})
 
 
 def lexical_import_positions(text: str) -> list[int]:
-    """Return ``import`` keyword positions outside strings and comments."""
+    """Return executable ``import`` positions from self-contained JS/TS lexing."""
     positions: list[int] = []
-    index = 0
-    state = "code"
-    while index < len(text):
-        character = text[index]
-        if state == "code":
-            if text.startswith("//", index):
-                state = "line-comment"
+    length = len(text)
+
+    def identifier_part(character: str) -> bool:
+        return character.isalnum() or character in "_$"
+
+    def skip_quoted(index: int, quote: str) -> int:
+        index += 1
+        while index < length:
+            if text[index] == "\\":
                 index += 2
-            elif text.startswith("/*", index):
-                state = "block-comment"
-                index += 2
-            elif character == "'":
-                state = "single-quoted"
-                index += 1
-            elif character == '"':
-                state = "double-quoted"
-                index += 1
-            elif character == "`":
-                state = "template-literal"
-                index += 1
-            elif text.startswith("import", index) and (
-                index == 0 or not (text[index - 1].isalnum() or text[index - 1] in "_$")
-            ) and (index + 6 == len(text) or not (text[index + 6].isalnum() or text[index + 6] in "_$")):
-                positions.append(index)
-                index += 6
+            elif text[index] == quote:
+                return index + 1
             else:
                 index += 1
-        elif state == "line-comment":
+        return index
+
+    def regex_literal_end(index: int) -> int | None:
+        cursor = index + 1
+        in_character_class = False
+        while cursor < length:
+            character = text[cursor]
             if character in "\r\n":
-                state = "code"
-            index += 1
-        elif state == "block-comment":
-            if text.startswith("*/", index):
-                state = "code"
-                index += 2
-            else:
-                index += 1
-        else:
-            quote = {"single-quoted": "'", "double-quoted": '"', "template-literal": "`"}[state]
+                return None
             if character == "\\":
+                cursor += 2
+            elif character == "[" and not in_character_class:
+                in_character_class = True
+                cursor += 1
+            elif character == "]" and in_character_class:
+                in_character_class = False
+                cursor += 1
+            elif character == "/" and not in_character_class:
+                cursor += 1
+                while cursor < length and text[cursor].isalpha():
+                    cursor += 1
+                return cursor
+            else:
+                cursor += 1
+        return None
+
+    def scan_template(index: int) -> int:
+        index += 1
+        while index < length:
+            if text[index] == "\\":
                 index += 2
-            elif character == quote:
-                state = "code"
-                index += 1
+            elif text[index] == "`":
+                return index + 1
+            elif text.startswith("${", index):
+                index = scan_code(index + 2, stop_at_template_brace=True)
             else:
                 index += 1
+        return index
+
+    def scan_code(index: int, *, stop_at_template_brace: bool = False) -> int:
+        can_start_regex = True
+        brace_depth = 0
+        parenthesis_context: list[bool] = []
+        last_word: str | None = None
+        while index < length:
+            character = text[index]
+            if text.startswith("//", index):
+                newline = text.find("\n", index + 2)
+                index = length if newline < 0 else newline + 1
+                continue
+            if text.startswith("/*", index):
+                comment_end = text.find("*/", index + 2)
+                index = length if comment_end < 0 else comment_end + 2
+                continue
+            if character in "'\"":
+                index = skip_quoted(index, character)
+                can_start_regex = False
+                last_word = None
+                continue
+            if character == "`":
+                index = scan_template(index)
+                can_start_regex = False
+                last_word = None
+                continue
+            if character == "/":
+                closing_tag = (
+                    index > 0
+                    and text[index - 1] == "<"
+                    and index + 1 < length
+                    and (text[index + 1].isalpha() or text[index + 1] in "_$")
+                )
+                regex_end = None if closing_tag or not can_start_regex else regex_literal_end(index)
+                if regex_end is not None:
+                    index = regex_end
+                    can_start_regex = False
+                else:
+                    index += 2 if text.startswith("/=", index) else 1
+                    can_start_regex = True
+                last_word = None
+                continue
+            if character.isalpha() or character in "_$":
+                word_start = index
+                index += 1
+                while index < length and identifier_part(text[index]):
+                    index += 1
+                word = text[word_start:index]
+                if word == "import":
+                    positions.append(word_start)
+                can_start_regex = word in REGEX_PREFIX_KEYWORDS
+                last_word = word
+                continue
+            if character.isdigit():
+                index += 1
+                while index < length and (identifier_part(text[index]) or text[index] == "."):
+                    index += 1
+                can_start_regex = False
+                last_word = None
+                continue
+            if character == "{":
+                if stop_at_template_brace:
+                    brace_depth += 1
+                can_start_regex = True
+            elif character == "}":
+                if stop_at_template_brace and brace_depth == 0:
+                    return index + 1
+                if brace_depth:
+                    brace_depth -= 1
+                can_start_regex = False
+            elif character == "(":
+                parenthesis_context.append(last_word in CONTROL_HEAD_KEYWORDS)
+                can_start_regex = True
+            elif character == ")":
+                can_start_regex = parenthesis_context.pop() if parenthesis_context else False
+            elif character == "]":
+                can_start_regex = False
+            elif text.startswith("...", index):
+                index += 3
+                can_start_regex = True
+                last_word = None
+                continue
+            elif text.startswith("++", index) or text.startswith("--", index):
+                index += 2
+                can_start_regex = False
+                last_word = None
+                continue
+            elif character == ".":
+                can_start_regex = False
+            elif not character.isspace():
+                can_start_regex = True
+            if not character.isspace():
+                last_word = None
+            index += 1
+        return index
+
+    scan_code(0)
     return positions
 
 

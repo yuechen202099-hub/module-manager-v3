@@ -590,6 +590,47 @@ def test_v321_kpi_source_contract_ignores_import_words_inside_strings() -> None:
     assert failures == []
 
 
+@pytest.mark.parametrize(
+    "template_expression",
+    (
+        "async function probe() { return `${await import('@/lib/sideEffects')}` }\n",
+        (
+            "async function probe() { return "
+            "`outer ${await import('@/lib/sideEffects') ? `inner ${value}` : ''}` }\n"
+        ),
+        "async function probe() { return `outer ${`inner ${await import('@/lib/sideEffects')}`}` }\n",
+    ),
+)
+def test_v321_kpi_source_contract_rejects_dynamic_imports_inside_template_expressions(
+    template_expression: str,
+) -> None:
+    verifier = load_v321_release_verifier()
+    source = (ROOT / "v2-web/src/utils/installerKpi.ts").read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_kpi_source_contract(
+        "v2-web/src/utils/installerKpi.ts",
+        template_expression + source,
+        failures,
+    )
+
+    assert any("must not contain unrecognized import syntax" in failure for failure in failures)
+
+
+def test_v321_kpi_source_contract_ignores_import_words_inside_regex_literals() -> None:
+    verifier = load_v321_release_verifier()
+    source = (ROOT / "v2-web/src/utils/installerKpi.ts").read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_kpi_source_contract(
+        "v2-web/src/utils/installerKpi.ts",
+        r"const importPattern = /import\(/;" + "\n" + source,
+        failures,
+    )
+
+    assert failures == []
+
+
 def test_v320_release_verifies_the_real_admin_system_status_route() -> None:
     release_verifier = (ROOT / "scripts" / "verify_v3_2_0_release.py").read_text(
         encoding="utf-8"
