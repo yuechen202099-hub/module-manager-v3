@@ -547,12 +547,22 @@ def test_v321_pending_record_rejects_english_and_chinese_affirmative_deployment_
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "const { queueExport: run } = await import('@/lib/exporter')\nrun()\n" + text,
-            "must not use dynamic imports",
+            "must not contain unrecognized import syntax",
         ),
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "const { queueExport: run } = await import('@/lib/' + 'exporter')\nrun()\n" + text,
-            "must not use dynamic imports",
+            "must not contain unrecognized import syntax",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "import/*comment*/{ run }from '@/lib/sideEffects'; run()\n" + text,
+            "must not contain unrecognized import syntax",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "const sideEffects = await import/*comment*/('@/lib/sideEffects')\n" + text,
+            "must not contain unrecognized import syntax",
         ),
     ),
 )
@@ -564,6 +574,20 @@ def test_v321_kpi_sources_reject_extra_api_imports_and_direct_network_or_export_
     verifier.verify_kpi_source_contract(relative_path, mutate(source), failures)
 
     assert any(expected_failure in failure for failure in failures)
+
+
+def test_v321_kpi_source_contract_ignores_import_words_inside_strings() -> None:
+    verifier = load_v321_release_verifier()
+    source = (ROOT / "v2-web/src/utils/installerKpi.ts").read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_kpi_source_contract(
+        "v2-web/src/utils/installerKpi.ts",
+        "const explanatoryText = \"import('@/lib/exporter') is forbidden\"\n" + source,
+        failures,
+    )
+
+    assert failures == []
 
 
 def test_v320_release_verifies_the_real_admin_system_status_route() -> None:

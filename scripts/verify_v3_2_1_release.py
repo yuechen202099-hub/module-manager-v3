@@ -69,6 +69,58 @@ KPI_ALLOWED_IMPORT_SOURCES = {
 }
 
 
+def lexical_import_positions(text: str) -> list[int]:
+    """Return ``import`` keyword positions outside strings and comments."""
+    positions: list[int] = []
+    index = 0
+    state = "code"
+    while index < len(text):
+        character = text[index]
+        if state == "code":
+            if text.startswith("//", index):
+                state = "line-comment"
+                index += 2
+            elif text.startswith("/*", index):
+                state = "block-comment"
+                index += 2
+            elif character == "'":
+                state = "single-quoted"
+                index += 1
+            elif character == '"':
+                state = "double-quoted"
+                index += 1
+            elif character == "`":
+                state = "template-literal"
+                index += 1
+            elif text.startswith("import", index) and (
+                index == 0 or not (text[index - 1].isalnum() or text[index - 1] in "_$")
+            ) and (index + 6 == len(text) or not (text[index + 6].isalnum() or text[index + 6] in "_$")):
+                positions.append(index)
+                index += 6
+            else:
+                index += 1
+        elif state == "line-comment":
+            if character in "\r\n":
+                state = "code"
+            index += 1
+        elif state == "block-comment":
+            if text.startswith("*/", index):
+                state = "code"
+                index += 2
+            else:
+                index += 1
+        else:
+            quote = {"single-quoted": "'", "double-quoted": '"', "template-literal": "`"}[state]
+            if character == "\\":
+                index += 2
+            elif character == quote:
+                state = "code"
+                index += 1
+            else:
+                index += 1
+    return positions
+
+
 def read(relative_path: str, failures: list[str]) -> str:
     path = ROOT / relative_path
     if not path.is_file():
@@ -179,11 +231,26 @@ def verify_lifecycle(failures: list[str]) -> None:
 
 
 def verify_kpi_source_contract(relative_path: str, text: str, failures: list[str]) -> None:
-    imports = [
-        (match.group("binding").strip(), match.group("source"))
+    lexical_positions = set(lexical_import_positions(text))
+    static_imports = [
+        (match, match.group("binding").strip(), match.group("source"))
         for match in IMPORT_FROM_PATTERN.finditer(text)
     ]
-    imports.extend(("<side-effect>", match.group("source")) for match in IMPORT_SIDE_EFFECT_PATTERN.finditer(text))
+    static_imports.extend(
+        (match, "<side-effect>", match.group("source")) for match in IMPORT_SIDE_EFFECT_PATTERN.finditer(text)
+    )
+    recognized_spans = [
+        match.span()
+        for match, _, _ in static_imports
+        if next((position for position in lexical_positions if match.start() <= position < match.end()), None) is not None
+    ]
+    imports = [
+        (binding, source)
+        for match, binding, source in static_imports
+        if match.span() in recognized_spans
+    ]
+    if any(not any(start <= position < end for start, end in recognized_spans) for position in lexical_positions):
+        failures.append(f"{relative_path}: must not contain unrecognized import syntax")
     allowed_sources = KPI_ALLOWED_IMPORT_SOURCES[relative_path]
     for binding, source in imports:
         if source not in allowed_sources:
@@ -202,13 +269,11 @@ def verify_kpi_source_contract(relative_path: str, text: str, failures: list[str
         failures.append(f"{relative_path}: must not import API services")
     if re.search(r"\b(?:fetch|XMLHttpRequest|axios)\b", text):
         failures.append(f"{relative_path}: must not make direct network calls")
-    if re.search(r"\bimport\s*\(", text):
-        failures.append(f"{relative_path}: must not use dynamic imports")
     if re.search(r"\b(?:post|put|patch|delete)\s*\(", text):
         failures.append(f"{relative_path}: must not call write methods")
     if re.search(r"\b(?:create|download|queue|start)[A-Za-z0-9_]*(?:Export|export)[A-Za-z0-9_]*\s*\(", text):
         failures.append(f"{relative_path}: must not call export-job helpers")
-    if re.search(r"['\"][^'\"\n]*\/(?:[^'\"\n]*export)[^'\"\n]*['\"]", text, re.IGNORECASE):
+    if re.search(r"['\"]/(?:[^'\"\n]*export)[^'\"\n]*['\"]", text, re.IGNORECASE):
         failures.append(f"{relative_path}: must not reference export routes")
 
 
