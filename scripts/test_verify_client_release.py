@@ -169,6 +169,7 @@ def write_release_archive(
         "SOURCE_COMMIT": source_commit,
         "RELEASE_MANIFEST.md": manifest,
         "AGENTS.md": agents,
+        "docs/CLIENT_FINAL_AUDIT.md": (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8"),
         V3080_RELEASE_RECORD: deployed_release_record(
             "3.0.80",
             "Status: reviewed, packaged, deployed, and verified in production",
@@ -1103,7 +1104,17 @@ def test_client_final_audit_is_valid_only_as_version_locked_v320_history() -> No
     ("document_path", "content", "expected_version"),
     [
         ("README.md", ".\\scripts\\build-client-release.ps1 -Version 3.2.0", "3.2.1"),
-        ("docs/CLIENT_FINAL_AUDIT.md", "build/server-release/module-manager-v2-server-3.2.1.zip", "3.2.0"),
+        (
+            "docs/CLIENT_FINAL_AUDIT.md",
+            "\n".join(
+                (
+                    "# V3.2.0 生产发布审计",
+                    "V3.2.0 是当前公网生产基线",
+                    "build/server-release/module-manager-v2-server-3.2.1.zip",
+                )
+            ),
+            "3.2.0",
+        ),
     ],
 )
 def test_release_markdown_rejects_unexpected_current_or_locked_historical_versions(
@@ -1115,6 +1126,40 @@ def test_release_markdown_rejects_unexpected_current_or_locked_historical_versio
 
     with pytest.raises(AssertionError, match=rf"non-current release version .* expected {re.escape(expected_version)}"):
         verifier.verify_release_markdown_text(document_path, content, "3.2.1")
+
+
+def test_archive_accepts_version_locked_client_final_audit_history(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "version-locked-history.zip"
+    audit_history = (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8")
+
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={"docs/CLIENT_FINAL_AUDIT.md": audit_history},
+    )
+
+    verifier.verify_package(archive_path)
+
+
+def test_archive_rejects_relabelled_version_locked_client_final_audit_identity(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "relabelled-version-locked-history.zip"
+    audit_history = (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8")
+    relabelled_history = (
+        audit_history.replace("# V3.2.0 生产发布审计", "# V3.2.1 生产发布审计")
+        .replace("V3.2.0 是当前公网生产基线", "V3.2.1 是当前公网生产基线")
+    )
+
+    assert "module-manager-v2-server-3.2.0.zip" in relabelled_history
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={"docs/CLIENT_FINAL_AUDIT.md": relabelled_history},
+    )
+
+    with pytest.raises(AssertionError, match="version-locked historical identity"):
+        verifier.verify_package(archive_path)
 
 
 @pytest.mark.parametrize(

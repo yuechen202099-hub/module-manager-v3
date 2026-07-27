@@ -233,6 +233,12 @@ HISTORICAL_RELEASE_RECORD_PATTERN = re.compile(r"^ops/releases/V\d+\.\d+\.\d+\.m
 VERSION_LOCKED_HISTORICAL_DOCUMENTS = {
     "docs/CLIENT_FINAL_AUDIT.md": "3.2.0",
 }
+VERSION_LOCKED_HISTORICAL_DOCUMENT_IDENTITIES = {
+    "docs/CLIENT_FINAL_AUDIT.md": (
+        "# V3.2.0 生产发布审计",
+        "V3.2.0 是当前公网生产基线",
+    ),
+}
 
 FORBIDDEN_PARTS = {
     ".venv",
@@ -414,6 +420,9 @@ def verify_release_markdown_text(path: str, content: str, package_version: str) 
         and path != f"ops/releases/V{package_version}.md"
     ):
         return
+    for marker in VERSION_LOCKED_HISTORICAL_DOCUMENT_IDENTITIES.get(path, ()):
+        if marker not in content:
+            fail(f"{path} missing version-locked historical identity marker: {marker}")
     expected_version = VERSION_LOCKED_HISTORICAL_DOCUMENTS.get(path, package_version)
     for version_pattern in OPERATIONAL_RELEASE_VERSION_PATTERNS:
         for match in version_pattern.finditer(content):
