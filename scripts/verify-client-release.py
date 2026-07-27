@@ -307,8 +307,35 @@ def load_release_truth_parser():
     return module
 
 
+def load_v321_release_verifier():
+    path = Path(__file__).with_name("verify_v3_2_1_release.py")
+    spec = importlib.util.spec_from_file_location("package_v321_release", path)
+    if spec is None or spec.loader is None:
+        fail("Unable to load V3.2.1 release verifier")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def fail(message: str) -> None:
     raise AssertionError(message)
+
+
+def verify_packaged_kpi_source_integrity(
+    archive: zipfile.ZipFile,
+    names: set[str],
+) -> None:
+    v321_verifier = load_v321_release_verifier()
+    expected_digests = dict(v321_verifier.KPI_SOURCE_SHA256)
+    for relative_path, expected_digest in expected_digests.items():
+        if relative_path not in names:
+            fail(f"Missing reviewed KPI source member: {relative_path}")
+        actual_digest = hashlib.sha256(archive.read(relative_path)).hexdigest()
+        if actual_digest != expected_digest:
+            fail(
+                f"{relative_path}: packaged KPI source integrity mismatch: "
+                f"expected SHA-256 {expected_digest}, got {actual_digest}"
+            )
 
 
 def verify_archive_members_are_tracked(names: set[str], source_commit: str) -> None:
@@ -550,6 +577,7 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         missing = sorted(REQUIRED_FILES - names)
         if missing:
             fail("Missing required release files: " + ", ".join(missing))
+        verify_packaged_kpi_source_integrity(archive, names)
         source_commit = archive.read("SOURCE_COMMIT").decode("ascii").strip().lower()
         if SOURCE_COMMIT_PATTERN.fullmatch(source_commit) is None:
             fail("SOURCE_COMMIT must contain exactly one lowercase 40-character Git commit")

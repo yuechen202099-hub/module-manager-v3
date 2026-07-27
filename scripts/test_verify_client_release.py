@@ -20,6 +20,10 @@ RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
 VALID_SHA256 = "a" * 64
 VALID_SOURCE_COMMIT = "b" * 40
+KPI_SOURCE_PATHS = (
+    "v2-web/src/components/InstallerKpiDialog.vue",
+    "v2-web/src/utils/installerKpi.ts",
+)
 SAFETY_NOTES = (
     "Production mode disables demo accounts by default",
     "Production mode disables /docs, /redoc, and /openapi.json by default",
@@ -143,7 +147,7 @@ def write_release_archive(
     release_record: str = PENDING_RELEASE_RECORD,
     source_commit: str = VALID_SOURCE_COMMIT,
     omitted: set[str] | None = None,
-    content_overrides: dict[str, str] | None = None,
+    content_overrides: dict[str, str | bytes] | None = None,
 ) -> None:
     omitted_names = set(omitted or set())
     names = (set(verifier.REQUIRED_FILES) | {RUNTIME_VERSION_ARTIFACT, SOURCE_VERSION_ARTIFACT}) - omitted_names
@@ -183,7 +187,11 @@ def write_release_archive(
             f'{{"version":"{unrelated_chunk_entry_version}"}};\n'
         )
     archive_contents = {
-        name: contents.get(name, "fixture\n")
+        name: (
+            (ROOT / name).read_bytes()
+            if name in KPI_SOURCE_PATHS
+            else contents.get(name, "fixture\n")
+        )
         for name in names
         if name != RUNTIME_VERSION_ARTIFACT
     }
@@ -438,6 +446,62 @@ def test_v321_installer_kpi_release_inputs_are_packaged_and_required() -> None:
     assert required <= verifier.REQUIRED_FILES
     for path in required:
         assert path.replace("/", "\\") in build_script
+
+
+def test_v321_kpi_sources_are_pinned_to_lf() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    assert "v2-web/src/components/InstallerKpiDialog.vue text eol=lf" in attributes
+    assert "v2-web/src/utils/installerKpi.ts text eol=lf" in attributes
+
+
+@pytest.mark.parametrize("relative_path", KPI_SOURCE_PATHS)
+def test_v321_package_rejects_modified_kpi_source_member(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "tampered-kpi-source.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={relative_path: b"tampered KPI source\n"},
+    )
+
+    with pytest.raises(AssertionError, match=rf"{re.escape(relative_path)}: packaged KPI source integrity mismatch"):
+        verifier.verify_package(archive_path)
+
+
+@pytest.mark.parametrize("relative_path", KPI_SOURCE_PATHS)
+def test_v321_package_rejects_crlf_kpi_source_member(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    verifier = load_verifier()
+    source = (ROOT / relative_path).read_bytes()
+    assert b"\r\n" not in source
+    crlf_source = source.replace(b"\n", b"\r\n")
+    assert crlf_source != source
+    archive_path = tmp_path / "crlf-kpi-source.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={relative_path: crlf_source},
+    )
+
+    with pytest.raises(AssertionError, match=rf"{re.escape(relative_path)}: packaged KPI source integrity mismatch"):
+        verifier.verify_package(archive_path)
+
+
+def test_valid_pending_candidate_archive_contains_reviewed_kpi_bytes(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "valid-reviewed-kpi.zip"
+    write_release_archive(verifier, archive_path)
+
+    with zipfile.ZipFile(archive_path) as archive:
+        for relative_path in KPI_SOURCE_PATHS:
+            assert archive.read(relative_path) == (ROOT / relative_path).read_bytes()
+
+    verifier.verify_package(archive_path)
 
 
 def test_v321_build_sequence_keeps_historical_boundaries_but_replaces_the_candidate_release_gate() -> None:
