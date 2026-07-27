@@ -15,7 +15,7 @@ from app.models import GroupStatus, MaterialGroup, Photo, PhotoUploadStatus
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 API_ROOT = REPOSITORY_ROOT / "v2-api"
-EXPECTED_VERSION = "3.2.0"
+EXPECTED_VERSION = "3.2.1"
 
 
 def read(relative_path: str) -> str:
@@ -128,6 +128,13 @@ def test_v3_1_runtime_version_sources_and_release_notes_are_aligned() -> None:
     assert f"Module Manager V{EXPECTED_VERSION}" in read("v2-web/index.html")
 
     release_notes = read("v2-web/src/constants/releaseNotes.ts")
+    for required_text in (
+        "安装人员 KPI 原模式恢复",
+        "项目驾驶舱重新以独立弹窗展示安装人员每日工作量、效率、工时和异常明细。",
+        "恢复 2 小时工时分段、分段地址清单、异常资料组下钻和页面内 KPI CSV。",
+        "保留日、周、月范围与数据中台“查看原始资料”次级入口，KPI 公式、接口和生产数据不变。",
+    ):
+        assert required_text in release_notes
     for required_text in (
         "双 Sheet",
         "四类照片",
@@ -650,7 +657,7 @@ def test_v3_1_package_builder_blocks_without_verified_performance_evidence() -> 
     package_sop = read("docs/sop/05-release-package-and-hash.md")
 
     assert '[string]$PerformanceReport = ""' in builder
-    assert "Performance report is required for V3.2.0 packaging" in builder
+    assert "Performance report is required for V3.2.1 packaging" in builder
     assert "verify_v3_1_release.py" in builder
     assert "--performance-report $performanceReportPath" in builder
     assert "--expected-source-commit $sourceCommit" in builder

@@ -2,9 +2,9 @@
 
 ## Package
 
-- Package: `build/server-release/module-manager-v2-server-3.2.0.zip`
-- Name: `module-manager-v2-server-3.2.0.zip`
-- Version: 3.2.0
+- Package: `build/server-release/module-manager-v2-server-3.2.1.zip`
+- Name: `module-manager-v2-server-3.2.1.zip`
+- Version: 3.2.1
 - Generated at: 2026-07-24 10:33:21 +08:00
 - Size: 1621627 bytes
 - SHA256: `9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF`
@@ -50,7 +50,7 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.0
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.1
 
 ## Verified During Packaging
 

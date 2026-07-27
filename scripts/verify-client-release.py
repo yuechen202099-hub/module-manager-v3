@@ -79,6 +79,8 @@ REQUIRED_FILES = {
     "scripts/verify_v3_2_0_export_center_ui.py",
     "scripts/verify_v3_2_0_single_export_entry.py",
     "scripts/verify_v3_2_0_release.py",
+    "scripts/verify_v3_2_1_installer_kpi_restore.py",
+    "scripts/verify_v3_2_1_release.py",
     "v2-api/scripts/preview_v3_1_backfill.py",
     "v2-api/scripts/verify_v3_1_release.py",
     "v2-api/alembic/versions/0006_group_barcode_verification.py",
@@ -99,6 +101,7 @@ REQUIRED_FILES = {
     "ops/releases/V3.1.1.md",
     "ops/releases/V3.1.0.md",
     "ops/releases/V3.2.0.md",
+    "ops/releases/V3.2.1.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.80.md",
@@ -182,6 +185,8 @@ REQUIRED_FILES = {
     "v2-web/src/composables/useDataCenterQuery.ts",
     "v2-web/src/composables/useExportCenterQuery.ts",
     "v2-web/src/utils/dataCenterDrilldown.ts",
+    "v2-web/src/components/InstallerKpiDialog.vue",
+    "v2-web/src/utils/installerKpi.ts",
 }
 
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"

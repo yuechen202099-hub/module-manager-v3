@@ -12,6 +12,17 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.1',
+    date: '2026-07-27',
+    type: 'BUG 修复',
+    title: '安装人员 KPI 原模式恢复',
+    items: [
+      '项目驾驶舱重新以独立弹窗展示安装人员每日工作量、效率、工时和异常明细。',
+      '恢复 2 小时工时分段、分段地址清单、异常资料组下钻和页面内 KPI CSV。',
+      '保留日、周、月范围与数据中台“查看原始资料”次级入口，KPI 公式、接口和生产数据不变。',
+    ],
+  },
+  {
     version: 'V3.2.0',
     date: '2026-07-24',
     type: '大更新',

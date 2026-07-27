@@ -235,7 +235,7 @@ def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.2.0"' in build_script
+    assert '[string]$Version = "3.2.1"' in build_script
 
 
 def test_release_builder_embeds_the_current_source_commit() -> None:
@@ -411,6 +411,42 @@ def test_v320_release_inputs_are_packaged_and_required() -> None:
     for path in required:
         assert path.replace("/", "\\") in build_script
         assert f'"{path}"' in release_verifier
+
+
+def test_v321_installer_kpi_release_inputs_are_packaged_and_required() -> None:
+    verifier = load_verifier()
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    required = {
+        "scripts/verify_v3_2_1_installer_kpi_restore.py",
+        "scripts/verify_v3_2_1_release.py",
+        "v2-web/src/components/InstallerKpiDialog.vue",
+        "v2-web/src/utils/installerKpi.ts",
+        "ops/releases/V3.2.1.md",
+    }
+
+    assert required <= verifier.REQUIRED_FILES
+    for path in required:
+        assert path.replace("/", "\\") in build_script
+
+
+def test_v321_build_sequence_keeps_historical_boundaries_but_replaces_the_candidate_release_gate() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    match = re.search(r"\$releaseVerifiers\s*=\s*@\((?P<items>[\s\S]*?)\n\)", build_script)
+
+    assert match is not None
+    release_verifiers = match.group("items")
+    expected = (
+        "scripts\\verify_v3_2_0_role_routes.py",
+        "scripts\\verify_v3_2_0_data_center_ui.py",
+        "scripts\\verify_v3_2_0_dashboard_drilldown.py",
+        "scripts\\verify_v3_2_0_export_center_ui.py",
+        "scripts\\verify_v3_2_0_single_export_entry.py",
+        "scripts\\verify_v3_2_1_installer_kpi_restore.py",
+        "scripts\\verify_v3_2_1_release.py",
+    )
+    for verifier_path in expected:
+        assert verifier_path in release_verifiers
+    assert "scripts\\verify_v3_2_0_release.py" not in release_verifiers
 
 
 def test_v320_release_verifies_the_real_admin_system_status_route() -> None:
@@ -610,7 +646,8 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.2.0")
+        package_version = "3.2.1" if document_path == "RELEASE_MANIFEST.md" else "3.2.0"
+        verifier.verify_release_markdown_text(document_path, content, package_version)
 
 
 @pytest.mark.parametrize(
