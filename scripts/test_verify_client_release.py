@@ -1072,8 +1072,49 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        package_version = "3.2.1" if document_path == "RELEASE_MANIFEST.md" else "3.2.0"
-        verifier.verify_release_markdown_text(document_path, content, package_version)
+        verifier.verify_release_markdown_text(document_path, content, "3.2.1")
+
+
+@pytest.mark.parametrize(
+    "document_path",
+    ["README.md", "docs/CLIENT_ACCEPTANCE_REPORT.md", "docs/CLIENT_SIGNOFF_CHECKLIST.md"],
+)
+def test_current_operational_documents_validate_against_the_package_version(document_path: str) -> None:
+    verifier = load_verifier()
+
+    verifier.verify_release_markdown_text(
+        document_path,
+        (ROOT / document_path).read_text(encoding="utf-8"),
+        "3.2.1",
+    )
+
+
+def test_client_final_audit_is_valid_only_as_version_locked_v320_history() -> None:
+    verifier = load_verifier()
+
+    verifier.verify_release_markdown_text(
+        "docs/CLIENT_FINAL_AUDIT.md",
+        (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8"),
+        "3.2.1",
+    )
+
+
+@pytest.mark.parametrize(
+    ("document_path", "content", "expected_version"),
+    [
+        ("README.md", ".\\scripts\\build-client-release.ps1 -Version 3.2.0", "3.2.1"),
+        ("docs/CLIENT_FINAL_AUDIT.md", "build/server-release/module-manager-v2-server-3.2.1.zip", "3.2.0"),
+    ],
+)
+def test_release_markdown_rejects_unexpected_current_or_locked_historical_versions(
+    document_path: str,
+    content: str,
+    expected_version: str,
+) -> None:
+    verifier = load_verifier()
+
+    with pytest.raises(AssertionError, match=rf"non-current release version .* expected {re.escape(expected_version)}"):
+        verifier.verify_release_markdown_text(document_path, content, "3.2.1")
 
 
 @pytest.mark.parametrize(

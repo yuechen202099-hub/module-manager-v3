@@ -118,10 +118,10 @@
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-生成 V3.2.0 服务器发布包：
+生成 V3.2.1 服务器发布包：
 
 ```powershell
-.\scripts\build-client-release.ps1 -Version 3.2.0 -PerformanceReport .\build\release-evidence\v3.2.0-task-review.json
+.\scripts\build-client-release.ps1 -Version 3.2.1 -PerformanceReport .\build\release-evidence\v3.2.1-task-review.json
 ```
 
 发布包内会包含 `RELEASE_MANIFEST.md`，用于说明版本、生成时间、包含内容、排除项、验证命令和生产运维注意事项。

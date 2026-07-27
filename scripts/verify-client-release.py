@@ -230,6 +230,9 @@ OPERATIONAL_RELEASE_VERSION_PATTERNS = (
     ),
 )
 HISTORICAL_RELEASE_RECORD_PATTERN = re.compile(r"^ops/releases/V\d+\.\d+\.\d+\.md$")
+VERSION_LOCKED_HISTORICAL_DOCUMENTS = {
+    "docs/CLIENT_FINAL_AUDIT.md": "3.2.0",
+}
 
 FORBIDDEN_PARTS = {
     ".venv",
@@ -411,12 +414,13 @@ def verify_release_markdown_text(path: str, content: str, package_version: str) 
         and path != f"ops/releases/V{package_version}.md"
     ):
         return
+    expected_version = VERSION_LOCKED_HISTORICAL_DOCUMENTS.get(path, package_version)
     for version_pattern in OPERATIONAL_RELEASE_VERSION_PATTERNS:
         for match in version_pattern.finditer(content):
-            if match.group("version") != package_version:
+            if match.group("version") != expected_version:
                 fail(
                     f"{path} contains non-current release version "
-                    f"{match.group('version')}; expected {package_version}"
+                    f"{match.group('version')}; expected {expected_version}"
                 )
 
 
