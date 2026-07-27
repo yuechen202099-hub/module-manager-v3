@@ -82,6 +82,15 @@ function clearWorkload() {
   resetPagesAndDrilldowns()
 }
 
+function invalidateWorkloadRequest() {
+  requestGate.invalidate()
+  loading.value = false
+}
+
+function isCurrentRequest(request: number, installer: string) {
+  return requestGate.isCurrent(request) && installer === props.installer.trim() && props.modelValue
+}
+
 async function loadWorkload() {
   const installer = props.installer.trim()
   if (!props.modelValue || !installer) return
@@ -94,16 +103,16 @@ async function loadWorkload() {
       rows = (await fetchInstallerWorkload(installer)).items
       workloadCache.set(installer, rows)
     }
-    if (!requestGate.isCurrent(request) || installer !== props.installer.trim() || !props.modelValue) return
+    if (!isCurrentRequest(request, installer)) return
     rawRows.value = rows
     loadedInstaller.value = installer
     resetPagesAndDrilldowns()
   } catch (error) {
-    if (!requestGate.isCurrent(request)) return
+    if (!isCurrentRequest(request, installer)) return
     rawRows.value = []
     loadError.value = error instanceof Error ? error.message : '安装人员工作量加载失败'
   } finally {
-    if (requestGate.isCurrent(request)) loading.value = false
+    if (isCurrentRequest(request, installer)) loading.value = false
   }
 }
 
@@ -151,12 +160,12 @@ watch(
   () => [props.modelValue, props.installer, props.scope.mode, props.scope.anchorDate] as const,
   ([isVisible], previous) => {
     if (!isVisible) {
-      requestGate.invalidate()
-      loading.value = false
+      invalidateWorkloadRequest()
       resetDrilldowns()
       return
     }
     if (!previous || props.installer !== previous[1] || loadedInstaller.value !== props.installer.trim()) {
+      invalidateWorkloadRequest()
       clearWorkload()
       void loadWorkload()
     }

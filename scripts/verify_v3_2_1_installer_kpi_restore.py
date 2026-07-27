@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import uuid
@@ -131,9 +132,35 @@ def run_component_contract() -> None:
     assert component.count("append-to-body") >= 3, "InstallerKpiDialog nested dialogs must append-to-body"
 
 
+def run_component_request_lifecycle_contract() -> None:
+    component = COMPONENT.read_text(encoding="utf-8") if COMPONENT.exists() else ""
+    assert component, "InstallerKpiDialog.vue must exist"
+    assert "function invalidateWorkloadRequest()" in component, (
+        "InstallerKpiDialog must invalidate a pending request before an installer changes, including A -> empty"
+    )
+    assert re.search(
+        r"if \(!previous \|\| props\.installer !== previous\[1\] \|\| loadedInstaller\.value !== props\.installer\.trim\(\)\) \{\s*"
+        r"invalidateWorkloadRequest\(\)\s*clearWorkload\(\)\s*void loadWorkload\(\)",
+        component,
+    ), "InstallerKpiDialog must invalidate before clearing/loading an A -> empty installer transition"
+    assert "function isCurrentRequest(request: number, installer: string)" in component, (
+        "InstallerKpiDialog must guard stale responses by request, installer, and visibility"
+    )
+    assert component.count("isCurrentRequest(request, installer)") >= 3, (
+        "InstallerKpiDialog must guard success, stale failure, and loading cleanup with the same current-request predicate"
+    )
+    assert "if (!isCurrentRequest(request, installer)) return" in component, (
+        "InstallerKpiDialog stale failure must not update loadError"
+    )
+    assert "if (isCurrentRequest(request, installer)) loading.value = false" in component, (
+        "InstallerKpiDialog stale failure must not update loading"
+    )
+
+
 def main() -> None:
     actual = run_utility_contract()
     run_component_contract()
+    run_component_request_lifecycle_contract()
     assert actual["day"] == ["2026-07-06"]
     assert actual["week"] == ["2026-07-06"]
     assert actual["month"] == ["2026-07-01", "2026-07-06", "2026-07-31"]
