@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 
@@ -30,7 +32,7 @@ const output = ts.transpileModule(source, {{
   compilerOptions: {{ module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 }},
   fileName: 'installerKpi.ts',
 }}).outputText
-const modulePath = {json.dumps(str(UTILITY.with_suffix('.contract.mjs')))}
+const modulePath = process.env.INSTALLER_KPI_MODULE
 await writeFile(modulePath, output, 'utf8')
 const mod = await import(pathToFileURL(modulePath).href + `?contract=${{Date.now()}}`)
 
@@ -82,15 +84,16 @@ process.stdout.write(JSON.stringify({{
   bar: [mod.installerKpiBarHeight(0, 120), mod.installerKpiBarHeight(1, 120), mod.installerKpiBarHeight(120, 120)], csv,
 }}))
 """
-    with tempfile.NamedTemporaryFile("w", suffix=".mjs", encoding="utf-8", delete=False) as file:
-        temporary = Path(file.name)
-        file.write(node_source)
-    try:
-        completed = subprocess.run(["node", str(temporary)], cwd=ROOT, check=True, capture_output=True)
+    with tempfile.TemporaryDirectory() as directory:
+        module_path = Path(directory) / f"installerKpi-{uuid.uuid4().hex}.mjs"
+        completed = subprocess.run(
+            ["node", "--input-type=module", "--eval", node_source],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            env={**os.environ, "INSTALLER_KPI_MODULE": str(module_path)},
+        )
         return json.loads(completed.stdout)
-    finally:
-        temporary.unlink(missing_ok=True)
-        UTILITY.with_suffix(".contract.mjs").unlink(missing_ok=True)
 
 
 def main() -> None:
