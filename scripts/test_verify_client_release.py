@@ -111,6 +111,17 @@ def load_v320_release_verifier():
     return module
 
 
+def load_v321_release_verifier():
+    spec = importlib.util.spec_from_file_location(
+        "verify_v3_2_1_release", ROOT / "scripts" / "verify_v3_2_1_release.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Unable to load verify_v3_2_1_release.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def write_release_archive(
     verifier,
     archive_path: Path,
@@ -447,6 +458,88 @@ def test_v321_build_sequence_keeps_historical_boundaries_but_replaces_the_candid
     for verifier_path in expected:
         assert verifier_path in release_verifiers
     assert "scripts\\verify_v3_2_0_release.py" not in release_verifiers
+
+
+def test_v321_manifest_keeps_candidate_artifact_evidence_pending() -> None:
+    verifier = load_v321_release_verifier()
+    manifest = (ROOT / "RELEASE_MANIFEST.md").read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_manifest_pending_truth(manifest, failures)
+
+    assert failures == []
+    stale = manifest.replace("- SHA256: pending", "- SHA256: `9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF`")
+    failures = []
+    verifier.verify_manifest_pending_truth(stale, failures)
+    assert failures == ["RELEASE_MANIFEST.md: must not retain V3.2.0 artifact evidence"]
+
+
+@pytest.mark.parametrize(
+    "claim",
+    (
+        "Deployment completed.",
+        "Deployment succeeded.",
+        "Production verified.",
+        "The release is live.",
+        "已部署。",
+        "已上线。",
+        "部署完成。",
+        "部署已完成。",
+        "已完成部署。",
+        "部署成功。",
+        "上线完成。",
+        "生产验证通过。",
+    ),
+)
+def test_v321_pending_record_rejects_english_and_chinese_affirmative_deployment_claims(claim: str) -> None:
+    verifier = load_v321_release_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.2.1.md").read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_pending_record(f"{record}\n- {claim}\n", failures)
+
+    assert failures == ["ops/releases/V3.2.1.md: pending candidate must not claim deployment"]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "mutate", "expected_failure"),
+    (
+        (
+            "v2-web/src/components/InstallerKpiDialog.vue",
+            lambda text: text.replace(
+                "import { fetchInstallerWorkload } from '@/api/services'",
+                "import { fetchInstallerWorkload, createExportJob as queuedExport } from '@/api/services'",
+            ),
+            "must import only fetchInstallerWorkload",
+        ),
+        (
+            "v2-web/src/components/InstallerKpiDialog.vue",
+            lambda text: text.replace(
+                "const requestGate = createInstallerKpiRequestGate()",
+                "void fetch('/exports')\nconst requestGate = createInstallerKpiRequestGate()",
+            ),
+            "must not make direct network calls",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "import axios from 'axios'\nvoid axios.post('/exports')\n" + text,
+            "must not make direct network calls",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "const forbiddenRoute = '/export-jobs'\n" + text,
+            "must not reference export routes",
+        ),
+    ),
+)
+def test_v321_kpi_sources_reject_extra_api_imports_and_direct_network_or_export_calls(relative_path, mutate, expected_failure) -> None:
+    verifier = load_v321_release_verifier()
+    source = (ROOT / relative_path).read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_kpi_source_contract(relative_path, mutate(source), failures)
+
+    assert any(expected_failure in failure for failure in failures)
 
 
 def test_v320_release_verifies_the_real_admin_system_status_route() -> None:

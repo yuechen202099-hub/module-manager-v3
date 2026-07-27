@@ -5,11 +5,11 @@
 - Package: `build/server-release/module-manager-v2-server-3.2.1.zip`
 - Name: `module-manager-v2-server-3.2.1.zip`
 - Version: 3.2.1
-- Generated at: 2026-07-24 10:33:21 +08:00
-- Size: 1621627 bytes
-- SHA256: `9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF`
-- Source commit: `fe527eb84064096321e727abf9ccbdc981e10b7e`
-- Production release: `/opt/module-manager-v2/releases/v3.2.0-20260724_105649`
+- Generated at: pending
+- Size: pending
+- SHA256: pending
+- Source commit: pending
+- Production release: pending
 
 ## Included
 
@@ -17,7 +17,7 @@
 - Vue production bundle under v2-api/app/static/vue
 - v2-web source required by docker-compose.yml
 - Alembic migration files
-- V3.2.0 data-center and export-center schemas, services, components, migrations `0013`/`0014`, release record, and focused gates
+- V3.2.0 data-center/export-center boundaries and V3.2.1 installer KPI restore candidate gates
 - JSON/PostgreSQL and photo migration scripts under v2-api/scripts
 - Requirements and Dockerfile
 - Client acceptance gate, demo startup, smoke-check, strict Vue migration verification, PostgreSQL cutover audit, production-readiness verification, and release verification scripts under scripts
@@ -52,11 +52,11 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.1
 
-## Verified During Packaging
+## Pending Package Gates
 
-- Release smoke check passes unless -SkipSmoke was used
+- Release smoke check must pass unless -SkipSmoke is used
 - Demo admin and constructor login are available only for local walkthrough when enabled
-- V3.2.0 role, data-center, dashboard-drilldown, export-center, single-export-entry, and release gates pass
+- V3.2.0 role, data-center, dashboard-drilldown, export-center, and single-export-entry boundaries plus V3.2.1 installer KPI gates must pass
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
 - Production mode disables demo accounts by default
@@ -76,5 +76,4 @@
 - V3.1 migrations `0006` through `0012` are production-irreversible; never run Alembic downgrade. Application rollback keeps the forward schema, and data rollback requires a validated pre-upgrade PostgreSQL backup.
 - Use `build/server-release/` packages for production deployment
 - Record each production release under `ops/releases/`
-- V3.2.0 发布前备份：`/opt/module-manager-v2/backups/V3.2.0-pre-20260724_105349`
-- V3.2.0 回滚 release：`/opt/module-manager-v2/releases/v3.2.0-20260724_095503`
+- V3.2.0 的历史生产证据仅保留在 `ops/releases/V3.2.0.md`。

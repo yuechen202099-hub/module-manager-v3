@@ -29,6 +29,31 @@ PENDING_LIFECYCLE_FIELDS = {
     "Production Reconciliation": "pending",
     "Rollback target": "V3.2.0",
 }
+PENDING_MANIFEST_FIELDS = (
+    "Generated at",
+    "Size",
+    "SHA256",
+    "Source commit",
+    "Production release",
+)
+V320_ARTIFACT_EVIDENCE = (
+    "module-manager-v2-server-3.2.0.zip",
+    "2026-07-24 10:33:21 +08:00",
+    "1621627 bytes",
+    "9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF",
+    "fe527eb84064096321e727abf9ccbdc981e10b7e",
+    "/opt/module-manager-v2/releases/v3.2.0-20260724_105649",
+)
+AFFIRMATIVE_DEPLOYMENT_CLAIM = re.compile(
+    r"(?i)\b(?:deployed|shipped|released)\b"
+    r"|\b(?:deployment|production)\s+(?:has\s+been\s+)?(?:completed|verified|successful|succeeded)\b"
+    r"|\b(?:deployment\s+(?:is\s+)?complete(?:d)?|production\s+(?:is\s+)?verified)\b"
+    r"|\b(?:the\s+)?release\s+(?:is|was|has\s+gone)\s+live\b"
+    r"|已部署|已上线|部署(?:已)?(?:完成|成功)|已完成部署|上线完成|生产(?:已)?验证(?:通过)?|已发布"
+)
+IMPORT_FROM_PATTERN = re.compile(
+    r"(?ms)^\s*import\s+(?P<binding>.*?)\s+from\s+['\"](?P<source>[^'\"]+)['\"]\s*;?"
+)
 
 
 def read(relative_path: str, failures: list[str]) -> str:
@@ -96,6 +121,34 @@ def verify_release_note(failures: list[str]) -> None:
         require(note, item, "v2-web/src/constants/releaseNotes.ts", failures)
 
 
+def verify_manifest_pending_truth(manifest: str, failures: list[str]) -> None:
+    artifact_values = [
+        match.group("value").strip()
+        for field in PENDING_MANIFEST_FIELDS
+        if (match := re.search(rf"(?m)^- {re.escape(field)}:\s*(?P<value>.*?)\s*$", manifest))
+    ]
+    if any(marker in manifest for marker in V320_ARTIFACT_EVIDENCE) or any(
+        re.search(r"(?i)\bv?3\.2\.0\b", value) for value in artifact_values
+    ):
+        failures.append("RELEASE_MANIFEST.md: must not retain V3.2.0 artifact evidence")
+        return
+    for field in PENDING_MANIFEST_FIELDS:
+        match = re.search(rf"(?m)^- {re.escape(field)}:\s*(?P<value>.*?)\s*$", manifest)
+        if match is None or match.group("value").strip() != "pending":
+            failures.append(f"RELEASE_MANIFEST.md: {field} must be pending")
+
+
+def verify_pending_record(record: str, failures: list[str]) -> None:
+    record_path = "ops/releases/V3.2.1.md"
+    require(record, "# V3.2.1 Production Release Record", record_path, failures)
+    for field, value in PENDING_LIFECYCLE_FIELDS.items():
+        matches = re.findall(rf"(?m)^[-*+]\s*{re.escape(field)}:\s*`?([^`\n]+)`?\s*$", record)
+        if matches != [value]:
+            failures.append(f"{record_path}: {field} must equal {value!r} exactly once; got {matches!r}")
+    if AFFIRMATIVE_DEPLOYMENT_CLAIM.search(record):
+        failures.append(f"{record_path}: pending candidate must not claim deployment")
+
+
 def verify_lifecycle(failures: list[str]) -> None:
     agents = read("AGENTS.md", failures)
     for marker in (
@@ -108,15 +161,37 @@ def verify_lifecycle(failures: list[str]) -> None:
     ):
         require(agents, marker, "AGENTS.md", failures)
 
-    record_path = "ops/releases/V3.2.1.md"
-    record = read(record_path, failures)
-    require(record, "# V3.2.1 Production Release Record", record_path, failures)
-    for field, value in PENDING_LIFECYCLE_FIELDS.items():
-        matches = re.findall(rf"(?m)^[-*+]\s*{re.escape(field)}:\s*`?([^`\n]+)`?\s*$", record)
-        if matches != [value]:
-            failures.append(f"{record_path}: {field} must equal {value!r} exactly once; got {matches!r}")
-    if re.search(r"(?i)\b(?:deployed|shipped|released)\b", record):
-        failures.append(f"{record_path}: pending candidate must not claim deployment")
+    verify_pending_record(read("ops/releases/V3.2.1.md", failures), failures)
+
+
+def verify_kpi_source_contract(relative_path: str, text: str, failures: list[str]) -> None:
+    api_imports = [
+        (match.group("binding").strip(), match.group("source"))
+        for match in IMPORT_FROM_PATTERN.finditer(text)
+        if "/api/" in match.group("source") or match.group("source").startswith("api/")
+    ]
+    service_imports = [binding for binding, source in api_imports if source == "@/api/services"]
+    if relative_path.endswith("InstallerKpiDialog.vue"):
+        if service_imports != ["{ fetchInstallerWorkload }"]:
+            failures.append(f"{relative_path}: must import only fetchInstallerWorkload from @/api/services")
+        if len(re.findall(r"\bfetchInstallerWorkload\s*\(", text)) != 1:
+            failures.append(f"{relative_path}: must call fetchInstallerWorkload exactly once")
+    elif service_imports:
+        failures.append(f"{relative_path}: must not import API services")
+    for binding, source in api_imports:
+        if source == "@/api/services" and binding == "{ fetchInstallerWorkload }":
+            continue
+        if source == "@/api/types" and binding.startswith("type "):
+            continue
+        failures.append(f"{relative_path}: unsupported API import {source}")
+    if re.search(r"\b(?:fetch|XMLHttpRequest|axios)\b", text):
+        failures.append(f"{relative_path}: must not make direct network calls")
+    if re.search(r"\b(?:post|put|patch|delete)\s*\(", text):
+        failures.append(f"{relative_path}: must not call write methods")
+    if re.search(r"\b(?:create|download|queue|start)[A-Za-z0-9_]*(?:Export|export)[A-Za-z0-9_]*\s*\(", text):
+        failures.append(f"{relative_path}: must not call export-job helpers")
+    if re.search(r"['\"][^'\"\n]*\/(?:[^'\"\n]*export)[^'\"\n]*['\"]", text, re.IGNORECASE):
+        failures.append(f"{relative_path}: must not reference export routes")
 
 
 def verify_kpi_contract(failures: list[str]) -> None:
@@ -132,16 +207,14 @@ def verify_kpi_contract(failures: list[str]) -> None:
     services = read("v2-web/src/api/services.ts", failures)
     require(services, "fetchInstallerWorkload", "v2-web/src/api/services.ts", failures)
     for relative_path in REQUIRED_KPI_FILES[1:3]:
-        text = read(relative_path, failures)
-        for forbidden in ("createExportJob", "downloadExportJob"):
-            if forbidden in text:
-                failures.append(f"{relative_path}: must not reference {forbidden}")
+        verify_kpi_source_contract(relative_path, read(relative_path, failures), failures)
 
 
 def main() -> int:
     failures: list[str] = []
     verify_version_surfaces(failures)
     verify_release_note(failures)
+    verify_manifest_pending_truth(read("RELEASE_MANIFEST.md", failures), failures)
     verify_lifecycle(failures)
     verify_kpi_contract(failures)
     if failures:
