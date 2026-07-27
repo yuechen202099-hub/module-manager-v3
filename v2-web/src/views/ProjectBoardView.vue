@@ -21,6 +21,7 @@ import type {
   ReviewTask,
   TaskStatusSummary,
 } from '@/api/types'
+import InstallerKpiDialog from '@/components/InstallerKpiDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { mapBarcodeDashboardState } from '@/utils/barcodeVerificationState.mjs'
 import {
@@ -28,6 +29,7 @@ import {
   type DataCenterDrilldownContext,
   type DataCenterDrilldownKind,
 } from '@/utils/dataCenterDrilldown'
+import type { InstallerKpiScope } from '@/utils/installerKpi'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -94,6 +96,8 @@ const installerWorkloadScope = ref<'all' | 'day' | 'week' | 'month'>('all')
 const installerScopeDate = ref('')
 const installerWorkloadLoading = ref(false)
 const installerWorkloadCache = reactive<Record<string, InstallerWorkloadRow[]>>({})
+const installerKpiDialogVisible = ref(false)
+const installerKpiInstaller = ref('')
 
 let boardEventAbortController: AbortController | null = null
 let boardFallbackTimer = 0
@@ -243,6 +247,11 @@ const installerScopeChoices = computed(() => {
     .sort(([left], [right]) => right.localeCompare(left))
     .map(([month, date]) => ({ value: date, label: month }))
 })
+
+const installerKpiScope = computed<InstallerKpiScope>(() => ({
+  mode: installerWorkloadScope.value,
+  anchorDate: installerScopeAnchorDate() || '',
+}))
 
 const filteredInstallerDistribution = computed(() => {
   if (installerWorkloadScope.value === 'all') {
@@ -445,6 +454,19 @@ function installerDrilldownContext(installer: string): DataCenterDrilldownContex
 function openDashboardDrilldown(kind: DataCenterDrilldownKind, context: DataCenterDrilldownContext = {}) {
   if (!isAdmin.value) return
   void router.push(buildDataCenterDrilldown(kind, context))
+}
+
+function openInstallerKpi(installer: string) {
+  if (!isAdmin.value || !installer) return
+  installerKpiInstaller.value = installer
+  installerKpiDialogVisible.value = true
+}
+
+function openInstallerDataCenter() {
+  openDashboardDrilldown(
+    'installer_completed',
+    installerDrilldownContext(installerKpiInstaller.value),
+  )
 }
 
 async function loadBoard(options: { forceSummaryRefresh?: boolean } = {}) {
@@ -758,7 +780,7 @@ onUnmounted(() => {
               v-if="isAdmin"
               class="installer-row installer-row-button"
               type="button"
-              @click="openDashboardDrilldown('installer_completed', installerDrilldownContext(item.installer))"
+              @click="openInstallerKpi(item.installer)"
             >
               <span>{{ item.installer }}</span>
               <el-progress :percentage="Math.round(item.share * 100)" />
@@ -811,6 +833,13 @@ onUnmounted(() => {
         </div>
       </div>
     </section>
+    <InstallerKpiDialog
+      v-if="isAdmin"
+      v-model="installerKpiDialogVisible"
+      :installer="installerKpiInstaller"
+      :scope="installerKpiScope"
+      @open-data-center="openInstallerDataCenter"
+    />
   </section>
 </template>
 

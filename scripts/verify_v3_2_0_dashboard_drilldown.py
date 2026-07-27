@@ -205,6 +205,7 @@ def main() -> int:
     board_source = read_text("v2-web/src/views/ProjectBoardView.vue")
     router_source = read_text("v2-web/src/router/index.ts")
     utility_source = read_text("v2-web/src/utils/dataCenterDrilldown.ts")
+    kpi_source = read_text("v2-web/src/components/InstallerKpiDialog.vue")
 
     actual = transpile_and_run_drilldowns()
     assert actual["installer_completed"]["query"]["page_size"] == "20"
@@ -213,7 +214,9 @@ def main() -> int:
     assert_contains(board_source, "buildDataCenterDrilldown", "ProjectBoardView must consume the unified drilldown whitelist")
     assert_contains(board_source, "router.push(buildDataCenterDrilldown(", "dashboard clicks must push drilldowns through the whitelist")
     assert_contains(board_source, "type=\"button\"", "dashboard drilldown affordances must stay keyboard accessible")
-    assert_contains(board_source, "openDashboardDrilldown('installer_completed'", "installer chart must drill into data center")
+    assert_contains(board_source, "openInstallerKpi(item.installer)", "installer chart must open isolated KPI")
+    assert_contains(board_source, "openInstallerDataCenter", "KPI must retain a secondary Data Center entry")
+    assert_contains(kpi_source, "open-data-center", "KPI component must emit its precise Data Center context")
     assert_contains(board_source, "openDashboardDrilldown(item.drilldown", "summary/progress/risk/terminal cards must share the same drilldown entry")
     assert_contains(utility_source, "has_photos", "dashboard drilldown utility must expose precise has_photos mapping")
     assert_contains(utility_source, "terminal_status", "terminal drilldowns must use terminal_status keys")

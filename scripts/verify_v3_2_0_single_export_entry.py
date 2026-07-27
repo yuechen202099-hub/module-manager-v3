@@ -7,6 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VUE_SRC = ROOT / "v2-web" / "src"
+KPI_SNAPSHOT_EXPORT_PATH = "v2-web/src/components/InstallerKpiDialog.vue"
+KPI_SNAPSHOT_EXPORT_LABEL = "导出 KPI CSV"
 ALLOWED_EXPORT_VUE_PATHS = {
     "v2-web/src/views/ExportsView.vue",
 }
@@ -86,6 +88,19 @@ def scan_vue_source() -> None:
                 raise AssertionError(f"{relative_path} must not reference `{api_name}`")
 
 
+def verify_installer_kpi_snapshot_export() -> None:
+    installer_kpi = read(KPI_SNAPSHOT_EXPORT_PATH)
+    contains(installer_kpi, KPI_SNAPSHOT_EXPORT_LABEL, "installer KPI snapshot export")
+    for api_name in BUSINESS_EXPORT_APIS:
+        not_contains(installer_kpi, api_name, "installer KPI snapshot export")
+    for path in sorted(VUE_SRC.rglob("*.vue")):
+        if KPI_SNAPSHOT_EXPORT_LABEL in path.read_text(encoding="utf-8"):
+            ensure(
+                path.relative_to(ROOT).as_posix() == KPI_SNAPSHOT_EXPORT_PATH,
+                "KPI snapshot CSV must exist only in InstallerKpiDialog",
+            )
+
+
 def main() -> None:
     claim_tasks = read("v2-web/src/views/ClaimTasksView.vue")
     global_search = read("v2-web/src/views/GlobalSearchView.vue")
@@ -98,6 +113,7 @@ def main() -> None:
     static_page_verifier = read("scripts/verify-static-pages.py")
 
     scan_vue_source()
+    verify_installer_kpi_snapshot_export()
 
     ensure(
         not (ROOT / "v2-web/src/views/TaskHallView.vue").exists(),

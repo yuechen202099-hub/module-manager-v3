@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 UTILITY = ROOT / "v2-web/src/utils/installerKpi.ts"
 COMPONENT = ROOT / "v2-web/src/components/InstallerKpiDialog.vue"
+BOARD = ROOT / "v2-web/src/views/ProjectBoardView.vue"
 TYPESCRIPT = ROOT / "v2-web/node_modules/typescript/lib/typescript.js"
 
 
@@ -157,10 +158,30 @@ def run_component_request_lifecycle_contract() -> None:
     )
 
 
+def run_parent_integration_contract() -> None:
+    board = BOARD.read_text(encoding="utf-8") if BOARD.exists() else ""
+    assert board, "ProjectBoardView.vue must exist"
+    installer_row_match = re.search(
+        r'<button\s+v-if="isAdmin"\s+class="installer-row installer-row-button"[\s\S]*?</button>',
+        board,
+    )
+    assert installer_row_match, "ProjectBoardView must retain an admin installer row"
+    installer_row_block = installer_row_match.group(0)
+
+    assert "import InstallerKpiDialog" in board
+    assert '@click="openInstallerKpi(item.installer)"' in board
+    assert "<InstallerKpiDialog" in board
+    assert ':installer="installerKpiInstaller"' in board
+    assert ':scope="installerKpiScope"' in board
+    assert '@open-data-center="openInstallerDataCenter"' in board
+    assert "openDashboardDrilldown('installer_completed'" not in installer_row_block
+
+
 def main() -> None:
     actual = run_utility_contract()
     run_component_contract()
     run_component_request_lifecycle_contract()
+    run_parent_integration_contract()
     assert actual["day"] == ["2026-07-06"]
     assert actual["week"] == ["2026-07-06"]
     assert actual["month"] == ["2026-07-01", "2026-07-06", "2026-07-31"]
