@@ -44,16 +44,29 @@ V320_ARTIFACT_EVIDENCE = (
     "fe527eb84064096321e727abf9ccbdc981e10b7e",
     "/opt/module-manager-v2/releases/v3.2.0-20260724_105649",
 )
-AFFIRMATIVE_DEPLOYMENT_CLAIM = re.compile(
-    r"(?i)\b(?:deployed|shipped|released)\b"
-    r"|\b(?:deployment|production)\s+(?:has\s+been\s+)?(?:completed|verified|successful|succeeded)\b"
-    r"|\b(?:deployment\s+(?:is\s+)?complete(?:d)?|production\s+(?:is\s+)?verified)\b"
-    r"|\b(?:the\s+)?release\s+(?:is|was|has\s+gone)\s+live\b"
-    r"|已部署|已上线|部署(?:已)?(?:完成|成功)|已完成部署|上线完成|生产(?:已)?验证(?:通过)?|已发布"
+AFFIRMATIVE_PENDING_RECORD_PATTERNS = (
+    re.compile(r"\b(?:deployed|shipped|released)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:deployment|production(?:\s+verification)?)\s+"
+        r"(?:(?:has|was|is)\s+)?(?:been\s+)?(?:completed|verified|successful|succeeded)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:the\s+)?release\s+(?:is|was|has\s+gone)\s+live\b", re.IGNORECASE),
+    re.compile(r"已部署|已上线|部署(?:已)?(?:完成|成功)|已完成部署|上线完成|生产(?:已)?验证(?:通过)?|已发布"),
 )
 IMPORT_FROM_PATTERN = re.compile(
     r"(?ms)^\s*import\s+(?P<binding>.*?)\s+from\s+['\"](?P<source>[^'\"]+)['\"]\s*;?"
 )
+IMPORT_SIDE_EFFECT_PATTERN = re.compile(r"(?m)^\s*import\s+['\"](?P<source>[^'\"]+)['\"]\s*;?")
+KPI_ALLOWED_IMPORT_SOURCES = {
+    "v2-web/src/components/InstallerKpiDialog.vue": {
+        "vue",
+        "@/api/services",
+        "@/api/types",
+        "@/utils/installerKpi",
+    },
+    "v2-web/src/utils/installerKpi.ts": {"@/api/types"},
+}
 
 
 def read(relative_path: str, failures: list[str]) -> str:
@@ -145,7 +158,8 @@ def verify_pending_record(record: str, failures: list[str]) -> None:
         matches = re.findall(rf"(?m)^[-*+]\s*{re.escape(field)}:\s*`?([^`\n]+)`?\s*$", record)
         if matches != [value]:
             failures.append(f"{record_path}: {field} must equal {value!r} exactly once; got {matches!r}")
-    if AFFIRMATIVE_DEPLOYMENT_CLAIM.search(record):
+    normalized_record = " ".join(record.split())
+    if any(pattern.search(normalized_record) for pattern in AFFIRMATIVE_PENDING_RECORD_PATTERNS):
         failures.append(f"{record_path}: pending candidate must not claim deployment")
 
 
@@ -165,12 +179,20 @@ def verify_lifecycle(failures: list[str]) -> None:
 
 
 def verify_kpi_source_contract(relative_path: str, text: str, failures: list[str]) -> None:
-    api_imports = [
+    imports = [
         (match.group("binding").strip(), match.group("source"))
         for match in IMPORT_FROM_PATTERN.finditer(text)
-        if "/api/" in match.group("source") or match.group("source").startswith("api/")
     ]
-    service_imports = [binding for binding, source in api_imports if source == "@/api/services"]
+    imports.extend(("<side-effect>", match.group("source")) for match in IMPORT_SIDE_EFFECT_PATTERN.finditer(text))
+    allowed_sources = KPI_ALLOWED_IMPORT_SOURCES[relative_path]
+    for binding, source in imports:
+        if source not in allowed_sources:
+            failures.append(f"{relative_path}: must not import unsupported source {source}")
+        elif source == "@/api/services" and binding != "{ fetchInstallerWorkload }":
+            failures.append(f"{relative_path}: must import only fetchInstallerWorkload from @/api/services")
+        elif source == "@/api/types" and not binding.startswith("type "):
+            failures.append(f"{relative_path}: API declarations must be type-only")
+    service_imports = [binding for binding, source in imports if source == "@/api/services"]
     if relative_path.endswith("InstallerKpiDialog.vue"):
         if service_imports != ["{ fetchInstallerWorkload }"]:
             failures.append(f"{relative_path}: must import only fetchInstallerWorkload from @/api/services")
@@ -178,14 +200,10 @@ def verify_kpi_source_contract(relative_path: str, text: str, failures: list[str
             failures.append(f"{relative_path}: must call fetchInstallerWorkload exactly once")
     elif service_imports:
         failures.append(f"{relative_path}: must not import API services")
-    for binding, source in api_imports:
-        if source == "@/api/services" and binding == "{ fetchInstallerWorkload }":
-            continue
-        if source == "@/api/types" and binding.startswith("type "):
-            continue
-        failures.append(f"{relative_path}: unsupported API import {source}")
     if re.search(r"\b(?:fetch|XMLHttpRequest|axios)\b", text):
         failures.append(f"{relative_path}: must not make direct network calls")
+    if re.search(r"\bimport\s*\(", text):
+        failures.append(f"{relative_path}: must not use dynamic imports")
     if re.search(r"\b(?:post|put|patch|delete)\s*\(", text):
         failures.append(f"{relative_path}: must not call write methods")
     if re.search(r"\b(?:create|download|queue|start)[A-Za-z0-9_]*(?:Export|export)[A-Za-z0-9_]*\s*\(", text):

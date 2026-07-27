@@ -479,7 +479,11 @@ def test_v321_manifest_keeps_candidate_artifact_evidence_pending() -> None:
     (
         "Deployment completed.",
         "Deployment succeeded.",
+        "Deployment was successful.",
+        "Deployment has succeeded.",
         "Production verified.",
+        "Production verification completed.",
+        "Production verification was completed.",
         "The release is live.",
         "已部署。",
         "已上线。",
@@ -529,6 +533,26 @@ def test_v321_pending_record_rejects_english_and_chinese_affirmative_deployment_
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "const forbiddenRoute = '/export-jobs'\n" + text,
             "must not reference export routes",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "import { queueExport as run } from '@/lib/exporter'\nrun()\n" + text,
+            "must not import unsupported source",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "import '@/lib/exporter'\n" + text,
+            "must not import unsupported source",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "const { queueExport: run } = await import('@/lib/exporter')\nrun()\n" + text,
+            "must not use dynamic imports",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "const { queueExport: run } = await import('@/lib/' + 'exporter')\nrun()\n" + text,
+            "must not use dynamic imports",
         ),
     ),
 )
