@@ -538,6 +538,48 @@ def test_v321_manifest_keeps_candidate_artifact_evidence_pending() -> None:
     assert failures == ["RELEASE_MANIFEST.md: must not retain V3.2.0 artifact evidence"]
 
 
+@pytest.mark.parametrize("local_verification", ("not run", "passed"))
+def test_v321_pending_record_accepts_prepackage_local_verification_states(
+    local_verification: str,
+) -> None:
+    verifier = load_v321_release_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.2.1.md").read_text(encoding="utf-8")
+    candidate = re.sub(
+        r"(?m)^- Local Verification: .*?$",
+        f"- Local Verification: {local_verification}",
+        record,
+    )
+    failures: list[str] = []
+
+    verifier.verify_pending_record(candidate, failures)
+
+    assert failures == []
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected_matches"),
+    (
+        ("- Local Verification: failed", ["failed"]),
+        ("- Local Verification: passed\n- Local Verification: passed", ["passed", "passed"]),
+    ),
+)
+def test_v321_pending_record_rejects_invalid_or_duplicate_local_verification(
+    candidate: str,
+    expected_matches: list[str],
+) -> None:
+    verifier = load_v321_release_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.2.1.md").read_text(encoding="utf-8")
+    candidate_record = re.sub(r"(?m)^- Local Verification: .*?$", candidate, record)
+    failures: list[str] = []
+
+    verifier.verify_pending_record(candidate_record, failures)
+
+    assert failures == [
+        "ops/releases/V3.2.1.md: Local Verification must equal one of "
+        f"('not run', 'passed') exactly once; got {expected_matches!r}"
+    ]
+
+
 @pytest.mark.parametrize(
     "claim",
     (

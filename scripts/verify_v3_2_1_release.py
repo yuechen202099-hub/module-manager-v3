@@ -24,12 +24,12 @@ RELEASE_NOTE_ITEMS = (
 )
 PENDING_LIFECYCLE_FIELDS = {
     "Status": "pending",
-    "Local Verification": "not run",
     "Package": "pending",
     "Production Deployment": "pending",
     "Production Reconciliation": "pending",
     "Rollback target": "V3.2.0",
 }
+PREPACKAGE_LOCAL_VERIFICATION_STATES = ("not run", "passed")
 PENDING_MANIFEST_FIELDS = (
     "Generated at",
     "Size",
@@ -154,6 +154,17 @@ def verify_pending_record(record: str, failures: list[str]) -> None:
         matches = re.findall(rf"(?m)^[-*+]\s*{re.escape(field)}:\s*`?([^`\n]+)`?\s*$", record)
         if matches != [value]:
             failures.append(f"{record_path}: {field} must equal {value!r} exactly once; got {matches!r}")
+    local_verification_matches = re.findall(
+        r"(?m)^[-*+]\s*Local\ Verification:\s*`?([^`\n]+)`?\s*$", record
+    )
+    if (
+        len(local_verification_matches) != 1
+        or local_verification_matches[0] not in PREPACKAGE_LOCAL_VERIFICATION_STATES
+    ):
+        failures.append(
+            f"{record_path}: Local Verification must equal one of "
+            f"{PREPACKAGE_LOCAL_VERIFICATION_STATES!r} exactly once; got {local_verification_matches!r}"
+        )
     normalized_record = " ".join(record.split())
     if any(pattern.search(normalized_record) for pattern in AFFIRMATIVE_PENDING_RECORD_PATTERNS):
         failures.append(f"{record_path}: pending candidate must not claim deployment")
