@@ -514,7 +514,7 @@ def test_v321_pending_record_rejects_english_and_chinese_affirmative_deployment_
                 "import { fetchInstallerWorkload } from '@/api/services'",
                 "import { fetchInstallerWorkload, createExportJob as queuedExport } from '@/api/services'",
             ),
-            "must import only fetchInstallerWorkload",
+            "source integrity mismatch",
         ),
         (
             "v2-web/src/components/InstallerKpiDialog.vue",
@@ -522,61 +522,193 @@ def test_v321_pending_record_rejects_english_and_chinese_affirmative_deployment_
                 "const requestGate = createInstallerKpiRequestGate()",
                 "void fetch('/exports')\nconst requestGate = createInstallerKpiRequestGate()",
             ),
-            "must not make direct network calls",
+            "source integrity mismatch",
         ),
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "import axios from 'axios'\nvoid axios.post('/exports')\n" + text,
-            "must not make direct network calls",
+            "source integrity mismatch",
         ),
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "const forbiddenRoute = '/export-jobs'\n" + text,
-            "must not reference export routes",
+            "source integrity mismatch",
         ),
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "import { queueExport as run } from '@/lib/exporter'\nrun()\n" + text,
-            "must not import unsupported source",
+            "source integrity mismatch",
         ),
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "import '@/lib/exporter'\n" + text,
-            "must not import unsupported source",
+            "source integrity mismatch",
         ),
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "const { queueExport: run } = await import('@/lib/exporter')\nrun()\n" + text,
-            "must not contain unrecognized import syntax",
+            "source integrity mismatch",
         ),
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "const { queueExport: run } = await import('@/lib/' + 'exporter')\nrun()\n" + text,
-            "must not contain unrecognized import syntax",
+            "source integrity mismatch",
         ),
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "import/*comment*/{ run }from '@/lib/sideEffects'; run()\n" + text,
-            "must not contain unrecognized import syntax",
+            "source integrity mismatch",
         ),
         (
             "v2-web/src/utils/installerKpi.ts",
             lambda text: "const sideEffects = await import/*comment*/('@/lib/sideEffects')\n" + text,
-            "must not contain unrecognized import syntax",
+            "source integrity mismatch",
         ),
     ),
 )
-def test_v321_kpi_sources_reject_extra_api_imports_and_direct_network_or_export_calls(relative_path, mutate, expected_failure) -> None:
+def test_v321_kpi_source_integrity_rejects_prior_parser_and_write_export_mutations(
+    relative_path,
+    mutate,
+    expected_failure,
+) -> None:
     verifier = load_v321_release_verifier()
     source = (ROOT / relative_path).read_text(encoding="utf-8")
     failures: list[str] = []
 
     verifier.verify_kpi_source_contract(relative_path, mutate(source), failures)
 
+    assert len(failures) == 1
     assert any(expected_failure in failure for failure in failures)
 
 
-def test_v321_kpi_source_contract_ignores_import_words_inside_strings() -> None:
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "v2-web/src/components/InstallerKpiDialog.vue",
+        "v2-web/src/utils/installerKpi.ts",
+    ),
+)
+def test_v321_reviewed_kpi_sources_match_integrity_lock_and_semantics(
+    relative_path: str,
+) -> None:
+    verifier = load_v321_release_verifier()
+    failures: list[str] = []
+
+    verifier.verify_kpi_source_contract(
+        relative_path,
+        (ROOT / relative_path).read_bytes(),
+        failures,
+    )
+
+    assert failures == []
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "mutate", "expected_failure"),
+    (
+        (
+            "v2-web/src/components/InstallerKpiDialog.vue",
+            lambda text: text.replace(
+                "import { fetchInstallerWorkload } from '@/api/services'",
+                "import { fetchInstallerWorkload, createExportJob } from '@/api/services'",
+            ),
+            "missing",
+        ),
+        (
+            "v2-web/src/components/InstallerKpiDialog.vue",
+            lambda text: "void fetch('/exports')\n" + text,
+            "must not make direct network calls",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "client.delete('/workload')\n" + text,
+            "must not call write methods",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "queueInstallerExport()\n" + text,
+            "must not call export-job helpers",
+        ),
+        (
+            "v2-web/src/utils/installerKpi.ts",
+            lambda text: "const forbiddenRoute = '/export-jobs'\n" + text,
+            "must not reference export routes",
+        ),
+    ),
+)
+def test_v321_kpi_source_semantics_keep_client_write_and_export_defense_in_depth(
+    relative_path,
+    mutate,
+    expected_failure,
+) -> None:
+    verifier = load_v321_release_verifier()
+    source = (ROOT / relative_path).read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_kpi_source_semantics(relative_path, mutate(source), failures)
+
+    assert any(expected_failure in failure for failure in failures)
+
+
+def test_v321_kpi_source_integrity_rejects_template_quasi_span_bypass() -> None:
+    verifier = load_v321_release_verifier()
+    relative_path = "v2-web/src/utils/installerKpi.ts"
+    source = (ROOT / relative_path).read_text(encoding="utf-8")
+    mutation = """async function probe() {
+  return `
+import type ${await import('@/lib/sideEffects')} from '@/api/types'
+`;
+}
+"""
+    failures: list[str] = []
+
+    verifier.verify_kpi_source_contract(relative_path, mutation + source, failures)
+
+    assert len(failures) == 1
+    assert failures[0].startswith(f"{relative_path}: source integrity mismatch:")
+    assert "import" not in failures[0]
+
+
+def test_v321_kpi_source_integrity_does_not_misclassify_contextual_regex() -> None:
+    verifier = load_v321_release_verifier()
+    relative_path = "v2-web/src/utils/installerKpi.ts"
+    source = (ROOT / relative_path).read_text(encoding="utf-8")
+    mutation = r"if (enabled) {} /import\(/.test(label);" + "\n"
+    failures: list[str] = []
+
+    verifier.verify_kpi_source_contract(relative_path, mutation + source, failures)
+
+    assert len(failures) == 1
+    assert failures[0].startswith(f"{relative_path}: source integrity mismatch:")
+    assert "import" not in failures[0]
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "v2-web/src/components/InstallerKpiDialog.vue",
+        "v2-web/src/utils/installerKpi.ts",
+    ),
+)
+def test_v321_kpi_source_integrity_rejects_harmless_source_mutations(
+    relative_path: str,
+) -> None:
+    verifier = load_v321_release_verifier()
+    source = (ROOT / relative_path).read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.verify_kpi_source_contract(
+        relative_path,
+        source + "\n// harmless release-gate integrity mutation\n",
+        failures,
+    )
+
+    assert len(failures) == 1
+    assert failures[0].startswith(f"{relative_path}: source integrity mismatch:")
+    assert "import" not in failures[0]
+
+
+def test_v321_kpi_source_integrity_supersedes_string_import_parser_control() -> None:
     verifier = load_v321_release_verifier()
     source = (ROOT / "v2-web/src/utils/installerKpi.ts").read_text(encoding="utf-8")
     failures: list[str] = []
@@ -587,7 +719,9 @@ def test_v321_kpi_source_contract_ignores_import_words_inside_strings() -> None:
         failures,
     )
 
-    assert failures == []
+    assert len(failures) == 1
+    assert "source integrity mismatch" in failures[0]
+    assert "unrecognized import syntax" not in failures[0]
 
 
 @pytest.mark.parametrize(
@@ -601,7 +735,7 @@ def test_v321_kpi_source_contract_ignores_import_words_inside_strings() -> None:
         "async function probe() { return `outer ${`inner ${await import('@/lib/sideEffects')}`}` }\n",
     ),
 )
-def test_v321_kpi_source_contract_rejects_dynamic_imports_inside_template_expressions(
+def test_v321_kpi_source_integrity_supersedes_template_import_parser_controls(
     template_expression: str,
 ) -> None:
     verifier = load_v321_release_verifier()
@@ -614,10 +748,12 @@ def test_v321_kpi_source_contract_rejects_dynamic_imports_inside_template_expres
         failures,
     )
 
-    assert any("must not contain unrecognized import syntax" in failure for failure in failures)
+    assert len(failures) == 1
+    assert "source integrity mismatch" in failures[0]
+    assert "unrecognized import syntax" not in failures[0]
 
 
-def test_v321_kpi_source_contract_ignores_import_words_inside_regex_literals() -> None:
+def test_v321_kpi_source_integrity_supersedes_regex_import_parser_control() -> None:
     verifier = load_v321_release_verifier()
     source = (ROOT / "v2-web/src/utils/installerKpi.ts").read_text(encoding="utf-8")
     failures: list[str] = []
@@ -628,7 +764,9 @@ def test_v321_kpi_source_contract_ignores_import_words_inside_regex_literals() -
         failures,
     )
 
-    assert failures == []
+    assert len(failures) == 1
+    assert "source integrity mismatch" in failures[0]
+    assert "unrecognized import syntax" not in failures[0]
 
 
 def test_v320_release_verifies_the_real_admin_system_status_route() -> None:

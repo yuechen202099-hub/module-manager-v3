@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -54,192 +55,14 @@ AFFIRMATIVE_PENDING_RECORD_PATTERNS = (
     re.compile(r"\b(?:the\s+)?release\s+(?:is|was|has\s+gone)\s+live\b", re.IGNORECASE),
     re.compile(r"已部署|已上线|部署(?:已)?(?:完成|成功)|已完成部署|上线完成|生产(?:已)?验证(?:通过)?|已发布"),
 )
-IMPORT_FROM_PATTERN = re.compile(
-    r"(?ms)^\s*import\s+(?P<binding>.*?)\s+from\s+['\"](?P<source>[^'\"]+)['\"]\s*;?"
-)
-IMPORT_SIDE_EFFECT_PATTERN = re.compile(r"(?m)^\s*import\s+['\"](?P<source>[^'\"]+)['\"]\s*;?")
-KPI_ALLOWED_IMPORT_SOURCES = {
-    "v2-web/src/components/InstallerKpiDialog.vue": {
-        "vue",
-        "@/api/services",
-        "@/api/types",
-        "@/utils/installerKpi",
-    },
-    "v2-web/src/utils/installerKpi.ts": {"@/api/types"},
+KPI_SOURCE_SHA256 = {
+    "v2-web/src/components/InstallerKpiDialog.vue": (
+        "488605be1de1bfcf022c9365253be5e352e94cc9e058aae879fce9b3b899f5dc"
+    ),
+    "v2-web/src/utils/installerKpi.ts": (
+        "8d9e308fc073d4703ad22b116ee297571c4051df7e23ae8b9984c1f17ab46c78"
+    ),
 }
-REGEX_PREFIX_KEYWORDS = frozenset(
-    {
-        "await",
-        "case",
-        "delete",
-        "do",
-        "else",
-        "in",
-        "instanceof",
-        "of",
-        "return",
-        "throw",
-        "typeof",
-        "void",
-        "yield",
-    }
-)
-CONTROL_HEAD_KEYWORDS = frozenset({"catch", "for", "if", "switch", "while", "with"})
-
-
-def lexical_import_positions(text: str) -> list[int]:
-    """Return executable ``import`` positions from self-contained JS/TS lexing."""
-    positions: list[int] = []
-    length = len(text)
-
-    def identifier_part(character: str) -> bool:
-        return character.isalnum() or character in "_$"
-
-    def skip_quoted(index: int, quote: str) -> int:
-        index += 1
-        while index < length:
-            if text[index] == "\\":
-                index += 2
-            elif text[index] == quote:
-                return index + 1
-            else:
-                index += 1
-        return index
-
-    def regex_literal_end(index: int) -> int | None:
-        cursor = index + 1
-        in_character_class = False
-        while cursor < length:
-            character = text[cursor]
-            if character in "\r\n":
-                return None
-            if character == "\\":
-                cursor += 2
-            elif character == "[" and not in_character_class:
-                in_character_class = True
-                cursor += 1
-            elif character == "]" and in_character_class:
-                in_character_class = False
-                cursor += 1
-            elif character == "/" and not in_character_class:
-                cursor += 1
-                while cursor < length and text[cursor].isalpha():
-                    cursor += 1
-                return cursor
-            else:
-                cursor += 1
-        return None
-
-    def scan_template(index: int) -> int:
-        index += 1
-        while index < length:
-            if text[index] == "\\":
-                index += 2
-            elif text[index] == "`":
-                return index + 1
-            elif text.startswith("${", index):
-                index = scan_code(index + 2, stop_at_template_brace=True)
-            else:
-                index += 1
-        return index
-
-    def scan_code(index: int, *, stop_at_template_brace: bool = False) -> int:
-        can_start_regex = True
-        brace_depth = 0
-        parenthesis_context: list[bool] = []
-        last_word: str | None = None
-        while index < length:
-            character = text[index]
-            if text.startswith("//", index):
-                newline = text.find("\n", index + 2)
-                index = length if newline < 0 else newline + 1
-                continue
-            if text.startswith("/*", index):
-                comment_end = text.find("*/", index + 2)
-                index = length if comment_end < 0 else comment_end + 2
-                continue
-            if character in "'\"":
-                index = skip_quoted(index, character)
-                can_start_regex = False
-                last_word = None
-                continue
-            if character == "`":
-                index = scan_template(index)
-                can_start_regex = False
-                last_word = None
-                continue
-            if character == "/":
-                closing_tag = (
-                    index > 0
-                    and text[index - 1] == "<"
-                    and index + 1 < length
-                    and (text[index + 1].isalpha() or text[index + 1] in "_$")
-                )
-                regex_end = None if closing_tag or not can_start_regex else regex_literal_end(index)
-                if regex_end is not None:
-                    index = regex_end
-                    can_start_regex = False
-                else:
-                    index += 2 if text.startswith("/=", index) else 1
-                    can_start_regex = True
-                last_word = None
-                continue
-            if character.isalpha() or character in "_$":
-                word_start = index
-                index += 1
-                while index < length and identifier_part(text[index]):
-                    index += 1
-                word = text[word_start:index]
-                if word == "import":
-                    positions.append(word_start)
-                can_start_regex = word in REGEX_PREFIX_KEYWORDS
-                last_word = word
-                continue
-            if character.isdigit():
-                index += 1
-                while index < length and (identifier_part(text[index]) or text[index] == "."):
-                    index += 1
-                can_start_regex = False
-                last_word = None
-                continue
-            if character == "{":
-                if stop_at_template_brace:
-                    brace_depth += 1
-                can_start_regex = True
-            elif character == "}":
-                if stop_at_template_brace and brace_depth == 0:
-                    return index + 1
-                if brace_depth:
-                    brace_depth -= 1
-                can_start_regex = False
-            elif character == "(":
-                parenthesis_context.append(last_word in CONTROL_HEAD_KEYWORDS)
-                can_start_regex = True
-            elif character == ")":
-                can_start_regex = parenthesis_context.pop() if parenthesis_context else False
-            elif character == "]":
-                can_start_regex = False
-            elif text.startswith("...", index):
-                index += 3
-                can_start_regex = True
-                last_word = None
-                continue
-            elif text.startswith("++", index) or text.startswith("--", index):
-                index += 2
-                can_start_regex = False
-                last_word = None
-                continue
-            elif character == ".":
-                can_start_regex = False
-            elif not character.isspace():
-                can_start_regex = True
-            if not character.isspace():
-                last_word = None
-            index += 1
-        return index
-
-    scan_code(0)
-    return positions
 
 
 def read(relative_path: str, failures: list[str]) -> str:
@@ -351,43 +174,23 @@ def verify_lifecycle(failures: list[str]) -> None:
     verify_pending_record(read("ops/releases/V3.2.1.md", failures), failures)
 
 
-def verify_kpi_source_contract(relative_path: str, text: str, failures: list[str]) -> None:
-    lexical_positions = set(lexical_import_positions(text))
-    static_imports = [
-        (match, match.group("binding").strip(), match.group("source"))
-        for match in IMPORT_FROM_PATTERN.finditer(text)
-    ]
-    static_imports.extend(
-        (match, "<side-effect>", match.group("source")) for match in IMPORT_SIDE_EFFECT_PATTERN.finditer(text)
-    )
-    recognized_spans = [
-        match.span()
-        for match, _, _ in static_imports
-        if next((position for position in lexical_positions if match.start() <= position < match.end()), None) is not None
-    ]
-    imports = [
-        (binding, source)
-        for match, binding, source in static_imports
-        if match.span() in recognized_spans
-    ]
-    if any(not any(start <= position < end for start, end in recognized_spans) for position in lexical_positions):
-        failures.append(f"{relative_path}: must not contain unrecognized import syntax")
-    allowed_sources = KPI_ALLOWED_IMPORT_SOURCES[relative_path]
-    for binding, source in imports:
-        if source not in allowed_sources:
-            failures.append(f"{relative_path}: must not import unsupported source {source}")
-        elif source == "@/api/services" and binding != "{ fetchInstallerWorkload }":
-            failures.append(f"{relative_path}: must import only fetchInstallerWorkload from @/api/services")
-        elif source == "@/api/types" and not binding.startswith("type "):
-            failures.append(f"{relative_path}: API declarations must be type-only")
-    service_imports = [binding for binding, source in imports if source == "@/api/services"]
+def verify_kpi_source_semantics(relative_path: str, text: str, failures: list[str]) -> None:
     if relative_path.endswith("InstallerKpiDialog.vue"):
-        if service_imports != ["{ fetchInstallerWorkload }"]:
-            failures.append(f"{relative_path}: must import only fetchInstallerWorkload from @/api/services")
+        require(
+            text,
+            "import { fetchInstallerWorkload } from '@/api/services'",
+            relative_path,
+            failures,
+        )
         if len(re.findall(r"\bfetchInstallerWorkload\s*\(", text)) != 1:
             failures.append(f"{relative_path}: must call fetchInstallerWorkload exactly once")
-    elif service_imports:
-        failures.append(f"{relative_path}: must not import API services")
+    else:
+        require(
+            text,
+            "import type { InstallerWorkloadRow } from '@/api/types'",
+            relative_path,
+            failures,
+        )
     if re.search(r"\b(?:fetch|XMLHttpRequest|axios)\b", text):
         failures.append(f"{relative_path}: must not make direct network calls")
     if re.search(r"\b(?:post|put|patch|delete)\s*\(", text):
@@ -396,6 +199,37 @@ def verify_kpi_source_contract(relative_path: str, text: str, failures: list[str
         failures.append(f"{relative_path}: must not call export-job helpers")
     if re.search(r"['\"]/(?:[^'\"\n]*export)[^'\"\n]*['\"]", text, re.IGNORECASE):
         failures.append(f"{relative_path}: must not reference export routes")
+
+
+def verify_kpi_source_contract(
+    relative_path: str,
+    source: str | bytes,
+    failures: list[str],
+) -> None:
+    if isinstance(source, str):
+        source_bytes = source.encode("utf-8")
+        text = source
+    else:
+        source_bytes = source
+        try:
+            text = source.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            failures.append(f"{relative_path}: source must be valid UTF-8: {exc}")
+            return
+
+    expected_digest = KPI_SOURCE_SHA256.get(relative_path)
+    if expected_digest is None:
+        failures.append(f"{relative_path}: missing reviewed source integrity digest")
+        return
+    actual_digest = hashlib.sha256(source_bytes).hexdigest()
+    if actual_digest != expected_digest:
+        failures.append(
+            f"{relative_path}: source integrity mismatch: "
+            f"expected SHA-256 {expected_digest}, got {actual_digest}"
+        )
+        return
+
+    verify_kpi_source_semantics(relative_path, text, failures)
 
 
 def verify_kpi_contract(failures: list[str]) -> None:
@@ -411,7 +245,9 @@ def verify_kpi_contract(failures: list[str]) -> None:
     services = read("v2-web/src/api/services.ts", failures)
     require(services, "fetchInstallerWorkload", "v2-web/src/api/services.ts", failures)
     for relative_path in REQUIRED_KPI_FILES[1:3]:
-        verify_kpi_source_contract(relative_path, read(relative_path, failures), failures)
+        path = ROOT / relative_path
+        if path.is_file():
+            verify_kpi_source_contract(relative_path, path.read_bytes(), failures)
 
 
 def main() -> int:
