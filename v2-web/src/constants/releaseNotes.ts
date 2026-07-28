@@ -12,6 +12,17 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.2',
+    date: '2026-07-29',
+    type: '小更新',
+    title: '安装人员 KPI 经营简报',
+    items: [
+      '每日工作量 KPI 升级为 A1 通栏经营简报，强化人员、日期范围、总完成量、效率、工时与异常概览。',
+      '保留原有 15 列每日明细、日期固定列、横向滚动、2 小时工时分段、地址与异常资料组下钻以及页面内 KPI CSV。',
+      'KPI 公式、接口、人工导入口径、日周月范围和数据中台“查看原始资料”入口保持不变。',
+    ],
+  },
+  {
     version: 'V3.2.1',
     date: '2026-07-27',
     type: 'BUG 修复',

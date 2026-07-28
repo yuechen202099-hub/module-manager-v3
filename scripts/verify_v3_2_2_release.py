@@ -9,25 +9,25 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "3.2.1"
-DISPLAY_VERSION = "V3.2.1"
+VERSION = "3.2.2"
+DISPLAY_VERSION = "V3.2.2"
 REQUIRED_KPI_FILES = (
     "scripts/verify_v3_2_1_installer_kpi_restore.py",
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
-    "ops/releases/V3.2.1.md",
+    "ops/releases/V3.2.2.md",
 )
 RELEASE_NOTE_ITEMS = (
-    "项目驾驶舱重新以独立弹窗展示安装人员每日工作量、效率、工时和异常明细。",
-    "恢复 2 小时工时分段、分段地址清单、异常资料组下钻和页面内 KPI CSV。",
-    "保留日、周、月范围与数据中台“查看原始资料”次级入口，KPI 公式、接口和生产数据不变。",
+    "每日工作量 KPI 升级为 A1 通栏经营简报，强化人员、日期范围、总完成量、效率、工时与异常概览。",
+    "保留原有 15 列每日明细、日期固定列、横向滚动、2 小时工时分段、地址与异常资料组下钻以及页面内 KPI CSV。",
+    "KPI 公式、接口、人工导入口径、日周月范围和数据中台“查看原始资料”入口保持不变。",
 )
 PENDING_LIFECYCLE_FIELDS = {
     "Status": "pending",
     "Package": "pending",
     "Production Deployment": "pending",
     "Production Reconciliation": "pending",
-    "Rollback target": "V3.2.0",
+    "Rollback target": "V3.2.1",
 }
 PREPACKAGE_LOCAL_VERIFICATION_STATES = ("not run", "passed")
 PENDING_MANIFEST_FIELDS = (
@@ -37,13 +37,12 @@ PENDING_MANIFEST_FIELDS = (
     "Source commit",
     "Production release",
 )
-V320_ARTIFACT_EVIDENCE = (
-    "module-manager-v2-server-3.2.0.zip",
-    "2026-07-24 10:33:21 +08:00",
-    "1621627 bytes",
-    "9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF",
-    "fe527eb84064096321e727abf9ccbdc981e10b7e",
-    "/opt/module-manager-v2/releases/v3.2.0-20260724_105649",
+V321_ARTIFACT_EVIDENCE = (
+    "module-manager-v2-server-3.2.1.zip",
+    "1646549 bytes",
+    "2A05A337D20982BF67B750D4EB7E48C137FCDAD902668636A7B513C1E456BA2B",
+    "d076d5ddd8fd875f249497c474892585297c1d5a",
+    "/opt/module-manager-v2/releases/v3.2.1-20260728_111144",
 )
 AFFIRMATIVE_PENDING_RECORD_PATTERNS = (
     re.compile(r"\b(?:deployed|shipped|released)\b", re.IGNORECASE),
@@ -57,7 +56,7 @@ AFFIRMATIVE_PENDING_RECORD_PATTERNS = (
 )
 KPI_SOURCE_SHA256 = {
     "v2-web/src/components/InstallerKpiDialog.vue": (
-        "488605be1de1bfcf022c9365253be5e352e94cc9e058aae879fce9b3b899f5dc"
+        "f10d46f7d34293673c3892a9a15c811377ba06900822ff77bfc7b0ad1197450b"
     ),
     "v2-web/src/utils/installerKpi.ts": (
         "8d9e308fc073d4703ad22b116ee297571c4051df7e23ae8b9984c1f17ab46c78"
@@ -111,7 +110,7 @@ def verify_version_surfaces(failures: list[str]) -> None:
         require(read(relative_path, failures), marker, relative_path, failures)
     require(
         read("v2-api/pyproject.toml", failures),
-        "Module Replacement Project Manager V3.2.1",
+        "Module Replacement Project Manager V3.2.2",
         "v2-api/pyproject.toml",
         failures,
     )
@@ -125,7 +124,7 @@ def verify_release_note(failures: list[str]) -> None:
         return
     note = first_note.group("note")
     require(note, f"version: '{DISPLAY_VERSION}'", "v2-web/src/constants/releaseNotes.ts", failures)
-    require(note, "title: '安装人员 KPI 原模式恢复'", "v2-web/src/constants/releaseNotes.ts", failures)
+    require(note, "title: '安装人员 KPI 经营简报'", "v2-web/src/constants/releaseNotes.ts", failures)
     for item in RELEASE_NOTE_ITEMS:
         require(note, item, "v2-web/src/constants/releaseNotes.ts", failures)
 
@@ -136,10 +135,10 @@ def verify_manifest_pending_truth(manifest: str, failures: list[str]) -> None:
         for field in PENDING_MANIFEST_FIELDS
         if (match := re.search(rf"(?m)^- {re.escape(field)}:\s*(?P<value>.*?)\s*$", manifest))
     ]
-    if any(marker in manifest for marker in V320_ARTIFACT_EVIDENCE) or any(
-        re.search(r"(?i)\bv?3\.2\.0\b", value) for value in artifact_values
+    if any(marker in manifest for marker in V321_ARTIFACT_EVIDENCE) or any(
+        re.search(r"(?i)\bv?3\.2\.1\b", value) for value in artifact_values
     ):
-        failures.append("RELEASE_MANIFEST.md: must not retain V3.2.0 artifact evidence")
+        failures.append("RELEASE_MANIFEST.md: must not retain V3.2.1 artifact evidence")
         return
     for field in PENDING_MANIFEST_FIELDS:
         match = re.search(rf"(?m)^- {re.escape(field)}:\s*(?P<value>.*?)\s*$", manifest)
@@ -148,8 +147,8 @@ def verify_manifest_pending_truth(manifest: str, failures: list[str]) -> None:
 
 
 def verify_pending_record(record: str, failures: list[str]) -> None:
-    record_path = "ops/releases/V3.2.1.md"
-    require(record, "# V3.2.1 Production Release Record", record_path, failures)
+    record_path = "ops/releases/V3.2.2.md"
+    require(record, "# V3.2.2 Production Release Record", record_path, failures)
     for field, value in PENDING_LIFECYCLE_FIELDS.items():
         matches = re.findall(rf"(?m)^[-*+]\s*{re.escape(field)}:\s*`?([^`\n]+)`?\s*$", record)
         if matches != [value]:
@@ -173,16 +172,16 @@ def verify_pending_record(record: str, failures: list[str]) -> None:
 def verify_lifecycle(failures: list[str]) -> None:
     agents = read("AGENTS.md", failures)
     for marker in (
-        "- Deployed production baseline: `V3.2.0`.",
-        "- Release candidate: `V3.2.1`.",
-        "- Release-candidate maintenance branch: `production/V3/3.2.1`.",
-        "- 当前已部署生产版本：`V3.2.0`。",
-        "- 当前发布候选版本：`V3.2.1`。",
-        "- 当前候选维护分支：`production/V3/3.2.1`。",
+        "- Deployed production baseline: `V3.2.1`.",
+        "- Release candidate: `V3.2.2`.",
+        "- Release-candidate maintenance branch: `production/V3/3.2.2`.",
+        "- 当前已部署生产版本：`V3.2.1`。",
+        "- 当前发布候选版本：`V3.2.2`。",
+        "- 当前候选维护分支：`production/V3/3.2.2`。",
     ):
         require(agents, marker, "AGENTS.md", failures)
 
-    verify_pending_record(read("ops/releases/V3.2.1.md", failures), failures)
+    verify_pending_record(read("ops/releases/V3.2.2.md", failures), failures)
 
 
 def verify_kpi_source_semantics(relative_path: str, text: str, failures: list[str]) -> None:
@@ -246,7 +245,7 @@ def verify_kpi_source_contract(
 def verify_kpi_contract(failures: list[str]) -> None:
     for relative_path in REQUIRED_KPI_FILES:
         if not (ROOT / relative_path).is_file():
-            failures.append(f"missing V3.2.1 KPI release input: {relative_path}")
+            failures.append(f"missing V3.2.2 KPI release input: {relative_path}")
     migrations = sorted((ROOT / "v2-api/alembic/versions").glob("*.py"))
     migration_names = [path.name for path in migrations]
     if "0014_export_center_jobs.py" not in migration_names or any(name > "0014_export_center_jobs.py" for name in migration_names):
@@ -269,11 +268,11 @@ def main() -> int:
     verify_lifecycle(failures)
     verify_kpi_contract(failures)
     if failures:
-        print("[FAIL] V3.2.1 release checks failed:", file=sys.stderr)
+        print("[FAIL] V3.2.2 release checks failed:", file=sys.stderr)
         for failure in failures:
             print(f"- {failure}", file=sys.stderr)
         return 1
-    print("[OK] V3.2.1 release checks passed")
+    print("[OK] V3.2.2 release checks passed")
     return 0
 
 

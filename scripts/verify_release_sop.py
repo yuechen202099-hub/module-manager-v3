@@ -19,7 +19,7 @@ RELEASE_INPUTS = (
     "scripts/verify_v3_2_0_single_export_entry.py",
     "scripts/verify_v3_2_0_release.py",
     "scripts/verify_v3_2_1_installer_kpi_restore.py",
-    "scripts/verify_v3_2_1_release.py",
+    "scripts/verify_v3_2_2_release.py",
     "v2-api/alembic/versions/0013_data_center_query_indexes.py",
     "v2-api/alembic/versions/0014_export_center_jobs.py",
     "v2-api/app/api/routes/groups.py",
@@ -40,6 +40,7 @@ RELEASE_INPUTS = (
     "v2-web/src/utils/installerKpi.ts",
     "ops/releases/V3.2.0.md",
     "ops/releases/V3.2.1.md",
+    "ops/releases/V3.2.2.md",
 )
 
 REQUIRED_FILES = [

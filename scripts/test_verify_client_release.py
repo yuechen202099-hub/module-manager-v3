@@ -117,10 +117,10 @@ def load_v320_release_verifier():
 
 def load_v321_release_verifier():
     spec = importlib.util.spec_from_file_location(
-        "verify_v3_2_1_release", ROOT / "scripts" / "verify_v3_2_1_release.py"
+        "verify_v3_2_2_release", ROOT / "scripts" / "verify_v3_2_2_release.py"
     )
     if spec is None or spec.loader is None:
-        raise RuntimeError("Unable to load verify_v3_2_1_release.py")
+        raise RuntimeError("Unable to load verify_v3_2_2_release.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -255,7 +255,7 @@ def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.2.1"' in build_script
+    assert '[string]$Version = "3.2.2"' in build_script
 
 
 def test_release_builder_embeds_the_current_source_commit() -> None:
@@ -438,10 +438,10 @@ def test_v321_installer_kpi_release_inputs_are_packaged_and_required() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     required = {
         "scripts/verify_v3_2_1_installer_kpi_restore.py",
-        "scripts/verify_v3_2_1_release.py",
+        "scripts/verify_v3_2_2_release.py",
         "v2-web/src/components/InstallerKpiDialog.vue",
         "v2-web/src/utils/installerKpi.ts",
-        "ops/releases/V3.2.1.md",
+        "ops/releases/V3.2.2.md",
     }
 
     assert required <= verifier.REQUIRED_FILES
@@ -518,7 +518,7 @@ def test_v321_build_sequence_keeps_historical_boundaries_but_replaces_the_candid
         "scripts\\verify_v3_2_0_export_center_ui.py",
         "scripts\\verify_v3_2_0_single_export_entry.py",
         "scripts\\verify_v3_2_1_installer_kpi_restore.py",
-        "scripts\\verify_v3_2_1_release.py",
+        "scripts\\verify_v3_2_2_release.py",
     )
     for verifier_path in expected:
         assert verifier_path in release_verifiers
@@ -533,10 +533,10 @@ def test_v321_manifest_keeps_candidate_artifact_evidence_pending() -> None:
     verifier.verify_manifest_pending_truth(manifest, failures)
 
     assert failures == []
-    stale = manifest.replace("- SHA256: pending", "- SHA256: `9448EDDCA27A36F2DF606EC1BC04A3BED05930B3D4D718E2D10381EE7FAEE6DF`")
+    stale = manifest.replace("- SHA256: pending", "- SHA256: `2A05A337D20982BF67B750D4EB7E48C137FCDAD902668636A7B513C1E456BA2B`")
     failures = []
     verifier.verify_manifest_pending_truth(stale, failures)
-    assert failures == ["RELEASE_MANIFEST.md: must not retain V3.2.0 artifact evidence"]
+    assert failures == ["RELEASE_MANIFEST.md: must not retain V3.2.1 artifact evidence"]
 
 
 @pytest.mark.parametrize("local_verification", ("not run", "passed"))
@@ -544,7 +544,7 @@ def test_v321_pending_record_accepts_prepackage_local_verification_states(
     local_verification: str,
 ) -> None:
     verifier = load_v321_release_verifier()
-    record = (ROOT / "ops" / "releases" / "V3.2.1.md").read_text(encoding="utf-8")
+    record = (ROOT / "ops" / "releases" / "V3.2.2.md").read_text(encoding="utf-8")
     candidate = re.sub(
         r"(?m)^- Local Verification: .*?$",
         f"- Local Verification: {local_verification}",
@@ -569,14 +569,14 @@ def test_v321_pending_record_rejects_invalid_or_duplicate_local_verification(
     expected_matches: list[str],
 ) -> None:
     verifier = load_v321_release_verifier()
-    record = (ROOT / "ops" / "releases" / "V3.2.1.md").read_text(encoding="utf-8")
+    record = (ROOT / "ops" / "releases" / "V3.2.2.md").read_text(encoding="utf-8")
     candidate_record = re.sub(r"(?m)^- Local Verification: .*?$", candidate, record)
     failures: list[str] = []
 
     verifier.verify_pending_record(candidate_record, failures)
 
     assert failures == [
-        "ops/releases/V3.2.1.md: Local Verification must equal one of "
+        "ops/releases/V3.2.2.md: Local Verification must equal one of "
         f"('not run', 'passed') exactly once; got {expected_matches!r}"
     ]
 
@@ -604,12 +604,12 @@ def test_v321_pending_record_rejects_invalid_or_duplicate_local_verification(
 )
 def test_v321_pending_record_rejects_english_and_chinese_affirmative_deployment_claims(claim: str) -> None:
     verifier = load_v321_release_verifier()
-    record = (ROOT / "ops" / "releases" / "V3.2.1.md").read_text(encoding="utf-8")
+    record = (ROOT / "ops" / "releases" / "V3.2.2.md").read_text(encoding="utf-8")
     failures: list[str] = []
 
     verifier.verify_pending_record(f"{record}\n- {claim}\n", failures)
 
-    assert failures == ["ops/releases/V3.2.1.md: pending candidate must not claim deployment"]
+    assert failures == ["ops/releases/V3.2.2.md: pending candidate must not claim deployment"]
 
 
 @pytest.mark.parametrize(
@@ -1073,7 +1073,7 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.2.1")
+        verifier.verify_release_markdown_text(document_path, content, "3.2.2")
 
 
 @pytest.mark.parametrize(
@@ -1086,7 +1086,7 @@ def test_current_operational_documents_validate_against_the_package_version(docu
     verifier.verify_release_markdown_text(
         document_path,
         (ROOT / document_path).read_text(encoding="utf-8"),
-        "3.2.1",
+        "3.2.2",
     )
 
 
@@ -1096,21 +1096,21 @@ def test_client_final_audit_is_valid_only_as_version_locked_v320_history() -> No
     verifier.verify_release_markdown_text(
         "docs/CLIENT_FINAL_AUDIT.md",
         (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8"),
-        "3.2.1",
+        "3.2.2",
     )
 
 
 @pytest.mark.parametrize(
     ("document_path", "content", "expected_version"),
     [
-        ("README.md", ".\\scripts\\build-client-release.ps1 -Version 3.2.0", "3.2.1"),
+        ("README.md", ".\\scripts\\build-client-release.ps1 -Version 3.2.0", "3.2.2"),
         (
             "docs/CLIENT_FINAL_AUDIT.md",
             "\n".join(
                 (
                     "# V3.2.0 生产发布审计",
                     "V3.2.0 是当前公网生产基线",
-                    "build/server-release/module-manager-v2-server-3.2.1.zip",
+                    "build/server-release/module-manager-v2-server-3.2.2.zip",
                 )
             ),
             "3.2.0",
@@ -1125,7 +1125,7 @@ def test_release_markdown_rejects_unexpected_current_or_locked_historical_versio
     verifier = load_verifier()
 
     with pytest.raises(AssertionError, match=rf"non-current release version .* expected {re.escape(expected_version)}"):
-        verifier.verify_release_markdown_text(document_path, content, "3.2.1")
+        verifier.verify_release_markdown_text(document_path, content, "3.2.2")
 
 
 def test_archive_accepts_version_locked_client_final_audit_history(tmp_path: Path) -> None:

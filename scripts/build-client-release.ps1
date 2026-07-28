@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.2.1",
+    [string]$Version = "3.2.2",
     [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
@@ -20,7 +20,7 @@ $releaseInputs = @(
     "scripts\verify_v3_2_0_export_center_ui.py",
     "scripts\verify_v3_2_0_single_export_entry.py",
     "scripts\verify_v3_2_1_installer_kpi_restore.py",
-    "scripts\verify_v3_2_1_release.py",
+    "scripts\verify_v3_2_2_release.py",
     "v2-api\alembic\versions\0013_data_center_query_indexes.py",
     "v2-api\alembic\versions\0014_export_center_jobs.py",
     "v2-api\app\api\routes\groups.py",
@@ -43,7 +43,8 @@ $releaseInputs = @(
     "v2-web\src\components\InstallerKpiDialog.vue",
     "v2-web\src\utils\installerKpi.ts",
     "ops\releases\V3.2.0.md",
-    "ops\releases\V3.2.1.md"
+    "ops\releases\V3.2.1.md",
+    "ops\releases\V3.2.2.md"
 )
 foreach ($releaseInput in $releaseInputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $root $releaseInput) -PathType Leaf)) {
@@ -63,7 +64,7 @@ if ($worktreeChanges.Count -ne 0) {
     throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
 }
 if ([string]::IsNullOrWhiteSpace($PerformanceReport)) {
-    throw "Performance report is required for V3.2.1 packaging."
+    throw "Performance report is required for V3.2.2 packaging."
 }
 $performanceReportPath = if ([System.IO.Path]::IsPathRooted($PerformanceReport)) {
     [System.IO.Path]::GetFullPath($PerformanceReport)
@@ -120,7 +121,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "V3.1 performance evidence verification failed."
 }
 
-Write-Host "Running V3.2.1 focused release gates..."
+Write-Host "Running V3.2.2 focused release gates..."
 $releaseVerifiers = @(
     "scripts\verify_v3_2_0_role_routes.py",
     "scripts\verify_v3_2_0_data_center_ui.py",
@@ -128,12 +129,12 @@ $releaseVerifiers = @(
     "scripts\verify_v3_2_0_export_center_ui.py",
     "scripts\verify_v3_2_0_single_export_entry.py",
     "scripts\verify_v3_2_1_installer_kpi_restore.py",
-    "scripts\verify_v3_2_1_release.py"
+    "scripts\verify_v3_2_2_release.py"
 )
 foreach ($releaseVerifier in $releaseVerifiers) {
     & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
     if ($LASTEXITCODE -ne 0) {
-        throw "V3.2.1 release gate failed: $releaseVerifier"
+        throw "V3.2.2 release gate failed: $releaseVerifier"
     }
 }
 
@@ -216,7 +217,7 @@ Copy-ReleaseItem "scripts\verify_v3_2_0_export_center_ui.py" "scripts\verify_v3_
 Copy-ReleaseItem "scripts\verify_v3_2_0_single_export_entry.py" "scripts\verify_v3_2_0_single_export_entry.py"
 Copy-ReleaseItem "scripts\verify_v3_2_0_release.py" "scripts\verify_v3_2_0_release.py"
 Copy-ReleaseItem "scripts\verify_v3_2_1_installer_kpi_restore.py" "scripts\verify_v3_2_1_installer_kpi_restore.py"
-Copy-ReleaseItem "scripts\verify_v3_2_1_release.py" "scripts\verify_v3_2_1_release.py"
+Copy-ReleaseItem "scripts\verify_v3_2_2_release.py" "scripts\verify_v3_2_2_release.py"
 Copy-ReleaseItem "v2-web\src\components\InstallerKpiDialog.vue" "v2-web\src\components\InstallerKpiDialog.vue"
 Copy-ReleaseItem "v2-web\src\utils\installerKpi.ts" "v2-web\src\utils\installerKpi.ts"
 Copy-ReleaseItem "scripts\production_backup.sh" "scripts\production_backup.sh"

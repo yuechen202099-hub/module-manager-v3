@@ -80,7 +80,7 @@ REQUIRED_FILES = {
     "scripts/verify_v3_2_0_single_export_entry.py",
     "scripts/verify_v3_2_0_release.py",
     "scripts/verify_v3_2_1_installer_kpi_restore.py",
-    "scripts/verify_v3_2_1_release.py",
+    "scripts/verify_v3_2_2_release.py",
     "v2-api/scripts/preview_v3_1_backfill.py",
     "v2-api/scripts/verify_v3_1_release.py",
     "v2-api/alembic/versions/0006_group_barcode_verification.py",
@@ -102,6 +102,7 @@ REQUIRED_FILES = {
     "ops/releases/V3.1.0.md",
     "ops/releases/V3.2.0.md",
     "ops/releases/V3.2.1.md",
+    "ops/releases/V3.2.2.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.80.md",
@@ -316,11 +317,11 @@ def load_release_truth_parser():
     return module
 
 
-def load_v321_release_verifier():
-    path = Path(__file__).with_name("verify_v3_2_1_release.py")
-    spec = importlib.util.spec_from_file_location("package_v321_release", path)
+def load_v322_release_verifier():
+    path = Path(__file__).with_name("verify_v3_2_2_release.py")
+    spec = importlib.util.spec_from_file_location("package_v322_release", path)
     if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.1 release verifier")
+        fail("Unable to load V3.2.2 release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -334,8 +335,8 @@ def verify_packaged_kpi_source_integrity(
     archive: zipfile.ZipFile,
     names: set[str],
 ) -> None:
-    v321_verifier = load_v321_release_verifier()
-    expected_digests = dict(v321_verifier.KPI_SOURCE_SHA256)
+    v322_verifier = load_v322_release_verifier()
+    expected_digests = dict(v322_verifier.KPI_SOURCE_SHA256)
     for relative_path, expected_digest in expected_digests.items():
         if relative_path not in names:
             fail(f"Missing reviewed KPI source member: {relative_path}")
