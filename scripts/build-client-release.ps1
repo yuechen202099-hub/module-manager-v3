@@ -463,7 +463,7 @@ $manifest = @"
 
 - Release smoke check passes unless -SkipSmoke was used
 - Source-bound V3.1 task/review performance evidence passes the release verifier
-- V3.2.0 focused release gates pass before package staging
+- V3.2.0 inherited gates, V3.2.1 KPI behavior gate, and V3.2.2 release gate pass before package staging
 - Demo admin and constructor login are available only for local walkthrough when enabled
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment

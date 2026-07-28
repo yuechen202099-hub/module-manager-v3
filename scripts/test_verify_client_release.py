@@ -160,6 +160,7 @@ def write_release_archive(
     resolved_source_version = source_version or resolved_runtime_version
     resolved_entry_version = entry_version or resolved_runtime_version
     resolved_title_version = title_version or static_version
+    resolved_document_version = versions[0] if len(versions) == 1 else resolved_source_version
     resolved_entry_source = entry_source or (
         "globalThis.__MODULE_MANAGER_VUE_ENTRY_ATTESTATION__="
         f'{{"version":"{resolved_entry_version}"}};\n'
@@ -169,6 +170,10 @@ def write_release_archive(
         "SOURCE_COMMIT": source_commit,
         "RELEASE_MANIFEST.md": manifest,
         "AGENTS.md": agents,
+        "README.md": (
+            f".\\scripts\\build-client-release.ps1 -Version {resolved_document_version} "
+            f"-PerformanceReport .\\build\\release-evidence\\v{resolved_document_version}-task-review.json"
+        ),
         "docs/CLIENT_FINAL_AUDIT.md": (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8"),
         V3080_RELEASE_RECORD: deployed_release_record(
             "3.0.80",
@@ -1088,6 +1093,14 @@ def test_current_operational_documents_validate_against_the_package_version(docu
         (ROOT / document_path).read_text(encoding="utf-8"),
         "3.2.2",
     )
+
+
+def test_readme_build_command_requires_source_bound_performance_report() -> None:
+    verifier = load_verifier()
+    incomplete_command = r".\scripts\build-client-release.ps1 -Version 3.2.2"
+
+    with pytest.raises(AssertionError, match="PerformanceReport"):
+        verifier.verify_release_markdown_text("README.md", incomplete_command, "3.2.2")
 
 
 def test_client_final_audit_is_valid_only_as_version_locked_v320_history() -> None:

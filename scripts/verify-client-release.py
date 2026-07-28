@@ -432,6 +432,13 @@ def verify_release_markdown_text(path: str, content: str, package_version: str) 
                     f"{path} contains non-current release version "
                     f"{match.group('version')}; expected {expected_version}"
                 )
+    if path == "README.md":
+        expected_build_command = (
+            f".\\scripts\\build-client-release.ps1 -Version {package_version} "
+            f"-PerformanceReport .\\build\\release-evidence\\v{package_version}-task-review.json"
+        )
+        if expected_build_command not in content:
+            fail("README.md build command must include the source-bound -PerformanceReport")
 
 
 def verify_release_markdown_documents(
