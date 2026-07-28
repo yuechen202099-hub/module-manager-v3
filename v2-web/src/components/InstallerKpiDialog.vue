@@ -58,6 +58,13 @@ const pagedExceptionGroups = computed(() => paginateInstallerKpiRows(activeExcep
 const timeDialogTitle = computed(() => `${props.installer} ${activeTimeRow.value?.date || ''} 2 小时效率分布`)
 const segmentDialogTitle = computed(() => `${props.installer} ${activeTimeRow.value?.date || ''} ${activeSegment.value?.label || ''} 地址清单`)
 const exceptionDialogTitle = computed(() => `${props.installer} ${activeTimeRow.value?.date || ''} 异常明细`)
+const scopeLabel = computed(() => {
+  const anchorDate = props.scope.anchorDate.trim()
+  if (props.scope.mode === 'day') return anchorDate ? `按日 · ${anchorDate}` : '按日'
+  if (props.scope.mode === 'week') return anchorDate ? `按周 · ${anchorDate} 起` : '按周'
+  if (props.scope.mode === 'month') return anchorDate ? `按月 · ${anchorDate.slice(0, 7)}` : '按月'
+  return '全部周期'
+})
 
 function resetDrilldowns() {
   activeTimeRow.value = null
@@ -176,62 +183,96 @@ watch(
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="`${installer} 每日工作量`" width="1180px" append-to-body>
+  <el-dialog
+    v-model="visible"
+    :title="`${installer} · 每日工作量`"
+    class="installer-kpi-dialog"
+    width="min(1180px, calc(100vw - 32px))"
+    append-to-body
+  >
+    <template #header>
+      <div class="installer-kpi-dialog-header">
+        <div>
+          <h2>{{ installer }} · 每日工作量</h2>
+          <span>{{ scopeLabel }}</span>
+        </div>
+      </div>
+    </template>
+
     <el-alert v-if="loadError" type="error" :closable="false" :title="loadError" show-icon>
       <template #default>
         <el-button link type="primary" @click="loadWorkload">重试</el-button>
       </template>
     </el-alert>
 
-    <div class="workload-summary">
-      <article><span>资料组</span><strong>{{ totals.groupCount }}</strong></article>
-      <article><span>照片</span><strong>{{ totals.photoCount }}</strong></article>
-      <article><span>已归档</span><strong>{{ totals.archivedCount }}</strong></article>
-      <article><span>异常</span><strong>{{ totals.exceptionCount }}</strong></article>
-      <article><span>总工时</span><strong>{{ formatInstallerKpiDuration(totals.workDurationMinutes) }}</strong></article>
-      <article><span>完成量</span><strong>{{ totals.completionCount }}</strong></article>
-      <article><span>加权完成</span><strong>{{ formatInstallerKpiDecimal(totals.weightedCompletion) }}</strong></article>
-    </div>
+    <section class="workload-primary-summary" aria-label="核心产出指标">
+      <article class="workload-primary-item"><span>资料组</span><strong>{{ totals.groupCount }}</strong></article>
+      <article class="workload-primary-item"><span>照片</span><strong>{{ totals.photoCount }}</strong></article>
+      <article class="workload-primary-item"><span>已归档</span><strong>{{ totals.archivedCount }}</strong></article>
+      <article class="workload-primary-item workload-primary-item-danger">
+        <span>异常</span><strong>{{ totals.exceptionCount }}</strong>
+      </article>
+    </section>
 
-    <el-table v-loading="loading" :data="pagedRows.items" height="390" size="small">
-      <el-table-column prop="date" label="日期" width="104" />
-      <el-table-column prop="startTime" label="开工" width="82" />
-      <el-table-column prop="endTime" label="收工" width="82" />
-      <el-table-column label="工作时长" min-width="120">
-        <template #default="{ row }">
-          <el-button class="workload-exception-link" link type="primary" :disabled="!row.timepointCount" @click="openWorkTime(row)">
-            {{ row.workDurationLabel || formatInstallerKpiDuration(row.workDurationMinutes) }}
-          </el-button>
-        </template>
-      </el-table-column>
-      <el-table-column label="每小时完成" width="104">
-        <template #default="{ row }">{{ formatInstallerKpiDecimal(row.completionPerEffectiveHour) }}</template>
-      </el-table-column>
-      <el-table-column label="加权效率" width="104">
-        <template #default="{ row }">{{ formatInstallerKpiDecimal(row.weightedCompletionPerEffectiveHour) }}</template>
-      </el-table-column>
-      <el-table-column label="计入工时" min-width="116">
-        <template #default="{ row }">{{ row.fusedWorkDurationLabel || formatInstallerKpiDuration(row.fusedWorkDurationMinutes) }}</template>
-      </el-table-column>
-      <el-table-column label="融合效率" width="104">
-        <template #default="{ row }">{{ formatInstallerKpiDecimal(row.fusedWeightedCompletionPerEffectiveHour) }}</template>
-      </el-table-column>
-      <el-table-column label="在线系数" width="96">
-        <template #default="{ row }">{{ formatInstallerKpiDecimal(row.finalOnlineCoefficient) }}</template>
-      </el-table-column>
-      <el-table-column prop="denseBonusMinutesV2" label="补偿" width="78" />
-      <el-table-column prop="groupCount" label="资料组" width="78" />
-      <el-table-column prop="photoCount" label="照片" width="70" />
-      <el-table-column prop="archivedCount" label="已归档" width="82" />
-      <el-table-column label="异常" width="78">
-        <template #default="{ row }">
-          <el-button class="workload-exception-link" link type="danger" :disabled="!row.exceptionCount" @click="openExceptions(row)">
-            {{ row.exceptionCount }}
-          </el-button>
-        </template>
-      </el-table-column>
-      <el-table-column prop="unreviewedCount" label="未审阅" width="82" />
-    </el-table>
+    <section class="workload-secondary-summary" aria-label="工时与完成效率">
+      <article class="workload-secondary-item workload-total-duration">
+        <span>总工时</span><strong>{{ formatInstallerKpiDuration(totals.workDurationMinutes) }}</strong>
+      </article>
+      <article class="workload-secondary-item">
+        <span>完成量</span><strong>{{ totals.completionCount }}</strong>
+      </article>
+      <article class="workload-secondary-item">
+        <span>加权完成</span><strong>{{ formatInstallerKpiDecimal(totals.weightedCompletion) }}</strong>
+      </article>
+    </section>
+
+    <div class="installer-kpi-table-shell">
+      <el-table
+        v-loading="loading"
+        class="installer-kpi-main-table"
+        :data="pagedRows.items"
+        height="390"
+        size="small"
+      >
+        <el-table-column fixed="left" prop="date" label="日期" width="104" />
+        <el-table-column prop="startTime" label="开工" width="82" />
+        <el-table-column prop="endTime" label="收工" width="82" />
+        <el-table-column label="工作时长" min-width="120">
+          <template #default="{ row }">
+            <el-button class="workload-exception-link" link type="primary" :disabled="!row.timepointCount" @click="openWorkTime(row)">
+              {{ row.workDurationLabel || formatInstallerKpiDuration(row.workDurationMinutes) }}
+            </el-button>
+          </template>
+        </el-table-column>
+        <el-table-column label="每小时完成" width="104">
+          <template #default="{ row }">{{ formatInstallerKpiDecimal(row.completionPerEffectiveHour) }}</template>
+        </el-table-column>
+        <el-table-column label="加权效率" width="104">
+          <template #default="{ row }">{{ formatInstallerKpiDecimal(row.weightedCompletionPerEffectiveHour) }}</template>
+        </el-table-column>
+        <el-table-column label="计入工时" min-width="116">
+          <template #default="{ row }">{{ row.fusedWorkDurationLabel || formatInstallerKpiDuration(row.fusedWorkDurationMinutes) }}</template>
+        </el-table-column>
+        <el-table-column label="融合效率" width="104">
+          <template #default="{ row }">{{ formatInstallerKpiDecimal(row.fusedWeightedCompletionPerEffectiveHour) }}</template>
+        </el-table-column>
+        <el-table-column label="在线系数" width="96">
+          <template #default="{ row }">{{ formatInstallerKpiDecimal(row.finalOnlineCoefficient) }}</template>
+        </el-table-column>
+        <el-table-column prop="denseBonusMinutesV2" label="补偿" width="78" />
+        <el-table-column prop="groupCount" label="资料组" width="78" />
+        <el-table-column prop="photoCount" label="照片" width="70" />
+        <el-table-column prop="archivedCount" label="已归档" width="82" />
+        <el-table-column label="异常" width="78">
+          <template #default="{ row }">
+            <el-button class="workload-exception-link" link type="danger" :disabled="!row.exceptionCount" @click="openExceptions(row)">
+              {{ row.exceptionCount }}
+            </el-button>
+          </template>
+        </el-table-column>
+        <el-table-column prop="unreviewedCount" label="未审阅" width="82" />
+      </el-table>
+    </div>
     <el-pagination
       v-if="pagedRows.total > INSTALLER_KPI_PAGE_SIZE"
       v-model:current-page="page"
@@ -241,9 +282,13 @@ watch(
     />
     <el-empty v-if="!loading && !loadError && !workloadRows.length" description="当前范围暂无 KPI 数据" />
     <template #footer>
-      <el-button @click="visible = false">关闭</el-button>
-      <el-button plain :disabled="!installer" @click="openDataCenter">查看原始资料</el-button>
-      <el-button type="primary" :disabled="!workloadRows.length" @click="downloadCsv">导出 KPI CSV</el-button>
+      <div class="installer-kpi-footer">
+        <el-button @click="visible = false">关闭</el-button>
+        <div class="installer-kpi-footer-actions">
+          <el-button plain :disabled="!installer" @click="openDataCenter">查看原始资料</el-button>
+          <el-button type="primary" :disabled="!workloadRows.length" @click="downloadCsv">导出 KPI CSV</el-button>
+        </div>
+      </div>
     </template>
   </el-dialog>
 
@@ -325,15 +370,188 @@ watch(
 </template>
 
 <style scoped>
-.workload-summary,
+:global(.installer-kpi-dialog) {
+  display: flex;
+  overflow: hidden;
+  max-height: calc(100vh - 64px);
+  margin-top: clamp(16px, 5vh, 48px);
+  flex-direction: column;
+}
+
+:global(.installer-kpi-dialog .el-dialog__header),
+:global(.installer-kpi-dialog .el-dialog__footer) {
+  flex: 0 0 auto;
+}
+
+:global(.installer-kpi-dialog .el-dialog__body) {
+  overflow: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.installer-kpi-dialog-header {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.installer-kpi-dialog-header h2 {
+  margin: 0;
+  color: #14243a;
+  font-size: 18px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.installer-kpi-dialog-header span {
+  display: block;
+  margin-top: 3px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.workload-primary-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.workload-primary-item {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 13px 14px 13px 17px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: #f7f9fc;
+}
+
+.workload-primary-item::before {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--el-color-primary);
+  content: '';
+}
+
+.workload-primary-item span,
+.workload-secondary-item span {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.workload-primary-item strong {
+  color: #14243a;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+.workload-primary-item-danger strong {
+  color: var(--el-color-danger);
+}
+
+.workload-secondary-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 12px;
+  border-top: 1px solid #dce7ef;
+  border-bottom: 1px solid #dce7ef;
+  background: #f7fbfe;
+}
+
+.workload-secondary-item {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 13px 20px;
+  border-right: 1px solid #dbe5ed;
+}
+
+.workload-secondary-item:last-child {
+  border-right: 0;
+}
+
+.workload-secondary-item strong {
+  color: #14243a;
+  font-size: 20px;
+  font-weight: 780;
+  line-height: 1.2;
+}
+
+.workload-total-duration {
+  position: relative;
+  padding-left: 22px;
+}
+
+.workload-total-duration::before {
+  position: absolute;
+  top: 13px;
+  bottom: 13px;
+  left: 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--el-color-primary);
+  content: '';
+}
+
+.workload-total-duration strong {
+  color: var(--el-color-primary);
+}
+
+.installer-kpi-table-shell {
+  overflow: hidden;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+}
+
+.installer-kpi-main-table {
+  width: 100%;
+}
+
+:deep(.installer-kpi-main-table .el-table__header-wrapper th.el-table__cell) {
+  color: #596a80;
+  background: #f6f8fb;
+  font-weight: 700;
+}
+
+:deep(.installer-kpi-main-table .el-table__row:hover > td.el-table__cell) {
+  background: #f7fbfe;
+}
+
+.installer-kpi-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+
+.installer-kpi-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.installer-kpi-footer-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
 .work-time-stats {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
 
-.workload-summary article,
 .work-time-stats article {
   display: grid;
   gap: 4px;
@@ -343,14 +561,12 @@ watch(
   background: var(--el-fill-color-lighter);
 }
 
-.workload-summary span,
 .work-time-stats span,
 .screen-time-legend {
   color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 
-.workload-summary strong,
 .work-time-stats strong {
   color: var(--el-text-color-primary);
   font-size: 18px;
@@ -364,10 +580,6 @@ watch(
 .work-time-detail {
   display: grid;
   gap: 14px;
-}
-
-.work-time-stats {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .screen-time-card {
@@ -436,15 +648,51 @@ watch(
 }
 
 @media (max-width: 960px) {
-  .workload-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .work-time-chart { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .workload-primary-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .work-time-chart {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 720px) {
-  .workload-summary,
-  .work-time-stats { grid-template-columns: 1fr; }
-  .work-time-chart { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .screen-time-head { display: grid; }
-  .screen-time-legend { text-align: left; }
+  .workload-primary-summary,
+  .workload-secondary-summary,
+  .work-time-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .workload-secondary-item {
+    border-right: 0;
+    border-bottom: 1px solid #dbe5ed;
+  }
+
+  .workload-secondary-item:last-child {
+    border-bottom: 0;
+  }
+
+  .installer-kpi-footer {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .installer-kpi-footer-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .work-time-chart {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .screen-time-head {
+    display: grid;
+  }
+
+  .screen-time-legend {
+    text-align: left;
+  }
 }
 </style>
