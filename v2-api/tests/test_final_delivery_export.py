@@ -25,6 +25,7 @@ from app.services.final_delivery_export import (
     cleanup_delivery_cache,
     delivery_evidence_fingerprint,
     get_or_build_delivery_package,
+    plan_delivery_photo_members,
     release_delivery_cache_path,
     reserve_delivery_cache_path,
 )
@@ -732,6 +733,33 @@ def test_windows_casefold_collision_assignment_is_stable_and_suffixes_every_memb
     assert first_names == reordered_names
     assert len({name.casefold() for name in first_names}) == 8
     assert all("group-UPPER" in name or "group-lower" in name for name in first_names)
+
+
+def test_public_planner_preserves_delivery_member_paths_for_windows_collisions() -> None:
+    upper = delivery_group(
+        "group-UPPER",
+        terminal="TERM-A",
+        meter_no="METER-A",
+        module_no="MODULE-A",
+        collector="COLLECTOR-A",
+        address="ADDRESS-A",
+    )
+    lower = delivery_group(
+        "group-lower",
+        terminal="term-a",
+        meter_no="meter-a",
+        module_no="module-a",
+        collector="collector-a",
+        address="address-a",
+    )
+
+    planned = plan_delivery_photo_members([lower, upper])
+    private = final_delivery_export._delivery_photo_members([lower, upper])
+
+    assert [item["path"] for item in planned] == [item["path"] for item in private]
+    assert len(
+        {final_delivery_export._windows_member_key(item["path"]) for item in planned}
+    ) == len(planned)
 
 
 def test_cleanup_rechecks_a_late_path_reservation_before_delete(

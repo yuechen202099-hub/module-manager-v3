@@ -502,6 +502,12 @@ def _delivery_photo_members(groups: Sequence[Mapping[str, Any]]) -> list[dict[st
     )
 
 
+def plan_delivery_photo_members(
+    groups: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return _delivery_photo_members(groups)
+
+
 def _write_delivery_package_archive(
     output: Any,
     groups: Iterable[Mapping[str, Any]],
