@@ -37,14 +37,27 @@ SOURCE = ExternalPhotoSource(
 POLICY = DownloadPolicy(frozenset({"img.example"}))
 
 
-def make_image_bytes(image_format: str) -> bytes:
+def make_image_bytes(image_format: str, *, color: tuple[int, int, int] = (21, 88, 144)) -> bytes:
     buffer = io.BytesIO()
-    Image.new("RGB", (3, 2), color=(21, 88, 144)).save(buffer, format=image_format)
+    Image.new("RGB", (3, 2), color=color).save(buffer, format=image_format)
     return buffer.getvalue()
 
 
 JPEG_BYTES = make_image_bytes("JPEG")
+_jpeg_replacement = bytearray(JPEG_BYTES)
+_jpeg_replacement[13] = 1
+JPEG_REPLACEMENT_BYTES = bytes(_jpeg_replacement)
 PNG_BYTES = make_image_bytes("PNG")
+
+
+def make_header_only_bmp() -> bytes:
+    full_bmp = make_image_bytes("BMP")
+    header = bytearray(full_bmp[:54])
+    header[2:6] = (54).to_bytes(4, "little")
+    return bytes(header)
+
+
+HEADER_ONLY_BMP = make_header_only_bmp()
 
 
 def corrupt_png_idat_checksum(content: bytes) -> bytes:
@@ -100,6 +113,30 @@ class GeneratedImageResponse(FakeImageResponse):
         count = min(size, self.remaining)
         self.remaining -= count
         return b"x" * count
+
+
+class StatuslessImageResponse(FakeImageResponse):
+    def __init__(self, content: bytes) -> None:
+        super().__init__(content)
+        del self.status
+
+
+class RaisingStatusImageResponse(FakeImageResponse):
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.headers = {}
+        self.offset = 0
+        self.read_sizes = []
+        self.read_calls = 0
+
+    @property
+    def status(self):  # noqa: ANN201
+        raise RuntimeError("status unavailable")
+
+
+class RaisingGetcodeImageResponse(StatuslessImageResponse):
+    def getcode(self):  # noqa: ANN201
+        raise RuntimeError("getcode unavailable")
 
 
 def test_download_uses_allowlist_pinned_no_redirect_opener_and_hashes_file(tmp_path: Path) -> None:
@@ -275,6 +312,30 @@ def test_partial_http_response_is_rejected_before_body_read(tmp_path: Path) -> N
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    "response_factory",
+    [
+        lambda: StatuslessImageResponse(JPEG_BYTES),
+        lambda: FakeImageResponse(JPEG_BYTES, status="not-a-status"),
+        lambda: FakeImageResponse(JPEG_BYTES, status=True),
+        lambda: RaisingStatusImageResponse(JPEG_BYTES),
+        lambda: RaisingGetcodeImageResponse(JPEG_BYTES),
+    ],
+    ids=["missing", "malformed", "boolean", "raising-status", "raising-getcode"],
+)
+def test_invalid_or_missing_http_status_is_rejected_before_body_or_temp_file(
+    tmp_path: Path,
+    response_factory,
+) -> None:
+    response = response_factory()
+
+    with pytest.raises(PhotoTransferError, match="invalid HTTP status"):
+        download_external_photo(SOURCE, POLICY, temp_dir=tmp_path, opener=lambda *_a, **_k: response)
+
+    assert response.read_calls == 0
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_temp_file_is_private_unpredictable_and_exactly_one_per_download(tmp_path: Path) -> None:
     first = download_external_photo(
         SOURCE,
@@ -298,6 +359,91 @@ def test_temp_file_is_private_unpredictable_and_exactly_one_per_download(tmp_pat
         opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
     )
     assert second.path.name != first_name
+
+
+def test_symlink_temp_directory_is_rejected_without_touching_target_or_body(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        os.symlink(target, linked, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    response = FakeImageResponse(JPEG_BYTES)
+
+    with pytest.raises(PhotoTransferError, match="private temp directory"):
+        download_external_photo(SOURCE, POLICY, temp_dir=linked, opener=lambda *_a, **_k: response)
+
+    assert response.read_calls == 0
+    assert list(target.iterdir()) == []
+
+
+def test_non_directory_temp_path_is_rejected_before_body_read(tmp_path: Path) -> None:
+    not_a_directory = tmp_path / "not-a-directory"
+    not_a_directory.write_text("keep", encoding="utf-8")
+    response = FakeImageResponse(JPEG_BYTES)
+
+    with pytest.raises(PhotoTransferError, match="private temp directory"):
+        download_external_photo(SOURCE, POLICY, temp_dir=not_a_directory, opener=lambda *_a, **_k: response)
+
+    assert response.read_calls == 0
+    assert not_a_directory.read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode ownership is not exposed by Windows stat")
+def test_existing_temp_directory_with_group_or_other_permissions_is_rejected(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    os.chmod(shared, 0o755)
+    response = FakeImageResponse(JPEG_BYTES)
+
+    with pytest.raises(PhotoTransferError, match="private temp directory"):
+        download_external_photo(SOURCE, POLICY, temp_dir=shared, opener=lambda *_a, **_k: response)
+
+    assert response.read_calls == 0
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership is not exposed by Windows stat")
+def test_temp_directory_not_owned_by_effective_user_is_rejected(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    actual_owner = tmp_path.stat().st_uid
+    monkeypatch.setattr(migration.os, "geteuid", lambda: actual_owner + 1)
+    response = FakeImageResponse(JPEG_BYTES)
+
+    with pytest.raises(PhotoTransferError, match="private temp directory"):
+        download_external_photo(SOURCE, POLICY, temp_dir=tmp_path, opener=lambda *_a, **_k: response)
+
+    assert response.read_calls == 0
+
+
+def test_path_replacement_between_stream_and_verification_is_rejected_and_cleaned(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    assert len(JPEG_REPLACEMENT_BYTES) == len(JPEG_BYTES)
+    real_verify = migration._verify_image_file
+
+    def replace_before_verify(path: Path, byte_size: int, *args, **kwargs):  # noqa: ANN202
+        path.unlink()
+        path.write_bytes(JPEG_REPLACEMENT_BYTES)
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+        return real_verify(path, byte_size, *args, **kwargs)
+
+    monkeypatch.setattr(migration, "_verify_image_file", replace_before_verify)
+
+    with pytest.raises(PhotoTransferError, match="changed"):
+        download_external_photo(
+            SOURCE,
+            POLICY,
+            temp_dir=tmp_path,
+            opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
+        )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_base_exception_during_streaming_removes_temp_file(tmp_path: Path) -> None:
@@ -351,6 +497,18 @@ def test_invalid_or_incomplete_image_is_rejected_and_removed(tmp_path: Path, con
     assert list(tmp_path.iterdir()) == []
 
 
+def test_header_only_bmp_with_self_consistent_file_size_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(PhotoTransferError, match="invalid image"):
+        download_external_photo(
+            SOURCE,
+            POLICY,
+            temp_dir=tmp_path,
+            opener=lambda *_a, **_k: FakeImageResponse(HEADER_ONLY_BMP),
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_content_type_and_suffix_are_derived_from_file_not_upstream_headers(tmp_path: Path) -> None:
     photo = download_external_photo(
         SOURCE,
@@ -381,6 +539,51 @@ def test_cleanup_download_unlinks_only_downloaded_file(tmp_path: Path) -> None:
 
     assert photo.path.exists() is False
     assert sibling.read_text(encoding="utf-8") == "keep"
+
+
+def test_cleanup_download_refuses_same_size_replacement(tmp_path: Path) -> None:
+    photo = download_external_photo(
+        SOURCE,
+        POLICY,
+        temp_dir=tmp_path,
+        opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
+    )
+    photo.path.unlink()
+    photo.path.write_bytes(JPEG_REPLACEMENT_BYTES)
+    if os.name != "nt":
+        os.chmod(photo.path, 0o600)
+
+    cleanup_download(photo)
+
+    assert photo.path.read_bytes() == JPEG_REPLACEMENT_BYTES
+
+
+def test_cleanup_download_refuses_symlinked_parent_boundary(tmp_path: Path) -> None:
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    if os.name != "nt":
+        os.chmod(private_dir, 0o700)
+    photo = download_external_photo(
+        SOURCE,
+        POLICY,
+        temp_dir=private_dir,
+        opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
+    )
+    preserved_dir = tmp_path / "preserved"
+    private_dir.rename(preserved_dir)
+    attacker_dir = tmp_path / "attacker"
+    attacker_dir.mkdir()
+    attacker_file = attacker_dir / photo.path.name
+    attacker_file.write_bytes(JPEG_REPLACEMENT_BYTES)
+    try:
+        os.symlink(attacker_dir, private_dir, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    cleanup_download(photo)
+
+    assert attacker_file.read_bytes() == JPEG_REPLACEMENT_BYTES
+    assert (preserved_dir / photo.path.name).read_bytes() == JPEG_BYTES
 
 
 @pytest.mark.parametrize(
@@ -442,6 +645,8 @@ class FakeBucket:
         self.head_calls: list[str] = []
         self.put_calls: list[tuple[str, Path]] = []
         self.headers: dict[str, str] = {}
+        self.uploaded_sha256: str | None = None
+        self.uploaded_size: int | None = None
         self.overwrite_calls: list[str] = []
         self.delete_calls: list[str] = []
 
@@ -464,12 +669,20 @@ class FakeBucket:
             raise FakeOssError(409, "FileAlreadyExists")
         if self.put_error is not None:
             raise self.put_error
+        digest = hashlib.sha256()
+        uploaded_size = 0
+        with path.open("rb") as uploaded:
+            while chunk := uploaded.read(CHUNK_BYTES):
+                digest.update(chunk)
+                uploaded_size += len(chunk)
+        self.uploaded_sha256 = digest.hexdigest()
+        self.uploaded_size = uploaded_size
         if self.vanish_after_put:
             self.existing_meta = None
         else:
             self.existing_meta = self.after_upload_meta or {
-                "Content-Length": str(path.stat().st_size),
-                "x-oss-meta-sha256": headers["x-oss-meta-sha256"],
+                "Content-Length": str(uploaded_size),
+                "x-oss-meta-sha256": self.uploaded_sha256,
                 "Content-Type": headers["Content-Type"],
             }
         return object()
@@ -482,6 +695,9 @@ class FakeBucket:
 def downloaded(tmp_path: Path) -> DownloadedPhoto:
     path = tmp_path / "download.jpg"
     path.write_bytes(JPEG_BYTES)
+    if os.name != "nt":
+        os.chmod(tmp_path, 0o700)
+        os.chmod(path, 0o600)
     return DownloadedPhoto(
         path=path,
         sha256=hashlib.sha256(JPEG_BYTES).hexdigest(),
@@ -532,7 +748,10 @@ def test_new_object_uploads_from_file_with_forbid_overwrite_and_is_head_verified
 
     receipt = store_downloaded_photo(bucket, "bucket", "content/key.jpg", downloaded)
 
-    assert bucket.put_calls == [("content/key.jpg", downloaded.path)]
+    assert len(bucket.put_calls) == 1
+    assert bucket.put_calls[0][0] == "content/key.jpg"
+    assert bucket.uploaded_sha256 == downloaded.sha256
+    assert bucket.uploaded_size == downloaded.byte_size
     assert bucket.headers == {
         "Content-Type": downloaded.content_type,
         "x-oss-meta-sha256": downloaded.sha256,
@@ -558,7 +777,8 @@ def test_object_created_between_head_and_put_is_reused_only_when_exactly_matchin
     receipt = store_downloaded_photo(bucket, "bucket", "content/key.jpg", downloaded)
 
     assert receipt.reused is True
-    assert bucket.put_calls == [("content/key.jpg", downloaded.path)]
+    assert len(bucket.put_calls) == 1
+    assert bucket.put_calls[0][0] == "content/key.jpg"
     assert bucket.overwrite_calls == []
     assert bucket.delete_calls == []
 
@@ -607,6 +827,22 @@ def test_missing_post_upload_head_fails_without_delete(downloaded: DownloadedPho
         store_downloaded_photo(bucket, "bucket", "content/key.jpg", downloaded)
 
     assert len(bucket.put_calls) == 1
+    assert bucket.delete_calls == []
+
+
+def test_same_size_path_replacement_is_rejected_before_head_or_upload(downloaded: DownloadedPhoto) -> None:
+    assert len(JPEG_REPLACEMENT_BYTES) == downloaded.byte_size
+    downloaded.path.unlink()
+    downloaded.path.write_bytes(JPEG_REPLACEMENT_BYTES)
+    if os.name != "nt":
+        os.chmod(downloaded.path, 0o600)
+    bucket = FakeBucket()
+
+    with pytest.raises(PhotoTransferError, match="changed"):
+        store_downloaded_photo(bucket, "bucket", "content/key.jpg", downloaded)
+
+    assert bucket.head_calls == []
+    assert bucket.put_calls == []
     assert bucket.delete_calls == []
 
 
