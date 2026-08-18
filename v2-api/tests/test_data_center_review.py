@@ -144,7 +144,7 @@ def _mark_future_authoritative_barcode_pass(group: dict, *, photo_id: str, categ
     )
 
 
-def test_data_center_edit_invalidates_barcode_archive_and_delivery_cache(
+def test_data_center_edit_invalidates_barcode_archive_and_preserves_retired_delivery_history(
     json_review_repo: repository.JsonStateRepository,
 ) -> None:
     group = _latest_group()
@@ -153,6 +153,8 @@ def test_data_center_edit_invalidates_barcode_archive_and_delivery_cache(
     group["delivery_cache_status"] = "ready"
     for photo in group["photos"]:
         photo["archive_status"] = "archived"
+    delivery_history = deepcopy(local_simulation.get_state()["delivery_package_jobs"])
+    invalidation_epoch = group["delivery_package_invalidation_epoch"]
     result = json_review_repo.update_data_center_group(
         group_id="g-1",
         patch={"module_asset_no": "MOD002"},
@@ -161,12 +163,11 @@ def test_data_center_edit_invalidates_barcode_archive_and_delivery_cache(
         source_page="data_center",
     )
     group = _latest_group()
-    package_job = local_simulation.get_state()["delivery_package_jobs"][0]
 
     assert result["archive_status"] != "archived"
     assert group["barcode_verification"]["status"] == "pending"
-    assert group["delivery_package_invalidation_epoch"] == 8
-    assert package_job["status"] == "stale"
+    assert group["delivery_package_invalidation_epoch"] == invalidation_epoch
+    assert local_simulation.get_state()["delivery_package_jobs"] == delivery_history
     assert _audit_has_before_after("data_center_group_updated", "module_asset_no")
     update_payload = _audit_payload("data_center_group_updated")
     invalidation_payload = _audit_payload("data_center_archive_invalidated")
@@ -179,7 +180,7 @@ def test_data_center_edit_invalidates_barcode_archive_and_delivery_cache(
         assert "after" in payload
 
 
-def test_json_data_center_classifies_final_photo_then_auto_archives_and_queues_delivery(
+def test_json_data_center_classifies_final_photo_then_auto_archives_without_delivery_enqueue(
     json_review_repo: repository.JsonStateRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -231,8 +232,8 @@ def test_json_data_center_classifies_final_photo_then_auto_archives_and_queues_d
     assert group["status"] == "approved"
     assert group["barcode_verification"]["auto_archive_status"] == "archived"
     assert all(photo["archive_status"] == "archived" for photo in group["photos"])
-    assert delivery_jobs, "auto archive must enqueue delivery cache"
-    assert package_jobs, "auto archive must enqueue delivery package"
+    assert delivery_jobs == []
+    assert package_jobs == []
     assert nested_begin_attempts == 0
     payload = _audit_payload("data_center_photo_classified")
     assert payload["source_page"] == "data_center"
@@ -246,6 +247,13 @@ def test_json_data_center_classifies_final_photo_then_auto_archives_and_queues_d
 def test_manual_confirmation_requires_reason_and_auto_archives_when_ready(
     json_review_repo: repository.JsonStateRepository,
 ) -> None:
+    state = local_simulation.get_state()
+    delivery_history = deepcopy(
+        {
+            "delivery_cache_jobs": state["delivery_cache_jobs"],
+            "delivery_package_jobs": state["delivery_package_jobs"],
+        }
+    )
     with pytest.raises(ValueError, match="原因"):
         json_review_repo.manual_confirm_group_barcode(
             "g-1",
@@ -269,12 +277,12 @@ def test_manual_confirmation_requires_reason_and_auto_archives_when_ready(
         photo_ids=["p1", "p2", "p3", "p4"],
     )
     group = _latest_group()
-    package_statuses = {str(job.get("status") or "") for job in local_simulation.get_state()["delivery_package_jobs"]}
 
     assert result["barcode_status"] == "manual_confirmed"
     assert result["archive_status"] == "archived"
     assert group["status"] == "approved"
-    assert package_statuses & {"pending", "ready"}
+    assert local_simulation.get_state()["delivery_cache_jobs"] == delivery_history["delivery_cache_jobs"]
+    assert local_simulation.get_state()["delivery_package_jobs"] == delivery_history["delivery_package_jobs"]
     payload = _audit_payload("group_barcode_manual_confirmed")
     assert payload["source_page"] == "data_center"
     assert payload["source"] == "data_center"

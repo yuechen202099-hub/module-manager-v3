@@ -4373,7 +4373,7 @@ def test_validation_error_uses_contract_shape() -> None:
     assert isinstance(payload["request_id"], str)
 
 
-def test_review_api_publishes_durable_delivery_cache_job_only_after_json_persistence(
+def test_review_api_preserves_retired_delivery_cache_queue_after_json_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client.post("/local-test/bootstrap")
@@ -4409,10 +4409,7 @@ def test_review_api_publishes_durable_delivery_cache_job_only_after_json_persist
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "approved"
     assert events == ["persist"]
-    jobs = local_simulation.get_state()["delivery_cache_jobs"]
-    assert len(jobs) == 1
-    assert jobs[0]["group_id"] == group["id"]
-    assert jobs[0]["status"] == "pending"
+    assert local_simulation.get_state()["delivery_cache_jobs"] == []
 
 
 def test_local_test_task_and_review_flow() -> None:
