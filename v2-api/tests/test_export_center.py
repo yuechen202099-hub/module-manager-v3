@@ -22,6 +22,7 @@ from app.api.routes import auth, exports as export_routes, local_test
 from app.core import security
 from app.services import account_store, export_center as export_center_service, local_simulation
 from app.services.delivery_package_queue import DeliveryPackageNotReady
+from app.services.export_retirement import RETIREMENT_MESSAGE
 from app.services.final_delivery_export import group_is_formally_archived
 from app.services.export_center import (
     SUPPORTED_EXPORT_JOB_PAGE_SIZES,
@@ -92,6 +93,11 @@ def production_rbac_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple[T
     return client, headers
 
 
+def assert_export_retired(response) -> None:
+    assert response.status_code == 410
+    assert response.json() == {"detail": RETIREMENT_MESSAGE}
+
+
 @pytest.mark.parametrize(
     ("kind", "values", "expected"),
     [
@@ -120,133 +126,44 @@ def test_device_export_deduplicates_filters_sorts_and_keeps_text(kind: str, valu
     assert f"count={len(expected)}" in (workbook.properties.description or "")
 
 
-def test_terminal_readiness_is_one_server_query_and_reports_blockers(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_terminal_readiness_http_route_is_retired(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
-    calls: list[dict] = []
-
-    class ReadinessRepository:
-        def list_terminal_delivery_readiness(self, *, page: int, page_size: int, query: str = "") -> dict:
-            calls.append({"page": page, "page_size": page_size, "query": query})
-            return {
-                "page": page,
-                "page_size": page_size,
-                "total": 1,
-                "items": [
-                    {
-                        "terminal": "T-1",
-                        "group_count": 4,
-                        "constructed_count": 4,
-                        "archived_count": 3,
-                        "cache_ready_count": 3,
-                        "status": "blocked",
-                        "blockers": ["1 个资料组未归档"],
-                    }
-                ],
-            }
-
-    monkeypatch.setattr(export_routes, "state_repository", lambda: ReadinessRepository())
 
     response = client.get("/exports/terminal-readiness?page=1&page_size=20&query=T-1", headers=headers["admin"])
 
-    assert response.status_code == 200
-    assert response.json()["data"]["items"][0] == {
-        "terminal": "T-1",
-        "group_count": 4,
-        "constructed_count": 4,
-        "archived_count": 3,
-        "cache_ready_count": 3,
-        "status": "blocked",
-        "blockers": ["1 个资料组未归档"],
-    }
-    assert calls == [{"page": 1, "page_size": 20, "query": "T-1"}]
+    assert_export_retired(response)
 
 
 @pytest.mark.parametrize("page_size", sorted(SUPPORTED_EXPORT_JOB_PAGE_SIZES))
-def test_export_jobs_use_supported_page_sizes(monkeypatch: pytest.MonkeyPatch, tmp_path, page_size: int) -> None:
+def test_export_jobs_http_route_is_retired_for_supported_page_sizes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    page_size: int,
+) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
-    calls: list[dict] = []
-
-    class JobRepository:
-        def list_export_jobs(
-            self,
-            *,
-            page: int,
-            page_size: int,
-            category: str = "",
-            job_types: list[str] | None = None,
-            status: list[str] | None = None,
-        ) -> dict:
-            calls.append(
-                {
-                    "page": page,
-                    "page_size": page_size,
-                    "category": category,
-                    "job_types": list(job_types or []),
-                    "status": list(status or []),
-                }
-            )
-            return {"page": page, "page_size": page_size, "total": 0, "items": []}
-
-    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
 
     response = client.get(f"/exports/jobs?page_size={page_size}", headers=headers["admin"])
 
-    assert response.status_code == 200
-    assert response.json()["data"]["page_size"] == page_size
-    assert calls == [{"page": 1, "page_size": page_size, "category": "", "job_types": [], "status": []}]
+    assert_export_retired(response)
 
 
-def test_export_jobs_forward_server_side_filters(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_export_jobs_http_route_is_retired_before_filtering(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
-    calls: list[dict] = []
-
-    class JobRepository:
-        def list_export_jobs(
-            self,
-            *,
-            page: int,
-            page_size: int,
-            category: str = "",
-            job_types: list[str] | None = None,
-            status: list[str] | None = None,
-        ) -> dict:
-            calls.append(
-                {
-                    "page": page,
-                    "page_size": page_size,
-                    "category": category,
-                    "job_types": list(job_types or []),
-                    "status": list(status or []),
-                }
-            )
-            return {"page": page, "page_size": page_size, "total": 3, "items": []}
-
-    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
 
     response = client.get(
         "/exports/jobs?page=2&page_size=50&category=business&job_types=task_detail,exception_meter&status=pending,failed",
         headers=headers["admin"],
     )
 
-    assert response.status_code == 200
-    assert response.json()["data"]["total"] == 3
-    assert calls == [
-        {
-            "page": 2,
-            "page_size": 50,
-            "category": "business",
-            "job_types": ["task_detail", "exception_meter"],
-            "status": ["pending", "failed"],
-        }
-    ]
+    assert_export_retired(response)
 
 
-def test_export_jobs_reject_unsupported_page_size(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_export_jobs_http_route_is_retired_before_page_size_validation(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
 
     response = client.get("/exports/jobs?page_size=10", headers=headers["admin"])
 
-    assert response.status_code == 422
+    assert_export_retired(response)
 
 
 def test_postgres_export_jobs_include_created_by() -> None:
@@ -569,35 +486,15 @@ def test_pg_inline_export_existing_job_removes_only_new_duplicate_content(
     assert reused_path.read_bytes() == content
 
 
-def test_terminal_readiness_route_includes_latest_generated_at(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_terminal_readiness_http_route_is_retired_before_latest_generated_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
-
-    class ReadinessRepository:
-        def list_terminal_delivery_readiness(self, *, page: int, page_size: int, query: str = "") -> dict:
-            return {
-                "page": page,
-                "page_size": page_size,
-                "total": 1,
-                "items": [
-                    {
-                        "terminal": "T-1",
-                        "group_count": 2,
-                        "constructed_count": 2,
-                        "archived_count": 2,
-                        "cache_ready_count": 2,
-                        "status": "ready",
-                        "blockers": [],
-                        "latest_generated_at": "2026-07-23T08:09:10+00:00",
-                    }
-                ],
-            }
-
-    monkeypatch.setattr(export_routes, "state_repository", lambda: ReadinessRepository())
 
     response = client.get("/exports/terminal-readiness", headers=headers["admin"])
 
-    assert response.status_code == 200
-    assert response.json()["data"]["items"][0]["latest_generated_at"] == "2026-07-23T08:09:10+00:00"
+    assert_export_retired(response)
 
 
 def test_json_export_jobs_filter_by_category_job_types_and_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -706,22 +603,20 @@ def test_json_terminal_readiness_includes_latest_generated_at_from_export_jobs(m
     assert page["items"][0]["latest_generated_at"] == "2026-07-23T12:00:00+00:00"
 
 
-def test_export_catalog_marks_task_detail_required_filters(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_export_catalog_http_route_is_retired(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
 
     response = client.get("/exports/catalog", headers=headers["admin"])
 
-    assert response.status_code == 200
-    task_detail = next(item for item in response.json()["data"]["items"] if item["key"] == "task_detail")
-    assert task_detail["required_filters"] == [{"key": "task_id", "label": "任务", "kind": "task"}]
+    assert_export_retired(response)
 
 
-def test_export_task_options_are_admin_only(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_export_task_options_http_route_is_retired_before_auth(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
 
     response = client.get("/exports/task-options?query=T-1&limit=20", headers=headers["constructor"])
 
-    assert response.status_code == 403
+    assert_export_retired(response)
 
 
 def test_json_export_task_options_filter_and_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -764,7 +659,10 @@ def test_task_detail_export_job_requires_positive_task_id(monkeypatch: pytest.Mo
         local_simulation.reset_current_team(token)
 
 
-def test_constructor_cannot_create_or_download_export(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_export_create_and_download_http_routes_are_retired_for_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
 
     create = client.post(
@@ -774,39 +672,15 @@ def test_constructor_cannot_create_or_download_export(monkeypatch: pytest.Monkey
     )
     download = client.get("/exports/jobs/job-1/download", headers=headers["constructor"])
 
-    assert create.status_code == 403
-    assert download.status_code == 403
+    assert_export_retired(create)
+    assert_export_retired(download)
 
 
-def test_export_create_and_download_are_audited(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_export_create_and_download_http_routes_are_retired_for_admin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
-    events: list[tuple[str, str, dict]] = []
-
-    class JobRepository:
-        def create_export_job(self, *, job_type: str, filters: dict, actor: str) -> dict:
-            return {
-                "id": "job-1",
-                "job_type": job_type,
-                "status": "succeeded",
-                "file_name": "terminal-devices.xlsx",
-                "content": b"workbook-bytes",
-            }
-
-        def open_export_job_download(self, job_id: str, *, actor: str) -> dict:
-            assert job_id == "job-1"
-            return {
-                "id": "job-1",
-                "job_type": "device_terminal",
-                "file_name": "terminal-devices.xlsx",
-                "content": b"workbook-bytes",
-                "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            }
-
-        def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
-            events.append((action, actor, deepcopy(payload)))
-            return {"id": f"audit-{len(events)}", "action": action, "actor": actor, "payload": payload}
-
-    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
 
     create = client.post(
         "/exports/jobs",
@@ -815,22 +689,8 @@ def test_export_create_and_download_are_audited(monkeypatch: pytest.MonkeyPatch,
     )
     download = client.get("/exports/jobs/job-1/download", headers=headers["admin"])
 
-    assert create.status_code == 200
-    assert create.json()["data"]["id"] == "job-1"
-    assert download.status_code == 200
-    assert download.content == b"workbook-bytes"
-    assert events == [
-        (
-            "export_job_created",
-            "root-admin",
-            {"job_id": "job-1", "job_type": "device_terminal", "filters": {"terminal": "T-1"}},
-        ),
-        (
-            "export_job_downloaded",
-            "root-admin",
-            {"job_id": "job-1", "job_type": "device_terminal", "file_name": "terminal-devices.xlsx"},
-        ),
-    ]
+    assert_export_retired(create)
+    assert_export_retired(download)
 
 
 def formal_group(
@@ -1019,121 +879,37 @@ def test_pg_lightweight_readiness_query_includes_barcode_verification() -> None:
     assert "auto_archive_status" in source
 
 
-def test_download_route_streams_validated_path_after_success_audit(
+def test_download_http_route_is_retired_before_streaming(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
-    cache_root = tmp_path / "delivery-cache"
-    cache_root.mkdir()
-    monkeypatch.setattr(local_simulation, "delivery_cache_root", lambda: cache_root)
-    export_file = cache_root / "terminal-devices.xlsx"
-    export_file.write_bytes(b"streamed-workbook")
-    events: list[tuple[str, str, dict]] = []
-
-    class JobRepository:
-        def open_export_job_download(self, job_id: str, *, actor: str) -> dict:
-            return {
-                "id": job_id,
-                "job_type": "device_terminal",
-                "file_name": "terminal-devices.xlsx",
-                "relative_path": "terminal-devices.xlsx",
-                "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            }
-
-        def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
-            events.append((action, actor, deepcopy(payload)))
-            return {"id": "audit-1", "action": action, "actor": actor, "payload": payload}
-
-    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
-    monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail("download route must not read whole file"))
-    monkeypatch.setattr(export_routes, "FileResponse", lambda *_args, **_kwargs: pytest.fail("download route must stream opened fd"))
 
     response = client.get("/exports/jobs/job-1/download", headers=headers["admin"])
 
-    assert response.status_code == 200
-    assert response.content == b"streamed-workbook"
-    assert events == [
-        (
-            "export_job_downloaded",
-            "root-admin",
-            {"job_id": "job-1", "job_type": "device_terminal", "file_name": "terminal-devices.xlsx"},
-        )
-    ]
+    assert_export_retired(response)
 
 
-def test_download_route_opens_safe_stream_before_success_audit(
+def test_download_http_route_is_retired_before_safe_stream_open(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
-    events: list[tuple[str, str, dict]] = []
-
-    class JobRepository:
-        def open_export_job_download(self, job_id: str, *, actor: str) -> dict:
-            return {
-                "id": job_id,
-                "job_type": "device_terminal",
-                "file_name": "terminal-devices.xlsx",
-                "relative_path": "exports/missing.xlsx",
-                "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            }
-
-        def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
-            events.append((action, actor, deepcopy(payload)))
-            return {"id": "audit-1", "action": action, "actor": actor, "payload": payload}
-
-    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
-    monkeypatch.setattr(
-        export_center_service,
-        "open_validated_export_stream",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing")),
-    )
 
     response = client.get("/exports/jobs/job-1/download", headers=headers["admin"])
 
-    assert response.status_code == 409
-    assert events == []
+    assert_export_retired(response)
 
 
-def test_download_route_closes_opened_stream_when_audit_fails(
+def test_download_http_route_is_retired_before_audit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
-    closed: list[str] = []
 
-    class FakeOpened:
-        media_type = "application/octet-stream"
-        file_name = "terminal-devices.xlsx"
-        size_bytes = 7
+    response = client.get("/exports/jobs/job-1/download", headers=headers["admin"])
 
-        def iter_bytes(self):
-            yield b"content"
-
-        def close(self):
-            closed.append("closed")
-
-    class JobRepository:
-        def open_export_job_download(self, job_id: str, *, actor: str) -> dict:
-            return {
-                "id": job_id,
-                "job_type": "device_terminal",
-                "file_name": "terminal-devices.xlsx",
-                "relative_path": "exports/job.xlsx",
-                "media_type": "application/octet-stream",
-            }
-
-        def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
-            raise RuntimeError("audit unavailable")
-
-    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
-    monkeypatch.setattr(export_center_service, "open_validated_export_stream", lambda *_args, **_kwargs: FakeOpened())
-
-    with pytest.raises(RuntimeError, match="audit unavailable"):
-        client.get("/exports/jobs/job-1/download", headers=headers["admin"])
-
-    assert closed == ["closed"]
+    assert_export_retired(response)
 
 
 def test_posix_export_stream_uses_openat_without_following_parent_symlinks(
@@ -1350,29 +1126,11 @@ def test_json_export_job_concurrent_create_rechecks_request_key_under_lock(monke
     assert len(state["export_jobs"]) == 1
 
 
-def test_export_create_audits_only_new_jobs(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_export_create_http_route_is_retired_before_deduplication_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     client, headers = production_rbac_client(monkeypatch, tmp_path)
-    events: list[tuple[str, str, dict]] = []
-    created = True
-
-    class JobRepository:
-        def create_export_job(self, *, job_type: str, filters: dict, actor: str) -> dict:
-            nonlocal created
-            result = {
-                "id": "job-1",
-                "job_type": job_type,
-                "status": "pending",
-                "file_name": "final-delivery.zip",
-                "created": created,
-            }
-            created = False
-            return result
-
-        def append_audit_event(self, action: str, actor: str, payload: dict) -> dict:
-            events.append((action, actor, deepcopy(payload)))
-            return {"id": f"audit-{len(events)}", "action": action, "actor": actor, "payload": payload}
-
-    monkeypatch.setattr(export_routes, "state_repository", lambda: JobRepository())
 
     first = client.post(
         "/exports/jobs",
@@ -1385,19 +1143,8 @@ def test_export_create_audits_only_new_jobs(monkeypatch: pytest.MonkeyPatch, tmp
         json={"job_type": "final_delivery", "filters": {"terminal": "T-1", "review_scope": "reviewed"}},
     )
 
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert events == [
-        (
-            "export_job_created",
-            "root-admin",
-            {
-                "job_id": "job-1",
-                "job_type": "final_delivery",
-                "filters": {"terminal": "T-1", "review_scope": "reviewed"},
-            },
-        )
-    ]
+    assert_export_retired(first)
+    assert_export_retired(second)
 
 
 def test_final_delivery_request_key_reuses_existing_delivery_package_job(monkeypatch: pytest.MonkeyPatch) -> None:

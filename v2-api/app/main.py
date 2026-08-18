@@ -2,7 +2,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
@@ -11,7 +11,6 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from app.api.router import api_router
-from app.api.routes.auth import require_production_reviewer_or_admin
 from app.core.config import settings
 from app.core.request_id import RequestIdMiddleware
 from app.core.responses import error_response, ok
@@ -24,6 +23,7 @@ from app.services.local_simulation import (
     finish_authoritative_json_write,
     save_all_team_states,
 )
+from app.services.export_retirement import is_retired_export_path, retired_export_response
 from app.services.ezcodes_scheduler import sync_manager
 from app.services.project_board_cache import (
     start_project_board_summary_cache,
@@ -164,6 +164,8 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def persist_local_test_state(request: Request, call_next):
+        if is_retired_export_path(request.url.path):
+            return retired_export_response()
         rejection = production_auth_rejection(request)
         if rejection is not None:
             return rejection
@@ -277,10 +279,6 @@ def create_app() -> FastAPI:
 
     @app.get("/global-search")
     def global_search_page():
-        return vue_index_response()
-
-    @app.get("/exports")
-    def exports_page(_admin: dict = Depends(require_production_reviewer_or_admin)):
         return vue_index_response()
 
     @app.get("/account-management")

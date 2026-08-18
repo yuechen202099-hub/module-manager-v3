@@ -28,10 +28,16 @@ from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
 from app.services.ezcodes_scheduler import sync_manager
 from app.services import account_store, local_simulation, photo_barcode_check, photo_storage, state_repository, unmatched_review
+from app.services.export_retirement import RETIREMENT_MESSAGE
 from app.services.photo_storage import resolve_photo_for_response
 
 
 client = TestClient(create_app())
+
+
+def assert_export_retired(response) -> None:
+    assert response.status_code == 410
+    assert response.json() == {"detail": RETIREMENT_MESSAGE}
 
 
 def build_api_workbook(rows: list[list[str]]) -> bytes:
@@ -262,7 +268,7 @@ def test_constructor_cannot_use_export_or_review_routes(monkeypatch, tmp_path) -
         },
     )
 
-    assert export_response.status_code == 403
+    assert_export_retired(export_response)
     assert review_response.status_code == 403
 
 
@@ -703,40 +709,11 @@ def test_production_constructor_unmatched_list_is_scoped_to_authenticated_actor(
     ]
 
 
-def test_production_unmatched_export_is_admin_only_and_uses_one_server_snapshot(
+def test_production_unmatched_export_is_retired_for_every_role(
     monkeypatch,
     tmp_path,
 ) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
-
-    class ExportRepository(FakeLegacyUnmatchedRepository):
-        def __init__(self) -> None:
-            super().__init__()
-            self.export_calls: list[dict] = []
-
-        def export_unmatched_records(
-            self,
-            *,
-            query: str,
-            limit: int,
-        ) -> dict:
-            self.export_calls.append(
-                {
-                    "query": query,
-                    "limit": limit,
-                }
-            )
-            return {
-                "total": 2,
-                "items": [
-                    {"unmatched_id": "u-export-1", "review_version": 1},
-                    {"unmatched_id": "u-export-2", "review_version": 1},
-                ],
-                "stats": {"pending": 2, "assigned": 0, "outside": 0},
-            }
-
-    repository = ExportRepository()
-    monkeypatch.setattr(local_test, "state_repository", lambda: repository)
 
     constructor = production_client.get(
         "/local-test/unmatched/export?query=full-list",
@@ -751,41 +728,20 @@ def test_production_unmatched_export_is_admin_only_and_uses_one_server_snapshot(
         headers=headers["admin"],
     )
 
-    assert constructor.status_code == 403
-    assert reviewer.status_code == 403
-    assert admin.status_code == 200
-    assert [item["unmatched_id"] for item in admin.json()["data"]["items"]] == [
-        "u-export-1",
-        "u-export-2",
-    ]
-    assert repository.export_calls == [
-        {
-            "query": "full-list",
-            "limit": local_test.UNMATCHED_EXPORT_LIMIT,
-        }
-    ]
+    assert_export_retired(constructor)
+    assert_export_retired(reviewer)
+    assert_export_retired(admin)
 
 
-def test_production_unmatched_export_rejects_truncated_server_snapshot(monkeypatch, tmp_path) -> None:
+def test_production_unmatched_export_is_retired_before_snapshot_validation(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
-
-    class TruncatedExportRepository(FakeLegacyUnmatchedRepository):
-        def export_unmatched_records(self, **kwargs) -> dict:
-            return {
-                "total": 2,
-                "items": [{"unmatched_id": "u-export-1", "review_version": 1}],
-                "stats": {"pending": 2, "assigned": 0, "outside": 0},
-            }
-
-    monkeypatch.setattr(local_test, "state_repository", lambda: TruncatedExportRepository())
 
     response = production_client.get(
         "/local-test/unmatched/export",
         headers=headers["admin"],
     )
 
-    assert response.status_code == 409
-    assert "snapshot" in response.text.lower()
+    assert_export_retired(response)
 
 
 def test_production_unmatched_dedupe_is_retired_without_write_or_audit(monkeypatch, tmp_path) -> None:
@@ -4242,58 +4198,26 @@ def test_photo_barcode_review_groups_support_passed_all_and_query_filters() -> N
     assert {item["group_id"] for item in all_items} >= {seeded[0]["id"], seeded[1]["id"]}
 
 
-def test_photo_barcode_review_groups_export_returns_admin_workbook() -> None:
+def test_photo_barcode_review_groups_export_is_retired() -> None:
     headers = demo_admin_headers()
-    seed_photo_barcode_review_groups(count=1)
 
     export_response = client.get(
         "/local-test/photo-barcode/review-groups/export?status=unreadable",
         headers=headers,
     )
 
-    assert export_response.status_code == 200
-    assert export_response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    assert "attachment" in export_response.headers["content-disposition"]
-    assert export_response.content.startswith(b"PK")
-
-    from openpyxl import load_workbook
-
-    workbook = load_workbook(BytesIO(export_response.content), read_only=True)
-    sheet = workbook.active
-    headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
-    assert "资料组状态" in headers
-    assert "是否已归档" in headers
-    assert "缺失项" in headers
+    assert_export_retired(export_response)
 
 
-def test_photo_barcode_review_groups_export_supports_passed_query_filter() -> None:
+def test_photo_barcode_review_groups_export_is_retired_before_query_filtering() -> None:
     headers = demo_admin_headers()
-    seeded = seed_photo_barcode_review_groups(count=3)
-    seeded[0]["group_barcode_manual_confirmed"] = True
-    seeded[0]["group_barcode_manual_confirmed_fields"] = ["meter", "module", "collector"]
-    seeded[0]["terminal"] = "TERMINAL-EXPORT-PASSED-001"
-    seeded[1]["terminal"] = "TERMINAL-EXPORT-UNREADABLE-002"
-    local_simulation.save_all_team_states()
 
     export_response = client.get(
         "/local-test/photo-barcode/review-groups/export?status=matched&query=TERMINAL-EXPORT-PASSED-001",
         headers=headers,
     )
 
-    assert export_response.status_code == 200
-
-    from openpyxl import load_workbook
-
-    workbook = load_workbook(BytesIO(export_response.content), read_only=True)
-    sheet = workbook.active
-    rows = list(sheet.iter_rows(values_only=True))
-    headers_row = list(rows[0])
-    status_index = headers_row.index("状态")
-    terminal_index = headers_row.index("终端")
-    data_rows = rows[1:]
-    assert len(data_rows) == 1
-    assert data_rows[0][status_index] == "通过"
-    assert data_rows[0][terminal_index] == "TERMINAL-EXPORT-PASSED-001"
+    assert_export_retired(export_response)
 
 
 def test_account_login_history_keeps_30_rows_and_marks_ip_common_user(monkeypatch, tmp_path) -> None:
@@ -5836,8 +5760,9 @@ def test_construction_tasks_include_meter_search_text_for_task_picker() -> None:
 
 
 def test_direct_workspace_routes_redirect_to_app_shell() -> None:
-    for path in ["/project-board", "/claim-tasks", "/construction", "/account-management", "/sync-config", "/exports"]:
+    for path in ["/project-board", "/claim-tasks", "/construction", "/account-management", "/sync-config"]:
         assert_vue_shell_response(client.get(path, follow_redirects=False))
+    assert_export_retired(client.get("/exports", follow_redirects=False))
     response = client.get("/construction-cache", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"] == "/construction"
@@ -5846,13 +5771,13 @@ def test_direct_workspace_routes_redirect_to_app_shell() -> None:
     assert response.headers["location"] == "/global-search?review=1"
 
 
-def test_production_exports_page_is_admin_only_and_serves_vue(monkeypatch, tmp_path) -> None:
+def test_production_exports_page_is_retired_before_auth(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
 
-    assert production_client.get("/exports").status_code == 401
-    assert production_client.get("/exports", headers=headers["reviewer"]).status_code == 403
-    assert production_client.get("/exports", headers=headers["constructor"]).status_code == 403
-    assert_vue_shell_response(production_client.get("/exports", headers=headers["admin"]))
+    assert_export_retired(production_client.get("/exports"))
+    assert_export_retired(production_client.get("/exports", headers=headers["reviewer"]))
+    assert_export_retired(production_client.get("/exports", headers=headers["constructor"]))
+    assert_export_retired(production_client.get("/exports", headers=headers["admin"]))
 
 
 def test_project_board_page_is_available() -> None:
@@ -6878,63 +6803,31 @@ def test_installer_kpi_clusters_same_building_number_public_equipment() -> None:
     assert addresses["110000000003"]["address_cluster_key"] != addresses["110000000001"]["address_cluster_key"]
 
 
-def test_excel_exports_return_real_workbooks() -> None:
-    client.post("/local-test/bootstrap")
-    task = client.get("/local-test/tasks").json()["data"]["items"][0]
+def test_excel_exports_are_retired() -> None:
     admin_headers = _final_delivery_headers()
 
-    task_export = client.post("/exports/task-detail", headers=admin_headers, json={"task_id": task["id"]})
+    task_export = client.post("/exports/task-detail", headers=admin_headers, json={"task_id": 1})
     all_final_export = client.post("/exports/final-delivery", headers=admin_headers, json={"project_id": 1})
     terminal_final_export = client.post(
         "/exports/final-delivery",
         headers=admin_headers,
-        json={"task_id": task["id"]},
+        json={"task_id": 1},
     )
     exception_export = client.post("/exports/exception-meters", headers=admin_headers, json={})
     project_outside_export = client.post("/exports/project-outside", headers=admin_headers, json={})
 
-    assert task_export.status_code == 200
-    assert task_export.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    assert "attachment" in task_export.headers["content-disposition"]
-    assert task_export.content.startswith(b"PK")
-    assert all_final_export.status_code == 400
-    assert terminal_final_export.status_code == 422
-    assert terminal_final_export.json()["detail"]["code"] == "formal_delivery_invalid"
-    assert exception_export.status_code == 200
-    assert exception_export.content.startswith(b"PK")
-    assert project_outside_export.status_code == 200
-    assert project_outside_export.content.startswith(b"PK")
-    from io import BytesIO
-
-    from openpyxl import load_workbook
-
-    workbook = load_workbook(BytesIO(exception_export.content), read_only=True)
-    sheet = workbook.active
-    headers = [cell.value for cell in next(sheet.iter_rows(min_row=1, max_row=1))]
-    assert "\u5f02\u5e38\u539f\u56e0" in headers
-    assert "\u73b0\u573a\u5904\u7406\u5efa\u8bae" in headers
+    for response in (
+        task_export,
+        all_final_export,
+        terminal_final_export,
+        exception_export,
+        project_outside_export,
+    ):
+        assert_export_retired(response)
 
 
-def test_production_legacy_export_endpoints_require_admin(monkeypatch, tmp_path) -> None:
+def test_production_legacy_export_endpoints_are_retired_for_every_role(monkeypatch, tmp_path) -> None:
     production_client, headers = production_rbac_client(monkeypatch, tmp_path)
-    workbook = build_api_workbook([["header"], ["value"]])
-    calls: list[tuple[str, object | None]] = []
-
-    class ExportRepository:
-        def build_task_detail_export(self, task_id):
-            calls.append(("task-detail", task_id))
-            return workbook
-
-        def build_exception_meter_export(self, reviewer=""):
-            calls.append(("exception-meters", reviewer))
-            return workbook
-
-        def build_project_outside_export(self):
-            calls.append(("project-outside", None))
-            return workbook
-
-    repository = ExportRepository()
-    monkeypatch.setattr(export_routes, "get_state_repository", lambda: repository)
     cases = [
         ("/exports/task-detail", {"task_id": 101}),
         ("/exports/exception-meters", {"reviewer": ""}),
@@ -6944,18 +6837,11 @@ def test_production_legacy_export_endpoints_require_admin(monkeypatch, tmp_path)
     for role in ("constructor", "reviewer"):
         for path, payload in cases:
             response = production_client.post(path, headers=headers[role], json=payload)
-            assert response.status_code == 403
+            assert_export_retired(response)
 
     for path, payload in cases:
         response = production_client.post(path, headers=headers["admin"], json=payload)
-        assert response.status_code == 200
-        assert response.content.startswith(b"PK")
-
-    assert calls == [
-        ("task-detail", 101),
-        ("exception-meters", ""),
-        ("project-outside", None),
-    ]
+        assert_export_retired(response)
 
 
 def _final_delivery_headers(*, role: str = "admin", subject: str = "admin-a") -> dict[str, str]:
@@ -6970,18 +6856,7 @@ def _final_delivery_headers(*, role: str = "admin", subject: str = "admin-a") ->
     return {"Authorization": f"bearer {token}"}
 
 
-def test_final_delivery_rejects_anonymous_and_non_admin_before_repository_access(monkeypatch) -> None:
-    from app.services.delivery_package_queue import DeliveryPackageNotReady
-
-    calls: list[dict] = []
-
-    class Repository:
-        def request_final_delivery_export(self, **kwargs):
-            calls.append(kwargs)
-            raise DeliveryPackageNotReady(job_id="must-not-enqueue", status="pending")
-
-    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
-
+def test_final_delivery_is_retired_for_anonymous_and_non_admin() -> None:
     anonymous = client.post("/exports/final-delivery", json={"task_id": 17})
     reviewer = client.post(
         "/exports/final-delivery",
@@ -6989,81 +6864,28 @@ def test_final_delivery_rejects_anonymous_and_non_admin_before_repository_access
         json={"task_id": 17},
     )
 
-    assert anonymous.status_code == 401
-    assert reviewer.status_code == 403
-    assert calls == []
+    assert_export_retired(anonymous)
+    assert_export_retired(reviewer)
 
 
-def test_final_delivery_export_returns_versioned_zip(monkeypatch, tmp_path: Path) -> None:
-    package = tmp_path / "formal.zip"
-    with ZipFile(package, "w") as archive:
-        archive.writestr("设备清单.xlsx", b"workbook")
-
-    released = []
-
-    class Package:
-        path = package
-
-        def release(self):
-            released.append(self.path)
-
-    class Repository:
-        def request_final_delivery_export(self, **kwargs):
-            assert kwargs == {
-                "task_id": 17,
-                "terminal": "",
-                "review_scope": "reviewed",
-                "requested_by": "admin-a",
-            }
-            return Package()
-
-    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
-
+def test_final_delivery_export_is_retired_before_zip_creation() -> None:
     response = client.post(
         "/exports/final-delivery",
         headers=_final_delivery_headers(),
         json={"task_id": 17},
     )
 
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "application/zip"
-    assert "V3.2.0-final-delivery-17-" in response.headers["content-disposition"]
-    assert response.headers["content-disposition"].endswith('.zip"')
-    assert response.content == package.read_bytes()
-    assert released == [package]
+    assert_export_retired(response)
 
 
-def test_final_delivery_cache_miss_returns_stable_202_without_building_zip(monkeypatch) -> None:
-    from app.services.delivery_package_queue import DeliveryPackageNotReady
-
-    class Repository:
-        def request_final_delivery_export(self, **kwargs):
-            assert kwargs == {
-                "task_id": 17,
-                "terminal": "",
-                "review_scope": "reviewed",
-                "requested_by": "admin-a",
-            }
-            raise DeliveryPackageNotReady(job_id="package-job-1", status="pending")
-
-        def build_final_delivery_export(self, **_kwargs):
-            pytest.fail("HTTP request must never invoke the synchronous ZIP builder")
-
-    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
-
+def test_final_delivery_cache_miss_path_is_retired_before_repository_access() -> None:
     response = client.post(
         "/exports/final-delivery",
         headers=_final_delivery_headers(),
         json={"task_id": 17},
     )
 
-    assert response.status_code == 202
-    assert response.json()["detail"] == {
-        "code": "formal_delivery_not_ready",
-        "message": "正式交付包正在后台生成，请稍后重试。",
-        "job_id": "package-job-1",
-        "status": "pending",
-    }
+    assert_export_retired(response)
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("response failed"), asyncio.CancelledError()])
@@ -7179,98 +7001,40 @@ def test_final_delivery_asgi_response_releases_exact_lease_on_every_exit(
         assert sent[-1]["type"] == "http.response.body"
 
 
-def test_final_delivery_export_returns_structured_group_errors(monkeypatch) -> None:
-    from app.services.final_delivery_export import DeliveryPackageValidationError
-
-    errors = [
-        {
-            "group_id": "group-bad",
-            "code": "missing_module_no",
-            "field": "module_asset_no",
-            "message": "Missing required module_asset_no",
-        }
-    ]
-
-    class Repository:
-        def request_final_delivery_export(self, **_kwargs):
-            raise DeliveryPackageValidationError(errors)
-
-    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
-
+def test_final_delivery_export_is_retired_before_group_validation() -> None:
     response = client.post(
         "/exports/final-delivery",
         headers=_final_delivery_headers(),
         json={"terminal": "00112233"},
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"] == {"code": "formal_delivery_invalid", "groups": errors}
+    assert_export_retired(response)
 
 
 @pytest.mark.parametrize(
     "cache_code",
     ["delivery_cache_invalid", "delivery_cache_pending", "invalid_photo_count"],
 )
-def test_final_delivery_export_returns_422_for_every_cache_validation_shape(
+def test_final_delivery_export_is_retired_before_every_cache_validation_shape(
     cache_code: str,
-    monkeypatch,
 ) -> None:
-    from app.services.final_delivery_export import DeliveryPackageValidationError
-
-    errors = [
-        {
-            "group_id": "group-cache",
-            "code": cache_code,
-            "field": "photos",
-            "message": "cache validation failed",
-        }
-    ]
-
-    class Repository:
-        def request_final_delivery_export(self, **_kwargs):
-            raise DeliveryPackageValidationError(errors)
-
-    monkeypatch.setattr(export_routes, "get_state_repository", lambda: Repository())
-
     response = client.post(
         "/exports/final-delivery",
         headers=_final_delivery_headers(),
-        json={"task_id": 17},
+        json={"task_id": 17, "cache_code": cache_code},
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["groups"] == errors
+    assert_export_retired(response)
 
 
-def test_final_delivery_manifest_supports_frontend_zip_export() -> None:
-    client.post("/local-test/bootstrap")
-    task = client.get("/local-test/tasks").json()["data"]["items"][0]
-    client.post(f"/local-test/tasks/{task['id']}/claim", json={"reviewer": "api-test"})
-    group = client.get(f"/local-test/tasks/{task['id']}/groups?limit=1&scan_only=false").json()["data"]["items"][0]
-    client.patch(
-        f"/local-test/groups/{group['id']}/review",
-        json={"status": "approved", "reviewer": "api-test", "note": "done"},
-    )
-
+def test_final_delivery_manifest_is_retired_for_every_scope() -> None:
     all_response = client.get("/local-test/export-manifest/final-delivery")
-    response = client.get(f"/local-test/export-manifest/final-delivery?task_id={task['id']}")
-    all_scope_response = client.get(f"/local-test/export-manifest/final-delivery?task_id={task['id']}&review_scope=all")
+    response = client.get("/local-test/export-manifest/final-delivery?task_id=17")
+    all_scope_response = client.get("/local-test/export-manifest/final-delivery?task_id=17&review_scope=all")
 
-    assert all_response.status_code == 400
-    assert response.status_code == 200
-    payload = response.json()["data"]
-    assert payload["photo_limit_per_group"] == 4
-    assert payload["scope"]["task_id"] == task["id"]
-    assert payload["scope"]["review_scope"] == "reviewed"
-    assert payload["groups"]
-    assert all(item["status"] in {"approved", "exception"} or item.get("has_archive_blocker") for item in payload["groups"])
-    assert all_scope_response.status_code == 200
-    assert len(all_scope_response.json()["data"]["groups"]) >= len(payload["groups"])
-    first_group = payload["groups"][0]
-    assert {"terminal", "address", "meter_no", "photos"}.issubset(first_group)
-    if first_group["photos"]:
-        first_photo = first_group["photos"][0]
-        assert {"image_url", "category_label", "archive_filename"}.issubset(first_photo)
+    assert_export_retired(all_response)
+    assert_export_retired(response)
+    assert_export_retired(all_scope_response)
 
 
 def test_group_detail_uses_local_data_without_legacy_sync(monkeypatch) -> None:
