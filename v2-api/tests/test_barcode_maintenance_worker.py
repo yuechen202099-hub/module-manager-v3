@@ -20,9 +20,73 @@ from sqlalchemy.dialects import postgresql
 
 from app.services import local_simulation
 from app.services.group_barcode_verification import evaluate_group_eligibility
+from app.services.export_retirement import ExportCenterRetiredError
 
 
 REQUIRED_CATEGORIES = ("before_box", "collector_barcode", "module_meter", "after_box")
+
+
+def _explode_retired_delivery_path(*_args, **_kwargs):
+    raise AssertionError("retired delivery path was called")
+
+
+def test_delivery_worker_claims_only_verification_and_auto_archive(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    calls: list[str] = []
+    monkeypatch.setattr(worker, "_next_claim_kind", "delivery_package")
+    monkeypatch.setattr(
+        worker,
+        "claim_next_verification_job",
+        lambda **_kwargs: calls.append("verification"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "claim_next_archive_job",
+        lambda **_kwargs: calls.append("auto_archive"),
+    )
+    monkeypatch.setattr(worker, "claim_next_delivery_cache_job", _explode_retired_delivery_path)
+    monkeypatch.setattr(worker, "claim_next_delivery_package_job", _explode_retired_delivery_path)
+
+    assert worker._claim_next_work("worker-1") is None
+    assert set(calls) == {"verification", "auto_archive"}
+
+
+def test_worker_batch_never_runs_delivery_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    calls: list[str] = []
+    monkeypatch.setattr(worker, "_claim_next_work", lambda _worker_id: None)
+    monkeypatch.setattr(
+        worker,
+        "process_storage_cleanup_jobs",
+        lambda **_kwargs: {"processed": 0, "completed": 0, "failed": 0},
+    )
+    monkeypatch.setattr(
+        worker,
+        "run_delivery_cache_cleanup_if_due",
+        lambda: calls.append("cleanup") or {"status": "unexpected"},
+    )
+    monkeypatch.setattr(
+        worker,
+        "reconcile_delivery_cache_jobs",
+        lambda **_kwargs: calls.append("reconcile"),
+    )
+
+    report = worker.run_worker_batch(batch_size=1, batch_pause_seconds=0, can_claim=lambda: True)
+
+    assert calls == []
+    assert report["processed"] == report["failed"] == 0
+    assert report["status"] == "complete"
+    assert "cleanup" not in report
+
+
+@pytest.mark.parametrize("kind", ["delivery_cache", "delivery_package"])
+def test_worker_rejects_retired_delivery_jobs(kind: str) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    with pytest.raises(ExportCenterRetiredError):
+        worker._process_job(worker.MaintenanceJob(kind=kind, team_id="team", group_id="job"))
 
 
 def eligible_group(group_id: str, *, verification_status: str = "pending") -> dict:
@@ -815,7 +879,7 @@ def test_postgres_delivery_package_claim_terminalizes_expired_exhausted_lease(
     assert any("delivery_package_jobs.status = 'processing'" in sql for sql in statements)
 
 
-def test_json_delivery_package_job_is_claimed_once_and_completed_by_serial_worker(
+def test_json_delivery_package_job_is_rejected_by_serial_worker_after_stale_direct_claim(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -860,14 +924,15 @@ def test_json_delivery_package_job_is_claimed_once_and_completed_by_serial_worke
     assert claim.kind == "delivery_package"
     assert competing is None
 
-    worker._process_job(claim)
+    with pytest.raises(ExportCenterRetiredError):
+        worker._process_job(claim)
 
     job = local_simulation._team_states[team_id]["delivery_package_jobs"][0]
-    assert job["status"] == "ready"
-    assert job["package_path"] == str(package_path)
-    assert job["lease_owner"] is None
-    assert job["lease_token"] is None
-    assert releases == [package_path]
+    assert job["status"] == "processing"
+    assert "package_path" not in job
+    assert job["lease_owner"] == "package-worker"
+    assert job["lease_token"]
+    assert releases == []
 
 
 def test_json_delivery_package_failures_stop_after_retry_limit(
@@ -1061,7 +1126,7 @@ def test_auto_archive_rejects_ocr_only_and_incomplete_categories(
         ("manual_confirmed", "manual_confirmed", "manual_confirmed"),
     ],
 )
-def test_auto_archive_is_transactional_idempotent_and_enqueues_cache(
+def test_auto_archive_is_transactional_idempotent_without_delivery_enqueue(
     monkeypatch: pytest.MonkeyPatch,
     verification_status: str,
     recognition_source: str,
@@ -1086,8 +1151,7 @@ def test_auto_archive_is_transactional_idempotent_and_enqueues_cache(
     assert all(photo["archive_status"] == "archived" for photo in committed_group["photos"])
     assert len(archive_audits) == 1
     assert archive_audits[0]["payload"]["source"] == expected_source
-    assert len(state["delivery_cache_jobs"]) == 1
-    assert state["delivery_cache_jobs"][0]["status"] == "pending"
+    assert state["delivery_cache_jobs"] == []
 
 
 def test_delivery_cache_reuses_sha_across_groups_and_retries_after_failure(tmp_path: Path) -> None:
@@ -1234,6 +1298,7 @@ def test_declared_hash_stays_strict_when_it_matches_the_image_url_fingerprint(tm
 
 
 @pytest.mark.parametrize("legacy_url_hash", [False, True])
+@pytest.mark.skip(reason="delivery-cache worker retired in V3.2.3")
 def test_json_repository_delivery_cache_job_builds_readable_manifest_and_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1312,6 +1377,7 @@ def test_delivery_cache_rejects_corrupt_named_objects_and_partial_temp_files(tmp
 
 
 @pytest.mark.parametrize("gap", ["review", "auto_archive"])
+@pytest.mark.skip(reason="delivery-cache reconciliation retired in V3.2.3")
 def test_json_delivery_cache_reconciliation_recovers_post_commit_enqueue_gap(
     monkeypatch: pytest.MonkeyPatch,
     gap: str,
@@ -1349,6 +1415,7 @@ def test_json_delivery_cache_reconciliation_recovers_post_commit_enqueue_gap(
     assert reconciled["delivery_cache_jobs"][0]["status"] == "pending"
 
 
+@pytest.mark.skip(reason="delivery-cache reconciliation retired in V3.2.3")
 def test_worker_and_daily_enqueue_paths_run_delivery_cache_reconciliation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1372,6 +1439,7 @@ def test_worker_and_daily_enqueue_paths_run_delivery_cache_reconciliation(
     assert reconciliations == ["reconcile:20", "reconcile:20"]
 
 
+@pytest.mark.skip(reason="delivery-cache cleanup retired in V3.2.3")
 def test_low_load_worker_runs_delivery_cleanup_before_reconciliation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1544,6 +1612,7 @@ def test_real_postgres_worker_gate_reads_only_control_and_load(
     assert load_checks == ["load"]
 
 
+@pytest.mark.skip(reason="delivery-cache reconciliation retired in V3.2.3")
 def test_json_delivery_cache_reconciliation_is_bounded_and_eventually_recovers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2543,6 +2612,7 @@ def test_expired_json_verification_lease_stops_at_retry_limit(
     assert verification["lease_owner"] is None
 
 
+@pytest.mark.skip(reason="delivery-cache worker retired in V3.2.3")
 def test_expired_json_delivery_cache_lease_stops_at_retry_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2572,6 +2642,7 @@ def test_expired_json_delivery_cache_lease_stops_at_retry_limit(
     assert state["groups"][0]["delivery_cache_status"] == "manual_required"
 
 
+@pytest.mark.skip(reason="delivery-cache reconciliation retired in V3.2.3")
 def test_json_invalidation_neutralizes_live_delivery_job_and_reconciliation_reactivates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2619,6 +2690,7 @@ def test_json_invalidation_neutralizes_live_delivery_job_and_reconciliation_reac
     assert worker.claim_next_delivery_cache_job(worker_id="repaired-worker") is not None
 
 
+@pytest.mark.skip(reason="delivery-cache job transitions retired in V3.2.3")
 def test_postgres_delivery_job_eligibility_transition_matches_json() -> None:
     from app.services import delivery_cache
 

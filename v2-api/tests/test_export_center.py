@@ -20,15 +20,123 @@ import app.main as main_module
 from app import models
 from app.api.routes import auth, exports as export_routes, local_test
 from app.core import security
-from app.services import account_store, export_center as export_center_service, local_simulation
+from app.services import (
+    account_store,
+    delivery_cache,
+    delivery_package_queue,
+    export_center as export_center_service,
+    local_simulation,
+)
 from app.services.delivery_package_queue import DeliveryPackageNotReady
-from app.services.export_retirement import RETIREMENT_MESSAGE
+from app.services.export_retirement import ExportCenterRetiredError, RETIREMENT_MESSAGE
 from app.services.final_delivery_export import group_is_formally_archived
 from app.services.export_center import (
     SUPPORTED_EXPORT_JOB_PAGE_SIZES,
     build_device_workbook,
 )
 from app.services.state_repository import JsonStateRepository, PostgresStateRepository
+
+
+class _ExplodingRetiredDeliveryDependency:
+    def __getattribute__(self, _name):
+        raise AssertionError("retired delivery producer touched a dependency")
+
+    def __iter__(self):
+        raise AssertionError("retired delivery producer iterated a dependency")
+
+
+def test_low_level_json_delivery_cache_enqueue_producers_are_retired_and_preserve_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {
+        "groups": [{"id": "group-1", "delivery_cache_status": "ready"}],
+        "delivery_cache_jobs": [{"id": "cache-1", "group_id": "group-1", "status": "ready"}],
+        "delivery_package_jobs": [{"id": "package-1", "group_ids": ["group-1"], "status": "ready"}],
+    }
+    before = deepcopy(state)
+    monkeypatch.setattr(local_simulation, "state_for_team", lambda _team_id: state)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "team-1")
+
+    assert delivery_cache.enqueue_json_delivery_cache_job("group-1", team_id="team-1") is None
+    assert (
+        delivery_cache.sync_json_delivery_cache_job_for_group(
+            state["groups"][0],
+            team_id="team-1",
+            actor="tester",
+            reason="photo changed",
+        )
+        is None
+    )
+
+    assert state == before
+
+
+def test_low_level_postgres_delivery_cache_enqueue_producers_are_retired_before_dependencies() -> None:
+    exploding = _ExplodingRetiredDeliveryDependency()
+
+    assert delivery_cache.enqueue_postgres_delivery_cache_job(exploding, exploding) is None
+    assert (
+        delivery_cache.sync_postgres_delivery_cache_job_for_group(
+            exploding,
+            exploding,
+            group_payload=exploding,
+            actor="tester",
+            reason="photo changed",
+        )
+        is None
+    )
+    assert (
+        delivery_cache.invalidate_postgres_delivery_cache_for_group_change(
+            exploding,
+            exploding,
+            actor="tester",
+            reason="photo changed",
+        )
+        is None
+    )
+    assert (
+        delivery_cache.invalidate_postgres_delivery_cache_for_group_changes(
+            exploding,
+            exploding,
+            actor="tester",
+            reason="photo changed",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda exploding: delivery_package_queue.request_json_delivery_package(
+            groups=exploding,
+            task_id=None,
+            terminal="",
+            review_scope="reviewed",
+            requested_by="tester",
+        ),
+        lambda exploding: delivery_package_queue.stage_json_delivery_package(
+            exploding,
+            groups=exploding,
+            task_id=None,
+            terminal="",
+            review_scope="reviewed",
+            requested_by="tester",
+        ),
+        lambda exploding: delivery_package_queue.request_postgres_delivery_package(
+            exploding,
+            groups=exploding,
+            team_id="team",
+            task_id=None,
+            terminal="",
+            review_scope="reviewed",
+            requested_by="tester",
+        ),
+    ],
+)
+def test_low_level_delivery_package_producers_are_retired_before_dependencies(invoke) -> None:
+    with pytest.raises(ExportCenterRetiredError, match=RETIREMENT_MESSAGE):
+        invoke(_ExplodingRetiredDeliveryDependency())
 
 
 def production_test_settings(**overrides) -> SimpleNamespace:
@@ -1147,6 +1255,7 @@ def test_export_create_http_route_is_retired_before_deduplication_audit(
     assert_export_retired(second)
 
 
+@pytest.mark.skip(reason="final-delivery export jobs retired in V3.2.3")
 def test_final_delivery_request_key_reuses_existing_delivery_package_job(monkeypatch: pytest.MonkeyPatch) -> None:
     team_id = "team-final-delivery-dedupe"
     state = local_simulation.blank_state(team_id)
@@ -1181,6 +1290,7 @@ def test_final_delivery_request_key_reuses_existing_delivery_package_job(monkeyp
     assert len(state["export_jobs"]) == 1
 
 
+@pytest.mark.skip(reason="final-delivery export jobs retired in V3.2.3")
 def test_json_final_delivery_export_job_links_delivery_job_in_same_create_unit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1209,6 +1319,7 @@ def test_json_final_delivery_export_job_links_delivery_job_in_same_create_unit(
     assert state["export_jobs"][0]["params"]["delivery_package_job_id"] == state["delivery_package_jobs"][0]["id"]
 
 
+@pytest.mark.skip(reason="final-delivery export jobs retired in V3.2.3")
 def test_pg_final_delivery_export_job_links_delivery_job_in_same_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

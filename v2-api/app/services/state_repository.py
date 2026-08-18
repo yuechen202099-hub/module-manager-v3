@@ -59,6 +59,7 @@ from app.services.barcode_verification_contract import (
 )
 from app.services.construction_task_rules import construction_task_availability
 from app.services.final_delivery_export import LeasedDeliveryPackage
+from app.services.export_retirement import ExportCenterRetiredError, RETIREMENT_MESSAGE
 from app.services.matching import build_total_catalog_match_key
 
 
@@ -238,6 +239,7 @@ def _json_mark_data_center_archive_invalidated(group: dict[str, Any], *, actor: 
 
 
 def _json_request_data_center_delivery_package(group: Mapping[str, Any], *, actor: str) -> str:
+    return "retired"
     from app.services.delivery_package_queue import DeliveryPackageNotReady, request_json_delivery_package
     from app.services.final_delivery_export import DeliveryPackageValidationError
 
@@ -2870,7 +2872,7 @@ class StateRepository(ABC):
 
     @abstractmethod
     def create_export_job(self, *, job_type: str, filters: dict[str, Any], actor: str) -> dict[str, Any]:
-        raise NotImplementedError
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
 
     @abstractmethod
     def open_export_job_download(self, job_id: str, *, actor: str) -> dict[str, Any]:
@@ -3132,7 +3134,7 @@ class StateRepository(ABC):
         review_scope: str = "reviewed",
         requested_by: str = "",
     ) -> LeasedDeliveryPackage:
-        raise NotImplementedError
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
 
     @abstractmethod
     def build_final_delivery_export(
@@ -3142,7 +3144,7 @@ class StateRepository(ABC):
         terminal: str = "",
         review_scope: str = "reviewed",
     ) -> LeasedDeliveryPackage:
-        raise NotImplementedError
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
 
     @abstractmethod
     def build_final_delivery_manifest(
@@ -3152,7 +3154,7 @@ class StateRepository(ABC):
         terminal: str = "",
         review_scope: str = "reviewed",
     ) -> dict[str, Any]:
-        raise NotImplementedError
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
 
     @abstractmethod
     def build_exception_meter_export(self, *, reviewer: str = "") -> bytes:
@@ -4109,6 +4111,7 @@ class JsonStateRepository(StateRepository):
         return items[:safe_limit]
 
     def create_export_job(self, *, job_type: str, filters: dict[str, Any], actor: str) -> dict[str, Any]:
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
         job_type = str(job_type or "").strip()
         if job_type not in export_center.CATALOG_BY_KEY:
             raise ValueError(f"Unsupported export job type: {job_type}")
@@ -4749,6 +4752,7 @@ class JsonStateRepository(StateRepository):
         review_scope: str = "reviewed",
         requested_by: str = "",
     ) -> LeasedDeliveryPackage:
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
         from app.services.delivery_package_queue import request_json_delivery_package
 
         groups = local_simulation.filter_delivery_groups(
@@ -4771,6 +4775,7 @@ class JsonStateRepository(StateRepository):
         terminal: str = "",
         review_scope: str = "reviewed",
     ) -> LeasedDeliveryPackage:
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
         return local_simulation.build_final_delivery_export(
             task_id=task_id,
             terminal=terminal,
@@ -4789,6 +4794,7 @@ class JsonStateRepository(StateRepository):
         terminal: str = "",
         review_scope: str = "reviewed",
     ) -> dict[str, Any]:
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
         return local_simulation.build_final_delivery_manifest(
             task_id=task_id,
             terminal=terminal,
@@ -8228,6 +8234,7 @@ class PostgresStateRepository(StateRepository):
         actor: str,
         reason: str,
     ) -> str:
+        return "retired"
         from app.services.delivery_cache import sync_postgres_delivery_cache_job_for_group
         from app.services.delivery_package_queue import DeliveryPackageNotReady, request_postgres_delivery_package
 
@@ -9020,6 +9027,7 @@ class PostgresStateRepository(StateRepository):
         return project.id
 
     def create_export_job(self, *, job_type: str, filters: dict[str, Any], actor: str) -> dict[str, Any]:
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
         job_type = str(job_type or "").strip()
         if job_type not in export_center.CATALOG_BY_KEY:
             raise ValueError(f"Unsupported export job type: {job_type}")
@@ -9841,6 +9849,7 @@ class PostgresStateRepository(StateRepository):
         reason: str,
         require_eligible: bool = False,
     ) -> None:
+        return None
         from app.services.delivery_cache import (
             enqueue_postgres_delivery_cache_job,
             sync_postgres_delivery_cache_job_for_group,
@@ -11371,6 +11380,7 @@ class PostgresStateRepository(StateRepository):
         review_scope: str = "reviewed",
         requested_by: str = "",
     ) -> LeasedDeliveryPackage:
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
         from app.services.delivery_package_queue import request_postgres_delivery_package
 
         terminal = terminal.strip()
@@ -11409,6 +11419,7 @@ class PostgresStateRepository(StateRepository):
         terminal: str = "",
         review_scope: str = "reviewed",
     ) -> LeasedDeliveryPackage:
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
         terminal = terminal.strip()
         if task_id is None and not terminal:
             raise ValueError("Final delivery export must be scoped to one terminal")
@@ -11443,6 +11454,7 @@ class PostgresStateRepository(StateRepository):
         terminal: str = "",
         review_scope: str = "reviewed",
     ) -> dict[str, Any]:
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
         terminal = terminal.strip()
         if task_id is None and not terminal:
             raise ValueError("Final delivery export must be scoped to one terminal")
@@ -11995,9 +12007,7 @@ class DualWriteStateRepository(JsonStateRepository):
         review_scope: str = "reviewed",
         requested_by: str = "",
     ) -> LeasedDeliveryPackage:
-        raise StateBackendNotReady(
-            "Dual formal delivery export requires one authoritative delivery-package queue backend"
-        )
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
 
     def build_final_delivery_export(
         self,
@@ -12006,9 +12016,7 @@ class DualWriteStateRepository(JsonStateRepository):
         terminal: str = "",
         review_scope: str = "reviewed",
     ) -> LeasedDeliveryPackage:
-        raise StateBackendNotReady(
-            "Dual formal delivery export requires one authoritative delivery-cache repair backend"
-        )
+        raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
 
     def _mirror_write(self, operation: str, *args: Any, **kwargs: Any) -> None:
         try:

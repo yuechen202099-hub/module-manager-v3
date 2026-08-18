@@ -22,6 +22,85 @@ from app.services import state_repository as repository
 from app.services.construction_priority_import import PriorityImportRow
 from app.services.group_barcode_verification import GroupScanResult, evaluate_group_eligibility
 from app.services.final_delivery_export import LeasedDeliveryPackage
+from app.services.export_retirement import ExportCenterRetiredError, RETIREMENT_MESSAGE
+
+
+class _ExplodingRetiredDeliveryDependency:
+    def __getattribute__(self, _name):
+        raise AssertionError("retired delivery producer touched a dependency")
+
+    def __iter__(self):
+        raise AssertionError("retired delivery producer iterated a dependency")
+
+
+class _TrackingRetiredDeliveryDependency:
+    def __init__(self) -> None:
+        self.touched = False
+
+    def __getattribute__(self, name):
+        if name == "touched":
+            return object.__getattribute__(self, name)
+        object.__setattr__(self, "touched", True)
+        raise RuntimeError("retired delivery producer touched a dependency")
+
+
+def test_postgres_delivery_enqueue_compatibility_hook_is_noop_before_dependencies() -> None:
+    dependency = _TrackingRetiredDeliveryDependency()
+    assert (
+        repository.PostgresStateRepository._enqueue_delivery_cache_after_commit(
+            dependency,
+            "group-1",
+            actor="tester",
+            reason="photo changed",
+            require_eligible=True,
+        )
+        is None
+    )
+    assert dependency.touched is False
+
+
+@pytest.mark.parametrize(
+    "repository_type",
+    [
+        repository.StateRepository,
+        repository.JsonStateRepository,
+        repository.PostgresStateRepository,
+        repository.DualWriteStateRepository,
+    ],
+)
+def test_direct_delivery_create_export_job_is_retired_before_dependencies(repository_type) -> None:
+    with pytest.raises(ExportCenterRetiredError, match=RETIREMENT_MESSAGE):
+        repository_type.create_export_job(
+            _ExplodingRetiredDeliveryDependency(),
+            job_type="final_delivery",
+            filters=_ExplodingRetiredDeliveryDependency(),
+            actor="tester",
+        )
+
+
+@pytest.mark.parametrize(
+    "repository_type",
+    [
+        repository.StateRepository,
+        repository.JsonStateRepository,
+        repository.PostgresStateRepository,
+        repository.DualWriteStateRepository,
+    ],
+)
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "request_final_delivery_export",
+        "build_final_delivery_export",
+        "build_final_delivery_manifest",
+    ],
+)
+def test_direct_final_delivery_service_calls_are_retired_before_dependencies(
+    repository_type,
+    method_name: str,
+) -> None:
+    with pytest.raises(ExportCenterRetiredError, match=RETIREMENT_MESSAGE):
+        getattr(repository_type, method_name)(_ExplodingRetiredDeliveryDependency())
 
 
 def group_scan_result(*, status: str = "partial", passed_count: int = 2) -> GroupScanResult:
@@ -165,7 +244,7 @@ def test_json_delivery_mutations_roll_back_when_authoritative_persistence_fails(
     assert repository.local_simulation._team_states[team_id] == before
 
 
-def test_postgres_delivery_invalidation_batches_group_queries() -> None:
+def test_postgres_delivery_invalidation_is_retired_before_batch_queries() -> None:
     from app.services import delivery_cache
 
     assert hasattr(delivery_cache, "invalidate_postgres_delivery_cache_for_group_changes")
@@ -233,12 +312,12 @@ def test_postgres_delivery_invalidation_batches_group_queries() -> None:
         reason="scan_import_changed",
     )
 
-    assert len(session.statements) == 3
-    assert session.flushes == 1
-    assert all(group.raw_data["delivery_cache_status"] == "stale" for group in groups)
-    assert all(photo.raw_data["delivery_cache_status"] == "stale" for photo in photos)
-    assert all(job.status == "not_eligible" for job in jobs)
-    assert package_job.status == "stale"
+    assert session.statements == []
+    assert session.flushes == 0
+    assert all(group.raw_data == {} for group in groups)
+    assert all(photo.raw_data["delivery_cache_status"] == "ready" for photo in photos)
+    assert all(job.status == "ready" for job in jobs)
+    assert package_job.status == "ready"
 
 
 def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state() -> None:
@@ -1463,7 +1542,7 @@ def test_postgres_review_cache_enqueue_failure_preserves_review_and_records_retr
     ]
 
 
-def test_postgres_delivery_package_request_takes_transaction_lock_before_scope_lookup(
+def test_postgres_delivery_package_request_retires_before_transaction_lock_or_scope_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.services import delivery_package_queue
@@ -1496,7 +1575,7 @@ def test_postgres_delivery_package_request_takes_transaction_lock_before_scope_l
         lambda *_args, **_kwargs: ([], "f" * 64, ["group-a"]),
     )
 
-    with pytest.raises(delivery_package_queue.DeliveryPackageNotReady):
+    with pytest.raises(ExportCenterRetiredError, match=RETIREMENT_MESSAGE):
         delivery_package_queue.request_postgres_delivery_package(
             Session(),
             groups=[],
@@ -1507,8 +1586,7 @@ def test_postgres_delivery_package_request_takes_transaction_lock_before_scope_l
             requested_by="admin-a",
         )
 
-    assert "pg_advisory_xact_lock" in statements[0]
-    assert "FROM delivery_package_jobs" in statements[1]
+    assert statements == []
 
 
 @pytest.mark.parametrize("legacy_url_hash", [False, True])

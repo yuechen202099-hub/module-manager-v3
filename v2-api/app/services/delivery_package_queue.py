@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, NoReturn
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import BarcodeMaintenanceControl, DeliveryPackageJob, ExportJob, JobStatus
 from app.services import local_simulation
+from app.services.export_retirement import ExportCenterRetiredError, RETIREMENT_MESSAGE
 from app.services.final_delivery_export import (
     PACKAGE_TTL,
     LeasedDeliveryPackage,
@@ -28,6 +29,10 @@ from app.services.final_delivery_export import (
 MAX_DELIVERY_PACKAGE_ATTEMPTS = 3
 DEFAULT_LEASE_SECONDS = 900
 MAX_EXPIRED_DELIVERY_PACKAGE_LEASES = 20
+
+
+def _raise_delivery_retired() -> NoReturn:
+    raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
 
 
 class DeliveryPackageNotReady(RuntimeError):
@@ -175,6 +180,7 @@ def request_json_delivery_package(
     review_scope: str,
     requested_by: str,
 ) -> LeasedDeliveryPackage:
+    _raise_delivery_retired()
     team_id = local_simulation.current_team_id()
     active_transaction = local_simulation.active_authoritative_json_write(team_id)
     if active_transaction is not None:
@@ -218,6 +224,7 @@ def stage_json_delivery_package(
     review_scope: str,
     requested_by: str,
 ) -> LeasedDeliveryPackage:
+    _raise_delivery_retired()
     team_id = transaction.team_id
     _candidates, fingerprint, group_ids = prepare_delivery_request(
         groups,
@@ -301,6 +308,7 @@ def request_postgres_delivery_package(
     requested_by: str,
     auto_commit: bool = True,
 ) -> LeasedDeliveryPackage:
+    _raise_delivery_retired()
     _candidates, fingerprint, group_ids = prepare_delivery_request(
         groups,
         archived_only=review_scope == "reviewed",

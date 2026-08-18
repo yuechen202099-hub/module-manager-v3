@@ -76,6 +76,63 @@ from app.services.group_barcode_verification import evaluate_group_eligibility
 SAMPLE_FILES = [DEFAULT_TOTAL_CATALOG, DEFAULT_SCAN_FILE]
 
 
+def _explode_retired_delivery_path(*_args, **_kwargs):
+    raise AssertionError("retired delivery path was called")
+
+
+def test_delivery_schedule_enqueue_compatibility_hook_is_noop_before_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(local_simulation, "normalize_team_id", _explode_retired_delivery_path)
+
+    assert (
+        local_simulation.schedule_delivery_cache_build(
+            "group-1",
+            "team-1",
+            force=True,
+            reason="classification",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("verification_changed", [False, True])
+def test_json_delivery_artifact_invalidation_is_retired_and_preserves_history(
+    monkeypatch: pytest.MonkeyPatch,
+    verification_changed: bool,
+) -> None:
+    from app.services import delivery_cache
+
+    group = {
+        "id": "group-1",
+        "delivery_cache_status": "ready",
+        "delivery_cache_error": "",
+        "delivery_package_invalidation_epoch": 7,
+    }
+    before = deepcopy(group)
+    verification_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        delivery_cache,
+        "sync_json_delivery_cache_job_for_group",
+        _explode_retired_delivery_path,
+    )
+    monkeypatch.setattr(
+        state_repository,
+        "invalidate_verification_for_group",
+        lambda _session, _group, actor, reason: verification_calls.append((actor, reason)),
+    )
+
+    local_simulation.invalidate_json_delivery_artifacts(
+        group,
+        actor="tester",
+        reason="photo changed",
+        verification_changed=verification_changed,
+    )
+
+    assert group == before
+    assert verification_calls == ([('tester', 'photo changed')] if verification_changed else [])
+
+
 requires_sample_workbooks = pytest.mark.skipif(
     not all(path.exists() for path in SAMPLE_FILES) or find_spec("openpyxl") is None,
     reason="local sample workbooks or openpyxl are not available",
@@ -1309,7 +1366,7 @@ def test_manual_barcode_confirmation_syncs_formal_identity_photos_and_complete_r
     assert "storage_key" not in str(event["payload"])
 
 
-def test_manual_barcode_identity_change_revokes_old_delivery_artifacts(
+def test_manual_barcode_identity_change_preserves_retired_delivery_artifacts(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1360,9 +1417,9 @@ def test_manual_barcode_identity_change_revokes_old_delivery_artifacts(
     )
 
     assert group["barcode_verification"]["status"] == "manual_confirmed"
-    assert group["delivery_cache_status"] in {"stale", "retry_pending"}
-    assert all(photo["delivery_cache_status"] == "stale" for photo in group["photos"])
-    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    assert group["delivery_cache_status"] == "ready"
+    assert all(photo["delivery_cache_status"] == "ready" for photo in group["photos"])
+    _assert_delivery_artifacts_preserved(group, cache_job, package_job)
     assert scheduled == [(group["id"], "manual_barcode_identity_changed")]
 
 
@@ -1534,7 +1591,7 @@ def test_downloaded_photo_can_be_classified(synthetic_state: dict) -> None:
     assert synthetic_state["summary"]["unclassified_photos"] == 4
 
 
-def test_reclassifying_same_category_revokes_delivery_cache_and_package(
+def test_reclassifying_same_category_preserves_retired_delivery_cache_and_package(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1571,9 +1628,9 @@ def test_reclassifying_same_category_revokes_delivery_cache_and_package(
     )
 
     assert classified["archived_at"] != "2026-07-22T00:00:00+00:00"
-    assert group["delivery_cache_status"] in {"stale", "retry_pending"}
-    assert photo["delivery_cache_status"] == "stale"
-    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    assert group["delivery_cache_status"] == "ready"
+    assert photo["delivery_cache_status"] == "ready"
+    _assert_delivery_artifacts_preserved(group, cache_job, package_job)
     assert scheduled == [(group["id"], "photo_archive_changed")]
 
 
@@ -3096,7 +3153,7 @@ def test_fourth_review_delivery_cache_submission_is_discarded_on_late_failure(
             local_simulation.abort_authoritative_json_write(transaction, token)
 
 
-def test_fourth_review_delivery_cache_worker_serializes_with_finalizer(
+def test_fourth_review_delivery_cache_worker_is_retired_after_finalizer(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3118,9 +3175,7 @@ def test_fourth_review_delivery_cache_worker_serializes_with_finalizer(
         if local_simulation._private_team_state.get() is transaction:
             local_simulation.abort_authoritative_json_write(transaction, token)
     jobs = local_simulation.get_state()["delivery_cache_jobs"]
-    assert len(jobs) == 1
-    assert jobs[0]["group_id"] == group["id"]
-    assert jobs[0]["status"] == "pending"
+    assert jobs == []
 
 
 def test_json_state_repository_finalizes_unmatched_match_from_server_candidate(synthetic_state: dict) -> None:
@@ -3169,21 +3224,21 @@ def _seed_processing_delivery_artifacts(state: dict, group: dict, suffix: str) -
     return cache_job, package_job
 
 
-def _assert_delivery_artifacts_revoked(group: dict, cache_job: dict, package_job: dict) -> None:
-    assert group["delivery_package_invalidation_epoch"] == 8
-    assert cache_job["status"] != "processing"
-    assert cache_job["lease_owner"] is None
-    assert cache_job["lease_token"] is None
-    assert cache_job["lease_expires_at"] is None
-    assert cache_job["completed_at"] is None
-    assert package_job["status"] == "stale"
-    assert package_job["lease_owner"] is None
-    assert package_job["lease_token"] is None
-    assert package_job["lease_expires_at"] is None
-    assert package_job["completed_at"] is None
+def _assert_delivery_artifacts_preserved(group: dict, cache_job: dict, package_job: dict) -> None:
+    assert group["delivery_package_invalidation_epoch"] == 7
+    assert cache_job["status"] == "processing"
+    assert cache_job["lease_owner"] == "cache-worker"
+    assert cache_job["lease_token"] == "cache-lease"
+    assert cache_job["lease_expires_at"] == "2026-07-23T12:00:00+00:00"
+    assert cache_job["completed_at"] == "2026-07-23T11:00:00+00:00"
+    assert package_job["status"] == "processing"
+    assert package_job["lease_owner"] == "package-worker"
+    assert package_job["lease_token"] == "package-lease"
+    assert package_job["lease_expires_at"] == "2026-07-23T12:00:00+00:00"
+    assert package_job["completed_at"] == "2026-07-23T11:00:00+00:00"
 
 
-def test_json_exception_submit_and_return_revoke_old_delivery_workers(synthetic_state: dict) -> None:
+def test_json_exception_submit_and_return_preserve_retired_delivery_workers(synthetic_state: dict) -> None:
     state = local_simulation.get_state()
     group = state["groups"][0]
     claim_task(group["task_id"], "alice")
@@ -3197,7 +3252,7 @@ def test_json_exception_submit_and_return_revoke_old_delivery_workers(synthetic_
         note="模块号错误",
     )
 
-    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    _assert_delivery_artifacts_preserved(group, cache_job, package_job)
     seed_passed_group_verification(group)
     cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "submit-exception")
 
@@ -3208,11 +3263,11 @@ def test_json_exception_submit_and_return_revoke_old_delivery_workers(synthetic_
         note="现场已修正",
     )
 
-    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    _assert_delivery_artifacts_preserved(group, cache_job, package_job)
     assert group["barcode_verification"]["status"] != "passed"
 
 
-def test_json_bulk_archive_requeues_only_after_revoking_old_delivery_workers(
+def test_json_bulk_archive_preserves_retired_delivery_workers(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3230,13 +3285,13 @@ def test_json_bulk_archive_requeues_only_after_revoking_old_delivery_workers(
     result = bulk_archive_groups([group["id"]], actor="admin", reason="人工归档")
 
     assert result["archived_count"] == 1
-    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    _assert_delivery_artifacts_preserved(group, cache_job, package_job)
     assert group["barcode_verification"]["status"] != "passed"
     if group["status"] == "approved":
         assert (group["id"], "admin_bulk_archive") in scheduled
 
 
-def test_json_scan_import_and_clear_revoke_old_delivery_workers(synthetic_state: dict) -> None:
+def test_json_scan_import_and_clear_preserve_retired_delivery_workers(synthetic_state: dict) -> None:
     state = local_simulation.get_state()
     group = state["groups"][0]
     cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "scan-import")
@@ -3255,15 +3310,15 @@ def test_json_scan_import_and_clear_revoke_old_delivery_workers(synthetic_state:
         ]
     )
 
-    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    _assert_delivery_artifacts_preserved(group, cache_job, package_job)
     cache_job, package_job = _seed_processing_delivery_artifacts(state, group, "scan-clear")
 
     clear_scan_data()
 
-    _assert_delivery_artifacts_revoked(group, cache_job, package_job)
+    _assert_delivery_artifacts_preserved(group, cache_job, package_job)
 
 
-def test_json_unmatched_finalization_revokes_existing_group_delivery_workers(
+def test_json_unmatched_finalization_preserves_existing_retired_delivery_workers(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3307,7 +3362,7 @@ def test_json_unmatched_finalization_revokes_existing_group_delivery_workers(
     committed_group = next(item for item in committed_state["groups"] if item["id"] == existing["id"])
     committed_cache_job = committed_state["delivery_cache_jobs"][0]
     committed_package_job = committed_state["delivery_package_jobs"][0]
-    _assert_delivery_artifacts_revoked(committed_group, committed_cache_job, committed_package_job)
+    _assert_delivery_artifacts_preserved(committed_group, committed_cache_job, committed_package_job)
 
 
 def test_json_repository_reselects_compatible_formal_meter_identity_before_mutation(
@@ -4420,7 +4475,7 @@ def test_unmatched_record_attaches_to_existing_terminal_group(synthetic_state: d
 
 
 @pytest.mark.parametrize("operation", ["associate", "create-existing"])
-def test_json_unmatched_merge_invalidates_existing_delivery_package(
+def test_json_unmatched_merge_preserves_existing_retired_delivery_package(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
@@ -4469,12 +4524,12 @@ def test_json_unmatched_merge_invalidates_existing_delivery_package(
             terminal=target["terminal"],
         )
 
-    assert target["delivery_package_invalidation_epoch"] == 8
-    assert package_job["status"] == "stale"
-    assert package_job["lease_owner"] is None
-    assert package_job["lease_token"] is None
-    assert package_job["lease_expires_at"] is None
-    assert package_job["completed_at"] is None
+    assert target["delivery_package_invalidation_epoch"] == 7
+    assert package_job["status"] == "processing"
+    assert package_job["lease_owner"] == "package-worker"
+    assert package_job["lease_token"] == "package-lease"
+    assert package_job["lease_expires_at"] == "2026-07-23T12:00:00+00:00"
+    assert package_job["completed_at"] == "2026-07-23T11:00:00+00:00"
     assert scheduled and scheduled[-1][0] == target["id"]
 
 
@@ -4799,12 +4854,12 @@ def test_json_evidence_writes_invalidate_current_group_verification(
     assert verification["collector_matched"] is None
     assert verification["recognition_source"] is None
     assert group["group_barcode_manual_confirmed"] is False
-    assert group["delivery_package_invalidation_epoch"] == 8
-    assert package_job["status"] == "stale"
-    assert package_job["lease_owner"] is None
-    assert package_job["lease_token"] is None
-    assert package_job["lease_expires_at"] is None
-    assert package_job["completed_at"] is None
+    assert group["delivery_package_invalidation_epoch"] == 7
+    assert package_job["status"] == "processing"
+    assert package_job["lease_owner"] == "package-worker"
+    assert package_job["lease_token"] == "package-lease"
+    assert package_job["lease_expires_at"] == "2026-07-23T12:00:00+00:00"
+    assert package_job["completed_at"] == "2026-07-23T11:00:00+00:00"
     assert any(event["action"] == "group_barcode_verification_passed" for event in synthetic_state["audit_events"])
     assert any(event["action"] == "group_barcode_verification_invalidated" for event in synthetic_state["audit_events"])
 
@@ -4819,7 +4874,7 @@ def test_json_evidence_writes_invalidate_current_group_verification(
         ("exception_note", "updated exception note"),
     ],
 )
-def test_json_delivery_metadata_changes_invalidate_existing_delivery_package(
+def test_json_delivery_metadata_changes_preserve_existing_retired_delivery_package(
     synthetic_state: dict,
     monkeypatch: pytest.MonkeyPatch,
     field: str,
@@ -4846,16 +4901,16 @@ def test_json_delivery_metadata_changes_invalidate_existing_delivery_package(
 
     update_group_metadata(group["id"], actor="admin-a", updates={field: value})
 
-    assert group["delivery_package_invalidation_epoch"] == 8
-    assert package_job["status"] == "stale"
-    assert package_job["lease_owner"] is None
-    assert package_job["lease_token"] is None
-    assert package_job["lease_expires_at"] is None
-    assert package_job["completed_at"] is None
+    assert group["delivery_package_invalidation_epoch"] == 7
+    assert package_job["status"] == "ready"
+    assert package_job["lease_owner"] == "package-worker"
+    assert package_job["lease_token"] == "package-lease"
+    assert package_job["lease_expires_at"] == "2026-07-23T12:00:00+00:00"
+    assert package_job["completed_at"] == "2026-07-23T11:00:00+00:00"
     assert scheduled and scheduled[-1][0] == group["id"]
 
 
-def test_json_barcode_rescan_invalidates_existing_delivery_package(
+def test_json_barcode_rescan_preserves_existing_retired_delivery_package(
     synthetic_state: dict,
 ) -> None:
     group = synthetic_state["groups"][0]
@@ -4878,12 +4933,12 @@ def test_json_barcode_rescan_invalidates_existing_delivery_package(
         reviewer="alice",
     )
 
-    assert group["delivery_package_invalidation_epoch"] == 8
-    assert package_job["status"] == "stale"
-    assert package_job["lease_owner"] is None
-    assert package_job["lease_token"] is None
-    assert package_job["lease_expires_at"] is None
-    assert package_job["completed_at"] is None
+    assert group["delivery_package_invalidation_epoch"] == 7
+    assert package_job["status"] == "ready"
+    assert package_job["lease_owner"] == "package-worker"
+    assert package_job["lease_token"] == "package-lease"
+    assert package_job["lease_expires_at"] == "2026-07-23T12:00:00+00:00"
+    assert package_job["completed_at"] == "2026-07-23T11:00:00+00:00"
 
 
 @pytest.mark.parametrize("operation", ["photo_added", "photo_deleted"])

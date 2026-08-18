@@ -25,6 +25,7 @@ from app.models import (
     Photo,
 )
 from app.services import local_simulation, photo_barcode_check
+from app.services.export_retirement import ExportCenterRetiredError, RETIREMENT_MESSAGE
 from app.services.delivery_cache import (
     MAX_DELIVERY_CACHE_ATTEMPTS,
     cache_group_photos,
@@ -1310,7 +1311,7 @@ def claim_next_delivery_cache_job(*, worker_id: str, now: datetime | None = None
 
 def _claim_next_work(worker_id: str) -> MaintenanceJob | None:
     global _next_claim_kind
-    claim_order = ("verification", "auto_archive", "delivery_cache", "delivery_package")
+    claim_order = ("verification", "auto_archive")
     with _claim_kind_lock:
         first = _next_claim_kind
         first_index = claim_order.index(first) if first in claim_order else 0
@@ -1318,8 +1319,6 @@ def _claim_next_work(worker_id: str) -> MaintenanceJob | None:
     claimers = {
         "verification": lambda: claim_next_verification_job(worker_id=worker_id),
         "auto_archive": lambda: claim_next_archive_job(worker_id=worker_id),
-        "delivery_cache": lambda: claim_next_delivery_cache_job(worker_id=worker_id),
-        "delivery_package": lambda: claim_next_delivery_package_job(worker_id=worker_id),
     }
     for kind in claim_order[first_index:] + claim_order[:first_index]:
         job = claimers[kind]()
@@ -1615,13 +1614,7 @@ def _process_job(job: MaintenanceJob) -> None:
     if job.kind == "auto_archive":
         _process_archive_job(job)
         return
-    if job.kind == "delivery_package":
-        _process_delivery_package_job(job)
-        return
-    if job.kind == "delivery_cache":
-        _process_delivery_job(job)
-        return
-    raise ValueError(f"Unsupported maintenance job kind: {job.kind}")
+    raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
 
 
 def _fail_job(job: MaintenanceJob, error: Exception) -> None:
@@ -1844,7 +1837,6 @@ def run_worker_batch(
     on_failure = fail_job or _fail_job
     processed = 0
     failed = 0
-    cleanup_report: dict[str, Any] | None = None
     storage_cleanup_report: dict[str, Any] | None = None
     try:
         if not can_continue():
@@ -1854,11 +1846,6 @@ def run_worker_batch(
                 storage_cleanup_report = process_storage_cleanup_jobs(limit=limit)
             except Exception as exc:
                 storage_cleanup_report = {"processed": 0, "completed": 0, "failed": 1, "error": str(exc)[:500]}
-            try:
-                cleanup_report = run_delivery_cache_cleanup_if_due()
-            except Exception as exc:
-                cleanup_report = {"status": "failed", "error": str(exc)[:500]}
-            reconcile_delivery_cache_jobs(limit=limit)
         while processed < limit:
             if not can_continue():
                 break
@@ -1874,8 +1861,6 @@ def run_worker_batch(
         if limit > 0 and processed == limit and batch_pause_seconds > 0:
             sleeper(float(batch_pause_seconds))
         report = {"processed": processed, "failed": failed, "status": "complete"}
-        if cleanup_report is not None:
-            report["cleanup"] = cleanup_report
         if storage_cleanup_report is not None:
             report["storage_cleanup"] = storage_cleanup_report
         return report
@@ -2158,7 +2143,6 @@ def enqueue_verification_jobs(
     clean_ids = list(dict.fromkeys(str(value).strip() for value in (group_ids or []) if str(value).strip()))
     backend = _backend()
     team_id = local_simulation.current_team_id()
-    reconcile_delivery_cache_jobs()
     if backend == "json":
         return _enqueue_json_verifications(clean_ids, actor=actor, team_id=team_id)
     if backend == "postgres":

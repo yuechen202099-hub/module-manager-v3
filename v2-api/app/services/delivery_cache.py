@@ -124,6 +124,7 @@ def enqueue_json_delivery_cache_job(
     actor: str = "system",
     reason: str = "review_completed",
 ) -> dict[str, Any]:
+    return None
     team = local_simulation.normalize_team_id(team_id or local_simulation.current_team_id())
     state = local_simulation.state_for_team(team)
     group = next((item for item in state.get("groups", []) if str(item.get("id") or "") == group_id), None)
@@ -183,6 +184,7 @@ def enqueue_postgres_delivery_cache_job(
     existing_job: DeliveryCacheJob | None | object = _EXISTING_JOB_NOT_PROVIDED,
     evidence_fingerprint: str | None = None,
 ) -> dict[str, Any]:
+    return None
     job = existing_job
     if job is _EXISTING_JOB_NOT_PROVIDED:
         job = session.scalar(
@@ -254,6 +256,7 @@ def sync_json_delivery_cache_job_for_group(
     actor: str,
     reason: str,
 ) -> dict[str, Any] | None:
+    return None
     state = local_simulation.state_for_team(team_id)
     job = next(
         (
@@ -285,6 +288,7 @@ def sync_postgres_delivery_cache_job_for_group(
     existing_job: DeliveryCacheJob | None | object = _EXISTING_JOB_NOT_PROVIDED,
     mark_retry_without_job: bool = True,
 ) -> DeliveryCacheJob | None:
+    return None
     job = existing_job
     if job is _EXISTING_JOB_NOT_PROVIDED:
         job = session.scalar(
@@ -337,6 +341,7 @@ def invalidate_postgres_delivery_cache_for_group_change(
     actor: str,
     reason: str,
 ) -> None:
+    return None
     package_group_ids = [str(group.id)]
     legacy_group_id = str(getattr(group, "legacy_id", "") or "").strip()
     if legacy_group_id and legacy_group_id != package_group_ids[0]:
@@ -428,6 +433,7 @@ def invalidate_postgres_delivery_cache_for_group_changes(
     actor: str,
     reason: str,
 ) -> None:
+    return None
     unique_groups = list({group.id: group for group in groups}.values())
     if not unique_groups:
         return

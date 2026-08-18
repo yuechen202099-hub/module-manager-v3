@@ -1374,6 +1374,7 @@ def invalidate_delivery_package_jobs_for_group(
     actor: str,
     reason: str,
 ) -> None:
+    return None
     if not group:
         return
     now = now_iso()
@@ -1413,17 +1414,7 @@ def invalidate_json_delivery_artifacts(
         from app.services.state_repository import invalidate_verification_for_group
 
         invalidate_verification_for_group(None, group, actor, reason)
-    else:
-        from app.services.delivery_cache import sync_json_delivery_cache_job_for_group
-
-        mark_delivery_cache_stale(group, reason)
-        sync_json_delivery_cache_job_for_group(
-            group,
-            team_id=current_team_id(),
-            actor=actor,
-            reason=reason,
-        )
-    invalidate_delivery_package_jobs_for_group(group, actor=actor, reason=reason)
+    return None
 
 
 def build_delivery_cache_for_group(group_id: str, force: bool = False) -> dict[str, Any]:
@@ -1526,83 +1517,7 @@ def schedule_delivery_cache_build(
     *,
     reason: str = "review_completed",
 ) -> None:
-    del force
-    from app.services.delivery_cache import enqueue_json_delivery_cache_job
-
-    team = normalize_team_id(team_id or current_team_id())
-    active_transaction = active_authoritative_json_write(team)
-
-    def group_can_enqueue(group: dict[str, Any]) -> bool:
-        if not is_reviewed_group(group) and reason != "review_completed":
-            group["delivery_cache_status"] = "retry_pending"
-            group["delivery_cache_error"] = "delivery cache evidence is temporarily ineligible"
-            group["delivery_cache_retryable"] = True
-            group["delivery_cache_retry_requested_at"] = now_iso()
-            return False
-        if not is_reviewed_group(group):
-            return False
-        if reason != "review_completed" and not delivery_cache_group_is_eligible(group):
-            group["delivery_cache_status"] = "retry_pending"
-            group["delivery_cache_error"] = "delivery cache evidence is temporarily ineligible"
-            group["delivery_cache_retryable"] = True
-            group["delivery_cache_retry_requested_at"] = now_iso()
-            return False
-        return True
-
-    def enqueue_after_commit() -> None:
-        team_token = set_current_team(team)
-        transaction = None
-        try:
-            transaction = begin_authoritative_json_write(team)
-            token = activate_authoritative_json_write(transaction)
-            group = get_group(group_id)
-            if not group:
-                abort_authoritative_json_write(transaction, token)
-                transaction = None
-                return
-            if not group_can_enqueue(group):
-                finish_authoritative_json_write(transaction, token)
-                transaction = None
-                return
-            enqueue_json_delivery_cache_job(
-                group_id,
-                team_id=team,
-                actor=str(group.get("reviewer") or "system"),
-                reason=reason,
-            )
-            finish_authoritative_json_write(transaction, token)
-            transaction = None
-        except Exception as exc:
-            if transaction is not None and not transaction.closed:
-                abort_authoritative_json_write(transaction)
-            _record_delivery_cache_submission_failure(group_id, team, exc)
-        finally:
-            reset_current_team(team_token)
-
-    if active_transaction is not None:
-        _queue_after_authoritative_commit(
-            active_transaction,
-            ("durable-delivery-cache", team, group_id),
-            enqueue_after_commit,
-        )
-        return
-    team_token = set_current_team(team)
-    try:
-        group = get_group(group_id)
-        if not group:
-            return
-        if group_can_enqueue(group):
-            enqueue_json_delivery_cache_job(
-                group_id,
-                team_id=team,
-                actor=str(group.get("reviewer") or "system"),
-                reason=reason,
-            )
-        save_all_team_states()
-    except Exception as exc:
-        _record_delivery_cache_submission_failure(group_id, team, exc)
-    finally:
-        reset_current_team(team_token)
+    return None
 
 
 def copy_oss_reference(target: dict[str, Any], source: dict[str, Any]) -> None:
