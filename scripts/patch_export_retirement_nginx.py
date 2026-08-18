@@ -32,8 +32,23 @@ RETIREMENT_BLOCK = f"""
 
 def patch_nginx_config(source: str) -> str:
     marker = "    location / {"
-    if source.count("location = /exports") == 2:
+    retirement_route_markers = (
+        "location = /exports {",
+        "location ^~ /exports/ {",
+        "location = /local-test/export-manifest/final-delivery {",
+        "location = /local-test/unmatched/export {",
+        "location = /local-test/photo-barcode/review-groups/export {",
+    )
+    retirement_route_counts = tuple(
+        source.count(route_marker) for route_marker in retirement_route_markers
+    )
+    complete_block_count = source.count(RETIREMENT_BLOCK.strip())
+    if complete_block_count == 2 and all(
+        route_count == 2 for route_count in retirement_route_counts
+    ):
         return source
+    if complete_block_count or any(retirement_route_counts):
+        raise ValueError("partial export retirement block detected")
     if source.count(marker) != 2:
         raise ValueError("expected exactly two production location / markers")
     return source.replace(marker, RETIREMENT_BLOCK + "\n" + marker)

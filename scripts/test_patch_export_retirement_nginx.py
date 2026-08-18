@@ -38,6 +38,37 @@ def test_patch_is_idempotent() -> None:
     assert patch_nginx_config(once) == once
 
 
+def test_patch_rejects_partial_retirement_state() -> None:
+    partial_block = """
+    location = /exports {
+        default_type application/json;
+        return 410 '{"detail":"partial"}';
+    }
+"""
+    partial = BASE.replace(
+        "    location / {", partial_block + "\n" + "    location / {"
+    )
+
+    with pytest.raises(ValueError, match="partial export retirement block"):
+        patch_nginx_config(partial)
+
+
+def test_similarly_prefixed_locations_do_not_bypass_patching() -> None:
+    unrelated_block = """
+    location = /exports-archive {
+        return 404;
+    }
+"""
+    source = BASE.replace(
+        "    location / {", unrelated_block + "\n" + "    location / {"
+    )
+
+    patched = patch_nginx_config(source)
+
+    assert patched.count(RETIREMENT_BLOCK.strip()) == 2
+    assert patched.count("location = /exports-archive") == 2
+
+
 def test_patch_rejects_unexpected_server_shape() -> None:
     with pytest.raises(ValueError, match="exactly two"):
         patch_nginx_config(BASE.split("server {", 2)[1])
