@@ -43,6 +43,9 @@ DATA_CENTER_STATIC_HTML_PATHS = set(RETAINED_STATIC_HTML_PATHS) - {
 }
 RETIRED_REVIEW_WORKBENCH_MARKERS = ("审阅工作台", "/task-hall", "task-hall")
 UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
+RETIRED_EXPORT_ROUTE_RE = re.compile(
+    r"\b(?:path|redirect)\b\s*:\s*(['\"`])/?exports(?:[/?#][^'\"`]*)?\1"
+)
 
 
 def read(relative_path: str) -> str:
@@ -149,6 +152,10 @@ def main() -> None:
         "router legacy review redirect query",
     )
     not_contains(router_source, "TaskHallView", "router legacy hall component")
+    ensure(
+        RETIRED_EXPORT_ROUTE_RE.search(router_source) is None,
+        "router must not register or redirect the retired /exports path",
+    )
     not_contains(router_source, "task-hall-legacy", "router legacy hall route")
     not_contains(router_source, "path: 'task-hall',\n          redirect: '/claim-tasks'", "router legacy task-hall claim redirect")
 
