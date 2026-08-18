@@ -595,7 +595,7 @@ def _commit_group(
             }
             duplicate_rows = session.execute(
                 select(Photo.id, Photo.sha256)
-                .where(Photo.group_id == group_id, Photo.sha256.in_(transfer_digests))
+                .where(Photo.group_id == group_id, func.lower(Photo.sha256).in_(transfer_digests))
                 .order_by(Photo.sha256.asc(), Photo.id.asc())
             ).all()
             for photo_id, sha256 in duplicate_rows:
@@ -622,6 +622,7 @@ def _commit_group(
                     sha_owners[original_sha].discard(photo.id)
                 sha_owners[receipt_sha].add(photo.id)
                 raw = dict(photo.raw_data or {})
+                raw.pop("oss_rollback_at", None)
                 raw.update(
                     {
                         "pre_oss_image_url": photo.image_url,

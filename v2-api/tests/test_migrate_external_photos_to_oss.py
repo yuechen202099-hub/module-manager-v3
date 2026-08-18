@@ -811,7 +811,7 @@ def test_locked_commit_rechecks_source_records_complete_audit_and_invalidates_on
     assert "photos.id IN" in photo_lock_sql
     duplicate_sql = str(session.query_statements[0])
     assert "photos.group_id =" in duplicate_sql
-    assert "photos.sha256 IN" in duplicate_sql
+    assert "lower(photos.sha256) IN" in duplicate_sql
     assert photo.image_url == "oss://bucket-a/content/photo.jpg"
     assert {
         "pre_oss_image_url",
@@ -897,6 +897,33 @@ def test_duplicate_content_is_reported_before_unique_constraint(monkeypatch) -> 
         migration_id="run-1",
     )
 
+    assert result["statuses"][str(candidate.photo_id)] == "duplicate_content"
+    assert target.storage_type == "external_url"
+
+
+def test_duplicate_content_lookup_normalizes_stored_digest_case(monkeypatch) -> None:
+    candidate = _candidate()
+    transfer_sha = "abcdef" * 10 + "abcd"
+    group = SimpleNamespace(id=candidate.group_id, team_id="team-a", legacy_id="group-1", status="approved")
+    target = _photo_for(candidate)
+    existing = SimpleNamespace(id=uuid4(), sha256=transfer_sha.upper())
+    session = _CommitSession(group, [target, existing])
+    monkeypatch.setattr(
+        migration,
+        "invalidate_verification_for_group",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("invalidated duplicate")),
+    )
+
+    result = migration._commit_group(
+        lambda: session,
+        group_id=candidate.group_id,
+        transfers=[_transfer_for(candidate, sha256=transfer_sha)],
+        migration_id="run-1",
+    )
+
+    duplicate_sql = str(session.query_statements[0].compile(dialect=postgresql.dialect()))
+    assert "photos.group_id =" in duplicate_sql
+    assert "lower(photos.sha256) IN" in duplicate_sql
     assert result["statuses"][str(candidate.photo_id)] == "duplicate_content"
     assert target.storage_type == "external_url"
 
@@ -1132,6 +1159,41 @@ def test_postgres_execute_locks_transferred_rows_persists_jsonb_and_invalidates_
         assert session.scalar(select(func.count(DeliveryPackageJob.id))) == 0
 
 
+def test_postgres_uppercase_digest_is_detected_as_duplicate_content(
+    external_photo_postgres,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session_factory = external_photo_postgres
+    team_id, _group_id, photo_ids = _seed_postgres_external_group(session_factory)
+    target_id, blocker_id = photo_ids
+    target_digest = __import__("hashlib").sha256(str(target_id).encode("ascii")).hexdigest()
+    assert target_digest != target_digest.upper()
+    with session_factory.begin() as session:
+        blocker = session.get(Photo, blocker_id)
+        blocker.storage_type = "local_upload"
+        blocker.sha256 = target_digest.upper()
+    bucket = _install_postgres_fake_io(monkeypatch, tmp_path)
+
+    report = migration.execute_run(
+        session_factory,
+        bucket,
+        migration_id="pg-case-duplicate",
+        allowlist=frozenset({"img.example"}),
+    )
+
+    assert report["committed"] == 0
+    assert report["failure_counts"] == {"duplicate_content": 1}
+    with session_factory() as session:
+        target = session.get(Photo, target_id)
+        blocker = session.get(Photo, blocker_id)
+        assert target.storage_type == "external_url"
+        assert "oss_migration_id" not in target.raw_data
+        assert blocker.sha256 == target_digest.upper()
+        assert session.scalar(select(func.count(GroupBarcodeVerification.id))) == 0
+        assert session.scalar(select(func.count(AuditLog.id)).where(AuditLog.team_id == team_id)) == 0
+
+
 def test_postgres_unique_constraint_rolls_back_the_group_commit(
     external_photo_postgres,
     monkeypatch,
@@ -1151,7 +1213,14 @@ def test_postgres_unique_constraint_rolls_back_the_group_commit(
 
     def create_duplicate_after_digest_query(_connection, _cursor, statement, _parameters, _context, _executemany):
         nonlocal raced
-        if raced or "SELECT" not in statement or "photos" not in statement or "sha256 IN" not in statement:
+        if (
+            raced
+            or "SELECT" not in statement
+            or "photos" not in statement
+            or "lower(" not in statement
+            or "sha256" not in statement
+            or " IN " not in statement
+        ):
             return
         raced = True
         with session_factory.begin() as other_session:
@@ -1261,6 +1330,48 @@ def test_postgres_rollback_discovers_changed_storage_and_reports_conflict(
         ) == 2
         assert session.scalar(select(func.count(DeliveryCacheJob.id))) == 0
         assert session.scalar(select(func.count(DeliveryPackageJob.id))) == 0
+
+
+def test_postgres_same_migration_id_can_rollback_after_recommit(
+    external_photo_postgres,
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session_factory = external_photo_postgres
+    _team_id, _group_id, photo_ids = _seed_postgres_external_group(session_factory, photo_count=1)
+    photo_id = photo_ids[0]
+    bucket = _install_postgres_fake_io(monkeypatch, tmp_path)
+    migration_id = "pg-repeat-cycle"
+
+    first_execute = migration.execute_run(
+        session_factory,
+        bucket,
+        migration_id=migration_id,
+        allowlist=frozenset({"img.example"}),
+    )
+    assert first_execute["committed"] == 1
+
+    first_rollback = migration.rollback_run(session_factory, migration_id=migration_id)
+    assert first_rollback["candidate_count"] == 1
+    assert first_rollback["rolled_back"] == 1
+    assert migration._fetch_rollback_candidates(session_factory, migration_id=migration_id) == []
+
+    recommit = migration.execute_run(
+        session_factory,
+        bucket,
+        migration_id=migration_id,
+        allowlist=frozenset({"img.example"}),
+    )
+    assert recommit["committed"] == 1
+
+    second_rollback = migration.rollback_run(session_factory, migration_id=migration_id)
+    assert second_rollback["candidate_count"] == 1
+    assert second_rollback["rolled_back"] == 1
+    with session_factory() as session:
+        photo = session.get(Photo, photo_id)
+        assert photo.storage_type == "external_url"
+        assert photo.image_url.startswith("https://img.example/")
+        assert "oss_rollback_at" in photo.raw_data
 
 
 def test_postgres_rollback_invalidation_failure_is_atomic(
