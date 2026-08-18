@@ -4,7 +4,6 @@ export type StaticPageKey =
   | 'global-search'
   | 'construction'
   | 'account-management'
-  | 'exports'
   | 'sync-config'
 
 export type StaticPageMigrationStatus = 'native_vue'
@@ -56,14 +55,6 @@ export const staticPages: StaticPageRoute[] = [
     title: '账号管理',
     subtitle: '',
     routePath: '/account-management',
-    roles: ['admin'],
-    migrationStatus: 'native_vue',
-  },
-  {
-    key: 'exports',
-    title: '导出中心',
-    subtitle: '',
-    routePath: '/exports',
     roles: ['admin'],
     migrationStatus: 'native_vue',
   },

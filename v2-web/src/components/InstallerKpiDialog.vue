@@ -5,7 +5,6 @@ import { fetchInstallerWorkload } from '@/api/services'
 import type { InstallerExceptionGroup, InstallerWorkSegment, InstallerWorkloadRow } from '@/api/types'
 import {
   INSTALLER_KPI_PAGE_SIZE,
-  buildInstallerKpiCsv,
   createInstallerKpiRequestGate,
   filterInstallerKpiRows,
   formatInstallerKpiDecimal,
@@ -150,19 +149,6 @@ function openDataCenter() {
   emit('open-data-center')
 }
 
-function downloadCsv() {
-  if (!workloadRows.value.length) return
-  const { filename, content } = buildInstallerKpiCsv(props.installer, workloadRows.value)
-  const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }))
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  URL.revokeObjectURL(url)
-}
-
 watch(
   () => [props.modelValue, props.installer, props.scope.mode, props.scope.anchorDate] as const,
   ([isVisible], previous) => {
@@ -286,7 +272,6 @@ watch(
         <el-button @click="visible = false">关闭</el-button>
         <div class="installer-kpi-footer-actions">
           <el-button plain :disabled="!installer" @click="openDataCenter">查看原始资料</el-button>
-          <el-button type="primary" :disabled="!workloadRows.length" @click="downloadCsv">导出 KPI CSV</el-button>
         </div>
       </div>
     </template>

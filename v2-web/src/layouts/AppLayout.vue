@@ -24,7 +24,6 @@ const navigation = computed(() => {
     'global-search': Search,
     construction: FolderChecked,
     'account-management': UserFilled,
-    exports: SwitchButton,
     'sync-config': DataBoard,
   }
   return staticPages

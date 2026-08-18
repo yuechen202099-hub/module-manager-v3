@@ -120,32 +120,3 @@ export function installerKpiBarHeight(minutes: number, maximum: number) {
   if (!value) return 0
   return Math.max(8, Math.min(100, Math.round((value / ceiling) * 100)))
 }
-
-function csvCell(value: unknown) {
-  const text = String(value ?? '')
-  const safe = /^[=+\-@]/.test(text.trimStart()) ? `'${text}` : text
-  return `"${safe.replace(/"/g, '""')}"`
-}
-
-export function buildInstallerKpiCsv(installer: string, rows: InstallerWorkloadRow[]) {
-  const header = [
-    '安装人员', '日期', '开工时间', '收工时间', '有效工时', '补偿分钟', '考勤跨度',
-    '有效时间点', '完成量', '每小时完成量', '难度加权完成量', '难度加权效率',
-    '资料组数', '照片数', '已归档', '异常', '未审核',
-  ]
-  const body = rows.map((row) => [
-    installer, row.date, row.startTime || '-', row.endTime || '-',
-    row.workDurationLabel || formatInstallerKpiDuration(row.workDurationMinutes),
-    row.denseBonusMinutesV2, row.workSpanLabel || formatInstallerKpiDuration(row.workSpanMinutes),
-    row.timepointCount, row.completionCount, row.completionPerEffectiveHour,
-    row.weightedCompletion, row.weightedCompletionPerEffectiveHour,
-    row.groupCount, row.photoCount, row.archivedCount, row.exceptionCount, row.unreviewedCount,
-  ])
-  const filenameBase = (installer || 'installer')
-    .replace(/[<>:"/\\\\|?*\u0000-\u001f]/g, '_')
-    .replace(/[. ]+$/g, '') || 'installer'
-  return {
-    filename: `${filenameBase}-daily-workload.csv`,
-    content: `\uFEFF${[header, ...body].map((row) => row.map(csvCell).join(',')).join('\r\n')}`,
-  }
-}

@@ -16,13 +16,6 @@ import type {
   DataCenterPageSize,
   DataCenterRow,
   DataCenterTerminalFilterStatus,
-  ExportCatalogItem,
-  ExportCenterPageSize,
-  ExportJob,
-  ExportJobPage,
-  ExportTaskOption,
-  TerminalReadinessItem,
-  TerminalReadinessPage,
   GroupBarcodeManualConfirmation,
   GroupSearchResult,
   ImportJob,
@@ -114,67 +107,6 @@ type BackendDataCenterPage = {
   page?: number
   page_size?: number
   items?: BackendDataCenterRow[]
-}
-
-type BackendExportCatalogItem = {
-  key?: string
-  label?: string
-  delivery?: string
-  mode?: 'inline' | 'background'
-  required_filters?: Array<{
-    key?: string
-    label?: string
-    kind?: 'task'
-  }>
-}
-
-type BackendExportTaskOption = {
-  task_id?: string | number
-  terminal?: string
-  status?: string
-  label?: string
-}
-
-type BackendTerminalReadinessItem = {
-  terminal?: string
-  group_count?: number
-  constructed_count?: number
-  archived_count?: number
-  cache_ready_count?: number
-  status?: 'ready' | 'blocked'
-  blockers?: string[]
-  latest_generated_at?: string
-}
-
-type BackendTerminalReadinessPage = {
-  total?: number
-  page?: number
-  page_size?: number
-  items?: BackendTerminalReadinessItem[]
-}
-
-type BackendExportJob = {
-  id?: string
-  job_type?: string
-  status?: string
-  file_name?: string
-  row_count?: number
-  progress?: number
-  error_message?: string
-  filters?: Record<string, unknown>
-  request_key?: string
-  created_by?: string
-  created_at?: string
-  updated_at?: string
-  finished_at?: string
-  created?: boolean
-}
-
-type BackendExportJobPage = {
-  total?: number
-  page?: number
-  page_size?: number
-  items?: BackendExportJob[]
 }
 
 type LegacySession = {
@@ -1091,61 +1023,6 @@ function mapDataCenterDetail(raw: BackendDataCenterRow): DataCenterDetail {
   }
 }
 
-function mapExportCatalogItem(raw: BackendExportCatalogItem): ExportCatalogItem {
-  return {
-    key: String(raw.key || ''),
-    label: String(raw.label || ''),
-    delivery: String(raw.delivery || ''),
-    mode: raw.mode === 'background' ? 'background' : 'inline',
-    requiredFilters: (raw.required_filters || []).map((item) => ({
-      key: String(item.key || ''),
-      label: String(item.label || ''),
-      kind: item.kind === 'task' ? 'task' : 'task',
-    })),
-  }
-}
-
-function mapExportTaskOption(raw: BackendExportTaskOption): ExportTaskOption {
-  return {
-    taskId: String(raw.task_id || ''),
-    terminal: String(raw.terminal || ''),
-    status: String(raw.status || ''),
-    label: String(raw.label || ''),
-  }
-}
-
-function mapTerminalReadinessItem(raw: BackendTerminalReadinessItem): TerminalReadinessItem {
-  return {
-    terminal: String(raw.terminal || ''),
-    groupCount: Number(raw.group_count || 0),
-    constructedCount: Number(raw.constructed_count || 0),
-    archivedCount: Number(raw.archived_count || 0),
-    cacheReadyCount: Number(raw.cache_ready_count || 0),
-    status: raw.status === 'ready' ? 'ready' : 'blocked',
-    blockers: mapStringArray(raw.blockers),
-    latestGeneratedAt: String(raw.latest_generated_at || ''),
-  }
-}
-
-function mapExportJob(raw: BackendExportJob): ExportJob {
-  return {
-    id: String(raw.id || ''),
-    jobType: String(raw.job_type || ''),
-    status: String(raw.status || ''),
-    fileName: String(raw.file_name || ''),
-    rowCount: Number(raw.row_count || 0),
-    progress: Number(raw.progress || 0),
-    errorMessage: String(raw.error_message || ''),
-    filters: { ...(raw.filters || {}) },
-    requestKey: String(raw.request_key || ''),
-    createdBy: String(raw.created_by || ''),
-    createdAt: String(raw.created_at || ''),
-    updatedAt: String(raw.updated_at || ''),
-    finishedAt: String(raw.finished_at || ''),
-    created: Boolean(raw.created),
-  }
-}
-
 function normalizeBarcodeVerificationStatus(value: unknown): BarcodeVerificationStatus | undefined {
   const status = String(value || '')
   if (
@@ -1704,22 +1581,6 @@ export type DataCenterListQuery = {
   page?: number
   pageSize?: DataCenterPageSize
   sort?: string
-  signal?: AbortSignal
-}
-
-export type TerminalReadinessQuery = {
-  page?: number
-  pageSize?: ExportCenterPageSize
-  filter?: string
-  signal?: AbortSignal
-}
-
-export type ExportJobListQuery = {
-  page?: number
-  pageSize?: ExportCenterPageSize
-  category?: string
-  jobTypes?: string[]
-  status?: string[]
   signal?: AbortSignal
 }
 
@@ -2380,26 +2241,6 @@ export async function fetchPhotoBarcodeReviewGroups(
   }
 }
 
-export async function exportPhotoBarcodeReviewGroups(status = 'unreadable', query = ''): Promise<void> {
-  const params = new URLSearchParams({ status })
-  if (query.trim()) params.set('query', query.trim())
-  const response = await fetchWithAuth(`/local-test/photo-barcode/review-groups/export?${params.toString()}`, {
-    method: 'GET',
-    headers: formHeaders(),
-  })
-  if (!response.ok) {
-    throw new Error(response.statusText || '导出条码复核清单失败')
-  }
-  const blob = await response.blob()
-  triggerBrowserDownload(
-    blob,
-    filenameFromDisposition(
-      response.headers.get('Content-Disposition') || '',
-      `photo-barcode-review-${Date.now()}.xlsx`,
-    ),
-  )
-}
-
 export async function fetchInstallerWorkload(installer: string): Promise<InstallerWorkload> {
   const data = await api<BackendInstallerWorkload>(
     `/local-test/installers/${encodeURIComponent(installer)}/daily-workload`,
@@ -2617,13 +2458,6 @@ export async function fetchAllUnmatchedRecords(query = ''): Promise<UnmatchedRec
     if (!result.items.length || records.length >= result.total) break
   }
   return records
-}
-
-export async function exportUnmatchedRecords(query = ''): Promise<UnmatchedRecord[]> {
-  let path = '/local-test/unmatched/export'
-  if (query.trim()) path += `?query=${encodeURIComponent(query.trim())}`
-  const data = await api<{ total: number; items: BackendUnmatchedRecord[] }>(path)
-  return (data.items || []).map(mapUnmatchedRecord)
 }
 
 export async function fetchUnmatchedReview(unmatchedId: string): Promise<UnmatchedReviewDetail> {
@@ -3020,11 +2854,6 @@ function looksLikeBlankOrPlaceholderImage(image: HTMLImageElement): boolean {
   }
 }
 
-type DeliveryExportProgress = {
-  text: string
-  percent: number
-}
-
 function filenameFromDisposition(disposition: string, fallbackName: string) {
   return parseContentDispositionFilename(disposition, fallbackName)
 }
@@ -3038,184 +2867,4 @@ function triggerBrowserDownload(blob: Blob, filename: string) {
   link.click()
   link.remove()
   URL.revokeObjectURL(url)
-}
-
-async function downloadExcel(path: string, body: Record<string, unknown>, fallbackName: string): Promise<void> {
-  const response = await fetchWithAuth(path, {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    throw new Error(response.statusText || fallbackName)
-  }
-  const blob = await response.blob()
-  triggerBrowserDownload(blob, filenameFromDisposition(response.headers.get('Content-Disposition') || '', fallbackName))
-}
-
-async function createResponseError(response: Response, fallbackMessage: string): Promise<ApiRequestError> {
-  let message = response.statusText || fallbackMessage
-  try {
-    const payload = (await response.json()) as { detail?: { message?: string } | string; error?: { message?: string } }
-    if (typeof payload.detail === 'string' && payload.detail) message = payload.detail
-    else if (typeof payload.detail === 'object' && payload.detail?.message) message = payload.detail.message
-    else if (payload.error?.message) message = payload.error.message
-  } catch {
-    // Keep HTTP fallback when the response body is not JSON.
-  }
-  return new ApiRequestError(message, response.status)
-}
-
-export async function fetchExportCatalog(signal?: AbortSignal): Promise<ExportCatalogItem[]> {
-  const data = await api<{ items?: BackendExportCatalogItem[] }>('/exports/catalog', { signal })
-  return (data.items || []).map(mapExportCatalogItem)
-}
-
-export async function fetchExportTaskOptions(
-  query = '',
-  limit = 20,
-  signal?: AbortSignal,
-): Promise<ExportTaskOption[]> {
-  const params = new URLSearchParams({
-    query: query.trim(),
-    limit: String(Math.max(1, Math.min(50, Math.floor(Number(limit) || 20)))),
-  })
-  const data = await api<{ items?: BackendExportTaskOption[] }>(`/exports/task-options?${params.toString()}`, { signal })
-  return (data.items || []).map(mapExportTaskOption)
-}
-
-export async function fetchTerminalReadinessPage(query: TerminalReadinessQuery): Promise<TerminalReadinessPage> {
-  const params = new URLSearchParams({
-    page: String(query.page || 1),
-    page_size: String(query.pageSize || 20),
-    query: query.filter || '',
-  })
-  const data = await api<BackendTerminalReadinessPage>(`/exports/terminal-readiness?${params.toString()}`, {
-    signal: query.signal,
-  })
-  const pageSize = [20, 50, 100].includes(Number(data.page_size))
-    ? (Number(data.page_size) as ExportCenterPageSize)
-    : 20
-  return {
-    total: Number(data.total || 0),
-    page: Number(data.page || query.page || 1),
-    pageSize,
-    items: (data.items || []).map(mapTerminalReadinessItem),
-  }
-}
-
-export async function fetchExportJobs(query: ExportJobListQuery = {}): Promise<ExportJobPage> {
-  const params = new URLSearchParams({
-    page: String(query.page || 1),
-    page_size: String(query.pageSize || 20),
-  })
-  if (query.category) params.set('category', query.category)
-  if (query.jobTypes?.length) params.set('job_types', query.jobTypes.join(','))
-  if (query.status?.length) params.set('status', query.status.join(','))
-  const data = await api<BackendExportJobPage>(`/exports/jobs?${params.toString()}`, {
-    signal: query.signal,
-  })
-  const pageSize = [20, 50, 100].includes(Number(data.page_size))
-    ? (Number(data.page_size) as ExportCenterPageSize)
-    : 20
-  return {
-    total: Number(data.total || 0),
-    page: Number(data.page || query.page || 1),
-    pageSize,
-    items: (data.items || []).map(mapExportJob),
-  }
-}
-
-export async function createExportJob(jobType: string, filters: Record<string, unknown> = {}): Promise<ExportJob> {
-  const data = await api<BackendExportJob>('/exports/jobs', {
-    method: 'POST',
-    body: JSON.stringify({ job_type: jobType, filters }),
-  })
-  return mapExportJob(data)
-}
-
-export async function downloadExportJob(jobId: string): Promise<{ filename: string }> {
-  const response = await fetchWithAuth(`/exports/jobs/${encodeURIComponent(jobId)}/download`, {
-    headers: authHeaders(),
-  })
-  if (!response.ok) throw await createResponseError(response, '导出文件下载失败')
-  const blob = await response.blob()
-  if (!blob.size) throw new Error('导出文件为空')
-  const fallbackName = `export-job-${jobId}.bin`
-  const filename = filenameFromDisposition(response.headers.get('Content-Disposition') || '', fallbackName)
-  triggerBrowserDownload(blob, filename)
-  return { filename }
-}
-
-export async function exportTaskDetail(taskId: string): Promise<void> {
-  await downloadExcel('/exports/task-detail', { task_id: Number(taskId) }, `task-detail-${taskId}.xlsx`)
-}
-
-export async function exportExceptionMeters(reviewer = ''): Promise<void> {
-  const response = await fetchWithAuth('/exports/exception-meters', {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify({ reviewer, team_id: currentTeamId() }),
-  })
-  if (!response.ok) {
-    throw new Error(response.statusText || '导出异常表计失败')
-  }
-  const blob = await response.blob()
-  triggerBrowserDownload(
-    blob,
-    filenameFromDisposition(response.headers.get('Content-Disposition') || '', `exception-meters-${Date.now()}.xlsx`),
-  )
-}
-
-export async function exportProjectOutsideConstruction(): Promise<void> {
-  await downloadExcel('/exports/project-outside', { team_id: currentTeamId() }, `project-outside-${Date.now()}.xlsx`)
-}
-
-export async function exportTerminalDeliveryPackage(options: {
-  taskId: string
-  terminal?: string
-  reviewScope: 'reviewed' | 'all'
-  onProgress?: (progress: DeliveryExportProgress) => void
-}): Promise<{ filename: string }> {
-  if (!options.taskId && !options.terminal) throw new Error('只支持单终端导出，请从终端任务行发起。')
-  options.onProgress?.({ text: '请求正式交付包...', percent: 10 })
-  const body: Record<string, unknown> = {
-    review_scope: options.reviewScope || 'reviewed',
-  }
-  if (options.taskId) body.task_id = Number(options.taskId)
-  if (options.terminal) body.terminal = options.terminal
-  const response = await fetchWithAuth('/exports/final-delivery', {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify(body),
-  })
-  if (response.status === 202 || response.status === 409) {
-    let message = '正式交付包正在后台生成，请稍后重试。'
-    try {
-      const payload = (await response.json()) as { detail?: { message?: string } | string }
-      if (typeof payload.detail === 'string' && payload.detail) message = payload.detail
-      if (typeof payload.detail === 'object' && payload.detail?.message) message = payload.detail.message
-    } catch {
-      // Stable fallback for a malformed not-ready response.
-    }
-    throw new ApiRequestError(message, response.status)
-  }
-  if (!response.ok) {
-    let message = response.statusText || '正式交付包下载失败'
-    try {
-      const payload = (await response.json()) as { detail?: { message?: string } | string }
-      if (typeof payload.detail === 'string' && payload.detail) message = payload.detail
-      if (typeof payload.detail === 'object' && payload.detail?.message) message = payload.detail.message
-    } catch {
-      // Keep the HTTP status fallback.
-    }
-    throw new ApiRequestError(message, response.status)
-  }
-  const blob = await response.blob()
-  if (!blob.size) throw new Error('正式交付包为空，请稍后重试。')
-  const fallbackName = `V3.2.0-final-delivery-${options.terminal || options.taskId}.zip`
-  const filename = filenameFromDisposition(response.headers.get('Content-Disposition') || '', fallbackName)
-  triggerBrowserDownload(blob, filename)
-  options.onProgress?.({ text: '正式交付包已下载', percent: 100 })
-  return { filename }
 }

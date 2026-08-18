@@ -7,11 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VUE_SRC = ROOT / "v2-web" / "src"
-KPI_SNAPSHOT_EXPORT_PATH = "v2-web/src/components/InstallerKpiDialog.vue"
-KPI_SNAPSHOT_EXPORT_LABEL = "导出 KPI CSV"
-ALLOWED_EXPORT_VUE_PATHS = {
-    "v2-web/src/views/ExportsView.vue",
-}
+ALLOWED_EXPORT_VUE_PATHS: set[str] = set()
 ALLOWED_TEMPLATE_USAGE = {
     "downloadConstructionPriorityTemplate": {
         "v2-web/src/components/ConstructionPriorityImportDialog.vue",
@@ -88,19 +84,6 @@ def scan_vue_source() -> None:
                 raise AssertionError(f"{relative_path} must not reference `{api_name}`")
 
 
-def verify_installer_kpi_snapshot_export() -> None:
-    installer_kpi = read(KPI_SNAPSHOT_EXPORT_PATH)
-    contains(installer_kpi, KPI_SNAPSHOT_EXPORT_LABEL, "installer KPI snapshot export")
-    for api_name in BUSINESS_EXPORT_APIS:
-        not_contains(installer_kpi, api_name, "installer KPI snapshot export")
-    for path in sorted(VUE_SRC.rglob("*.vue")):
-        if KPI_SNAPSHOT_EXPORT_LABEL in path.read_text(encoding="utf-8"):
-            ensure(
-                path.relative_to(ROOT).as_posix() == KPI_SNAPSHOT_EXPORT_PATH,
-                "KPI snapshot CSV must exist only in InstallerKpiDialog",
-            )
-
-
 def main() -> None:
     claim_tasks = read("v2-web/src/views/ClaimTasksView.vue")
     global_search = read("v2-web/src/views/GlobalSearchView.vue")
@@ -108,13 +91,10 @@ def main() -> None:
     app_layout = read("v2-web/src/layouts/AppLayout.vue")
     static_pages = read("v2-web/src/router/staticPages.ts")
     router_source = read("v2-web/src/router/index.ts")
-    exports_view = read("v2-web/src/views/ExportsView.vue")
     priority_import_dialog = read("v2-web/src/components/ConstructionPriorityImportDialog.vue")
     static_page_verifier = read("scripts/verify-static-pages.py")
 
     scan_vue_source()
-    verify_installer_kpi_snapshot_export()
-
     ensure(
         not (ROOT / "v2-web/src/views/TaskHallView.vue").exists(),
         "obsolete TaskHallView.vue must be deleted",
@@ -151,7 +131,7 @@ def main() -> None:
 
     contains(static_pages, "title: '任务派发'", "staticPages task dispatch entry")
     contains(static_pages, "title: '数据中台'", "staticPages data center entry")
-    contains(static_pages, "title: '导出中心'", "staticPages export center entry")
+    not_contains(static_pages, "title: '导出中心'", "staticPages export center entry")
     not_contains(static_pages, "key: 'task-hall'", "staticPages legacy task-hall registry")
     not_contains(static_pages, "task-hall-legacy", "staticPages legacy task-hall route")
     not_contains(static_pages, "title: '任务领取'", "staticPages legacy claim title")
@@ -212,8 +192,7 @@ def main() -> None:
     not_contains(app_layout, "'task-hall': List", "AppLayout legacy task-hall icon")
     not_contains(app_layout, "task-hall", "AppLayout legacy task-hall nav")
 
-    contains(exports_view, "createExportJob", "ExportsView single export entry")
-    contains(exports_view, "downloadExportJob", "ExportsView download flow")
+    ensure(not (ROOT / "v2-web/src/views/ExportsView.vue").exists(), "ExportsView must be deleted")
     contains(priority_import_dialog, "downloadConstructionPriorityTemplate", "priority import template exception")
     contains(global_search, "数据中台", "GlobalSearchView data center heading")
 

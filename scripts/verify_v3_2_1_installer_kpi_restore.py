@@ -23,6 +23,7 @@ def run_utility_contract() -> dict[str, object]:
     assert TYPESCRIPT.exists(), "local TypeScript runtime must exist"
 
     utility_source = UTILITY.read_text(encoding="utf-8")
+    assert "buildInstallerKpiCsv" not in utility_source, "installer KPI CSV builder must be retired"
     node_source = f"""
 import {{ createRequire }} from 'node:module'
 import {{ pathToFileURL }} from 'node:url'
@@ -78,13 +79,12 @@ const page = mod.paginateInstallerKpiRows(Array.from({{ length: 41 }}, (_, index
 const gate = mod.createInstallerKpiRequestGate()
 const first = gate.begin()
 const second = gate.begin()
-const csv = mod.buildInstallerKpiCsv('张三', [{{ ...rows[0], date: '=2+2', startTime: '08:00,"早班"', endTime: '17:00\\n次日' }}])
 process.stdout.write(JSON.stringify({{
   day, week, month,
   ranges: {{ day: mod.installerKpiDateRange({{ mode: 'day', anchorDate: '2026-07-06' }}), week: mod.installerKpiDateRange({{ mode: 'week', anchorDate: '2026-07-06' }}), month: mod.installerKpiDateRange({{ mode: 'month', anchorDate: '2026-07-31' }}) }},
   page, stale: [gate.isCurrent(first), gate.isCurrent(second)],
   totals: mod.summarizeInstallerKpiRows(rows), duration: [mod.formatInstallerKpiDuration(61), mod.formatInstallerKpiDuration(-1)], decimal: [mod.formatInstallerKpiDecimal(1.2), mod.formatInstallerKpiDecimal(Number.NaN)],
-  bar: [mod.installerKpiBarHeight(0, 120), mod.installerKpiBarHeight(1, 120), mod.installerKpiBarHeight(120, 120)], csv,
+  bar: [mod.installerKpiBarHeight(0, 120), mod.installerKpiBarHeight(1, 120), mod.installerKpiBarHeight(120, 120)],
 }}))
 """
     with tempfile.TemporaryDirectory() as directory:
@@ -106,18 +106,23 @@ def run_component_contract() -> None:
         "fetchInstallerWorkload",
         "createInstallerKpiRequestGate",
         "filterInstallerKpiRows",
-        "buildInstallerKpiCsv",
         "update:modelValue",
         "open-data-center",
         "每日工作量",
-        "导出 KPI CSV",
         "查看原始资料",
         "2 小时效率分布",
         "地址清单",
         "异常明细",
     ]:
         assert marker in component, f"InstallerKpiDialog missing {marker}"
-    for forbidden in ["useRouter", "useAuthStore", "createExportJob", "downloadExportJob"]:
+    for forbidden in [
+        "useRouter",
+        "useAuthStore",
+        "createExportJob",
+        "downloadExportJob",
+        "buildInstallerKpiCsv",
+        "导出 KPI CSV",
+    ]:
         assert forbidden not in component, f"InstallerKpiDialog must not use {forbidden}"
     for marker in [
         'v-if="loadError"',
@@ -193,10 +198,6 @@ def main() -> None:
     assert actual["duration"] == ["1小时1分钟", "0分钟"]
     assert actual["decimal"] == ["1.2", "0"]
     assert actual["bar"] == [0, 8, 100]
-    assert actual["csv"]["filename"] == "张三-daily-workload.csv"
-    assert actual["csv"]["content"].startswith("\ufeff\"安装人员\",\"日期\"")
-    assert "\"'=2+2\"" in actual["csv"]["content"]
-    assert "\"08:00,\"\"早班\"\"\"" in actual["csv"]["content"]
     print("[OK] V3.2.1 installer KPI restore checks passed")
 
 
