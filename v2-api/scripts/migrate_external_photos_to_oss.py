@@ -40,13 +40,14 @@ from app.services.external_photo_oss_migration import (  # noqa: E402
     redact_source_url,
     store_downloaded_photo,
 )
+from app.services.final_delivery_export import delivery_group_readiness  # noqa: E402
 from app.services.photo_storage import (  # noqa: E402
     oss_bucket_name,
     oss_object_key,
     require_oss_client,
     validate_remote_image_url,
 )
-from app.services.state_repository import invalidate_verification_for_group  # noqa: E402
+from app.services.state_repository import _group_payload, invalidate_verification_for_group  # noqa: E402
 
 
 MIB = 1024 * 1024
@@ -61,10 +62,29 @@ HOST_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z"
 )
 URL_IN_TEXT_RE = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+SENSITIVE_KEY_RE = re.compile(
+    r"password|passwd|secret|token|credential|authorization|cookie|"
+    r"api[_-]?key|access[_-]?key|accesskeyid|signature",
+    re.IGNORECASE,
+)
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"\b(authorization|proxy-authorization|accesskeyid|access[_-]?key|secret[_-]?key|"
+    r"api[_-]?key|password|passwd|token|credential|cookie|signature)\b"
+    r"\s*[:=]\s*(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
+BEARER_TOKEN_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
 
 
 class ResourceGateError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class OomJournalState:
+    valid: bool
+    cursor: str
+    oom_detected: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +93,8 @@ class ResourceSnapshot:
     temp_free_bytes: int
     api_healthy: bool
     oom_marker: str
+    oom_monitor_valid: bool = True
+    oom_detected: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +149,8 @@ def candidate_statement(team_id: str = "", limit: int = 0):
 
 
 def start_gate(snapshot: ResourceSnapshot) -> None:
+    if not snapshot.oom_monitor_valid or not snapshot.oom_marker:
+        raise ResourceGateError("kernel OOM monitor is unavailable")
     if snapshot.mem_available_bytes < START_MEMORY_BYTES:
         raise ResourceGateError("migration requires at least 400 MiB available memory")
     if snapshot.temp_free_bytes < START_TEMP_FREE_BYTES:
@@ -140,11 +164,13 @@ def stop_reason(
     initial_oom_marker: str,
     consecutive_oss_errors: int,
 ) -> str:
+    if not snapshot.oom_monitor_valid or not initial_oom_marker:
+        return "oom_monitor_failed"
     if snapshot.mem_available_bytes < STOP_MEMORY_BYTES:
         return "low_memory"
     if not snapshot.api_healthy:
         return "health_failed"
-    if snapshot.oom_marker != initial_oom_marker:
+    if snapshot.oom_detected:
         return "new_oom"
     if consecutive_oss_errors >= OSS_ERROR_LIMIT:
         return "oss_error_limit"
@@ -179,40 +205,71 @@ def _api_is_healthy() -> bool:
         connection.close()
 
 
-def _oom_marker() -> str:
+def _oom_marker(after_cursor: str = "") -> OomJournalState:
+    command = ["journalctl", "-k", "--no-pager", "-o", "cat", "--show-cursor"]
+    if after_cursor:
+        command.extend(["--after-cursor", after_cursor])
+    else:
+        command.extend(["-n", "0"])
     try:
         result = subprocess.run(
-            ["journalctl", "-k", "--no-pager", "-n", "200", "-o", "short-unix"],
+            command,
             capture_output=True,
             check=False,
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
-        return "journal-unavailable"
-    oom_lines = b"\n".join(
-        line
-        for line in result.stdout.splitlines()
-        if b"out of memory" in line.lower() or b"oom-kill" in line.lower()
+        return OomJournalState(False, after_cursor, False)
+    if result.returncode != 0:
+        return OomJournalState(False, after_cursor, False)
+    lines = result.stdout.splitlines()
+    cursor_lines = [line for line in lines if line.startswith(b"-- cursor: ")]
+    if not cursor_lines:
+        return OomJournalState(False, after_cursor, False)
+    try:
+        cursor = cursor_lines[-1].partition(b":")[2].strip().decode("utf-8")
+    except UnicodeDecodeError:
+        return OomJournalState(False, after_cursor, False)
+    if not cursor:
+        return OomJournalState(False, after_cursor, False)
+    oom_detected = any(
+        b"out of memory" in line.lower() or b"oom-kill" in line.lower()
+        for line in lines
+        if not line.startswith(b"-- cursor: ")
     )
-    return hashlib.sha256(oom_lines).hexdigest()
+    return OomJournalState(True, cursor, oom_detected)
 
 
-def probe_resources(temp_dir: Path) -> ResourceSnapshot:
+def probe_resources(temp_dir: Path, *, oom_cursor: str = "") -> ResourceSnapshot:
+    oom_state = _oom_marker(oom_cursor)
     return ResourceSnapshot(
         mem_available_bytes=_memory_available_bytes(),
         temp_free_bytes=shutil.disk_usage(temp_dir).free,
         api_healthy=_api_is_healthy(),
-        oom_marker=_oom_marker(),
+        oom_marker=oom_state.cursor,
+        oom_monitor_valid=oom_state.valid,
+        oom_detected=oom_state.oom_detected,
     )
 
 
 def _sanitize_text(value: str) -> str:
-    return URL_IN_TEXT_RE.sub(lambda match: redact_source_url(match.group(0)), str(value or ""))
+    sanitized = URL_IN_TEXT_RE.sub(lambda match: redact_source_url(match.group(0)), str(value or ""))
+    sanitized = SENSITIVE_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", sanitized)
+    return BEARER_TOKEN_RE.sub("Bearer [REDACTED]", sanitized)
 
 
 def _sanitize_report(value: Any, *, key: str = "") -> Any:
     if isinstance(value, dict):
-        return {str(item_key): _sanitize_report(item, key=str(item_key)) for item_key, item in value.items()}
+        sanitized: dict[str, Any] = {}
+        for item_key, item in value.items():
+            raw_key = str(item_key)
+            safe_key = _sanitize_text(raw_key)
+            sanitized[safe_key] = (
+                "[REDACTED]"
+                if SENSITIVE_KEY_RE.search(raw_key)
+                else _sanitize_report(item, key=raw_key)
+            )
+        return sanitized
     if isinstance(value, (list, tuple)):
         return [_sanitize_report(item, key=key) for item in value]
     if isinstance(value, Path):
@@ -248,7 +305,8 @@ def operational_directory() -> Path:
 
 def write_report(path: Path, report: dict[str, Any]) -> Path:
     target = Path(path)
-    _ensure_owner_directory(target.parent)
+    if target.parent.is_symlink() or not target.parent.is_dir():
+        raise RuntimeError("migration report parent directory is unsafe")
     if target.exists() and target.is_symlink():
         raise RuntimeError("migration report path is unsafe")
     payload = json.dumps(_sanitize_report(report), ensure_ascii=False, indent=2, sort_keys=True)
@@ -315,10 +373,9 @@ def run_dry_run(
         )
         if team_id:
             storage_statement = storage_statement.where(Photo.team_id == team_id)
-        storage_types = {
-            str(storage_type or "unknown"): int(count)
-            for storage_type, count in session.execute(storage_statement).all()
-        }
+        storage_types: Counter[str] = Counter()
+        for storage_type, count in session.execute(storage_statement).all():
+            storage_types[str(storage_type or "unknown")] += int(count)
 
         hosts: Counter[str] = Counter()
         hash_classes: Counter[str] = Counter()
@@ -464,12 +521,26 @@ def _hash_status(candidate: ExternalPhotoCandidate, content_sha256: str) -> str:
     return "declared_hash_mismatch"
 
 
+def _oss_error_details(exc: BaseException) -> dict[str, str]:
+    if isinstance(exc, OssObjectConflictError):
+        code = "object_conflict"
+        message = "OSS object conflict"
+    elif isinstance(exc, OssVerificationError):
+        code = "verification_failed"
+        message = "OSS object verification failed"
+    else:
+        code = "operation_failed"
+        message = "OSS operation failed"
+    return {"error_category": "oss", "error_code": code, "error": message}
+
+
 def _enum_text(value: Any) -> str:
     return str(getattr(value, "value", value) or "")
 
 
-def _final_delivery_ready(group: MaterialGroup) -> bool:
-    return _enum_text(getattr(group, "status", "")) == "approved"
+def _final_delivery_ready(session: Session, group: MaterialGroup) -> bool:
+    readiness = delivery_group_readiness(_group_payload(session, group, include_photos=True))
+    return bool(readiness["cache_ready"] and readiness["identity_ready"])
 
 
 def _source_still_matches(photo: Photo, candidate: ExternalPhotoCandidate) -> bool:
@@ -508,18 +579,29 @@ def _commit_group(
                     "final_delivery_ready": False,
                 }
             group_status = _enum_text(group.status)
+            transferred_ids = {item.candidate.photo_id for item in transfers}
             locked_photos = session.scalars(
                 select(Photo)
-                .where(Photo.group_id == group_id)
+                .where(Photo.group_id == group_id, Photo.id.in_(transferred_ids))
                 .order_by(Photo.id.asc())
                 .with_for_update()
             ).all()
             photos_by_id = {photo.id: photo for photo in locked_photos}
             sha_owners: dict[str, set[UUID]] = defaultdict(set)
-            for photo in locked_photos:
-                digest = str(photo.sha256 or "").strip().lower()
+            transfer_digests = {
+                item.receipt.sha256.strip().lower()
+                for item in transfers
+                if item.receipt.sha256.strip()
+            }
+            duplicate_rows = session.execute(
+                select(Photo.id, Photo.sha256)
+                .where(Photo.group_id == group_id, Photo.sha256.in_(transfer_digests))
+                .order_by(Photo.sha256.asc(), Photo.id.asc())
+            ).all()
+            for photo_id, sha256 in duplicate_rows:
+                digest = str(sha256 or "").strip().lower()
                 if digest:
-                    sha_owners[digest].add(photo.id)
+                    sha_owners[digest].add(photo_id)
 
             changed = False
             for transfer in transfers:
@@ -578,7 +660,7 @@ def _commit_group(
                     actor="oss-migration",
                     reason="external_photo_migrated_to_oss",
                 )
-                final_delivery_ready = _final_delivery_ready(group)
+                final_delivery_ready = _final_delivery_ready(session, group)
     return {
         "statuses": statuses,
         "group_status": group_status,
@@ -654,6 +736,7 @@ def _run_transfer_mode(
     try:
         initial_snapshot = probe_resources(temp_dir)
         start_gate(initial_snapshot)
+        oom_cursor = initial_snapshot.oom_marker
         candidates = _fetch_candidates(session_factory, limit=limit)
         report = _base_run_report(mode=mode, migration_id=migration_id, candidates=candidates)
         policy = DownloadPolicy(allowed_hosts=allowlist)
@@ -667,7 +750,9 @@ def _run_transfer_mode(
         for group_id, group_candidates in groups.items():
             transfers: list[PreparedTransfer] = []
             for candidate in group_candidates:
-                snapshot = probe_resources(temp_dir)
+                snapshot = probe_resources(temp_dir, oom_cursor=oom_cursor)
+                if snapshot.oom_monitor_valid and snapshot.oom_marker:
+                    oom_cursor = snapshot.oom_marker
                 reason = stop_reason(snapshot, initial_snapshot.oom_marker, consecutive_oss_errors)
                 if reason:
                     report["stop_reason"] = reason
@@ -704,7 +789,7 @@ def _run_transfer_mode(
                             if isinstance(exc, OssObjectConflictError)
                             else "oss_verification_failed"
                         )
-                        item["error"] = _sanitize_text(str(exc))
+                        item.update(_oss_error_details(exc))
                         if consecutive_oss_errors >= OSS_ERROR_LIMIT:
                             report["stop_reason"] = "oss_error_limit"
                             stopped = True
@@ -712,7 +797,7 @@ def _run_transfer_mode(
                     except Exception as exc:
                         consecutive_oss_errors += 1
                         item["status"] = "oss_error"
-                        item["error"] = _sanitize_text(str(exc))
+                        item.update(_oss_error_details(exc))
                         if consecutive_oss_errors >= OSS_ERROR_LIMIT:
                             report["stop_reason"] = "oss_error_limit"
                             stopped = True
@@ -810,8 +895,8 @@ def _fetch_rollback_candidates(
     statement = (
         select(Photo.id.label("photo_id"), Photo.group_id)
         .where(
-            Photo.storage_type == "oss",
             Photo.raw_data["oss_migration_id"].as_string() == migration_id,
+            Photo.raw_data["oss_rollback_at"].as_string().is_(None),
         )
         .order_by(Photo.team_id.asc(), Photo.group_id.asc(), Photo.id.asc())
     )
@@ -910,7 +995,7 @@ def _rollback_group(
                     actor="oss-migration",
                     reason="external_photo_oss_migration_rolled_back",
                 )
-                final_delivery_ready = _final_delivery_ready(group)
+                final_delivery_ready = _final_delivery_ready(session, group)
     return {
         "statuses": statuses,
         "source_urls": source_urls,
