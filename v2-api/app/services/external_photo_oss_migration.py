@@ -100,6 +100,7 @@ class _StablePhotoFile:
     device: int
     inode: int
     upload_path: Path
+    allowed_link_counts: tuple[int, ...]
 
 
 def _response_status(response: Any) -> int:
@@ -232,8 +233,12 @@ def _close_private_directory(boundary: _PrivateDirectoryBoundary | None) -> None
         boundary.descriptor = None
 
 
-def _validate_private_file(file_stat: os.stat_result) -> None:
-    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+def _validate_private_file(
+    file_stat: os.stat_result,
+    *,
+    allowed_link_counts: tuple[int, ...] = (1,),
+) -> None:
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink not in allowed_link_counts:
         raise PhotoTransferError("external photo private temp file is unsafe")
     if os.name != "nt":
         if file_stat.st_uid != os.geteuid() or stat.S_IMODE(file_stat.st_mode) != 0o600:
@@ -297,6 +302,7 @@ def _open_verified_private_file(
     boundary: _PrivateDirectoryBoundary,
     *,
     expected_identity: tuple[int, int] | None,
+    allowed_link_counts: tuple[int, ...] = (1,),
 ) -> tuple[BinaryIO, tuple[int, int]]:
     _verify_private_directory(boundary)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
@@ -308,12 +314,12 @@ def _open_verified_private_file(
         else:
             descriptor = os.open(path, flags)
         opened = os.fstat(descriptor)
-        _validate_private_file(opened)
+        _validate_private_file(opened, allowed_link_counts=allowed_link_counts)
         if expected_identity is not None and _identity(opened) != expected_identity:
             raise PhotoTransferError("external photo private temp file changed")
         _verify_private_directory(boundary)
         current = os.lstat(path)
-        _validate_private_file(current)
+        _validate_private_file(current, allowed_link_counts=allowed_link_counts)
         if _identity(current) != _identity(opened):
             raise PhotoTransferError("external photo private temp file changed")
         image_file = os.fdopen(descriptor, "rb")
@@ -544,21 +550,27 @@ def _verify_stable_photo_path(stable: _StablePhotoFile) -> None:
         current = os.lstat(stable.path)
     except OSError as exc:
         raise PhotoTransferError("downloaded photo file changed") from exc
-    _validate_private_file(current)
+    _validate_private_file(current, allowed_link_counts=stable.allowed_link_counts)
     if _identity(current) != (stable.device, stable.inode):
         raise PhotoTransferError("downloaded photo file changed")
 
 
 @contextmanager
-def _validated_photo_for_upload(photo: DownloadedPhoto) -> Iterator[_StablePhotoFile]:
+def _validated_photo_file(
+    photo: DownloadedPhoto,
+    path: Path,
+    *,
+    allowed_link_counts: tuple[int, ...],
+) -> Iterator[_StablePhotoFile]:
     boundary: _PrivateDirectoryBoundary | None = None
     photo_file: BinaryIO | None = None
     try:
-        boundary = _open_private_directory(photo.path.parent, create=False)
+        boundary = _open_private_directory(path.parent, create=False)
         photo_file, file_identity = _open_verified_private_file(
-            photo.path,
+            path,
             boundary,
             expected_identity=None,
+            allowed_link_counts=allowed_link_counts,
         )
         digest = hashlib.sha256()
         byte_size = 0
@@ -574,10 +586,11 @@ def _validated_photo_for_upload(photo: DownloadedPhoto) -> Iterator[_StablePhoto
         stable = _StablePhotoFile(
             boundary=boundary,
             file=photo_file,
-            path=photo.path,
+            path=path,
             device=file_identity[0],
             inode=file_identity[1],
             upload_path=upload_path,
+            allowed_link_counts=allowed_link_counts,
         )
         _verify_stable_photo_path(stable)
         yield stable
@@ -585,6 +598,12 @@ def _validated_photo_for_upload(photo: DownloadedPhoto) -> Iterator[_StablePhoto
         if photo_file is not None:
             photo_file.close()
         _close_private_directory(boundary)
+
+
+@contextmanager
+def _validated_photo_for_upload(photo: DownloadedPhoto) -> Iterator[_StablePhotoFile]:
+    with _validated_photo_file(photo, photo.path, allowed_link_counts=(1,)) as stable:
+        yield stable
 
 
 def _private_entry_stat(path: Path, boundary: _PrivateDirectoryBoundary) -> os.stat_result:
@@ -596,68 +615,100 @@ def _private_entry_stat(path: Path, boundary: _PrivateDirectoryBoundary) -> os.s
     return result
 
 
-def _rename_private_entry(
+def _link_private_entry_no_replace(
     source: Path,
     destination: Path,
     boundary: _PrivateDirectoryBoundary,
 ) -> None:
     if boundary.descriptor is not None:
-        os.rename(
+        os.link(
             source.name,
             destination.name,
             src_dir_fd=boundary.descriptor,
             dst_dir_fd=boundary.descriptor,
+            follow_symlinks=False,
         )
         return
     _verify_private_directory(boundary)
-    os.rename(source, destination)
+    os.link(source, destination, follow_symlinks=False)
     _verify_private_directory(boundary)
 
 
-def _new_cleanup_quarantine(boundary: _PrivateDirectoryBoundary) -> Path:
-    for _attempt in range(64):
-        candidate = boundary.path / f".external-photo-cleanup-{secrets.token_hex(16)}.part"
-        try:
-            _private_entry_stat(candidate, boundary)
-        except FileNotFoundError:
-            return candidate
-    raise PhotoTransferError("external photo cleanup filename collision")
+def _cleanup_quarantine_path(photo: DownloadedPhoto) -> Path:
+    return photo.path.with_name(f".{photo.path.name}.cleanup-{photo.sha256}.part")
 
 
-def _restore_quarantined_replacement(
+def _cleanup_boundary_hook(stage: str, original: Path, quarantine: Path) -> None:
+    del stage, original, quarantine
+
+
+def _unlink_if_stable(
     stable: _StablePhotoFile,
+    path: Path,
+    *,
+    allowed_link_counts: tuple[int, ...],
+) -> bool:
+    try:
+        current = _private_entry_stat(path, stable.boundary)
+    except FileNotFoundError:
+        return False
+    if _identity(current) != (stable.device, stable.inode):
+        return False
+    _validate_private_file(current, allowed_link_counts=allowed_link_counts)
+
+    if stable.boundary.descriptor is not None:
+        current = os.stat(path.name, dir_fd=stable.boundary.descriptor, follow_symlinks=False)
+        if _identity(current) != (stable.device, stable.inode):
+            return False
+        _validate_private_file(current, allowed_link_counts=allowed_link_counts)
+        os.unlink(path.name, dir_fd=stable.boundary.descriptor)
+        return True
+
+    _verify_private_directory(stable.boundary)
+    current = os.lstat(path)
+    if _identity(current) != (stable.device, stable.inode):
+        return False
+    _validate_private_file(current, allowed_link_counts=allowed_link_counts)
+    path.unlink()
+    _verify_private_directory(stable.boundary)
+    return True
+
+
+def _finish_quarantined_cleanup(
+    stable: _StablePhotoFile,
+    original: Path,
     quarantine: Path,
 ) -> None:
-    try:
-        _private_entry_stat(stable.path, stable.boundary)
-    except FileNotFoundError:
-        _rename_private_entry(quarantine, stable.path, stable.boundary)
+    _cleanup_boundary_hook("before_original_unlink", original, quarantine)
+    _unlink_if_stable(stable, original, allowed_link_counts=(2,))
+    _cleanup_boundary_hook("after_original_unlink", original, quarantine)
+
+    _cleanup_boundary_hook("before_quarantine_unlink", original, quarantine)
+    _unlink_if_stable(stable, quarantine, allowed_link_counts=(1,))
 
 
-def _cleanup_stable_photo(stable: _StablePhotoFile) -> None:
+def _start_quarantined_cleanup(stable: _StablePhotoFile, quarantine: Path) -> None:
     if stable.boundary.descriptor is None:
         stable.file.close()
+    _cleanup_boundary_hook("before_quarantine_link", stable.path, quarantine)
     _verify_stable_photo_path(stable)
 
-    quarantine = _new_cleanup_quarantine(stable.boundary)
-    _rename_private_entry(stable.path, quarantine, stable.boundary)
+    _link_private_entry_no_replace(stable.path, quarantine, stable.boundary)
+    _cleanup_boundary_hook("after_quarantine_link", stable.path, quarantine)
     quarantined = _private_entry_stat(quarantine, stable.boundary)
     if _identity(quarantined) != (stable.device, stable.inode):
-        _restore_quarantined_replacement(stable, quarantine)
         return
-    _validate_private_file(quarantined)
+    _validate_private_file(quarantined, allowed_link_counts=(2,))
+    _cleanup_boundary_hook("after_quarantine_verified", stable.path, quarantine)
+    _finish_quarantined_cleanup(stable, stable.path, quarantine)
 
-    quarantined = _private_entry_stat(quarantine, stable.boundary)
-    if _identity(quarantined) != (stable.device, stable.inode):
-        _restore_quarantined_replacement(stable, quarantine)
-        return
-    _validate_private_file(quarantined)
-    if stable.boundary.descriptor is not None:
-        os.unlink(quarantine.name, dir_fd=stable.boundary.descriptor)
-        return
-    _verify_private_directory(stable.boundary)
-    quarantine.unlink()
-    _verify_private_directory(stable.boundary)
+
+def _resume_quarantined_cleanup(photo: DownloadedPhoto, quarantine: Path) -> None:
+    with _validated_photo_file(photo, quarantine, allowed_link_counts=(1, 2)) as stable:
+        if stable.boundary.descriptor is None:
+            stable.file.close()
+        _cleanup_boundary_hook("after_quarantine_verified", photo.path, quarantine)
+        _finish_quarantined_cleanup(stable, photo.path, quarantine)
 
 
 def store_downloaded_photo(
@@ -701,9 +752,17 @@ def store_downloaded_photo(
 
 def cleanup_download(photo: DownloadedPhoto) -> None:
     try:
+        quarantine = _cleanup_quarantine_path(photo)
+        try:
+            os.lstat(quarantine)
+        except FileNotFoundError:
+            pass
+        else:
+            _resume_quarantined_cleanup(photo, quarantine)
+            return
         with _validated_photo_for_upload(photo) as stable:
-            _cleanup_stable_photo(stable)
-    except (FileNotFoundError, PhotoTransferError, OSError):
+            _start_quarantined_cleanup(stable, quarantine)
+    except Exception:
         return
 
 

@@ -559,32 +559,53 @@ def test_cleanup_download_refuses_same_size_replacement(tmp_path: Path) -> None:
     assert photo.path.read_bytes() == JPEG_REPLACEMENT_BYTES
 
 
+def test_cleanup_download_is_best_effort_for_invalid_recovery_name() -> None:
+    cleanup_download(
+        DownloadedPhoto(
+            path=Path("."),
+            sha256="invalid/name",
+            byte_size=1,
+            content_type="image/jpeg",
+            suffix=".jpg",
+        )
+    )
+
+
+def configure_cleanup_path_mode(monkeypatch, path_mode: str) -> None:
+    descriptor_ops_available = (
+        os.name != "nt"
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.link in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+    )
+    if path_mode == "descriptor" and not descriptor_ops_available:
+        pytest.skip("descriptor-relative link/unlink primitives are unavailable")
+    if path_mode != "fallback":
+        return
+    real_open_private_directory = migration._open_private_directory
+
+    def open_without_descriptor(*args, **kwargs):  # noqa: ANN202
+        boundary = real_open_private_directory(*args, **kwargs)
+        if boundary.descriptor is not None:
+            os.close(boundary.descriptor)
+            boundary.descriptor = None
+        return boundary
+
+    monkeypatch.setattr(migration, "_open_private_directory", open_without_descriptor)
+
+
+def expected_cleanup_quarantine(photo: DownloadedPhoto) -> Path:
+    return photo.path.with_name(f".{photo.path.name}.cleanup-{photo.sha256}.part")
+
+
 @pytest.mark.parametrize("path_mode", ["descriptor", "fallback"])
 def test_cleanup_download_preserves_replacement_at_destructive_boundary(
     tmp_path: Path,
     monkeypatch,
     path_mode: str,
 ) -> None:
-    descriptor_ops_available = (
-        os.name != "nt"
-        and hasattr(os, "O_DIRECTORY")
-        and hasattr(os, "O_NOFOLLOW")
-        and os.rename in os.supports_dir_fd
-        and os.unlink in os.supports_dir_fd
-    )
-    if path_mode == "descriptor" and not descriptor_ops_available:
-        pytest.skip("descriptor-relative rename/unlink primitives are unavailable")
-    if path_mode == "fallback":
-        real_open_private_directory = migration._open_private_directory
-
-        def open_without_descriptor(*args, **kwargs):  # noqa: ANN202
-            boundary = real_open_private_directory(*args, **kwargs)
-            if boundary.descriptor is not None:
-                os.close(boundary.descriptor)
-                boundary.descriptor = None
-            return boundary
-
-        monkeypatch.setattr(migration, "_open_private_directory", open_without_descriptor)
+    configure_cleanup_path_mode(monkeypatch, path_mode)
 
     photo = download_external_photo(
         SOURCE,
@@ -592,6 +613,7 @@ def test_cleanup_download_preserves_replacement_at_destructive_boundary(
         temp_dir=tmp_path,
         opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
     )
+    real_link = os.link
     real_rename = os.rename
     real_replace = os.replace
     real_unlink = os.unlink
@@ -615,24 +637,178 @@ def test_cleanup_download_preserves_replacement_at_destructive_boundary(
             replace_at_boundary()
         return real_rename(source, destination, *args, **kwargs)
 
+    def hooked_link(source, destination, *args, **kwargs):  # noqa: ANN001, ANN202
+        if targets_photo(source):
+            replace_at_boundary()
+        return real_link(source, destination, *args, **kwargs)
+
     def hooked_replace(source, destination, *args, **kwargs):  # noqa: ANN001, ANN202
         if targets_photo(source):
             replace_at_boundary()
         return real_replace(source, destination, *args, **kwargs)
 
-    def hooked_unlink(path, *args, **kwargs):  # noqa: ANN001, ANN202
-        if targets_photo(path):
-            replace_at_boundary()
-        return real_unlink(path, *args, **kwargs)
-
+    monkeypatch.setattr(migration.os, "link", hooked_link)
     monkeypatch.setattr(migration.os, "rename", hooked_rename)
     monkeypatch.setattr(migration.os, "replace", hooked_replace)
-    monkeypatch.setattr(migration.os, "unlink", hooked_unlink)
 
     cleanup_download(photo)
 
     assert replacement_created is True
     assert photo.path.read_bytes() == JPEG_REPLACEMENT_BYTES
+
+
+@pytest.mark.parametrize("path_mode", ["descriptor", "fallback"])
+def test_cleanup_download_revalidates_original_immediately_before_quarantine_link(
+    tmp_path: Path,
+    monkeypatch,
+    path_mode: str,
+) -> None:
+    configure_cleanup_path_mode(monkeypatch, path_mode)
+    photo = download_external_photo(
+        SOURCE,
+        POLICY,
+        temp_dir=tmp_path,
+        opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
+    )
+    replacement_created = False
+    real_unlink = os.unlink
+
+    def cleanup_boundary(stage: str, original: Path, quarantine: Path) -> None:
+        nonlocal replacement_created
+        if stage != "before_quarantine_link":
+            return
+        replacement_created = True
+        real_unlink(original)
+        original.write_bytes(JPEG_REPLACEMENT_BYTES)
+        if os.name != "nt":
+            os.chmod(original, 0o600)
+
+    monkeypatch.setattr(migration, "_cleanup_boundary_hook", cleanup_boundary, raising=False)
+
+    cleanup_download(photo)
+
+    assert replacement_created is True
+    assert photo.path.read_bytes() == JPEG_REPLACEMENT_BYTES
+    assert expected_cleanup_quarantine(photo).exists() is False
+
+
+@pytest.mark.parametrize("path_mode", ["descriptor", "fallback"])
+def test_cleanup_download_revalidates_quarantine_at_final_unlink_boundary(
+    tmp_path: Path,
+    monkeypatch,
+    path_mode: str,
+) -> None:
+    configure_cleanup_path_mode(monkeypatch, path_mode)
+    photo = download_external_photo(
+        SOURCE,
+        POLICY,
+        temp_dir=tmp_path,
+        opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
+    )
+    expected_quarantine = expected_cleanup_quarantine(photo)
+    quarantine_replaced = False
+    real_unlink = os.unlink
+
+    def cleanup_boundary(stage: str, original: Path, quarantine: Path) -> None:
+        nonlocal quarantine_replaced
+        if stage != "before_quarantine_unlink":
+            return
+        assert quarantine == expected_quarantine
+        quarantine_replaced = True
+        real_unlink(quarantine)
+        quarantine.write_bytes(JPEG_REPLACEMENT_BYTES)
+        if os.name != "nt":
+            os.chmod(quarantine, 0o600)
+
+    monkeypatch.setattr(migration, "_cleanup_boundary_hook", cleanup_boundary, raising=False)
+
+    cleanup_download(photo)
+    cleanup_download(photo)
+
+    assert quarantine_replaced is True
+    assert photo.path.exists() is False
+    assert expected_quarantine.read_bytes() == JPEG_REPLACEMENT_BYTES
+
+
+@pytest.mark.parametrize("path_mode", ["descriptor", "fallback"])
+def test_cleanup_download_never_overwrites_unrelated_original_before_source_unlink(
+    tmp_path: Path,
+    monkeypatch,
+    path_mode: str,
+) -> None:
+    configure_cleanup_path_mode(monkeypatch, path_mode)
+    photo = download_external_photo(
+        SOURCE,
+        POLICY,
+        temp_dir=tmp_path,
+        opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
+    )
+    replacement_created = False
+    real_unlink = os.unlink
+
+    def cleanup_boundary(stage: str, original: Path, quarantine: Path) -> None:
+        nonlocal replacement_created
+        if stage != "before_original_unlink":
+            return
+        replacement_created = True
+        real_unlink(original)
+        original.write_bytes(JPEG_REPLACEMENT_BYTES)
+        if os.name != "nt":
+            os.chmod(original, 0o600)
+
+    monkeypatch.setattr(migration, "_cleanup_boundary_hook", cleanup_boundary, raising=False)
+
+    cleanup_download(photo)
+
+    assert replacement_created is True
+    assert photo.path.read_bytes() == JPEG_REPLACEMENT_BYTES
+    assert expected_cleanup_quarantine(photo).exists() is False
+
+
+@pytest.mark.parametrize("path_mode", ["descriptor", "fallback"])
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        "after_quarantine_link",
+        "after_quarantine_verified",
+        "before_original_unlink",
+        "after_original_unlink",
+        "before_quarantine_unlink",
+    ],
+)
+def test_cleanup_download_retries_every_post_quarantine_failure(
+    tmp_path: Path,
+    monkeypatch,
+    path_mode: str,
+    failure_stage: str,
+) -> None:
+    configure_cleanup_path_mode(monkeypatch, path_mode)
+    photo = download_external_photo(
+        SOURCE,
+        POLICY,
+        temp_dir=tmp_path,
+        opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
+    )
+    expected_quarantine = expected_cleanup_quarantine(photo)
+    failure_injected = False
+
+    def cleanup_boundary(stage: str, original: Path, quarantine: Path) -> None:
+        nonlocal failure_injected
+        if stage == failure_stage and not failure_injected:
+            failure_injected = True
+            raise RuntimeError(f"injected cleanup failure at {stage}")
+
+    monkeypatch.setattr(migration, "_cleanup_boundary_hook", cleanup_boundary, raising=False)
+
+    cleanup_download(photo)
+
+    assert failure_injected is True
+    assert expected_quarantine.read_bytes() == JPEG_BYTES
+
+    cleanup_download(photo)
+
+    assert photo.path.exists() is False
+    assert expected_quarantine.exists() is False
 
 
 def test_cleanup_download_refuses_symlinked_parent_boundary(tmp_path: Path) -> None:
