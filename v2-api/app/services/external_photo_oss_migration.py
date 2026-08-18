@@ -587,6 +587,79 @@ def _validated_photo_for_upload(photo: DownloadedPhoto) -> Iterator[_StablePhoto
         _close_private_directory(boundary)
 
 
+def _private_entry_stat(path: Path, boundary: _PrivateDirectoryBoundary) -> os.stat_result:
+    if boundary.descriptor is not None:
+        return os.stat(path.name, dir_fd=boundary.descriptor, follow_symlinks=False)
+    _verify_private_directory(boundary)
+    result = os.lstat(path)
+    _verify_private_directory(boundary)
+    return result
+
+
+def _rename_private_entry(
+    source: Path,
+    destination: Path,
+    boundary: _PrivateDirectoryBoundary,
+) -> None:
+    if boundary.descriptor is not None:
+        os.rename(
+            source.name,
+            destination.name,
+            src_dir_fd=boundary.descriptor,
+            dst_dir_fd=boundary.descriptor,
+        )
+        return
+    _verify_private_directory(boundary)
+    os.rename(source, destination)
+    _verify_private_directory(boundary)
+
+
+def _new_cleanup_quarantine(boundary: _PrivateDirectoryBoundary) -> Path:
+    for _attempt in range(64):
+        candidate = boundary.path / f".external-photo-cleanup-{secrets.token_hex(16)}.part"
+        try:
+            _private_entry_stat(candidate, boundary)
+        except FileNotFoundError:
+            return candidate
+    raise PhotoTransferError("external photo cleanup filename collision")
+
+
+def _restore_quarantined_replacement(
+    stable: _StablePhotoFile,
+    quarantine: Path,
+) -> None:
+    try:
+        _private_entry_stat(stable.path, stable.boundary)
+    except FileNotFoundError:
+        _rename_private_entry(quarantine, stable.path, stable.boundary)
+
+
+def _cleanup_stable_photo(stable: _StablePhotoFile) -> None:
+    if stable.boundary.descriptor is None:
+        stable.file.close()
+    _verify_stable_photo_path(stable)
+
+    quarantine = _new_cleanup_quarantine(stable.boundary)
+    _rename_private_entry(stable.path, quarantine, stable.boundary)
+    quarantined = _private_entry_stat(quarantine, stable.boundary)
+    if _identity(quarantined) != (stable.device, stable.inode):
+        _restore_quarantined_replacement(stable, quarantine)
+        return
+    _validate_private_file(quarantined)
+
+    quarantined = _private_entry_stat(quarantine, stable.boundary)
+    if _identity(quarantined) != (stable.device, stable.inode):
+        _restore_quarantined_replacement(stable, quarantine)
+        return
+    _validate_private_file(quarantined)
+    if stable.boundary.descriptor is not None:
+        os.unlink(quarantine.name, dir_fd=stable.boundary.descriptor)
+        return
+    _verify_private_directory(stable.boundary)
+    quarantine.unlink()
+    _verify_private_directory(stable.boundary)
+
+
 def store_downloaded_photo(
     bucket: Any,
     bucket_name: str,
@@ -595,6 +668,7 @@ def store_downloaded_photo(
 ) -> OssObjectReceipt:
     with _validated_photo_for_upload(photo) as stable:
         before = _head_object_or_none(bucket, key)
+        _verify_stable_photo_path(stable)
         if before is not None:
             _verify_object_metadata(before, photo, error_type=OssObjectConflictError)
             return _receipt(bucket_name, key, photo, reused=True)
@@ -611,12 +685,14 @@ def store_downloaded_photo(
             if not _is_forbid_overwrite_conflict(exc):
                 raise
             raced = _head_object_or_none(bucket, key)
+            _verify_stable_photo_path(stable)
             if raced is None:
                 raise OssVerificationError("concurrent OSS object is missing") from exc
             _verify_object_metadata(raced, photo, error_type=OssObjectConflictError)
             return _receipt(bucket_name, key, photo, reused=True)
 
         after = _head_object_or_none(bucket, key)
+        _verify_stable_photo_path(stable)
         if after is None:
             raise OssVerificationError("uploaded OSS object is missing")
         _verify_object_metadata(after, photo, error_type=OssVerificationError)
@@ -626,12 +702,7 @@ def store_downloaded_photo(
 def cleanup_download(photo: DownloadedPhoto) -> None:
     try:
         with _validated_photo_for_upload(photo) as stable:
-            if stable.boundary.descriptor is not None:
-                os.unlink(photo.path.name, dir_fd=stable.boundary.descriptor)
-                return
-            stable.file.close()
-            _verify_stable_photo_path(stable)
-            photo.path.unlink(missing_ok=True)
+            _cleanup_stable_photo(stable)
     except (FileNotFoundError, PhotoTransferError, OSError):
         return
 

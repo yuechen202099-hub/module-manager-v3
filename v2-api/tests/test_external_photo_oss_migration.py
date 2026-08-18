@@ -4,6 +4,7 @@ import hashlib
 import io
 import os
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -558,6 +559,82 @@ def test_cleanup_download_refuses_same_size_replacement(tmp_path: Path) -> None:
     assert photo.path.read_bytes() == JPEG_REPLACEMENT_BYTES
 
 
+@pytest.mark.parametrize("path_mode", ["descriptor", "fallback"])
+def test_cleanup_download_preserves_replacement_at_destructive_boundary(
+    tmp_path: Path,
+    monkeypatch,
+    path_mode: str,
+) -> None:
+    descriptor_ops_available = (
+        os.name != "nt"
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.rename in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+    )
+    if path_mode == "descriptor" and not descriptor_ops_available:
+        pytest.skip("descriptor-relative rename/unlink primitives are unavailable")
+    if path_mode == "fallback":
+        real_open_private_directory = migration._open_private_directory
+
+        def open_without_descriptor(*args, **kwargs):  # noqa: ANN202
+            boundary = real_open_private_directory(*args, **kwargs)
+            if boundary.descriptor is not None:
+                os.close(boundary.descriptor)
+                boundary.descriptor = None
+            return boundary
+
+        monkeypatch.setattr(migration, "_open_private_directory", open_without_descriptor)
+
+    photo = download_external_photo(
+        SOURCE,
+        POLICY,
+        temp_dir=tmp_path,
+        opener=lambda *_a, **_k: FakeImageResponse(JPEG_BYTES),
+    )
+    real_rename = os.rename
+    real_replace = os.replace
+    real_unlink = os.unlink
+    replacement_created = False
+
+    def targets_photo(path: str | os.PathLike[str]) -> bool:
+        return Path(path).name == photo.path.name
+
+    def replace_at_boundary() -> None:
+        nonlocal replacement_created
+        if replacement_created:
+            return
+        replacement_created = True
+        real_unlink(photo.path)
+        photo.path.write_bytes(JPEG_REPLACEMENT_BYTES)
+        if os.name != "nt":
+            os.chmod(photo.path, 0o600)
+
+    def hooked_rename(source, destination, *args, **kwargs):  # noqa: ANN001, ANN202
+        if targets_photo(source):
+            replace_at_boundary()
+        return real_rename(source, destination, *args, **kwargs)
+
+    def hooked_replace(source, destination, *args, **kwargs):  # noqa: ANN001, ANN202
+        if targets_photo(source):
+            replace_at_boundary()
+        return real_replace(source, destination, *args, **kwargs)
+
+    def hooked_unlink(path, *args, **kwargs):  # noqa: ANN001, ANN202
+        if targets_photo(path):
+            replace_at_boundary()
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(migration.os, "rename", hooked_rename)
+    monkeypatch.setattr(migration.os, "replace", hooked_replace)
+    monkeypatch.setattr(migration.os, "unlink", hooked_unlink)
+
+    cleanup_download(photo)
+
+    assert replacement_created is True
+    assert photo.path.read_bytes() == JPEG_REPLACEMENT_BYTES
+
+
 def test_cleanup_download_refuses_symlinked_parent_boundary(tmp_path: Path) -> None:
     private_dir = tmp_path / "private"
     private_dir.mkdir()
@@ -634,6 +711,7 @@ class FakeBucket:
         appearing_meta: dict[str, str] | None = None,
         after_upload_meta: dict[str, str] | None = None,
         vanish_after_put: bool = False,
+        head_hook: Callable[[int], None] | None = None,
     ) -> None:
         self.existing_meta = existing_meta
         self.initial_head_error = initial_head_error
@@ -642,6 +720,7 @@ class FakeBucket:
         self.appearing_meta = appearing_meta
         self.after_upload_meta = after_upload_meta
         self.vanish_after_put = vanish_after_put
+        self.head_hook = head_hook
         self.head_calls: list[str] = []
         self.put_calls: list[tuple[str, Path]] = []
         self.headers: dict[str, str] = {}
@@ -652,6 +731,8 @@ class FakeBucket:
 
     def head_object(self, key: str) -> FakeHeadResult:
         self.head_calls.append(key)
+        if self.head_hook is not None:
+            self.head_hook(len(self.head_calls))
         if self.initial_head_error is not None and len(self.head_calls) == 1:
             raise self.initial_head_error
         if self.existing_meta is None:
@@ -716,6 +797,48 @@ def test_matching_content_address_object_is_reused(downloaded: DownloadedPhoto) 
     assert receipt.bucket == "bucket"
     assert receipt.key == "content/key.jpg"
     assert bucket.put_calls == []
+    assert bucket.delete_calls == []
+
+
+@pytest.mark.parametrize(
+    ("scenario", "replacement_head_call"),
+    [
+        ("existing-reuse", 1),
+        ("before-put", 1),
+        ("race-reuse", 2),
+        ("post-upload", 2),
+    ],
+)
+def test_head_callback_path_replacement_is_rejected_before_success(
+    downloaded: DownloadedPhoto,
+    scenario: str,
+    replacement_head_call: int,
+) -> None:
+    def replace_path(call_number: int) -> None:
+        if call_number != replacement_head_call:
+            return
+        try:
+            downloaded.path.unlink()
+        except PermissionError as exc:
+            pytest.skip(f"open file pathname replacement is unavailable: {exc}")
+        downloaded.path.write_bytes(JPEG_REPLACEMENT_BYTES)
+        if os.name != "nt":
+            os.chmod(downloaded.path, 0o600)
+
+    bucket_args: dict[str, Any] = {"head_hook": replace_path}
+    if scenario == "existing-reuse":
+        bucket_args["existing_meta"] = matching_meta(downloaded)
+    elif scenario == "race-reuse":
+        bucket_args.update(
+            appear_on_forbid_overwrite=True,
+            appearing_meta=matching_meta(downloaded),
+        )
+    bucket = FakeBucket(**bucket_args)
+
+    with pytest.raises(PhotoTransferError, match="changed"):
+        store_downloaded_photo(bucket, "bucket", "content/key.jpg", downloaded)
+
+    assert downloaded.path.read_bytes() == JPEG_REPLACEMENT_BYTES
     assert bucket.delete_calls == []
 
 
