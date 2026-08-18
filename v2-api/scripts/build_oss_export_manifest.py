@@ -151,10 +151,10 @@ def load_scope_payloads(session: Session, scope: ManifestScope) -> list[dict[str
 
 
 def require_sha256(value: Any) -> str:
-    normalized = str(value or "").strip()
-    if SHA256_PATTERN.fullmatch(normalized) is None:
+    raw_value = str(value or "")
+    if SHA256_PATTERN.fullmatch(raw_value) is None:
         raise ValueError("Photo SHA256 must contain exactly 64 hexadecimal characters")
-    return normalized.lower()
+    return raw_value.lower()
 
 
 def _increment(counts: dict[str, int], key: str) -> None:
@@ -167,7 +167,7 @@ def count_unsupported_storage(
     expected_bucket: str,
 ) -> dict[str, int]:
     counts: dict[str, int] = {}
-    configured_bucket = str(expected_bucket or "").strip()
+    configured_bucket = str(expected_bucket or "")
     for group in payloads:
         for photo_value in group.get("photos", []) or []:
             if not isinstance(photo_value, dict):
@@ -178,14 +178,16 @@ def count_unsupported_storage(
             if storage_type != "oss":
                 _increment(counts, storage_type or "unknown")
                 continue
-            bucket = str(photo.get("storage_bucket") or "").strip()
-            key = str(photo.get("storage_key") or "").strip()
+            bucket = str(photo.get("storage_bucket") or "")
+            key = str(photo.get("storage_key") or "")
             if not bucket:
                 _increment(counts, "missing_storage_bucket")
-            elif bucket != configured_bucket:
+            elif bucket != bucket.strip() or bucket != configured_bucket:
                 _increment(counts, "wrong_storage_bucket")
             if not key:
                 _increment(counts, "missing_storage_key")
+            elif key != key.strip():
+                _increment(counts, "invalid_storage_key")
             if int(photo.get("byte_size") or 0) <= 0:
                 _increment(counts, "invalid_byte_size")
             try:
@@ -193,8 +195,6 @@ def count_unsupported_storage(
             except ValueError:
                 _increment(counts, "invalid_sha256")
             photo["storage_type"] = storage_type
-            photo["storage_bucket"] = bucket
-            photo["storage_key"] = key
     return counts
 
 

@@ -263,6 +263,54 @@ def test_manifest_rejects_incomplete_oss_metadata_before_signing(
     assert signed == []
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("storage_bucket", " export-bucket", {"wrong_storage_bucket": 1}),
+        ("storage_bucket", "export-bucket ", {"wrong_storage_bucket": 1}),
+        ("storage_key", " photos/group-a/1.jpg", {"invalid_storage_key": 1}),
+        ("storage_key", "photos/group-a/1.jpg ", {"invalid_storage_key": 1}),
+        ("sha256", f" {'1' * 64}", {"invalid_sha256": 1}),
+        ("sha256", f"{'1' * 64} ", {"invalid_sha256": 1}),
+    ],
+    ids=(
+        "bucket-leading",
+        "bucket-trailing",
+        "key-leading",
+        "key-trailing",
+        "sha-leading",
+        "sha-trailing",
+    ),
+)
+def test_manifest_rejects_noncanonical_oss_metadata_before_any_output(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+    expected: dict[str, int],
+) -> None:
+    monkeypatch.setattr(settings, "oss_bucket", "export-bucket")
+    rows = photo_rows("group-a")
+    rows[0][field] = value
+    original_storage_key = rows[0]["storage_key"]
+    signed: list[str] = []
+    emitted: list[dict[str, Any]] = []
+    iterator = iter_manifest_rows(
+        RecordingSession(rows),
+        ManifestScope("team-1"),
+        lambda key, _ttl: signed.append(key) or "must-not-sign",
+    )
+
+    with pytest.raises(UnsupportedPhotoStorageError) as captured:
+        while True:
+            emitted.append(next(iterator))
+
+    assert captured.value.counts == expected
+    assert emitted == []
+    assert signed == []
+    assert rows[0]["storage_key"] == original_storage_key
+    assert rows[0][field] == value
+
+
 def test_manifest_filters_unarchived_groups_before_planning_and_signing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -344,7 +392,7 @@ def test_manifest_accepts_ttl_boundaries(
 
 def test_require_sha256_accepts_only_full_hex_and_normalizes_case() -> None:
     assert require_sha256("A0" * 32) == "a0" * 32
-    for invalid in ("", "a" * 63, "a" * 65, "z" * 64):
+    for invalid in ("", "a" * 63, "a" * 65, "z" * 64, f" {'a' * 64}", f"{'a' * 64} "):
         with pytest.raises(ValueError, match="SHA256"):
             require_sha256(invalid)
 
