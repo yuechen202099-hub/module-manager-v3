@@ -161,14 +161,23 @@ def verify_template_download_chain(source_paths: list[Path]) -> None:
         "function triggerBrowserDownload(blob: Blob, filename: string)",
         "template browser-download helper",
     )
-    for marker in (
+    browser_lifecycle = (
         "URL.createObjectURL(blob)",
         "document.createElement('a')",
+        "link.href = url",
         "link.download = filename",
+        "document.body.appendChild(link)",
         "link.click()",
+        "link.remove()",
         "URL.revokeObjectURL(url)",
-    ):
+    )
+    for marker in browser_lifecycle:
         ensure(marker in browser_body, f"template browser-download helper missing `{marker}`")
+    lifecycle_positions = [browser_body.index(marker) for marker in browser_lifecycle]
+    ensure(
+        lifecycle_positions == sorted(lifecycle_positions),
+        "template browser-download helper lifecycle must assign, append, click, remove, and revoke in order",
+    )
 
     ensure(
         re.search(
