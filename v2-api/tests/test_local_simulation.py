@@ -17,6 +17,7 @@ from app.main import create_app
 from app.services import local_simulation, state_repository
 from app.services import photo_barcode_check
 from app.services import unmatched_review
+from app.services.export_retirement import ExportCenterRetiredError, RETIREMENT_MESSAGE
 from app.services.state_repository import DualWriteStateRepository, JsonStateRepository, StateBackendNotReady
 from app.services.local_simulation import (
     DEFAULT_SCAN_FILE,
@@ -27,7 +28,6 @@ from app.services.local_simulation import (
     add_photo_urls_to_group,
     blank_state,
     build_delivery_cache_for_group,
-    build_final_delivery_manifest,
     bootstrap_local_simulation,
     classify_photo,
     claim_task,
@@ -80,6 +80,39 @@ def _explode_retired_delivery_path(*_args, **_kwargs):
     raise AssertionError("retired delivery path was called")
 
 
+class _ExplodingRetiredDeliveryDependency:
+    def __getattribute__(self, _name):
+        raise AssertionError("retired final-delivery service touched a dependency")
+
+    def __iter__(self):
+        raise AssertionError("retired final-delivery service iterated groups")
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda exploding: local_simulation.build_final_delivery_export(
+            task_id=17,
+            repair_delivery_cache=exploding,
+        ),
+        lambda exploding: local_simulation.build_final_delivery_package_from_groups(
+            exploding,
+            scope="retired-direct-package",
+            repair_delivery_cache=exploding,
+        ),
+        lambda _exploding: local_simulation.build_final_delivery_manifest(task_id=17),
+    ],
+)
+def test_direct_local_final_delivery_services_retire_before_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    invoke,
+) -> None:
+    monkeypatch.setattr(local_simulation, "filter_delivery_groups", _explode_retired_delivery_path)
+
+    with pytest.raises(ExportCenterRetiredError, match=RETIREMENT_MESSAGE):
+        invoke(_ExplodingRetiredDeliveryDependency())
+
+
 def test_delivery_schedule_enqueue_compatibility_hook_is_noop_before_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -105,21 +138,51 @@ def test_json_delivery_artifact_invalidation_is_retired_and_preserves_history(
 
     group = {
         "id": "group-1",
+        "terminal": "120000000001",
+        "meter_no": "110000288056",
+        "collector": "COLLECTOR001",
+        "module_asset_no": "MOD001",
         "delivery_cache_status": "ready",
         "delivery_cache_error": "",
         "delivery_package_invalidation_epoch": 7,
+        "barcode_verification": {
+            "status": "passed",
+            "evidence_fingerprint": "f" * 64,
+            "evidence_version": 3,
+            "meter_matched": True,
+            "module_matched": True,
+            "collector_matched": True,
+            "recognition_source": "machine_barcode",
+        },
+        "photos": [
+            {
+                "id": f"photo-{index}",
+                "category": category,
+                "sha256": f"{index:x}" * 64,
+                "is_active": True,
+                "delivery_cache_path": f"objects/{index}/photo.jpg",
+                "delivery_cache_status": "ready",
+            }
+            for index, category in enumerate(
+                ("before_box", "collector_barcode", "module_meter", "after_box"),
+                start=1,
+            )
+        ],
     }
-    before = deepcopy(group)
-    verification_calls: list[tuple[str, str]] = []
+    delivery_before = deepcopy(
+        {
+            "delivery_cache_status": group["delivery_cache_status"],
+            "delivery_cache_error": group["delivery_cache_error"],
+            "delivery_package_invalidation_epoch": group["delivery_package_invalidation_epoch"],
+            "photos": group["photos"],
+        }
+    )
+    verification_before = deepcopy(group["barcode_verification"])
+    monkeypatch.setattr(local_simulation, "mark_delivery_cache_stale", _explode_retired_delivery_path)
     monkeypatch.setattr(
         delivery_cache,
         "sync_json_delivery_cache_job_for_group",
         _explode_retired_delivery_path,
-    )
-    monkeypatch.setattr(
-        state_repository,
-        "invalidate_verification_for_group",
-        lambda _session, _group, actor, reason: verification_calls.append((actor, reason)),
     )
 
     local_simulation.invalidate_json_delivery_artifacts(
@@ -129,8 +192,17 @@ def test_json_delivery_artifact_invalidation_is_retired_and_preserves_history(
         verification_changed=verification_changed,
     )
 
-    assert group == before
-    assert verification_calls == ([('tester', 'photo changed')] if verification_changed else [])
+    assert {
+        "delivery_cache_status": group["delivery_cache_status"],
+        "delivery_cache_error": group["delivery_cache_error"],
+        "delivery_package_invalidation_epoch": group["delivery_package_invalidation_epoch"],
+        "photos": group["photos"],
+    } == delivery_before
+    if verification_changed:
+        assert group["barcode_verification"]["status"] == "pending"
+        assert group["barcode_verification"]["evidence_version"] == 4
+    else:
+        assert group["barcode_verification"] == verification_before
 
 
 requires_sample_workbooks = pytest.mark.skipif(
@@ -1742,13 +1814,11 @@ def test_delivery_cache_builds_for_approved_group(
     claim_task(group["task_id"], reviewer="alice")
     archive_all_group_photos(group, reviewer="alice")
     result = build_delivery_cache_for_group(group["id"], force=True)
-    manifest = build_final_delivery_manifest(task_id=group["task_id"])
-    first_photo = manifest["groups"][0]["photos"][0]
+    first_photo = group["photos"][0]
     cached_path = get_delivery_cached_photo_path(group["id"], first_photo["id"])
 
     assert group["status"] == "approved"
     assert result["status"] == "ready"
-    assert first_photo["delivery_cache_url"].startswith(f"/local-test/delivery-cache/{group['id']}/")
     assert cached_path.read_bytes().startswith(b"cached-")
 
 

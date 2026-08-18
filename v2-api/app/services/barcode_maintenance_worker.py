@@ -1624,52 +1624,7 @@ def _fail_job(job: MaintenanceJob, error: Exception) -> None:
     if job.kind == "auto_archive":
         fail_archive_job(job, error)
         return
-    if job.kind == "delivery_package":
-        fail_delivery_package_job(job, error)
-        return
-    if job.kind == "delivery_cache" and _backend() == "json":
-        token = local_simulation.set_current_team(job.team_id)
-        try:
-            transaction = local_simulation.begin_authoritative_json_write(job.team_id)
-            transaction_token = local_simulation.activate_authoritative_json_write(transaction)
-            try:
-                durable_job = next(
-                    (item for item in transaction.working_state.get("delivery_cache_jobs", []) if str(item.get("group_id") or "") == job.group_id),
-                    None,
-                )
-                if durable_job and durable_job.get("lease_owner") == job.lease_owner and durable_job.get("lease_token") == job.lease_token:
-                    durable_job.update(
-                        {
-                            "status": "failed",
-                            "lease_owner": None,
-                            "lease_token": None,
-                            "lease_expires_at": None,
-                            "last_error": str(error)[:500],
-                            "retryable": int(durable_job.get("attempt_count") or 0) < MAX_DELIVERY_CACHE_ATTEMPTS,
-                        }
-                    )
-                local_simulation.finish_authoritative_json_write(transaction, transaction_token)
-            except BaseException:
-                if not transaction.closed:
-                    local_simulation.abort_authoritative_json_write(transaction, transaction_token)
-                raise
-        finally:
-            local_simulation.reset_current_team(token)
-        return
-    if job.kind == "delivery_cache" and _backend() == "postgres":
-        with SessionLocal() as session:
-            durable_job = session.scalar(
-                select(DeliveryCacheJob)
-                .where(DeliveryCacheJob.team_id == job.team_id, DeliveryCacheJob.group_id == UUID(job.group_id))
-                .with_for_update()
-            )
-            if durable_job and durable_job.lease_owner == job.lease_owner and durable_job.lease_token == job.lease_token:
-                durable_job.status = "failed"
-                durable_job.lease_owner = None
-                durable_job.lease_token = None
-                durable_job.lease_expires_at = None
-                durable_job.last_error = str(error)[:500]
-                session.commit()
+    raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
 
 
 def maintenance_load_too_high(max_ratio: float = DEFAULT_MAX_LOAD_RATIO) -> bool:
@@ -1854,6 +1809,8 @@ def run_worker_batch(
                 break
             try:
                 process(job)
+            except ExportCenterRetiredError:
+                raise
             except Exception as exc:
                 failed += 1
                 on_failure(job, exc)

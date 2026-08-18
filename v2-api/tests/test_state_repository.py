@@ -320,7 +320,11 @@ def test_postgres_delivery_invalidation_is_retired_before_batch_queries() -> Non
     assert package_job.status == "ready"
 
 
-def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state() -> None:
+def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
     group_id = uuid4()
     photos = [
         SimpleNamespace(
@@ -349,8 +353,16 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
             "collector": "C-VERIFY-001",
             "module_asset_no": "MOD-VERIFY-001",
             "delivery_cache_status": "ready",
+            "group_barcode_manual_confirmed": False,
+            "group_barcode_manual_confirmed_fields": [],
+            "group_barcode_manual_confirmed_by": "",
+            "group_barcode_manual_confirmed_at": "",
+            "group_barcode_manual_confirmation_reason": "",
+            "group_barcode_manual_confirmation_photo_ids": [],
         },
     )
+    delivery_group_before = deepcopy(group.raw_data)
+    delivery_photos_before = [deepcopy(photo.raw_data) for photo in photos]
     verification = GroupBarcodeVerification(
         team_id="verify-team",
         group_id=group_id,
@@ -382,17 +394,19 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
     class FakeSession:
         def __init__(self) -> None:
             self.staged = [previous_audit]
+            self.photo_queries = 0
 
         def scalar(self, statement):
             sql = str(statement)
             if "group_barcode_verifications" in sql:
                 return verification
-            if "delivery_cache_jobs" in sql:
-                return None
             raise AssertionError(sql)
 
         def scalars(self, statement):
             assert "FROM photos" in str(statement)
+            self.photo_queries += 1
+            if self.photo_queries > 1:
+                raise AssertionError("verification invalidation queried retired delivery photos")
             return FakeScalars()
 
         def add(self, value) -> None:
@@ -402,6 +416,16 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
             return None
 
     session = FakeSession()
+    monkeypatch.setattr(
+        delivery_cache,
+        "postgres_delivery_group_payload",
+        _ExplodingRetiredDeliveryDependency(),
+    )
+    monkeypatch.setattr(
+        delivery_cache,
+        "sync_postgres_delivery_cache_job_for_group",
+        _ExplodingRetiredDeliveryDependency(),
+    )
 
     result = repository.invalidate_verification_for_group(
         session,
@@ -420,9 +444,8 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
     assert verification.invalidation_reason == "photo_replaced"
     assert verification.invalidated_by == "reviewer-a"
     assert verification.invalidated_at is not None
-    assert group.raw_data["delivery_cache_status"] == "stale"
-    assert group.raw_data["delivery_cache_error"] == "photo_replaced"
-    assert all(photo.raw_data["delivery_cache_status"] == "stale" for photo in photos)
+    assert group.raw_data == delivery_group_before
+    assert [photo.raw_data for photo in photos] == delivery_photos_before
     assert previous_audit in session.staged
     invalidation_audit = next(
         event for event in session.staged if event.action == "group_barcode_verification_invalidated"
@@ -431,7 +454,11 @@ def test_postgres_unified_invalidation_preserves_history_and_clears_passed_state
     assert invalidation_audit.payload["reason"] == "photo_replaced"
 
 
-def test_json_unified_invalidation_stales_completed_delivery_cache() -> None:
+def test_json_unified_invalidation_preserves_completed_delivery_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import delivery_cache
+
     group = {
         "id": "json-cache-invalidation",
         "terminal": "00112233",
@@ -459,12 +486,30 @@ def test_json_unified_invalidation_stales_completed_delivery_cache() -> None:
             )
         ],
     }
+    delivery_before = deepcopy(
+        {
+            "delivery_cache_status": group["delivery_cache_status"],
+            "photos": group["photos"],
+        }
+    )
+    monkeypatch.setattr(
+        repository.local_simulation,
+        "mark_delivery_cache_stale",
+        _ExplodingRetiredDeliveryDependency(),
+    )
+    monkeypatch.setattr(
+        delivery_cache,
+        "sync_json_delivery_cache_job_for_group",
+        _ExplodingRetiredDeliveryDependency(),
+    )
 
     repository.invalidate_verification_for_group(None, group, actor="reviewer-a", reason="photo_category_changed")
 
-    assert group["delivery_cache_status"] == "stale"
-    assert group["delivery_cache_error"] == "photo_category_changed"
-    assert all(photo["delivery_cache_status"] == "stale" for photo in group["photos"])
+    assert group["barcode_verification"]["status"] == "pending"
+    assert {
+        "delivery_cache_status": group["delivery_cache_status"],
+        "photos": group["photos"],
+    } == delivery_before
 
 
 @pytest.mark.parametrize(
@@ -1301,36 +1346,22 @@ def _postgres_ready_job(
     )
 
 
-def test_formal_package_validation_uses_injected_repair_and_preserves_422_on_enqueue_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from app.services.final_delivery_export import DeliveryPackageValidationError
-
-    group = _formal_delivery_group(tmp_path, "injected-repair")
-    (tmp_path / group["photos"][0]["delivery_cache_path"]).unlink()
-    monkeypatch.setattr(repository.local_simulation.settings, "delivery_cache_path", str(tmp_path))
-    monkeypatch.setattr(
-        repository.local_simulation,
-        "schedule_delivery_cache_build",
-        lambda *_args, **_kwargs: pytest.fail("formal validation must not hard-code JSON repair"),
-    )
+def test_formal_package_validation_entry_is_retired_before_repair() -> None:
     repairs = []
 
-    def failing_repair(group_ids, *, reason):
+    def exploding_repair(group_ids, *, reason):
         repairs.append((group_ids, reason))
-        raise RuntimeError("injected enqueue failure")
+        raise AssertionError("retired final-delivery service invoked a repair callback")
 
-    with pytest.raises(DeliveryPackageValidationError) as captured:
+    with pytest.raises(ExportCenterRetiredError, match=RETIREMENT_MESSAGE):
         repository.local_simulation.build_final_delivery_package_from_groups(
-            [group],
-            scope="repair-callback",
+            _ExplodingRetiredDeliveryDependency(),
+            scope="retired-repair-callback",
             archived_only=False,
-            repair_delivery_cache=failing_repair,
+            repair_delivery_cache=exploding_repair,
         )
 
-    assert {error["code"] for error in captured.value.errors} == {"delivery_cache_pending"}
-    assert repairs == [([group["id"]], "formal_cache_validation_failed")]
+    assert repairs == []
 
 
 def test_group_barcode_rescan_audit_payload_has_unique_keys() -> None:

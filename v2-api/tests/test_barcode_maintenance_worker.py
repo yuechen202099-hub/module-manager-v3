@@ -89,6 +89,30 @@ def test_worker_rejects_retired_delivery_jobs(kind: str) -> None:
         worker._process_job(worker.MaintenanceJob(kind=kind, team_id="team", group_id="job"))
 
 
+@pytest.mark.parametrize("kind", ["delivery_cache", "delivery_package"])
+def test_worker_batch_rejects_stale_delivery_job_without_failure_mutation(kind: str) -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    job = worker.MaintenanceJob(
+        kind=kind,
+        team_id="historical-team",
+        group_id="historical-group",
+        lease_owner="historical-worker",
+        lease_token="historical-lease",
+    )
+    claims = iter([job])
+
+    with pytest.raises(ExportCenterRetiredError):
+        worker.run_worker_batch(
+            batch_size=1,
+            batch_pause_seconds=0,
+            claim_next=lambda: next(claims, None),
+            can_claim=lambda: True,
+            load_too_high=lambda: False,
+            fail_job=_explode_retired_delivery_path,
+        )
+
+
 def eligible_group(group_id: str, *, verification_status: str = "pending") -> dict:
     photos = [
         {

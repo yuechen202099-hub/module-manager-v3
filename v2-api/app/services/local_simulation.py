@@ -32,6 +32,7 @@ from app.services.barcode_verification_contract import (
 )
 from app.services import unmatched_review
 from app.services import data_center as data_center_service
+from app.services.export_retirement import ExportCenterRetiredError, RETIREMENT_MESSAGE
 from app.services.photo_storage import (
     active_storage_backend,
     open_validated_remote_image_url,
@@ -3399,7 +3400,6 @@ def add_photo_urls_to_group(
             reason="photo_added",
         )
         schedule_delivery_cache_build(group_id, reason="photo_added")
-    mark_delivery_cache_stale(group, "manual photos changed")
     append_audit_event("add_group_photos", actor, {"group_id": group_id, "added": added, "skipped_duplicates": skipped_duplicates})
     refresh_summary()
     return {
@@ -5647,6 +5647,7 @@ def build_final_delivery_export(
     *,
     repair_delivery_cache: Callable[..., None] | None = None,
 ):
+    raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
     groups = filter_delivery_groups(task_id=task_id, terminal=terminal, review_scope="all")
     scope = f"{current_team_id()}|task={task_id or ''}|terminal={terminal.strip()}|review_scope={review_scope}"
     return build_final_delivery_package_from_groups(
@@ -5664,6 +5665,7 @@ def build_final_delivery_package_from_groups(
     archived_only: bool = True,
     repair_delivery_cache: Callable[..., None] | None = None,
 ):
+    raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
     from app.services.final_delivery_export import (
         DeliveryPackageValidationError,
         delivery_evidence_fingerprint,
@@ -5914,6 +5916,7 @@ def build_field_work_suggestion(reason_text: str, group: dict[str, Any]) -> str:
 
 
 def build_final_delivery_manifest(task_id: int | None = None, terminal: str = "", review_scope: str = "reviewed") -> dict[str, Any]:
+    raise ExportCenterRetiredError(RETIREMENT_MESSAGE)
     groups = filter_delivery_groups(task_id=task_id, terminal=terminal, review_scope=review_scope)
     return {
         "generated_at": now_iso(),
@@ -6678,7 +6681,6 @@ def upload_construction_group_batch(
             actor=actor,
             reason="construction_photos_changed" if added else "construction_identity_changed",
         )
-    mark_delivery_cache_stale(group, "construction upload changed photos")
     append_audit_event(
         "construction_upload_batch",
         actor,
@@ -6752,7 +6754,6 @@ def review_group(
         }
     )
     if status != "approved":
-        mark_delivery_cache_stale(group, f"review status changed to {status}")
         invalidate_delivery_package_jobs_for_group(
             group,
             actor=reviewer,
@@ -7062,7 +7063,6 @@ def reset_group_to_unconstructed(group_id: str, actor: str, reason: str = "", fo
         actor=actor,
         reason="reset_to_unconstructed",
     )
-    mark_delivery_cache_stale(group, "reset to unconstructed")
     append_audit_event(
         "group_reset_to_unconstructed",
         actor,
@@ -7102,7 +7102,6 @@ def reset_group_to_unreviewed(group_id: str, actor: str, reason: str = "", force
         actor=actor,
         reason="reset_to_unreviewed",
     )
-    mark_delivery_cache_stale(group, "reset to unreviewed")
     append_audit_event(
         "admin_group_reset_unreviewed",
         actor,
@@ -7622,7 +7621,6 @@ def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str,
             "image_url": photo.get("image_url", ""),
         },
     )
-    mark_delivery_cache_stale(group, "photo deleted")
     refresh_summary()
     schedule_delivery_cache_build(group_id, reason="photo_deleted")
     return {"group": group, "deleted_photo": photo}
@@ -7647,7 +7645,6 @@ def update_group_archive_status(group: dict[str, Any], reviewer: str) -> None:
     if reasons:
         group["status"] = "exception"
         group["exception_note"] = "; ".join(display_exception_reasons(reasons))
-        mark_delivery_cache_stale(group, "archive blocked")
         append_audit_event("archive_blocked", reviewer, {"group_id": group["id"], "reasons": reasons})
         return
     group["status"] = "approved"

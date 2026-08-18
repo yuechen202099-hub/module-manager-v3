@@ -218,7 +218,6 @@ def _json_mark_data_center_archive_invalidated(group: dict[str, Any], *, actor: 
     group["reviewer"] = ""
     group["review_note"] = ""
     group["reviewed_at"] = None
-    local_simulation.mark_delivery_cache_stale(group, reason)
     local_simulation.append_audit_event(
         "data_center_archive_invalidated",
         actor,
@@ -774,15 +773,6 @@ def invalidate_verification_for_group(
         )
         group["barcode_verification"] = result
         _clear_legacy_verification_flags(group)
-        local_simulation.mark_delivery_cache_stale(group, reason)
-        from app.services.delivery_cache import sync_json_delivery_cache_job_for_group
-
-        sync_json_delivery_cache_job_for_group(
-            group,
-            team_id=local_simulation.current_team_id(),
-            actor=actor,
-            reason=reason,
-        )
         local_simulation.append_audit_event(
             "group_barcode_verification_invalidated",
             actor,
@@ -860,36 +850,6 @@ def invalidate_verification_for_group(
     verification.recognition_source = None
     verification.invalidated_at = now
     _clear_legacy_verification_flags(group)
-    group_raw = dict(group.raw_data or {})
-    if group_raw.get("delivery_cache_status") not in {None, "", "none"}:
-        group_raw["delivery_cache_status"] = "stale"
-        group_raw["delivery_cache_error"] = reason
-        group.raw_data = group_raw
-    cached_photos = session.scalars(
-        select(Photo).where(
-            Photo.team_id == group.team_id,
-            Photo.group_id == group.id,
-            Photo.is_active.is_(True),
-        )
-    ).all()
-    for photo in cached_photos:
-        photo_raw = dict(photo.raw_data or {})
-        if photo_raw.get("delivery_cache_path"):
-            photo_raw["delivery_cache_status"] = "stale"
-            photo.raw_data = photo_raw
-    from app.services.delivery_cache import (
-        postgres_delivery_group_payload,
-        sync_postgres_delivery_cache_job_for_group,
-    )
-
-    sync_postgres_delivery_cache_job_for_group(
-        session,
-        group,
-        group_payload=postgres_delivery_group_payload(group, cached_photos),
-        actor=actor,
-        reason=reason,
-        mark_retry_without_job=False,
-    )
     _stage_transactional_audit(
         session,
         team_id=group.team_id,
