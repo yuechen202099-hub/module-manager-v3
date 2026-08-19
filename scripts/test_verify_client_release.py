@@ -489,7 +489,7 @@ def test_valid_pending_candidate_archive_contains_reviewed_kpi_bytes(tmp_path: P
     verifier.verify_package(archive_path)
 
 
-def test_v321_build_sequence_keeps_historical_boundaries_but_replaces_the_candidate_release_gate() -> None:
+def test_v323_build_sequence_executes_current_and_compatible_release_gates_only() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     match = re.search(r"\$releaseVerifiers\s*=\s*@\((?P<items>[\s\S]*?)\n\)", build_script)
 
@@ -502,11 +502,12 @@ def test_v321_build_sequence_keeps_historical_boundaries_but_replaces_the_candid
         "scripts\\verify_v3_2_0_export_center_ui.py",
         "scripts\\verify_v3_2_0_single_export_entry.py",
         "scripts\\verify_v3_2_1_installer_kpi_restore.py",
-        "scripts\\verify_v3_2_2_release.py",
+        "scripts\\verify_v3_2_3_release.py",
     )
     for verifier_path in expected:
         assert verifier_path in release_verifiers
     assert "scripts\\verify_v3_2_0_release.py" not in release_verifiers
+    assert "scripts\\verify_v3_2_2_release.py" not in release_verifiers
 
 
 def test_v321_manifest_keeps_candidate_artifact_evidence_pending() -> None:
@@ -1963,6 +1964,34 @@ def test_archive_rejects_forbidden_directory_components_at_any_depth(
         verifier.verify_package(archive_path)
 
 
+@pytest.mark.parametrize(
+    "member_name",
+    (
+        "nested/Migration-Report.JSON",
+        r"nested\ALLOWED-HOSTS.TXT",
+        "nested/deeper/Oss-Local-Export-20260819.ZIP",
+    ),
+)
+def test_python_classifier_rejects_operational_artifact_basenames_at_any_depth(
+    member_name: str,
+) -> None:
+    assert load_verifier().is_forbidden_release_path(member_name)
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    (
+        "docs/sop/09-export-retirement-and-oss-local-export.md",
+        "v2-api/scripts/migrate_external_photos_to_oss.py",
+        "scripts/oss_local_export.py",
+    ),
+)
+def test_python_classifier_keeps_authorized_export_migration_sources(
+    member_name: str,
+) -> None:
+    assert not load_verifier().is_forbidden_release_path(member_name)
+
+
 def test_release_builder_classifier_rejects_forbidden_components_on_windows(
     tmp_path: Path,
 ) -> None:
@@ -2001,16 +2030,25 @@ def test_release_builder_classifier_rejects_forbidden_components_on_windows(
             "    (Join-Path $staging 'config\\.env.production\\settings.json'),",
             "    (Join-Path $staging 'nested\\.ENV.LOCAL\\key.txt'),",
             "    (Join-Path $staging 'artifacts\\.VeNv\\pyvenv.cfg'),",
-            "    (Join-Path $staging 'artifacts\\BUILD\\output.bin')",
+            "    (Join-Path $staging 'artifacts\\BUILD\\output.bin'),",
+            "    (Join-Path $staging 'nested\\Migration-Report.JSON'),",
+            "    (Join-Path $staging 'nested\\ALLOWED-HOSTS.TXT'),",
+            "    (Join-Path $staging 'nested\\Oss-Local-Export-20260819.ZIP')",
             ")",
             "foreach ($path in $forbiddenCases) {",
             "    if (-not (Test-ForbiddenReleasePath -Path $path -IsDirectory $false)) {",
             '        throw "Forbidden path was accepted: $path"',
             "    }",
             "}",
-            "$allowedPath = Join-Path $staging 'v2-web\\src\\main.ts'",
-            "if (Test-ForbiddenReleasePath -Path $allowedPath -IsDirectory $false) {",
-            '    throw "Allowed path was rejected: $allowedPath"',
+            "$allowedCases = @(",
+            "    (Join-Path $staging 'docs\\sop\\09-export-retirement-and-oss-local-export.md'),",
+            "    (Join-Path $staging 'v2-api\\scripts\\migrate_external_photos_to_oss.py'),",
+            "    (Join-Path $staging 'scripts\\oss_local_export.py')",
+            ")",
+            "foreach ($path in $allowedCases) {",
+            "    if (Test-ForbiddenReleasePath -Path $path -IsDirectory $false) {",
+            '        throw "Allowed path was rejected: $path"',
+            "    }",
             "}",
         )
     )

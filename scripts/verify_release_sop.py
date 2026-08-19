@@ -654,6 +654,19 @@ def has_single_valid_evidence(
     return len(values) == 1 and validator(values[0])
 
 
+def release_record_lifecycle_values(
+    record: str, fields: tuple[str, ...]
+) -> dict[str, list[str]]:
+    values = {field: [] for field in fields}
+    labels = {field: field for field in fields}
+    for line in record.splitlines():
+        parsed = parse_known_label_value(line, labels)
+        if parsed is not None:
+            field, value = parsed
+            values[field].append(value)
+    return values
+
+
 def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
     status = release_record_status(record)
     deployment_claimed = has_deployment_claim(status)
@@ -683,13 +696,7 @@ def candidate_release_record_is_pending(record: str, version: str, deployed_base
         "Production Reconciliation": "pending",
         "Rollback target": deployed_baseline,
     }
-    lifecycle_values = {field: [] for field in required_fields}
-    lifecycle_labels = {field: field for field in required_fields}
-    for line in record.splitlines():
-        parsed = parse_known_label_value(line, lifecycle_labels)
-        if parsed is not None:
-            field, value = parsed
-            lifecycle_values[field].append(value)
+    lifecycle_values = release_record_lifecycle_values(record, tuple(required_fields))
     for field, value in required_fields.items():
         values = lifecycle_values[field]
         if field == "Local Verification":
@@ -738,11 +745,35 @@ def structured_deployed_release_record_has_verified_evidence(record: str, versio
     )
 
 
+def validate_structured_deployed_lifecycle_fields(record: str, version: str) -> bool:
+    required_fields = {
+        "Status": "deployed",
+        "Local Verification": "passed",
+        "Package": "passed",
+        "Production Deployment": "passed",
+        "Production Reconciliation": "passed",
+    }
+    lifecycle_values = release_record_lifecycle_values(record, tuple(required_fields))
+    if not any(lifecycle_values[field] for field in tuple(required_fields)[1:]):
+        return False
+    for field, expected in required_fields.items():
+        values = lifecycle_values[field]
+        if len(values) != 1:
+            fail(f"{version} release record must define {field}: {expected} exactly once")
+    return all(
+        normalize_text(lifecycle_values[field][0]).strip() == normalize_text(expected)
+        for field, expected in required_fields.items()
+    )
+
+
 def deployed_release_record_is_verified(record: str, version: str) -> None:
     version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
     if version_match is None or version_match.group("version") != version:
         fail(f"{version} release record must have a matching title")
-    if structured_deployed_release_record_has_verified_evidence(record, version):
+    uses_structured_lifecycle = validate_structured_deployed_lifecycle_fields(record, version)
+    if uses_structured_lifecycle and structured_deployed_release_record_has_verified_evidence(
+        record, version
+    ):
         return
     status = release_record_status(record)
     if normalize_claim_text(status).strip() != DEPLOYED_LIFECYCLE_STATUS:

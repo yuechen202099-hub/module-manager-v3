@@ -214,6 +214,91 @@ def _call_leaf(call: ast.Call) -> str:
     return ""
 
 
+def _qualified_reference(node: ast.AST, bindings: dict[str, str]) -> str:
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        owner = _qualified_reference(node.value, bindings)
+        return f"{owner}.{node.attr}" if owner else node.attr
+    return ""
+
+
+def _import_and_alias_bindings(tree: ast.AST | None) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    if tree is None:
+        return bindings
+    nodes = list(ast.walk(tree))
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings[alias.asname or alias.name.split(".", 1)[0]] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                if alias.name != "*":
+                    bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            qualified = _qualified_reference(node.value, bindings)
+            if not qualified:
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in bindings:
+                    bindings[target.id] = qualified
+                    changed = True
+    return bindings
+
+
+def _retired_path_predicate_is_reachable(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    returns = [statement for statement in function.body if isinstance(statement, ast.Return)]
+    if len(returns) != 1 or not isinstance(returns[0].value, ast.BoolOp):
+        return False
+    expression = returns[0].value
+    if not isinstance(expression.op, ast.Or) or len(expression.values) != 3:
+        return False
+
+    exact_path = False
+    child_paths = False
+    exact_set = False
+    for value in expression.values:
+        if (
+            isinstance(value, ast.Compare)
+            and isinstance(value.left, ast.Name)
+            and value.left.id == "normalized"
+            and len(value.ops) == 1
+            and len(value.comparators) == 1
+        ):
+            comparator = value.comparators[0]
+            exact_path = exact_path or (
+                isinstance(value.ops[0], ast.Eq)
+                and isinstance(comparator, ast.Constant)
+                and comparator.value == "/exports"
+            )
+            exact_set = exact_set or (
+                isinstance(value.ops[0], ast.In)
+                and isinstance(comparator, ast.Name)
+                and comparator.id == "RETIRED_EXACT_PATHS"
+            )
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "startswith"
+            and isinstance(value.func.value, ast.Name)
+            and value.func.value.id == "normalized"
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Constant)
+            and value.args[0].value == "/exports/"
+        ):
+            child_paths = True
+    return exact_path and child_paths and exact_set
+
+
 def _first_is_call(function: ast.FunctionDef | ast.AsyncFunctionDef, call_name: str) -> bool:
     statement = _first_statement(function)
     return (
@@ -313,14 +398,10 @@ def _check_retirement_contract(root: Path, failures: list[str]) -> None:
     predicates = _functions(tree, "is_retired_export_path")
     if len(predicates) != 1:
         failures.append(f"{relative_path}: one retired path predicate is required")
-    else:
-        strings = {
-            node.value
-            for node in ast.walk(predicates[0])
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        }
-        if "/exports" not in strings or "/exports/" not in strings:
-            failures.append(f"{relative_path}: retired path predicate must cover /exports and children")
+    elif not _retired_path_predicate_is_reachable(predicates[0]):
+        failures.append(
+            f"{relative_path}: retired path predicate must reach /exports, its children, and exact paths"
+        )
 
     main_tree = _parse_python(root, "v2-api/app/main.py", failures)
     middleware = _functions(main_tree, "persist_local_test_state")
@@ -472,10 +553,12 @@ def _check_migration_and_manifest(root: Path, failures: list[str]) -> None:
     migration_tree = _parse_python(root, migration_path, failures)
     forbidden_calls = {"ThreadPoolExecutor", "urlopen", "delete_object", "batch_delete_objects"}
     if migration_tree is not None:
+        bindings = _import_and_alias_bindings(migration_tree)
         for node in ast.walk(migration_tree):
             if not isinstance(node, ast.Call):
                 continue
-            call_name = _call_leaf(node)
+            qualified_call = _qualified_reference(node.func, bindings)
+            call_name = qualified_call.rsplit(".", 1)[-1]
             if call_name in forbidden_calls:
                 failures.append(f"{migration_path}: forbidden migration call {call_name}")
             if call_name == "add_argument" and node.args:
@@ -507,8 +590,15 @@ def _check_migration_and_manifest(root: Path, failures: list[str]) -> None:
                 if any(isinstance(argument, ast.Name) for argument in node.args):
                     failures.append(f"{signer_path}: manifest query must remain scalar-only")
     iterators = _functions(signer_tree, "iter_manifest_rows")
-    yields = [node for node in ast.walk(iterators[0])] if len(iterators) == 1 else []
-    yield_dicts = [node.value for node in yields if isinstance(node, ast.Yield) and isinstance(node.value, ast.Dict)]
+    yield_dicts = []
+    if len(iterators) == 1:
+        yield_dicts = [
+            statement.value.value
+            for statement in iterators[0].body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Yield)
+            and isinstance(statement.value.value, ast.Dict)
+        ]
     first_kind = None
     if yield_dicts:
         first_kind = {

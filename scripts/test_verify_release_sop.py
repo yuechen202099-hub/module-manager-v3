@@ -314,6 +314,22 @@ def test_v322_release_record_passes_the_deployed_baseline_gate() -> None:
     verifier.deployed_release_record_is_verified(record, "V3.2.2")
 
 
+@pytest.mark.parametrize("duplicate_value", ("passed", "pending"))
+def test_v322_deployed_release_record_rejects_duplicate_package_field(
+    duplicate_value: str,
+) -> None:
+    verifier = load_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.2.2.md").read_text(encoding="utf-8")
+    record = record.replace(
+        "- Package: passed",
+        f"- Package: passed\n- Package: {duplicate_value}",
+        1,
+    )
+
+    with pytest.raises(AssertionError, match="Package: passed exactly once"):
+        verifier.deployed_release_record_is_verified(record, "V3.2.2")
+
+
 def test_v3082_release_record_passes_the_deployed_baseline_gate() -> None:
     verifier = load_verifier()
     record = (ROOT / "ops" / "releases" / "V3.0.82.md").read_text(encoding="utf-8")

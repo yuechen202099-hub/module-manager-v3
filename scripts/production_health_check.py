@@ -17,6 +17,14 @@ RETIRED_PATHS = (
 )
 
 
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+NO_REDIRECT_OPENER = urllib.request.build_opener(NoRedirectHandler())
+
+
 def read_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -36,13 +44,13 @@ def request_json(url: str, *, method: str = "GET", data: dict | None = None, tok
     if token:
         headers["Authorization"] = f"bearer {token}"
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=20) as response:
+    with NO_REDIRECT_OPENER.open(req, timeout=20) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def assert_http_ok(url: str) -> None:
     req = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(req, timeout=20) as response:
+    with NO_REDIRECT_OPENER.open(req, timeout=20) as response:
         if response.status != 200:
             raise AssertionError(f"{url} returned HTTP {response.status}")
 
@@ -50,7 +58,7 @@ def assert_http_ok(url: str) -> None:
 def assert_http_status(url: str, expected_status: int) -> None:
     req = urllib.request.Request(url, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=20) as response:
+        with NO_REDIRECT_OPENER.open(req, timeout=20) as response:
             actual_status = response.status
     except urllib.error.HTTPError as exc:
         actual_status = exc.code

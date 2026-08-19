@@ -299,6 +299,16 @@ FORBIDDEN_NAMES = {
     "coverage.xml",
     "junit.xml",
 }
+FORBIDDEN_OPERATIONAL_STEMS = {
+    "allowed-hosts",
+    "allowed_hosts",
+    "migration-report",
+    "migration_report",
+}
+FORBIDDEN_OPERATIONAL_ARCHIVE_PREFIXES = (
+    "oss-local-export-",
+    "oss_local_export_",
+)
 
 
 def is_forbidden_release_path(name: str) -> bool:
@@ -319,9 +329,15 @@ def is_forbidden_release_path(name: str) -> bool:
         return True
 
     leaf_name = components[-1]
+    leaf_path = PurePosixPath(leaf_name)
     return (
         leaf_name in FORBIDDEN_NAMES
-        or PurePosixPath(leaf_name).suffix in FORBIDDEN_SUFFIXES
+        or leaf_path.suffix in FORBIDDEN_SUFFIXES
+        or leaf_path.stem in FORBIDDEN_OPERATIONAL_STEMS
+        or (
+            leaf_path.suffix == ".zip"
+            and leaf_name.startswith(FORBIDDEN_OPERATIONAL_ARCHIVE_PREFIXES)
+        )
     )
 
 

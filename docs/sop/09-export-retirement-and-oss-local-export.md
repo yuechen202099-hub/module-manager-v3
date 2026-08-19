@@ -44,6 +44,20 @@ test "$(stat -c %a "$ALLOWLIST")" = 600
 sudo -u modulemgr /opt/module-manager-v2/venv/bin/python scripts/migrate_external_photos_to_oss.py \
   --execute --migration-id "$MIGRATION_ID" --allowlist-file "$ALLOWLIST" --limit 10 \
   --report "$REPORT_DIR/$MIGRATION_ID-limit10.json"
+```
+
+### 人工核验与审批停止点
+
+到此必须停止。逐张核对 10 张预览、OSS HEAD、数据库审计字段、条码证据、内存、OOM 记录和交付任务计数；只有结果全部通过且发布负责人明确批准继续，才可复制下一代码块。任何失败、冲突、剩余异常或未获得明确批准都不得执行 `--resume`。
+
+```bash
+set -euo pipefail
+REPORT_DIR=/var/lib/module-manager-v2/private-operations/v3.2.3-external-photo
+ALLOWLIST="$REPORT_DIR/allowed-hosts.txt"
+MIGRATION_ID=v323-external-photo-20260819
+cd /opt/module-manager-v2/current/v2-api
+umask 077
+test "$(stat -c %a "$ALLOWLIST")" = 600
 sudo -u modulemgr /opt/module-manager-v2/venv/bin/python scripts/migrate_external_photos_to_oss.py \
   --resume --migration-id "$MIGRATION_ID" --allowlist-file "$ALLOWLIST" \
   --report "$REPORT_DIR/$MIGRATION_ID-resume.json"
@@ -61,6 +75,14 @@ REPORT_DIR=/var/lib/module-manager-v2/private-operations/v3.2.3-external-photo
 MIGRATION_ID=v323-external-photo-20260819
 cd /opt/module-manager-v2/current/v2-api
 umask 077
+START_MEMORY_KIB=$((400 * 1024))
+STOP_MEMORY_KIB=$((250 * 1024))
+START_TEMP_FREE_KIB=$((512 * 1024))
+MEM_AVAILABLE_KIB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
+test "$MEM_AVAILABLE_KIB" -ge "$START_MEMORY_KIB" || { echo "MemAvailable is below the 400 MiB start threshold" >&2; exit 1; }
+test "$MEM_AVAILABLE_KIB" -ge "$STOP_MEMORY_KIB" || { echo "MemAvailable is below the 250 MiB emergency stop threshold" >&2; exit 1; }
+TEMP_FREE_KIB=$(df -Pk "${TMPDIR:-/tmp}" | awk 'NR==2 {print $4}')
+test "$TEMP_FREE_KIB" -ge "$START_TEMP_FREE_KIB" || { echo "Temporary free space is below 512 MiB" >&2; exit 1; }
 sudo -u modulemgr /opt/module-manager-v2/venv/bin/python scripts/migrate_external_photos_to_oss.py \
   --rollback-run "$MIGRATION_ID" \
   --report "$REPORT_DIR/$MIGRATION_ID-rollback.json"

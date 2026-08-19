@@ -132,7 +132,6 @@ $releaseVerifiers = @(
     "scripts\verify_v3_2_0_export_center_ui.py",
     "scripts\verify_v3_2_0_single_export_entry.py",
     "scripts\verify_v3_2_1_installer_kpi_restore.py",
-    "scripts\verify_v3_2_2_release.py",
     "scripts\verify_v3_2_3_release.py"
 )
 foreach ($releaseVerifier in $releaseVerifiers) {
@@ -340,9 +339,18 @@ function Test-ForbiddenReleasePath {
 
     $leafName = $normalizedComponents[-1]
     $leafSuffix = [System.IO.Path]::GetExtension($leafName)
+    $leafStem = [System.IO.Path]::GetFileNameWithoutExtension($leafName)
     return (
         $leafName -in $forbiddenReleaseFileNames -or
-        $leafSuffix -in $forbiddenReleaseFileSuffixes
+        $leafSuffix -in $forbiddenReleaseFileSuffixes -or
+        $leafStem -in @("migration-report", "migration_report", "allowed-hosts", "allowed_hosts") -or
+        (
+            $leafSuffix -eq ".zip" -and
+            (
+                $leafName.StartsWith("oss-local-export-") -or
+                $leafName.StartsWith("oss_local_export_")
+            )
+        )
     )
 }
 

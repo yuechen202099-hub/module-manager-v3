@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -14,6 +17,15 @@ def load_verifier():
     path = ROOT / "scripts" / "verify_v3_2_3_release.py"
     assert path.exists(), "V3.2.3 release verifier is missing"
     spec = importlib.util.spec_from_file_location("verify_v3_2_3_release", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_production_health_check():
+    path = ROOT / "scripts" / "production_health_check.py"
+    spec = importlib.util.spec_from_file_location("production_health_check", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -132,6 +144,28 @@ def test_release_verifier_requires_every_retired_path_class(
     assert_rejected(tmp_repo, "retired path")
 
 
+def test_release_verifier_rejects_retired_paths_hidden_in_dead_code(
+    tmp_repo: TemporaryRepository,
+) -> None:
+    tmp_repo.replace(
+        "v2-api/app/services/export_retirement.py",
+        '''    return (
+        normalized == "/exports"
+        or normalized.startswith("/exports/")
+        or normalized in RETIRED_EXACT_PATHS
+    )''',
+        '''    if False:
+        return (
+            normalized == "/exports"
+            or normalized.startswith("/exports/")
+            or normalized in RETIRED_EXACT_PATHS
+        )
+    return False''',
+    )
+
+    assert_rejected(tmp_repo, "retired path predicate")
+
+
 def test_release_verifier_requires_retirement_before_authentication(
     tmp_repo: TemporaryRepository,
 ) -> None:
@@ -242,6 +276,31 @@ def test_release_verifier_rejects_migration_concurrency_option(
     assert_rejected(tmp_repo, "concurrency option")
 
 
+def test_release_verifier_rejects_thread_pool_called_through_import_alias(
+    tmp_repo: TemporaryRepository,
+) -> None:
+    tmp_repo.append(
+        "v2-api/scripts/migrate_external_photos_to_oss.py",
+        "\nfrom concurrent.futures import ThreadPoolExecutor as MigrationPool\n"
+        "MigrationPool(max_workers=2)\n",
+    )
+
+    assert_rejected(tmp_repo, "ThreadPoolExecutor")
+
+
+def test_release_verifier_rejects_delete_object_called_through_module_and_call_aliases(
+    tmp_repo: TemporaryRepository,
+) -> None:
+    tmp_repo.append(
+        "v2-api/scripts/migrate_external_photos_to_oss.py",
+        "\nimport oss2 as storage_sdk\n"
+        "remove_object = storage_sdk.Bucket.delete_object\n"
+        "remove_object(None, 'key')\n",
+    )
+
+    assert_rejected(tmp_repo, "delete_object")
+
+
 def test_release_verifier_requires_scalar_manifest_query_and_header_first_stream(
     tmp_repo: TemporaryRepository,
 ) -> None:
@@ -254,6 +313,31 @@ def test_release_verifier_requires_scalar_manifest_query_and_header_first_stream
     failures = failures_for(tmp_repo)
     assert any("scalar-only" in item for item in failures)
     assert any("header first" in item for item in failures)
+
+
+def test_release_verifier_rejects_dead_manifest_yield_before_item_stream(
+    tmp_repo: TemporaryRepository,
+) -> None:
+    tmp_repo.replace(
+        "v2-api/scripts/build_oss_export_manifest.py",
+        '''    yield {
+        "schema": SCHEMA,
+        "kind": "manifest",
+        "planned_count": len(members),
+        "planned_bytes": sum(int(member["photo"].get("byte_size") or 0) for member in members),
+    }''',
+        '''    if False:
+        yield {"kind": "manifest"}
+    if True:
+        yield {
+            "schema": SCHEMA,
+            "kind": "item",
+            "planned_count": len(members),
+            "planned_bytes": sum(int(member["photo"].get("byte_size") or 0) for member in members),
+        }''',
+    )
+
+    assert_rejected(tmp_repo, "header first")
 
 
 @pytest.mark.parametrize(
@@ -315,3 +399,105 @@ def test_release_verifier_requires_retired_health_probes(
         "",
     )
     assert_rejected(tmp_repo, "production health check")
+
+
+class RetiredPathHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/gone":
+            self.send_response(410)
+        elif self.path == "/ok":
+            self.send_response(200)
+        elif self.path.startswith("/redirect-"):
+            self.send_response(int(self.path.removeprefix("/redirect-")))
+            self.send_header("Location", "/gone")
+        else:
+            self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def run_retired_path_server() -> tuple[ThreadingHTTPServer, threading.Thread]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RetiredPathHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_retired_health_probe_accepts_direct_410_and_rejects_200() -> None:
+    health_check = load_production_health_check()
+    server, thread = run_retired_path_server()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        health_check.assert_http_status(f"{base_url}/gone", 410)
+        with pytest.raises(AssertionError, match="returned HTTP 200, expected 410"):
+            health_check.assert_http_status(f"{base_url}/ok", 410)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("status", (301, 302, 307, 308))
+def test_retired_health_probe_rejects_redirect_to_410(status: int) -> None:
+    health_check = load_production_health_check()
+    server, thread = run_retired_path_server()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with pytest.raises(AssertionError, match=rf"returned HTTP {status}, expected 410"):
+            health_check.assert_http_status(f"{base_url}/redirect-{status}", 410)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def bash_blocks(markdown: str) -> list[tuple[int, int, str]]:
+    return [
+        (match.start(), match.end(), match.group("body"))
+        for match in re.finditer(r"(?ms)^```bash\n(?P<body>.*?)^```$", markdown)
+    ]
+
+
+def test_migration_execute_and_resume_are_separate_copyable_blocks_with_approval_stop() -> None:
+    sop = (ROOT / "docs" / "sop" / "09-export-retirement-and-oss-local-export.md").read_text(
+        encoding="utf-8"
+    )
+    blocks = bash_blocks(sop)
+    execute_blocks = [block for block in blocks if "--execute" in block[2]]
+    resume_blocks = [block for block in blocks if "--resume" in block[2]]
+
+    assert len(execute_blocks) == 1
+    assert len(resume_blocks) == 1
+    execute_block = execute_blocks[0]
+    resume_block = resume_blocks[0]
+    assert execute_block[1] < resume_block[0]
+    assert "--resume" not in execute_block[2]
+    assert "--execute" not in resume_block[2]
+    between_blocks = sop[execute_block[1] : resume_block[0]]
+    assert re.search(r"(?m)^### 人工核验与审批停止点$", between_blocks)
+
+
+def test_rollback_block_runs_copyable_resource_preflight_before_rollback() -> None:
+    sop = (ROOT / "docs" / "sop" / "09-export-retirement-and-oss-local-export.md").read_text(
+        encoding="utf-8"
+    )
+    rollback_blocks = [block[2] for block in bash_blocks(sop) if "--rollback-run" in block[2]]
+
+    assert len(rollback_blocks) == 1
+    block = rollback_blocks[0]
+    required_in_order = (
+        "START_MEMORY_KIB=$((400 * 1024))",
+        "STOP_MEMORY_KIB=$((250 * 1024))",
+        "START_TEMP_FREE_KIB=$((512 * 1024))",
+        "MEM_AVAILABLE_KIB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)",
+        'test "$MEM_AVAILABLE_KIB" -ge "$START_MEMORY_KIB"',
+        'test "$MEM_AVAILABLE_KIB" -ge "$STOP_MEMORY_KIB"',
+        'TEMP_FREE_KIB=$(df -Pk "${TMPDIR:-/tmp}" | awk \'NR==2 {print $4}\')',
+        'test "$TEMP_FREE_KIB" -ge "$START_TEMP_FREE_KIB"',
+        "--rollback-run",
+    )
+    positions = [block.index(marker) for marker in required_in_order]
+    assert positions == sorted(positions)
+    assert block.count("exit 1") >= 3
