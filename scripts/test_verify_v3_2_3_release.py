@@ -18,6 +18,22 @@ import scripts.oss_local_export as oss_local_export
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def current_source_version() -> str | None:
+    try:
+        payload = json.loads((ROOT / "v2-web" / "src" / "version.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    version = payload.get("version") if isinstance(payload, dict) else None
+    return version.strip() if isinstance(version, str) and version.strip() else None
+
+
+CURRENT_SOURCE_VERSION = current_source_version()
+V323_CURRENT_TREE_ONLY = pytest.mark.skipif(
+    CURRENT_SOURCE_VERSION is not None and CURRENT_SOURCE_VERSION != "3.2.3",
+    reason="historical V3.2.3 current-tree-only contract requires active version 3.2.3",
+)
+
+
 def load_verifier():
     path = ROOT / "scripts" / "verify_v3_2_3_release.py"
     assert path.exists(), "V3.2.3 release verifier is missing"
@@ -88,10 +104,12 @@ def assert_rejected(tmp_repo: TemporaryRepository, marker: str) -> None:
     assert any(marker in failure for failure in failures), failures
 
 
+@V323_CURRENT_TREE_ONLY
 def test_current_tree_satisfies_v323_contract() -> None:
     assert load_verifier().main([]) == 0
 
 
+@V323_CURRENT_TREE_ONLY
 @pytest.mark.parametrize(
     ("relative_path", "old", "new"),
     (
@@ -114,6 +132,7 @@ def test_release_verifier_rejects_stale_version_surfaces(
     assert_rejected(tmp_repo, relative_path)
 
 
+@V323_CURRENT_TREE_ONLY
 def test_release_verifier_requires_candidate_branch_and_deployed_baseline(
     tmp_repo: TemporaryRepository,
 ) -> None:
@@ -481,6 +500,7 @@ def test_release_verifier_requires_package_members_and_forbids_runtime_artifacts
     assert any("forbidden package classifier" in item for item in failures)
 
 
+@V323_CURRENT_TREE_ONLY
 def test_release_verifier_requires_pending_candidate_lifecycle(
     tmp_repo: TemporaryRepository,
 ) -> None:
