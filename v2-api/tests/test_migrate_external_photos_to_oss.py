@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -31,6 +32,7 @@ from app.models import (
     Team,
 )
 from app.services.external_photo_oss_migration import DownloadedPhoto, OssObjectReceipt
+from app.services.photo_storage import oss_object_key as production_oss_object_key
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "migrate_external_photos_to_oss.py"
@@ -698,6 +700,81 @@ def test_group_transfers_finish_before_short_commit_and_only_one_file_exists(
 
     assert events[-1] == "commit"
     assert events.count("commit") == 1
+    assert report["committed"] == 2
+
+
+def test_identical_downloaded_bytes_with_different_source_extensions_reuse_one_object(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    group_id = uuid4()
+    candidates = [
+        migration.ExternalPhotoCandidate(
+            uuid4(),
+            "team-a",
+            group_id,
+            "group-1",
+            "https://img.example/first",
+            "",
+            "source.jpeg",
+        ),
+        migration.ExternalPhotoCandidate(
+            uuid4(),
+            "team-a",
+            group_id,
+            "group-1",
+            "https://img.example/second",
+            "",
+            "source.png",
+        ),
+    ]
+    _install_safe_run_boundaries(monkeypatch, tmp_path, candidates)
+    monkeypatch.setattr(migration, "oss_object_key", production_oss_object_key)
+    content = b"same-downloaded-image"
+    content_sha256 = hashlib.sha256(content).hexdigest()
+
+    def download(source, _policy, *, temp_dir: Path):
+        path = temp_dir / f"{source.photo_id}.download"
+        path.write_bytes(content)
+        return DownloadedPhoto(path, content_sha256, len(content), "image/jpeg", ".jpg")
+
+    stored_keys: set[str] = set()
+
+    def store(_bucket, bucket_name: str, key: str, photo: DownloadedPhoto):
+        reused = key in stored_keys
+        stored_keys.add(key)
+        return OssObjectReceipt(
+            bucket_name,
+            key,
+            photo.sha256,
+            photo.byte_size,
+            photo.content_type,
+            reused,
+        )
+
+    monkeypatch.setattr(migration, "download_external_photo", download)
+    monkeypatch.setattr(migration, "store_downloaded_photo", store)
+    monkeypatch.setattr(
+        migration,
+        "_commit_group",
+        lambda *_args, **_kwargs: {
+            "statuses": {str(candidate.photo_id): "committed" for candidate in candidates},
+            "group_status": "approved",
+            "final_delivery_ready": True,
+        },
+    )
+
+    report = migration.execute_run(
+        lambda: None,
+        SimpleNamespace(bucket_name="bucket-a"),
+        migration_id="same-content",
+        allowlist=frozenset({"img.example"}),
+    )
+
+    assert len(stored_keys) == 1
+    assert next(iter(stored_keys)).endswith(f"{content_sha256}.jpg")
+    assert report["uploaded"] == 1
+    assert report["reused_objects"] == 1
     assert report["committed"] == 2
 
 

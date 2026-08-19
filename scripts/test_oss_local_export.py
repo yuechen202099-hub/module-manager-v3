@@ -40,11 +40,22 @@ SCHEMA = "module-manager-oss-export/v1"
 
 
 class FakeResponse(io.BytesIO):
+    def __init__(self, payload: bytes, headers: dict[str, str] | None = None) -> None:
+        super().__init__(payload)
+        self.headers = (
+            {"Content-Length": str(len(payload))} if headers is None else headers
+        )
+        self.read_calls = 0
+
     def __enter__(self) -> "FakeResponse":
         return self
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_calls += 1
+        return super().read(size)
 
 
 class FakeHttpClient:
@@ -230,6 +241,111 @@ def test_verification_failure_keeps_no_final_or_part_file(
     assert expected_error in (report.results[0].error or "")
     assert not target.exists()
     assert not target.with_name(target.name + ".part").exists()
+
+
+@pytest.mark.parametrize(
+    "headers",
+    (
+        {},
+        {"Content-Length": "not-a-decimal"},
+        {"Content-Length": str(len(IMAGE_BYTES) + 1)},
+    ),
+)
+def test_unusable_content_length_fails_before_body_read(
+    tmp_path: Path,
+    headers: dict[str, str],
+) -> None:
+    response = FakeResponse(IMAGE_BYTES, headers=headers)
+    report = download_manifest(
+        [manifest_item()],
+        tmp_path,
+        max_workers=1,
+        retry_delays=(),
+        opener=lambda *_args, **_kwargs: response,
+    )
+
+    assert report.failed == 1
+    assert "Content-Length" in (report.results[0].error or "")
+    assert response.read_calls == 0
+    assert list(tmp_path.rglob("*.part")) == []
+
+
+def test_oversize_nonending_response_stops_before_write_on_every_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = manifest_item()
+    responses = []
+
+    class OversizeNonEndingResponse:
+        headers = {"Content-Length": str(item.byte_size)}
+
+        def __init__(self) -> None:
+            self.read_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _size: int) -> bytes:
+            self.read_calls += 1
+            if self.read_calls > 4:
+                raise AssertionError("reader exceeded safe call limit")
+            return b"x" * (item.byte_size + 1)
+
+    def opener(*_args: object, **_kwargs: object) -> OversizeNonEndingResponse:
+        response = OversizeNonEndingResponse()
+        responses.append(response)
+        return response
+
+    real_open = Path.open
+    write_sizes: list[int] = []
+
+    class RecordingWriter:
+        def __init__(self, wrapped) -> None:
+            self.wrapped = wrapped
+
+        def __enter__(self):
+            self.wrapped.__enter__()
+            return self
+
+        def __exit__(self, *args: object):
+            return self.wrapped.__exit__(*args)
+
+        def write(self, payload: bytes) -> int:
+            write_sizes.append(len(payload))
+            return self.wrapped.write(payload)
+
+        def __getattr__(self, name: str):
+            return getattr(self.wrapped, name)
+
+    def recording_open(path: Path, *args: object, **kwargs: object):
+        opened = real_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if mode == "xb" and path.name.endswith(".part"):
+            return RecordingWriter(opened)
+        return opened
+
+    monkeypatch.setattr(Path, "open", recording_open)
+    sleeps: list[float] = []
+    report = download_manifest(
+        [item],
+        tmp_path,
+        max_workers=1,
+        retry_delays=(0.0, 0.0),
+        opener=opener,
+        sleeper=sleeps.append,
+    )
+
+    assert report.failed == 1
+    assert "exceeds declared byte_size" in (report.results[0].error or "")
+    assert [response.read_calls for response in responses] == [1, 1, 1]
+    assert write_sizes == []
+    assert sleeps == [0.0, 0.0]
+    assert not (tmp_path / item.relative_path).exists()
+    assert list(tmp_path.rglob("*.part")) == []
 
 
 def test_expired_signature_is_retried_and_error_is_sanitized(tmp_path: Path) -> None:
@@ -1070,6 +1186,72 @@ def test_outputs_match_manifest_and_contain_no_signed_urls(tmp_path: Path) -> No
     assert not list(tmp_path.rglob("*.part"))
 
 
+def test_zip_rejects_download_replaced_after_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reopening a verified download by path must not archive swapped bytes."""
+    real_atomic_zip = exporter._atomic_zip
+    replacement = b"x" * len(IMAGE_BYTES)
+    assert hashlib.sha256(replacement).hexdigest() != IMAGE_SHA256
+
+    def swap_then_zip(report: ExportReport, target: Path) -> None:
+        downloaded = next(result for result in report.results if result.succeeded)
+        source = Path(downloaded.local_path or "")
+        swap = source.with_name(source.name + ".swap")
+        swap.write_bytes(replacement)
+        os.replace(swap, source)
+        real_atomic_zip(report, target)
+
+    monkeypatch.setattr(exporter, "_atomic_zip", swap_then_zip)
+
+    with pytest.raises(ValueError, match="changed|sha256"):
+        run_export(
+            manifest_jsonl(1),
+            tmp_path,
+            formats={"files", "zip"},
+            opener=fake_oss_opener,
+        )
+
+    assert not (tmp_path / "photos.zip").exists()
+    assert not (tmp_path / "photos.zip.part").exists()
+    assert not (tmp_path / "export-report.json").exists()
+
+
+def test_zip_rejects_download_replaced_by_symlink_after_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ZIP assembly must not follow a post-download file symlink outside the root."""
+    output_root = tmp_path / "output"
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(IMAGE_BYTES)
+    real_atomic_zip = exporter._atomic_zip
+
+    def link_then_zip(report: ExportReport, target: Path) -> None:
+        downloaded = next(result for result in report.results if result.succeeded)
+        source = Path(downloaded.local_path or "")
+        source.unlink()
+        try:
+            source.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"file symlink creation is unavailable: {exc}")
+        real_atomic_zip(report, target)
+
+    monkeypatch.setattr(exporter, "_atomic_zip", link_then_zip)
+
+    with pytest.raises(ValueError, match="symlink|reparse|unsafe|changed"):
+        run_export(
+            manifest_jsonl(1),
+            output_root,
+            formats={"files", "zip"},
+            opener=fake_oss_opener,
+        )
+
+    assert outside.read_bytes() == IMAGE_BYTES
+    assert not (output_root / "photos.zip").exists()
+    assert not (output_root / "photos.zip.part").exists()
+    assert not (output_root / "export-report.json").exists()
+
+
 def test_all_report_metadata_is_sanitized_against_url_and_signature_fragments(
     tmp_path: Path,
 ) -> None:
@@ -1239,6 +1421,7 @@ def test_part_is_visible_but_final_is_hidden_until_verified_replace(tmp_path: Pa
     class BlockingResponse:
         def __init__(self) -> None:
             self.calls = 0
+            self.headers = {"Content-Length": str(len(IMAGE_BYTES))}
 
         def __enter__(self) -> "BlockingResponse":
             return self

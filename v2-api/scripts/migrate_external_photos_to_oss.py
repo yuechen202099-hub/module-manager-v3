@@ -776,7 +776,7 @@ def _run_transfer_mode(
                         continue
                     key = oss_object_key(
                         "external-migration",
-                        candidate.filename,
+                        f"content{downloaded.suffix}",
                         downloaded.sha256,
                         team_id=candidate.team_id,
                         group_id=str(candidate.group_id),

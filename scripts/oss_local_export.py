@@ -180,6 +180,38 @@ def _validated_download_url(value: str) -> str:
     return value
 
 
+def _validated_content_length(response: Any, expected: int) -> int:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        raise ValueError("response Content-Length is missing")
+    values: list[Any] | None = None
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        values = get_all("Content-Length")
+    if values is None:
+        get = getattr(headers, "get", None)
+        raw = get("Content-Length") if callable(get) else None
+        if raw is None and callable(get):
+            raw = get("content-length")
+        values = [] if raw is None else [raw]
+    if len(values) != 1:
+        raise ValueError("response Content-Length must appear exactly once")
+    raw_value = values[0]
+    if isinstance(raw_value, bool) or not isinstance(raw_value, (str, int)):
+        raise ValueError("response Content-Length is invalid")
+    text = str(raw_value).strip()
+    if not text or not text.isdecimal():
+        raise ValueError("response Content-Length is invalid")
+    declared = int(text)
+    if declared <= 0:
+        raise ValueError("response Content-Length must be positive")
+    if declared != expected:
+        raise ValueError(
+            f"byte size mismatch: expected {expected}, Content-Length declared {declared}"
+        )
+    return declared
+
+
 @dataclass(frozen=True, slots=True)
 class ManifestMetadata:
     schema: str
@@ -407,16 +439,23 @@ def _download_one(
             digest = hashlib.sha256()
             size = 0
             with opener(item.download_url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+                _validated_content_length(response, item.byte_size)
                 with part.open("xb") as output:
-                    while True:
-                        chunk = response.read(CHUNK_SIZE)
+                    while size < item.byte_size:
+                        remaining = item.byte_size - size
+                        chunk = response.read(min(CHUNK_SIZE, remaining))
                         if not chunk:
                             break
                         if not isinstance(chunk, bytes):
                             raise ValueError("download response returned non-byte content")
-                        size += len(chunk)
+                        next_size = size + len(chunk)
+                        if next_size > item.byte_size:
+                            raise ValueError(
+                                "download response exceeds declared byte_size"
+                            )
                         output.write(chunk)
                         digest.update(chunk)
+                        size = next_size
                     output.flush()
                     os.fsync(output.fileno())
             if size != item.byte_size:
@@ -763,6 +802,106 @@ def _atomic_xlsx(report: ExportReport, target: Path) -> None:
         _cleanup_part(part)
 
 
+def _zip_source_lstat(path: Path) -> os.stat_result:
+    try:
+        metadata = os.lstat(path)
+    except OSError as exc:
+        raise ValueError("ZIP source changed or is unavailable") from exc
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+        or not stat.S_ISREG(metadata.st_mode)
+    ):
+        raise ValueError("ZIP source is a symlink, reparse point, or unsafe file")
+    return metadata
+
+
+def _zip_source_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+def _write_verified_zip_entry(
+    archive: ZipFile,
+    report: ExportReport,
+    result: ItemResult,
+) -> None:
+    if not result.local_path:
+        raise ValueError("ZIP source path is missing")
+    source = _lexical_absolute(Path(result.local_path))
+    expected_source = safe_output_path(report.output_root, result.item.relative_path)
+    if source != expected_source:
+        raise ValueError("ZIP source path changed")
+
+    _assert_no_link_or_reparse_components(report.output_root, source)
+    before_open = _zip_source_lstat(source)
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(source, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError("ZIP source is not a regular file")
+        opened_identity = _zip_source_identity(opened)
+        if _zip_source_identity(before_open) != opened_identity:
+            raise ValueError("ZIP source identity changed while opening")
+        if opened.st_size != result.item.byte_size:
+            raise ValueError("ZIP source size changed before streaming")
+
+        _assert_no_link_or_reparse_components(report.output_root, source)
+        after_open = _zip_source_lstat(source)
+        if _zip_source_identity(after_open) != opened_identity:
+            raise ValueError("ZIP source identity changed after opening")
+
+        source_handle = os.fdopen(descriptor, "rb")
+        descriptor = -1
+        with source_handle:
+            digest = hashlib.sha256()
+            observed_size = 0
+            with archive.open(
+                result.item.relative_path,
+                mode="w",
+                force_zip64=True,
+            ) as archive_entry:
+                while True:
+                    remaining = result.item.byte_size - observed_size
+                    chunk = source_handle.read(min(CHUNK_SIZE, remaining + 1))
+                    if not chunk:
+                        break
+                    next_size = observed_size + len(chunk)
+                    if next_size > result.item.byte_size:
+                        raise ValueError("ZIP source size changed while streaming")
+                    archive_entry.write(chunk)
+                    digest.update(chunk)
+                    observed_size = next_size
+
+            after_stream = os.fstat(source_handle.fileno())
+            if (
+                not stat.S_ISREG(after_stream.st_mode)
+                or _zip_source_identity(after_stream) != opened_identity
+                or after_stream.st_size != opened.st_size
+            ):
+                raise ValueError("ZIP source descriptor changed while streaming")
+
+            _assert_no_link_or_reparse_components(report.output_root, source)
+            current = _zip_source_lstat(source)
+            if (
+                _zip_source_identity(current) != opened_identity
+                or current.st_size != after_stream.st_size
+            ):
+                raise ValueError("ZIP source path changed while streaming")
+            if observed_size != result.item.byte_size:
+                raise ValueError("ZIP source size changed while streaming")
+            if digest.hexdigest() != result.item.sha256:
+                raise ValueError("ZIP source sha256 changed after download verification")
+    except OSError as exc:
+        raise ValueError("ZIP source changed or is unsafe") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _atomic_zip(report: ExportReport, target: Path) -> None:
     part = _prepare_atomic_artifact(target)
     try:
@@ -770,7 +909,7 @@ def _atomic_zip(report: ExportReport, target: Path) -> None:
             for result in report.results:
                 if not result.succeeded or not result.local_path:
                     continue
-                archive.write(result.local_path, arcname=result.item.relative_path)
+                _write_verified_zip_entry(archive, report, result)
         _fsync_file(part)
         _replace_atomic_artifact(part, target)
     finally:

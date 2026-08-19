@@ -99,10 +99,11 @@ $Key = "C:\Users\Administrator\Downloads\production-readonly.pem"
 $Server = "modulemgr@www.sgcc.online"
 $TeamId = "default-team"
 $TaskId = 17
-$Output = "C:\Users\Administrator\Downloads\module-manager-exports\20260819-120000"
-ssh -i $Key $Server "cd /opt/module-manager-v2/current/v2-api && /opt/module-manager-v2/venv/bin/python scripts/build_oss_export_manifest.py --team-id '$TeamId' --task-id $TaskId --archived-only" |
-  .\.venv\Scripts\python.exe .\scripts\oss_local_export.py --output $Output --format files --format zip --format csv --format xlsx --max-workers 4
+$ExportSummary = ssh -i $Key $Server "cd /opt/module-manager-v2/current/v2-api && /opt/module-manager-v2/venv/bin/python scripts/build_oss_export_manifest.py --team-id '$TeamId' --task-id $TaskId --archived-only" |
+  .\.venv\Scripts\python.exe .\scripts\oss_local_export.py --format files --format zip --format csv --format xlsx --max-workers 4
 if ($LASTEXITCODE -ne 0) { throw "OSS 本机导出不完整；保留输出和失败清单并停止。" }
+$Output = ($ExportSummary | ConvertFrom-Json).output_root
+Write-Host "OSS 本机导出目录: $Output"
 ```
 
-未指定 `--output` 时使用 `C:\Users\Administrator\Downloads\module-manager-exports\<YYYYMMDD-HHmmss>`。本机最多 `4` 并发/`8` pending，按 `1/2/4` 秒重试；报告不保存签名 URL。若任一对象不存在、签名失效、SHA256/大小不符、磁盘不足或计划/成功数不一致，保留 `.part` 清理后的成功文件与失败清单并停止，不得声称完整。此流程只读 OSS，绝不删除 OSS。
+此命令必须省略 `--output`，让下载器把已识别的默认 Downloads known-folder 边界规范化后使用 `C:\Users\Administrator\Downloads\module-manager-exports\<YYYYMMDD-HHmmss>`；不要把可见的 Downloads Junction 作为自定义显式根目录传回工具。成功后从命令输出 JSON 的 `output_root` 读取实际显示路径。本机最多 `4` 并发/`8` pending，按 `1/2/4` 秒重试；报告不保存签名 URL。若任一对象不存在、签名失效、SHA256/大小不符、磁盘不足或计划/成功数不一致，保留 `.part` 清理后的成功文件与失败清单并停止，不得声称完整。此流程只读 OSS，绝不删除 OSS。

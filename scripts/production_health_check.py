@@ -16,6 +16,16 @@ RETIRED_PATHS = (
     "/local-test/unmatched/export",
 )
 
+CORE_PUBLIC_PATH_STATUSES = (
+    ("/health", 200),
+    ("/login", 200),
+    ("/project-board", 200),
+    ("/global-search", 200),
+    ("/task-hall", 307),
+    ("/claim-tasks", 200),
+    ("/construction", 200),
+)
+
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -75,16 +85,9 @@ def main() -> int:
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
-    for path in [
-        "/health",
-        "/login",
-        "/project-board",
-        "/global-search",
-        "/task-hall",
-        "/construction",
-    ]:
-        assert_http_ok(f"{base_url}{path}")
-    print("[OK] core public pages return 200")
+    for path, expected_status in CORE_PUBLIC_PATH_STATUSES:
+        assert_http_status(f"{base_url}{path}", expected_status)
+    print("[OK] core public routes return expected statuses")
 
     for path in RETIRED_PATHS:
         assert_http_status(f"{base_url}{path}", 410)

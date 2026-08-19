@@ -174,7 +174,7 @@ def count_unsupported_storage(
                 _increment(counts, "unknown")
                 continue
             photo = photo_value
-            storage_type = str(photo.get("storage_type") or "").strip().lower()
+            storage_type = str(photo.get("storage_type") or "")
             if storage_type != "oss":
                 _increment(counts, storage_type or "unknown")
                 continue
@@ -194,7 +194,6 @@ def count_unsupported_storage(
                 photo["sha256"] = require_sha256(photo.get("sha256"))
             except ValueError:
                 _increment(counts, "invalid_sha256")
-            photo["storage_type"] = storage_type
     return counts
 
 

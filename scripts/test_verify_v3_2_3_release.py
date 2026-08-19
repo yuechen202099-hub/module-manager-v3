@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import shutil
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
+import scripts.oss_local_export as oss_local_export
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -518,6 +523,80 @@ def run_retired_path_server() -> tuple[ThreadingHTTPServer, threading.Thread]:
     return server, thread
 
 
+class ProductionHealthContractHandler(BaseHTTPRequestHandler):
+    public_200 = {
+        "/health",
+        "/login",
+        "/project-board",
+        "/global-search",
+        "/claim-tasks",
+        "/construction",
+    }
+    retired_410 = {
+        "/exports",
+        "/exports/terminal-readiness",
+        "/local-test/export-manifest/final-delivery",
+        "/local-test/photo-barcode/review-groups/export",
+        "/local-test/unmatched/export",
+    }
+    hidden_404 = {"/docs", "/redoc", "/openapi.json"}
+
+    def do_GET(self) -> None:  # noqa: N802
+        self.server.seen_paths.append(self.path)  # type: ignore[attr-defined]
+        if self.path in self.public_200:
+            self.send_response(200)
+        elif self.path == "/task-hall":
+            self.send_response(307)
+            self.send_header("Location", "/global-search")
+        elif self.path in self.retired_410:
+            self.send_response(410)
+        elif self.path in self.hidden_404:
+            self.send_response(404)
+        else:
+            self.send_response(500)
+        self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def run_production_health_contract_server() -> tuple[ThreadingHTTPServer, threading.Thread]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ProductionHealthContractHandler)
+    server.seen_paths = []  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_health_check_accepts_task_hall_307_and_probes_claim_tasks_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    health_check = load_production_health_check()
+    server, thread = run_production_health_contract_server()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setattr(
+        health_check.sys,
+        "argv",
+        [
+            "production_health_check.py",
+            "--base-url",
+            base_url,
+            "--expected-version",
+            "3.2.3",
+            "--skip-admin",
+        ],
+    )
+    try:
+        assert health_check.main() == 0
+        seen_paths = server.seen_paths  # type: ignore[attr-defined]
+        assert seen_paths.count("/task-hall") == 1
+        assert seen_paths.count("/claim-tasks") == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_retired_health_probe_accepts_direct_410_and_rejects_200() -> None:
     health_check = load_production_health_check()
     server, thread = run_retired_path_server()
@@ -551,6 +630,89 @@ def bash_blocks(markdown: str) -> list[tuple[int, int, str]]:
         (match.start(), match.end(), match.group("body"))
         for match in re.finditer(r"(?ms)^```bash\n(?P<body>.*?)^```$", markdown)
     ]
+
+
+def powershell_blocks(markdown: str) -> list[str]:
+    return [
+        match.group("body")
+        for match in re.finditer(
+            r"(?ms)^(?P<fence>`{3}|~{3})powershell\r?\n(?P<body>.*?)^(?P=fence)\s*$",
+            markdown,
+        )
+    ]
+
+
+def test_task11_acceptance_scope_selector_executes_against_migration_report_fixture(
+    tmp_path: Path,
+) -> None:
+    plan = (
+        ROOT
+        / "docs"
+        / "superpowers"
+        / "plans"
+        / "2026-08-17-v3.2.3-export-center-retirement.md"
+    ).read_text(encoding="utf-8")
+    match = re.search(
+        r"(?m)^\$scope = ssh .*? -c '(?P<code>import json;.*?)'\"\s*$",
+        plan,
+    )
+    assert match is not None, "Task 11 acceptance-scope selector command is missing"
+
+    report = {
+        "items": {
+            "not-ready": {
+                "status": "committed",
+                "final_delivery_ready": False,
+                "team_id": "team-not-ready",
+                "group_id": "group-not-ready",
+            },
+            "ready": {
+                "status": "committed",
+                "final_delivery_ready": True,
+                "team_id": "team-ready",
+                "group_id": "group-ready",
+            },
+        }
+    }
+    report_path = tmp_path / "full.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    code = match.group("code").replace(r'\"', '"')
+    code = code.replace("$reportDir/full.json", report_path.as_posix())
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "team-ready group-ready"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "docs/sop/09-export-retirement-and-oss-local-export.md",
+        "docs/superpowers/plans/2026-08-17-v3.2.3-export-center-retirement.md",
+    ),
+)
+def test_documented_acceptance_export_executes_the_safe_default_output_contract(
+    relative_path: str,
+) -> None:
+    markdown = (ROOT / relative_path).read_text(encoding="utf-8")
+    blocks = [
+        block
+        for block in powershell_blocks(markdown)
+        if "build_oss_export_manifest.py" in block and "oss_local_export.py" in block
+    ]
+    assert len(blocks) == 1
+    invocation = next(line for line in blocks[0].splitlines() if "oss_local_export.py" in line)
+    argv = invocation.split("oss_local_export.py", 1)[1].strip().split()
+
+    args = oss_local_export.build_parser().parse_args(argv)
+    assert args.output is None
+    assert args.formats == ["files", "zip", "csv", "xlsx"]
+    assert args.max_workers == 4
 
 
 def test_migration_execute_and_resume_are_separate_copyable_blocks_with_approval_stop() -> None:

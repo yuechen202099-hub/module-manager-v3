@@ -444,6 +444,45 @@ def test_cli_writes_url_free_header_and_uses_key_only_oss_signing(
     assert stderr.getvalue() == ""
 
 
+@pytest.mark.parametrize("storage_type", ("OSS", " oss", "oss "))
+def test_cli_rejects_noncanonical_storage_type_before_stdout_or_signing(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_type: str,
+) -> None:
+    monkeypatch.setattr(settings, "oss_bucket", "export-bucket")
+    session = RecordingSession(photo_rows("group-a", storage_type=storage_type))
+
+    class SessionContext:
+        def __enter__(self) -> RecordingSession:
+            return session
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+    class Bucket:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, int, bool]] = []
+
+        def sign_url(self, method: str, key: str, ttl: int, *, slash_safe: bool) -> str:
+            self.calls.append((method, key, ttl, slash_safe))
+            return f"https://signed.invalid/{key}"
+
+    bucket = Bucket()
+    stdout = StringIO()
+    stderr = StringIO()
+    monkeypatch.setattr(manifest, "SessionLocal", SessionContext)
+    monkeypatch.setattr(manifest, "require_oss_client", lambda: bucket)
+    monkeypatch.setattr(manifest.sys, "stdout", stdout)
+    monkeypatch.setattr(manifest.sys, "stderr", stderr)
+
+    result = manifest.main(["--team-id", "team-1"])
+
+    assert result == 2
+    assert stdout.getvalue() == ""
+    assert bucket.calls == []
+    assert json.loads(stderr.getvalue())["counts"] == {storage_type: 4}
+
+
 def test_cli_does_not_accept_an_output_report_argument() -> None:
     with pytest.raises(SystemExit) as captured:
         manifest.parse_args(["--team-id", "team-1", "--output-report", "report.json"])
