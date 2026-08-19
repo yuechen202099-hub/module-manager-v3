@@ -12,6 +12,17 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.4',
+    date: '2026-08-19',
+    type: 'BUG 修复',
+    title: '外链照片 HTTPS 兼容修复',
+    items: [
+      '修复 Python 3.12 下外链照片迁移 HTTPS 请求读取不存在的 `_check_hostname` 属性而中止的问题。',
+      '保留 DNS 固定、防重定向、私网地址拒绝以及 SSL 上下文和 SNI 校验，未放宽远程图片下载边界。',
+      '数据库版本和导出退休边界保持不变，外链迁移仍须按 dry-run、10 张试运行、人工核验和 resume 流程执行。',
+    ],
+  },
+  {
     version: 'V3.2.3',
     date: '2026-08-19',
     type: '小更新',

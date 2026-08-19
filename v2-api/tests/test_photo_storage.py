@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
@@ -100,6 +101,29 @@ def test_pinned_https_connection_preserves_original_host_for_sni(monkeypatch) ->
 
     assert connection.sock is wrapped_socket
     assert server_names == ["images.example"]
+
+
+def test_pinned_https_handler_passes_inherited_ssl_context_to_connection(monkeypatch) -> None:
+    contexts: list[object] = []
+
+    class Response:
+        reason = "OK"
+
+    def request(connection, *_args, **_kwargs) -> None:  # noqa: ANN001
+        contexts.append(connection._context)
+
+    monkeypatch.setattr(photo_storage._PinnedHTTPSConnection, "request", request)
+    monkeypatch.setattr(photo_storage._PinnedHTTPSConnection, "getresponse", lambda _connection: Response())
+    handler = photo_storage._PinnedHTTPSHandler(("93.184.216.34",))
+    url = "https://images.example/photo.jpg"
+    request = urllib.request.Request(url)
+    request.timeout = 2
+
+    response = handler.https_open(request)
+
+    assert response.url == url
+    assert response.msg == "OK"
+    assert contexts == [handler._context]
 
 
 @pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.1.1", "::1"])

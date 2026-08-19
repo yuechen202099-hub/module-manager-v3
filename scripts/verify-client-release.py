@@ -84,12 +84,16 @@ REQUIRED_FILES = {
     "scripts/verify_v3_2_2_release.py",
     "scripts/verify_v3_2_3_release.py",
     "scripts/test_verify_v3_2_3_release.py",
+    "scripts/verify_v3_2_4_release.py",
+    "scripts/test_verify_v3_2_4_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
     "scripts/test_oss_local_export.py",
     "v2-api/scripts/preview_v3_1_backfill.py",
     "v2-api/scripts/verify_v3_1_release.py",
+    "v2-api/app/services/photo_storage.py",
+    "v2-api/tests/test_photo_storage.py",
     "v2-api/alembic/versions/0006_group_barcode_verification.py",
     "v2-api/alembic/versions/0007_group_barcode_verification_lease_token.py",
     "v2-api/alembic/versions/0008_delivery_cache_jobs.py",
@@ -111,6 +115,7 @@ REQUIRED_FILES = {
     "ops/releases/V3.2.1.md",
     "ops/releases/V3.2.2.md",
     "ops/releases/V3.2.3.md",
+    "ops/releases/V3.2.4.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.80.md",
@@ -351,11 +356,11 @@ def load_release_truth_parser():
     return module
 
 
-def load_v323_release_verifier():
-    path = Path(__file__).with_name("verify_v3_2_3_release.py")
-    spec = importlib.util.spec_from_file_location("package_v323_release", path)
+def load_v324_release_verifier():
+    path = Path(__file__).with_name("verify_v3_2_4_release.py")
+    spec = importlib.util.spec_from_file_location("package_v324_release", path)
     if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.3 release verifier")
+        fail("Unable to load V3.2.4 release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -633,10 +638,10 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
             fail("Release manifest must define exactly one semantic Version")
         package_version = manifest_versions[0]
-        current_release = load_v323_release_verifier()
+        current_release = load_v324_release_verifier()
         if package_version != current_release.VERSION:
             fail(
-                f"Release manifest Version must match the current V3.2.3 source contract: "
+                f"Release manifest Version must match the current V3.2.4 source contract: "
                 f"{current_release.VERSION}"
             )
         verify_release_markdown_documents(archive, names, package_version)

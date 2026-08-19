@@ -5,9 +5,9 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.2.3`
+- 生产维护分支：`production/V3/3.2.4`
 - 当前生产应用基线：`V3.2.2`
-- 当前发布候选版本：`V3.2.3`
+- 当前发布候选版本：`V3.2.4`
 - 当前生产 release：`/opt/module-manager-v2/releases/v3.2.2-20260729_033157`
 - 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.1-20260728_111144`
 - 当前生产提交：`5890a622b734c025be55da371287aae8c2d736e9`
@@ -74,7 +74,7 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest v2-api/tests
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.3
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.4
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py --help
 cd v2-web; npm run build
 ```

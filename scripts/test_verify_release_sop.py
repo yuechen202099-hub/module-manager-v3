@@ -29,22 +29,22 @@ def test_parses_current_deployed_baseline_and_release_candidate_markers() -> Non
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
     assert verifier.deployed_production_baseline(agents) == "V3.2.2"
-    assert verifier.release_candidate(agents) == "V3.2.3"
+    assert verifier.release_candidate(agents) == "V3.2.4"
 
 
 def test_cli_parses_version_and_rejects_unknown_arguments() -> None:
     verifier = load_verifier()
 
-    assert verifier.parse_args(["--version", "V3.2.3"]).version == "V3.2.3"
+    assert verifier.parse_args(["--version", "V3.2.4"]).version == "V3.2.4"
     with pytest.raises(SystemExit):
-        verifier.parse_args(["--version", "V3.2.3", "--unknown"])
+        verifier.parse_args(["--version", "V3.2.4", "--unknown"])
 
 
 def test_cli_version_must_match_the_release_candidate() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert verifier.validate_requested_candidate_version("V3.2.3", agents) == "V3.2.3"
+    assert verifier.validate_requested_candidate_version("V3.2.4", agents) == "V3.2.4"
     with pytest.raises(AssertionError, match="release candidate"):
         verifier.validate_requested_candidate_version("V3.1.1", agents)
 
@@ -52,7 +52,7 @@ def test_cli_version_must_match_the_release_candidate() -> None:
 def test_cli_verifies_the_current_release_contract() -> None:
     verifier = load_verifier()
 
-    assert verifier.main(["--version", "V3.2.3"]) == 0
+    assert verifier.main(["--version", "V3.2.4"]) == 0
 
 
 def test_v323_nested_release_inputs_accept_parent_directory_copy_semantics() -> None:
@@ -82,7 +82,7 @@ def test_v323_nested_release_inputs_accept_parent_directory_copy_semantics() -> 
 def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
-        "production/V3/3.2.3", "production/V3/3.0.81"
+        "production/V3/3.2.4", "production/V3/3.0.81"
     )
 
     with pytest.raises(AssertionError, match="maintenance branch"):
@@ -92,7 +92,7 @@ def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
 def test_rejects_inconsistent_release_candidate_maintenance_branch_markers() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
-        "- Release-candidate maintenance branch: `production/V3/3.2.3`.",
+        "- Release-candidate maintenance branch: `production/V3/3.2.4`.",
         "- Release-candidate maintenance branch: `production/V3/3.0.81`.",
         1,
     )
@@ -268,9 +268,9 @@ def test_v3083_release_record_contains_required_chinese_feature_titles() -> None
 def test_v323_manifest_records_the_release_candidate_package() -> None:
     manifest = (ROOT / "RELEASE_MANIFEST.md").read_text(encoding="utf-8")
 
-    assert "- Package: `build/server-release/module-manager-v2-server-3.2.3.zip`" in manifest
-    assert "- Name: `module-manager-v2-server-3.2.3.zip`" in manifest
-    assert "- Version: 3.2.3" in manifest
+    assert "- Package: `build/server-release/module-manager-v2-server-3.2.4.zip`" in manifest
+    assert "- Name: `module-manager-v2-server-3.2.4.zip`" in manifest
+    assert "- Version: 3.2.4" in manifest
 
 
 def test_v320_deployed_release_record_contains_required_release_evidence_contract() -> None:
@@ -406,7 +406,7 @@ def test_v3082_release_record_passes_the_deployed_baseline_gate() -> None:
             "deployed_production_baseline",
         ),
         (
-            "- Release candidate: `V3.2.3`.",
+            "- Release candidate: `V3.2.4`.",
             "- Release candidate: `V3.0.83`.",
             "release_candidate",
         ),
@@ -1085,7 +1085,7 @@ def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> No
     vite_config = (ROOT / "v2-web" / "vite.config.ts").read_text(encoding="utf-8")
 
     assert source_path.is_file()
-    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.2.3"}
+    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.2.4"}
     assert not legacy_source_path.exists()
     assert "from '../version.json'" in release_notes
     assert "APP_VERSION = versionArtifact.version" in release_notes

@@ -2,9 +2,9 @@
 
 ## Package
 
-- Package: `build/server-release/module-manager-v2-server-3.2.3.zip`
-- Name: `module-manager-v2-server-3.2.3.zip`
-- Version: 3.2.3
+- Package: `build/server-release/module-manager-v2-server-3.2.4.zip`
+- Name: `module-manager-v2-server-3.2.4.zip`
+- Version: 3.2.4
 - Generated at: pending
 - Size: pending
 - SHA256: pending
@@ -17,7 +17,7 @@
 - Vue production bundle under v2-api/app/static/vue
 - v2-web source required by docker-compose.yml
 - Alembic migration files
-- V3.2.0 historical boundaries, V3.2.1/V3.2.2 KPI history, and the V3.2.3 export-retirement, migration, signer, and OSS-local-export gates
+- V3.2.0 historical boundaries, V3.2.1/V3.2.2 KPI history, the immutable V3.2.3 export-retirement candidate, and the V3.2.4 HTTPS-compatibility, migration, signer, and OSS-local-export gates
 - Nginx retirement patcher, server migration and manifest signer, Windows-local downloader, verifier tests, operator SOP, and release record
 - JSON/PostgreSQL and photo migration scripts under v2-api/scripts
 - Requirements and Dockerfile
@@ -51,13 +51,13 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.3
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.4
 
 ## Pending Package Gates
 
 - Release smoke check must pass unless -SkipSmoke is used
 - Demo admin and constructor login are available only for local walkthrough when enabled
-- The three inverted historical export/UI gates and the V3.2.3 route, worker, migration, package, lifecycle, and local-export contract must pass
+- The three inverted historical export/UI gates, the retained V3.2.3 contract, and the V3.2.4 HTTPS, route, worker, migration, package, lifecycle, and local-export contract must pass
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
 - Production mode disables demo accounts by default

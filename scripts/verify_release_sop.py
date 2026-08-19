@@ -22,6 +22,8 @@ RELEASE_INPUTS = (
     "scripts/verify_v3_2_2_release.py",
     "scripts/verify_v3_2_3_release.py",
     "scripts/test_verify_v3_2_3_release.py",
+    "scripts/verify_v3_2_4_release.py",
+    "scripts/test_verify_v3_2_4_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -34,6 +36,8 @@ RELEASE_INPUTS = (
     "v2-api/app/schemas/export_center.py",
     "v2-api/app/services/data_center.py",
     "v2-api/app/services/export_center.py",
+    "v2-api/app/services/photo_storage.py",
+    "v2-api/tests/test_photo_storage.py",
     "v2-api/app/services/export_retirement.py",
     "v2-api/app/services/external_photo_oss_migration.py",
     "v2-api/scripts/build_oss_export_manifest.py",
@@ -48,6 +52,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.1.md",
     "ops/releases/V3.2.2.md",
     "ops/releases/V3.2.3.md",
+    "ops/releases/V3.2.4.md",
 )
 
 REQUIRED_FILES = [
@@ -837,6 +842,7 @@ def release_input_is_copied_by_build_script(path: str, build_script: str) -> boo
     directory_copy_markers = {
         "v2-api/alembic/": 'Copy-ReleaseItem "v2-api\\alembic" "v2-api\\alembic"',
         "v2-api/app/": 'Copy-ReleaseItem "v2-api\\app" "v2-api\\app"',
+        "v2-api/tests/": 'Copy-ReleaseItem "v2-api\\tests" "v2-api\\tests"',
         "v2-api/scripts/": 'Copy-ReleaseItem "v2-api\\scripts" "v2-api\\scripts"',
     }
     return windows_path in build_script or any(
