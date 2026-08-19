@@ -633,6 +633,77 @@ def test_report_part_symlink_is_rejected_without_overwriting_outside_target(
     assert outside.read_text(encoding="utf-8") == "original"
 
 
+def test_nonexistent_output_root_rejects_existing_symlink_ancestor_before_download(
+    tmp_path: Path,
+) -> None:
+    """Starting checks at a missing root must not skip an existing linked ancestor."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_ancestor = tmp_path / "link"
+    try:
+        linked_ancestor.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    output_root = linked_ancestor / "nested-output"
+    opened = False
+
+    def opener(*_args: object, **_kwargs: object) -> FakeResponse:
+        nonlocal opened
+        opened = True
+        return FakeResponse(IMAGE_BYTES)
+
+    with pytest.raises(ValueError, match="ancestor.*symlink|ancestor.*reparse"):
+        run_export(manifest_jsonl(1), output_root, opener=opener)
+    assert opened is False
+    assert list(outside.iterdir()) == []
+    assert not output_root.exists()
+
+
+def test_cli_returns_preflight_three_for_existing_symlink_ancestor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI must classify a linked output ancestor as preflight, not success."""
+    outside = tmp_path / "outside-cli"
+    outside.mkdir()
+    linked_ancestor = tmp_path / "cli-link"
+    try:
+        linked_ancestor.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    output_root = linked_ancestor / "nested-output"
+    header = {
+        "schema": SCHEMA,
+        "kind": "manifest",
+        "planned_count": 0,
+        "planned_bytes": 0,
+    }
+    monkeypatch.setattr(exporter.sys, "stdin", io.StringIO(json.dumps(header) + "\n"))
+
+    assert exporter.main(["--output", str(output_root)]) == 3
+    assert list(outside.iterdir()) == []
+    assert not output_root.exists()
+
+
+def test_windows_reparse_model_on_existing_output_ancestor_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ancestor traversal must consume the Windows reparse decision for each component."""
+    reparse_ancestor = exporter._lexical_absolute(tmp_path / "junction")
+    output_root = reparse_ancestor / "nested-output"
+    real_boundary = exporter._path_is_link_or_reparse
+
+    def modeled_boundary(path: Path) -> bool:
+        candidate = exporter._lexical_absolute(path)
+        if candidate == reparse_ancestor:
+            return True
+        return real_boundary(path)
+
+    monkeypatch.setattr(exporter, "_path_is_link_or_reparse", modeled_boundary)
+    with pytest.raises(ValueError, match="ancestor.*reparse"):
+        exporter.safe_output_path(output_root, "group/photo.jpg")
+
+
 @pytest.mark.parametrize(
     "text",
     [

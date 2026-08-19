@@ -325,6 +325,20 @@ def _path_is_link_or_reparse(path: Path) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
 
 
+def _assert_no_link_or_reparse_ancestors(path: Path) -> None:
+    absolute = _lexical_absolute(path)
+    parts = absolute.parts
+    if not parts:
+        raise ValueError("output root must be an absolute path")
+    current = Path(parts[0])
+    if _path_is_link_or_reparse(current):
+        raise ValueError("output root ancestor is a symlink or reparse point")
+    for segment in parts[1:]:
+        current /= segment
+        if _path_is_link_or_reparse(current):
+            raise ValueError("output root ancestor is a symlink or reparse point")
+
+
 def _assert_no_link_or_reparse_components(output_root: Path, target: Path) -> None:
     root = _lexical_absolute(output_root)
     candidate = _lexical_absolute(target)
@@ -332,9 +346,8 @@ def _assert_no_link_or_reparse_components(output_root: Path, target: Path) -> No
         relative = candidate.relative_to(root)
     except ValueError as exc:
         raise ValueError("relative_path escapes the output root") from exc
+    _assert_no_link_or_reparse_ancestors(root)
     current = root
-    if _path_is_link_or_reparse(current):
-        raise ValueError("output root must not be a symlink or reparse point")
     for segment in relative.parts:
         current /= segment
         if _path_is_link_or_reparse(current):
