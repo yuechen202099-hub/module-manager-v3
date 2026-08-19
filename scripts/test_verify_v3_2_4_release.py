@@ -94,6 +94,17 @@ def test_release_verifier_rejects_stale_version_surfaces(
     assert_rejected(tmp_repo, relative_path)
 
 
+def test_release_verifier_rejects_stale_active_v31_verifier_version(
+    tmp_repo: TemporaryRepository,
+) -> None:
+    tmp_repo.replace(
+        "v2-api/scripts/verify_v3_1_release.py",
+        'EXPECTED_VERSION = "3.2.4"',
+        'EXPECTED_VERSION = "3.2.3"',
+    )
+    assert_rejected(tmp_repo, "EXPECTED_VERSION must equal 3.2.4")
+
+
 def test_release_verifier_rejects_legacy_https_handler_keyword(
     tmp_repo: TemporaryRepository,
 ) -> None:

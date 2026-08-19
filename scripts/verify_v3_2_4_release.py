@@ -32,6 +32,7 @@ CONTRACT_PATHS = tuple(
     dict.fromkeys(
         (
             *legacy.CONTRACT_PATHS,
+            "v2-api/scripts/verify_v3_1_release.py",
             "v2-api/app/services/photo_storage.py",
             "v2-api/tests/test_photo_storage.py",
             RELEASE_PATH,
@@ -103,6 +104,11 @@ def _check_version_surfaces(root: Path, failures: list[str]) -> None:
                         fastapi_versions.append(str(keyword.value.value))
     if fastapi_versions != [VERSION]:
         failures.append(f"v2-api/app/main.py: FastAPI version must equal {VERSION} exactly once")
+
+    active_verifier_path = "v2-api/scripts/verify_v3_1_release.py"
+    active_verifier_tree = legacy._parse_python(root, active_verifier_path, failures)
+    if legacy._literal_assignment(active_verifier_tree, "EXPECTED_VERSION") != VERSION:
+        failures.append(f"{active_verifier_path}: EXPECTED_VERSION must equal {VERSION}")
 
     text_surfaces = {
         "v2-web/index.html": f"<title>Module Manager {DISPLAY_VERSION}</title>",
