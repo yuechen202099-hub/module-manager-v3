@@ -20,6 +20,12 @@ RELEASE_INPUTS = (
     "scripts/verify_v3_2_0_release.py",
     "scripts/verify_v3_2_1_installer_kpi_restore.py",
     "scripts/verify_v3_2_2_release.py",
+    "scripts/verify_v3_2_3_release.py",
+    "scripts/test_verify_v3_2_3_release.py",
+    "scripts/patch_export_retirement_nginx.py",
+    "scripts/test_patch_export_retirement_nginx.py",
+    "scripts/oss_local_export.py",
+    "scripts/test_oss_local_export.py",
     "v2-api/alembic/versions/0013_data_center_query_indexes.py",
     "v2-api/alembic/versions/0014_export_center_jobs.py",
     "v2-api/app/api/routes/groups.py",
@@ -28,19 +34,20 @@ RELEASE_INPUTS = (
     "v2-api/app/schemas/export_center.py",
     "v2-api/app/services/data_center.py",
     "v2-api/app/services/export_center.py",
+    "v2-api/app/services/export_retirement.py",
+    "v2-api/app/services/external_photo_oss_migration.py",
+    "v2-api/scripts/build_oss_export_manifest.py",
+    "v2-api/scripts/migrate_external_photos_to_oss.py",
     "v2-web/src/components/data-center/DataCenterFilters.vue",
     "v2-web/src/components/data-center/DataCenterReviewDialog.vue",
-    "v2-web/src/components/export-center/ExportCatalogTab.vue",
-    "v2-web/src/components/export-center/ExportJobsTable.vue",
-    "v2-web/src/components/export-center/TerminalDeliveryTab.vue",
     "v2-web/src/composables/useDataCenterQuery.ts",
-    "v2-web/src/composables/useExportCenterQuery.ts",
     "v2-web/src/utils/dataCenterDrilldown.ts",
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
     "ops/releases/V3.2.0.md",
     "ops/releases/V3.2.1.md",
     "ops/releases/V3.2.2.md",
+    "ops/releases/V3.2.3.md",
 )
 
 REQUIRED_FILES = [
@@ -53,6 +60,7 @@ REQUIRED_FILES = [
     "docs/sop/06-production-deploy-runbook.md",
     "docs/sop/07-rollback-and-incident-review.md",
     "docs/sop/08-business-acceptance-templates.md",
+    "docs/sop/09-export-retirement-and-oss-local-export.md",
     "ops/releases/README.md",
     "ops/releases/V3.0.84.md",
     "ops/releases/V3.1.1.md",
@@ -695,10 +703,47 @@ def candidate_release_record_is_pending(record: str, version: str, deployed_base
         fail(f"{version} pending release record must not claim production deployment")
 
 
+def structured_deployed_release_record_has_verified_evidence(record: str, version: str) -> bool:
+    semantic_version = version.removeprefix("V")
+    required_summary = (
+        f"# {version} Production Release Record",
+        "- Status: deployed",
+        "- Local Verification: passed",
+        "- Package: passed",
+        "- Production Deployment: passed",
+        "- Production Reconciliation: passed",
+    )
+    if any(marker not in record for marker in required_summary):
+        return False
+    source_commit = re.findall(r"(?m)^- 源码提交：`([0-9a-f]{40})`$", record)
+    current_release = re.findall(
+        rf"(?m)^- 当前 release：`(/opt/module-manager-v2/releases/v{re.escape(semantic_version)}-[^`]+)`$",
+        record,
+    )
+    backup_directory = re.findall(
+        rf"(?m)^- 上线前备份：`(/opt/module-manager-v2/backups/{re.escape(version)}-[^`]+)`$",
+        record,
+    )
+    local_hash = re.findall(r"(?m)^- 本地 SHA256：`([0-9A-F]{64})`$", record)
+    server_hash = re.findall(r"(?m)^- 服务器 SHA256：`([0-9A-F]{64})`$", record)
+    return (
+        len(source_commit) == 1
+        and len(current_release) == 1
+        and len(backup_directory) == 1
+        and len(local_hash) == 1
+        and server_hash == local_hash
+        and '- 本机 `/health`：`200`' in record
+        and '- 公网 `/health`：`200`' in record
+        and f"`production_health_check.py --expected-version {semantic_version}`：通过" in record
+    )
+
+
 def deployed_release_record_is_verified(record: str, version: str) -> None:
     version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
     if version_match is None or version_match.group("version") != version:
         fail(f"{version} release record must have a matching title")
+    if structured_deployed_release_record_has_verified_evidence(record, version):
+        return
     status = release_record_status(record)
     if normalize_claim_text(status).strip() != DEPLOYED_LIFECYCLE_STATUS:
         fail(
@@ -749,6 +794,19 @@ def validate_requested_candidate_version(version: str, agents: str) -> str:
     if requested != candidate:
         fail(f"Requested version {requested} does not match release candidate {candidate}")
     return candidate
+
+
+def release_input_is_copied_by_build_script(path: str, build_script: str) -> bool:
+    windows_path = path.replace("/", "\\")
+    directory_copy_markers = {
+        "v2-api/alembic/": 'Copy-ReleaseItem "v2-api\\alembic" "v2-api\\alembic"',
+        "v2-api/app/": 'Copy-ReleaseItem "v2-api\\app" "v2-api\\app"',
+        "v2-api/scripts/": 'Copy-ReleaseItem "v2-api\\scripts" "v2-api\\scripts"',
+    }
+    return windows_path in build_script or any(
+        path.startswith(prefix) and marker in build_script
+        for prefix, marker in directory_copy_markers.items()
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -802,7 +860,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in RELEASE_INPUTS:
         if path not in release_verifier:
             fail(f"verify-client-release.py must require release input {path}")
-        if path.replace("/", "\\") not in build_script:
+        if not release_input_is_copied_by_build_script(path, build_script):
             fail(f"build-client-release.ps1 must include release input {path}")
     for path in ["v2-api/scripts/preview_v3_1_backfill.py", "v2-api/scripts/verify_v3_1_release.py"]:
         if path not in release_verifier:

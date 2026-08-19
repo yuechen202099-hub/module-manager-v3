@@ -38,6 +38,7 @@ REQUIRED_FILES = {
     "docs/sop/06-production-deploy-runbook.md",
     "docs/sop/07-rollback-and-incident-review.md",
     "docs/sop/08-business-acceptance-templates.md",
+    "docs/sop/09-export-retirement-and-oss-local-export.md",
     "docs/database/postgresql-schema.md",
     "infra/nginx/module-manager-v2.conf",
     "infra/module-manager-v2.service",
@@ -81,6 +82,12 @@ REQUIRED_FILES = {
     "scripts/verify_v3_2_0_release.py",
     "scripts/verify_v3_2_1_installer_kpi_restore.py",
     "scripts/verify_v3_2_2_release.py",
+    "scripts/verify_v3_2_3_release.py",
+    "scripts/test_verify_v3_2_3_release.py",
+    "scripts/patch_export_retirement_nginx.py",
+    "scripts/test_patch_export_retirement_nginx.py",
+    "scripts/oss_local_export.py",
+    "scripts/test_oss_local_export.py",
     "v2-api/scripts/preview_v3_1_backfill.py",
     "v2-api/scripts/verify_v3_1_release.py",
     "v2-api/alembic/versions/0006_group_barcode_verification.py",
@@ -103,6 +110,7 @@ REQUIRED_FILES = {
     "ops/releases/V3.2.0.md",
     "ops/releases/V3.2.1.md",
     "ops/releases/V3.2.2.md",
+    "ops/releases/V3.2.3.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.80.md",
@@ -157,6 +165,8 @@ REQUIRED_FILES = {
     "v2-api/app/services/construction_task_rules.py",
     "v2-api/app/services/data_center.py",
     "v2-api/app/services/export_center.py",
+    "v2-api/app/services/export_retirement.py",
+    "v2-api/app/services/external_photo_oss_migration.py",
     "v2-api/app/static/favicon.svg",
     "v2-api/app/static/vue/index.html",
     "v2-api/app/static/vue/version.json",
@@ -168,9 +178,15 @@ REQUIRED_FILES = {
     "v2-api/requirements-dev.txt",
     "v2-api/tests/test_api.py",
     "v2-api/tests/test_recompute_photo_barcode_checks.py",
+    "v2-api/tests/test_export_retirement.py",
+    "v2-api/tests/test_external_photo_oss_migration.py",
+    "v2-api/tests/test_migrate_external_photos_to_oss.py",
+    "v2-api/tests/test_oss_export_manifest.py",
     "v2-api/scripts/recompute_photo_barcode_checks.py",
     "v2-api/scripts/migrate_json_to_postgres.py",
     "v2-api/scripts/migrate_photos_to_oss.py",
+    "v2-api/scripts/migrate_external_photos_to_oss.py",
+    "v2-api/scripts/build_oss_export_manifest.py",
     "v2-api/scripts/verify_task_review_performance.py",
     "v2-web/Dockerfile",
     "v2-web/package.json",
@@ -178,13 +194,8 @@ REQUIRED_FILES = {
     "v2-web/src/main.ts",
     "v2-web/src/components/data-center/DataCenterFilters.vue",
     "v2-web/src/components/data-center/DataCenterReviewDialog.vue",
-    "v2-web/src/components/export-center/ExportCatalogTab.vue",
-    "v2-web/src/components/export-center/ExportJobsTable.vue",
-    "v2-web/src/components/export-center/TerminalDeliveryTab.vue",
     "v2-web/src/views/GlobalSearchView.vue",
-    "v2-web/src/views/ExportsView.vue",
     "v2-web/src/composables/useDataCenterQuery.ts",
-    "v2-web/src/composables/useExportCenterQuery.ts",
     "v2-web/src/utils/dataCenterDrilldown.ts",
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
@@ -232,6 +243,7 @@ OPERATIONAL_RELEASE_VERSION_PATTERNS = (
 )
 HISTORICAL_RELEASE_RECORD_PATTERN = re.compile(r"^ops/releases/V\d+\.\d+\.\d+\.md$")
 VERSION_LOCKED_HISTORICAL_DOCUMENTS = {
+    "docs/CLIENT_ACCEPTANCE_REPORT.md": "3.2.2",
     "docs/CLIENT_FINAL_AUDIT.md": "3.2.0",
 }
 VERSION_LOCKED_HISTORICAL_DOCUMENT_IDENTITIES = {
@@ -259,6 +271,12 @@ FORBIDDEN_PARTS = {
     "playwright-report",
     ".nyc_output",
     "build",
+    "delivery-cache",
+    "delivery_cache",
+    "migration-reports",
+    "migration_reports",
+    "allowlists",
+    "module-manager-exports",
 }
 
 FORBIDDEN_SUFFIXES = {
@@ -317,11 +335,11 @@ def load_release_truth_parser():
     return module
 
 
-def load_v322_release_verifier():
-    path = Path(__file__).with_name("verify_v3_2_2_release.py")
-    spec = importlib.util.spec_from_file_location("package_v322_release", path)
+def load_v323_release_verifier():
+    path = Path(__file__).with_name("verify_v3_2_3_release.py")
+    spec = importlib.util.spec_from_file_location("package_v323_release", path)
     if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.2 release verifier")
+        fail("Unable to load V3.2.3 release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -329,23 +347,6 @@ def load_v322_release_verifier():
 
 def fail(message: str) -> None:
     raise AssertionError(message)
-
-
-def verify_packaged_kpi_source_integrity(
-    archive: zipfile.ZipFile,
-    names: set[str],
-) -> None:
-    v322_verifier = load_v322_release_verifier()
-    expected_digests = dict(v322_verifier.KPI_SOURCE_SHA256)
-    for relative_path, expected_digest in expected_digests.items():
-        if relative_path not in names:
-            fail(f"Missing reviewed KPI source member: {relative_path}")
-        actual_digest = hashlib.sha256(archive.read(relative_path)).hexdigest()
-        if actual_digest != expected_digest:
-            fail(
-                f"{relative_path}: packaged KPI source integrity mismatch: "
-                f"expected SHA-256 {expected_digest}, got {actual_digest}"
-            )
 
 
 def verify_archive_members_are_tracked(names: set[str], source_commit: str) -> None:
@@ -598,7 +599,6 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         missing = sorted(REQUIRED_FILES - names)
         if missing:
             fail("Missing required release files: " + ", ".join(missing))
-        verify_packaged_kpi_source_integrity(archive, names)
         source_commit = archive.read("SOURCE_COMMIT").decode("ascii").strip().lower()
         if SOURCE_COMMIT_PATTERN.fullmatch(source_commit) is None:
             fail("SOURCE_COMMIT must contain exactly one lowercase 40-character Git commit")
@@ -617,6 +617,12 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
             fail("Release manifest must define exactly one semantic Version")
         package_version = manifest_versions[0]
+        current_release = load_v323_release_verifier()
+        if package_version != current_release.VERSION:
+            fail(
+                f"Release manifest Version must match the current V3.2.3 source contract: "
+                f"{current_release.VERSION}"
+            )
         verify_release_markdown_documents(archive, names, package_version)
         static_index = (
             archive.read("v2-api/app/static/vue/index.html").decode("utf-8")

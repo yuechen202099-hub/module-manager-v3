@@ -2,9 +2,9 @@
 
 ## Package
 
-- Package: `build/server-release/module-manager-v2-server-3.2.2.zip`
-- Name: `module-manager-v2-server-3.2.2.zip`
-- Version: 3.2.2
+- Package: `build/server-release/module-manager-v2-server-3.2.3.zip`
+- Name: `module-manager-v2-server-3.2.3.zip`
+- Version: 3.2.3
 - Generated at: pending
 - Size: pending
 - SHA256: pending
@@ -17,7 +17,8 @@
 - Vue production bundle under v2-api/app/static/vue
 - v2-web source required by docker-compose.yml
 - Alembic migration files
-- V3.2.0 data-center/export-center boundaries, V3.2.1 KPI behavior gates, and the V3.2.2 KPI briefing UI gate
+- V3.2.0 historical boundaries, V3.2.1/V3.2.2 KPI history, and the V3.2.3 export-retirement, migration, signer, and OSS-local-export gates
+- Nginx retirement patcher, server migration and manifest signer, Windows-local downloader, verifier tests, operator SOP, and release record
 - JSON/PostgreSQL and photo migration scripts under v2-api/scripts
 - Requirements and Dockerfile
 - Client acceptance gate, demo startup, smoke-check, strict Vue migration verification, PostgreSQL cutover audit, production-readiness verification, and release verification scripts under scripts
@@ -29,8 +30,8 @@
 ## Excluded
 
 - Local virtual environments such as .venv
-- Local .env files and secrets
-- Runtime data, uploads, local databases, generated test results, and coverage output
+- Local `.env` files, PEM/key material, credentials, and allowlists
+- Runtime data, uploads, delivery caches, local databases, database dumps, migration reports, generated local exports, test results, and coverage output
 - Python caches such as __pycache__, .pyc, and .pytest_cache
 - Generated build/runtime folders outside this release package
 
@@ -50,13 +51,13 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.2
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.3
 
 ## Pending Package Gates
 
 - Release smoke check must pass unless -SkipSmoke is used
 - Demo admin and constructor login are available only for local walkthrough when enabled
-- V3.2.0 role, data-center, dashboard-drilldown, export-center, and single-export-entry boundaries plus V3.2.1 installer KPI behavior and V3.2.2 release gates must pass
+- The three inverted historical export/UI gates and the V3.2.3 route, worker, migration, package, lifecycle, and local-export contract must pass
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
 - Production mode disables demo accounts by default

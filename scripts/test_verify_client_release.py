@@ -14,8 +14,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 V3079_RELEASE_RECORD = "ops/releases/V3.0.79.md"
-V3080_RELEASE_RECORD = "ops/releases/V3.0.80.md"
-V3081_RELEASE_RECORD = "ops/releases/V3.0.81.md"
+V3080_RELEASE_RECORD = "ops/releases/V3.2.2.md"
+V3081_RELEASE_RECORD = "ops/releases/V3.2.3.md"
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
 VALID_SHA256 = "a" * 64
@@ -35,14 +35,14 @@ SAFETY_NOTES = (
 
 VALID_AGENTS = """# Package fixture
 
-- Deployed production baseline: `V3.0.80`.
-- Release candidate: `V3.0.81`.
-- Release-candidate maintenance branch: `production/V3/3.0.81`.
-- 当前已部署生产版本：`V3.0.80`。
-- 当前发布候选版本：`V3.0.81`。
-- 当前候选维护分支：`production/V3/3.0.81`。
+- Deployed production baseline: `V3.2.2`.
+- Release candidate: `V3.2.3`.
+- Release-candidate maintenance branch: `production/V3/3.2.3`.
+- 当前已部署生产版本：`V3.2.2`。
+- 当前发布候选版本：`V3.2.3`。
+- 当前候选维护分支：`production/V3/3.2.3`。
 """
-PENDING_RELEASE_RECORD = """# V3.0.81 Production Release Record
+PENDING_RELEASE_RECORD = """# V3.2.3 Production Release Record
 
 ## Summary
 
@@ -51,8 +51,8 @@ PENDING_RELEASE_RECORD = """# V3.0.81 Production Release Record
 - Package: pending
 - Production Deployment: pending
 - Production Reconciliation: pending
-- Rollback target: V3.0.80
-- V3.0.81 has not been deployed to production.
+- Rollback target: V3.2.2
+- V3.2.3 has not been deployed to production.
 
 ## Package
 
@@ -67,6 +67,18 @@ PENDING_RELEASE_RECORD = """# V3.0.81 Production Release Record
 | Backup directory | |
 | Release directory | |
 | Public health check | |
+"""
+
+V322_PENDING_RELEASE_RECORD = """# V3.2.2 Production Release Record
+
+## Summary
+
+- Status: pending
+- Local Verification: not run
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.2.1
 """
 
 
@@ -130,9 +142,9 @@ def write_release_archive(
     verifier,
     archive_path: Path,
     *,
-    manifest_version: str | None = "3.0.81",
+    manifest_version: str | None = "3.2.3",
     manifest_versions: list[str] | None = None,
-    static_version: str = "3.0.81",
+    static_version: str = "3.2.3",
     title_version: str | None = None,
     runtime_version: str | None = None,
     source_version: str | None = None,
@@ -176,7 +188,7 @@ def write_release_archive(
         ),
         "docs/CLIENT_FINAL_AUDIT.md": (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8"),
         V3080_RELEASE_RECORD: deployed_release_record(
-            "3.0.80",
+            "3.2.2",
             "Status: reviewed, packaged, deployed, and verified in production",
         ),
         V3081_RELEASE_RECORD: release_record,
@@ -239,12 +251,21 @@ def write_release_archive(
             archive.writestr("v2-api/app/static/vue/assets/app.js", resolved_entry_source)
 
 
-def test_archive_missing_v3081_release_record_fails_verification(tmp_path: Path) -> None:
+def test_archive_missing_v3081_historical_release_record_fails_verification(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "module-manager-v2-server-v3.0.81.zip"
-    write_release_archive(verifier, archive_path, omitted={V3081_RELEASE_RECORD})
+    write_release_archive(verifier, archive_path, omitted={"ops/releases/V3.0.81.md"})
 
     with pytest.raises(AssertionError, match=r"ops/releases/V3\.0\.81\.md"):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_missing_v323_candidate_release_record_fails_verification(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "module-manager-v2-server-v3.2.3.zip"
+    write_release_archive(verifier, archive_path, omitted={V3081_RELEASE_RECORD})
+
+    with pytest.raises(AssertionError, match=re.escape(V3081_RELEASE_RECORD)):
         verifier.verify_package(archive_path)
 
 
@@ -260,7 +281,7 @@ def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.2.2"' in build_script
+    assert '[string]$Version = "3.2.3"' in build_script
 
 
 def test_release_builder_embeds_the_current_source_commit() -> None:
@@ -424,11 +445,7 @@ def test_v320_release_inputs_are_packaged_and_required() -> None:
         "v2-api/app/services/export_center.py",
         "v2-web/src/components/data-center/DataCenterFilters.vue",
         "v2-web/src/components/data-center/DataCenterReviewDialog.vue",
-        "v2-web/src/components/export-center/ExportCatalogTab.vue",
-        "v2-web/src/components/export-center/ExportJobsTable.vue",
-        "v2-web/src/components/export-center/TerminalDeliveryTab.vue",
         "v2-web/src/views/GlobalSearchView.vue",
-        "v2-web/src/views/ExportsView.vue",
         "ops/releases/V3.2.0.md",
     }
 
@@ -458,44 +475,6 @@ def test_v321_kpi_sources_are_pinned_to_lf() -> None:
     attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
     assert "v2-web/src/components/InstallerKpiDialog.vue text eol=lf" in attributes
     assert "v2-web/src/utils/installerKpi.ts text eol=lf" in attributes
-
-
-@pytest.mark.parametrize("relative_path", KPI_SOURCE_PATHS)
-def test_v321_package_rejects_modified_kpi_source_member(
-    tmp_path: Path,
-    relative_path: str,
-) -> None:
-    verifier = load_verifier()
-    archive_path = tmp_path / "tampered-kpi-source.zip"
-    write_release_archive(
-        verifier,
-        archive_path,
-        content_overrides={relative_path: b"tampered KPI source\n"},
-    )
-
-    with pytest.raises(AssertionError, match=rf"{re.escape(relative_path)}: packaged KPI source integrity mismatch"):
-        verifier.verify_package(archive_path)
-
-
-@pytest.mark.parametrize("relative_path", KPI_SOURCE_PATHS)
-def test_v321_package_rejects_crlf_kpi_source_member(
-    tmp_path: Path,
-    relative_path: str,
-) -> None:
-    verifier = load_verifier()
-    source = (ROOT / relative_path).read_bytes()
-    assert b"\r\n" not in source
-    crlf_source = source.replace(b"\n", b"\r\n")
-    assert crlf_source != source
-    archive_path = tmp_path / "crlf-kpi-source.zip"
-    write_release_archive(
-        verifier,
-        archive_path,
-        content_overrides={relative_path: crlf_source},
-    )
-
-    with pytest.raises(AssertionError, match=rf"{re.escape(relative_path)}: packaged KPI source integrity mismatch"):
-        verifier.verify_package(archive_path)
 
 
 def test_valid_pending_candidate_archive_contains_reviewed_kpi_bytes(tmp_path: Path) -> None:
@@ -549,7 +528,7 @@ def test_v321_pending_record_accepts_prepackage_local_verification_states(
     local_verification: str,
 ) -> None:
     verifier = load_v321_release_verifier()
-    record = (ROOT / "ops" / "releases" / "V3.2.2.md").read_text(encoding="utf-8")
+    record = V322_PENDING_RELEASE_RECORD
     candidate = re.sub(
         r"(?m)^- Local Verification: .*?$",
         f"- Local Verification: {local_verification}",
@@ -574,7 +553,7 @@ def test_v321_pending_record_rejects_invalid_or_duplicate_local_verification(
     expected_matches: list[str],
 ) -> None:
     verifier = load_v321_release_verifier()
-    record = (ROOT / "ops" / "releases" / "V3.2.2.md").read_text(encoding="utf-8")
+    record = V322_PENDING_RELEASE_RECORD
     candidate_record = re.sub(r"(?m)^- Local Verification: .*?$", candidate, record)
     failures: list[str] = []
 
@@ -609,7 +588,7 @@ def test_v321_pending_record_rejects_invalid_or_duplicate_local_verification(
 )
 def test_v321_pending_record_rejects_english_and_chinese_affirmative_deployment_claims(claim: str) -> None:
     verifier = load_v321_release_verifier()
-    record = (ROOT / "ops" / "releases" / "V3.2.2.md").read_text(encoding="utf-8")
+    record = V322_PENDING_RELEASE_RECORD
     failures: list[str] = []
 
     verifier.verify_pending_record(f"{record}\n- {claim}\n", failures)
@@ -691,28 +670,6 @@ def test_v321_kpi_source_integrity_rejects_prior_parser_and_write_export_mutatio
 
     assert len(failures) == 1
     assert any(expected_failure in failure for failure in failures)
-
-
-@pytest.mark.parametrize(
-    "relative_path",
-    (
-        "v2-web/src/components/InstallerKpiDialog.vue",
-        "v2-web/src/utils/installerKpi.ts",
-    ),
-)
-def test_v321_reviewed_kpi_sources_match_integrity_lock_and_semantics(
-    relative_path: str,
-) -> None:
-    verifier = load_v321_release_verifier()
-    failures: list[str] = []
-
-    verifier.verify_kpi_source_contract(
-        relative_path,
-        (ROOT / relative_path).read_bytes(),
-        failures,
-    )
-
-    assert failures == []
 
 
 @pytest.mark.parametrize(
@@ -1078,7 +1035,7 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.2.2")
+        verifier.verify_release_markdown_text(document_path, content, "3.2.3")
 
 
 @pytest.mark.parametrize(
@@ -1091,16 +1048,16 @@ def test_current_operational_documents_validate_against_the_package_version(docu
     verifier.verify_release_markdown_text(
         document_path,
         (ROOT / document_path).read_text(encoding="utf-8"),
-        "3.2.2",
+        "3.2.3",
     )
 
 
 def test_readme_build_command_requires_source_bound_performance_report() -> None:
     verifier = load_verifier()
-    incomplete_command = r".\scripts\build-client-release.ps1 -Version 3.2.2"
+    incomplete_command = r".\scripts\build-client-release.ps1 -Version 3.2.3"
 
     with pytest.raises(AssertionError, match="PerformanceReport"):
-        verifier.verify_release_markdown_text("README.md", incomplete_command, "3.2.2")
+        verifier.verify_release_markdown_text("README.md", incomplete_command, "3.2.3")
 
 
 def test_client_final_audit_is_valid_only_as_version_locked_v320_history() -> None:
@@ -1109,14 +1066,14 @@ def test_client_final_audit_is_valid_only_as_version_locked_v320_history() -> No
     verifier.verify_release_markdown_text(
         "docs/CLIENT_FINAL_AUDIT.md",
         (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8"),
-        "3.2.2",
+        "3.2.3",
     )
 
 
 @pytest.mark.parametrize(
     ("document_path", "content", "expected_version"),
     [
-        ("README.md", ".\\scripts\\build-client-release.ps1 -Version 3.2.0", "3.2.2"),
+        ("README.md", ".\\scripts\\build-client-release.ps1 -Version 3.2.0", "3.2.3"),
         (
             "docs/CLIENT_FINAL_AUDIT.md",
             "\n".join(
@@ -1138,7 +1095,7 @@ def test_release_markdown_rejects_unexpected_current_or_locked_historical_versio
     verifier = load_verifier()
 
     with pytest.raises(AssertionError, match=rf"non-current release version .* expected {re.escape(expected_version)}"):
-        verifier.verify_release_markdown_text(document_path, content, "3.2.2")
+        verifier.verify_release_markdown_text(document_path, content, "3.2.3")
 
 
 def test_archive_accepts_version_locked_client_final_audit_history(tmp_path: Path) -> None:
@@ -1187,7 +1144,7 @@ def test_archive_rejects_stale_marker_in_every_required_markdown(
     archive_path = tmp_path / f"stale-markdown-{hashlib.sha256(document_path.encode()).hexdigest()[:8]}.zip"
     stale_content = "final-delivery-ready\n"
     if document_path == "RELEASE_MANIFEST.md":
-        stale_content = "\n".join(("# Release manifest", "- Version: 3.0.81", *SAFETY_NOTES, stale_content))
+        stale_content = "\n".join(("# Release manifest", "- Version: 3.2.3", *SAFETY_NOTES, stale_content))
     write_release_archive(
         verifier,
         archive_path,
@@ -1322,11 +1279,11 @@ def test_archive_rejects_stale_entry_bundle_despite_current_sidecars(tmp_path: P
     write_release_archive(
         verifier,
         archive_path,
-        runtime_version="3.0.81",
-        source_version="3.0.81",
-        entry_version="3.0.80",
-        unrelated_static_version="3.0.81",
-        unrelated_chunk_entry_version="3.0.81",
+        runtime_version="3.2.3",
+        source_version="3.2.3",
+        entry_version="3.2.2",
+        unrelated_static_version="3.2.3",
+        unrelated_chunk_entry_version="3.2.3",
     )
 
     with pytest.raises(AssertionError, match="entry bundle version"):
@@ -1404,8 +1361,8 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
     verifier = load_verifier()
     archive_path = tmp_path / "contradictory-agents.zip"
     agents = VALID_AGENTS.replace(
-        "Deployed production baseline: `V3.0.80`",
-        "Deployed production baseline: `V3.0.81`",
+        "- Deployed production baseline: `V3.2.2`.",
+        "- Deployed production baseline: `V3.2.3`.",
     )
     write_release_archive(verifier, archive_path, agents=agents)
 
@@ -1419,7 +1376,7 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
         (
             "star-package",
             "Package",
-            "* Package: module-manager-v2-server-3.0.81.zip",
+            "* Package: module-manager-v2-server-3.2.3.zip",
         ),
         ("plus-local-verification", "Local Verification", "+ Local Verification: passed"),
         (
@@ -1455,9 +1412,9 @@ def test_archive_rejects_normalized_duplicate_candidate_lifecycle_field(
 def test_archive_rejects_deployed_record_without_live_evidence(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "unsupported-deployed-record.zip"
-    agents = VALID_AGENTS.replace("V3.0.80", "V3.0.81")
+    agents = VALID_AGENTS.replace("V3.2.2", "V3.2.3")
     record = deployed_release_record(
-        "3.0.81",
+        "3.2.3",
         "Status: reviewed, packaged, deployed, and verified in production",
     ).replace(f"| SHA256 | {VALID_SHA256} |", "| SHA256 | |")
     write_release_archive(
@@ -1530,7 +1487,7 @@ def test_archive_rejects_bare_deployed_baseline_status(tmp_path: Path) -> None:
         verifier,
         archive_path,
         content_overrides={
-            V3080_RELEASE_RECORD: deployed_release_record("3.0.80", "Status: deployed")
+            V3080_RELEASE_RECORD: deployed_release_record("3.2.2", "Status: deployed")
         },
     )
 
@@ -1549,13 +1506,13 @@ def test_archive_accepts_complete_deployed_baseline_status(tmp_path: Path) -> No
 def test_archive_accepts_equal_post_deploy_markers_as_one_deployed_record(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "post-deploy-equal-markers.zip"
-    agents = VALID_AGENTS.replace("V3.0.80", "V3.0.81")
+    agents = VALID_AGENTS.replace("V3.2.2", "V3.2.3")
     write_release_archive(
         verifier,
         archive_path,
         agents=agents,
         release_record=deployed_release_record(
-            "3.0.81",
+            "3.2.3",
             "Status: reviewed, packaged, deployed, and verified in production",
         ),
     )

@@ -8,6 +8,15 @@ import urllib.request
 from pathlib import Path
 
 
+RETIRED_PATHS = (
+    "/exports",
+    "/exports/terminal-readiness",
+    "/local-test/export-manifest/final-delivery",
+    "/local-test/photo-barcode/review-groups/export",
+    "/local-test/unmatched/export",
+)
+
+
 def read_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -58,9 +67,20 @@ def main() -> int:
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
-    for path in ["/health", "/login", "/project-board", "/task-hall", "/construction"]:
+    for path in [
+        "/health",
+        "/login",
+        "/project-board",
+        "/global-search",
+        "/task-hall",
+        "/construction",
+    ]:
         assert_http_ok(f"{base_url}{path}")
     print("[OK] core public pages return 200")
+
+    for path in RETIRED_PATHS:
+        assert_http_status(f"{base_url}{path}", 410)
+    print("[OK] retired export paths return 410")
 
     for path in ["/docs", "/redoc", "/openapi.json"]:
         assert_http_status(f"{base_url}{path}", 404)

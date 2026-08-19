@@ -12,6 +12,17 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.3',
+    date: '2026-08-19',
+    type: '小更新',
+    title: '导出中心退休与 OSS 本机导出',
+    items: [
+      '导出中心和浏览器 CSV 导出已退休，服务器交付包与最终交付制品任务停止生成。',
+      '有效外链照片通过独立受控流程迁移到 OSS，不与应用发布或网页导出混合执行。',
+      '后续由服务器只读生成清单和短期签名，本机直接从 OSS 下载并完成文件、ZIP、CSV 或 Excel 组装。',
+    ],
+  },
+  {
     version: 'V3.2.2',
     date: '2026-07-29',
     type: '小更新',

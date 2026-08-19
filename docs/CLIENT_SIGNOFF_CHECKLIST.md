@@ -2,10 +2,10 @@
 
 本清单用于甲方第一版演示结束后的现场确认。签收范围是“模块更换项目管理器 V2.0 本地交付演示版”，不等同于公网生产部署版。
 
-## V3.2.2 生产包路径
+## V3.2.3 候选生产包路径
 
 ```text
-build/server-release/module-manager-v2-server-3.2.2.zip
+build/server-release/module-manager-v2-server-3.2.3.zip
 ```
 
 ## 演示入口
@@ -14,7 +14,7 @@ build/server-release/module-manager-v2-server-3.2.2.zip
 - 项目看板：`http://127.0.0.1:8000/project-board`
 - 任务派发：`http://127.0.0.1:8000/claim-tasks`
 - 数据中台：`http://127.0.0.1:8000/global-search`
-- 导出中心：`http://127.0.0.1:8000/exports`
+- 导出中心退休验证：`http://127.0.0.1:8000/exports` 必须返回 `410 Gone`
 - 异常处理：`http://127.0.0.1:8000/global-search` 中的未匹配证据筛选
 - 同步说明：`http://127.0.0.1:8000/sync-config`
 
