@@ -330,6 +330,66 @@ def test_v322_deployed_release_record_rejects_duplicate_package_field(
         verifier.deployed_release_record_is_verified(record, "V3.2.2")
 
 
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "- Rollback target: V3.2.1\n- Rollback target: V3.2.1",
+        "- Rollback target: V3.2.1\n- Rollback target: V3.2.0",
+        "",
+    ),
+)
+def test_v322_deployed_release_record_requires_one_rollback_target(
+    replacement: str,
+) -> None:
+    verifier = load_verifier()
+    record = (ROOT / "ops" / "releases" / "V3.2.2.md").read_text(encoding="utf-8")
+    record = record.replace("- Rollback target: V3.2.1", replacement, 1)
+
+    with pytest.raises(AssertionError, match="Rollback target.*exactly once"):
+        verifier.deployed_release_record_is_verified(record, "V3.2.2")
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    (
+        "- Rollback target: V3.2.2\n- Rollback target: V3.2.2",
+        "- Rollback target: V3.2.2\n- Rollback target: V3.2.1",
+        "",
+    ),
+)
+def test_candidate_release_record_requires_one_rollback_target(replacement: str) -> None:
+    verifier = load_verifier()
+    record = """# V3.2.3 Production Release Record
+
+- Status: pending
+- Local Verification: passed
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.2.2
+""".replace("- Rollback target: V3.2.2", replacement, 1)
+
+    with pytest.raises(AssertionError, match="Rollback target: V3.2.2 exactly once"):
+        verifier.candidate_release_record_is_pending(record, "V3.2.3", "V3.2.2")
+
+
+def test_candidate_and_deployed_records_accept_one_rollback_target() -> None:
+    verifier = load_verifier()
+    candidate = """# V3.2.3 Production Release Record
+
+- Status: pending
+- Local Verification: passed
+- Package: pending
+- Production Deployment: pending
+- Production Reconciliation: pending
+- Rollback target: V3.2.2
+"""
+    deployed = (ROOT / "ops" / "releases" / "V3.2.2.md").read_text(encoding="utf-8")
+
+    verifier.candidate_release_record_is_pending(candidate, "V3.2.3", "V3.2.2")
+    verifier.deployed_release_record_is_verified(deployed, "V3.2.2")
+
+
 def test_v3082_release_record_passes_the_deployed_baseline_gate() -> None:
     verifier = load_verifier()
     record = (ROOT / "ops" / "releases" / "V3.0.82.md").read_text(encoding="utf-8")

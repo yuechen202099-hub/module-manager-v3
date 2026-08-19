@@ -166,6 +166,30 @@ def test_release_verifier_rejects_retired_paths_hidden_in_dead_code(
     assert_rejected(tmp_repo, "retired path predicate")
 
 
+@pytest.mark.parametrize(
+    "terminator",
+    (
+        '    raise RuntimeError("stop before retirement return")\n',
+        "    return False\n",
+        '    if True:\n        raise RuntimeError("stop before retirement return")\n',
+        "    if True:\n        return False\n",
+    ),
+)
+def test_release_verifier_rejects_termination_before_retired_path_return(
+    tmp_repo: TemporaryRepository,
+    terminator: str,
+) -> None:
+    marker = '''    return (
+        normalized == "/exports"'''
+    tmp_repo.replace(
+        "v2-api/app/services/export_retirement.py",
+        marker,
+        terminator + marker,
+    )
+
+    assert_rejected(tmp_repo, "retired path predicate")
+
+
 def test_release_verifier_requires_retirement_before_authentication(
     tmp_repo: TemporaryRepository,
 ) -> None:
@@ -338,6 +362,75 @@ def test_release_verifier_rejects_dead_manifest_yield_before_item_stream(
     )
 
     assert_rejected(tmp_repo, "header first")
+
+
+@pytest.mark.parametrize(
+    "terminator",
+    (
+        '    raise RuntimeError("stop before manifest")\n',
+        "    return\n",
+        '    if True:\n        raise RuntimeError("stop before manifest")\n',
+        "    if True:\n        return\n",
+    ),
+)
+def test_release_verifier_rejects_termination_before_manifest_header(
+    tmp_repo: TemporaryRepository,
+    terminator: str,
+) -> None:
+    marker = '''    yield {
+        "schema": SCHEMA,
+        "kind": "manifest",'''
+    tmp_repo.replace(
+        "v2-api/scripts/build_oss_export_manifest.py",
+        marker,
+        terminator + marker,
+    )
+
+    assert_rejected(tmp_repo, "header first")
+
+
+@pytest.mark.parametrize(
+    "premature_effect",
+    (
+        '    yield {"kind": "item"}\n',
+        '    signer("premature", 60)\n',
+        '    if True:\n        signer("premature", 60)\n',
+        '    early_signer = signer\n    early_signer("premature", 60)\n',
+    ),
+)
+def test_release_verifier_rejects_item_or_signing_before_manifest_header(
+    tmp_repo: TemporaryRepository,
+    premature_effect: str,
+) -> None:
+    marker = '''    yield {
+        "schema": SCHEMA,
+        "kind": "manifest",'''
+    tmp_repo.replace(
+        "v2-api/scripts/build_oss_export_manifest.py",
+        marker,
+        premature_effect + marker,
+    )
+
+    assert_rejected(tmp_repo, "header first")
+
+
+def test_release_verifier_allows_nonterminating_setup_before_live_targets(
+    tmp_repo: TemporaryRepository,
+) -> None:
+    tmp_repo.replace(
+        "v2-api/app/services/export_retirement.py",
+        "def is_retired_export_path(path: str) -> bool:\n",
+        'def is_retired_export_path(path: str) -> bool:\n    """Classify live request paths."""\n    audit_marker = path\n',
+    )
+    tmp_repo.replace(
+        "v2-api/scripts/build_oss_export_manifest.py",
+        ") -> Iterator[dict[str, Any]]:\n    if not 60 <= expires_seconds <= 600:",
+        ') -> Iterator[dict[str, Any]]:\n    """Emit the header before signed items."""\n    audit_scope = scope\n    if not 60 <= expires_seconds <= 600:',
+    )
+
+    failures = failures_for(tmp_repo)
+    assert not any("retired path predicate" in failure for failure in failures), failures
+    assert not any("header first" in failure for failure in failures), failures
 
 
 @pytest.mark.parametrize(

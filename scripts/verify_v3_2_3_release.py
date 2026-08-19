@@ -253,13 +253,92 @@ def _import_and_alias_bindings(tree: ast.AST | None) -> dict[str, str]:
     return bindings
 
 
+def _static_truth(node: ast.AST) -> bool | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        value = _static_truth(node.operand)
+        return None if value is None else not value
+    return None
+
+
+def _statements_guarantee_termination(statements: list[ast.stmt]) -> bool:
+    return any(_statement_guarantees_termination(statement) for statement in statements)
+
+
+def _statement_guarantees_termination(statement: ast.stmt) -> bool:
+    if isinstance(statement, (ast.Raise, ast.Return)):
+        return True
+    if not isinstance(statement, ast.If):
+        return False
+    truth = _static_truth(statement.test)
+    if truth is True:
+        return _statements_guarantee_termination(statement.body)
+    if truth is False:
+        return _statements_guarantee_termination(statement.orelse)
+    return bool(statement.orelse) and _statements_guarantee_termination(
+        statement.body
+    ) and _statements_guarantee_termination(statement.orelse)
+
+
+def _expression_has_manifest_preheader_effect(
+    node: ast.AST | None, bindings: dict[str, str]
+) -> bool:
+    if node is None:
+        return False
+    for child in ast.walk(node):
+        if isinstance(child, ast.Yield):
+            return True
+        if isinstance(child, ast.Call):
+            qualified = _qualified_reference(child.func, bindings)
+            if qualified.rsplit(".", 1)[-1] == "signer":
+                return True
+    return False
+
+
+def _statements_have_manifest_preheader_effect(
+    statements: list[ast.stmt], bindings: dict[str, str]
+) -> bool:
+    for statement in statements:
+        if _statement_has_manifest_preheader_effect(statement, bindings):
+            return True
+        if _statement_guarantees_termination(statement):
+            return False
+    return False
+
+
+def _statement_has_manifest_preheader_effect(
+    statement: ast.stmt, bindings: dict[str, str]
+) -> bool:
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return False
+    if isinstance(statement, ast.If):
+        if _expression_has_manifest_preheader_effect(statement.test, bindings):
+            return True
+        truth = _static_truth(statement.test)
+        if truth is True:
+            return _statements_have_manifest_preheader_effect(statement.body, bindings)
+        if truth is False:
+            return _statements_have_manifest_preheader_effect(statement.orelse, bindings)
+        return _statements_have_manifest_preheader_effect(
+            statement.body, bindings
+        ) or _statements_have_manifest_preheader_effect(statement.orelse, bindings)
+    return _expression_has_manifest_preheader_effect(statement, bindings)
+
+
 def _retired_path_predicate_is_reachable(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> bool:
-    returns = [statement for statement in function.body if isinstance(statement, ast.Return)]
-    if len(returns) != 1 or not isinstance(returns[0].value, ast.BoolOp):
+    reachable_return = None
+    for statement in function.body:
+        if isinstance(statement, ast.Return):
+            reachable_return = statement
+            break
+        if _statement_guarantees_termination(statement):
+            return False
+    if reachable_return is None or not isinstance(reachable_return.value, ast.BoolOp):
         return False
-    expression = returns[0].value
+    expression = reachable_return.value
     if not isinstance(expression.op, ast.Or) or len(expression.values) != 3:
         return False
 
@@ -590,22 +669,26 @@ def _check_migration_and_manifest(root: Path, failures: list[str]) -> None:
                 if any(isinstance(argument, ast.Name) for argument in node.args):
                     failures.append(f"{signer_path}: manifest query must remain scalar-only")
     iterators = _functions(signer_tree, "iter_manifest_rows")
-    yield_dicts = []
-    if len(iterators) == 1:
-        yield_dicts = [
-            statement.value.value
-            for statement in iterators[0].body
-            if isinstance(statement, ast.Expr)
-            and isinstance(statement.value, ast.Yield)
-            and isinstance(statement.value.value, ast.Dict)
-        ]
     first_kind = None
-    if yield_dicts:
-        first_kind = {
-            key.value: value.value
-            for key, value in zip(yield_dicts[0].keys, yield_dicts[0].values)
-            if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
-        }.get("kind")
+    if len(iterators) == 1:
+        bindings = _import_and_alias_bindings(iterators[0])
+        for statement in iterators[0].body:
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Yield)
+                and isinstance(statement.value.value, ast.Dict)
+            ):
+                yield_dict = statement.value.value
+                first_kind = {
+                    key.value: value.value
+                    for key, value in zip(yield_dict.keys, yield_dict.values)
+                    if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
+                }.get("kind")
+                break
+            if _statement_has_manifest_preheader_effect(statement, bindings):
+                break
+            if _statement_guarantees_termination(statement):
+                break
     if first_kind != "manifest":
         failures.append(f"{signer_path}: manifest stream must emit its header first")
     signer_source = _read(root, signer_path, failures)

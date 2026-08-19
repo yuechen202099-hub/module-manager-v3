@@ -752,6 +752,7 @@ def validate_structured_deployed_lifecycle_fields(record: str, version: str) -> 
         "Package": "passed",
         "Production Deployment": "passed",
         "Production Reconciliation": "passed",
+        "Rollback target": None,
     }
     lifecycle_values = release_record_lifecycle_values(record, tuple(required_fields))
     if not any(lifecycle_values[field] for field in tuple(required_fields)[1:]):
@@ -759,9 +760,13 @@ def validate_structured_deployed_lifecycle_fields(record: str, version: str) -> 
     for field, expected in required_fields.items():
         values = lifecycle_values[field]
         if len(values) != 1:
-            fail(f"{version} release record must define {field}: {expected} exactly once")
+            expected_suffix = f": {expected}" if expected is not None else ""
+            fail(
+                f"{version} release record must define {field}{expected_suffix} exactly once"
+            )
     return all(
-        normalize_text(lifecycle_values[field][0]).strip() == normalize_text(expected)
+        expected is None
+        or normalize_text(lifecycle_values[field][0]).strip() == normalize_text(expected)
         for field, expected in required_fields.items()
     )
 
