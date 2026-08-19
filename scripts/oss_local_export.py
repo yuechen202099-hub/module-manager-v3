@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import time
 import unicodedata
@@ -101,8 +102,12 @@ _WINDOWS_RESERVED_NAMES = frozenset(
         "AUX",
         "NUL",
         "CLOCK$",
+        "CONIN$",
+        "CONOUT$",
         *(f"COM{index}" for index in range(1, 10)),
         *(f"LPT{index}" for index in range(1, 10)),
+        *(f"COM{index}" for index in ("¹", "²", "³")),
+        *(f"LPT{index}" for index in ("¹", "²", "³")),
     }
 )
 _LOCAL_EXPORT_OUTPUTS = frozenset(
@@ -176,6 +181,21 @@ def _validated_download_url(value: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class ManifestMetadata:
+    schema: str
+    kind: str
+    group_id: str
+    photo_id: str
+    category: str
+    relative_path: str
+    storage_bucket: str
+    storage_key: str
+    sha256: str
+    byte_size: int
+    content_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class ManifestItem:
     schema: str
     kind: str
@@ -189,6 +209,21 @@ class ManifestItem:
     byte_size: int
     content_type: str
     download_url: str
+
+    def metadata(self) -> ManifestMetadata:
+        return ManifestMetadata(
+            schema=self.schema,
+            kind=self.kind,
+            group_id=self.group_id,
+            photo_id=self.photo_id,
+            category=self.category,
+            relative_path=self.relative_path,
+            storage_bucket=self.storage_bucket,
+            storage_key=self.storage_key,
+            sha256=self.sha256,
+            byte_size=self.byte_size,
+            content_type=self.content_type,
+        )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ManifestItem":
@@ -220,7 +255,7 @@ class ManifestItem:
 
 @dataclass(frozen=True, slots=True)
 class ItemResult:
-    item: ManifestItem
+    item: ManifestMetadata
     succeeded: bool
     local_path: str | None
     downloaded_bytes: int
@@ -230,7 +265,7 @@ class ItemResult:
     @classmethod
     def success(cls, item: ManifestItem, target: Path, size: int) -> "ItemResult":
         return cls(
-            item=item,
+            item=item.metadata(),
             succeeded=True,
             local_path=str(target.resolve()),
             downloaded_bytes=size,
@@ -241,7 +276,7 @@ class ItemResult:
     @classmethod
     def failure(cls, item: ManifestItem, error: str) -> "ItemResult":
         return cls(
-            item=item,
+            item=item.metadata(),
             succeeded=False,
             local_path=None,
             downloaded_bytes=0,
@@ -252,7 +287,7 @@ class ItemResult:
 
 @dataclass(frozen=True, slots=True)
 class ExportReport:
-    items: tuple[ManifestItem, ...]
+    items: tuple[ManifestMetadata, ...]
     results: tuple[ItemResult, ...]
     planned_bytes: int
     output_root: Path
@@ -275,15 +310,48 @@ class ExportReport:
         return sum(result.downloaded_bytes for result in self.results)
 
 
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _path_is_link_or_reparse(path: Path) -> bool:
+    try:
+        metadata = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+
+
+def _assert_no_link_or_reparse_components(output_root: Path, target: Path) -> None:
+    root = _lexical_absolute(output_root)
+    candidate = _lexical_absolute(target)
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("relative_path escapes the output root") from exc
+    current = root
+    if _path_is_link_or_reparse(current):
+        raise ValueError("output root must not be a symlink or reparse point")
+    for segment in relative.parts:
+        current /= segment
+        if _path_is_link_or_reparse(current):
+            raise ValueError("relative_path contains a symlink or reparse point")
+
+
+def _assert_safe_download_paths(output_root: Path, target: Path, part: Path) -> None:
+    _assert_no_link_or_reparse_components(output_root, target)
+    _assert_no_link_or_reparse_components(output_root, part)
+
+
 def safe_output_path(output_root: Path, relative_path: str) -> Path:
     """Return a path beneath output_root after platform-independent validation."""
     safe_relative_path = _validated_relative_path(relative_path)
-    root = output_root.resolve(strict=False)
-    target = (root / Path(*safe_relative_path.split("/"))).resolve(strict=False)
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("relative_path escapes the output root") from exc
+    root = _lexical_absolute(output_root)
+    target = root / Path(*safe_relative_path.split("/"))
+    _assert_no_link_or_reparse_components(root, target)
     return target
 
 
@@ -310,16 +378,23 @@ def _download_one(
     sleeper: Callable[[float], None],
     retry_delays: tuple[float, ...],
 ) -> ItemResult:
-    target = safe_output_path(output_root, item.relative_path)
-    part = target.with_name(target.name + ".part")
-    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target = safe_output_path(output_root, item.relative_path)
+        part = target.with_name(target.name + ".part")
+    except Exception as exc:
+        return ItemResult.failure(item, sanitize_error(exc))
     for attempt in range(len(retry_delays) + 1):
         try:
-            part.unlink(missing_ok=True)
+            _assert_safe_download_paths(output_root, target, part)
+            cleanup_error = _cleanup_part(part)
+            if cleanup_error:
+                raise RuntimeError(f"temporary file cleanup failed: {cleanup_error}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _assert_safe_download_paths(output_root, target, part)
             digest = hashlib.sha256()
             size = 0
             with opener(item.download_url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
-                with part.open("wb") as output:
+                with part.open("xb") as output:
                     while True:
                         chunk = response.read(CHUNK_SIZE)
                         if not chunk:
@@ -338,14 +413,28 @@ def _download_one(
             observed_sha256 = digest.hexdigest()
             if observed_sha256 != item.sha256:
                 raise ValueError("sha256 mismatch")
+            _assert_safe_download_paths(output_root, target, part)
             os.replace(part, target)
             return ItemResult.success(item, target, size)
         except Exception as exc:
-            part.unlink(missing_ok=True)
-            if attempt == len(retry_delays):
-                return ItemResult.failure(item, sanitize_error(exc))
+            error = sanitize_error(exc)
+            cleanup_error = _cleanup_part(part)
+            if cleanup_error:
+                error = f"{error}; temporary file cleanup failed: {cleanup_error}"
+            if cleanup_error or attempt == len(retry_delays):
+                return ItemResult.failure(item, error)
             sleeper(retry_delays[attempt])
     raise AssertionError("unreachable")
+
+
+def _cleanup_part(part: Path) -> str | None:
+    try:
+        if _path_is_link_or_reparse(part):
+            return "temporary path is a symlink or reparse point"
+        part.unlink(missing_ok=True)
+    except Exception as exc:
+        return sanitize_error(exc)
+    return None
 
 
 def download_manifest(
@@ -378,7 +467,7 @@ def download_manifest(
         raise ValueError("retry_delays must be a tuple of non-negative numbers")
 
     iterator = iter(items)
-    submitted_items: list[ManifestItem] = []
+    submitted_items: list[ManifestMetadata] = []
     results_by_index: dict[int, ItemResult] = {}
     used_runtime_paths: set[str] = {
         _collision_key(path)
@@ -401,14 +490,22 @@ def download_manifest(
                 safe_output_path(output_root, item.relative_path)
                 final_key = _collision_key(item.relative_path)
                 part_key = _collision_key(item.relative_path + ".part")
-                if final_key in used_runtime_paths or part_key in used_runtime_paths:
+                if any(
+                    final_key == used_path
+                    or final_key.startswith(used_path + "/")
+                    or used_path.startswith(final_key + "/")
+                    or part_key == used_path
+                    or part_key.startswith(used_path + "/")
+                    or used_path.startswith(part_key + "/")
+                    for used_path in used_runtime_paths
+                ):
                     raise ValueError(
                         "duplicate relative_path or reserved runtime path is not allowed: "
                         f"{item.relative_path}"
                     )
                 used_runtime_paths.update((final_key, part_key))
                 index = len(submitted_items)
-                submitted_items.append(item)
+                submitted_items.append(item.metadata())
                 future = executor.submit(
                     _download_one,
                     item,
@@ -418,6 +515,7 @@ def download_manifest(
                     retry_delays=retry_delays,
                 )
                 pending[future] = index
+                del item
             if not pending:
                 continue
             completed, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
@@ -438,9 +536,19 @@ def download_manifest(
 
 
 def _parse_json_object(line: str, *, context: str) -> Mapping[str, Any]:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
     try:
-        value = json.loads(line)
-    except (TypeError, json.JSONDecodeError) as exc:
+        value = json.loads(line, object_pairs_hook=unique_object)
+    except ValueError as exc:
+        if "duplicate JSON key:" in str(exc):
+            raise ValueError(f"{context} contains {exc}") from exc
         raise ValueError(f"{context} must be valid JSON") from exc
     if not isinstance(value, Mapping):
         raise ValueError(f"{context} must be a JSON object")
@@ -540,14 +648,16 @@ def _sanitized_row(result: ItemResult) -> dict[str, Any]:
 
 
 def _sanitize_artifact_text(value: str) -> str:
-    sanitized = value.replace("\r", " ").replace("\n", " ")
+    sanitized = "".join(" " if ord(character) < 32 else character for character in value)
     sanitized = _URL_RE.sub("[redacted-url]", sanitized)
     return _SECRET_QUERY_RE.sub("[redacted-query]", sanitized)
 
 
 def _spreadsheet_text(value: Any) -> Any:
-    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
-        return "'" + value
+    if isinstance(value, str):
+        first_meaningful = value.lstrip()
+        if first_meaningful.startswith(("=", "+", "-", "@")):
+            return "'" + value
     return value
 
 
@@ -557,10 +667,25 @@ def _fsync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
-def _atomic_csv(report: ExportReport, target: Path) -> None:
+def _prepare_atomic_artifact(target: Path) -> Path:
     part = target.with_name(target.name + ".part")
+    _assert_safe_download_paths(target.parent, target, part)
+    cleanup_error = _cleanup_part(part)
+    if cleanup_error:
+        raise ValueError(f"temporary artifact cleanup failed: {cleanup_error}")
+    _assert_safe_download_paths(target.parent, target, part)
+    return part
+
+
+def _replace_atomic_artifact(part: Path, target: Path) -> None:
+    _assert_safe_download_paths(target.parent, target, part)
+    os.replace(part, target)
+
+
+def _atomic_csv(report: ExportReport, target: Path) -> None:
+    part = _prepare_atomic_artifact(target)
     try:
-        with part.open("w", encoding="utf-8-sig", newline="") as handle:
+        with part.open("x", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=TABULAR_FIELDS)
             writer.writeheader()
             for result in report.results:
@@ -572,9 +697,9 @@ def _atomic_csv(report: ExportReport, target: Path) -> None:
                 )
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(part, target)
+        _replace_atomic_artifact(part, target)
     finally:
-        part.unlink(missing_ok=True)
+        _cleanup_part(part)
 
 
 def _format_sheet(sheet: Any, headers: Sequence[str], row_count: int) -> None:
@@ -588,7 +713,7 @@ def _format_sheet(sheet: Any, headers: Sequence[str], row_count: int) -> None:
 
 
 def _atomic_xlsx(report: ExportReport, target: Path) -> None:
-    part = target.with_name(target.name + ".part")
+    part = _prepare_atomic_artifact(target)
     try:
         workbook = Workbook()
         manifest_sheet = workbook.active
@@ -616,25 +741,27 @@ def _atomic_xlsx(report: ExportReport, target: Path) -> None:
                 [_spreadsheet_text(row[field]) for field in failure_headers]
             )
         _format_sheet(failure_sheet, failure_headers, len(failures))
-        workbook.save(part)
-        _fsync_file(part)
-        os.replace(part, target)
+        with part.open("xb") as handle:
+            workbook.save(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace_atomic_artifact(part, target)
     finally:
-        part.unlink(missing_ok=True)
+        _cleanup_part(part)
 
 
 def _atomic_zip(report: ExportReport, target: Path) -> None:
-    part = target.with_name(target.name + ".part")
+    part = _prepare_atomic_artifact(target)
     try:
-        with ZipFile(part, mode="w", compression=ZIP_DEFLATED, allowZip64=True) as archive:
+        with ZipFile(part, mode="x", compression=ZIP_DEFLATED, allowZip64=True) as archive:
             for result in report.results:
                 if not result.succeeded or not result.local_path:
                     continue
                 archive.write(result.local_path, arcname=result.item.relative_path)
         _fsync_file(part)
-        os.replace(part, target)
+        _replace_atomic_artifact(part, target)
     finally:
-        part.unlink(missing_ok=True)
+        _cleanup_part(part)
 
 
 def _atomic_report(report: ExportReport, target: Path) -> None:
@@ -650,16 +777,16 @@ def _atomic_report(report: ExportReport, target: Path) -> None:
         "complete": report.failed == 0,
         "items": [_sanitized_row(result) for result in report.results],
     }
-    part = target.with_name(target.name + ".part")
+    part = _prepare_atomic_artifact(target)
     try:
-        with part.open("w", encoding="utf-8", newline="\n") as handle:
+        with part.open("x", encoding="utf-8", newline="\n") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(part, target)
+        _replace_atomic_artifact(part, target)
     finally:
-        part.unlink(missing_ok=True)
+        _cleanup_part(part)
 
 
 def _validated_formats(formats: set[str] | None) -> set[str]:
@@ -681,6 +808,7 @@ def run_export_stream(
     """Consume the manifest header eagerly and item lines only under backpressure."""
     selected_formats = _validated_formats(formats)
     planned_count, planned_bytes = _parse_header(input_stream)
+    _assert_no_link_or_reparse_components(output_root, output_root)
     _check_disk_space(output_root, planned_bytes, selected_formats)
     item_iterator = _iter_stream_items(
         input_stream,
@@ -699,7 +827,9 @@ def run_export_stream(
     if report.planned != planned_count or report.planned_bytes != planned_bytes:
         raise ValueError("manifest preflight totals do not match downloaded items")
 
+    _assert_no_link_or_reparse_components(output_root, output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    _assert_no_link_or_reparse_components(output_root, output_root)
     if "zip" in selected_formats:
         _atomic_zip(report, output_root / "photos.zip")
     if "csv" in selected_formats:

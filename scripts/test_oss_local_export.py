@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import io
 import json
+import os
+import stat
 import shutil
 import threading
 import time
 from collections import namedtuple
+from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterable
 from urllib.error import HTTPError
 from zipfile import ZipFile
@@ -430,6 +435,204 @@ def test_pending_futures_bound_applies_backpressure_to_lazy_items(tmp_path: Path
     assert outcome[0].succeeded == 20
 
 
+def test_completed_report_releases_all_signed_urls_after_bounded_run(tmp_path: Path) -> None:
+    """Keeping ManifestItem in report/result must retain every completed signed URL."""
+    items = [
+        manifest_item(
+            group_id=str(index),
+            photo_id=str(index),
+            relative_path=f"g{index}/photo.jpg",
+            storage_key=f"objects/{index}.jpg",
+            download_url=(
+                f"https://oss.invalid/{index}.jpg?Signature=secret-{index}"
+            ),
+        )
+        for index in range(24)
+    ]
+    report = download_manifest(items, tmp_path, max_workers=4, opener=fake_oss_opener)
+
+    rendered = repr(report) + json.dumps(asdict(report), default=str)
+    assert "https://" not in rendered
+    assert "Signature=" not in rendered
+    assert "download_url" not in rendered
+    assert all(not hasattr(item, "download_url") for item in report.items)
+    assert all(not hasattr(result.item, "download_url") for result in report.results)
+    assert report.succeeded == 24
+
+
+@pytest.mark.parametrize(
+    "relative_paths",
+    [
+        ("a", "a/child.jpg"),
+        ("a/child.jpg", "A"),
+        ("export-report.json/child.jpg",),
+        ("photos.zip.part/child",),
+    ],
+)
+def test_file_directory_prefix_collisions_are_rejected(
+    tmp_path: Path, relative_paths: tuple[str, ...]
+) -> None:
+    """Comparing only complete path strings must miss file/directory aliases."""
+    items = [
+        manifest_item(
+            group_id=str(index),
+            photo_id=str(index),
+            relative_path=relative_path,
+            storage_key=f"objects/{index}.jpg",
+        )
+        for index, relative_path in enumerate(relative_paths)
+    ]
+    with pytest.raises(ValueError, match="relative_path"):
+        download_manifest(
+            items,
+            tmp_path,
+            max_workers=1,
+            retry_delays=(),
+            opener=fake_oss_opener,
+        )
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "safe/CONIN$/photo.jpg",
+        "safe/CONOUT$.txt",
+        "safe/COM¹.jpg",
+        "safe/COM²",
+        "safe/COM³.png",
+        "safe/LPT¹.jpg",
+        "safe/LPT²",
+        "safe/LPT³.png",
+    ],
+)
+def test_extended_windows_device_aliases_are_rejected(relative_path: str) -> None:
+    """An incomplete device set must permit Windows console/device aliases."""
+    with pytest.raises(ValueError, match="reserved name"):
+        ManifestItem.from_mapping(valid_row(relative_path=relative_path))
+
+
+def test_existing_symlink_component_is_rejected_before_outside_write(
+    tmp_path: Path,
+) -> None:
+    """Resolving once must permit an existing in-root link that points outside."""
+    output_root = tmp_path / "output"
+    outside = tmp_path / "outside"
+    output_root.mkdir()
+    outside.mkdir()
+    link = output_root / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="symlink|reparse"):
+        download_manifest(
+            [manifest_item(relative_path="linked/escaped.jpg")],
+            output_root,
+            max_workers=1,
+            retry_delays=(),
+            opener=fake_oss_opener,
+        )
+    assert list(outside.iterdir()) == []
+
+
+def test_windows_reparse_attribute_detection_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ignoring st_file_attributes must miss Windows junction/reparse components."""
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    monkeypatch.setattr(
+        exporter.os,
+        "lstat",
+        lambda _path: SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=reparse_flag),
+    )
+    assert exporter._path_is_link_or_reparse(tmp_path / "junction") is True
+
+
+def test_symlink_injected_before_replace_is_rejected_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing replace-time revalidation must accept a newly injected reparse target."""
+    outside = tmp_path / "outside-target.jpg"
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(outside)
+        probe.unlink()
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    item = manifest_item()
+    target = tmp_path / item.relative_path
+    real_fsync = os.fsync
+    injected = False
+
+    def inject_target_symlink(file_descriptor: int) -> None:
+        nonlocal injected
+        real_fsync(file_descriptor)
+        if not injected:
+            target.symlink_to(outside)
+            injected = True
+
+    monkeypatch.setattr(exporter.os, "fsync", inject_target_symlink)
+    report = download_manifest(
+        [item],
+        tmp_path,
+        max_workers=1,
+        retry_delays=(),
+        opener=fake_oss_opener,
+    )
+    assert injected is True
+    assert report.failed == 1
+    assert target.is_symlink()
+    assert not outside.exists()
+    assert "symlink" in (report.results[0].error or "")
+    assert "https://" not in (report.results[0].error or "")
+
+
+def test_empty_manifest_rejects_symlink_output_root_without_outside_write(
+    tmp_path: Path,
+) -> None:
+    """Skipping download workers must not skip the output-root reparse boundary."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output_root = tmp_path / "output-link"
+    try:
+        output_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    header = {
+        "schema": SCHEMA,
+        "kind": "manifest",
+        "planned_count": 0,
+        "planned_bytes": 0,
+    }
+    with pytest.raises(ValueError, match="symlink|reparse"):
+        run_export(json.dumps(header) + "\n", output_root, opener=fake_oss_opener)
+    assert list(outside.iterdir()) == []
+
+
+def test_report_part_symlink_is_rejected_without_overwriting_outside_target(
+    tmp_path: Path,
+) -> None:
+    """Opening composer .part with w must not follow a pre-existing symlink."""
+    outside = tmp_path / "outside-report.json"
+    outside.write_text("original", encoding="utf-8")
+    part = tmp_path / "export-report.json.part"
+    try:
+        part.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    header = {
+        "schema": SCHEMA,
+        "kind": "manifest",
+        "planned_count": 0,
+        "planned_bytes": 0,
+    }
+    with pytest.raises(ValueError, match="symlink|reparse"):
+        run_export(json.dumps(header) + "\n", tmp_path, opener=fake_oss_opener)
+    assert outside.read_text(encoding="utf-8") == "original"
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -464,6 +667,34 @@ def test_stream_rejects_duplicate_or_late_header(tmp_path: Path) -> None:
     }
     text = json.dumps(header) + "\n" + json.dumps(header) + "\n"
     with pytest.raises(ValueError, match="header"):
+        run_export_stream(io.StringIO(text), tmp_path, opener=fake_oss_opener)
+
+
+def test_json_header_rejects_duplicate_object_keys(tmp_path: Path) -> None:
+    """Standard json.loads must not silently accept the last duplicate header key."""
+    text = (
+        '{"schema":"module-manager-oss-export/v1","kind":"manifest",'
+        '"kind":"manifest","planned_count":0,"planned_bytes":0}\n'
+    )
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        run_export_stream(io.StringIO(text), tmp_path, opener=fake_oss_opener)
+
+
+def test_json_item_rejects_duplicate_object_keys(tmp_path: Path) -> None:
+    """A duplicate item field must not be reduced to its last attacker value."""
+    header = {
+        "schema": SCHEMA,
+        "kind": "manifest",
+        "planned_count": 1,
+        "planned_bytes": len(IMAGE_BYTES),
+    }
+    item_text = json.dumps(valid_row())
+    item_text = item_text.replace(
+        '"photo_id": "000123456789"',
+        '"photo_id":"first","photo_id":"000123456789"',
+    )
+    text = json.dumps(header) + "\n" + item_text + "\n"
+    with pytest.raises(ValueError, match="duplicate JSON key"):
         run_export_stream(io.StringIO(text), tmp_path, opener=fake_oss_opener)
 
 
@@ -588,6 +819,44 @@ def test_disk_gate_runs_before_output_creation_or_download(
     assert opened is False
 
 
+@pytest.mark.parametrize(
+    ("planned_bytes", "formats", "required"),
+    [
+        (0, {"files"}, 268435456),
+        (1024, {"files"}, 268436480),
+        (1024, {"files", "zip"}, 268437504),
+        (3221225472, {"files", "zip"}, 6764573491),
+    ],
+)
+def test_disk_gate_uses_exact_formula_for_multiple_sizes_and_zip_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    planned_bytes: int,
+    formats: set[str],
+    required: int,
+) -> None:
+    """Changing any formula term must change the independently calculated threshold."""
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(
+        shutil,
+        "disk_usage",
+        lambda _path: Usage(required + 100, 101, required - 1),
+    )
+    header = {
+        "schema": SCHEMA,
+        "kind": "manifest",
+        "planned_count": 0,
+        "planned_bytes": planned_bytes,
+    }
+    with pytest.raises(InsufficientDiskError, match=f"required {required} bytes"):
+        run_export(
+            json.dumps(header) + "\n",
+            tmp_path / "output",
+            formats=formats,
+            opener=fake_oss_opener,
+        )
+
+
 def test_outputs_match_manifest_and_contain_no_signed_urls(tmp_path: Path) -> None:
     """Serializing ManifestItem directly must leak download_url/Signature into artifacts."""
     result = run_export(
@@ -692,6 +961,173 @@ def test_xlsx_has_manifest_formatting_and_failure_sheet(
     assert "Signature=" not in failure_text
     assert not (tmp_path / result.items[0].relative_path).exists()
     assert (tmp_path / result.items[1].relative_path).read_bytes() == IMAGE_BYTES
+
+
+@pytest.mark.parametrize("dangerous", ["\t=1+1", "   +SUM(1,1)", "\t@WEBSERVICE(1)"])
+def test_csv_and_xlsx_escape_formulas_after_leading_whitespace_or_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dangerous: str,
+) -> None:
+    """Checking only value[0] must leave whitespace-prefixed Excel formulas executable."""
+    monkeypatch.setattr(exporter, "RETRY_DELAYS", ())
+
+    def opener(_url: str, *, timeout: int) -> FakeResponse:
+        assert timeout == 30
+        raise RuntimeError(dangerous)
+
+    report = run_export(
+        manifest_jsonl(1),
+        tmp_path,
+        formats={"files", "csv", "xlsx"},
+        max_workers=1,
+        opener=opener,
+    )
+    assert report.failed == 1
+    with (tmp_path / "manifest.csv").open(encoding="utf-8-sig", newline="") as handle:
+        csv_error = next(csv.DictReader(handle))["error"]
+    workbook = load_workbook(tmp_path / "manifest.xlsx", data_only=False)
+    failure_sheet = workbook["Failures"]
+    error_column = [cell.value for cell in failure_sheet[1]].index("error") + 1
+    xlsx_error = failure_sheet.cell(2, error_column)
+    assert csv_error.startswith("'")
+    assert xlsx_error.value.startswith("'")
+    assert xlsx_error.data_type == "s"
+
+
+def test_existing_part_directory_becomes_sanitized_item_failure_with_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unlink failure in cleanup must not escape its future or suppress reports."""
+    monkeypatch.setattr(exporter, "RETRY_DELAYS", ())
+    target = tmp_path / "T01/group-000/photo-000.jpg"
+    part = target.with_name(target.name + ".part")
+    part.mkdir(parents=True)
+
+    report = run_export(
+        manifest_jsonl(1),
+        tmp_path,
+        formats={"files", "xlsx"},
+        max_workers=1,
+        opener=fake_oss_opener,
+    )
+    assert report.failed == 1
+    assert not target.exists()
+    assert part.is_dir()
+    persisted = (tmp_path / "export-report.json").read_text(encoding="utf-8")
+    assert "https://" not in persisted
+    assert "Signature=" not in persisted
+    assert load_workbook(tmp_path / "manifest.xlsx")["Failures"].max_row == 2
+
+
+def test_parent_mkdir_failure_becomes_item_failure_and_still_composes_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keeping mkdir outside the item try block must upgrade one bad path to preflight 3."""
+    monkeypatch.setattr(exporter, "RETRY_DELAYS", ())
+    blocking_parent = tmp_path / "T01"
+    blocking_parent.write_text("not a directory", encoding="utf-8")
+
+    report = run_export(
+        manifest_jsonl(1),
+        tmp_path,
+        formats={"files", "csv"},
+        max_workers=1,
+        opener=fake_oss_opener,
+    )
+    assert report.failed == 1
+    assert (tmp_path / "export-report.json").is_file()
+    assert (tmp_path / "manifest.csv").is_file()
+    assert "https://" not in (report.results[0].error or "")
+
+
+def test_part_is_visible_but_final_is_hidden_until_verified_replace(tmp_path: Path) -> None:
+    """Writing directly to final must expose an incomplete file before verification."""
+    blocked = threading.Event()
+    release = threading.Event()
+
+    class BlockingResponse:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __enter__(self) -> "BlockingResponse":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _size: int) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                return IMAGE_BYTES[:8]
+            if self.calls == 2:
+                blocked.set()
+                assert release.wait(timeout=5)
+                return IMAGE_BYTES[8:]
+            return b""
+
+    item = manifest_item()
+    outcome: list[ExportReport] = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(
+            download_manifest(
+                [item],
+                tmp_path,
+                max_workers=1,
+                retry_delays=(),
+                opener=lambda *_args, **_kwargs: BlockingResponse(),
+            )
+        )
+    )
+    worker.start()
+    assert blocked.wait(timeout=2)
+    target = tmp_path / item.relative_path
+    part = target.with_name(target.name + ".part")
+    assert part.is_file()
+    assert not target.exists()
+    release.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert outcome[0].succeeded == 1
+    assert target.read_bytes() == IMAGE_BYTES
+    assert not part.exists()
+
+
+def test_download_calls_real_fsync_before_atomic_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing fsync or replace must be observable while the real file operation still runs."""
+    real_fsync = os.fsync
+    real_replace = os.replace
+    fsync_calls: list[int] = []
+    fsync_sizes: list[int] = []
+    replace_calls: list[tuple[Path, Path]] = []
+
+    def recording_fsync(file_descriptor: int) -> None:
+        fsync_calls.append(file_descriptor)
+        fsync_sizes.append(os.fstat(file_descriptor).st_size)
+        real_fsync(file_descriptor)
+
+    def recording_replace(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        replace_calls.append((Path(source), Path(target)))
+        real_replace(source, target)
+
+    monkeypatch.setattr(exporter.os, "fsync", recording_fsync)
+    monkeypatch.setattr(exporter.os, "replace", recording_replace)
+    item = manifest_item()
+    report = download_manifest(
+        [item],
+        tmp_path,
+        max_workers=1,
+        retry_delays=(),
+        opener=fake_oss_opener,
+    )
+    target = tmp_path / item.relative_path
+    assert report.succeeded == 1
+    assert fsync_calls
+    assert fsync_sizes == [len(IMAGE_BYTES)]
+    assert replace_calls == [(target.with_name(target.name + ".part"), target)]
+    assert target.read_bytes() == IMAGE_BYTES
 
 
 def test_run_export_defaults_to_files_and_writes_atomic_report(tmp_path: Path) -> None:
