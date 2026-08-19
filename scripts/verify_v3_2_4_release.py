@@ -41,6 +41,23 @@ CONTRACT_PATHS = tuple(
 )
 
 
+def _literal_assignment(tree: ast.Module | None, name: str) -> object | None:
+    if tree is None:
+        return None
+    values: list[object | None] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id == name:
+                try:
+                    values.append(ast.literal_eval(node.value))
+                except (TypeError, ValueError):
+                    values.append(None)
+    return values[0] if len(values) == 1 else None
+
+
 def _check_json_version(
     root: Path,
     relative_path: str,
@@ -107,7 +124,7 @@ def _check_version_surfaces(root: Path, failures: list[str]) -> None:
 
     active_verifier_path = "v2-api/scripts/verify_v3_1_release.py"
     active_verifier_tree = legacy._parse_python(root, active_verifier_path, failures)
-    if legacy._literal_assignment(active_verifier_tree, "EXPECTED_VERSION") != VERSION:
+    if _literal_assignment(active_verifier_tree, "EXPECTED_VERSION") != VERSION:
         failures.append(f"{active_verifier_path}: EXPECTED_VERSION must equal {VERSION}")
 
     text_surfaces = {
