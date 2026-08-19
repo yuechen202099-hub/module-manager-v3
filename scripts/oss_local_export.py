@@ -894,7 +894,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    output_root = args.output or _default_output_root()
+    if args.output is None:
+        displayed_output_root = _default_output_root()
+        output_root = displayed_output_root.resolve(strict=False)
+    else:
+        displayed_output_root = None
+        output_root = args.output
     formats = set(args.formats) if args.formats else None
     try:
         report = run_export_stream(
@@ -909,7 +914,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         json.dumps(
             {
-                "output_root": str(report.output_root),
+                "output_root": str(
+                    displayed_output_root
+                    if displayed_output_root is not None
+                    else report.output_root
+                ),
                 "planned": report.planned,
                 "succeeded": report.succeeded,
                 "failed": report.failed,

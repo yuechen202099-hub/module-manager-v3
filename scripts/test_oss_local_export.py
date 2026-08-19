@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import shutil
+import subprocess
 import threading
 import time
 from collections import namedtuple
@@ -117,6 +118,23 @@ def manifest_jsonl(count: int, *, byte_size: int | None = None) -> str:
 def fake_oss_opener(_url: str, *, timeout: int) -> FakeResponse:
     assert timeout == 30
     return FakeResponse(IMAGE_BYTES)
+
+
+def create_directory_alias(alias: Path, target: Path) -> None:
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            pytest.skip(f"junction creation is unavailable: {completed.stderr}")
+        return
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
 
 
 @pytest.mark.parametrize(
@@ -683,6 +701,107 @@ def test_cli_returns_preflight_three_for_existing_symlink_ancestor(
     assert exporter.main(["--output", str(output_root)]) == 3
     assert list(outside.iterdir()) == []
     assert not output_root.exists()
+
+
+def test_cli_default_output_uses_normal_known_folder_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Canonicalizing the default must not change an ordinary Downloads root."""
+    output_root = tmp_path / "Downloads" / "module-manager-exports" / "fixed"
+    monkeypatch.setattr(exporter, "_default_output_root", lambda: output_root)
+    monkeypatch.setattr(exporter.sys, "stdin", io.StringIO(manifest_jsonl(0)))
+
+    assert exporter.main([]) == 0
+    stdout = json.loads(capsys.readouterr().out)
+    assert Path(stdout["output_root"]) == output_root
+    report = json.loads(
+        (output_root / "export-report.json").read_text(encoding="utf-8")
+    )
+    assert Path(report["output_root"]) == output_root
+    assert report["planned"] == report["succeeded"] == report["failed"] == 0
+
+
+def test_cli_default_output_canonicalizes_linked_known_folder_before_opener(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Passing the default alias into the core must reject a legitimate junction."""
+    canonical_downloads = tmp_path / "canonical-downloads"
+    canonical_downloads.mkdir()
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    downloads_alias = profile / "Downloads"
+    create_directory_alias(downloads_alias, canonical_downloads)
+    visible_root = downloads_alias / "module-manager-exports" / "fixed"
+    canonical_root = canonical_downloads / "module-manager-exports" / "fixed"
+    monkeypatch.setattr(exporter, "_default_output_root", lambda: visible_root)
+    monkeypatch.setattr(exporter.sys, "stdin", io.StringIO(manifest_jsonl(1)))
+    real_run_export_stream = exporter.run_export_stream
+    events: list[tuple[str, Path | None]] = []
+
+    def opener(_url: str, *, timeout: int) -> FakeResponse:
+        assert timeout == 30
+        events.append(("opener", None))
+        return FakeResponse(IMAGE_BYTES)
+
+    def run_with_fake_opener(
+        input_stream: Any,
+        output_root: Path,
+        formats: set[str] | None = None,
+        *,
+        max_workers: int = 4,
+    ) -> ExportReport:
+        events.append(("core", output_root))
+        return real_run_export_stream(
+            input_stream,
+            output_root,
+            formats,
+            max_workers=max_workers,
+            opener=opener,
+        )
+
+    monkeypatch.setattr(exporter, "run_export_stream", run_with_fake_opener)
+
+    assert exporter.main([]) == 0
+    assert events == [("core", canonical_root), ("opener", None)]
+    assert (canonical_root / "T01/group-000/photo-000.jpg").read_bytes() == IMAGE_BYTES
+    stdout = json.loads(capsys.readouterr().out)
+    assert Path(stdout["output_root"]) == visible_root
+    report = json.loads(
+        (canonical_root / "export-report.json").read_text(encoding="utf-8")
+    )
+    assert Path(report["output_root"]) == canonical_root
+    assert report["planned"] == report["succeeded"] == 1
+    assert report["failed"] == 0
+
+
+def test_cli_default_output_linked_known_folder_writes_empty_manifest_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty manifest must still create its report below the fixed target."""
+    canonical_downloads = tmp_path / "empty-canonical-downloads"
+    canonical_downloads.mkdir()
+    downloads_alias = tmp_path / "empty-Downloads"
+    create_directory_alias(downloads_alias, canonical_downloads)
+    visible_root = downloads_alias / "module-manager-exports" / "fixed-empty"
+    canonical_root = canonical_downloads / "module-manager-exports" / "fixed-empty"
+    monkeypatch.setattr(exporter, "_default_output_root", lambda: visible_root)
+    monkeypatch.setattr(exporter.sys, "stdin", io.StringIO(manifest_jsonl(0)))
+
+    assert exporter.main([]) == 0
+    stdout = json.loads(capsys.readouterr().out)
+    assert Path(stdout["output_root"]) == visible_root
+    report = json.loads(
+        (canonical_root / "export-report.json").read_text(encoding="utf-8")
+    )
+    assert Path(report["output_root"]) == canonical_root
+    assert report["complete"] is True
+    assert report["items"] == []
 
 
 def test_windows_reparse_model_on_existing_output_ancestor_is_rejected(
