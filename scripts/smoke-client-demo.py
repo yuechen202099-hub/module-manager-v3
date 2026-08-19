@@ -14,6 +14,7 @@ from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 API_ROOT = ROOT / "v2-api"
+EXPORT_RETIREMENT_DETAIL = "导出中心已下线，请联系管理员由 OSS 导出到本机。"
 os.environ["STATE_BACKEND"] = "json"
 sys.path.insert(0, str(API_ROOT))
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="fastapi.testclient")
@@ -104,13 +105,20 @@ def main() -> int:
         "/project-board",
         "/claim-tasks",
         "/task-hall",
-        "/exports",
         "/construction",
         "/sync-config",
     ]
     for path in vue_routes:
         text = assert_vue_shell(path)
         check(f"{path} does not hardcode demo passwords", "admin / admin123" not in text and "reviewer / review123" not in text)
+
+    retired_exports = client.get("/exports")
+    check(
+        "/exports returns exact V3.2.3 retirement response",
+        retired_exports.status_code == 410
+        and retired_exports.json() == {"detail": EXPORT_RETIREMENT_DETAIL},
+        f"{retired_exports.status_code} {retired_exports.text}",
+    )
 
     cancelled_app_shell_routes = [
         "/app?page=unmatched",

@@ -3,10 +3,12 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import stat
+import sys
 import zipfile
 
 import pytest
@@ -1194,6 +1196,33 @@ def test_smoke_check_validates_current_server_release_signoff_package() -> None:
     assert 'reviewer.json()["data"]["user"]["home"]' not in smoke_check
     assert '"/unmatched": "/global-search?review=1"' in smoke_check
     assert '"/unmatched?embedded=1": "/global-search?review=1"' in smoke_check
+
+
+def test_smoke_client_demo_executes_v323_retirement_and_retained_vue_contracts() -> None:
+    """The release smoke must exercise live route responses, not a source marker."""
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "scripts/smoke-client-demo.py"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=False,
+    )
+    output = completed.stdout + completed.stderr
+
+    assert completed.returncode == 0, output
+    for marker in (
+        "[OK] /project-board returns 200",
+        "[OK] /project-board serves Vue shell",
+        "[OK] /claim-tasks returns 200",
+        "[OK] /claim-tasks serves Vue shell",
+        "[OK] /exports returns exact V3.2.3 retirement response",
+    ):
+        assert marker in completed.stdout
 
 
 def test_archive_missing_manifest_version_fails_verification(tmp_path: Path) -> None:
