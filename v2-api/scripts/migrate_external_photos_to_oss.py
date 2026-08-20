@@ -103,6 +103,10 @@ class ExternalPhotoCandidate:
     team_id: str
     group_id: UUID
     group_legacy_id: str
+    photo_legacy_id: str
+    source_fingerprint: str
+    source_url: str
+    image_file_id: str
     url: str
     declared_sha256: str
     filename: str
@@ -127,6 +131,10 @@ def candidate_statement(team_id: str = "", limit: int = 0):
             Photo.team_id,
             Photo.group_id,
             MaterialGroup.legacy_id.label("group_legacy_id"),
+            Photo.legacy_id.label("photo_legacy_id"),
+            Photo.source_fingerprint,
+            Photo.source_url,
+            Photo.image_file_id,
             Photo.image_url.label("url"),
             Photo.sha256.label("declared_sha256"),
             Photo.original_filename.label("filename"),
@@ -333,20 +341,55 @@ def _candidate_from_row(row: Any) -> ExternalPhotoCandidate:
         team_id=str(row.team_id or ""),
         group_id=UUID(str(row.group_id)),
         group_legacy_id=str(row.group_legacy_id or ""),
+        photo_legacy_id=str(row.photo_legacy_id or ""),
+        source_fingerprint=str(row.source_fingerprint or ""),
+        source_url=str(row.source_url or ""),
+        image_file_id=str(row.image_file_id or ""),
         url=str(row.url or ""),
         declared_sha256=str(row.declared_sha256 or ""),
         filename=str(row.filename or ""),
     )
 
 
-def _declared_hash_class(value: str, url: str) -> str:
-    declared = str(value or "").strip().lower()
+def _legacy_declared_hash_class(candidate: ExternalPhotoCandidate) -> str:
+    formula_a = "|".join(
+        str(part or "")
+        for part in (
+            candidate.source_fingerprint,
+            candidate.source_url or candidate.url,
+            candidate.image_file_id,
+            candidate.photo_legacy_id,
+        )
+    )
+    formula_b = "|".join(
+        str(part or "")
+        for part in (
+            candidate.team_id,
+            candidate.group_legacy_id,
+            candidate.photo_legacy_id,
+            candidate.url,
+            candidate.image_file_id,
+        )
+    )
+    declared = str(candidate.declared_sha256 or "")
+    if declared == hashlib.sha256(formula_a.encode("utf-8")).hexdigest():
+        return "legacy_formula_a"
+    if declared == hashlib.sha256(formula_b.encode("utf-8")).hexdigest():
+        return "legacy_formula_b"
+    return ""
+
+
+def _declared_hash_class(candidate: ExternalPhotoCandidate) -> str:
+    declared = str(candidate.declared_sha256 or "").strip().lower()
     if not declared:
         return "empty"
     if not re.fullmatch(r"[0-9a-f]{64}", declared):
         return "invalid"
-    if declared == hashlib.sha256(url.encode("utf-8")).hexdigest():
+    if declared == hashlib.sha256(candidate.url.encode("utf-8")).hexdigest():
         return "url_sha256"
+    legacy_class = _legacy_declared_hash_class(candidate)
+    if legacy_class:
+        return legacy_class
     return "content_sha256_or_mismatch"
 
 
@@ -387,7 +430,7 @@ def run_dry_run(
             host = _host(candidate.url)
             if host:
                 hosts[host] += 1
-            hash_classes[_declared_hash_class(candidate.declared_sha256, candidate.url)] += 1
+            hash_classes[_declared_hash_class(candidate)] += 1
             url_status = "safe"
             if not host:
                 url_syntax_failures += 1
@@ -518,6 +561,8 @@ def _hash_status(candidate: ExternalPhotoCandidate, content_sha256: str) -> str:
     url_sha256 = hashlib.sha256(candidate.url.encode("utf-8")).hexdigest()
     if declared in {url_sha256, content_sha256.lower()}:
         return "accepted"
+    if _legacy_declared_hash_class(candidate):
+        return "accepted"
     return "declared_hash_mismatch"
 
 
@@ -548,9 +593,13 @@ def _source_still_matches(photo: Photo, candidate: ExternalPhotoCandidate) -> bo
         photo.id == candidate.photo_id
         and photo.team_id == candidate.team_id
         and photo.group_id == candidate.group_id
+        and str(photo.legacy_id or "") == candidate.photo_legacy_id
         and photo.is_active is True
         and photo.storage_type == "external_url"
         and str(photo.image_url or "") == candidate.url
+        and str(photo.source_url or "") == candidate.source_url
+        and str(photo.source_fingerprint or "") == candidate.source_fingerprint
+        and str(photo.image_file_id or "") == candidate.image_file_id
         and str(photo.sha256 or "") == candidate.declared_sha256
     )
 
@@ -609,7 +658,12 @@ def _commit_group(
                 receipt = transfer.receipt
                 item_key = str(candidate.photo_id)
                 photo = photos_by_id.get(candidate.photo_id)
-                if photo is None or not _source_still_matches(photo, candidate):
+                group_legacy_id = str(group.legacy_id or "")
+                if (
+                    photo is None
+                    or group_legacy_id != candidate.group_legacy_id
+                    or not _source_still_matches(photo, candidate)
+                ):
                     statuses[item_key] = "conflict"
                     continue
                 receipt_sha = receipt.sha256.strip().lower()

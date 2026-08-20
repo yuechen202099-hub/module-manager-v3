@@ -223,6 +223,10 @@ def test_candidate_is_immutable_and_statement_has_stable_scalar_order() -> None:
         team_id="team-a",
         group_id=group_id,
         group_legacy_id="group-1",
+        photo_legacy_id="photo-1",
+        source_fingerprint="scan:batch-1:row-1",
+        source_url="https://img.example/a.jpg?token=secret",
+        image_file_id="file-1",
         url="https://img.example/a.jpg?token=secret",
         declared_sha256="",
         filename="a.jpg",
@@ -235,6 +239,10 @@ def test_candidate_is_immutable_and_statement_has_stable_scalar_order() -> None:
     assert "photos.raw_data" not in sql
     assert "photos.team_id =" in sql
     assert "LIMIT" in sql
+    assert "photos.legacy_id AS photo_legacy_id" in sql
+    assert "photos.source_fingerprint" in sql
+    assert "photos.source_url" in sql
+    assert "photos.image_file_id" in sql
     assert (
         "ORDER BY photos.team_id ASC, material_groups.legacy_id ASC, "
         "photos.sort_order ASC, photos.id ASC"
@@ -278,6 +286,10 @@ def test_dry_run_is_database_read_only_and_does_not_transfer(monkeypatch) -> Non
             team_id="team-a",
             group_id=group_id,
             group_legacy_id="group-1",
+            photo_legacy_id="photo-1",
+            source_fingerprint="scan:batch-1:row-1",
+            source_url="https://img.example/a.jpg?token=secret",
+            image_file_id="file-1",
             url="https://img.example/a.jpg?token=secret",
             declared_sha256="",
             filename="a.jpg",
@@ -288,6 +300,10 @@ def test_dry_run_is_database_read_only_and_does_not_transfer(monkeypatch) -> Non
             team_id="team-a",
             group_id=group_id,
             group_legacy_id="group-1",
+            photo_legacy_id="photo-2",
+            source_fingerprint="scan:batch-1:row-2",
+            source_url="https://img.example/b.jpg",
+            image_file_id="file-2",
             url="https://img.example/b.jpg",
             declared_sha256="f" * 64,
             filename="b.jpg",
@@ -525,10 +541,106 @@ def _candidate(*, declared: str = "", url: str = "https://img.example/photo.jpg?
         team_id="team-a",
         group_id=uuid4(),
         group_legacy_id="group-1",
+        photo_legacy_id="photo-1",
+        source_fingerprint="scan:batch-1:row-1",
+        source_url=url,
+        image_file_id="file-1",
         url=url,
         declared_sha256=declared,
         filename="photo.jpg",
     )
+
+
+def _historical_candidate(formula: str, *, declared: str | None = None):
+    if formula == "a":
+        values = {
+            "photo_id": uuid4(),
+            "team_id": "team-a",
+            "group_id": uuid4(),
+            "group_legacy_id": "group-a-1",
+            "photo_legacy_id": "photo-a-9",
+            "source_fingerprint": "scan:batch-7:row-3",
+            "source_url": "https://img.example/historical-a.jpg",
+            "image_file_id": "file-a-123",
+            "url": "https://img.example/historical-a.jpg",
+            "declared_sha256": "7ab18e35bc20bcdca0578f4c5211d811503c1f7d13b0ec5e80ddd42b08d3c446",
+            "filename": "historical-a.jpg",
+        }
+    elif formula == "b":
+        values = {
+            "photo_id": uuid4(),
+            "team_id": "team-b",
+            "group_id": uuid4(),
+            "group_legacy_id": "group-b-42",
+            "photo_legacy_id": "photo-b-7",
+            "source_fingerprint": "",
+            "source_url": "https://img.example/historical-b.png",
+            "image_file_id": "file-b-456",
+            "url": "https://img.example/historical-b.png",
+            "declared_sha256": "4d360bde40c524917f800120c2b5019fefd72d80d375a90766d24f1560e7760a",
+            "filename": "historical-b.png",
+        }
+    else:
+        raise AssertionError(f"unknown historical formula fixture: {formula}")
+    if declared is not None:
+        values["declared_sha256"] = declared
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize("formula", ["a", "b"])
+def test_exact_historical_synthetic_identity_is_accepted(formula: str) -> None:
+    candidate = _historical_candidate(formula)
+    assert migration._hash_status(candidate, "a" * 64) == "accepted"
+
+
+@pytest.mark.parametrize(
+    ("formula", "drifted_input"),
+    [
+        ("b", "team_id"),
+        ("b", "group_legacy_id"),
+        ("b", "photo_legacy_id"),
+        ("a", "source_url"),
+        ("a", "image_file_id"),
+        ("a", "source_fingerprint"),
+        ("b", "image_url"),
+    ],
+)
+def test_historical_synthetic_identity_requires_every_formula_input(
+    formula: str,
+    drifted_input: str,
+) -> None:
+    values = vars(_historical_candidate(formula)).copy()
+    field = "url" if drifted_input == "image_url" else drifted_input
+    values[field] = f"{values[field]}-changed"
+    candidate = SimpleNamespace(**values)
+
+    assert migration._hash_status(candidate, "a" * 64) == "declared_hash_mismatch"
+
+
+def test_historical_identity_acceptance_does_not_admit_arbitrary_valid_sha256() -> None:
+    candidate = _historical_candidate("a", declared="e" * 64)
+
+    assert migration._hash_status(candidate, "a" * 64) == "declared_hash_mismatch"
+
+
+def test_dry_run_reports_historical_formula_classes_separately(monkeypatch) -> None:
+    formula_a = _historical_candidate("a")
+    formula_b = _historical_candidate("b")
+    arbitrary = _historical_candidate("a", declared="e" * 64)
+    rows = [
+        SimpleNamespace(**vars(candidate), sort_order=index)
+        for index, candidate in enumerate([formula_a, formula_b, arbitrary])
+    ]
+    session = _DryRunSession(rows, [("external_url", 3)])
+    monkeypatch.setattr(migration, "validate_remote_image_url", lambda *_args, **_kwargs: ("203.0.113.10",))
+
+    report = migration.run_dry_run(session, team_id="", allowlist=None)
+
+    assert report["declared_hash_classes"] == {
+        "content_sha256_or_mismatch": 1,
+        "legacy_formula_a": 1,
+        "legacy_formula_b": 1,
+    }
 
 
 def _install_safe_run_boundaries(monkeypatch, tmp_path: Path, candidates) -> None:
@@ -651,13 +763,17 @@ def test_group_transfers_finish_before_short_commit_and_only_one_file_exists(
     group_id = uuid4()
     candidates = [
         migration.ExternalPhotoCandidate(
-            uuid4(),
-            "team-a",
-            group_id,
-            "group-1",
-            f"https://img.example/{index}.jpg",
-            "",
-            f"{index}.jpg",
+            photo_id=uuid4(),
+            team_id="team-a",
+            group_id=group_id,
+            group_legacy_id="group-1",
+            photo_legacy_id=f"photo-{index}",
+            source_fingerprint=f"scan:batch-1:row-{index}",
+            source_url=f"https://img.example/{index}.jpg",
+            image_file_id=f"file-{index}",
+            url=f"https://img.example/{index}.jpg",
+            declared_sha256="",
+            filename=f"{index}.jpg",
         )
         for index in range(2)
     ]
@@ -710,22 +826,30 @@ def test_identical_downloaded_bytes_with_different_source_extensions_reuse_one_o
     group_id = uuid4()
     candidates = [
         migration.ExternalPhotoCandidate(
-            uuid4(),
-            "team-a",
-            group_id,
-            "group-1",
-            "https://img.example/first",
-            "",
-            "source.jpeg",
+            photo_id=uuid4(),
+            team_id="team-a",
+            group_id=group_id,
+            group_legacy_id="group-1",
+            photo_legacy_id="photo-first",
+            source_fingerprint="scan:batch-1:row-first",
+            source_url="https://img.example/first",
+            image_file_id="file-first",
+            url="https://img.example/first",
+            declared_sha256="",
+            filename="source.jpeg",
         ),
         migration.ExternalPhotoCandidate(
-            uuid4(),
-            "team-a",
-            group_id,
-            "group-1",
-            "https://img.example/second",
-            "",
-            "source.png",
+            photo_id=uuid4(),
+            team_id="team-a",
+            group_id=group_id,
+            group_legacy_id="group-1",
+            photo_legacy_id="photo-second",
+            source_fingerprint="scan:batch-1:row-second",
+            source_url="https://img.example/second",
+            image_file_id="file-second",
+            url="https://img.example/second",
+            declared_sha256="",
+            filename="source.png",
         ),
     ]
     _install_safe_run_boundaries(monkeypatch, tmp_path, candidates)
@@ -839,14 +963,40 @@ def _photo_for(candidate, *, image_url: str | None = None, sha256: str | None = 
     return SimpleNamespace(
         id=candidate.photo_id,
         team_id=candidate.team_id,
+        legacy_id=candidate.photo_legacy_id,
         group_id=candidate.group_id,
         is_active=True,
         image_url=image_url if image_url is not None else candidate.url,
+        source_url=candidate.source_url,
+        source_fingerprint=candidate.source_fingerprint,
+        image_file_id=candidate.image_file_id,
         storage_type="external_url",
         storage_bucket=None,
         storage_key=None,
         object_key="legacy/object",
         sha256=sha256 if sha256 is not None else candidate.declared_sha256,
+        content_type=None,
+        byte_size=None,
+        raw_data={},
+    )
+
+
+def _historical_photo_for(candidate):
+    return SimpleNamespace(
+        id=candidate.photo_id,
+        team_id=candidate.team_id,
+        legacy_id=candidate.photo_legacy_id,
+        group_id=candidate.group_id,
+        is_active=True,
+        image_url=candidate.url,
+        source_url=candidate.source_url,
+        source_fingerprint=candidate.source_fingerprint,
+        image_file_id=candidate.image_file_id,
+        storage_type="external_url",
+        storage_bucket=None,
+        storage_key=None,
+        object_key="legacy/object",
+        sha256=candidate.declared_sha256,
         content_type=None,
         byte_size=None,
         raw_data={},
@@ -952,6 +1102,89 @@ def test_concurrent_source_change_is_not_overwritten(monkeypatch) -> None:
 
     assert result["statuses"][str(candidate.photo_id)] == "conflict"
     assert photo.image_url == "https://new.example/photo.jpg"
+
+
+@pytest.mark.parametrize(
+    ("formula", "drifted_input"),
+    [
+        ("a", "source_fingerprint"),
+        ("a", "source_url"),
+        ("a", "image_file_id"),
+        ("a", "photo_legacy_id"),
+        ("b", "team_id"),
+        ("b", "group_legacy_id"),
+        ("b", "image_url"),
+    ],
+)
+def test_locked_commit_rejects_drift_in_every_historical_formula_input(
+    monkeypatch,
+    formula: str,
+    drifted_input: str,
+) -> None:
+    candidate = _historical_candidate(formula)
+    group = SimpleNamespace(
+        id=candidate.group_id,
+        team_id=candidate.team_id,
+        legacy_id=candidate.group_legacy_id,
+        status="approved",
+    )
+    photo = _historical_photo_for(candidate)
+    if drifted_input == "group_legacy_id":
+        group.legacy_id = f"{group.legacy_id}-changed"
+    elif drifted_input == "photo_legacy_id":
+        photo.legacy_id = f"{photo.legacy_id}-changed"
+    elif drifted_input == "image_url":
+        photo.image_url = "https://img.example/changed.jpg"
+    else:
+        setattr(photo, drifted_input, f"{getattr(photo, drifted_input)}-changed")
+    session = _CommitSession(group, [photo])
+    invalidations = []
+    monkeypatch.setattr(
+        migration,
+        "invalidate_verification_for_group",
+        lambda *_args, **_kwargs: invalidations.append(True),
+    )
+    monkeypatch.setattr(migration, "_final_delivery_ready", lambda *_args: False)
+
+    result = migration._commit_group(
+        lambda: session,
+        group_id=candidate.group_id,
+        transfers=[_transfer_for(candidate)],
+        migration_id=f"locked-{formula}",
+    )
+
+    assert result["statuses"][str(candidate.photo_id)] == "conflict"
+    assert photo.storage_type == "external_url"
+    assert invalidations == []
+
+
+def test_successful_commit_preserves_synthetic_sha_and_writes_downloaded_content_sha(monkeypatch) -> None:
+    candidate = _historical_candidate("a")
+    group = SimpleNamespace(
+        id=candidate.group_id,
+        team_id=candidate.team_id,
+        legacy_id=candidate.group_legacy_id,
+        status="approved",
+    )
+    photo = _historical_photo_for(candidate)
+    session = _CommitSession(group, [photo])
+    content_sha256 = "a" * 64
+    monkeypatch.setattr(migration, "invalidate_verification_for_group", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(migration, "_final_delivery_ready", lambda *_args: False)
+
+    result = migration._commit_group(
+        lambda: session,
+        group_id=candidate.group_id,
+        transfers=[_transfer_for(candidate, sha256=content_sha256)],
+        migration_id="synthetic-audit",
+    )
+
+    assert result["statuses"][str(candidate.photo_id)] == "committed"
+    assert photo.raw_data["pre_oss_sha256"] == (
+        "7ab18e35bc20bcdca0578f4c5211d811503c1f7d13b0ec5e80ddd42b08d3c446"
+    )
+    assert photo.sha256 == content_sha256
+    assert photo.image_url == "oss://bucket-a/content/photo.jpg"
 
 
 def test_duplicate_content_is_reported_before_unique_constraint(monkeypatch) -> None:
