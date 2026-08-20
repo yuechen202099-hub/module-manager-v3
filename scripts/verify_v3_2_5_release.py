@@ -65,6 +65,47 @@ def _function(
 def _static_truth(node: ast.AST) -> bool | None:
     if isinstance(node, ast.Constant):
         return bool(node.value)
+    if isinstance(node, ast.Compare):
+        try:
+            values = (
+                ast.literal_eval(node.left),
+                *(ast.literal_eval(comparator) for comparator in node.comparators),
+            )
+        except (TypeError, ValueError):
+            return None
+        for left, operator, right in zip(values, node.ops, values[1:], strict=True):
+            try:
+                if isinstance(operator, ast.Eq):
+                    matches = left == right
+                elif isinstance(operator, ast.NotEq):
+                    matches = left != right
+                elif isinstance(operator, ast.Lt):
+                    matches = left < right
+                elif isinstance(operator, ast.LtE):
+                    matches = left <= right
+                elif isinstance(operator, ast.Gt):
+                    matches = left > right
+                elif isinstance(operator, ast.GtE):
+                    matches = left >= right
+                elif isinstance(operator, ast.In):
+                    matches = left in right
+                elif isinstance(operator, ast.NotIn):
+                    matches = left not in right
+                elif isinstance(operator, ast.Is) and all(
+                    value is None or type(value) is bool for value in (left, right)
+                ):
+                    matches = left is right
+                elif isinstance(operator, ast.IsNot) and all(
+                    value is None or type(value) is bool for value in (left, right)
+                ):
+                    matches = left is not right
+                else:
+                    return None
+            except (TypeError, ValueError):
+                return None
+            if not matches:
+                return False
+        return True
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
         value = _static_truth(node.operand)
         return None if value is None else not value
@@ -228,6 +269,8 @@ def _name_is_rebound(nodes: tuple[ast.AST, ...], name: str) -> bool:
         and node.name == name
         or isinstance(node, ast.alias)
         and (node.asname or node.name.rsplit(".", 1)[-1]) == name
+        or isinstance(node, ast.arg)
+        and node.arg == name
         for node in nodes
     )
 

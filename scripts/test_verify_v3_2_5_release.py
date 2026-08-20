@@ -492,6 +492,39 @@ def test_release_verifier_rejects_group_identity_guard_moved_to_dead_code(
     assert_rejected(tmp_repo, "locked identity revalidation")
 
 
+def test_release_verifier_rejects_group_guard_under_false_constant_comparison(
+    tmp_repo: TemporaryRepository,
+) -> None:
+    tmp_repo.replace(
+        MIGRATION_PATH,
+        '''                if (
+                    photo is None
+                    or group_legacy_id != candidate.group_legacy_id
+                    or not _source_still_matches(photo, candidate)
+                ):
+                    statuses[item_key] = "conflict"
+                    continue
+''',
+        '''                if 1 == 2:
+                    if (
+                        photo is None
+                        or group_legacy_id != candidate.group_legacy_id
+                        or not _source_still_matches(photo, candidate)
+                    ):
+                        statuses[item_key] = "conflict"
+                        continue
+                if (
+                    photo is None
+                    or not _source_still_matches(photo, candidate)
+                ):
+                    statuses[item_key] = "conflict"
+                    continue
+''',
+    )
+
+    assert_rejected(tmp_repo, "locked identity revalidation")
+
+
 def test_release_verifier_requires_pre_oss_sha256_preservation(
     tmp_repo: TemporaryRepository,
 ) -> None:
@@ -597,6 +630,21 @@ def test_release_verifier_rejects_canonical_sha_name_or_value_rebinding(
     new: str,
 ) -> None:
     tmp_repo.replace(MIGRATION_PATH, old, new)
+    assert_rejected(tmp_repo, "canonical downloaded-content SHA")
+
+
+def test_release_verifier_rejects_hash_gate_shadowed_by_default_parameter(
+    tmp_repo: TemporaryRepository,
+) -> None:
+    tmp_repo.replace(
+        MIGRATION_PATH,
+        "    bucket: Any,\n    *,\n",
+        '''    bucket: Any,
+    _hash_status: Any = lambda *_args: "accepted",
+    *,
+''',
+    )
+
     assert_rejected(tmp_repo, "canonical downloaded-content SHA")
 
 
