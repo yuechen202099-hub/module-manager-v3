@@ -601,8 +601,10 @@ def test_exact_historical_synthetic_identity_is_accepted(formula: str) -> None:
         ("b", "photo_legacy_id"),
         ("a", "source_url"),
         ("a", "image_file_id"),
+        ("a", "photo_legacy_id"),
         ("a", "source_fingerprint"),
         ("b", "image_url"),
+        ("b", "image_file_id"),
     ],
 )
 def test_historical_synthetic_identity_requires_every_formula_input(
@@ -1113,7 +1115,9 @@ def test_concurrent_source_change_is_not_overwritten(monkeypatch) -> None:
         ("a", "photo_legacy_id"),
         ("b", "team_id"),
         ("b", "group_legacy_id"),
+        ("b", "photo_legacy_id"),
         ("b", "image_url"),
+        ("b", "image_file_id"),
     ],
 )
 def test_locked_commit_rejects_drift_in_every_historical_formula_input(
