@@ -62,6 +62,176 @@ def _function(
     return matches[0] if len(matches) == 1 else None
 
 
+def _static_truth(node: ast.AST) -> bool | None:
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        value = _static_truth(node.operand)
+        return None if value is None else not value
+    if isinstance(node, ast.BoolOp):
+        values = tuple(_static_truth(value) for value in node.values)
+        if isinstance(node.op, ast.And):
+            if False in values:
+                return False
+            return True if all(value is True for value in values) else None
+        if isinstance(node.op, ast.Or):
+            if True in values:
+                return True
+            return False if all(value is False for value in values) else None
+    return None
+
+
+def _statement_guarantees_termination(statement: ast.stmt) -> bool:
+    if isinstance(statement, (ast.Break, ast.Continue, ast.Raise, ast.Return)):
+        return True
+    if not isinstance(statement, ast.If):
+        return False
+    truth = _static_truth(statement.test)
+    if truth is True:
+        return any(_statement_guarantees_termination(item) for item in statement.body)
+    if truth is False:
+        return any(_statement_guarantees_termination(item) for item in statement.orelse)
+    return bool(statement.orelse) and all(
+        any(_statement_guarantees_termination(item) for item in branch)
+        for branch in (statement.body, statement.orelse)
+    )
+
+
+class _ReachableNodeCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.nodes: list[ast.AST] = []
+
+    def visit(self, node: ast.AST):  # type: ignore[override]
+        self.nodes.append(node)
+        return super().visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return None
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return None
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return None
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return None
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> None:
+        for value in node.values:
+            self.visit(value)
+            truth = _static_truth(value)
+            if isinstance(node.op, ast.And) and truth is False:
+                break
+            if isinstance(node.op, ast.Or) and truth is True:
+                break
+
+    def visit_If(self, node: ast.If) -> None:
+        self.visit(node.test)
+        truth = _static_truth(node.test)
+        if truth is not False:
+            self._visit_statements(node.body)
+        if truth is not True:
+            self._visit_statements(node.orelse)
+
+    def visit_IfExp(self, node: ast.IfExp) -> None:
+        self.visit(node.test)
+        truth = _static_truth(node.test)
+        if truth is not False:
+            self.visit(node.body)
+        if truth is not True:
+            self.visit(node.orelse)
+
+    def visit_For(self, node: ast.For) -> None:
+        self.visit(node.target)
+        self.visit(node.iter)
+        self._visit_statements(node.body)
+        self._visit_statements(node.orelse)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self.visit(node.target)
+        self.visit(node.iter)
+        self._visit_statements(node.body)
+        self._visit_statements(node.orelse)
+
+    def visit_While(self, node: ast.While) -> None:
+        self.visit(node.test)
+        truth = _static_truth(node.test)
+        if truth is not False:
+            self._visit_statements(node.body)
+        if truth is not True:
+            self._visit_statements(node.orelse)
+
+    def visit_With(self, node: ast.With) -> None:
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self.visit(item.optional_vars)
+        self._visit_statements(node.body)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self.visit(item.optional_vars)
+        self._visit_statements(node.body)
+
+    def visit_Try(self, node: ast.Try) -> None:
+        self._visit_statements(node.body)
+        for handler in node.handlers:
+            self.visit(handler)
+        self._visit_statements(node.orelse)
+        self._visit_statements(node.finalbody)
+
+    def visit_TryStar(self, node: ast.TryStar) -> None:
+        self.visit_Try(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.type is not None:
+            self.visit(node.type)
+        self._visit_statements(node.body)
+
+    def _visit_statements(self, statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            self.visit(statement)
+            if _statement_guarantees_termination(statement):
+                break
+
+
+def _reachable_nodes(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[ast.AST, ...]:
+    collector = _ReachableNodeCollector()
+    collector._visit_statements(function.body)
+    return tuple(collector.nodes)
+
+
+def _assignment_values(nodes: tuple[ast.AST, ...], target_text: str) -> list[str]:
+    values: list[str] = []
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            if any(ast.unparse(target) == target_text for target in node.targets):
+                values.append(ast.unparse(node.value))
+        elif isinstance(node, ast.AnnAssign) and ast.unparse(node.target) == target_text:
+            values.append(ast.unparse(node.value))
+        elif isinstance(node, ast.NamedExpr) and ast.unparse(node.target) == target_text:
+            values.append(ast.unparse(node.value))
+        elif isinstance(node, ast.AugAssign) and ast.unparse(node.target) == target_text:
+            values.append(ast.unparse(node))
+    return values
+
+
+def _name_is_rebound(nodes: tuple[ast.AST, ...], name: str) -> bool:
+    return any(
+        (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == name)
+        or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.name == name
+        or isinstance(node, ast.alias)
+        and (node.asname or node.name.rsplit(".", 1)[-1]) == name
+        for node in nodes
+    )
+
+
 def _check_json_version(
     root: Path,
     relative_path: str,
@@ -304,18 +474,57 @@ def _check_candidate_snapshot(tree: ast.Module, failures: list[str]) -> None:
 
     statement = _function(tree, "candidate_statement")
     candidate_from_row = _function(tree, "_candidate_from_row")
-    statement_source = ast.unparse(statement) if statement is not None else ""
-    row_source = ast.unparse(candidate_from_row) if candidate_from_row is not None else ""
-    query_markers = (
+    expected_query_args = (
+        "Photo.id.label('photo_id')",
+        "Photo.team_id",
+        "Photo.group_id",
+        "MaterialGroup.legacy_id.label('group_legacy_id')",
         "Photo.legacy_id.label('photo_legacy_id')",
         "Photo.source_fingerprint",
         "Photo.source_url",
         "Photo.image_file_id",
+        "Photo.image_url.label('url')",
+        "Photo.sha256.label('declared_sha256')",
+        "Photo.original_filename.label('filename')",
+        "Photo.sort_order",
     )
-    row_markers = tuple(f"{field}=" for field in expected_fields)
-    if any(marker not in statement_source for marker in query_markers) or any(
-        marker not in row_source for marker in row_markers
-    ):
+    statement_nodes = () if statement is None else _reachable_nodes(statement)
+    row_nodes = () if candidate_from_row is None else _reachable_nodes(candidate_from_row)
+    select_calls = [
+        node
+        for node in statement_nodes
+        if isinstance(node, ast.Call) and legacy.legacy._call_leaf(node) == "select"
+    ]
+    query_args = (
+        tuple(map(ast.unparse, select_calls[0].args))
+        if len(select_calls) == 1
+        else ()
+    )
+    expected_row_keywords = (
+        ("photo_id", "UUID(str(row.photo_id))"),
+        ("team_id", "str(row.team_id or '')"),
+        ("group_id", "UUID(str(row.group_id))"),
+        ("group_legacy_id", "str(row.group_legacy_id or '')"),
+        ("photo_legacy_id", "str(row.photo_legacy_id or '')"),
+        ("source_fingerprint", "str(row.source_fingerprint or '')"),
+        ("source_url", "str(row.source_url or '')"),
+        ("image_file_id", "str(row.image_file_id or '')"),
+        ("url", "str(row.url or '')"),
+        ("declared_sha256", "str(row.declared_sha256 or '')"),
+        ("filename", "str(row.filename or '')"),
+    )
+    constructor_calls = [
+        node
+        for node in row_nodes
+        if isinstance(node, ast.Call)
+        and legacy.legacy._call_leaf(node) == "ExternalPhotoCandidate"
+    ]
+    row_keywords = (
+        tuple((keyword.arg, ast.unparse(keyword.value)) for keyword in constructor_calls[0].keywords)
+        if len(constructor_calls) == 1
+        else ()
+    )
+    if query_args != expected_query_args or row_keywords != expected_row_keywords:
         failures.append(f"{MIGRATION_PATH}: candidate identity snapshot query/mapping is incomplete")
 
 
@@ -436,15 +645,18 @@ def _check_locked_identity_contract(tree: ast.Module, failures: list[str]) -> No
         failures.append(f"{MIGRATION_PATH}: locked identity revalidation is incomplete: {exc}")
 
     commit = _function(tree, "_commit_group")
-    conflict_guards = [] if commit is None else [
+    commit_nodes = () if commit is None else _reachable_nodes(commit)
+    conflict_guards = [
         node
-        for node in ast.walk(commit)
+        for node in commit_nodes
         if isinstance(node, ast.If)
+        and _static_truth(node.test) is not False
         and "group_legacy_id != candidate.group_legacy_id" in ast.unparse(node.test)
         and "_source_still_matches(photo, candidate)" in ast.unparse(node.test)
         and "statuses[item_key] = 'conflict'" in ast.unparse(
             ast.Module(body=node.body, type_ignores=[])
         )
+        and any(isinstance(statement, ast.Continue) for statement in node.body)
     ]
     if len(conflict_guards) != 1:
         failures.append(f"{MIGRATION_PATH}: locked identity revalidation must include group legacy ID")
@@ -457,8 +669,11 @@ def _check_canonical_sha_contract(tree: ast.Module, failures: list[str]) -> None
         failures.append(f"{MIGRATION_PATH}: canonical downloaded-content SHA functions are missing")
         return
 
+    commit_nodes = _reachable_nodes(commit)
+    runner_nodes = _reachable_nodes(runner)
+    runner_scope_nodes = tuple(ast.walk(runner))
     pre_oss_values: list[str] = []
-    for node in ast.walk(commit):
+    for node in commit_nodes:
         if not isinstance(node, ast.Dict):
             continue
         for key, value in zip(node.keys, node.values, strict=True):
@@ -467,16 +682,11 @@ def _check_canonical_sha_contract(tree: ast.Module, failures: list[str]) -> None
     if pre_oss_values != ["photo.sha256"]:
         failures.append(f"{MIGRATION_PATH}: pre_oss_sha256 must preserve the locked source digest")
 
-    assignments = {
-        ast.unparse(node.targets[0]): ast.unparse(node.value)
-        for node in ast.walk(commit)
-        if isinstance(node, ast.Assign) and len(node.targets) == 1
-    }
-    if assignments.get("photo.sha256") != "receipt.sha256":
+    if _assignment_values(commit_nodes, "photo.sha256") != ["receipt.sha256"]:
         failures.append(f"{MIGRATION_PATH}: canonical downloaded-content SHA must replace Photo.sha256")
 
     calls: dict[str, list[ast.Call]] = {}
-    for node in ast.walk(runner):
+    for node in runner_nodes:
         if isinstance(node, ast.Call):
             calls.setdefault(legacy.legacy._call_leaf(node), []).append(node)
     hash_calls = calls.get("_hash_status", [])
@@ -492,7 +702,34 @@ def _check_canonical_sha_contract(tree: ast.Module, failures: list[str]) -> None
     valid_store = len(store_calls) == 1 and len(store_calls[0].args) == 4 and ast.unparse(
         store_calls[0].args[3]
     ) == "downloaded"
-    if not (valid_hash and valid_key and valid_store):
+    expected_runner_bindings = {
+        "downloaded": ["None", "download_external_photo(source, policy, temp_dir=temp_dir)"],
+        "hash_status": ["_hash_status(candidate, downloaded.sha256)"],
+        "key": [
+            "oss_object_key('external-migration', f'content{downloaded.suffix}', "
+            "downloaded.sha256, team_id=candidate.team_id, group_id=str(candidate.group_id))"
+        ],
+        "receipt": ["store_downloaded_photo(bucket, bucket_name, key, downloaded)"],
+    }
+    valid_provenance = all(
+        _assignment_values(runner_nodes, name) == values
+        for name, values in expected_runner_bindings.items()
+    )
+    valid_provenance = valid_provenance and (
+        _assignment_values(commit_nodes, "candidate") == ["transfer.candidate"]
+        and _assignment_values(commit_nodes, "receipt") == ["transfer.receipt"]
+        and not _assignment_values(runner_nodes, "downloaded.sha256")
+        and not any(
+            _name_is_rebound(runner_scope_nodes, name)
+            for name in (
+                "_hash_status",
+                "download_external_photo",
+                "oss_object_key",
+                "store_downloaded_photo",
+            )
+        )
+    )
+    if not (valid_hash and valid_key and valid_store and valid_provenance):
         failures.append(f"{MIGRATION_PATH}: canonical downloaded-content SHA flow is incomplete")
 
 
@@ -514,6 +751,18 @@ def _check_migration_contract(root: Path, failures: list[str]) -> None:
     ]
     if len(dry_run_calls) != 1:
         failures.append(f"{MIGRATION_PATH}: dry-run must classify historical Formula A/B candidates")
+
+
+def _check_packaging_branch_contract(builder: str, failures: list[str]) -> None:
+    expected_guard = f'''$sourceBranch = (& git branch --show-current).Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "{MAINTENANCE_BRANCH}") {{
+    throw "Refusing to package branch '$sourceBranch'. Expected {MAINTENANCE_BRANCH}."
+}}'''
+    if builder.count(expected_guard) != 1:
+        failures.append(
+            f"scripts/build-client-release.ps1: packaging branch must equal "
+            f"{MAINTENANCE_BRANCH} exactly once"
+        )
 
 
 def _check_v325_package_contract(root: Path, failures: list[str]) -> None:
@@ -542,6 +791,7 @@ def _check_v325_package_contract(root: Path, failures: list[str]) -> None:
 
     builder_path = "scripts/build-client-release.ps1"
     builder = legacy.legacy._read(root, builder_path, failures)
+    _check_packaging_branch_contract(builder, failures)
     for member in (
         "scripts\\verify_v3_2_5_release.py",
         "scripts\\test_verify_v3_2_5_release.py",
@@ -585,14 +835,16 @@ def _check_release_record_and_sop(root: Path, failures: list[str]) -> None:
         "Production Deployment": "pending",
         "Production Reconciliation": "pending",
         "Rollback target": DEPLOYED_BASELINE,
+        "Candidate branch": f"`{MAINTENANCE_BRANCH}`",
+        "Deployed production baseline": f"`{DEPLOYED_BASELINE}`",
+        "Candidate version": f"`{DISPLAY_VERSION}`",
     }
     for field, expected in fields.items():
         values = re.findall(rf"(?m)^- {re.escape(field)}:\s*(.*?)\s*$", release)
         if values != [expected]:
             failures.append(f"{RELEASE_PATH}: {field} must equal {expected} exactly once")
-    for marker in (MAINTENANCE_BRANCH, DEPLOYED_BASELINE, MIGRATION_REVISION):
-        if marker not in release:
-            failures.append(f"{RELEASE_PATH}: release identity missing: {marker}")
+    if MIGRATION_REVISION not in release:
+        failures.append(f"{RELEASE_PATH}: release identity missing: {MIGRATION_REVISION}")
 
     notes_path = "v2-web/src/constants/releaseNotes.ts"
     notes = legacy.legacy._read(root, notes_path, failures)
@@ -691,4 +943,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_PATH = "v2-api/scripts/migrate_external_photos_to_oss.py"
+PACKAGING_BRANCH_GUARD = """$sourceBranch = (& git branch --show-current).Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.5") {
+    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.5."
+}"""
 
 
 def load_verifier():
@@ -76,6 +82,19 @@ def assert_rejected(tmp_repo: TemporaryRepository, marker: str) -> None:
 
 def test_current_tree_satisfies_v325_contract() -> None:
     assert load_verifier().main([]) == 0
+
+
+def test_cli_rejects_unexpected_arguments() -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "verify_v3_2_5_release.py"), "--unexpected"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "does not accept positional arguments" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -155,6 +174,70 @@ def test_release_verifier_requires_branch_baseline_and_pending_lifecycle(
 ) -> None:
     tmp_repo.replace(relative_path, old, new)
     assert_rejected(tmp_repo, failure)
+
+
+@pytest.mark.parametrize(
+    ("field", "expected", "wrong"),
+    (
+        ("Candidate branch", "`production/V3/3.2.5`", "`production/V3/9.9.9`"),
+        ("Deployed production baseline", "`V3.2.2`", "`V3.2.1`"),
+        ("Candidate version", "`V3.2.5`", "`V9.9.9`"),
+    ),
+)
+@pytest.mark.parametrize("mutation", ("wrong", "duplicate"))
+def test_release_verifier_binds_exact_release_identity_labels_once(
+    tmp_repo: TemporaryRepository,
+    field: str,
+    expected: str,
+    wrong: str,
+    mutation: str,
+) -> None:
+    release = tmp_repo.read("ops/releases/V3.2.5.md")
+    label = f"- {field}: {expected}"
+    assert label in release
+    if mutation == "wrong":
+        release = release.replace(
+            label,
+            f"- {field}: {wrong}\n\nExpected identity mentioned elsewhere: {expected}",
+            1,
+        )
+    else:
+        release = f"{release.rstrip()}\n{label}\n"
+    tmp_repo.write("ops/releases/V3.2.5.md", release)
+
+    assert_rejected(tmp_repo, f"{field} must equal {expected} exactly once")
+
+
+def test_release_verifier_accepts_exact_packaging_branch_guard() -> None:
+    checker = getattr(load_verifier(), "_check_packaging_branch_contract", None)
+    assert callable(checker), "V3.2.5 verifier must validate the packaging branch guard"
+    failures: list[str] = []
+
+    checker(PACKAGING_BRANCH_GUARD, failures)
+
+    assert failures == []
+
+
+@pytest.mark.parametrize(
+    "mutated_guard",
+    (
+        PACKAGING_BRANCH_GUARD.replace(
+            "$sourceBranch = (& git branch --show-current).Trim()",
+            '$sourceBranch = "production/V3/3.2.5"',
+        ),
+        PACKAGING_BRANCH_GUARD.replace("production/V3/3.2.5", "production/V3/9.9.9"),
+    ),
+)
+def test_release_verifier_rejects_missing_or_wrong_packaging_branch_guard(
+    mutated_guard: str,
+) -> None:
+    checker = getattr(load_verifier(), "_check_packaging_branch_contract", None)
+    assert callable(checker), "V3.2.5 verifier must validate the packaging branch guard"
+    failures: list[str] = []
+
+    checker(mutated_guard, failures)
+
+    assert any("packaging branch" in failure for failure in failures), failures
 
 
 @pytest.mark.parametrize(
@@ -324,6 +407,28 @@ def test_release_verifier_requires_formula_inputs_at_candidate_snapshot_boundary
     assert_rejected(tmp_repo, "candidate identity snapshot")
 
 
+@pytest.mark.parametrize(
+    ("old", "new"),
+    (
+        (
+            'MaterialGroup.legacy_id.label("group_legacy_id")',
+            'Photo.legacy_id.label("group_legacy_id")',
+        ),
+        (
+            'group_legacy_id=str(row.group_legacy_id or "")',
+            'group_legacy_id=str(row.photo_legacy_id or "")',
+        ),
+    ),
+)
+def test_release_verifier_binds_formula_b_group_legacy_provenance(
+    tmp_repo: TemporaryRepository,
+    old: str,
+    new: str,
+) -> None:
+    tmp_repo.replace(MIGRATION_PATH, old, new)
+    assert_rejected(tmp_repo, "candidate identity snapshot")
+
+
 def test_release_verifier_keeps_arbitrary_mismatch_rejection(
     tmp_repo: TemporaryRepository,
 ) -> None:
@@ -354,6 +459,36 @@ def test_release_verifier_requires_every_locked_identity_revalidation(
     comparison: str,
 ) -> None:
     tmp_repo.replace(MIGRATION_PATH, comparison, "")
+    assert_rejected(tmp_repo, "locked identity revalidation")
+
+
+def test_release_verifier_rejects_group_identity_guard_moved_to_dead_code(
+    tmp_repo: TemporaryRepository,
+) -> None:
+    tmp_repo.replace(
+        MIGRATION_PATH,
+        '''                if (
+                    photo is None
+                    or group_legacy_id != candidate.group_legacy_id
+                    or not _source_still_matches(photo, candidate)
+                ):
+                    statuses[item_key] = "conflict"
+                    continue
+''',
+        '''                if False and (
+                    group_legacy_id != candidate.group_legacy_id
+                    or not _source_still_matches(photo, candidate)
+                ):
+                    statuses[item_key] = "conflict"
+                if (
+                    photo is None
+                    or not _source_still_matches(photo, candidate)
+                ):
+                    statuses[item_key] = "conflict"
+                    continue
+''',
+    )
+
     assert_rejected(tmp_repo, "locked identity revalidation")
 
 
@@ -390,6 +525,73 @@ def test_release_verifier_requires_pre_oss_sha256_preservation(
     ),
 )
 def test_release_verifier_requires_canonical_downloaded_content_sha_flow(
+    tmp_repo: TemporaryRepository,
+    old: str,
+    new: str,
+) -> None:
+    tmp_repo.replace(MIGRATION_PATH, old, new)
+    assert_rejected(tmp_repo, "canonical downloaded-content SHA")
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    (
+        (
+            "                    hash_status = _hash_status(candidate, downloaded.sha256)\n",
+            '''                    if False:
+                        _hash_status(candidate, downloaded.sha256)
+                    hash_status = "accepted"
+''',
+        ),
+        (
+            "                photo.sha256 = receipt.sha256\n",
+            '''                photo.sha256 = candidate.declared_sha256
+                if False:
+                    photo.sha256 = receipt.sha256
+''',
+        ),
+    ),
+)
+def test_release_verifier_rejects_canonical_sha_contract_moved_to_dead_code(
+    tmp_repo: TemporaryRepository,
+    old: str,
+    new: str,
+) -> None:
+    tmp_repo.replace(MIGRATION_PATH, old, new)
+    assert_rejected(tmp_repo, "canonical downloaded-content SHA")
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    (
+        (
+            "                    hash_status = _hash_status(candidate, downloaded.sha256)\n",
+            '''                    _hash_status = lambda *_args: "accepted"
+                    hash_status = _hash_status(candidate, downloaded.sha256)
+''',
+        ),
+        (
+            "                    hash_status = _hash_status(candidate, downloaded.sha256)\n",
+            '''                    if False:
+                        _hash_status = lambda *_args: "accepted"
+                    hash_status = _hash_status(candidate, downloaded.sha256)
+''',
+        ),
+        (
+            "                    hash_status = _hash_status(candidate, downloaded.sha256)\n",
+            '''                    downloaded.sha256 = candidate.declared_sha256
+                    hash_status = _hash_status(candidate, downloaded.sha256)
+''',
+        ),
+        (
+            "                receipt = transfer.receipt\n",
+            '''                receipt = transfer.receipt
+                receipt = candidate
+''',
+        ),
+    ),
+)
+def test_release_verifier_rejects_canonical_sha_name_or_value_rebinding(
     tmp_repo: TemporaryRepository,
     old: str,
     new: str,

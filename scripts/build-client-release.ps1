@@ -69,6 +69,10 @@ $sourceCommit = (& git rev-parse HEAD).Trim().ToLowerInvariant()
 if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the full Git source commit for this release."
 }
+$sourceBranch = (& git branch --show-current).Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.5") {
+    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.5."
+}
 $worktreeChanges = @(git status --porcelain --untracked-files=all)
 if ($LASTEXITCODE -ne 0) {
     throw "Unable to verify Git worktree state before packaging."
