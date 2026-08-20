@@ -15,7 +15,7 @@ from app.models import GroupStatus, MaterialGroup, Photo, PhotoUploadStatus
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 API_ROOT = REPOSITORY_ROOT / "v2-api"
-EXPECTED_VERSION = "3.2.4"
+EXPECTED_VERSION = "3.2.5"
 
 
 def read(relative_path: str) -> str:
@@ -147,10 +147,10 @@ def test_v3_1_runtime_version_sources_and_release_notes_are_aligned() -> None:
         assert required_text in release_notes
 
 
-def test_v3_1_release_manifest_marks_every_migration_through_0012_irreversible() -> None:
+def test_release_manifest_marks_every_migration_through_0014_irreversible() -> None:
     manifest = read("RELEASE_MANIFEST.md")
 
-    assert "V3.1 migrations `0006` through `0012` are production-irreversible" in manifest
+    assert "V3.1-V3.2 migrations `0006` through `0014` are production-irreversible" in manifest
 
 
 def test_v3_1_deploy_runbook_prepares_writable_persistent_runtime_directories() -> None:
@@ -657,7 +657,7 @@ def test_v3_1_package_builder_blocks_without_verified_performance_evidence() -> 
     package_sop = read("docs/sop/05-release-package-and-hash.md")
 
     assert '[string]$PerformanceReport = ""' in builder
-    assert "Performance report is required for V3.2.4 packaging" in builder
+    assert "Performance report is required for V3.2.5 packaging" in builder
     assert "verify_v3_1_release.py" in builder
     assert "--performance-report $performanceReportPath" in builder
     assert "--expected-source-commit $sourceCommit" in builder

@@ -12,6 +12,18 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.5',
+    date: '2026-08-20',
+    type: 'BUG 修复',
+    title: '历史照片身份哈希兼容修复',
+    items: [
+      'V3.2.4 trial v324-external-20260819T233526Z stopped on 10 declared_hash_mismatch; uploaded/reused/committed: 0 / 0 / 0; production reconciled to V3.2.2 with zero persistent database/OSS effects.',
+      'Historical classification is exact: Formula A: 1999 and Formula B: 3; every arbitrary 64-hex mismatch remains rejected.',
+      'The locked identity revalidation covers every formula input; accepted transfers use the canonical downloaded-content SHA256 while preserving the prior synthetic value in pre_oss_sha256.',
+      'There is no Alembic migration; database head remains 20260724_0014, and the export-retirement boundary is unchanged.',
+    ],
+  },
+  {
     version: 'V3.2.4',
     date: '2026-08-19',
     type: 'BUG 修复',

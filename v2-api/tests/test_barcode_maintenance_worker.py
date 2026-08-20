@@ -2144,7 +2144,7 @@ def test_deployment_runs_one_paused_worker_and_daily_enqueue() -> None:
     assert "--serve" in runner
     assert "recompute_photo_barcode_checks.py" not in runner
     assert "alembic upgrade head" in runbook
-    assert "20260723_0012" in runbook
+    assert "20260724_0014" in runbook
     assert "module-manager-v2-photo-barcode-maintenance-enqueue.service" in runbook
     assert "id -u modulemgr" in runbook
     assert "useradd --system" in runbook

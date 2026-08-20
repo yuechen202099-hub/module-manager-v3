@@ -16,6 +16,7 @@ import scripts.oss_local_export as oss_local_export
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SEMANTIC_VERSION_RE = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
 
 
 def current_source_version() -> str | None:
@@ -24,7 +25,8 @@ def current_source_version() -> str | None:
     except (OSError, json.JSONDecodeError):
         return None
     version = payload.get("version") if isinstance(payload, dict) else None
-    return version.strip() if isinstance(version, str) and version.strip() else None
+    normalized = version.strip() if isinstance(version, str) else ""
+    return normalized if SEMANTIC_VERSION_RE.fullmatch(normalized) else None
 
 
 CURRENT_SOURCE_VERSION = current_source_version()

@@ -19,6 +19,7 @@ V3079_RELEASE_RECORD = "ops/releases/V3.0.79.md"
 V3080_RELEASE_RECORD = "ops/releases/V3.2.2.md"
 V323_RELEASE_RECORD = "ops/releases/V3.2.3.md"
 V324_RELEASE_RECORD = "ops/releases/V3.2.4.md"
+V325_RELEASE_RECORD = "ops/releases/V3.2.5.md"
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
 VALID_SHA256 = "a" * 64
@@ -39,13 +40,13 @@ SAFETY_NOTES = (
 VALID_AGENTS = """# Package fixture
 
 - Deployed production baseline: `V3.2.2`.
-- Release candidate: `V3.2.4`.
-- Release-candidate maintenance branch: `production/V3/3.2.4`.
+- Release candidate: `V3.2.5`.
+- Release-candidate maintenance branch: `production/V3/3.2.5`.
 - 当前已部署生产版本：`V3.2.2`。
-- 当前发布候选版本：`V3.2.4`。
-- 当前候选维护分支：`production/V3/3.2.4`。
+- 当前发布候选版本：`V3.2.5`。
+- 当前候选维护分支：`production/V3/3.2.5`。
 """
-PENDING_RELEASE_RECORD = """# V3.2.4 Production Release Record
+PENDING_RELEASE_RECORD = """# V3.2.5 Production Release Record
 
 ## Summary
 
@@ -55,7 +56,7 @@ PENDING_RELEASE_RECORD = """# V3.2.4 Production Release Record
 - Production Deployment: pending
 - Production Reconciliation: pending
 - Rollback target: V3.2.2
-- V3.2.4 has not been deployed to production.
+- V3.2.5 has not been deployed to production.
 
 ## Package
 
@@ -145,9 +146,9 @@ def write_release_archive(
     verifier,
     archive_path: Path,
     *,
-    manifest_version: str | None = "3.2.4",
+    manifest_version: str | None = "3.2.5",
     manifest_versions: list[str] | None = None,
-    static_version: str = "3.2.4",
+    static_version: str = "3.2.5",
     title_version: str | None = None,
     runtime_version: str | None = None,
     source_version: str | None = None,
@@ -194,7 +195,8 @@ def write_release_archive(
             "3.2.2",
             "Status: reviewed, packaged, deployed, and verified in production",
         ),
-        V324_RELEASE_RECORD: release_record,
+        V324_RELEASE_RECORD: (ROOT / V324_RELEASE_RECORD).read_text(encoding="utf-8"),
+        V325_RELEASE_RECORD: release_record,
         SOURCE_VERSION_ARTIFACT: json.dumps({"version": resolved_source_version}),
         "v2-api/app/static/vue/index.html": (
             f"<!doctype html><title>Module Manager V{resolved_title_version}</title>"
@@ -263,9 +265,18 @@ def test_archive_missing_v3081_historical_release_record_fails_verification(tmp_
         verifier.verify_package(archive_path)
 
 
-def test_archive_missing_v324_candidate_release_record_fails_verification(tmp_path: Path) -> None:
+def test_archive_missing_v325_candidate_release_record_fails_verification(tmp_path: Path) -> None:
     verifier = load_verifier()
-    archive_path = tmp_path / "module-manager-v2-server-v3.2.4.zip"
+    archive_path = tmp_path / "module-manager-v2-server-v3.2.5.zip"
+    write_release_archive(verifier, archive_path, omitted={V325_RELEASE_RECORD})
+
+    with pytest.raises(AssertionError, match=re.escape(V325_RELEASE_RECORD)):
+        verifier.verify_package(archive_path)
+
+
+def test_archive_missing_v324_historical_release_record_fails_verification(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "module-manager-v2-server-v3.2.5.zip"
     write_release_archive(verifier, archive_path, omitted={V324_RELEASE_RECORD})
 
     with pytest.raises(AssertionError, match=re.escape(V324_RELEASE_RECORD)):
@@ -274,7 +285,7 @@ def test_archive_missing_v324_candidate_release_record_fails_verification(tmp_pa
 
 def test_archive_missing_v323_historical_release_record_fails_verification(tmp_path: Path) -> None:
     verifier = load_verifier()
-    archive_path = tmp_path / "module-manager-v2-server-v3.2.4.zip"
+    archive_path = tmp_path / "module-manager-v2-server-v3.2.5.zip"
     write_release_archive(verifier, archive_path, omitted={V323_RELEASE_RECORD})
 
     with pytest.raises(AssertionError, match=re.escape(V323_RELEASE_RECORD)):
@@ -293,7 +304,7 @@ def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.2.4"' in build_script
+    assert '[string]$Version = "3.2.5"' in build_script
 
 
 def test_release_builder_embeds_the_current_source_commit() -> None:
@@ -501,7 +512,7 @@ def test_valid_pending_candidate_archive_contains_reviewed_kpi_bytes(tmp_path: P
     verifier.verify_package(archive_path)
 
 
-def test_v324_build_sequence_executes_current_and_compatible_release_gates_only() -> None:
+def test_v325_build_sequence_executes_current_and_compatible_release_gates_only() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     match = re.search(r"\$releaseVerifiers\s*=\s*@\((?P<items>[\s\S]*?)\n\)", build_script)
 
@@ -514,16 +525,21 @@ def test_v324_build_sequence_executes_current_and_compatible_release_gates_only(
         "scripts\\verify_v3_2_0_export_center_ui.py",
         "scripts\\verify_v3_2_0_single_export_entry.py",
         "scripts\\verify_v3_2_1_installer_kpi_restore.py",
-        "scripts\\verify_v3_2_4_release.py",
+        "scripts\\verify_v3_2_5_release.py",
     )
     for verifier_path in expected:
         assert verifier_path in release_verifiers
     assert "scripts\\verify_v3_2_0_release.py" not in release_verifiers
     assert "scripts\\verify_v3_2_2_release.py" not in release_verifiers
     assert "scripts\\verify_v3_2_3_release.py" not in release_verifiers
+    assert "scripts\\verify_v3_2_4_release.py" not in release_verifiers
     assert '"scripts\\verify_v3_2_3_release.py"' in build_script
     assert (
         'Copy-ReleaseItem "scripts\\verify_v3_2_3_release.py" "scripts\\verify_v3_2_3_release.py"'
+        in build_script
+    )
+    assert (
+        'Copy-ReleaseItem "scripts\\verify_v3_2_4_release.py" "scripts\\verify_v3_2_4_release.py"'
         in build_script
     )
 
@@ -1054,7 +1070,7 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.2.4")
+        verifier.verify_release_markdown_text(document_path, content, "3.2.5")
 
 
 @pytest.mark.parametrize(
@@ -1067,16 +1083,16 @@ def test_current_operational_documents_validate_against_the_package_version(docu
     verifier.verify_release_markdown_text(
         document_path,
         (ROOT / document_path).read_text(encoding="utf-8"),
-        "3.2.4",
+        "3.2.5",
     )
 
 
 def test_readme_build_command_requires_source_bound_performance_report() -> None:
     verifier = load_verifier()
-    incomplete_command = r".\scripts\build-client-release.ps1 -Version 3.2.4"
+    incomplete_command = r".\scripts\build-client-release.ps1 -Version 3.2.5"
 
     with pytest.raises(AssertionError, match="PerformanceReport"):
-        verifier.verify_release_markdown_text("README.md", incomplete_command, "3.2.4")
+        verifier.verify_release_markdown_text("README.md", incomplete_command, "3.2.5")
 
 
 def test_client_final_audit_is_valid_only_as_version_locked_v320_history() -> None:
@@ -1085,14 +1101,14 @@ def test_client_final_audit_is_valid_only_as_version_locked_v320_history() -> No
     verifier.verify_release_markdown_text(
         "docs/CLIENT_FINAL_AUDIT.md",
         (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8"),
-        "3.2.4",
+        "3.2.5",
     )
 
 
 @pytest.mark.parametrize(
     ("document_path", "content", "expected_version"),
     [
-        ("README.md", ".\\scripts\\build-client-release.ps1 -Version 3.2.0", "3.2.4"),
+        ("README.md", ".\\scripts\\build-client-release.ps1 -Version 3.2.0", "3.2.5"),
         (
             "docs/CLIENT_FINAL_AUDIT.md",
             "\n".join(
@@ -1114,7 +1130,7 @@ def test_release_markdown_rejects_unexpected_current_or_locked_historical_versio
     verifier = load_verifier()
 
     with pytest.raises(AssertionError, match=rf"non-current release version .* expected {re.escape(expected_version)}"):
-        verifier.verify_release_markdown_text(document_path, content, "3.2.4")
+        verifier.verify_release_markdown_text(document_path, content, "3.2.5")
 
 
 def test_archive_accepts_version_locked_client_final_audit_history(tmp_path: Path) -> None:
@@ -1163,7 +1179,7 @@ def test_archive_rejects_stale_marker_in_every_required_markdown(
     archive_path = tmp_path / f"stale-markdown-{hashlib.sha256(document_path.encode()).hexdigest()[:8]}.zip"
     stale_content = "final-delivery-ready\n"
     if document_path == "RELEASE_MANIFEST.md":
-            stale_content = "\n".join(("# Release manifest", "- Version: 3.2.4", *SAFETY_NOTES, stale_content))
+            stale_content = "\n".join(("# Release manifest", "- Version: 3.2.5", *SAFETY_NOTES, stale_content))
     write_release_archive(
         verifier,
         archive_path,
@@ -1325,11 +1341,11 @@ def test_archive_rejects_stale_entry_bundle_despite_current_sidecars(tmp_path: P
     write_release_archive(
         verifier,
         archive_path,
-        runtime_version="3.2.4",
-        source_version="3.2.4",
-        entry_version="3.2.3",
-        unrelated_static_version="3.2.4",
-        unrelated_chunk_entry_version="3.2.4",
+        runtime_version="3.2.5",
+        source_version="3.2.5",
+        entry_version="3.2.4",
+        unrelated_static_version="3.2.5",
+        unrelated_chunk_entry_version="3.2.5",
     )
 
     with pytest.raises(AssertionError, match="entry bundle version"):
@@ -1422,7 +1438,7 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
         (
             "star-package",
             "Package",
-            "* Package: module-manager-v2-server-3.2.4.zip",
+            "* Package: module-manager-v2-server-3.2.5.zip",
         ),
         ("plus-local-verification", "Local Verification", "+ Local Verification: passed"),
         (
@@ -1458,9 +1474,9 @@ def test_archive_rejects_normalized_duplicate_candidate_lifecycle_field(
 def test_archive_rejects_deployed_record_without_live_evidence(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "unsupported-deployed-record.zip"
-    agents = VALID_AGENTS.replace("V3.2.2", "V3.2.4")
+    agents = VALID_AGENTS.replace("V3.2.2", "V3.2.5")
     record = deployed_release_record(
-        "3.2.4",
+        "3.2.5",
         "Status: reviewed, packaged, deployed, and verified in production",
     ).replace(f"| SHA256 | {VALID_SHA256} |", "| SHA256 | |")
     write_release_archive(
@@ -1552,13 +1568,13 @@ def test_archive_accepts_complete_deployed_baseline_status(tmp_path: Path) -> No
 def test_archive_accepts_equal_post_deploy_markers_as_one_deployed_record(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "post-deploy-equal-markers.zip"
-    agents = VALID_AGENTS.replace("V3.2.2", "V3.2.4")
+    agents = VALID_AGENTS.replace("V3.2.2", "V3.2.5")
     write_release_archive(
         verifier,
         archive_path,
         agents=agents,
         release_record=deployed_release_record(
-            "3.2.4",
+            "3.2.5",
             "Status: reviewed, packaged, deployed, and verified in production",
         ),
     )

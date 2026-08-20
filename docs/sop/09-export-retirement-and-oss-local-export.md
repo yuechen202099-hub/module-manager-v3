@@ -1,6 +1,6 @@
-# V3.2.4 导出退休、外链迁移与 OSS 本机导出 SOP
+# V3.2.5 导出退休、外链迁移与 OSS 本机导出 SOP
 
-本 SOP 只适用于 V3.2.4 候选发布完成本地验证之后的受控操作。导出中心、浏览器 CSV 和服务器交付包已退休；应用回滚到 V3.2.2 时仍保留 Nginx `410 Gone` 拦截。迁移、清单生成和本机下载互相独立，不得把生产数据库或 OSS 写凭据带到本机。
+本 SOP 只适用于 V3.2.5 候选发布完成本地验证之后的受控操作。导出中心、浏览器 CSV 和服务器交付包已退休；应用回滚到 V3.2.2 时仍保留 Nginx `410 Gone` 拦截。迁移、清单生成和本机下载互相独立，不得把生产数据库或 OSS 写凭据带到本机。
 
 ## 固定安全边界
 
@@ -17,7 +17,7 @@
 
 ```bash
 set -euo pipefail
-REPORT_DIR=/var/lib/module-manager-v2/private-operations/v324-external-photo
+REPORT_DIR=/var/lib/module-manager-v2/private-operations/v325-external-photo
 install -d -o modulemgr -g modulemgr -m 0700 "$REPORT_DIR"
 cd /opt/module-manager-v2/current/v2-api
 umask 077
@@ -35,9 +35,9 @@ test "$(stat -c %a "$REPORT_DIR/dry-run.json")" = 600
 
 ```bash
 set -euo pipefail
-REPORT_DIR=/var/lib/module-manager-v2/private-operations/v324-external-photo
+REPORT_DIR=/var/lib/module-manager-v2/private-operations/v325-external-photo
 ALLOWLIST="$REPORT_DIR/allowed-hosts.txt"
-MIGRATION_ID=v324-external-photo-20260819
+MIGRATION_ID=v325-external-photo-20260820
 cd /opt/module-manager-v2/current/v2-api
 umask 077
 test "$(stat -c %a "$ALLOWLIST")" = 600
@@ -52,9 +52,9 @@ sudo -u modulemgr /opt/module-manager-v2/venv/bin/python scripts/migrate_externa
 
 ```bash
 set -euo pipefail
-REPORT_DIR=/var/lib/module-manager-v2/private-operations/v324-external-photo
+REPORT_DIR=/var/lib/module-manager-v2/private-operations/v325-external-photo
 ALLOWLIST="$REPORT_DIR/allowed-hosts.txt"
-MIGRATION_ID=v324-external-photo-20260819
+MIGRATION_ID=v325-external-photo-20260820
 cd /opt/module-manager-v2/current/v2-api
 umask 077
 test "$(stat -c %a "$ALLOWLIST")" = 600
@@ -71,8 +71,8 @@ sudo -u modulemgr /opt/module-manager-v2/venv/bin/python scripts/migrate_externa
 
 ```bash
 set -euo pipefail
-REPORT_DIR=/var/lib/module-manager-v2/private-operations/v324-external-photo
-MIGRATION_ID=v324-external-photo-20260819
+REPORT_DIR=/var/lib/module-manager-v2/private-operations/v325-external-photo
+MIGRATION_ID=v325-external-photo-20260820
 cd /opt/module-manager-v2/current/v2-api
 umask 077
 START_MEMORY_KIB=$((400 * 1024))

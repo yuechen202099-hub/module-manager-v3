@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
 import shutil
 from pathlib import Path
 
@@ -8,6 +10,24 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SEMANTIC_VERSION_RE = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
+
+
+def current_source_version() -> str | None:
+    try:
+        payload = json.loads((ROOT / "v2-web" / "src" / "version.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    version = payload.get("version") if isinstance(payload, dict) else None
+    normalized = version.strip() if isinstance(version, str) else ""
+    return normalized if SEMANTIC_VERSION_RE.fullmatch(normalized) else None
+
+
+CURRENT_SOURCE_VERSION = current_source_version()
+V324_CURRENT_TREE_ONLY = pytest.mark.skipif(
+    CURRENT_SOURCE_VERSION is not None and CURRENT_SOURCE_VERSION != "3.2.4",
+    reason="historical V3.2.4 current-tree-only contract requires active version 3.2.4",
+)
 
 
 def load_verifier():
@@ -68,10 +88,12 @@ def assert_rejected(tmp_repo: TemporaryRepository, marker: str) -> None:
     assert any(marker in failure for failure in failures), failures
 
 
+@V324_CURRENT_TREE_ONLY
 def test_current_tree_satisfies_v324_contract() -> None:
     assert load_verifier().main([]) == 0
 
 
+@V324_CURRENT_TREE_ONLY
 @pytest.mark.parametrize(
     ("relative_path", "old", "new"),
     (
@@ -94,6 +116,7 @@ def test_release_verifier_rejects_stale_version_surfaces(
     assert_rejected(tmp_repo, relative_path)
 
 
+@V324_CURRENT_TREE_ONLY
 def test_release_verifier_rejects_stale_active_v31_verifier_version(
     tmp_repo: TemporaryRepository,
 ) -> None:
@@ -105,6 +128,7 @@ def test_release_verifier_rejects_stale_active_v31_verifier_version(
     assert_rejected(tmp_repo, "EXPECTED_VERSION must equal 3.2.4")
 
 
+@V324_CURRENT_TREE_ONLY
 def test_release_verifier_rejects_rebound_active_v31_verifier_version(
     tmp_repo: TemporaryRepository,
 ) -> None:
@@ -116,6 +140,7 @@ def test_release_verifier_rejects_rebound_active_v31_verifier_version(
     assert_rejected(tmp_repo, "EXPECTED_VERSION must equal 3.2.4")
 
 
+@V324_CURRENT_TREE_ONLY
 def test_release_verifier_rejects_nested_only_active_v31_verifier_version(
     tmp_repo: TemporaryRepository,
 ) -> None:
@@ -151,10 +176,11 @@ def test_release_verifier_rejects_legacy_https_handler_keyword(
             'Copy-ReleaseItem "scripts\\verify_v3_2_4_release.py" "scripts\\verify_v3_2_4_release.py"\n',
             "package copy",
         ),
-        (
+        pytest.param(
             "scripts/build-client-release.ps1",
             '    "scripts\\verify_v3_2_4_release.py"\n',
             "release gate",
+            marks=V324_CURRENT_TREE_ONLY,
         ),
     ),
 )

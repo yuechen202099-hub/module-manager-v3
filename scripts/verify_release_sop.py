@@ -24,6 +24,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_3_release.py",
     "scripts/verify_v3_2_4_release.py",
     "scripts/test_verify_v3_2_4_release.py",
+    "scripts/verify_v3_2_5_release.py",
+    "scripts/test_verify_v3_2_5_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -42,6 +44,7 @@ RELEASE_INPUTS = (
     "v2-api/app/services/external_photo_oss_migration.py",
     "v2-api/scripts/build_oss_export_manifest.py",
     "v2-api/scripts/migrate_external_photos_to_oss.py",
+    "v2-api/tests/test_migrate_external_photos_to_oss.py",
     "v2-web/src/components/data-center/DataCenterFilters.vue",
     "v2-web/src/components/data-center/DataCenterReviewDialog.vue",
     "v2-web/src/composables/useDataCenterQuery.ts",
@@ -53,6 +56,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.2.md",
     "ops/releases/V3.2.3.md",
     "ops/releases/V3.2.4.md",
+    "ops/releases/V3.2.5.md",
 )
 
 REQUIRED_FILES = [
@@ -543,6 +547,15 @@ def deployment_claim_prose(record: str) -> str:
             continue
         stripped = line.strip()
         if not stripped:
+            continue
+        baseline_metadata = parse_known_label_value(
+            stripped,
+            {
+                ENGLISH_DEPLOYED_BASELINE_MARKER: ENGLISH_DEPLOYED_BASELINE_MARKER,
+                DEPLOYED_BASELINE_MARKER: DEPLOYED_BASELINE_MARKER,
+            },
+        )
+        if baseline_metadata is not None and parse_marker_version(baseline_metadata[1]) is not None:
             continue
         if EXAMPLE_LINE_PATTERN.search(normalize_claim_text(stripped)):
             continue

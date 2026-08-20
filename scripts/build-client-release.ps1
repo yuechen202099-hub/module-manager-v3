@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.2.4",
+    [string]$Version = "3.2.5",
     [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
@@ -25,6 +25,8 @@ $releaseInputs = @(
     "scripts\test_verify_v3_2_3_release.py",
     "scripts\verify_v3_2_4_release.py",
     "scripts\test_verify_v3_2_4_release.py",
+    "scripts\verify_v3_2_5_release.py",
+    "scripts\test_verify_v3_2_5_release.py",
     "scripts\patch_export_retirement_nginx.py",
     "scripts\test_patch_export_retirement_nginx.py",
     "scripts\oss_local_export.py",
@@ -48,11 +50,14 @@ $releaseInputs = @(
     "v2-web\src\utils\dataCenterDrilldown.ts",
     "v2-web\src\components\InstallerKpiDialog.vue",
     "v2-web\src\utils\installerKpi.ts",
+    "v2-api\scripts\migrate_external_photos_to_oss.py",
+    "v2-api\tests\test_migrate_external_photos_to_oss.py",
     "ops\releases\V3.2.0.md",
     "ops\releases\V3.2.1.md",
     "ops\releases\V3.2.2.md",
     "ops\releases\V3.2.3.md",
-    "ops\releases\V3.2.4.md"
+    "ops\releases\V3.2.4.md",
+    "ops\releases\V3.2.5.md"
 )
 foreach ($releaseInput in $releaseInputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $root $releaseInput) -PathType Leaf)) {
@@ -72,7 +77,7 @@ if ($worktreeChanges.Count -ne 0) {
     throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
 }
 if ([string]::IsNullOrWhiteSpace($PerformanceReport)) {
-    throw "Performance report is required for V3.2.4 packaging."
+    throw "Performance report is required for V3.2.5 packaging."
 }
 $performanceReportPath = if ([System.IO.Path]::IsPathRooted($PerformanceReport)) {
     [System.IO.Path]::GetFullPath($PerformanceReport)
@@ -129,7 +134,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "V3.1 performance evidence verification failed."
 }
 
-Write-Host "Running V3.2.4 focused release gates..."
+Write-Host "Running V3.2.5 focused release gates..."
 $releaseVerifiers = @(
     "scripts\verify_v3_2_0_role_routes.py",
     "scripts\verify_v3_2_0_data_center_ui.py",
@@ -137,12 +142,12 @@ $releaseVerifiers = @(
     "scripts\verify_v3_2_0_export_center_ui.py",
     "scripts\verify_v3_2_0_single_export_entry.py",
     "scripts\verify_v3_2_1_installer_kpi_restore.py",
-    "scripts\verify_v3_2_4_release.py"
+    "scripts\verify_v3_2_5_release.py"
 )
 foreach ($releaseVerifier in $releaseVerifiers) {
     & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
     if ($LASTEXITCODE -ne 0) {
-        throw "V3.2.4 release gate failed: $releaseVerifier"
+        throw "V3.2.5 release gate failed: $releaseVerifier"
     }
 }
 
@@ -230,6 +235,8 @@ Copy-ReleaseItem "scripts\verify_v3_2_3_release.py" "scripts\verify_v3_2_3_relea
 Copy-ReleaseItem "scripts\test_verify_v3_2_3_release.py" "scripts\test_verify_v3_2_3_release.py"
 Copy-ReleaseItem "scripts\verify_v3_2_4_release.py" "scripts\verify_v3_2_4_release.py"
 Copy-ReleaseItem "scripts\test_verify_v3_2_4_release.py" "scripts\test_verify_v3_2_4_release.py"
+Copy-ReleaseItem "scripts\verify_v3_2_5_release.py" "scripts\verify_v3_2_5_release.py"
+Copy-ReleaseItem "scripts\test_verify_v3_2_5_release.py" "scripts\test_verify_v3_2_5_release.py"
 Copy-ReleaseItem "scripts\patch_export_retirement_nginx.py" "scripts\patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\test_patch_export_retirement_nginx.py" "scripts\test_patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\oss_local_export.py" "scripts\oss_local_export.py"
@@ -489,7 +496,7 @@ $manifest = @"
 
 - Release smoke check passes unless -SkipSmoke was used
 - Source-bound V3.1 task/review performance evidence passes the release verifier
-- V3.2.0 inherited gates, the three inverted retirement UI gates, the retained V3.2.3 contract, and the V3.2.4 HTTPS compatibility contract pass before package staging
+- V3.2.0 inherited gates, the three inverted retirement UI gates, retained V3.2.3/V3.2.4 contracts, and the active V3.2.5 historical-identity contract pass before package staging
 - Demo admin and constructor login are available only for local walkthrough when enabled
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
