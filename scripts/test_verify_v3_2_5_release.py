@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -68,11 +70,18 @@ def tmp_repo(tmp_path: Path) -> TemporaryRepository:
             shutil.copytree(source, target, dirs_exist_ok=True)
         else:
             shutil.copy2(source, target)
+    release_path = destination / "ops/releases/V3.2.5.md"
+    release_path.write_text(
+        release_path.read_text(encoding="utf-8")
+        .replace("- Local Verification: passed", "- Local Verification: not run", 1)
+        .replace("- Package: passed", "- Package: pending", 1),
+        encoding="utf-8",
+    )
     return TemporaryRepository(destination)
 
 
-def failures_for(tmp_repo: TemporaryRepository) -> list[str]:
-    return load_verifier().collect_failures(tmp_repo.root)
+def failures_for(tmp_repo: TemporaryRepository, phase: str = "source") -> list[str]:
+    return load_verifier().collect_failures(tmp_repo.root, phase)
 
 
 def assert_rejected(tmp_repo: TemporaryRepository, marker: str) -> None:
@@ -81,7 +90,7 @@ def assert_rejected(tmp_repo: TemporaryRepository, marker: str) -> None:
 
 
 def test_current_tree_satisfies_v325_contract() -> None:
-    assert load_verifier().main([]) == 0
+    assert load_verifier().main(["--phase", "attestation"]) == 0
 
 
 def test_cli_rejects_unexpected_arguments() -> None:
@@ -94,7 +103,16 @@ def test_cli_rejects_unexpected_arguments() -> None:
     )
 
     assert result.returncode == 2
-    assert "does not accept positional arguments" in result.stderr
+    assert "--phase" in result.stderr
+    unknown = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "verify_v3_2_5_release.py"), "--phase", "unknown"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert unknown.returncode == 2
+    assert "invalid choice" in unknown.stderr
 
 
 @pytest.mark.parametrize(
@@ -656,3 +674,143 @@ def test_release_verifier_requires_unchanged_migration_head(
         'revision = "20260820_0015"\ndown_revision = "20260724_0014"\n',
     )
     assert_rejected(tmp_repo, "migration head must remain 0014")
+
+
+def git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def make_attestation_history(
+    tmp_path: Path,
+    *,
+    intermediate_commit: bool = False,
+    extra_attestation_path: bool = False,
+) -> tuple[Path, str]:
+    root = tmp_path / "attestation-repository"
+    root.mkdir()
+    git(root, "init")
+    git(root, "config", "user.email", "release-test@example.invalid")
+    git(root, "config", "user.name", "Release Test")
+    record = root / "ops" / "releases" / "V3.2.5.md"
+    record.parent.mkdir(parents=True)
+    record.write_text("source record\n", encoding="utf-8")
+    git(root, "add", "ops/releases/V3.2.5.md")
+    git(root, "commit", "-m", "source")
+    source_commit = git(root, "rev-parse", "HEAD")
+    if intermediate_commit:
+        (root / "README.md").write_text("intermediate\n", encoding="utf-8")
+        git(root, "add", "README.md")
+        git(root, "commit", "-m", "intermediate")
+    record.write_text("attested record\n", encoding="utf-8")
+    if extra_attestation_path:
+        (root / "application.py").write_text("unexpected drift\n", encoding="utf-8")
+        git(root, "add", "application.py")
+    git(root, "add", "ops/releases/V3.2.5.md")
+    git(root, "commit", "-m", "attestation")
+    (root / "scripts").mkdir(exist_ok=True)
+    (root / "scripts" / "verify.py").write_text("repair\n", encoding="utf-8")
+    git(root, "add", "scripts/verify.py")
+    git(root, "commit", "-m", "later verifier-only repair")
+    return root, source_commit
+
+
+def test_attestation_relationship_accepts_real_git_history_with_later_repair(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    repository, source_commit = make_attestation_history(tmp_path)
+    failures: list[str] = []
+
+    attestation_commit = verifier.attestation_commit_for_source(
+        repository, source_commit, "ops/releases/V3.2.5.md", failures
+    )
+
+    assert failures == []
+    assert attestation_commit == git(repository, "rev-parse", "HEAD~1")
+
+
+@pytest.mark.parametrize(
+    ("intermediate_commit", "extra_attestation_path", "failure"),
+    (
+        (True, False, "immediate child"),
+        (False, True, "only change"),
+    ),
+)
+def test_attestation_relationship_rejects_non_immediate_or_drifting_commit(
+    tmp_path: Path,
+    intermediate_commit: bool,
+    extra_attestation_path: bool,
+    failure: str,
+) -> None:
+    verifier = load_verifier()
+    repository, source_commit = make_attestation_history(
+        tmp_path,
+        intermediate_commit=intermediate_commit,
+        extra_attestation_path=extra_attestation_path,
+    )
+    failures: list[str] = []
+
+    verifier.attestation_commit_for_source(
+        repository, source_commit, "ops/releases/V3.2.5.md", failures
+    )
+
+    assert any(failure in item for item in failures), failures
+
+
+def test_package_attestation_binds_real_zip_source_size_and_hash(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    package_path = tmp_path / "package.zip"
+    source_commit = "a" * 40
+    with zipfile.ZipFile(package_path, "w") as archive:
+        archive.writestr("SOURCE_COMMIT", f"{source_commit}\n")
+    expected_size = package_path.stat().st_size
+    expected_hash = hashlib.sha256(package_path.read_bytes()).hexdigest()
+
+    failures: list[str] = []
+    verifier.check_package_attestation(
+        package_path, source_commit, expected_size, expected_hash, failures
+    )
+    assert failures == []
+
+    for expected_source, size, digest, failure in (
+        ("b" * 40, expected_size, expected_hash, "embedded source commit"),
+        (source_commit, expected_size + 1, expected_hash, "size"),
+        (source_commit, expected_size, "0" * 64, "SHA256"),
+    ):
+        failures = []
+        verifier.check_package_attestation(package_path, expected_source, size, digest, failures)
+        assert any(failure in item for item in failures), failures
+
+
+def test_v325_phase_lifecycle_accepts_source_and_attestation_only() -> None:
+    verifier = load_verifier()
+    attested = (ROOT / "ops" / "releases" / "V3.2.5.md").read_text(encoding="utf-8")
+    source = attested.replace("- Local Verification: passed", "- Local Verification: not run", 1).replace(
+        "- Package: passed", "- Package: pending", 1
+    )
+
+    assert verifier.v325_release_lifecycle_failures(source, "source") == []
+    assert verifier.v325_release_lifecycle_failures(attested, "attestation") == []
+    assert verifier.v325_release_lifecycle_failures(attested, "source")
+    assert verifier.v325_release_lifecycle_failures(source, "attestation")
+    for field in ("Production Deployment", "Production Reconciliation"):
+        deployed = attested.replace(f"- {field}: pending", f"- {field}: passed", 1)
+        assert verifier.v325_release_lifecycle_failures(deployed, "attestation")
+
+
+def test_packaging_builder_explicitly_selects_source_phase() -> None:
+    verifier = load_verifier()
+    builder = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    failures: list[str] = []
+
+    verifier.check_packaging_source_phase_contract(builder, failures)
+    assert failures == []
+
+    failures = []
+    verifier.check_packaging_source_phase_contract(
+        builder.replace("--phase source", "--phase attestation", 1),
+        failures,
+    )
+    assert any("--phase source" in failure for failure in failures), failures

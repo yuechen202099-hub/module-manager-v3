@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+import importlib.util
 import json
 import re
 import sys
@@ -837,7 +838,19 @@ def validate_release_lifecycle_records(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify release SOP files for one explicit candidate version.")
     parser.add_argument("--version", required=True, help="Expected candidate version, including the V prefix.")
+    parser.add_argument("--phase", required=True, choices=("source", "attestation"))
     return parser.parse_args(argv)
+
+
+def verify_v325_phase(phase: str) -> None:
+    path = ROOT / "scripts" / "verify_v3_2_5_release.py"
+    spec = importlib.util.spec_from_file_location("verify_v3_2_5_release", path)
+    if spec is None or spec.loader is None:
+        fail("Unable to load V3.2.5 release verifier")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if module.main(["--phase", phase]) != 0:
+        fail(f"V3.2.5 {phase} release contract failed")
 
 
 def validate_requested_candidate_version(version: str, agents: str) -> str:
@@ -869,6 +882,7 @@ def main(argv: list[str] | None = None) -> int:
     missing = [path for path in REQUIRED_FILES if not (ROOT / path).exists()]
     if missing:
         fail("Missing SOP files: " + ", ".join(missing))
+    verify_v325_phase(args.phase)
 
     readme = read("README.md")
     if "build/server-release/" not in readme:
@@ -1005,11 +1019,19 @@ def main(argv: list[str] | None = None) -> int:
     if "ops/releases" not in agents:
         fail("AGENTS.md must reference production release records")
 
-    validate_release_lifecycle_records(
-        lambda version: read(f"ops/releases/{version}.md"),
+    release_record_matches_lifecycle_state(
+        read(f"ops/releases/{deployed_baseline}.md"),
+        deployed_baseline,
         deployed_baseline,
         candidate,
     )
+    if candidate != "V3.2.5":
+        release_record_matches_lifecycle_state(
+            read(f"ops/releases/{candidate}.md"),
+            candidate,
+            deployed_baseline,
+            candidate,
+        )
 
     source_runtime_version = runtime_version_from_artifact(read("v2-web/src/version.json"))
     if f"V{source_runtime_version}" != candidate:
