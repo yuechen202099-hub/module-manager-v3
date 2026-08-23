@@ -14,6 +14,7 @@ from app.database import SessionLocal
 from app.models import CollectorPhoto
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
+    CollectorPhotoConflictError,
     PoolInsufficientError,
     collector_no_from_photo_filename,
     normalize_identifier,
@@ -89,6 +90,13 @@ def service_error_response(request: Request, exc: Exception):
             request,
             code="allocation_conflict",
             message="采集器或需求已被其他分配占用，本次操作已回滚。",
+            status_code=409,
+        )
+    if isinstance(exc, CollectorPhotoConflictError):
+        return error_response(
+            request,
+            code="photo_conflict",
+            message="该照片已绑定其他采集器，本次操作已回滚。",
             status_code=409,
         )
     if isinstance(exc, KeyError):

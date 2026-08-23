@@ -192,5 +192,6 @@ def test_collector_transfer_migration_is_chained_and_enforces_one_time_assignmen
     assert "CREATE TABLE collector_assignments" in upgrade
     assert "CONSTRAINT uq_collector_assignments_requirement UNIQUE (requirement_id)" in upgrade
     assert "CONSTRAINT uq_collector_assignments_physical UNIQUE (physical_collector_id)" in upgrade
+    assert "CONSTRAINT uq_collector_photos_sha256 UNIQUE (sha256)" in upgrade
     assert "CONSTRAINT ck_physical_collectors_pool_status CHECK" in upgrade
     assert "DROP TABLE collector_transfer_runs" in downgrade

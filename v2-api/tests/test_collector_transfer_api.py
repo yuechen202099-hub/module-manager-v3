@@ -15,6 +15,7 @@ from app.api.routes import collector_transfer as routes
 from app.core import security
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
+    CollectorPhotoConflictError,
     PoolInsufficientError,
 )
 
@@ -344,6 +345,39 @@ def test_mobile_photo_validation_error_uses_the_stable_api_error_shape(monkeypat
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
     assert service.calls == []
+
+
+def test_mobile_photo_sha_conflict_returns_409_and_removes_new_orphan(monkeypatch) -> None:
+    """Catches a concurrent cross-collector SHA conflict leaking storage or returning 400/500."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+    stored = {
+        "url": "/static/uploads/collector-transfer/conflict.jpg",
+        "sha256": "c" * 64,
+        "storage_type": "local_upload",
+        "storage_key": "collector-transfer/conflict.jpg",
+        "content_type": "image/jpeg",
+        "created_new": True,
+    }
+    deleted: list[str] = []
+    monkeypatch.setattr(routes, "save_image_bytes", lambda **_kwargs: stored)
+    monkeypatch.setattr(routes, "saved_image_is_registered", lambda **_kwargs: False)
+    monkeypatch.setattr(routes, "delete_saved_image", lambda item: deleted.append(str(item["storage_key"])))
+
+    def reject_reuse(**_kwargs):
+        raise CollectorPhotoConflictError("photo content is already bound to another physical collector")
+
+    monkeypatch.setattr(service, "register_photo", reject_reuse)
+
+    response = client.post(
+        "/collector-transfer/runs/run-1/collectors/collector-2/photo",
+        headers=auth_headers(),
+        files={"file": ("collector-2.jpg", b"duplicate-image", "image/jpeg")},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "photo_conflict"
+    assert deleted == ["collector-transfer/conflict.jpg"]
 
 
 def test_corrupt_workbook_returns_stable_invalid_request(monkeypatch) -> None:

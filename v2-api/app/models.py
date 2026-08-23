@@ -818,7 +818,7 @@ class PhysicalCollector(Base, TimestampMixin):
 class CollectorPhoto(Base, TimestampMixin):
     __tablename__ = "collector_photos"
     __table_args__ = (
-        UniqueConstraint("physical_collector_id", "sha256", name="uq_collector_photos_collector_sha256"),
+        UniqueConstraint("sha256", name="uq_collector_photos_sha256"),
         Index("ix_collector_photos_team_active", "team_id", "is_active"),
     )
 

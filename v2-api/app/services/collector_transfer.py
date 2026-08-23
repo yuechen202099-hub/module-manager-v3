@@ -67,6 +67,10 @@ class CollectorAllocationConflictError(ValueError):
     """A database uniqueness backstop rejected an allocation after the service acquired its locks."""
 
 
+class CollectorPhotoConflictError(ValueError):
+    """Photo content is already bound to a different physical collector."""
+
+
 _MISSING_TERMINAL_PREFIX = "__missing_terminal__:"
 
 
@@ -724,10 +728,13 @@ class PostgresCollectorTransferService:
         sha256 = normalize_identifier(stored.get("sha256"))
         photo = self.session.scalar(
             select(CollectorPhoto).where(
-                CollectorPhoto.physical_collector_id == physical.id,
                 CollectorPhoto.sha256 == sha256,
             )
         )
+        if photo is not None and photo.physical_collector_id != physical.id:
+            raise CollectorPhotoConflictError(
+                "photo content is already bound to another physical collector"
+            )
         if photo is None:
             photo = CollectorPhoto(
                 team_id=self.team_id,
@@ -743,7 +750,13 @@ class PostgresCollectorTransferService:
                 is_active=True,
             )
             self.session.add(photo)
-            self.session.flush()
+            try:
+                self.session.flush()
+            except IntegrityError as exc:
+                self.session.rollback()
+                raise CollectorPhotoConflictError(
+                    "photo content is already bound to another physical collector"
+                ) from exc
 
         direct_event = self.session.scalar(
             select(CollectorScanEvent)

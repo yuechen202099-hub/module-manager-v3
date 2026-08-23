@@ -2,11 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { encodeCode128B } from '../src/features/collectorTransfer/code128.ts'
-import {
-  inventoryResultPresentation,
-  nextWorkbenchItemIndex,
-  workbenchItemsForMode,
-} from '../src/features/collectorTransfer/state.ts'
+import { inventoryResultPresentation } from '../src/features/collectorTransfer/state.ts'
 
 
 test('same-number reusable photo is confirmed without camera or pool admission', () => {
@@ -55,23 +51,19 @@ test('an existing assignment is shown as reuse and can never re-enter the pool',
 })
 
 
-test('workbench mode keeps meter installs and collector removals separate', () => {
-  const items = [
-    { id: 'meter-1', kind: 'meter_install' as const },
-    { id: 'collector-1', kind: 'collector_removal' as const },
-    { id: 'meter-2', kind: 'meter_install' as const },
-  ]
+test('a photographed pool collector transitions to a completed result and next-scan action', () => {
+  const result = inventoryResultPresentation({
+    decision: 'pool_needs_photo',
+    requiresPhoto: false,
+    addToPool: true,
+  })
 
-  assert.deepEqual(workbenchItemsForMode(items, 'install').map((item) => item.id), ['meter-1', 'meter-2'])
-  assert.deepEqual(workbenchItemsForMode(items, 'removal').map((item) => item.id), ['collector-1'])
-})
-
-
-test('next workbench navigation clamps at both ends', () => {
-  assert.equal(nextWorkbenchItemIndex(3, 0, -1), 0)
-  assert.equal(nextWorkbenchItemIndex(3, 1, 1), 2)
-  assert.equal(nextWorkbenchItemIndex(3, 2, 1), 2)
-  assert.equal(nextWorkbenchItemIndex(0, 0, 1), 0)
+  assert.deepEqual(result, {
+    tone: 'success',
+    title: '已加入替换池',
+    description: '照片已保存，采集器已作为一次性替换资源登记。',
+    primaryAction: '继续扫码',
+  })
 })
 
 

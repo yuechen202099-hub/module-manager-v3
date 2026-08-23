@@ -18,8 +18,13 @@ const workspaceMock = vi.hoisted(() => ({
   loadProjects: vi.fn(),
 }))
 
+const authMock = vi.hoisted(() => ({
+  user: { role: 'admin', roles: ['admin'] } as { role: string; roles: string[] } | null,
+}))
+
 vi.mock('@/api/services', () => serviceMocks)
 vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => workspaceMock }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => authMock }))
 vi.mock('element-plus', () => ({
   ElMessage: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
 }))
@@ -88,6 +93,7 @@ describe('CollectorInventoryView', () => {
     vi.clearAllMocks()
     serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([run])
     workspaceMock.loadProjects.mockResolvedValue(undefined)
+    authMock.user = { role: 'admin', roles: ['admin'] }
     vi.stubGlobal('URL', {
       ...URL,
       createObjectURL: vi.fn(() => 'blob:collector-preview'),
@@ -129,6 +135,15 @@ describe('CollectorInventoryView', () => {
     expect(wrapper.text()).not.toMatch(/甲方账号|甲方密码|平台登录|自动上传/)
     expect(wrapper.find('input[type="password"]').exists()).toBe(false)
     expect(wrapper.find('a[href*="platform"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the active project identity visible and filters runs by that project', async () => {
+    const wrapper = await mountPage()
+
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('城南改造')
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('project-1')
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
     wrapper.unmount()
   })
 
@@ -182,6 +197,33 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
+  it('shows a completed pool result and continue-scan action after a pool photo upload succeeds', async () => {
+    serviceMocks.scanPhysicalCollector.mockResolvedValue(decision('pool_needs_photo', true, true))
+    serviceMocks.uploadPhysicalCollectorPhoto.mockResolvedValue({
+      collector_id: 'collector-pool_needs_photo',
+      collector_no: 'CG-2026-0819-0036',
+      pool_status: 'available',
+      assignment_id: null,
+      photo: { id: 'photo-pool', preview_url: '/photos/pool.jpg' } as CollectorPhotoRegistration['photo'],
+    })
+    const wrapper = await mountPage()
+    await submitManualScan(wrapper)
+    const input = wrapper.get<HTMLInputElement>('[data-testid="photo-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: [new File(['pool-photo'], 'pool.jpg', { type: 'image/jpeg' })],
+    })
+
+    await input.trigger('change')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="decision-title"]').text()).toContain('已加入替换池')
+    expect(wrapper.get('[data-testid="pool-semantics"]').text()).toContain('已加入替换池')
+    expect(wrapper.get('[data-testid="decision-primary-action"]').text()).toContain('继续扫码')
+    expect(wrapper.text()).not.toContain('需要补拍')
+    wrapper.unmount()
+  })
+
   it('uses native BarcodeDetector continuously, deduplicates an in-flight value, and stops MediaStream tracks', async () => {
     const scan = deferred<CollectorInventoryDecision>()
     serviceMocks.scanPhysicalCollector.mockReturnValue(scan.promise)
@@ -231,5 +273,60 @@ describe('CollectorInventoryView', () => {
     expect(wrapper.get('[data-testid="camera-status"]').text()).toContain('摄像头不可用')
     expect(wrapper.get('#collector-number').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
+  })
+
+  it.each([
+    ['盘点记录', 'records'],
+    ['批量导入', 'import'],
+  ])('stops the camera and cancels its frame when switching to %s', async (label) => {
+    const stop = vi.fn()
+    const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [{ stop }] })
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 73))
+    const cancelAnimationFrame = vi.fn()
+    vi.stubGlobal('cancelAnimationFrame', cancelAnimationFrame)
+    vi.stubGlobal('BarcodeDetector', class { detect = vi.fn().mockResolvedValue([]) })
+    const wrapper = await mountPage()
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get(`nav.bottom-nav button[aria-label="${label}"]`).trigger('click')
+    await flushPromises()
+
+    expect(stop).toHaveBeenCalledTimes(1)
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(73)
+    wrapper.unmount()
+  })
+
+  it('surfaces a completed duplicate scan instead of silently replacing the recent result', async () => {
+    serviceMocks.scanPhysicalCollector.mockResolvedValue(decision('direct_reuse', false, false))
+    const wrapper = await mountPage()
+    await submitManualScan(wrapper)
+    await wrapper.get('[data-testid="decision-primary-action"]').trigger('click')
+    await flushPromises()
+
+    await submitManualScan(wrapper)
+
+    expect(serviceMocks.scanPhysicalCollector).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-testid="completed-duplicate-feedback"]').text()).toContain('重复扫码')
+    expect(wrapper.get('[data-testid="completed-duplicate-feedback"]').text()).toContain('已扫码')
+    wrapper.unmount()
+  })
+
+  it('shows admin setup/import actions but hides them for constructors', async () => {
+    const adminWrapper = await mountPage()
+    expect(adminWrapper.find('[aria-label="选择盘点批次"]').exists()).toBe(true)
+    expect(adminWrapper.find('nav.bottom-nav button[aria-label="批量导入"]').exists()).toBe(true)
+    adminWrapper.unmount()
+
+    authMock.user = { role: 'constructor', roles: ['constructor'] }
+    serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([])
+    const constructorWrapper = await mountPage()
+    expect(constructorWrapper.find('[aria-label="选择盘点批次"]').exists()).toBe(false)
+    expect(constructorWrapper.find('nav.bottom-nav button[aria-label="批量导入"]').exists()).toBe(false)
+    expect(constructorWrapper.find('.setup-dialog').exists()).toBe(false)
+    expect(constructorWrapper.get('[data-testid="constructor-empty-state"]').text()).toContain('暂无可盘点批次')
+    expect(constructorWrapper.get('[data-testid="constructor-empty-state"]').text()).toContain('管理员')
+    constructorWrapper.unmount()
   })
 })

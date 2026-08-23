@@ -186,7 +186,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["physical_collector_id"], ["physical_collectors.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["captured_by_id"], ["users.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("physical_collector_id", "sha256", name="uq_collector_photos_collector_sha256"),
+        sa.UniqueConstraint("sha256", name="uq_collector_photos_sha256"),
     )
     op.create_index("ix_collector_photos_team_active", "collector_photos", ["team_id", "is_active"])
 

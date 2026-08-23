@@ -38,6 +38,7 @@ from app.models import (
 )
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
+    CollectorPhotoConflictError,
     PostgresCollectorTransferService,
     collector_no_from_photo_filename,
     meter_sources_from_groups,
@@ -672,6 +673,61 @@ def test_real_database_duplicate_photo_never_demotes_existing_assignment_state(
     assert result["pool_status"] == physical_status
     assert physical.pool_status == physical_status
     assert required.status == requirement_status
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 1
+
+
+def test_real_database_rejects_same_photo_sha_for_a_different_physical_collector(
+    db_session: Session,
+) -> None:
+    """Catches cross-collector reuse before either pool state is mutated."""
+    run = transfer_run(db_session)
+    first = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-FIRST", pool_status="available")
+    second = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-SECOND", pool_status="awaiting_photo")
+    db_session.add_all((first, second))
+    db_session.commit()
+    existing = collector_photo(db_session, first, sha256="9" * 64)
+
+    with pytest.raises(CollectorPhotoConflictError, match="another physical collector"):
+        service(db_session).register_photo(
+            run_id=str(run.id),
+            collector_id=str(second.id),
+            original_filename="C-SECOND.jpg",
+            stored={
+                "sha256": existing.sha256,
+                "storage_key": "collector-transfer/C-SECOND-new.jpg",
+                "storage_type": "local_upload",
+            },
+            byte_size=15,
+        )
+
+    db_session.rollback()
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 1
+    assert db_session.get(PhysicalCollector, second.id).pool_status == "awaiting_photo"
+
+
+def test_sqlite_unique_backstop_rejects_cross_collector_photo_sha(db_session: Session) -> None:
+    """Proves the database backstop covers concurrent service races."""
+    first = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-DB-1", pool_status="available")
+    second = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-DB-2", pool_status="awaiting_photo")
+    db_session.add_all((first, second))
+    db_session.commit()
+    collector_photo(db_session, first, sha256="8" * 64)
+    duplicate = CollectorPhoto(
+        id=uuid4(),
+        team_id="team-1",
+        physical_collector_id=second.id,
+        sha256="8" * 64,
+        original_filename="C-DB-2.jpg",
+        object_key="collector-transfer/C-DB-2.jpg",
+        storage_type="local_upload",
+        is_active=True,
+    )
+    db_session.add(duplicate)
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+    db_session.rollback()
     assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 1
 
 

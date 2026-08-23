@@ -15,6 +15,7 @@ import type {
   CollectorTransferRun,
 } from '@/api/types'
 import { inventoryResultPresentation } from '@/features/collectorTransfer/state'
+import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 type MobileView = 'scan' | 'records' | 'import'
@@ -25,6 +26,7 @@ type NativeBarcodeDetector = { detect: (source: HTMLVideoElement) => Promise<Det
 type NativeBarcodeDetectorConstructor = new (options?: { formats?: string[] }) => NativeBarcodeDetector
 
 const workspace = useWorkspaceStore()
+const auth = useAuthStore()
 const runs = ref<CollectorTransferRun[]>([])
 const selectedRunId = ref('')
 const mobileView = ref<MobileView>('scan')
@@ -46,6 +48,8 @@ const setupName = ref(`采集器盘点 ${new Date().toLocaleDateString('zh-CN')}
 const localPhotoUrl = ref('')
 const uploadStatus = ref<UploadStatus>('idle')
 const uploadMessage = ref('')
+const completedDuplicateFeedback = ref('')
+const completedCollectorNos = new Set<string>()
 let mediaStream: MediaStream | null = null
 let barcodeDetector: NativeBarcodeDetector | null = null
 let animationFrameId = 0
@@ -55,6 +59,16 @@ let lastDecodedValue = ''
 let lastDecodedAt = 0
 
 const selectedRun = computed(() => runs.value.find((item) => item.id === selectedRunId.value) || null)
+const isAdmin = computed(() => {
+  const roles = new Set([auth.user?.role, ...(auth.user?.roles || [])].filter(Boolean))
+  return roles.has('admin')
+})
+const activeProject = computed(() => (
+  workspace.projects.find((item) => item.id === setupProjectId.value)
+  || workspace.activeProject
+  || workspace.projects[0]
+  || null
+))
 const presentation = computed(() => result.value
   ? inventoryResultPresentation({
       decision: result.value.decision,
@@ -89,11 +103,9 @@ const runProgress = computed(() => {
 })
 
 onMounted(async () => {
-  await Promise.all([
-    loadRuns(),
-    workspace.projects.length ? Promise.resolve() : workspace.loadProjects(),
-  ])
-  setupProjectId.value = workspace.activeProject?.id || workspace.projects[0]?.id || ''
+  if (!workspace.projects.length) await workspace.loadProjects()
+  setupProjectId.value = activeProject.value?.id || ''
+  if (setupProjectId.value) await loadRuns(setupProjectId.value)
 })
 
 onUnmounted(() => {
@@ -101,19 +113,20 @@ onUnmounted(() => {
   releaseLocalPhotoUrl()
 })
 
-async function loadRuns() {
+async function loadRuns(projectId = activeProject.value?.id || '') {
   try {
-    runs.value = await fetchCollectorTransferRuns()
+    runs.value = projectId ? await fetchCollectorTransferRuns(projectId) : []
     if (!selectedRunId.value || !runs.value.some((item) => item.id === selectedRunId.value)) {
       selectedRunId.value = runs.value[0]?.id || ''
     }
-    if (!runs.value.length) setupOpen.value = true
+    if (!runs.value.length) setupOpen.value = isAdmin.value
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '盘点批次加载失败')
   }
 }
 
 async function createRun() {
+  if (!isAdmin.value) return
   if (!setupProjectId.value) {
     ElMessage.warning('请先选择项目')
     return
@@ -121,7 +134,7 @@ async function createRun() {
   loading.value = true
   try {
     const created = await createCollectorTransferRun(setupProjectId.value, setupName.value.trim() || '采集器盘点')
-    await loadRuns()
+    await loadRuns(setupProjectId.value)
     selectedRunId.value = created.id
     setupOpen.value = false
     ElMessage.success('已根据现有数据生成终端和采集器需求')
@@ -143,6 +156,10 @@ async function submitScan(rawValue = collectorNo.value) {
     ElMessage.warning('请输入或扫描采集器号')
     return
   }
+  const wasCompleted = completedCollectorNos.has(value)
+  completedDuplicateFeedback.value = wasCompleted
+    ? `重复扫码：${value} 已扫码，本次正在重新确认。`
+    : ''
   if (scanInFlight) {
     scanFeedback.value = value === lastDecodedValue
       ? '已识别该采集器，正在查询，请勿重复扫码'
@@ -157,6 +174,7 @@ async function submitScan(rawValue = collectorNo.value) {
     uploadStatus.value = 'idle'
     uploadMessage.value = ''
     result.value = decision
+    completedCollectorNos.add(decision.collector_no)
     collectorNo.value = decision.collector_no
     recent.value = [decision, ...recent.value.filter((item) => item.collector_id !== decision.collector_id)].slice(0, 20)
     stopCamera()
@@ -230,7 +248,7 @@ async function detectNextFrame(session: number) {
     if (value) {
       if (scanInFlight && value === lastDecodedValue) {
         scanFeedback.value = '已识别该采集器，正在查询，请勿重复扫码'
-      } else if (value !== lastDecodedValue || now - lastDecodedAt >= 1800) {
+      } else if (completedCollectorNos.has(value) || value !== lastDecodedValue || now - lastDecodedAt >= 1800) {
         lastDecodedValue = value
         lastDecodedAt = now
         collectorNo.value = value
@@ -249,8 +267,14 @@ async function detectNextFrame(session: number) {
 function resetForNextScan() {
   result.value = null
   collectorNo.value = ''
+  completedDuplicateFeedback.value = ''
   mobileView.value = 'scan'
   void startCamera()
+}
+
+function setMobileView(view: MobileView) {
+  if (view !== 'scan') stopCamera()
+  mobileView.value = view
 }
 
 function requestPhoto() {
@@ -304,6 +328,7 @@ function selectInventoryPhotos(event: Event) {
 }
 
 async function submitImport() {
+  if (!isAdmin.value) return
   if (!selectedRunId.value) {
     ElMessage.warning('请先选择盘点批次')
     return
@@ -320,7 +345,7 @@ async function submitImport() {
       inventoryPhotos.value,
     )
     ElMessage.success(`批量盘点完成，共处理 ${importResult.value.total} 条`)
-    await loadRuns()
+    await loadRuns(activeProject.value?.id || '')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '批量盘点失败')
   } finally {
@@ -337,11 +362,12 @@ async function submitImport() {
           <strong>采集器盘点</strong>
           <small>手机摄像头扫码</small>
         </div>
-        <button class="round-button" type="button" aria-label="选择盘点批次" @click="setupOpen = true">•••</button>
+        <button v-if="isAdmin" class="round-button" type="button" aria-label="选择盘点批次" @click="setupOpen = true">•••</button>
       </header>
 
       <div class="stage-banner">仅做盘点与补拍 · 不录入甲方平台</div>
       <div class="batch-row">
+        <p class="project-identity" data-testid="project-identity"><span>当前项目</span><strong>{{ activeProject?.name || '未选择项目' }}</strong><small>{{ activeProject?.id || '无项目编号' }}</small></p>
         <label>
           <span>当前批次</span>
           <select v-model="selectedRunId" aria-label="当前盘点批次">
@@ -354,7 +380,11 @@ async function submitImport() {
 
       <main class="inventory-body">
         <section v-if="mobileView === 'scan'" class="scan-view">
-          <template v-if="!result">
+          <div v-if="!selectedRunId" class="run-empty" data-testid="constructor-empty-state">
+            <strong>暂无可盘点批次</strong>
+            <p>{{ isAdmin ? '请先新建或选择盘点批次。' : '请联系管理员创建当前项目的盘点批次。' }}</p>
+          </div>
+          <template v-else-if="!result">
             <div class="camera-stage">
               <video v-show="cameraActive" ref="video" autoplay muted playsinline />
               <div v-if="!cameraActive" class="camera-empty">
@@ -383,6 +413,7 @@ async function submitImport() {
               <h1 data-testid="decision-title">{{ presentation?.title }}</h1>
               <p>{{ presentation?.description }}</p>
             </div>
+            <p v-if="completedDuplicateFeedback" class="duplicate-feedback" data-testid="completed-duplicate-feedback" aria-live="polite">{{ completedDuplicateFeedback }}</p>
 
             <div class="collector-card">
               <div class="collector-preview">
@@ -401,7 +432,7 @@ async function submitImport() {
             <div class="result-actions">
               <button v-if="result.requires_photo" class="primary-button wide" data-testid="decision-primary-action" type="button" :disabled="uploadStatus === 'uploading'" @click="requestPhoto">{{ primaryActionLabel }}</button>
               <button v-else class="primary-button wide" data-testid="decision-primary-action" type="button" @click="resetForNextScan">{{ presentation?.primaryAction }}</button>
-              <button class="secondary-button wide" type="button" @click="mobileView = 'records'">查看盘点记录</button>
+              <button class="secondary-button wide" type="button" @click="setMobileView('records')">查看盘点记录</button>
             </div>
           </section>
         </section>
@@ -430,16 +461,16 @@ async function submitImport() {
         </section>
       </main>
 
-      <nav class="bottom-nav" aria-label="采集器盘点功能">
-        <button :class="{ active: mobileView === 'scan' }" type="button" @click="mobileView = 'scan'"><span>⌗</span>扫码</button>
-        <button :class="{ active: mobileView === 'records' }" type="button" @click="mobileView = 'records'"><span>▤</span>盘点记录</button>
-        <button :class="{ active: mobileView === 'import' }" type="button" @click="mobileView = 'import'"><span>⇧</span>批量导入</button>
+      <nav class="bottom-nav" :class="{ 'two-items': !isAdmin }" aria-label="采集器盘点功能">
+        <button :class="{ active: mobileView === 'scan' }" type="button" aria-label="扫码" @click="setMobileView('scan')"><span>⌗</span>扫码</button>
+        <button :class="{ active: mobileView === 'records' }" type="button" aria-label="盘点记录" @click="setMobileView('records')"><span>▤</span>盘点记录</button>
+        <button v-if="isAdmin" :class="{ active: mobileView === 'import' }" type="button" aria-label="批量导入" @click="setMobileView('import')"><span>⇧</span>批量导入</button>
       </nav>
     </section>
 
     <input ref="photoInput" class="visually-hidden" data-testid="photo-input" type="file" accept="image/*" capture="environment" :disabled="!result?.requires_photo" @change="uploadPhoto" />
 
-    <div v-if="setupOpen" class="setup-backdrop" @click.self="setupOpen = false">
+    <div v-if="isAdmin && setupOpen" class="setup-backdrop" @click.self="setupOpen = false">
       <form class="setup-dialog" @submit.prevent="createRun">
         <header><h2>选择或新建盘点批次</h2><button type="button" aria-label="关闭" @click="setupOpen = false">×</button></header>
         <label><span>已有批次</span><select v-model="selectedRunId" @change="setupOpen = false"><option value="">无</option><option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option></select></label>
@@ -533,9 +564,16 @@ button, input, select { font: inherit; }
 .batch-row label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 9px; color: var(--muted); font-size: 11px; }
 .batch-row select { min-width: 0; border: 0; background: transparent; color: var(--ink); font-weight: 800; }
 .batch-row strong { color: var(--muted); font-size: 10px; font-weight: 600; }
+.project-identity { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; margin: 0; font-size: 11px; }
+.project-identity span { color: var(--muted); }
+.project-identity strong { color: var(--ink); overflow-wrap: anywhere; }
+.project-identity small { grid-column: 2; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
 
 .inventory-body { flex: 1; padding-bottom: 72px; }
 .scan-view { min-height: 100%; }
+.run-empty { display: grid; min-height: 390px; place-content: center; gap: 8px; padding: 24px; text-align: center; }
+.run-empty strong { font-size: 18px; }
+.run-empty p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
 
 .camera-stage {
   position: relative;
@@ -603,6 +641,7 @@ button, input, select { font: inherit; }
 .collector-card dd { margin: 0; font-weight: 800; text-align: right; overflow-wrap: anywhere; }
 
 .boundary-note { margin: 12px 0; padding: 11px 12px; border: 1px solid rgba(0,0,0,.07); border-radius: 9px; background: #fff; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.duplicate-feedback { margin: 0 0 12px; padding: 10px 12px; border: 1px solid #c6dae6; border-radius: 9px; background: var(--blue-soft); color: var(--blue); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .upload-status { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .upload-status.status-success { border-color: #b8dcc7; background: var(--green-soft); color: var(--green); }
 .upload-status.status-error { border-color: #e1b8b4; background: var(--red-soft); color: var(--red); }
@@ -631,6 +670,7 @@ button, input, select { font: inherit; }
 .import-summary > div { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; color: var(--muted); font-size: 11px; }
 
 .bottom-nav { position: absolute; right: 0; bottom: 0; left: 0; z-index: 8; display: grid; height: 70px; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); background: rgba(255,255,255,.97); backdrop-filter: blur(16px); }
+.bottom-nav.two-items { grid-template-columns: repeat(2, 1fr); }
 .bottom-nav button { display: grid; place-items: center; align-content: center; gap: 3px; border: 0; background: transparent; color: var(--muted); font-size: 10px; }
 .bottom-nav button span { font-size: 19px; }
 .bottom-nav button.active { color: var(--green); font-weight: 800; }

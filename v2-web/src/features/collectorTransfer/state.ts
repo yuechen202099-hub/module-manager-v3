@@ -24,6 +24,14 @@ export function inventoryResultPresentation(input: InventoryDecisionInput): Inve
       primaryAction: '继续扫码',
     }
   }
+  if (!input.requiresPhoto && input.addToPool) {
+    return {
+      tone: 'success',
+      title: '已加入替换池',
+      description: '照片已保存，采集器已作为一次性替换资源登记。',
+      primaryAction: '继续扫码',
+    }
+  }
   if (!input.requiresPhoto && !input.addToPool) {
     return {
       tone: 'success',
@@ -46,21 +54,4 @@ export function inventoryResultPresentation(input: InventoryDecisionInput): Inve
     description: '没有同号，补图后加入替换池。',
     primaryAction: '立即补拍',
   }
-}
-
-export type WorkbenchMode = 'install' | 'removal'
-
-export type WorkbenchKindItem = {
-  id: string
-  kind: 'meter_install' | 'collector_removal'
-}
-
-export function workbenchItemsForMode<T extends WorkbenchKindItem>(items: readonly T[], mode: WorkbenchMode): T[] {
-  const kind = mode === 'install' ? 'meter_install' : 'collector_removal'
-  return items.filter((item) => item.kind === kind)
-}
-
-export function nextWorkbenchItemIndex(length: number, currentIndex: number, direction: -1 | 1): number {
-  if (length <= 0) return 0
-  return Math.max(0, Math.min(length - 1, currentIndex + direction))
 }

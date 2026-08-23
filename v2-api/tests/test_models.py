@@ -121,3 +121,17 @@ def test_physical_collector_is_unique_per_team_and_has_explicit_pool_state() -> 
 
     assert ("team_id", "collector_no") in unique_constraints
     assert any("awaiting_photo" in constraint and "available" in constraint and "used" in constraint for constraint in check_constraints)
+
+
+def test_collector_photo_sha_is_unique_across_physical_collectors_in_one_team() -> None:
+    """Catches the same image content being bound to two physical collectors."""
+    table = models.CollectorPhoto.__table__
+    unique_constraints = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+
+    assert ("sha256",) in unique_constraints
+    assert ("team_id", "sha256") not in unique_constraints
+    assert ("physical_collector_id", "sha256") not in unique_constraints
