@@ -178,3 +178,19 @@ def test_export_center_jobs_migration_is_reversible_and_non_enum() -> None:
     assert "DROP COLUMN filter_snapshot" in downgrade
     assert "ELSE 'task_detail'" not in downgrade
     assert "DROP TYPE" not in downgrade
+
+
+def test_collector_transfer_migration_is_chained_and_enforces_one_time_assignment() -> None:
+    migration = load_migration_module("0015_collector_transfer_workbench.py")
+    upgrade = render_postgresql_ddl("upgrade", "0015_collector_transfer_workbench.py")
+    downgrade = render_postgresql_ddl("downgrade", "0015_collector_transfer_workbench.py")
+
+    assert migration.revision == "20260823_0015"
+    assert migration.down_revision == "20260724_0014"
+    assert "CREATE TABLE collector_transfer_runs" in upgrade
+    assert "CREATE TABLE physical_collectors" in upgrade
+    assert "CREATE TABLE collector_assignments" in upgrade
+    assert "CONSTRAINT uq_collector_assignments_requirement UNIQUE (requirement_id)" in upgrade
+    assert "CONSTRAINT uq_collector_assignments_physical UNIQUE (physical_collector_id)" in upgrade
+    assert "CONSTRAINT ck_physical_collectors_pool_status CHECK" in upgrade
+    assert "DROP TABLE collector_transfer_runs" in downgrade

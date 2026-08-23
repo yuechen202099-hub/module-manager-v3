@@ -69,3 +69,55 @@ def test_delivery_cache_job_is_durable_retryable_and_group_idempotent() -> None:
     assert table.c.lease_token.type.length == 128
     assert {"evidence_fingerprint", "evidence_version"} <= set(table.c.keys())
     assert any("not_eligible" in constraint for constraint in check_constraints)
+
+
+def test_collector_transfer_models_keep_source_data_in_sidecar_tables() -> None:
+    """Catches collapsing collector pool state into the legacy photo/group tables."""
+    expected = {
+        "CollectorTransferRun": "collector_transfer_runs",
+        "CollectorTransferTerminal": "collector_transfer_terminals",
+        "CollectorMeterItem": "collector_meter_items",
+        "CollectorRequirement": "collector_requirements",
+        "CollectorRequirementMeter": "collector_requirement_meters",
+        "PhysicalCollector": "physical_collectors",
+        "CollectorPhoto": "collector_photos",
+        "CollectorScanEvent": "collector_scan_events",
+        "CollectorAssignment": "collector_assignments",
+        "CollectorWorkbenchItem": "collector_workbench_items",
+        "CollectorImportRow": "collector_import_rows",
+    }
+
+    assert {name: getattr(models, name).__table__.name for name in expected} == expected
+
+
+def test_collector_assignment_schema_prevents_double_consumption() -> None:
+    """Catches removing either side of the one-requirement/one-collector contract."""
+    table = models.CollectorAssignment.__table__
+    unique_constraints = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+
+    assert ("requirement_id",) in unique_constraints
+    assert ("physical_collector_id",) in unique_constraints
+    assert table.c.assignment_mode.type.__class__.__name__ == "String"
+    assert table.c.status.type.__class__.__name__ == "String"
+
+
+def test_physical_collector_is_unique_per_team_and_has_explicit_pool_state() -> None:
+    """Catches duplicate physical inventory rows or implicit photo-derived availability."""
+    table = models.PhysicalCollector.__table__
+    unique_constraints = {
+        tuple(column.name for column in constraint.columns)
+        for constraint in table.constraints
+        if isinstance(constraint, UniqueConstraint)
+    }
+    check_constraints = [
+        str(constraint.sqltext)
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    ]
+
+    assert ("team_id", "collector_no") in unique_constraints
+    assert any("awaiting_photo" in constraint and "available" in constraint and "used" in constraint for constraint in check_constraints)

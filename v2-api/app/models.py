@@ -672,3 +672,282 @@ class MigrationRun(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class CollectorTransferRun(Base, TimestampMixin):
+    __tablename__ = "collector_transfer_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'inventory', 'allocated', 'completed', 'cancelled')",
+            name="ck_collector_transfer_runs_status",
+        ),
+        Index("ix_collector_transfer_runs_team_project_created", "team_id", "project_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", server_default=text("'draft'"))
+    source_snapshot_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    stats: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    diagnostics: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+
+
+class CollectorTransferTerminal(Base, TimestampMixin):
+    __tablename__ = "collector_transfer_terminals"
+    __table_args__ = (
+        UniqueConstraint("run_id", "terminal_code", name="uq_collector_transfer_terminals_run_code"),
+        CheckConstraint(
+            "status IN ('blocked', 'ready', 'in_progress', 'completed')",
+            name="ck_collector_transfer_terminals_status",
+        ),
+        Index("ix_collector_transfer_terminals_run_status", "run_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    terminal_code: Mapped[str] = mapped_column(String(255), nullable=False)
+    installation_address: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ready", server_default=text("'ready'"))
+    meter_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    collector_requirement_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    completed_item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    diagnostics: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+
+
+class CollectorMeterItem(Base, TimestampMixin):
+    __tablename__ = "collector_meter_items"
+    __table_args__ = (
+        UniqueConstraint("run_id", "source_group_id", name="uq_collector_meter_items_run_group"),
+        Index("ix_collector_meter_items_terminal_sort", "terminal_id", "sort_order"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    terminal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_terminals.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    source_group_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("material_groups.id", ondelete="RESTRICT"), nullable=False)
+    meter_no: Mapped[str] = mapped_column(String(255), nullable=False)
+    meter_barcode: Mapped[str] = mapped_column(String(255), nullable=False)
+    module_no: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    module_barcode: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    original_collector_no: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    module_meter_photo_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("photos.id", ondelete="RESTRICT"))
+    after_box_photo_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("photos.id", ondelete="RESTRICT"))
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    diagnostics: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+
+
+class CollectorRequirement(Base, TimestampMixin):
+    __tablename__ = "collector_requirements"
+    __table_args__ = (
+        UniqueConstraint("terminal_id", "original_collector_no", name="uq_collector_requirements_terminal_no"),
+        CheckConstraint(
+            "status IN ('unmatched', 'direct_pending_photo', 'direct_ready', 'assigned', 'used', 'blocked')",
+            name="ck_collector_requirements_status",
+        ),
+        Index("ix_collector_requirements_run_status", "run_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    terminal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_terminals.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    original_collector_no: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unmatched", server_default=text("'unmatched'")
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    diagnostics: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+
+
+class CollectorRequirementMeter(Base):
+    __tablename__ = "collector_requirement_meters"
+    __table_args__ = (
+        UniqueConstraint("requirement_id", "meter_item_id", name="uq_collector_requirement_meters_pair"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    requirement_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_requirements.id", ondelete="CASCADE"), nullable=False
+    )
+    meter_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_meter_items.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class PhysicalCollector(Base, TimestampMixin):
+    __tablename__ = "physical_collectors"
+    __table_args__ = (
+        UniqueConstraint("team_id", "collector_no", name="uq_physical_collectors_team_no"),
+        CheckConstraint(
+            "pool_status IN ('awaiting_photo', 'direct', 'available', 'reserved', 'used')",
+            name="ck_physical_collectors_pool_status",
+        ),
+        Index("ix_physical_collectors_team_pool_status", "team_id", "pool_status"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    collector_no: Mapped[str] = mapped_column(String(255), nullable=False)
+    pool_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="awaiting_photo", server_default=text("'awaiting_photo'")
+    )
+    first_seen_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collector_transfer_runs.id", ondelete="SET NULL")
+    )
+    last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class CollectorPhoto(Base, TimestampMixin):
+    __tablename__ = "collector_photos"
+    __table_args__ = (
+        UniqueConstraint("physical_collector_id", "sha256", name="uq_collector_photos_collector_sha256"),
+        Index("ix_collector_photos_team_active", "team_id", "is_active"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    physical_collector_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("physical_collectors.id", ondelete="CASCADE"), nullable=False
+    )
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    image_url: Mapped[str | None] = mapped_column(Text)
+    storage_type: Mapped[str] = mapped_column(String(32), nullable=False, default="local")
+    content_type: Mapped[str | None] = mapped_column(String(100))
+    byte_size: Mapped[int | None] = mapped_column(BigInteger)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    captured_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class CollectorScanEvent(Base):
+    __tablename__ = "collector_scan_events"
+    __table_args__ = (Index("ix_collector_scan_events_run_created", "run_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    physical_collector_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("physical_collectors.id", ondelete="RESTRICT"), nullable=False
+    )
+    requirement_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collector_requirements.id", ondelete="SET NULL")
+    )
+    scanned_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    decision: Mapped[str] = mapped_column(String(64), nullable=False)
+    requires_photo: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    add_to_pool: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class CollectorAssignment(Base, TimestampMixin):
+    __tablename__ = "collector_assignments"
+    __table_args__ = (
+        UniqueConstraint("requirement_id", name="uq_collector_assignments_requirement"),
+        UniqueConstraint("physical_collector_id", name="uq_collector_assignments_physical"),
+        CheckConstraint("assignment_mode IN ('direct', 'random')", name="ck_collector_assignments_mode"),
+        CheckConstraint("status IN ('reserved', 'used', 'rolled_back')", name="ck_collector_assignments_status"),
+        Index("ix_collector_assignments_run_status", "run_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    requirement_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_requirements.id", ondelete="RESTRICT"), nullable=False
+    )
+    physical_collector_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("physical_collectors.id", ondelete="RESTRICT"), nullable=False
+    )
+    collector_photo_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_photos.id", ondelete="RESTRICT"), nullable=False
+    )
+    assignment_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="reserved", server_default=text("'reserved'")
+    )
+    assigned_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CollectorWorkbenchItem(Base, TimestampMixin):
+    __tablename__ = "collector_workbench_items"
+    __table_args__ = (
+        UniqueConstraint("run_id", "item_kind", "source_key", name="uq_collector_workbench_items_source"),
+        CheckConstraint("item_kind IN ('meter_install', 'collector_removal')", name="ck_collector_workbench_items_kind"),
+        CheckConstraint("status IN ('pending', 'completed')", name="ck_collector_workbench_items_status"),
+        Index("ix_collector_workbench_items_terminal_sort", "terminal_id", "sort_order"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    terminal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_terminals.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    item_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    meter_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collector_meter_items.id", ondelete="CASCADE")
+    )
+    requirement_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collector_requirements.id", ondelete="CASCADE")
+    )
+    assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collector_assignments.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending", server_default=text("'pending'")
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    completed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CollectorImportRow(Base):
+    __tablename__ = "collector_import_rows"
+    __table_args__ = (
+        UniqueConstraint("run_id", "batch_id", "row_number", name="uq_collector_import_rows_batch_row"),
+        Index("ix_collector_import_rows_run_outcome", "run_id", "outcome"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_column()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collector_transfer_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    batch_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    collector_no: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
