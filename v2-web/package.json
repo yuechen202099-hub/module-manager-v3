@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "test:collector-transfer": "node --test tests/collector-transfer-state.test.ts",
+    "test:components": "vitest run",
     "type-check": "vue-tsc --noEmit",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0"
@@ -21,8 +23,11 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/test-utils": "2.4.6",
+    "jsdom": "25.0.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
+    "vitest": "2.1.9",
     "vue-tsc": "^2.2.0"
   }
 }

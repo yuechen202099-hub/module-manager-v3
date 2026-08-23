@@ -714,3 +714,152 @@ export type ReplacementRecord = {
   replacementBy: string
   replacementAt: string
 }
+
+export type CollectorTransferPhoto = {
+  id: string
+  image_url: string
+  object_key: string
+  storage_type: string
+  storage_key: string
+  storage_bucket: string
+  sha256: string
+  content_type: string
+  canonical_image_url: string
+  module_asset_no: string
+  collector: string
+  creator: string
+  preview_url: string
+  thumbnail_url: string
+}
+
+export type CollectorTransferDiagnostic = {
+  group_id: string
+  code: string
+  message: string
+}
+
+export type CollectorTransferRun = {
+  id: string
+  project_id: string
+  name: string
+  status: 'draft' | 'inventory' | 'allocated' | 'completed' | 'cancelled'
+  terminal_count: number
+  meter_count: number
+  collector_requirement_count: number
+  blocked_terminal_count: number
+  direct_match_count: number
+  pool_available_count: number
+  assignment_count: number
+  diagnostics: CollectorTransferDiagnostic[]
+  created_at: string | null
+}
+
+export type CollectorInventoryDecision = {
+  collector_id: string
+  collector_no: string
+  decision: 'direct_reuse' | 'direct_needs_photo' | 'pool_needs_photo' | 'assignment_reuse'
+  requires_photo: boolean
+  add_to_pool: boolean
+  pool_status: 'awaiting_photo' | 'direct' | 'available' | 'reserved' | 'used'
+  requirement_id: string | null
+  photo: CollectorTransferPhoto | null
+}
+
+export type CollectorPhotoRegistration = {
+  collector_id: string
+  collector_no: string
+  pool_status: 'awaiting_photo' | 'direct' | 'available' | 'reserved' | 'used'
+  photo: CollectorTransferPhoto
+  assignment_id: string | null
+}
+
+export type CollectorAllocation = {
+  assignment_id: string
+  requirement_id: string
+  original_collector_no: string
+  physical_collector_id: string
+  final_collector_no: string
+  mode: 'random'
+}
+
+export type CollectorAllocationResult = {
+  run_id: string
+  assignment_count: number
+  assignments: CollectorAllocation[]
+}
+
+export type CollectorWorkbenchTerminal = {
+  id: string
+  terminal_code: string
+  installation_address: string
+  status: 'blocked' | 'ready' | 'in_progress' | 'completed'
+  meter_count: number
+  collector_requirement_count: number
+  completed_count: number
+  total_count: number
+  progress: number
+  diagnostics: CollectorTransferDiagnostic[]
+}
+
+export type CollectorWorkbenchPhotoSlot = {
+  slot: 'module_meter' | 'after_box' | 'collector'
+  label: string
+  photo: CollectorTransferPhoto | null
+}
+
+export type CollectorWorkbenchItemBase = {
+  id: string
+  status: 'pending' | 'completed'
+  photos: CollectorWorkbenchPhotoSlot[]
+}
+
+export type CollectorMeterInstallWorkbenchItem = CollectorWorkbenchItemBase & {
+  kind: 'meter_install'
+  meter_no: string
+  meter_barcode: string
+  module_no: string
+  module_barcode: string
+}
+
+export type CollectorRemovalWorkbenchItem = CollectorWorkbenchItemBase & {
+  kind: 'collector_removal'
+  collector_no: string
+  collector_barcode: string
+  assignment_mode: 'direct' | 'random'
+}
+
+export type CollectorWorkbenchItem = CollectorMeterInstallWorkbenchItem | CollectorRemovalWorkbenchItem
+
+export type CollectorWorkbenchSummary = {
+  run: CollectorTransferRun
+  terminals: CollectorWorkbenchTerminal[]
+}
+
+export type CollectorTerminalWorkbench = {
+  run_id: string
+  terminal: Pick<CollectorWorkbenchTerminal, 'id' | 'terminal_code' | 'installation_address' | 'status'>
+  items: CollectorWorkbenchItem[]
+}
+
+export type CollectorInventoryImportResult = {
+  batch_id: string
+  total: number
+  inserted: number
+  reused: number
+  needs_photo: number
+  invalid: number
+  rows: Array<{
+    row_number: number
+    input_kind: 'excel' | 'photo'
+    collector_no: string
+    outcome: 'inserted' | 'reused' | 'needs_photo' | 'invalid'
+    message: string
+    original_filename?: string
+  }>
+}
+
+export type CollectorWorkbenchItemStatus = {
+  id: string
+  status: 'pending' | 'completed'
+  completed_at: string | null
+}

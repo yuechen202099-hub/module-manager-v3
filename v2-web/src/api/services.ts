@@ -6,6 +6,14 @@ import type {
   ConstructionExceptionOrder,
   ConstructionPriorityImportResult,
   ConstructionUploadPayload,
+  CollectorInventoryDecision,
+  CollectorInventoryImportResult,
+  CollectorAllocationResult,
+  CollectorPhotoRegistration,
+  CollectorTerminalWorkbench,
+  CollectorTransferRun,
+  CollectorWorkbenchItemStatus,
+  CollectorWorkbenchSummary,
   CurrentUser,
   DataCenterBarcodeFilterStatus,
   DataCenterBarcodeEligibility,
@@ -2867,4 +2875,88 @@ function triggerBrowserDownload(blob: Blob, filename: string) {
   link.click()
   link.remove()
   URL.revokeObjectURL(url)
+}
+
+export async function fetchCollectorTransferRuns(projectId = ''): Promise<CollectorTransferRun[]> {
+  const query = new URLSearchParams()
+  if (projectId) query.set('project_id', projectId)
+  const suffix = query.size ? `?${query.toString()}` : ''
+  return api<CollectorTransferRun[]>(`/collector-transfer/runs${suffix}`)
+}
+
+export async function createCollectorTransferRun(projectId: string, name: string): Promise<CollectorTransferRun> {
+  return api<CollectorTransferRun>('/collector-transfer/runs', {
+    method: 'POST',
+    body: JSON.stringify({ project_id: projectId, name }),
+  })
+}
+
+export async function fetchCollectorTransferRun(runId: string): Promise<CollectorWorkbenchSummary> {
+  return api<CollectorWorkbenchSummary>(`/collector-transfer/runs/${encodeURIComponent(runId)}`)
+}
+
+export async function scanPhysicalCollector(runId: string, collectorNo: string): Promise<CollectorInventoryDecision> {
+  return api<CollectorInventoryDecision>(
+    `/collector-transfer/runs/${encodeURIComponent(runId)}/scan`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ collector_no: collectorNo }),
+    },
+  )
+}
+
+export async function uploadPhysicalCollectorPhoto(
+  runId: string,
+  collectorId: string,
+  file: File,
+): Promise<CollectorPhotoRegistration> {
+  const form = new FormData()
+  form.append('file', file)
+  return formApi<CollectorPhotoRegistration>(
+    `/collector-transfer/runs/${encodeURIComponent(runId)}/collectors/${encodeURIComponent(collectorId)}/photo`,
+    form,
+  )
+}
+
+export async function importCollectorInventory(
+  runId: string,
+  workbook: File | null,
+  photos: File[],
+): Promise<CollectorInventoryImportResult> {
+  const form = new FormData()
+  if (workbook) form.append('workbook', workbook)
+  for (const photo of photos) form.append('photos', photo)
+  return formApi<CollectorInventoryImportResult>(
+    `/collector-transfer/runs/${encodeURIComponent(runId)}/inventory/import`,
+    form,
+  )
+}
+
+export async function allocateCollectorPool(runId: string): Promise<CollectorAllocationResult> {
+  return api<CollectorAllocationResult>(`/collector-transfer/runs/${encodeURIComponent(runId)}/allocate`, { method: 'POST' })
+}
+
+export async function fetchCollectorWorkbench(runId: string): Promise<CollectorWorkbenchSummary> {
+  return api<CollectorWorkbenchSummary>(
+    `/collector-transfer/runs/${encodeURIComponent(runId)}/workbench`,
+  )
+}
+
+export async function fetchCollectorTerminalWorkbench(
+  runId: string,
+  terminalId: string,
+): Promise<CollectorTerminalWorkbench> {
+  return api<CollectorTerminalWorkbench>(
+    `/collector-transfer/runs/${encodeURIComponent(runId)}/workbench/${encodeURIComponent(terminalId)}`,
+  )
+}
+
+export async function setCollectorWorkbenchItemCompleted(
+  itemId: string,
+  completed: boolean,
+): Promise<CollectorWorkbenchItemStatus> {
+  return api<CollectorWorkbenchItemStatus>(`/collector-transfer/workbench/items/${encodeURIComponent(itemId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ completed }),
+  })
 }
