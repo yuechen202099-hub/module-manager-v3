@@ -58,6 +58,8 @@ let cameraSession = 0
 let scanInFlight = false
 let lastDecodedValue = ''
 let lastDecodedAt = 0
+let loadRunsGeneration = 0
+let componentUnmounted = false
 
 const selectedRun = computed(() => runs.value.find((item) => item.id === selectedRunId.value) || null)
 const isAdmin = computed(() => {
@@ -105,26 +107,42 @@ const runProgress = computed(() => {
 
 onMounted(async () => {
   if (!workspace.projects.length) await workspace.loadProjects()
+  if (componentUnmounted) return
   selectedProjectId.value = activeProject.value?.id || ''
   setupProjectId.value = selectedProjectId.value
   if (selectedProjectId.value) await loadRuns(selectedProjectId.value)
 })
 
 onUnmounted(() => {
+  componentUnmounted = true
+  loadRunsGeneration += 1
   stopCamera()
   releaseLocalPhotoUrl()
 })
 
 async function loadRuns(projectId = selectedProjectId.value, preferredRunId = '') {
+  if (componentUnmounted) return
+  const requestGeneration = ++loadRunsGeneration
   runs.value = []
   selectedRunId.value = ''
   try {
-    runs.value = projectId ? await fetchCollectorTransferRuns(projectId) : []
+    const loadedRuns = projectId ? await fetchCollectorTransferRuns(projectId) : []
+    if (
+      componentUnmounted
+      || requestGeneration !== loadRunsGeneration
+      || projectId !== selectedProjectId.value
+    ) return
+    runs.value = loadedRuns
     selectedRunId.value = runs.value.some((item) => item.id === preferredRunId)
       ? preferredRunId
       : runs.value[0]?.id || ''
     if (!runs.value.length && isAdmin.value) openSetup()
   } catch (error) {
+    if (
+      componentUnmounted
+      || requestGeneration !== loadRunsGeneration
+      || projectId !== selectedProjectId.value
+    ) return
     ElMessage.error(error instanceof Error ? error.message : '盘点批次加载失败')
   }
 }

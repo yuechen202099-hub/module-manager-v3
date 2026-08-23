@@ -201,6 +201,42 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
+  it('ignores a stale project run response after a newer project load completes', async () => {
+    workspaceMock.projects = [
+      { id: 'project-1', name: '城南改造' },
+      { id: 'project-2', name: '城北改造' },
+    ]
+    const projectARuns = deferred<Array<typeof run>>()
+    const projectBRuns = deferred<Array<typeof run>>()
+    serviceMocks.fetchCollectorTransferRuns.mockImplementation((projectId: string) => (
+      projectId === 'project-2' ? projectBRuns.promise : projectARuns.promise
+    ))
+    serviceMocks.createCollectorTransferRun.mockResolvedValue(otherProjectRun)
+    const wrapper = await mountPage()
+
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenNthCalledWith(1, 'project-1')
+    await wrapper.get('[aria-label="选择盘点批次"]').trigger('click')
+    await wrapper.findAll<HTMLSelectElement>('.setup-dialog select')[1].setValue('project-2')
+    await wrapper.get('form.setup-dialog').trigger('submit')
+
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenNthCalledWith(2, 'project-2')
+    projectBRuns.resolve([otherProjectRun])
+    await flushPromises()
+
+    const currentRunSelect = wrapper.get<HTMLSelectElement>('[aria-label="当前盘点批次"]')
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('project-2')
+    expect(currentRunSelect.element.value).toBe('run-2')
+    expect(Array.from(currentRunSelect.element.options, (option) => option.value)).toEqual(['', 'run-2'])
+
+    projectARuns.resolve([run])
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('project-2')
+    expect(currentRunSelect.element.value).toBe('run-2')
+    expect(Array.from(currentRunSelect.element.options, (option) => option.value)).toEqual(['', 'run-2'])
+    wrapper.unmount()
+  })
+
   it('uses the rear camera file input and shows local preview, uploading, and success feedback', async () => {
     serviceMocks.scanPhysicalCollector.mockResolvedValue(decision('direct_needs_photo', true, false))
     const upload = deferred<CollectorPhotoRegistration>()
