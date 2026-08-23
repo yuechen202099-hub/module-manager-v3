@@ -5,6 +5,7 @@ from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
@@ -85,6 +86,23 @@ def client_with_service(
     )
 
 
+def auth_headers(
+    *,
+    team_id: str = "team-1",
+    username: str = "admin-a",
+    role: str = "admin",
+) -> dict[str, str]:
+    token = security.create_access_token(
+        {
+            "sub": username,
+            "username": username,
+            "roles": [role],
+            "team_id": team_id,
+        }
+    )
+    return {"Authorization": f"bearer {token}"}
+
+
 def production_client_with_service(
     monkeypatch,
     service: FakeCollectorTransferService,
@@ -123,6 +141,32 @@ def production_client_with_service(
     return TestClient(main_module.create_app()), headers, identities
 
 
+def test_request_identity_decodes_bearer_claims_and_ignores_team_header() -> None:
+    """Catches any environment allowing X-Team-Id to override authenticated claims."""
+    request = SimpleNamespace(
+        state=SimpleNamespace(),
+        headers={**auth_headers(team_id="token-team", username="constructor-a"), "X-Team-Id": "spoofed-team"},
+    )
+
+    identity = routes.request_identity(request)
+
+    assert identity == ("token-team", "constructor-a")
+    assert request.state.auth["team_id"] == "token-team"
+
+
+def test_request_identity_rejects_x_team_header_without_bearer_token() -> None:
+    """Catches the non-production compatibility path treating X-Team-Id as authentication."""
+    request = SimpleNamespace(
+        state=SimpleNamespace(),
+        headers={"X-Team-Id": "spoofed-team"},
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        routes.request_identity(request)
+
+    assert raised.value.status_code == 401
+
+
 def test_create_run_uses_project_snapshot_contract(monkeypatch) -> None:
     """Catches a route that accepts uploaded replacement data instead of a project snapshot."""
     service = FakeCollectorTransferService()
@@ -130,7 +174,7 @@ def test_create_run_uses_project_snapshot_contract(monkeypatch) -> None:
 
     response = client.post(
         "/collector-transfer/runs",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
         json={"project_id": "11111111-1111-1111-1111-111111111111", "name": "8月盘点"},
     )
 
@@ -151,7 +195,7 @@ def test_mobile_scan_contract_only_returns_inventory_decision(monkeypatch) -> No
 
     response = client.post(
         "/collector-transfer/runs/run-1/scan",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
         json={"collector_no": "000123"},
     )
 
@@ -173,7 +217,7 @@ def test_pool_shortage_is_a_conflict_with_no_partial_success_payload(monkeypatch
 
     response = client.post(
         "/collector-transfer/runs/run-1/allocate",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
     )
 
     assert response.status_code == 409
@@ -189,7 +233,7 @@ def test_workbench_endpoint_is_read_only_customer_relay_data(monkeypatch) -> Non
 
     response = client.get(
         "/collector-transfer/runs/run-1/workbench",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
     )
 
     assert response.status_code == 200
@@ -202,10 +246,10 @@ def test_list_runs_and_terminal_workbench_have_separate_summary_and_detail_contr
     service = FakeCollectorTransferService()
     client = client_with_service(monkeypatch, service)
 
-    runs = client.get("/collector-transfer/runs", headers={"X-Team-Id": "team-1"})
+    runs = client.get("/collector-transfer/runs", headers=auth_headers())
     detail = client.get(
         "/collector-transfer/runs/run-1/workbench/terminal-1",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
     )
 
     assert runs.status_code == 200
@@ -221,7 +265,7 @@ def test_run_detail_returns_diagnostics_and_terminal_summary(monkeypatch) -> Non
 
     response = client.get(
         "/collector-transfer/runs/run-1",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
     )
 
     assert response.status_code == 200
@@ -239,7 +283,7 @@ def test_workbench_completion_is_an_explicit_manual_confirmation(monkeypatch) ->
 
     response = client.patch(
         "/collector-transfer/workbench/items/item-1",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
         json={"completed": True},
     )
 
@@ -268,7 +312,7 @@ def test_mobile_photo_upload_passes_validated_storage_metadata_to_the_transactio
 
     response = client.post(
         "/collector-transfer/runs/run-1/collectors/collector-1/photo",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
         files={"file": ("000123.jpg", b"validated-by-storage-layer", "image/jpeg")},
     )
 
@@ -292,8 +336,34 @@ def test_mobile_photo_validation_error_uses_the_stable_api_error_shape(monkeypat
 
     response = client.post(
         "/collector-transfer/runs/run-1/collectors/collector-1/photo",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
         files={"file": ("000123.txt", b"not-an-image", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert service.calls == []
+
+
+def test_corrupt_workbook_returns_stable_invalid_request(monkeypatch) -> None:
+    """Catches BadZipFile/openpyxl parser failures escaping the API as HTTP 500."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(
+        monkeypatch,
+        service,
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/collector-transfer/runs/run-1/inventory/import",
+        headers=auth_headers(),
+        files={
+            "workbook": (
+                "collectors.xlsx",
+                b"this-is-not-an-xlsx-zip",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
     )
 
     assert response.status_code == 400
@@ -325,7 +395,7 @@ def test_excel_and_barcode_named_photos_share_the_same_inventory_decision_path(m
 
     response = client.post(
         "/collector-transfer/runs/run-1/inventory/import",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
         files=[
             ("workbook", ("collectors.xlsx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
             ("photos", ("000123.jpg", b"validated-photo", "image/jpeg")),
@@ -380,7 +450,7 @@ def test_batch_import_failure_deletes_only_the_uncommitted_photo_unit(monkeypatc
     with pytest.raises(RuntimeError, match="second row failed"):
         client.post(
             "/collector-transfer/runs/run-1/inventory/import",
-            headers={"X-Team-Id": "team-1"},
+            headers=auth_headers(),
             files=[
                 ("photos", ("000123.jpg", b"first", "image/jpeg")),
                 ("photos", ("000456.jpg", b"second", "image/jpeg")),
@@ -437,7 +507,7 @@ def test_batch_import_success_cleans_only_invalid_or_unused_photo_units(monkeypa
 
     response = client.post(
         "/collector-transfer/runs/run-1/inventory/import",
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
         files=[
             ("photos", ("000123.jpg", b"first", "image/jpeg")),
             ("photos", ("000456.jpg", b"second", "image/jpeg")),
@@ -499,7 +569,7 @@ def test_service_errors_have_stable_http_contracts(
     response = client.request(
         method,
         path,
-        headers={"X-Team-Id": "team-1"},
+        headers=auth_headers(),
         json=json,
     )
 
@@ -599,7 +669,7 @@ def test_request_models_reject_team_actor_and_customer_platform_credentials(monk
 
     response = client.post(
         "/collector-transfer/runs",
-        headers={"X-Team-Id": "trusted-local-team"},
+        headers={**auth_headers(team_id="trusted-token-team"), "X-Team-Id": "spoofed-header-team"},
         json={
             "project_id": "project-1",
             "name": "盘点",

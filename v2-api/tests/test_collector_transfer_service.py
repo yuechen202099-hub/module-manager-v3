@@ -6,18 +6,23 @@ from uuid import UUID, uuid4
 
 from openpyxl import Workbook
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import main as main_module
+from app.api.routes import collector_transfer as routes
+from app.core import security
 from app.database import Base
 from app.domain.collector_transfer import PoolInsufficientError
 from app.models import (
     AuditLog,
     CollectorAssignment,
+    CollectorImportRow,
     CollectorMeterItem,
     CollectorPhoto,
     CollectorRequirement,
@@ -228,6 +233,15 @@ def test_excel_inventory_import_preserves_leading_zeroes_and_compatible_headers(
     assert rows == ((2, "0000123"), (3, "0000456"))
 
 
+def test_excel_inventory_import_preserves_blank_rows_for_diagnostics() -> None:
+    """Catches an empty collector cell disappearing before it can be persisted as invalid."""
+    rows = read_collector_numbers_from_workbook(
+        workbook_bytes(["采集器"], [["0000123"], [None], ["0000456"]])
+    )
+
+    assert rows == ((2, "0000123"), (3, ""), (4, "0000456"))
+
+
 def test_photo_filename_is_a_collector_number_not_a_storage_path() -> None:
     """Catches losing leading zeroes or accepting path traversal as a collector number."""
     assert collector_no_from_photo_filename("0000123.jpg") == "0000123"
@@ -436,6 +450,188 @@ def test_real_database_rescan_never_demotes_existing_assignment_state(
     assert required.status == requirement_status
     assert assigned.assignment_mode == "random"
     assert assigned.status == assignment_status
+
+
+def _route_session_factory(session: Session):
+    return sessionmaker(bind=session.get_bind(), expire_on_commit=False)
+
+
+def _route_auth_headers(*, team_id: str = "team-1", username: str = "admin-a") -> dict[str, str]:
+    token = security.create_access_token(
+        {
+            "sub": username,
+            "username": username,
+            "roles": ["admin"],
+            "team_id": team_id,
+        }
+    )
+    return {"Authorization": f"bearer {token}"}
+
+
+def test_saved_image_registration_scope_includes_inactive_database_ownership(
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    """Catches cleanup deleting an object still owned by an inactive/soft-invalid photo row."""
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        collector_no="C-INACTIVE",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical, sha256="d" * 64)
+    photo.is_active = False
+    db_session.commit()
+    monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
+
+    assert routes.saved_image_is_registered(
+        team_id="team-1",
+        stored={"sha256": "d" * 64, "storage_key": photo.object_key},
+    ) is True
+    assert routes.saved_image_is_registered(
+        team_id="team-2",
+        stored={"sha256": "d" * 64, "storage_key": photo.object_key},
+    ) is False
+    assert routes.saved_image_is_registered(
+        team_id="team-1",
+        stored={"sha256": "e" * 64, "storage_key": photo.object_key},
+    ) is False
+    assert routes.saved_image_is_registered(
+        team_id="team-1",
+        stored={"sha256": "d" * 64, "storage_key": "collector-transfer/other.jpg"},
+    ) is False
+
+
+def test_single_photo_reuse_deletes_the_new_unreferenced_saved_object(
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    """Catches successful SHA reuse leaking the newly saved object whose key was not persisted."""
+    run = transfer_run(db_session)
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        collector_no="C-REUSE",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    old_photo = collector_photo(db_session, physical, sha256="f" * 64)
+    new_key = "collector-transfer/new-upload-C-REUSE.jpg"
+    deleted: list[str] = []
+    monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
+    monkeypatch.setattr(
+        routes,
+        "save_image_bytes",
+        lambda **_kwargs: {
+            "url": f"/static/uploads/{new_key}",
+            "sha256": old_photo.sha256,
+            "storage_type": "local_upload",
+            "storage_key": new_key,
+            "content_type": "image/jpeg",
+            "created_new": True,
+        },
+    )
+    monkeypatch.setattr(
+        routes,
+        "delete_saved_image",
+        lambda stored: deleted.append(str(stored["storage_key"])),
+    )
+    client = TestClient(main_module.create_app())
+
+    response = client.post(
+        f"/collector-transfer/runs/{run.id}/collectors/{physical.id}/photo",
+        headers=_route_auth_headers(),
+        files={"file": ("C-REUSE.jpg", b"same-image-content", "image/jpeg")},
+    )
+
+    assert response.status_code == 200
+    assert deleted == [new_key]
+    with _route_session_factory(db_session)() as verification:
+        photos = verification.scalars(
+            select(CollectorPhoto).where(CollectorPhoto.physical_collector_id == physical.id)
+        ).all()
+        assert len(photos) == 1
+        assert photos[0].object_key == old_photo.object_key
+
+
+def test_batch_route_persists_one_diagnostic_per_excel_row_and_photo_input(
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    """Catches blank rows, invalid filenames, or duplicate-number photos disappearing from diagnostics."""
+    run = transfer_run(db_session)
+    deleted: list[str] = []
+    monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
+
+    def save_photo(**kwargs):
+        filename = str(kwargs["filename"])
+        suffix = "jpg" if filename.endswith(".jpg") else "png"
+        return {
+            "url": f"/static/uploads/collector-transfer/{filename}",
+            "sha256": ("a" if suffix == "jpg" else "b") * 64,
+            "storage_type": "local_upload",
+            "storage_key": f"collector-transfer/{filename}",
+            "content_type": kwargs["content_type"],
+            "created_new": True,
+        }
+
+    monkeypatch.setattr(routes, "save_image_bytes", save_photo)
+    monkeypatch.setattr(
+        routes,
+        "delete_saved_image",
+        lambda stored: deleted.append(str(stored["storage_key"])),
+    )
+    client = TestClient(main_module.create_app())
+
+    response = client.post(
+        f"/collector-transfer/runs/{run.id}/inventory/import",
+        headers=_route_auth_headers(),
+        files=[
+            (
+                "workbook",
+                (
+                    "collectors.xlsx",
+                    workbook_bytes(["采集器"], [["000123"], [None]]),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ),
+            ),
+            ("photos", ("folder/invalid.jpg", b"invalid-name", "image/jpeg")),
+            ("photos", ("000123.jpg", b"first", "image/jpeg")),
+            ("photos", ("000123.png", b"duplicate", "image/png")),
+        ],
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["total"] == 5
+    assert payload["inserted"] == 2
+    assert payload["invalid"] == 2
+    assert payload["reused"] == 1
+    assert [(item["input_kind"], item["outcome"]) for item in payload["rows"]] == [
+        ("excel", "inserted"),
+        ("excel", "invalid"),
+        ("photo", "invalid"),
+        ("photo", "inserted"),
+        ("photo", "reused"),
+    ]
+    with _route_session_factory(db_session)() as verification:
+        persisted = verification.scalars(
+            select(CollectorImportRow)
+            .where(CollectorImportRow.run_id == run.id)
+            .order_by(CollectorImportRow.row_number, CollectorImportRow.id)
+        ).all()
+        assert len(persisted) == 5
+        assert [item.payload["input_kind"] for item in persisted] == [
+            "excel",
+            "excel",
+            "photo",
+            "photo",
+            "photo",
+        ]
+    assert deleted == ["collector-transfer/000123.png"]
 
 
 @pytest.mark.parametrize(("assignment_status", "physical_status", "requirement_status"), [("reserved", "reserved", "assigned"), ("used", "used", "used")])

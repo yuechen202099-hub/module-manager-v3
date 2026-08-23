@@ -8,8 +8,8 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from app.core.config import settings
 from app.core.responses import error_response, ok
+from app.core.security import decode_access_token
 from app.database import SessionLocal
 from app.models import CollectorPhoto
 from app.services.collector_transfer import (
@@ -46,18 +46,20 @@ class WorkbenchItemStatusRequest(BaseModel):
 
 def request_identity(request: Request) -> tuple[str, str]:
     payload = getattr(request.state, "auth", None) or {}
-    if payload:
-        team_id = normalize_identifier(payload.get("team_id"))
-        actor = normalize_identifier(payload.get("username") or payload.get("sub"))
-    elif settings.app_env.lower() not in {"prod", "production"}:
-        team_id = normalize_identifier(request.headers.get("X-Team-Id"))
-        actor = "local-test"
-    else:
-        team_id = ""
-        actor = ""
-    if not team_id:
-        raise HTTPException(status_code=400, detail="Team context is required")
-    return team_id, actor or "authenticated-user"
+    if not payload:
+        authorization = normalize_identifier(request.headers.get("Authorization"))
+        if not authorization.lower().startswith("bearer "):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        try:
+            payload = decode_access_token(authorization.split(" ", 1)[1].strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=401, detail="Invalid access token") from exc
+        request.state.auth = payload
+    team_id = normalize_identifier(payload.get("team_id"))
+    actor = normalize_identifier(payload.get("username") or payload.get("sub"))
+    if not team_id or not actor:
+        raise HTTPException(status_code=401, detail="Authenticated team and actor are required")
+    return team_id, actor
 
 
 @contextmanager
@@ -125,7 +127,6 @@ def saved_image_is_registered(*, team_id: str, stored: dict[str, object]) -> boo
                     CollectorPhoto.team_id == team_id,
                     CollectorPhoto.sha256 == sha256,
                     CollectorPhoto.object_key == object_key,
-                    CollectorPhoto.is_active.is_(True),
                 )
             )
             is not None
@@ -238,6 +239,7 @@ async def upload_collector_photo(
     except Exception:
         cleanup_unregistered_saved_images(team_id=team_id, saved_objects=[stored])
         raise
+    cleanup_unregistered_saved_images(team_id=team_id, saved_objects=[stored])
     return ok(request, result)
 
 
@@ -255,45 +257,79 @@ async def import_inventory(
         return service_error_response(request, exc)
     saved_objects: list[dict[str, object]] = []
     photos_by_collector: dict[str, dict[str, object]] = {}
+    photo_inputs: list[dict[str, object]] = []
     try:
+        next_input_number = max((row_number for row_number, _collector_no in rows), default=1) + 1
         for photo_file in photos:
             filename = normalize_identifier(photo_file.filename)
             collector_no = collector_no_from_photo_filename(filename)
             if not collector_no:
+                photo_inputs.append(
+                    {
+                        "row_number": next_input_number,
+                        "input_kind": "photo",
+                        "original_filename": filename,
+                        "collector_no": "",
+                        "status": "invalid",
+                        "message": "照片文件名必须是单个采集器号，不能包含路径",
+                    }
+                )
+                next_input_number += 1
                 continue
             content = await photo_file.read()
-            stored = save_image_bytes(
-                scope="collector-transfer",
-                filename=filename,
-                content=content,
-                content_type=photo_file.content_type or "",
-                team_id=team_id,
-                group_id=run_id,
-                key_hint=f"{collector_no}-{run_id}-{uuid4().hex[:12]}",
-                cleanup_safe=True,
-            )
+            try:
+                stored = save_image_bytes(
+                    scope="collector-transfer",
+                    filename=filename,
+                    content=content,
+                    content_type=photo_file.content_type or "",
+                    team_id=team_id,
+                    group_id=run_id,
+                    key_hint=f"{collector_no}-{run_id}-{uuid4().hex[:12]}",
+                    cleanup_safe=True,
+                )
+            except ValueError as exc:
+                photo_inputs.append(
+                    {
+                        "row_number": next_input_number,
+                        "input_kind": "photo",
+                        "original_filename": filename,
+                        "collector_no": collector_no,
+                        "status": "invalid",
+                        "message": str(exc),
+                    }
+                )
+                next_input_number += 1
+                continue
             saved_objects.append(stored)
-            photos_by_collector.setdefault(
-                collector_no,
-                {
-                    "original_filename": filename,
-                    "stored": stored,
-                    "byte_size": len(content),
-                },
-            )
-        row_collectors = {collector_no for _row_number, collector_no in rows}
-        next_row_number = max((row_number for row_number, _collector_no in rows), default=1) + 1
-        combined_rows = list(rows)
-        for collector_no in sorted(set(photos_by_collector) - row_collectors):
-            combined_rows.append((next_row_number, collector_no))
-            next_row_number += 1
-        if not combined_rows:
+            photo_payload = {
+                "row_number": next_input_number,
+                "input_kind": "photo",
+                "original_filename": filename,
+                "collector_no": collector_no,
+                "stored": stored,
+                "byte_size": len(content),
+            }
+            if collector_no in photos_by_collector:
+                photo_payload.update(
+                    {
+                        "status": "duplicate",
+                        "message": "同一批次重复上传同号照片，已保留第一张",
+                    }
+                )
+            else:
+                photo_payload["status"] = "primary"
+                photos_by_collector[collector_no] = photo_payload
+            photo_inputs.append(photo_payload)
+            next_input_number += 1
+        if not rows and not photo_inputs:
             raise ValueError("Excel 或按采集器号命名的照片至少提供一项")
         with service_for_request(request) as service:
             result = service.import_inventory(
                 run_id=run_id,
-                rows=tuple(combined_rows),
+                rows=tuple(rows),
                 photos_by_collector=photos_by_collector,
+                photo_inputs=tuple(photo_inputs),
             )
         cleanup_unregistered_saved_images(team_id=team_id, saved_objects=saved_objects)
     except (KeyError, ValueError) as exc:
