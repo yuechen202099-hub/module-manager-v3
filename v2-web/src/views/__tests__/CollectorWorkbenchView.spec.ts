@@ -260,6 +260,36 @@ describe('CollectorWorkbenchView data and evidence anatomy', () => {
     }))
   })
 
+  it('recovers when the initial project bootstrap fails and retry succeeds', async () => {
+    workspaceMock.projects = []
+    let attempts = 0
+    workspaceMock.loadProjects.mockImplementation(async () => {
+      attempts += 1
+      if (attempts === 1) throw new Error('项目列表暂时不可用')
+      workspaceMock.projects = [
+        { id: 'project-1', name: '城南改造' },
+        { id: 'project-2', name: '城北改造' },
+      ]
+    })
+
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.get('[role="alert"]').text()).toContain('项目列表暂时不可用')
+    expect(serviceMocks.fetchCollectorTransferRuns).not.toHaveBeenCalled()
+
+    await wrapper.get('[data-testid="retry-error"]').trigger('click')
+    await flushPromises()
+
+    expect(workspaceMock.loadProjects).toHaveBeenCalledTimes(2)
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
+    expect(serviceMocks.fetchCollectorWorkbench).toHaveBeenCalledWith('run-1')
+    expect(serviceMocks.fetchCollectorTerminalWorkbench).toHaveBeenCalledWith('run-1', 'terminal-1')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.value).toBe('project-1')
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('loads the selected project run and lets the operator choose a terminal through the API', async () => {
     const wrapper = await mountWorkbench()
 
@@ -330,6 +360,94 @@ describe('CollectorWorkbenchView data and evidence anatomy', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    ['表号条形码', 'meter_barcode', '缺少表号条形码', 0],
+    ['模块号条形码', 'module_barcode', '缺少模块号条形码', 0],
+    ['模块与电表合照', 'module_meter', '缺少模块与电表合照', 1],
+    ['改造完成照片', 'after_box', '缺少改造完成照片', 1],
+  ] as const)('blocks completion when an install item is missing %s', async (_label, missingField, expectedReason, missingPhotoCount) => {
+    const detail = structuredClone(terminalDetail)
+    const item = detail.items[0]
+    if (item.kind !== 'meter_install') throw new Error('fixture must be an install item')
+    if (missingField === 'meter_barcode' || missingField === 'module_barcode') {
+      item[missingField] = ''
+    } else if (missingField === 'module_meter') {
+      const slot = item.photos.find((candidate) => candidate.slot === missingField)
+      if (slot) slot.photo = null
+    } else {
+      item.photos = item.photos.filter((candidate) => candidate.slot !== missingField)
+    }
+    serviceMocks.fetchCollectorTerminalWorkbench.mockResolvedValue(detail)
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.get('.record-chip').text()).toBe('资料不完整')
+    expect(wrapper.get('[data-testid="blocking-reasons"]').text()).toContain(expectedReason)
+    expect(wrapper.findAll('.photo-frame').map((frame) => frame.attributes('data-slot'))).toEqual([
+      'module_meter',
+      'after_box',
+    ])
+    expect(wrapper.findAll('.photo-missing')).toHaveLength(missingPhotoCount)
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-and-next"]').element.disabled).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['最终采集器号', 'collector_barcode', '缺少最终采集器号', 0],
+    ['采集器实物照片', 'collector', '缺少采集器实物照片', 1],
+  ] as const)('blocks completion when a removal item is missing %s', async (_label, missingField, expectedReason, missingPhotoCount) => {
+    const detail = structuredClone(terminalDetail)
+    const item = detail.items.find((candidate) => candidate.kind === 'collector_removal')
+    if (!item || item.kind !== 'collector_removal') throw new Error('fixture must contain a removal item')
+    if (missingField === 'collector_barcode') {
+      item.collector_barcode = ''
+    } else {
+      item.photos = item.photos.filter((candidate) => candidate.slot !== 'collector')
+    }
+    detail.items = [item]
+    serviceMocks.fetchCollectorTerminalWorkbench.mockResolvedValue(detail)
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.get('.record-chip').text()).toBe('资料不完整')
+    expect(wrapper.get('[data-testid="blocking-reasons"]').text()).toContain(expectedReason)
+    expect(wrapper.findAll('.photo-frame').map((frame) => frame.attributes('data-slot'))).toEqual(['collector'])
+    expect(wrapper.findAll('.photo-missing')).toHaveLength(missingPhotoCount)
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-and-next"]').element.disabled).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['blocked status', 'blocked', [], '终端状态为资料有阻塞'],
+    ['terminal diagnostics', 'in_progress', [{ group_id: 'group-7', code: 'missing_group', message: '终端未匹配到施工组' }], '终端未匹配到施工组'],
+  ] as const)('blocks completion for %s even when item evidence is complete', async (_label, status, diagnostics, expectedReason) => {
+    const blockedSummary = structuredClone(summary)
+    blockedSummary.terminals[0].status = status
+    blockedSummary.terminals[0].diagnostics = [...diagnostics]
+    serviceMocks.fetchCollectorWorkbench.mockResolvedValue(blockedSummary)
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.get('.record-chip').text()).toBe('资料不完整')
+    expect(wrapper.get('[data-testid="blocking-reasons"]').text()).toContain(expectedReason)
+    expect(wrapper.findAll('.photo-frame').map((frame) => frame.attributes('data-slot'))).toEqual([
+      'module_meter',
+      'after_box',
+    ])
+    expect(wrapper.findAll('.photo-missing')).toHaveLength(0)
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-and-next"]').element.disabled).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('moves between work items with buttons and the left and right arrow keys', async () => {
     const wrapper = await mountWorkbench()
 
@@ -368,6 +486,100 @@ describe('CollectorWorkbenchView data and evidence anatomy', () => {
     expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenLastCalledWith('meter-2', false)
     expect(wrapper.get('.record-chip').text()).toBe('资料完整')
     expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630120')
+    wrapper.unmount()
+  })
+
+  it('keeps a late completion response from changing a newer terminal context', async () => {
+    const completion = deferred<{ id: string; status: 'completed'; completed_at: string }>()
+    serviceMocks.setCollectorWorkbenchItemCompleted.mockReturnValueOnce(completion.promise)
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="complete-and-next"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前批次"]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前终端"]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="mode-removal"]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLButtonElement>('.work-item').element.disabled).toBe(true)
+
+    const exposed = wrapper.vm as unknown as {
+      activeItemId: string
+      mode: 'install' | 'removal'
+      terminalDetail: CollectorTerminalWorkbench | null
+      terminalId: string
+    }
+    exposed.terminalId = 'terminal-2'
+    exposed.terminalDetail = {
+      ...structuredClone(terminalDetail2),
+      run_id: 'run-1',
+    }
+    exposed.mode = 'removal'
+    exposed.activeItemId = 'removal-1'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('CG-POOL-0008')
+    expect(wrapper.get('.progress').text()).toContain('0 / 2')
+
+    completion.resolve({ id: 'meter-1', status: 'completed', completed_at: '2026-08-23T01:00:00Z' })
+    await flushPromises()
+
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('CG-POOL-0008')
+    expect(wrapper.get('.record-chip').text()).toBe('资料完整')
+    expect(wrapper.get('.progress').text()).toContain('0 / 2')
+    expect(wrapper.find('[data-testid="undo-completion"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps a late completion response from changing a newer item in the same terminal', async () => {
+    const completion = deferred<{ id: string; status: 'completed'; completed_at: string }>()
+    serviceMocks.setCollectorWorkbenchItemCompleted.mockReturnValueOnce(completion.promise)
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="complete-and-next"]').trigger('click')
+    await flushPromises()
+
+    const exposed = wrapper.vm as unknown as { activeItemId: string }
+    exposed.activeItemId = 'meter-2'
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630120')
+    expect(wrapper.get('.progress').text()).toContain('1 / 4')
+
+    completion.resolve({ id: 'meter-1', status: 'completed', completed_at: '2026-08-23T01:00:00Z' })
+    await flushPromises()
+
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630120')
+    expect(wrapper.get('.progress').text()).toContain('1 / 4')
+    wrapper.unmount()
+  })
+
+  it('retries a failed completion against its original item after the operator changes terminals', async () => {
+    serviceMocks.fetchCollectorTerminalWorkbench.mockImplementation(async (_runId: string, selectedTerminalId: string) => (
+      structuredClone(selectedTerminalId === 'terminal-2'
+        ? { ...terminalDetail2, run_id: 'run-1' }
+        : terminalDetail)
+    ))
+    serviceMocks.setCollectorWorkbenchItemCompleted
+      .mockRejectedValueOnce(new Error('完成服务暂时不可用'))
+      .mockResolvedValueOnce({ id: 'meter-1', status: 'completed', completed_at: '2026-08-23T01:00:00Z' })
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="complete-and-next"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[aria-label="当前终端"]').setValue('terminal-2')
+    await flushPromises()
+
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('CG-POOL-0008')
+    expect(wrapper.get('.progress').text()).toContain('0 / 2')
+
+    await wrapper.get('[data-testid="retry-error"]').trigger('click')
+    await flushPromises()
+
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenNthCalledWith(1, 'meter-1', true)
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenNthCalledWith(2, 'meter-1', true)
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('CG-POOL-0008')
+    expect(wrapper.get('.record-chip').text()).toBe('资料完整')
+    expect(wrapper.get('.progress').text()).toContain('0 / 2')
     wrapper.unmount()
   })
 

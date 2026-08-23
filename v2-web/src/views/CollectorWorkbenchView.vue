@@ -18,6 +18,16 @@ import Code128Barcode from '@/components/Code128Barcode.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 type WorkbenchMode = 'install' | 'removal'
+type RecoverableActionKind = 'completion' | 'load'
+type CompletionActionContext = {
+  advance: boolean
+  completed: boolean
+  itemId: string
+  projectId: string
+  runId: string
+  terminalId: string
+  wasCompleted: boolean
+}
 
 const workspace = useWorkspaceStore()
 const projectId = ref('')
@@ -35,6 +45,7 @@ const loading = ref(false)
 const actionPending = ref(false)
 const errorMessage = ref('')
 const retryAction = ref<null | (() => Promise<void>)>(null)
+const retryActionKind = ref<RecoverableActionKind | null>(null)
 const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth)
 let loadGeneration = 0
 
@@ -46,6 +57,8 @@ const activeItem = computed<CollectorWorkbenchItem | null>(() => (
   modeItems.value.find((item) => item.id === activeItemId.value) || modeItems.value[0] || null
 ))
 const activeIndex = computed(() => Math.max(0, modeItems.value.findIndex((item) => item.id === activeItem.value?.id)))
+const activeBlockingReasons = computed(() => completionBlockingReasons(activeItem.value))
+const activeItemCanComplete = computed(() => Boolean(activeItem.value) && activeBlockingReasons.value.length === 0)
 const terminalProgress = computed(() => selectedTerminal.value
   ? `${selectedTerminal.value.completed_count} / ${selectedTerminal.value.total_count}`
   : '0 / 0')
@@ -57,12 +70,10 @@ const workbenchColumns = computed(() => {
 })
 const controlsGridColumn = computed(() => viewportWidth.value <= 1180 ? '1 / -1' : '')
 
-onMounted(async () => {
+onMounted(() => {
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('resize', handleResize)
-  if (!workspace.projects.length) await workspace.loadProjects()
-  projectId.value = workspace.activeProject?.id || workspace.projects[0]?.id || ''
-  await loadRuns()
+  void bootstrapWorkspace()
 })
 
 onUnmounted(() => {
@@ -74,11 +85,29 @@ function handleResize() {
   viewportWidth.value = window.innerWidth
 }
 
+async function bootstrapWorkspace() {
+  loading.value = true
+  clearRecoverableLoadError()
+  try {
+    if (!workspace.projects.length) await workspace.loadProjects()
+    projectId.value = workspace.activeProject?.id || workspace.projects[0]?.id || ''
+    if (projectId.value) await loadRuns(projectId.value)
+    else loading.value = false
+  } catch (error) {
+    loading.value = false
+    setRecoverableError(error, '项目列表加载失败，请重试', bootstrapWorkspace)
+  }
+}
+
 async function loadRuns(targetProjectId = projectId.value) {
+  if (actionPending.value) {
+    projectId.value = loadedProjectId.value
+    return
+  }
   if (!targetProjectId) return
   const generation = ++loadGeneration
   loading.value = true
-  clearRecoverableError()
+  clearRecoverableLoadError()
   try {
     const nextRuns = await fetchCollectorTransferRuns(targetProjectId)
     if (generation !== loadGeneration) return
@@ -112,10 +141,14 @@ async function loadRuns(targetProjectId = projectId.value) {
 }
 
 async function loadWorkbench(targetRunId = runId.value) {
+  if (actionPending.value) {
+    runId.value = loadedRunId.value
+    return
+  }
   if (!targetRunId) return
   const generation = ++loadGeneration
   loading.value = true
-  clearRecoverableError()
+  clearRecoverableLoadError()
   try {
     const nextSummary = await fetchCollectorWorkbench(targetRunId)
     if (generation !== loadGeneration) return
@@ -140,10 +173,14 @@ async function loadWorkbench(targetRunId = runId.value) {
 }
 
 async function loadTerminal(targetTerminalId = terminalId.value) {
+  if (actionPending.value) {
+    terminalId.value = loadedTerminalId.value
+    return
+  }
   if (!runId.value || !targetTerminalId) return
   const generation = ++loadGeneration
   loading.value = true
-  clearRecoverableError()
+  clearRecoverableLoadError()
   try {
     const nextDetail = await fetchCollectorTerminalWorkbench(runId.value, targetTerminalId)
     if (generation !== loadGeneration) return
@@ -170,46 +207,98 @@ function applyTerminalDetail(nextDetail: CollectorTerminalWorkbench | null) {
 function clearRecoverableError() {
   errorMessage.value = ''
   retryAction.value = null
+  retryActionKind.value = null
 }
 
-function setRecoverableError(error: unknown, fallback: string, retry: () => Promise<void>) {
+function clearRecoverableLoadError() {
+  if (retryActionKind.value !== 'completion') clearRecoverableError()
+}
+
+function setRecoverableError(
+  error: unknown,
+  fallback: string,
+  retry: () => Promise<void>,
+  kind: RecoverableActionKind = 'load',
+) {
   errorMessage.value = error instanceof Error ? error.message : fallback
   retryAction.value = retry
+  retryActionKind.value = kind
 }
 
 function selectMode(nextMode: WorkbenchMode) {
+  if (actionPending.value) return
   mode.value = nextMode
   activeItemId.value = (nextMode === 'install' ? installItems.value : removalItems.value)[0]?.id || ''
 }
 
 function moveItem(delta: number) {
+  if (actionPending.value) return
+  moveItemWithinCurrentContext(delta)
+}
+
+function moveItemWithinCurrentContext(delta: number) {
   if (!modeItems.value.length) return
   const nextIndex = Math.max(0, Math.min(modeItems.value.length - 1, activeIndex.value + delta))
   activeItemId.value = modeItems.value[nextIndex]?.id || ''
 }
 
-async function setCompleted(completed: boolean, advance = false) {
-  const item = activeItem.value
-  if (!item || actionPending.value) return
+function selectItem(itemId: string) {
+  if (!actionPending.value) activeItemId.value = itemId
+}
+
+function completionContextIsDisplayed(context: CompletionActionContext) {
+  return projectId.value === context.projectId
+    && runId.value === context.runId
+    && terminalId.value === context.terminalId
+    && terminalDetail.value?.run_id === context.runId
+    && activeItem.value?.id === context.itemId
+}
+
+async function executeCompletion(context: CompletionActionContext) {
+  if (actionPending.value) return
   actionPending.value = true
   clearRecoverableError()
   try {
-    const status = await setCollectorWorkbenchItemCompleted(item.id, completed)
-    const wasCompleted = item.status === 'completed'
+    const status = await setCollectorWorkbenchItemCompleted(context.itemId, context.completed)
+    if (!completionContextIsDisplayed(context)) return
+    const item = terminalDetail.value?.items.find((candidate) => candidate.id === context.itemId)
+    const terminal = summary.value?.terminals.find((candidate) => candidate.id === context.terminalId)
+    if (!item || !terminal) return
     item.status = status.status
-    if (selectedTerminal.value && wasCompleted !== (status.status === 'completed')) {
+    if (context.wasCompleted !== (status.status === 'completed')) {
       const change = status.status === 'completed' ? 1 : -1
-      selectedTerminal.value.completed_count = Math.max(0, selectedTerminal.value.completed_count + change)
-      selectedTerminal.value.progress = selectedTerminal.value.total_count
-        ? Math.round((selectedTerminal.value.completed_count / selectedTerminal.value.total_count) * 100)
+      terminal.completed_count = Math.max(0, terminal.completed_count + change)
+      terminal.progress = terminal.total_count
+        ? Math.round((terminal.completed_count / terminal.total_count) * 100)
         : 0
     }
-    if (advance && status.status === 'completed') moveItem(1)
+    if (context.advance && status.status === 'completed' && activeItem.value?.id === context.itemId) {
+      moveItemWithinCurrentContext(1)
+    }
   } catch (error) {
-    setRecoverableError(error, '工作项状态更新失败，请重试', () => setCompleted(completed, advance))
+    setRecoverableError(
+      error,
+      '工作项状态更新失败，请重试',
+      () => executeCompletion(context),
+      'completion',
+    )
   } finally {
     actionPending.value = false
   }
+}
+
+function setCompleted(completed: boolean, advance = false) {
+  const item = activeItem.value
+  if (!item || actionPending.value || (completed && completionBlockingReasons(item).length > 0)) return
+  void executeCompletion({
+    advance,
+    completed,
+    itemId: item.id,
+    projectId: projectId.value,
+    runId: runId.value,
+    terminalId: terminalId.value,
+    wasCompleted: item.status === 'completed',
+  })
 }
 
 function retryError() {
@@ -218,6 +307,7 @@ function retryError() {
 }
 
 function handleKeydown(event: KeyboardEvent) {
+  if (actionPending.value) return
   const target = event.target
   if (target instanceof Element && target.matches('input, select, textarea, [contenteditable="true"]')) return
   if (event.key === 'ArrowLeft') {
@@ -226,7 +316,7 @@ function handleKeydown(event: KeyboardEvent) {
   } else if (event.key === 'ArrowRight') {
     event.preventDefault()
     moveItem(1)
-  } else if (event.key === 'Enter' && activeItem.value?.status !== 'completed') {
+  } else if (event.key === 'Enter' && activeItem.value?.status !== 'completed' && activeItemCanComplete.value) {
     event.preventDefault()
     void setCompleted(true, true)
   }
@@ -245,13 +335,42 @@ function requiredPhotoSlots(item: CollectorWorkbenchItem | null): Array<{ slot: 
   return []
 }
 
+function photoForItem(item: CollectorWorkbenchItem | null, slot: CollectorWorkbenchPhotoSlot['slot']) {
+  return item?.photos.find((photo) => photo.slot === slot)?.photo || null
+}
+
+function photoUrlForItem(item: CollectorWorkbenchItem | null, slot: CollectorWorkbenchPhotoSlot['slot']) {
+  const itemPhoto = photoForItem(item, slot)
+  return itemPhoto?.preview_url || itemPhoto?.image_url || itemPhoto?.thumbnail_url || itemPhoto?.canonical_image_url || ''
+}
+
+function completionBlockingReasons(item: CollectorWorkbenchItem | null) {
+  if (!item) return ['当前没有可完成的工作项']
+  const reasons: string[] = []
+  if (selectedTerminal.value?.status === 'blocked' || terminalDetail.value?.terminal.status === 'blocked') {
+    reasons.push('终端状态为资料有阻塞')
+  }
+  for (const diagnostic of selectedTerminal.value?.diagnostics || []) {
+    if (diagnostic.message && !reasons.includes(diagnostic.message)) reasons.push(diagnostic.message)
+  }
+  if (item.kind === 'meter_install') {
+    if (!item.meter_barcode.trim()) reasons.push('缺少表号条形码')
+    if (!item.module_barcode.trim()) reasons.push('缺少模块号条形码')
+    if (!photoUrlForItem(item, 'module_meter')) reasons.push('缺少模块与电表合照')
+    if (!photoUrlForItem(item, 'after_box')) reasons.push('缺少改造完成照片')
+  } else {
+    if (!item.collector_barcode.trim()) reasons.push('缺少最终采集器号')
+    if (!photoUrlForItem(item, 'collector')) reasons.push('缺少采集器实物照片')
+  }
+  return reasons
+}
+
 function photoFor(slot: CollectorWorkbenchPhotoSlot['slot']) {
-  return activeItem.value?.photos.find((photo) => photo.slot === slot)?.photo || null
+  return photoForItem(activeItem.value, slot)
 }
 
 function photoUrl(slot: CollectorWorkbenchPhotoSlot['slot']) {
-  const itemPhoto = photoFor(slot)
-  return itemPhoto?.preview_url || itemPhoto?.image_url || itemPhoto?.thumbnail_url || itemPhoto?.canonical_image_url || ''
+  return photoUrlForItem(activeItem.value, slot)
 }
 </script>
 
@@ -268,19 +387,19 @@ function photoUrl(slot: CollectorWorkbenchPhotoSlot['slot']) {
     <section class="selection-bar" aria-label="工作台选择">
       <label>
         <span>当前项目</span>
-        <select v-model="projectId" aria-label="当前项目" @change="loadRuns(projectId)">
+        <select v-model="projectId" aria-label="当前项目" :disabled="actionPending" @change="loadRuns(projectId)">
           <option v-for="project in workspace.projects" :key="project.id" :value="project.id">{{ project.name }}</option>
         </select>
       </label>
       <label>
         <span>当前批次</span>
-        <select v-model="runId" aria-label="当前批次" @change="loadWorkbench(runId)">
+        <select v-model="runId" aria-label="当前批次" :disabled="actionPending" @change="loadWorkbench(runId)">
           <option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option>
         </select>
       </label>
       <label>
         <span>当前终端</span>
-        <select v-model="terminalId" aria-label="当前终端" @change="loadTerminal(terminalId)">
+        <select v-model="terminalId" aria-label="当前终端" :disabled="actionPending" @change="loadTerminal(terminalId)">
           <option v-for="terminal in summary?.terminals || []" :key="terminal.id" :value="terminal.id">
             {{ terminal.terminal_code }} · {{ terminal.installation_address }}
           </option>
@@ -308,10 +427,10 @@ function photoUrl(slot: CollectorWorkbenchPhotoSlot['slot']) {
       <div class="transfer-grid" :style="{ gridTemplateColumns: workbenchColumns }">
         <aside class="terminal-side" data-region="queue" aria-label="终端工作项队列">
           <div class="mode-switch">
-            <button class="mode-button" :class="{ active: mode === 'install' }" data-testid="mode-install" type="button" @click="selectMode('install')">
+            <button class="mode-button" :class="{ active: mode === 'install' }" data-testid="mode-install" type="button" :disabled="actionPending" @click="selectMode('install')">
               新装 {{ installItems.length }}
             </button>
-            <button class="mode-button" :class="{ active: mode === 'removal' }" data-testid="mode-removal" type="button" @click="selectMode('removal')">
+            <button class="mode-button" :class="{ active: mode === 'removal' }" data-testid="mode-removal" type="button" :disabled="actionPending" @click="selectMode('removal')">
               拆除 {{ removalItems.length }}
             </button>
           </div>
@@ -322,7 +441,8 @@ function photoUrl(slot: CollectorWorkbenchPhotoSlot['slot']) {
               type="button"
               class="work-item"
               :class="{ active: item.id === activeItem?.id }"
-              @click="activeItemId = item.id"
+              :disabled="actionPending"
+              @click="selectItem(item.id)"
             >
               <strong>{{ String(index + 1).padStart(2, '0') }} · {{ item.kind === 'meter_install' ? item.meter_no : item.collector_barcode }}</strong>
               <small>{{ item.status === 'completed' ? '已完成' : item.id === activeItem?.id ? '当前翻拍' : '待处理' }}</small>
@@ -338,8 +458,14 @@ function photoUrl(slot: CollectorWorkbenchPhotoSlot['slot']) {
                 <p v-if="activeItem.kind === 'meter_install'">请先扫表号和模块号，再依次翻拍两张照片。</p>
                 <p v-else>扫描最终采集器号后，直接翻拍已绑定的实物照片。</p>
               </div>
-              <span class="record-chip">{{ activeItem.status === 'completed' ? '已完成' : '资料完整' }}</span>
+              <span class="record-chip" :class="{ incomplete: activeItem.status !== 'completed' && !activeItemCanComplete }">
+                {{ activeItem.status === 'completed' ? '已完成' : activeItemCanComplete ? '资料完整' : '资料不完整' }}
+              </span>
             </div>
+
+            <ul v-if="activeItem.status !== 'completed' && activeBlockingReasons.length" class="blocking-reasons" data-testid="blocking-reasons">
+              <li v-for="reason in activeBlockingReasons" :key="reason">{{ reason }}</li>
+            </ul>
 
             <div v-if="activeItem.kind === 'meter_install'" class="barcode-row">
               <div class="barcode-card">
@@ -406,7 +532,7 @@ function photoUrl(slot: CollectorWorkbenchPhotoSlot['slot']) {
                 type="button"
                 class="primary"
                 data-testid="complete-and-next"
-                :disabled="!activeItem || actionPending"
+                :disabled="!activeItem || !activeItemCanComplete || actionPending"
                 @click="setCompleted(true, true)"
               >
                 标记完成并下一条
@@ -467,6 +593,8 @@ button, select { font-family: inherit; }
 .record-title h2 { margin: 0 0 5px; font-size: 21px; }
 .record-title p { margin: 0; color: #68746c; font-size: 13px; }
 .record-chip { flex: none; padding: 7px 11px; border-radius: 999px; background: #e9f5ee; color: #176b43; font-size: 12px; font-weight: 800; }
+.record-chip.incomplete { background: #fff0ee; color: #9f3630; }
+.blocking-reasons { padding: 10px 12px 10px 30px; margin: -5px 0 16px; border: 1px solid #e6b5b0; border-radius: 9px; background: #fff0ee; color: #9f3630; font-size: 13px; line-height: 1.6; }
 .barcode-row, .photo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .barcode-row { margin-bottom: 16px; }
 .barcode-row.single, .photo-grid.single { grid-template-columns: minmax(0, 520px); }
