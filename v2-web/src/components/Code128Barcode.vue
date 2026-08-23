@@ -43,7 +43,7 @@ const barcode = computed(() => {
       />
     </svg>
     <div v-else class="code128__empty">编号为空或包含条形码不支持的字符</div>
-    <figcaption>{{ displayValue.trim() ? displayValue : '未提供编号' }}</figcaption>
+    <figcaption style="white-space: pre-wrap">{{ displayValue.trim() ? displayValue : '未提供编号' }}</figcaption>
   </figure>
 </template>
 

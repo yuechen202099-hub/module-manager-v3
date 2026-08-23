@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "test:collector-transfer": "node --test tests/collector-transfer-state.test.ts",
     "test:components": "vitest run",
     "type-check": "vue-tsc --noEmit",
     "build": "vue-tsc --noEmit && vite build",

@@ -14,6 +14,15 @@ describe('Code128Barcode', () => {
     expect(wrapper.text()).toContain('001234')
   })
 
+  it('keeps every visible whitespace character in the human-readable caption', () => {
+    const value = '  A  B  '
+    const wrapper = mount(Code128Barcode, { props: { value } })
+    const caption = wrapper.get('figcaption')
+
+    expect(caption.element.textContent).toBe(value)
+    expect(window.getComputedStyle(caption.element).whiteSpace).toBe('pre-wrap')
+  })
+
   it('does not render a barcode for an all-whitespace value and provides a clear empty state', () => {
     const wrapper = mount(Code128Barcode, { props: { value: '   ' } })
 
