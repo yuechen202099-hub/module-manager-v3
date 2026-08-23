@@ -458,12 +458,15 @@ function photoUrl(slot: CollectorWorkbenchPhotoSlot['slot']) {
                 <p v-if="activeItem.kind === 'meter_install'">请先扫表号和模块号，再依次翻拍两张照片。</p>
                 <p v-else>扫描最终采集器号后，直接翻拍已绑定的实物照片。</p>
               </div>
-              <span class="record-chip" :class="{ incomplete: activeItem.status !== 'completed' && !activeItemCanComplete }">
-                {{ activeItem.status === 'completed' ? '已完成' : activeItemCanComplete ? '资料完整' : '资料不完整' }}
-              </span>
+              <div class="record-chips">
+                <span v-if="activeItem.status === 'completed'" class="record-chip">已完成</span>
+                <span class="record-chip" :class="{ incomplete: !activeItemCanComplete }">
+                  {{ activeItemCanComplete ? '资料完整' : '资料不完整' }}
+                </span>
+              </div>
             </div>
 
-            <ul v-if="activeItem.status !== 'completed' && activeBlockingReasons.length" class="blocking-reasons" data-testid="blocking-reasons">
+            <ul v-if="activeBlockingReasons.length" class="blocking-reasons" data-testid="blocking-reasons">
               <li v-for="reason in activeBlockingReasons" :key="reason">{{ reason }}</li>
             </ul>
 
@@ -592,6 +595,7 @@ button, select { font-family: inherit; }
 .record-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; margin-bottom: 17px; }
 .record-title h2 { margin: 0 0 5px; font-size: 21px; }
 .record-title p { margin: 0; color: #68746c; font-size: 13px; }
+.record-chips { display: flex; flex: none; align-items: center; gap: 7px; }
 .record-chip { flex: none; padding: 7px 11px; border-radius: 999px; background: #e9f5ee; color: #176b43; font-size: 12px; font-weight: 800; }
 .record-chip.incomplete { background: #fff0ee; color: #9f3630; }
 .blocking-reasons { padding: 10px 12px 10px 30px; margin: -5px 0 16px; border: 1px solid #e6b5b0; border-radius: 9px; background: #fff0ee; color: #9f3630; font-size: 13px; line-height: 1.6; }

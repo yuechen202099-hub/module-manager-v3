@@ -448,6 +448,85 @@ describe('CollectorWorkbenchView data and evidence anatomy', () => {
     wrapper.unmount()
   })
 
+  it('shows completed status and current incomplete reasons when install evidence later becomes invalid', async () => {
+    const detail = structuredClone(terminalDetail)
+    const item = detail.items[1]
+    if (item.kind !== 'meter_install') throw new Error('fixture must be a completed install item')
+    item.meter_barcode = ''
+    const moduleMeterSlot = item.photos.find((candidate) => candidate.slot === 'module_meter')
+    if (moduleMeterSlot) moduleMeterSlot.photo = null
+    detail.items = [item]
+    serviceMocks.fetchCollectorTerminalWorkbench.mockResolvedValue(detail)
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.findAll('.record-chip').map((chip) => chip.text())).toEqual(['已完成', '资料不完整'])
+    expect(wrapper.get('[data-testid="blocking-reasons"]').text()).toContain('缺少表号条形码')
+    expect(wrapper.get('[data-testid="blocking-reasons"]').text()).toContain('缺少模块与电表合照')
+    expect(wrapper.findAll('.photo-frame').map((frame) => frame.attributes('data-slot'))).toEqual([
+      'module_meter',
+      'after_box',
+    ])
+    expect(wrapper.findAll('.photo-missing')).toHaveLength(1)
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="undo-completion"]').element.disabled).toBe(false)
+    expect(wrapper.find('[data-testid="complete-and-next"]').exists()).toBe(false)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('shows completed status and current incomplete reasons when removal evidence later becomes invalid', async () => {
+    const detail = structuredClone(terminalDetail)
+    const item = detail.items.find((candidate) => candidate.kind === 'collector_removal')
+    if (!item || item.kind !== 'collector_removal') throw new Error('fixture must contain a removal item')
+    item.status = 'completed'
+    item.collector_barcode = ''
+    item.photos = item.photos.filter((candidate) => candidate.slot !== 'collector')
+    detail.items = [item]
+    serviceMocks.fetchCollectorTerminalWorkbench.mockResolvedValue(detail)
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.findAll('.record-chip').map((chip) => chip.text())).toEqual(['已完成', '资料不完整'])
+    expect(wrapper.get('[data-testid="blocking-reasons"]').text()).toContain('缺少最终采集器号')
+    expect(wrapper.get('[data-testid="blocking-reasons"]').text()).toContain('缺少采集器实物照片')
+    expect(wrapper.findAll('.photo-frame').map((frame) => frame.attributes('data-slot'))).toEqual(['collector'])
+    expect(wrapper.findAll('.photo-missing')).toHaveLength(1)
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="undo-completion"]').element.disabled).toBe(false)
+    expect(wrapper.find('[data-testid="complete-and-next"]').exists()).toBe(false)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('shows completed status and current blocker reasons when its terminal becomes blocked with diagnostics', async () => {
+    const blockedSummary = structuredClone(summary)
+    blockedSummary.terminals[0].status = 'blocked'
+    blockedSummary.terminals[0].diagnostics = [
+      { group_id: 'group-7', code: 'missing_group', message: '终端未匹配到施工组' },
+    ]
+    const detail = structuredClone(terminalDetail)
+    const item = detail.items[1]
+    if (item.kind !== 'meter_install') throw new Error('fixture must be a completed install item')
+    detail.items = [item]
+    serviceMocks.fetchCollectorWorkbench.mockResolvedValue(blockedSummary)
+    serviceMocks.fetchCollectorTerminalWorkbench.mockResolvedValue(detail)
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.findAll('.record-chip').map((chip) => chip.text())).toEqual(['已完成', '资料不完整'])
+    expect(wrapper.get('[data-testid="blocking-reasons"]').text()).toContain('终端状态为资料有阻塞')
+    expect(wrapper.get('[data-testid="blocking-reasons"]').text()).toContain('终端未匹配到施工组')
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="undo-completion"]').element.disabled).toBe(false)
+    expect(wrapper.find('[data-testid="complete-and-next"]').exists()).toBe(false)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('moves between work items with buttons and the left and right arrow keys', async () => {
     const wrapper = await mountWorkbench()
 
