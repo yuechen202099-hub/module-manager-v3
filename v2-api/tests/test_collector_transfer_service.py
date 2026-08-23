@@ -545,3 +545,71 @@ def test_real_database_assignment_conflict_leaves_session_usable_and_reports_con
 
     assert db_session.scalar(select(func.count(CollectorAssignment.id))) == 1
     assert db_session.get(CollectorRequirement, required.id).status == "unmatched"
+
+
+@pytest.mark.parametrize(
+    ("assignment_status", "physical_status", "requirement_status"),
+    [("reserved", "reserved", "assigned"), ("used", "used", "used")],
+)
+def test_real_database_rescan_of_random_replacement_never_returns_pool_decision(
+    db_session: Session,
+    assignment_status: str,
+    physical_status: str,
+    requirement_status: str,
+) -> None:
+    """Catches a replacement whose physical number differs from the original being sent back to the pool."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(
+        db_session,
+        run,
+        terminal,
+        collector_no="ORIGINAL-001",
+        status=requirement_status,
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        collector_no="REPLACEMENT-999",
+        pool_status=physical_status,
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical)
+    assigned = CollectorAssignment(
+        id=uuid4(),
+        run_id=run.id,
+        team_id="team-1",
+        requirement_id=required.id,
+        physical_collector_id=physical.id,
+        collector_photo_id=photo.id,
+        assignment_mode="random",
+        status=assignment_status,
+    )
+    db_session.add(assigned)
+    db_session.commit()
+
+    result = service(db_session).scan_collector(run_id=str(run.id), collector_no="REPLACEMENT-999")
+
+    event = db_session.scalar(
+        select(CollectorScanEvent)
+        .where(
+            CollectorScanEvent.run_id == run.id,
+            CollectorScanEvent.physical_collector_id == physical.id,
+        )
+        .order_by(CollectorScanEvent.created_at.desc(), CollectorScanEvent.id.desc())
+    )
+    db_session.refresh(physical)
+    db_session.refresh(required)
+    db_session.refresh(assigned)
+    assert result["decision"] == "assignment_reuse"
+    assert result["requires_photo"] is False
+    assert result["add_to_pool"] is False
+    assert result["pool_status"] == physical_status
+    assert event.decision == "assignment_reuse"
+    assert event.requires_photo is False
+    assert event.add_to_pool is False
+    assert physical.pool_status == physical_status
+    assert required.status == requirement_status
+    assert assigned.assignment_mode == "random"
+    assert assigned.status == assignment_status

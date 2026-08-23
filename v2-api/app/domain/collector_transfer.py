@@ -42,6 +42,7 @@ class CollectorScanDecisionKind(str, Enum):
     DIRECT_REUSE = "direct_reuse"
     DIRECT_NEEDS_PHOTO = "direct_needs_photo"
     POOL_NEEDS_PHOTO = "pool_needs_photo"
+    ASSIGNMENT_REUSE = "assignment_reuse"
 
 
 @dataclass(frozen=True, slots=True)

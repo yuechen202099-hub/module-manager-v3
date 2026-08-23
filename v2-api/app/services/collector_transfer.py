@@ -604,11 +604,19 @@ class PostgresCollectorTransferService:
                 .with_for_update()
             )
 
-        decision = decide_collector_scan(
-            collector_no=normalized_no,
-            unmatched_requirements=({str(requirement.id): requirement.original_collector_no} if requirement else {}),
-            has_reusable_photo=photo is not None,
-        )
+        if existing_assignment is not None:
+            decision = CollectorScanDecision(
+                kind=CollectorScanDecisionKind.ASSIGNMENT_REUSE,
+                requirement_id=str(existing_assignment.requirement_id),
+                requires_photo=False,
+                add_to_pool=False,
+            )
+        else:
+            decision = decide_collector_scan(
+                collector_no=normalized_no,
+                unmatched_requirements=({str(requirement.id): requirement.original_collector_no} if requirement else {}),
+                has_reusable_photo=photo is not None,
+            )
         if requirement is not None and existing_assignment is None:
             physical.pool_status = "direct"
             if photo is None:
