@@ -9,6 +9,7 @@ const nativePageComponents = {
   'claim-tasks': () => import('@/views/ClaimTasksView.vue'),
   'global-search': () => import('@/views/GlobalSearchView.vue'),
   construction: () => import('@/views/ConstructionView.vue'),
+  'collector-inventory': () => import('@/views/CollectorInventoryView.vue'),
   'account-management': () => import('@/views/AccountManagementView.vue'),
   'sync-config': () => import('@/views/SyncConfigView.vue'),
 } as const

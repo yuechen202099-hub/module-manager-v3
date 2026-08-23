@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "test:components": "vitest run",
+    "test:collector-transfer": "node --test --experimental-strip-types tests/collector-transfer-state.test.ts && vitest run --config tests/collector-transfer.vitest.config.ts",
     "type-check": "vue-tsc --noEmit",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0"

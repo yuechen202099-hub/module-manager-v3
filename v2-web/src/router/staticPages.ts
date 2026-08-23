@@ -3,6 +3,7 @@ export type StaticPageKey =
   | 'claim-tasks'
   | 'global-search'
   | 'construction'
+  | 'collector-inventory'
   | 'account-management'
   | 'sync-config'
 
@@ -47,6 +48,14 @@ export const staticPages: StaticPageRoute[] = [
     title: '施工采集',
     subtitle: '',
     routePath: '/construction',
+    roles: ['admin', 'constructor'],
+    migrationStatus: 'native_vue',
+  },
+  {
+    key: 'collector-inventory',
+    title: '采集器盘点',
+    subtitle: '手机扫码与补拍',
+    routePath: '/collector-inventory',
     roles: ['admin', 'constructor'],
     migrationStatus: 'native_vue',
   },

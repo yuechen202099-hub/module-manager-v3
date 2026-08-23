@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DataBoard, FolderChecked, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
+import { CameraFilled, DataBoard, FolderChecked, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -23,6 +23,7 @@ const navigation = computed(() => {
     'claim-tasks': Tickets,
     'global-search': Search,
     construction: FolderChecked,
+    'collector-inventory': CameraFilled,
     'account-management': UserFilled,
     'sync-config': DataBoard,
   }
@@ -39,6 +40,7 @@ const roleLabel = computed(() => {
 })
 const isEmbedded = computed(() => route.query.embedded === '1')
 const isConstructionRoute = computed(() => route.path === '/construction')
+const isCollectorInventoryRoute = computed(() => route.path === '/collector-inventory')
 const isAdmin = computed(() => auth.user?.role === 'admin' || auth.user?.roles?.includes('admin'))
 const releaseNotesVisible = ref(false)
 const releaseNotesPage = ref(1)
@@ -224,7 +226,7 @@ async function startShellScanImport(message: { file?: File; filename?: string })
 </script>
 
 <template>
-  <div class="app-shell" :class="{ embedded: isEmbedded, 'construction-route': isConstructionRoute }">
+  <div class="app-shell" :class="{ embedded: isEmbedded, 'construction-route': isConstructionRoute, 'collector-inventory-route': isCollectorInventoryRoute }">
     <header v-if="!isEmbedded" class="topbar">
       <div class="topbar-brand">
         <span class="brand-mark">V{{ APP_VERSION }}</span>
@@ -339,6 +341,28 @@ async function startShellScanImport(message: { file?: File; filename?: string })
     right: 10px;
     bottom: calc(10px + env(safe-area-inset-bottom, 0px));
     width: calc(100vw - 20px);
+  }
+}
+
+@media (max-width: 760px) {
+  .app-shell.collector-inventory-route {
+    width: 100%;
+    min-width: 0;
+    max-width: 100vw;
+    overflow-x: clip;
+  }
+
+  .app-shell.collector-inventory-route .topbar {
+    display: none;
+  }
+
+  .app-shell.collector-inventory-route .main-panel {
+    width: 100%;
+    min-width: 0;
+    max-width: 100vw;
+    min-height: 100dvh;
+    overflow-x: clip;
+    padding: 0;
   }
 }
 
