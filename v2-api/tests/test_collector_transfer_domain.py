@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.collector_transfer import (
+from app.domain.collector_transfer import (
     CollectorScanDecisionKind,
     MeterSource,
     PoolInsufficientError,
