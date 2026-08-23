@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CameraFilled, DataBoard, FolderChecked, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
+import { CameraFilled, DataBoard, FolderChecked, PictureFilled, Search, SwitchButton, Tickets, UserFilled } from '@element-plus/icons-vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -24,6 +24,7 @@ const navigation = computed(() => {
     'global-search': Search,
     construction: FolderChecked,
     'collector-inventory': CameraFilled,
+    'collector-workbench': PictureFilled,
     'account-management': UserFilled,
     'sync-config': DataBoard,
   }

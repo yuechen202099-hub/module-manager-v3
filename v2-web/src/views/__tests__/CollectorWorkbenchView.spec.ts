@@ -1,0 +1,486 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type {
+  CollectorTerminalWorkbench,
+  CollectorTransferPhoto,
+  CollectorTransferRun,
+  CollectorWorkbenchSummary,
+} from '@/api/types'
+import AppLayout from '@/layouts/AppLayout.vue'
+import router from '@/router'
+import { findStaticPage } from '@/router/staticPages'
+import CollectorWorkbenchView from '@/views/CollectorWorkbenchView.vue'
+
+const serviceMocks = vi.hoisted(() => ({
+  fetchCollectorTransferRuns: vi.fn(),
+  fetchCollectorWorkbench: vi.fn(),
+  fetchCollectorTerminalWorkbench: vi.fn(),
+  setCollectorWorkbenchItemCompleted: vi.fn(),
+  fetchScanImportJob: vi.fn(),
+  startScanImportJob: vi.fn(),
+}))
+
+const workspaceMock = vi.hoisted(() => ({
+  projects: [{ id: 'project-1', name: '城南改造' }],
+  activeProject: { id: 'project-1', name: '城南改造' },
+  loadProjects: vi.fn(),
+}))
+
+const authMock = vi.hoisted(() => ({
+  isAuthenticated: true,
+  user: { role: 'constructor', roles: ['constructor'], teamId: 'team-1' },
+  displayName: '施工员甲',
+  hydrateFromLegacySession: vi.fn(),
+  logout: vi.fn(),
+}))
+
+vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => workspaceMock }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => authMock }))
+vi.mock('@/api/services', () => serviceMocks)
+
+const run: CollectorTransferRun = {
+  id: 'run-1',
+  project_id: 'project-1',
+  name: '城南改造 · 第三批',
+  status: 'allocated',
+  terminal_count: 2,
+  meter_count: 2,
+  collector_requirement_count: 2,
+  blocked_terminal_count: 0,
+  direct_match_count: 1,
+  pool_available_count: 1,
+  assignment_count: 2,
+  diagnostics: [],
+  created_at: '2026-08-23T00:00:00Z',
+}
+
+const photo = (id: string, url: string): CollectorTransferPhoto => ({
+  id,
+  image_url: url,
+  object_key: `collector-transfer/${id}.jpg`,
+  storage_type: 'oss',
+  storage_key: `collector-transfer/${id}.jpg`,
+  storage_bucket: 'evidence',
+  sha256: `${id}-sha256`,
+  content_type: 'image/jpeg',
+  canonical_image_url: url,
+  module_asset_no: '',
+  collector: '',
+  creator: 'fixture',
+  preview_url: url,
+  thumbnail_url: url,
+})
+
+const summary: CollectorWorkbenchSummary = {
+  run,
+  terminals: [
+    {
+      id: 'terminal-1',
+      terminal_code: 'T-07',
+      installation_address: '城南公变',
+      status: 'in_progress',
+      meter_count: 2,
+      collector_requirement_count: 2,
+      completed_count: 1,
+      total_count: 4,
+      progress: 25,
+      diagnostics: [],
+    },
+    {
+      id: 'terminal-2',
+      terminal_code: 'T-08',
+      installation_address: '城北公变',
+      status: 'ready',
+      meter_count: 1,
+      collector_requirement_count: 1,
+      completed_count: 0,
+      total_count: 2,
+      progress: 0,
+      diagnostics: [],
+    },
+  ],
+}
+
+const terminalDetail: CollectorTerminalWorkbench = {
+  run_id: 'run-1',
+  terminal: {
+    id: 'terminal-1',
+    terminal_code: 'T-07',
+    installation_address: '城南公变',
+    status: 'in_progress',
+  },
+  items: [
+    {
+      id: 'meter-1',
+      kind: 'meter_install',
+      status: 'pending',
+      meter_no: '000217630119',
+      meter_barcode: '000217630119',
+      module_no: 'M202608190771',
+      module_barcode: 'M202608190771',
+      photos: [
+        { slot: 'module_meter', label: '模块与电表合照', photo: photo('module-meter-1', '/photos/module-meter.jpg') },
+        { slot: 'after_box', label: '改造完成照片', photo: photo('after-box-1', '/photos/after-box.jpg') },
+      ],
+    },
+    {
+      id: 'meter-2',
+      kind: 'meter_install',
+      status: 'completed',
+      meter_no: '000217630120',
+      meter_barcode: '000217630120',
+      module_no: 'M202608190772',
+      module_barcode: 'M202608190772',
+      photos: [
+        { slot: 'module_meter', label: '模块与电表合照', photo: photo('module-meter-2', '/photos/module-meter-2.jpg') },
+        { slot: 'after_box', label: '改造完成照片', photo: photo('after-box-2', '/photos/after-box-2.jpg') },
+      ],
+    },
+    {
+      id: 'removal-1',
+      kind: 'collector_removal',
+      status: 'pending',
+      collector_no: 'CG-2026-OLD-0041',
+      collector_barcode: 'CG-POOL-0008',
+      assignment_mode: 'random',
+      photos: [
+        { slot: 'collector', label: '采集器实物照片', photo: photo('collector-1', '/photos/collector.jpg') },
+      ],
+    },
+  ],
+}
+
+const run2: CollectorTransferRun = {
+  ...run,
+  id: 'run-2',
+  project_id: 'project-2',
+  name: '城北改造 · 第一批',
+  meter_count: 0,
+  collector_requirement_count: 1,
+  assignment_count: 1,
+}
+
+const summary2: CollectorWorkbenchSummary = {
+  run: run2,
+  terminals: [summary.terminals[1]],
+}
+
+const terminalDetail2: CollectorTerminalWorkbench = {
+  run_id: 'run-2',
+  terminal: {
+    id: 'terminal-2',
+    terminal_code: 'T-08',
+    installation_address: '城北公变',
+    status: 'ready',
+  },
+  items: [structuredClone(terminalDetail.items[2])],
+}
+
+async function mountWorkbench() {
+  const wrapper = mount(CollectorWorkbenchView, { attachTo: document.body })
+  await flushPromises()
+  return wrapper
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, reject, resolve }
+}
+
+describe('collector workbench route and navigation', () => {
+  beforeEach(async () => {
+    vi.clearAllMocks()
+    workspaceMock.loadProjects.mockResolvedValue(undefined)
+    authMock.hydrateFromLegacySession.mockResolvedValue(undefined)
+    await router.push('/collector-workbench')
+    await router.isReady()
+  })
+
+  it('registers the authenticated desktop page for admin and constructor', () => {
+    const page = findStaticPage('collector-workbench')
+    expect(page).toMatchObject({
+      routePath: '/collector-workbench',
+      roles: ['admin', 'constructor'],
+      migrationStatus: 'native_vue',
+    })
+
+    const route = router.getRoutes().find((item) => item.name === 'collector-workbench')
+    expect(route?.path).toBe('/collector-workbench')
+    expect(route?.meta.roles).toEqual(['admin', 'constructor'])
+    expect(route?.components?.default).toBeTruthy()
+  })
+
+  it.each(['constructor', 'admin'])('renders the workbench entry in AppLayout navigation for %s', async (role) => {
+    authMock.user = { role, roles: [role], teamId: 'team-1' }
+    const wrapper = mount(AppLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          RouterView: true,
+          ElButton: true,
+          ElDialog: true,
+          ElIcon: true,
+          ElPagination: true,
+          ElProgress: true,
+          ElTag: true,
+          ElTooltip: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    const links = wrapper.findAll('.top-nav__item').map((item) => item.text())
+    expect(links).toContain('翻拍工作台')
+    wrapper.unmount()
+  })
+})
+
+describe('CollectorWorkbenchView data and evidence anatomy', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    workspaceMock.projects = [
+      { id: 'project-1', name: '城南改造' },
+      { id: 'project-2', name: '城北改造' },
+    ]
+    workspaceMock.activeProject = workspaceMock.projects[0]
+    workspaceMock.loadProjects.mockResolvedValue(undefined)
+    serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([run])
+    serviceMocks.fetchCollectorWorkbench.mockImplementation(async () => structuredClone(summary))
+    serviceMocks.fetchCollectorTerminalWorkbench.mockImplementation(async () => structuredClone(terminalDetail))
+    serviceMocks.setCollectorWorkbenchItemCompleted.mockImplementation(async (itemId: string, completed: boolean) => ({
+      id: itemId,
+      status: completed ? 'completed' : 'pending',
+      completed_at: completed ? '2026-08-23T01:00:00Z' : null,
+    }))
+  })
+
+  it('loads the selected project run and lets the operator choose a terminal through the API', async () => {
+    const wrapper = await mountWorkbench()
+
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
+    expect(serviceMocks.fetchCollectorWorkbench).toHaveBeenCalledWith('run-1')
+    expect(serviceMocks.fetchCollectorTerminalWorkbench).toHaveBeenCalledWith('run-1', 'terminal-1')
+    expect(wrapper.get('[aria-label="当前终端"]').text()).toContain('T-07')
+
+    await wrapper.get('[aria-label="当前终端"]').setValue('terminal-2')
+    await flushPromises()
+    expect(serviceMocks.fetchCollectorTerminalWorkbench).toHaveBeenLastCalledWith('run-1', 'terminal-2')
+    wrapper.unmount()
+  })
+
+  it('loads a newly selected run and its first terminal through the workbench APIs', async () => {
+    const alternateRun = { ...run, id: 'run-alt', name: '城南改造 · 第四批' }
+    const alternateSummary = { ...summary, run: alternateRun }
+    serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([structuredClone(run), alternateRun])
+    serviceMocks.fetchCollectorWorkbench.mockImplementation(async (selectedRunId: string) => (
+      structuredClone(selectedRunId === 'run-alt' ? alternateSummary : summary)
+    ))
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[aria-label="当前批次"]').setValue('run-alt')
+    await flushPromises()
+
+    expect(serviceMocks.fetchCollectorWorkbench).toHaveBeenLastCalledWith('run-alt')
+    expect(serviceMocks.fetchCollectorTerminalWorkbench).toHaveBeenLastCalledWith('run-alt', 'terminal-1')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前批次"]').element.value).toBe('run-alt')
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
+    wrapper.unmount()
+  })
+
+  it('renders exactly two real barcodes and the two required photos for a new-install item', async () => {
+    const wrapper = await mountWorkbench()
+
+    const barcodes = wrapper.findAll('.barcode-card .code128')
+    expect(barcodes).toHaveLength(2)
+    expect(barcodes.map((item) => item.get('figcaption').text())).toEqual([
+      '000217630119',
+      'M202608190771',
+    ])
+    expect(barcodes.every((item) => item.get('svg').attributes('role') === 'img')).toBe(true)
+
+    const photos = wrapper.findAll('.photo-frame')
+    expect(photos).toHaveLength(2)
+    expect(photos.map((item) => item.attributes('data-slot'))).toEqual(['module_meter', 'after_box'])
+    expect(photos.map((item) => item.get('img').attributes('src'))).toEqual([
+      '/photos/module-meter.jpg',
+      '/photos/after-box.jpg',
+    ])
+    wrapper.unmount()
+  })
+
+  it('uses the assigned final collector barcode and one bound physical photo for removal', async () => {
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="mode-removal"]').trigger('click')
+
+    const barcodes = wrapper.findAll('.barcode-card .code128')
+    expect(barcodes).toHaveLength(1)
+    expect(barcodes[0].get('figcaption').text()).toBe('CG-POOL-0008')
+    expect(wrapper.text()).not.toContain('CG-2026-OLD-0041')
+    const photos = wrapper.findAll('.photo-frame')
+    expect(photos).toHaveLength(1)
+    expect(photos[0].attributes('data-slot')).toBe('collector')
+    expect(photos[0].get('img').attributes('src')).toBe('/photos/collector.jpg')
+    wrapper.unmount()
+  })
+
+  it('moves between work items with buttons and the left and right arrow keys', async () => {
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
+    await wrapper.get('[aria-label="下一条"]').trigger('click')
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630120')
+    await wrapper.get('[aria-label="上一条"]').trigger('click')
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }))
+    await flushPromises()
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630120')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }))
+    await flushPromises()
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
+    wrapper.unmount()
+  })
+
+  it('waits for the completion API before Enter advances and round-trips undo for a completed item', async () => {
+    const completion = deferred<{ id: string; status: 'completed'; completed_at: string }>()
+    serviceMocks.setCollectorWorkbenchItemCompleted.mockReturnValueOnce(completion.promise)
+    const wrapper = await mountWorkbench()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenCalledWith('meter-1', true)
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
+
+    completion.resolve({ id: 'meter-1', status: 'completed', completed_at: '2026-08-23T01:00:00Z' })
+    await flushPromises()
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630120')
+    expect(wrapper.get('[data-testid="undo-completion"]').text()).toContain('撤销完成')
+
+    await wrapper.get('[data-testid="undo-completion"]').trigger('click')
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenLastCalledWith('meter-2', false)
+    expect(wrapper.get('.record-chip').text()).toBe('资料完整')
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630120')
+    wrapper.unmount()
+  })
+
+  it('keeps the current item and offers a working retry when the completion API fails', async () => {
+    serviceMocks.setCollectorWorkbenchItemCompleted
+      .mockRejectedValueOnce(new Error('完成服务暂时不可用'))
+      .mockResolvedValueOnce({ id: 'meter-1', status: 'completed', completed_at: '2026-08-23T01:00:00Z' })
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="complete-and-next"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
+    expect(wrapper.get('.record-chip').text()).toBe('资料完整')
+    expect(wrapper.get('[role="alert"]').text()).toContain('完成服务暂时不可用')
+
+    await wrapper.get('[data-testid="retry-error"]').trigger('click')
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630120')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('preserves the current project and evidence when project loading fails, then retries the intended project', async () => {
+    let project2Attempts = 0
+    serviceMocks.fetchCollectorTransferRuns.mockImplementation(async (selectedProjectId: string) => {
+      if (selectedProjectId !== 'project-2') return [structuredClone(run)]
+      project2Attempts += 1
+      if (project2Attempts === 1) throw new Error('批次列表暂时不可用')
+      return [structuredClone(run2)]
+    })
+    serviceMocks.fetchCollectorWorkbench.mockImplementation(async (selectedRunId: string) => (
+      structuredClone(selectedRunId === 'run-2' ? summary2 : summary)
+    ))
+    serviceMocks.fetchCollectorTerminalWorkbench.mockImplementation(async (selectedRunId: string) => (
+      structuredClone(selectedRunId === 'run-2' ? terminalDetail2 : terminalDetail)
+    ))
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[aria-label="当前项目"]').setValue('project-2')
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.value).toBe('project-1')
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
+    expect(wrapper.get('[role="alert"]').text()).toContain('批次列表暂时不可用')
+
+    await wrapper.get('[data-testid="retry-error"]').trigger('click')
+    await flushPromises()
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenLastCalledWith('project-2')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.value).toBe('project-2')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前批次"]').element.value).toBe('run-2')
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('CG-POOL-0008')
+    wrapper.unmount()
+  })
+
+  it('ignores a stale project response after a newer project selection has completed', async () => {
+    const delayedProject2Runs = deferred<CollectorTransferRun[]>()
+    serviceMocks.fetchCollectorTransferRuns.mockImplementation(async (selectedProjectId: string) => (
+      selectedProjectId === 'project-2' ? delayedProject2Runs.promise : [structuredClone(run)]
+    ))
+    serviceMocks.fetchCollectorWorkbench.mockImplementation(async (selectedRunId: string) => (
+      structuredClone(selectedRunId === 'run-2' ? summary2 : summary)
+    ))
+    serviceMocks.fetchCollectorTerminalWorkbench.mockImplementation(async (selectedRunId: string) => (
+      structuredClone(selectedRunId === 'run-2' ? terminalDetail2 : terminalDetail)
+    ))
+    const wrapper = await mountWorkbench()
+
+    const projectSelect = wrapper.get('[aria-label="当前项目"]')
+    await projectSelect.setValue('project-2')
+    await projectSelect.setValue('project-1')
+    await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.value).toBe('project-1')
+
+    delayedProject2Runs.resolve([structuredClone(run2)])
+    await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.value).toBe('project-1')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前批次"]').element.value).toBe('run-1')
+    expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
+    wrapper.unmount()
+  })
+
+  it('keeps the accepted three-region desktop and narrow-desktop layout contract', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440, writable: true })
+    const wrapper = await mountWorkbench()
+
+    const regions = wrapper.findAll('.transfer-grid > [data-region]').map((region) => region.attributes('data-region'))
+    expect(regions).toEqual(['queue', 'canvas', 'controls'])
+    expect(getComputedStyle(wrapper.get('.transfer-grid').element).gridTemplateColumns).toBe('250px minmax(0, 1fr) 270px')
+    expect(getComputedStyle(wrapper.get('.photo-frame img').element).objectFit).toBe('contain')
+
+    window.innerWidth = 1000
+    window.dispatchEvent(new Event('resize'))
+    await flushPromises()
+    expect(getComputedStyle(wrapper.get('.transfer-grid').element).gridTemplateColumns).toBe('230px minmax(0, 1fr)')
+    expect(getComputedStyle(wrapper.get('[data-region="controls"]').element).gridColumn).toBe('1 / -1')
+
+    window.innerWidth = 820
+    window.dispatchEvent(new Event('resize'))
+    await flushPromises()
+    expect(getComputedStyle(wrapper.get('.transfer-grid').element).gridTemplateColumns).toBe('minmax(190px, 230px) minmax(0, 1fr)')
+    wrapper.unmount()
+  })
+
+  it('states the manual-only boundary without credential fields or client-platform actions', async () => {
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.text()).toContain('本页仅辅助掌机人工翻拍与人工录入，不会登录或自动上传甲方平台。')
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
+    expect(wrapper.find('a[href*="platform"], a[href*="login"], a[target="_blank"]').exists()).toBe(false)
+    const actionText = wrapper.findAll('button').map((button) => button.text()).join(' ')
+    expect(actionText).not.toMatch(/甲方账号|甲方密码|平台登录|自动上传|跳转甲方/)
+    wrapper.unmount()
+  })
+})
