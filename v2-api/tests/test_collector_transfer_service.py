@@ -2,17 +2,165 @@ from __future__ import annotations
 
 from io import BytesIO
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from openpyxl import Workbook
+import pytest
+from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
+from app.database import Base
+from app.domain.collector_transfer import PoolInsufficientError
+from app.models import (
+    AuditLog,
+    CollectorAssignment,
+    CollectorMeterItem,
+    CollectorPhoto,
+    CollectorRequirement,
+    CollectorScanEvent,
+    CollectorTransferRun,
+    CollectorTransferTerminal,
+    CollectorWorkbenchItem,
+    MaterialGroup,
+    PhysicalCollector,
+    Project,
+    ProjectStatus,
+    Team,
+)
 from app.services.collector_transfer import (
+    CollectorAllocationConflictError,
     PostgresCollectorTransferService,
     collector_no_from_photo_filename,
     meter_sources_from_groups,
     read_collector_numbers_from_workbook,
 )
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_as_json(_type: JSONB, _compiler: object, **_kwargs: object) -> str:
+    return "JSON"
+
+
+@pytest.fixture
+def db_session() -> Session:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def register_uuid_function(connection, _connection_record) -> None:
+        connection.create_function("gen_random_uuid", 0, lambda: uuid4().hex)
+
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    try:
+        session.add(Team(id="team-1", name="测试团队"))
+        session.add(
+            Project(
+                id=uuid4(),
+                team_id="team-1",
+                code=f"P-{uuid4().hex[:8]}",
+                name="测试项目",
+                status=ProjectStatus.ACTIVE,
+                settings={},
+            )
+        )
+        session.commit()
+        yield session
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def project_id(session: Session) -> UUID:
+    return session.scalar(select(Project.id).where(Project.team_id == "team-1"))
+
+
+def transfer_run(session: Session, *, status: str = "inventory") -> CollectorTransferRun:
+    run = CollectorTransferRun(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project_id(session),
+        name="盘点",
+        status=status,
+        stats={},
+        diagnostics=[],
+    )
+    session.add(run)
+    session.commit()
+    return run
+
+
+def transfer_terminal(session: Session, run: CollectorTransferRun, *, code: str = "T-001") -> CollectorTransferTerminal:
+    terminal = CollectorTransferTerminal(
+        id=uuid4(),
+        run_id=run.id,
+        team_id="team-1",
+        terminal_code=code,
+        installation_address="测试地址",
+        status="ready",
+        meter_count=1,
+        collector_requirement_count=1,
+        diagnostics=[],
+    )
+    session.add(terminal)
+    session.commit()
+    return terminal
+
+
+def requirement(
+    session: Session,
+    run: CollectorTransferRun,
+    terminal: CollectorTransferTerminal,
+    *,
+    collector_no: str = "C-001",
+    status: str = "unmatched",
+) -> CollectorRequirement:
+    record = CollectorRequirement(
+        id=uuid4(),
+        run_id=run.id,
+        terminal_id=terminal.id,
+        team_id="team-1",
+        original_collector_no=collector_no,
+        status=status,
+        sort_order=0,
+        diagnostics=[],
+    )
+    session.add(record)
+    session.commit()
+    return record
+
+
+def collector_photo(
+    session: Session,
+    collector: PhysicalCollector,
+    *,
+    sha256: str = "a" * 64,
+) -> CollectorPhoto:
+    photo = CollectorPhoto(
+        id=uuid4(),
+        team_id="team-1",
+        physical_collector_id=collector.id,
+        sha256=sha256,
+        original_filename=f"{collector.collector_no}.jpg",
+        object_key=f"collector-transfer/{collector.collector_no}.jpg",
+        storage_type="local_upload",
+        is_active=True,
+    )
+    session.add(photo)
+    session.commit()
+    return photo
+
+
+def service(session: Session) -> PostgresCollectorTransferService:
+    return PostgresCollectorTransferService(session=session, team_id="team-1", actor="operator")
 
 
 def test_existing_groups_project_to_only_the_two_confirmed_install_photo_slots() -> None:
@@ -39,8 +187,8 @@ def test_existing_groups_project_to_only_the_two_confirmed_install_photo_slots()
     assert projection.sources[0].collector_no == "C-001"
 
 
-def test_projection_reports_missing_terminal_and_does_not_merge_it_into_a_fake_terminal() -> None:
-    """Catches silently combining all blank terminal groups into one terminal."""
+def test_projection_preserves_a_blank_terminal_group_in_its_own_blocked_snapshot() -> None:
+    """Catches silently combining or dropping blank-terminal groups instead of keeping a blocked meter item."""
     group = SimpleNamespace(
         id="group-blank",
         terminal=" ",
@@ -51,10 +199,13 @@ def test_projection_reports_missing_terminal_and_does_not_merge_it_into_a_fake_t
 
     projection = meter_sources_from_groups([group], [])
 
-    assert projection.sources == ()
-    assert projection.diagnostics == (
-        {"group_id": "group-blank", "code": "terminal_missing", "message": "终端地址码为空"},
-    )
+    assert projection.sources[0].terminal_code == "__missing_terminal__:group-blank"
+    assert projection.sources[0].group_id == "group-blank"
+    assert projection.diagnostics[0] == {
+        "group_id": "group-blank",
+        "code": "terminal_missing",
+        "message": "终端地址码为空",
+    }
 
 
 def workbook_bytes(headers: list[str], rows: list[list[object]]) -> bytes:
@@ -179,3 +330,218 @@ def test_scan_recovers_the_physical_collector_that_won_a_unique_constraint_race(
     assert result["collector_id"] == str(winner.id)
     assert result["pool_status"] == "awaiting_photo"
     assert session.commit_count == 1
+
+
+def test_real_database_create_run_keeps_each_blank_terminal_group_as_a_blocked_meter_item(
+    db_session: Session,
+) -> None:
+    """Catches dropping source groups with blank terminals instead of preserving a separately blocked snapshot."""
+    first = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project_id(db_session),
+        terminal=" ",
+        meter_match_key="MISSING-TERMINAL-1",
+        display_meter_no="M-001",
+        installation_address="地址一",
+        raw_data={"collector": "C-001"},
+    )
+    second = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project_id(db_session),
+        terminal="",
+        meter_match_key="MISSING-TERMINAL-2",
+        display_meter_no="M-002",
+        installation_address="地址二",
+        raw_data={"collector": "C-002"},
+    )
+    db_session.add_all((first, second))
+    db_session.commit()
+
+    result = service(db_session).create_run(project_id=str(project_id(db_session)), name="空终端")
+
+    terminals = db_session.scalars(
+        select(CollectorTransferTerminal).where(CollectorTransferTerminal.run_id == UUID(str(result["id"])))
+    ).all()
+    meter_items = db_session.scalars(
+        select(CollectorMeterItem).where(CollectorMeterItem.run_id == UUID(str(result["id"])))
+    ).all()
+    assert len(terminals) == 2
+    assert {terminal.status for terminal in terminals} == {"blocked"}
+    assert len({terminal.terminal_code for terminal in terminals}) == 2
+    assert {item.source_group_id for item in meter_items} == {first.id, second.id}
+
+
+def test_real_database_scan_returns_each_direct_and_pool_decision(
+    db_session: Session,
+) -> None:
+    """Catches the scan service bypassing the persisted same-number or replacement-pool state machine."""
+    run = transfer_run(db_session)
+    no_photo_requirement = requirement(db_session, run, transfer_terminal(db_session, run, code="T-001"), collector_no="C-001")
+    reusable_requirement = requirement(db_session, run, transfer_terminal(db_session, run, code="T-002"), collector_no="C-002")
+    reusable_collector = PhysicalCollector(
+        id=uuid4(), team_id="team-1", collector_no="C-002", pool_status="awaiting_photo"
+    )
+    db_session.add(reusable_collector)
+    db_session.commit()
+    collector_photo(db_session, reusable_collector)
+
+    needs_photo = service(db_session).scan_collector(run_id=str(run.id), collector_no="C-001")
+    reusable = service(db_session).scan_collector(run_id=str(run.id), collector_no="C-002")
+    pool = service(db_session).scan_collector(run_id=str(run.id), collector_no="C-999")
+
+    assert needs_photo["decision"] == "direct_needs_photo"
+    assert needs_photo["requires_photo"] is True
+    assert reusable["decision"] == "direct_reuse"
+    assert reusable["add_to_pool"] is False
+    assert pool["decision"] == "pool_needs_photo"
+    assert pool["pool_status"] == "awaiting_photo"
+    assert db_session.get(CollectorRequirement, no_photo_requirement.id).status == "direct_pending_photo"
+    assert db_session.get(CollectorRequirement, reusable_requirement.id).status == "direct_ready"
+    assert db_session.scalar(select(func.count(AuditLog.id))) == 3
+
+
+@pytest.mark.parametrize(("assignment_status", "physical_status", "requirement_status"), [("reserved", "reserved", "assigned"), ("used", "used", "used")])
+def test_real_database_rescan_never_demotes_existing_assignment_state(
+    db_session: Session,
+    assignment_status: str,
+    physical_status: str,
+    requirement_status: str,
+) -> None:
+    """Catches a repeat scan rewriting reserved or used allocation state into a direct assignment state."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(db_session, run, terminal, status=requirement_status)
+    physical = PhysicalCollector(
+        id=uuid4(), team_id="team-1", collector_no="C-001", pool_status=physical_status
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical)
+    assigned = CollectorAssignment(
+        id=uuid4(), run_id=run.id, team_id="team-1", requirement_id=required.id,
+        physical_collector_id=physical.id, collector_photo_id=photo.id, assignment_mode="random", status=assignment_status,
+    )
+    db_session.add(assigned)
+    db_session.commit()
+
+    result = service(db_session).scan_collector(run_id=str(run.id), collector_no="C-001")
+
+    db_session.refresh(physical)
+    db_session.refresh(required)
+    db_session.refresh(assigned)
+    assert result["pool_status"] == physical_status
+    assert physical.pool_status == physical_status
+    assert required.status == requirement_status
+    assert assigned.assignment_mode == "random"
+    assert assigned.status == assignment_status
+
+
+@pytest.mark.parametrize(("assignment_status", "physical_status", "requirement_status"), [("reserved", "reserved", "assigned"), ("used", "used", "used")])
+def test_real_database_duplicate_photo_never_demotes_existing_assignment_state(
+    db_session: Session,
+    assignment_status: str,
+    physical_status: str,
+    requirement_status: str,
+) -> None:
+    """Catches an idempotent photo upload changing a reserved or used collector back to direct or available."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(db_session, run, terminal, status=requirement_status)
+    physical = PhysicalCollector(
+        id=uuid4(), team_id="team-1", collector_no="C-001", pool_status=physical_status
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical)
+    assigned = CollectorAssignment(
+        id=uuid4(), run_id=run.id, team_id="team-1", requirement_id=required.id,
+        physical_collector_id=physical.id, collector_photo_id=photo.id, assignment_mode="random", status=assignment_status,
+    )
+    event = CollectorScanEvent(
+        id=uuid4(), run_id=run.id, team_id="team-1", physical_collector_id=physical.id,
+        requirement_id=required.id, scanned_value="C-001", decision="direct_reuse", requires_photo=False, add_to_pool=False,
+    )
+    db_session.add_all((assigned, event))
+    db_session.commit()
+
+    result = service(db_session).register_photo(
+        run_id=str(run.id), collector_id=str(physical.id), original_filename="C-001.jpg",
+        stored={"sha256": photo.sha256, "storage_key": photo.object_key, "storage_type": "local_upload"}, byte_size=12,
+    )
+
+    db_session.refresh(physical)
+    db_session.refresh(required)
+    assert result["pool_status"] == physical_status
+    assert physical.pool_status == physical_status
+    assert required.status == requirement_status
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 1
+
+
+def test_real_database_pool_shortage_leaves_no_allocation_side_effects(db_session: Session) -> None:
+    """Catches a shortage that writes a partial assignment, state change, workbench item, or audit row."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(db_session, run, terminal)
+
+    with pytest.raises(PoolInsufficientError):
+        service(db_session).allocate(run_id=str(run.id))
+
+    db_session.rollback()
+    assert db_session.get(CollectorRequirement, required.id).status == "unmatched"
+    assert db_session.scalar(select(func.count(CollectorAssignment.id))) == 0
+    assert db_session.scalar(select(func.count(CollectorWorkbenchItem.id))) == 0
+    assert db_session.scalar(select(func.count(AuditLog.id))) == 0
+
+
+def test_real_database_allocation_persists_and_retries_without_duplicate_audit(db_session: Session) -> None:
+    """Catches random allocation changing on retry or appending duplicate assignments and audits."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(db_session, run, terminal)
+    physical = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-999", pool_status="available")
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical)
+
+    first = service(db_session).allocate(run_id=str(run.id))
+    db_session.expire_all()
+    second = service(db_session).allocate(run_id=str(run.id))
+
+    assert first["assignment_count"] == 1
+    assert second == {"run_id": str(run.id), "assignment_count": 1, "assignments": []}
+    assert db_session.get(CollectorRequirement, required.id).status == "assigned"
+    assert db_session.get(PhysicalCollector, physical.id).pool_status == "reserved"
+    assert db_session.scalar(select(func.count(CollectorAssignment.id))) == 1
+    assert db_session.scalar(select(func.count(CollectorWorkbenchItem.id))) == 1
+    assert db_session.scalar(select(func.count(AuditLog.id))) == 1
+
+
+def test_real_database_assignment_conflict_leaves_session_usable_and_reports_controlled_conflict(
+    db_session: Session,
+) -> None:
+    """Catches allocation leaving PendingRollback after a unique assignment collision instead of returning a domain conflict."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(db_session, run, terminal)
+    physical = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-999", pool_status="available")
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical)
+    conflicting_requirement = requirement(
+        db_session, run, transfer_terminal(db_session, run, code="T-002"), collector_no="C-888", status="assigned"
+    )
+    db_session.add(
+        CollectorAssignment(
+            id=uuid4(), run_id=run.id, team_id="team-1", requirement_id=conflicting_requirement.id,
+            physical_collector_id=physical.id, collector_photo_id=photo.id, assignment_mode="random", status="reserved",
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(CollectorAllocationConflictError):
+        service(db_session).allocate(run_id=str(run.id))
+
+    assert db_session.scalar(select(func.count(CollectorAssignment.id))) == 1
+    assert db_session.get(CollectorRequirement, required.id).status == "unmatched"

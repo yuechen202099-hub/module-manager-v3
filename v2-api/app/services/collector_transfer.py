@@ -10,7 +10,7 @@ from uuid import UUID
 from uuid import uuid4
 
 from openpyxl import load_workbook
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -42,6 +42,13 @@ from app.models import (
     Project,
 )
 from app.services.photo_storage import resolve_photo_for_response
+
+
+class CollectorAllocationConflictError(ValueError):
+    """A database uniqueness backstop rejected an allocation after the service acquired its locks."""
+
+
+_MISSING_TERMINAL_PREFIX = "__missing_terminal__:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +83,7 @@ def meter_sources_from_groups(groups: Iterable[object], photos: Iterable[object]
             diagnostics.append(
                 {"group_id": group_id, "code": "terminal_missing", "message": "终端地址码为空"}
             )
-            continue
+            terminal_code = f"{_MISSING_TERMINAL_PREFIX}{group_id}"
         group_photos = photos_by_group.get(group_id, [])
         module_meter = next(
             (photo for photo in group_photos if normalize_identifier(getattr(photo, "category", "")) == "module_meter"),
@@ -461,6 +468,53 @@ class PostgresCollectorTransferService:
             return physical
         return candidate
 
+    def _create_assignment(
+        self,
+        *,
+        run: CollectorTransferRun,
+        requirement: CollectorRequirement,
+        physical: PhysicalCollector,
+        photo: CollectorPhoto,
+        assignment_mode: str,
+    ) -> tuple[CollectorAssignment, bool]:
+        candidate = CollectorAssignment(
+            run_id=run.id,
+            team_id=self.team_id,
+            requirement_id=requirement.id,
+            physical_collector_id=physical.id,
+            collector_photo_id=photo.id,
+            assignment_mode=assignment_mode,
+            status="reserved",
+        )
+        try:
+            with self.session.begin_nested():
+                self.session.add(candidate)
+                self.session.flush()
+        except IntegrityError as exc:
+            winner = self.session.scalar(
+                select(CollectorAssignment)
+                .where(
+                    or_(
+                        CollectorAssignment.requirement_id == requirement.id,
+                        CollectorAssignment.physical_collector_id == physical.id,
+                    )
+                )
+                .with_for_update()
+            )
+            if (
+                winner is not None
+                and winner.run_id == run.id
+                and winner.requirement_id == requirement.id
+                and winner.physical_collector_id == physical.id
+                and winner.collector_photo_id == photo.id
+                and winner.assignment_mode == assignment_mode
+                and winner.status in {"reserved", "used"}
+            ):
+                return winner, False
+            self.session.rollback()
+            raise CollectorAllocationConflictError("collector assignment conflicts with an existing allocation") from exc
+        return candidate, True
+
     def _ensure_removal_workbench_item(
         self,
         *,
@@ -555,30 +609,25 @@ class PostgresCollectorTransferService:
             unmatched_requirements=({str(requirement.id): requirement.original_collector_no} if requirement else {}),
             has_reusable_photo=photo is not None,
         )
-        if requirement is not None:
+        if requirement is not None and existing_assignment is None:
             physical.pool_status = "direct"
             if photo is None:
                 requirement.status = "direct_pending_photo"
             else:
                 requirement.status = "direct_ready"
-                if existing_assignment is None:
-                    existing_assignment = CollectorAssignment(
-                        run_id=run.id,
-                        team_id=self.team_id,
-                        requirement_id=requirement.id,
-                        physical_collector_id=physical.id,
-                        collector_photo_id=photo.id,
-                        assignment_mode="direct",
-                        status="reserved",
-                    )
-                    self.session.add(existing_assignment)
-                    self.session.flush()
+                existing_assignment, _created = self._create_assignment(
+                    run=run,
+                    requirement=requirement,
+                    physical=physical,
+                    photo=photo,
+                    assignment_mode="direct",
+                )
                 self._ensure_removal_workbench_item(
                     run=run,
                     requirement=requirement,
                     assignment=existing_assignment,
                 )
-        else:
+        if requirement is None:
             physical.pool_status = "available" if photo is not None else "awaiting_photo"
             if photo is not None:
                 decision = CollectorScanDecision(
@@ -691,25 +740,21 @@ class PostgresCollectorTransferService:
                     select(CollectorAssignment).where(CollectorAssignment.requirement_id == requirement.id)
                 )
                 if assignment is None:
-                    assignment = CollectorAssignment(
-                        run_id=run.id,
-                        team_id=self.team_id,
-                        requirement_id=requirement.id,
-                        physical_collector_id=physical.id,
-                        collector_photo_id=photo.id,
+                    assignment, _created = self._create_assignment(
+                        run=run,
+                        requirement=requirement,
+                        physical=physical,
+                        photo=photo,
                         assignment_mode="direct",
-                        status="reserved",
                     )
-                    self.session.add(assignment)
-                    self.session.flush()
-                requirement.status = "direct_ready"
-                physical.pool_status = "direct"
-                self._ensure_removal_workbench_item(
-                    run=run,
-                    requirement=requirement,
-                    assignment=assignment,
-                )
-        if direct_event is None:
+                    requirement.status = "direct_ready"
+                    physical.pool_status = "direct"
+                    self._ensure_removal_workbench_item(
+                        run=run,
+                        requirement=requirement,
+                        assignment=assignment,
+                    )
+        if direct_event is None and physical.pool_status == "awaiting_photo":
             physical.pool_status = "available"
         self._audit(
             action="collector_transfer.photo_registered",
@@ -786,19 +831,17 @@ class PostgresCollectorTransferService:
             requirement = requirements_by_id[requirement_id]
             physical = collectors_by_id[collector_id]
             photo = photos_by_collector[collector_id]
-            assignment = CollectorAssignment(
-                run_id=run.id,
-                team_id=self.team_id,
-                requirement_id=requirement.id,
-                physical_collector_id=physical.id,
-                collector_photo_id=photo.id,
+            assignment, created = self._create_assignment(
+                run=run,
+                requirement=requirement,
+                physical=physical,
+                photo=photo,
                 assignment_mode="random",
-                status="reserved",
             )
-            self.session.add(assignment)
-            self.session.flush()
-            requirement.status = "assigned"
-            physical.pool_status = "reserved"
+            if created or requirement.status == "unmatched":
+                requirement.status = "assigned"
+            if created or physical.pool_status == "available":
+                physical.pool_status = "reserved"
             self._ensure_removal_workbench_item(
                 run=run,
                 requirement=requirement,
