@@ -45,6 +45,13 @@ const run = {
   created_at: '2026-08-23T00:00:00Z',
 }
 
+const otherProjectRun = {
+  ...run,
+  id: 'run-2',
+  project_id: 'project-2',
+  name: '城北改造 · 第一批',
+}
+
 function decision(
   kind: CollectorInventoryDecision['decision'],
   requiresPhoto: boolean,
@@ -92,6 +99,8 @@ describe('CollectorInventoryView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([run])
+    workspaceMock.projects = [{ id: 'project-1', name: '城南改造' }]
+    workspaceMock.activeProject = { id: 'project-1', name: '城南改造' }
     workspaceMock.loadProjects.mockResolvedValue(undefined)
     authMock.user = { role: 'admin', roles: ['admin'] }
     vi.stubGlobal('URL', {
@@ -144,6 +153,51 @@ describe('CollectorInventoryView', () => {
     expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('城南改造')
     expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('project-1')
     expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
+    wrapper.unmount()
+  })
+
+  it('keeps setup project changes as a draft until a new run is created successfully', async () => {
+    workspaceMock.projects = [
+      { id: 'project-1', name: '城南改造' },
+      { id: 'project-2', name: '城北改造' },
+    ]
+    serviceMocks.fetchCollectorTransferRuns.mockImplementation(async (projectId: string) => (
+      projectId === 'project-2' ? [otherProjectRun] : [run]
+    ))
+    serviceMocks.createCollectorTransferRun.mockResolvedValue(otherProjectRun)
+    const wrapper = await mountPage()
+    const currentRunSelect = wrapper.get<HTMLSelectElement>('[aria-label="当前盘点批次"]')
+
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('城南改造')
+    expect(currentRunSelect.element.value).toBe('run-1')
+    expect(Array.from(currentRunSelect.element.options, (option) => option.value)).toEqual(['', 'run-1'])
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
+
+    await wrapper.get('[aria-label="选择盘点批次"]').trigger('click')
+    const setupProjectSelect = wrapper.findAll<HTMLSelectElement>('.setup-dialog select')[1]
+    await setupProjectSelect.setValue('project-2')
+
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('城南改造')
+    expect(currentRunSelect.element.value).toBe('run-1')
+    expect(Array.from(currentRunSelect.element.options, (option) => option.value)).toEqual(['', 'run-1'])
+    expect(serviceMocks.fetchCollectorTransferRuns).not.toHaveBeenCalledWith('project-2')
+
+    await wrapper.get('[aria-label="关闭"]').trigger('click')
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('城南改造')
+    expect(currentRunSelect.element.value).toBe('run-1')
+    expect(serviceMocks.fetchCollectorTransferRuns).not.toHaveBeenCalledWith('project-2')
+
+    await wrapper.get('[aria-label="选择盘点批次"]').trigger('click')
+    await wrapper.findAll<HTMLSelectElement>('.setup-dialog select')[1].setValue('project-2')
+    await wrapper.get('form.setup-dialog').trigger('submit')
+    await flushPromises()
+
+    expect(serviceMocks.createCollectorTransferRun).toHaveBeenCalledWith('project-2', expect.any(String))
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-2')
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('城北改造')
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('project-2')
+    expect(currentRunSelect.element.value).toBe('run-2')
+    expect(Array.from(currentRunSelect.element.options, (option) => option.value)).toEqual(['', 'run-2'])
     wrapper.unmount()
   })
 

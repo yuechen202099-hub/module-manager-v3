@@ -43,6 +43,7 @@ const workbookFile = ref<File | null>(null)
 const inventoryPhotos = ref<File[]>([])
 const importResult = ref<CollectorInventoryImportResult | null>(null)
 const setupOpen = ref(false)
+const selectedProjectId = ref('')
 const setupProjectId = ref('')
 const setupName = ref(`采集器盘点 ${new Date().toLocaleDateString('zh-CN')}`)
 const localPhotoUrl = ref('')
@@ -64,7 +65,7 @@ const isAdmin = computed(() => {
   return roles.has('admin')
 })
 const activeProject = computed(() => (
-  workspace.projects.find((item) => item.id === setupProjectId.value)
+  workspace.projects.find((item) => item.id === selectedProjectId.value)
   || workspace.activeProject
   || workspace.projects[0]
   || null
@@ -104,8 +105,9 @@ const runProgress = computed(() => {
 
 onMounted(async () => {
   if (!workspace.projects.length) await workspace.loadProjects()
-  setupProjectId.value = activeProject.value?.id || ''
-  if (setupProjectId.value) await loadRuns(setupProjectId.value)
+  selectedProjectId.value = activeProject.value?.id || ''
+  setupProjectId.value = selectedProjectId.value
+  if (selectedProjectId.value) await loadRuns(selectedProjectId.value)
 })
 
 onUnmounted(() => {
@@ -113,16 +115,28 @@ onUnmounted(() => {
   releaseLocalPhotoUrl()
 })
 
-async function loadRuns(projectId = activeProject.value?.id || '') {
+async function loadRuns(projectId = selectedProjectId.value, preferredRunId = '') {
+  runs.value = []
+  selectedRunId.value = ''
   try {
     runs.value = projectId ? await fetchCollectorTransferRuns(projectId) : []
-    if (!selectedRunId.value || !runs.value.some((item) => item.id === selectedRunId.value)) {
-      selectedRunId.value = runs.value[0]?.id || ''
-    }
-    if (!runs.value.length) setupOpen.value = isAdmin.value
+    selectedRunId.value = runs.value.some((item) => item.id === preferredRunId)
+      ? preferredRunId
+      : runs.value[0]?.id || ''
+    if (!runs.value.length && isAdmin.value) openSetup()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '盘点批次加载失败')
   }
+}
+
+function openSetup() {
+  setupProjectId.value = selectedProjectId.value
+  setupOpen.value = true
+}
+
+function closeSetup() {
+  setupProjectId.value = selectedProjectId.value
+  setupOpen.value = false
 }
 
 async function createRun() {
@@ -133,10 +147,11 @@ async function createRun() {
   }
   loading.value = true
   try {
-    const created = await createCollectorTransferRun(setupProjectId.value, setupName.value.trim() || '采集器盘点')
-    await loadRuns(setupProjectId.value)
-    selectedRunId.value = created.id
-    setupOpen.value = false
+    const projectId = setupProjectId.value
+    const created = await createCollectorTransferRun(projectId, setupName.value.trim() || '采集器盘点')
+    selectedProjectId.value = projectId
+    await loadRuns(projectId, created.id)
+    closeSetup()
     ElMessage.success('已根据现有数据生成终端和采集器需求')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '新建盘点批次失败')
@@ -149,7 +164,7 @@ async function submitScan(rawValue = collectorNo.value) {
   const value = rawValue.trim()
   if (!selectedRunId.value) {
     ElMessage.warning('请先选择盘点批次')
-    setupOpen.value = true
+    openSetup()
     return
   }
   if (!value) {
@@ -189,7 +204,7 @@ async function submitScan(rawValue = collectorNo.value) {
 async function startCamera() {
   if (cameraActive.value) return
   if (!selectedRunId.value) {
-    setupOpen.value = true
+    openSetup()
     return
   }
   result.value = null
@@ -362,7 +377,7 @@ async function submitImport() {
           <strong>采集器盘点</strong>
           <small>手机摄像头扫码</small>
         </div>
-        <button v-if="isAdmin" class="round-button" type="button" aria-label="选择盘点批次" @click="setupOpen = true">•••</button>
+        <button v-if="isAdmin" class="round-button" type="button" aria-label="选择盘点批次" @click="openSetup">•••</button>
       </header>
 
       <div class="stage-banner">仅做盘点与补拍 · 不录入甲方平台</div>
@@ -470,10 +485,10 @@ async function submitImport() {
 
     <input ref="photoInput" class="visually-hidden" data-testid="photo-input" type="file" accept="image/*" capture="environment" :disabled="!result?.requires_photo" @change="uploadPhoto" />
 
-    <div v-if="isAdmin && setupOpen" class="setup-backdrop" @click.self="setupOpen = false">
+    <div v-if="isAdmin && setupOpen" class="setup-backdrop" @click.self="closeSetup">
       <form class="setup-dialog" @submit.prevent="createRun">
-        <header><h2>选择或新建盘点批次</h2><button type="button" aria-label="关闭" @click="setupOpen = false">×</button></header>
-        <label><span>已有批次</span><select v-model="selectedRunId" @change="setupOpen = false"><option value="">无</option><option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option></select></label>
+        <header><h2>选择或新建盘点批次</h2><button type="button" aria-label="关闭" @click="closeSetup">×</button></header>
+        <label><span>已有批次</span><select v-model="selectedRunId" @change="closeSetup"><option value="">无</option><option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option></select></label>
         <div class="setup-divider">根据现有数据新建</div>
         <label><span>项目</span><select v-model="setupProjectId"><option v-for="project in workspace.projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
         <label><span>批次名称</span><input v-model="setupName" /></label>
