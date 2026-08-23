@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 from uuid import UUID
 from uuid import uuid4
+from xml.etree.ElementTree import ParseError as ElementTreeParseError
 from zipfile import BadZipFile
 
 from openpyxl import load_workbook
@@ -44,6 +45,22 @@ from app.models import (
     Project,
 )
 from app.services.photo_storage import resolve_photo_for_response
+
+
+_WORKBOOK_PARSE_ERRORS: tuple[type[Exception], ...] = (
+    BadZipFile,
+    InvalidFileException,
+    OSError,
+    EOFError,
+    KeyError,
+    ElementTreeParseError,
+)
+try:
+    from lxml.etree import XMLSyntaxError as LxmlXMLSyntaxError
+except ImportError:
+    pass
+else:
+    _WORKBOOK_PARSE_ERRORS += (LxmlXMLSyntaxError,)
 
 
 class CollectorAllocationConflictError(ValueError):
@@ -152,30 +169,30 @@ def read_collector_numbers_from_workbook(content: bytes) -> tuple[tuple[int, str
         raise ValueError("Excel 文件为空")
     try:
         workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
-    except (BadZipFile, InvalidFileException, OSError, EOFError, KeyError) as exc:
+        sheet = workbook.active
+        rows = sheet.iter_rows(values_only=True)
+        headers = [normalize_identifier(value) for value in next(rows, ())]
+        header_indexes = {header: index for index, header in enumerate(headers) if header}
+        preferred_indexes = [
+            header_indexes[header]
+            for header in ("采集器", "采集器号", "扫码内容")
+            if header in header_indexes
+        ]
+        if not preferred_indexes:
+            raise ValueError("Excel 缺少采集器、采集器号或扫码内容列")
+        result: list[tuple[int, str]] = []
+        for row_number, row in enumerate(rows, start=2):
+            collector_no = next(
+                (
+                    normalize_identifier(row[index])
+                    for index in preferred_indexes
+                    if index < len(row) and normalize_identifier(row[index])
+                ),
+                "",
+            )
+            result.append((row_number, collector_no))
+    except _WORKBOOK_PARSE_ERRORS as exc:
         raise ValueError("Excel 文件无法解析") from exc
-    sheet = workbook.active
-    rows = sheet.iter_rows(values_only=True)
-    headers = [normalize_identifier(value) for value in next(rows, ())]
-    header_indexes = {header: index for index, header in enumerate(headers) if header}
-    preferred_indexes = [
-        header_indexes[header]
-        for header in ("采集器", "采集器号", "扫码内容")
-        if header in header_indexes
-    ]
-    if not preferred_indexes:
-        raise ValueError("Excel 缺少采集器、采集器号或扫码内容列")
-    result: list[tuple[int, str]] = []
-    for row_number, row in enumerate(rows, start=2):
-        collector_no = next(
-            (
-                normalize_identifier(row[index])
-                for index in preferred_indexes
-                if index < len(row) and normalize_identifier(row[index])
-            ),
-            "",
-        )
-        result.append((row_number, collector_no))
     return tuple(result)
 
 

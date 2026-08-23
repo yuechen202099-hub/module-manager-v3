@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from io import BytesIO
 from types import SimpleNamespace
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from fastapi import HTTPException
@@ -361,6 +362,53 @@ def test_corrupt_workbook_returns_stable_invalid_request(monkeypatch) -> None:
             "workbook": (
                 "collectors.xlsx",
                 b"this-is-not-an-xlsx-zip",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert service.calls == []
+
+
+def workbook_with_corrupt_worksheet_xml() -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["采集器"])
+    sheet.append(["000123"])
+    valid = BytesIO()
+    workbook.save(valid)
+    corrupt = BytesIO()
+    with ZipFile(BytesIO(valid.getvalue()), "r") as source, ZipFile(
+        corrupt,
+        "w",
+        compression=ZIP_DEFLATED,
+    ) as target:
+        for member in source.infolist():
+            content = source.read(member.filename)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                content = b"<worksheet><sheetData><row><broken>"
+            target.writestr(member, content)
+    return corrupt.getvalue()
+
+
+def test_corrupt_worksheet_xml_returns_stable_invalid_request(monkeypatch) -> None:
+    """Catches lazy worksheet XML parse errors escaping after load_workbook succeeds."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(
+        monkeypatch,
+        service,
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/collector-transfer/runs/run-1/inventory/import",
+        headers=auth_headers(),
+        files={
+            "workbook": (
+                "corrupt-sheet.xlsx",
+                workbook_with_corrupt_worksheet_xml(),
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         },
