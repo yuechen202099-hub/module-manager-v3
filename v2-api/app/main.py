@@ -91,11 +91,24 @@ def create_app() -> FastAPI:
         "/jobs",
         "/ezcodes",
         "/barcode-maintenance",
+        "/collector-transfer",
     )
 
     def required_production_write_roles(request: Request) -> tuple[set[str], str]:
         path = request.url.path.rstrip("/")
         method = request.method.upper()
+        if path.startswith("/collector-transfer"):
+            admin_only = (
+                method == "POST"
+                and (
+                    path == "/collector-transfer/runs"
+                    or path.endswith("/inventory/import")
+                    or path.endswith("/allocate")
+                )
+            )
+            if admin_only:
+                return {"admin"}, "Administrator role required"
+            return {"constructor", "admin"}, "Constructor or administrator role required"
         if method in {"GET", "HEAD", "OPTIONS"} or not path.startswith("/local-test"):
             return set(), ""
         if path in {"/local-test/scan/clear", "/local-test/tasks/release-all"}:
