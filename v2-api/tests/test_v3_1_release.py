@@ -147,10 +147,10 @@ def test_v3_1_runtime_version_sources_and_release_notes_are_aligned() -> None:
         assert required_text in release_notes
 
 
-def test_release_manifest_marks_every_migration_through_0014_irreversible() -> None:
+def test_release_manifest_marks_every_migration_through_0016_irreversible() -> None:
     manifest = read("RELEASE_MANIFEST.md")
 
-    assert "V3.1-V3.2 migrations `0006` through `0014` are production-irreversible" in manifest
+    assert "V3.1-V3.2 migrations `0006` through `0016` are production-irreversible" in manifest
 
 
 def test_v3_1_deploy_runbook_prepares_writable_persistent_runtime_directories() -> None:

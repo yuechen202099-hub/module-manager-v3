@@ -29,6 +29,34 @@ KPI_SOURCE_PATHS = (
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
 )
+V327_ARCHIVE_SOURCE_FILES = frozenset(
+    {
+        "docs/superpowers/specs/2026-08-23-collector-transfer-workbench-design.md",
+        "scripts/build-client-release.ps1",
+        "scripts/verify-client-release.py",
+        "scripts/verify_release_sop.py",
+        "scripts/verify_v3_2_7_release.py",
+        "scripts/test_verify_v3_2_7_release.py",
+        "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
+        "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
+        "v2-api/app/api/routes/collector_transfer.py",
+        "v2-api/app/main.py",
+        "v2-api/app/models.py",
+        "v2-api/app/services/collector_transfer.py",
+        "v2-api/app/services/ops_status.py",
+        "v2-api/pyproject.toml",
+        "v2-api/scripts/verify_v3_1_release.py",
+        "v2-api/tests/test_collector_transfer_api.py",
+        "v2-api/tests/test_collector_transfer_service.py",
+        "v2-api/tests/test_v3_1_release.py",
+        "v2-web/index.html",
+        "v2-web/src/api/services.ts",
+        "v2-web/src/api/types.ts",
+        "v2-web/src/components/AppLayout.vue",
+        "v2-web/src/constants/releaseNotes.ts",
+        "v2-web/src/views/CollectorInventoryView.vue",
+    }
+)
 SAFETY_NOTES = (
     "Production mode disables demo accounts by default",
     "Production mode disables /docs, /redoc, and /openapi.json by default",
@@ -57,7 +85,15 @@ PENDING_RELEASE_RECORD = """# V3.2.7 Production Release Record
 - Production Deployment: pending
 - Production Reconciliation: pending
 - Rollback target: V3.2.6
+- Candidate branch: `production/V3/3.2.7`
+- Deployed production baseline: `V3.2.6`
+- Candidate version: `V3.2.7`
+- Database head: `20260824_0016 (head)`
 - V3.2.7 has not been deployed to production.
+- current-project no-batch scanning
+- atomic photo admission
+- project isolation
+- unchanged client-platform boundary
 
 ## Package
 
@@ -151,6 +187,12 @@ def test_release_builder_excludes_runtime_uploads_before_recursive_app_copy() ->
     assert '"static\\uploads"' in build_script
 
 
+def test_release_builder_generates_0016_irreversible_migration_warning() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+
+    assert "V3.1-V3.2 migrations ``0006`` through ``0016`` are production-irreversible" in build_script
+
+
 def write_release_archive(
     verifier,
     archive_path: Path,
@@ -180,7 +222,14 @@ def write_release_archive(
     if versions is None:
         versions = [] if manifest_version is None else [manifest_version]
     version_lines = [f"- Version: {version}" for version in versions]
-    manifest = "\n".join(("# Release manifest", *version_lines, *SAFETY_NOTES))
+    manifest = "\n".join(
+        (
+            "# Release manifest",
+            *version_lines,
+            *SAFETY_NOTES,
+            "- V3.1-V3.2 migrations `0006` through `0016` are production-irreversible.",
+        )
+    )
     resolved_runtime_version = runtime_version or static_version
     resolved_source_version = source_version or resolved_runtime_version
     resolved_entry_version = entry_version or resolved_runtime_version
@@ -221,7 +270,7 @@ def write_release_archive(
     archive_contents = {
         name: (
             (ROOT / name).read_bytes()
-            if name in KPI_SOURCE_PATHS
+            if name in KPI_SOURCE_PATHS or name in V327_ARCHIVE_SOURCE_FILES
             else contents.get(name, "fixture\n")
         )
         for name in names
@@ -501,6 +550,62 @@ def test_v321_installer_kpi_release_inputs_are_packaged_and_required() -> None:
     assert required <= verifier.REQUIRED_FILES
     for path in required:
         assert path.replace("/", "\\") in build_script
+
+
+def test_v327_contract_inputs_are_packaged_and_required() -> None:
+    verifier = load_verifier()
+    required = {
+        "AGENTS.md",
+        "RELEASE_MANIFEST.md",
+        "ops/releases/V3.2.7.md",
+        "scripts/build-client-release.ps1",
+        "scripts/verify-client-release.py",
+        "scripts/verify_release_sop.py",
+        "scripts/verify_v3_2_7_release.py",
+        "scripts/test_verify_v3_2_7_release.py",
+        "docs/superpowers/specs/2026-08-23-collector-transfer-workbench-design.md",
+        "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
+        "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
+        "v2-api/app/api/routes/collector_transfer.py",
+        "v2-api/app/main.py",
+        "v2-api/app/models.py",
+        "v2-api/app/services/collector_transfer.py",
+        "v2-api/app/services/ops_status.py",
+        "v2-api/pyproject.toml",
+        "v2-api/scripts/verify_v3_1_release.py",
+        "v2-api/tests/test_collector_transfer_api.py",
+        "v2-api/tests/test_collector_transfer_service.py",
+        "v2-api/tests/test_v3_1_release.py",
+        "v2-web/index.html",
+        "v2-web/src/api/services.ts",
+        "v2-web/src/api/types.ts",
+        "v2-web/src/components/AppLayout.vue",
+        "v2-web/src/constants/releaseNotes.ts",
+        "v2-web/src/views/CollectorInventoryView.vue",
+    }
+
+    assert required <= verifier.REQUIRED_FILES
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    assert (
+        'Copy-ReleaseItem "docs\\superpowers\\specs\\2026-08-23-collector-transfer-workbench-design.md" '
+        '"docs\\superpowers\\specs\\2026-08-23-collector-transfer-workbench-design.md"'
+        in build_script
+    )
+
+
+def test_archive_runs_v327_contract_against_archived_sources(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "broken-v327-contract.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        content_overrides={
+            "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py": "revision = 'broken'\n",
+        },
+    )
+
+    with pytest.raises(AssertionError, match="V3.2.7 archive source contract"):
+        verifier.verify_package(archive_path)
 
 
 def test_v321_kpi_sources_are_pinned_to_lf() -> None:
@@ -1486,7 +1591,6 @@ def test_archive_rejects_normalized_duplicate_candidate_lifecycle_field(
 def test_archive_rejects_deployed_record_without_live_evidence(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "unsupported-deployed-record.zip"
-    agents = VALID_AGENTS.replace("V3.2.6", "V3.2.7")
     record = deployed_release_record(
         "3.2.7",
         "Status: reviewed, packaged, deployed, and verified in production",
@@ -1494,11 +1598,10 @@ def test_archive_rejects_deployed_record_without_live_evidence(tmp_path: Path) -
     write_release_archive(
         verifier,
         archive_path,
-        agents=agents,
         release_record=record,
     )
 
-    with pytest.raises(AssertionError, match="claims deployment without complete live evidence"):
+    with pytest.raises(AssertionError, match="release record must define Status: pending"):
         verifier.verify_package(archive_path)
 
 
@@ -1577,21 +1680,20 @@ def test_archive_accepts_complete_deployed_baseline_status(tmp_path: Path) -> No
     verifier.verify_package(archive_path)
 
 
-def test_archive_accepts_equal_post_deploy_markers_as_one_deployed_record(tmp_path: Path) -> None:
+def test_archive_rejects_deployed_candidate_record(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "post-deploy-equal-markers.zip"
-    agents = VALID_AGENTS.replace("V3.2.6", "V3.2.7")
     write_release_archive(
         verifier,
         archive_path,
-        agents=agents,
         release_record=deployed_release_record(
             "3.2.7",
             "Status: reviewed, packaged, deployed, and verified in production",
         ),
     )
 
-    verifier.verify_package(archive_path)
+    with pytest.raises(AssertionError, match="release record must define Status: pending"):
+        verifier.verify_package(archive_path)
 
 
 def test_valid_pending_candidate_archive_passes_truthfulness_checks(tmp_path: Path) -> None:

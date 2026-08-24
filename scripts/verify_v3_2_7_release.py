@@ -17,16 +17,33 @@ RELEASE_PATH = "ops/releases/V3.2.7.md"
 VERIFICATION_PHASES = frozenset(("source", "attestation"))
 
 REQUIRED_FILES = (
+    "AGENTS.md",
+    "RELEASE_MANIFEST.md",
+    "docs/superpowers/specs/2026-08-23-collector-transfer-workbench-design.md",
+    RELEASE_PATH,
+    "scripts/build-client-release.ps1",
+    "scripts/verify-client-release.py",
+    "scripts/verify_release_sop.py",
     "scripts/verify_v3_2_7_release.py",
     "scripts/test_verify_v3_2_7_release.py",
+    "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
     "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
     "v2-api/app/api/routes/collector_transfer.py",
+    "v2-api/app/main.py",
+    "v2-api/app/models.py",
     "v2-api/app/services/collector_transfer.py",
+    "v2-api/app/services/ops_status.py",
+    "v2-api/pyproject.toml",
+    "v2-api/scripts/verify_v3_1_release.py",
     "v2-api/tests/test_collector_transfer_api.py",
     "v2-api/tests/test_collector_transfer_service.py",
+    "v2-api/tests/test_v3_1_release.py",
+    "v2-web/index.html",
     "v2-web/src/api/services.ts",
+    "v2-web/src/api/types.ts",
+    "v2-web/src/components/AppLayout.vue",
+    "v2-web/src/constants/releaseNotes.ts",
     "v2-web/src/views/CollectorInventoryView.vue",
-    RELEASE_PATH,
 )
 
 
@@ -105,6 +122,57 @@ def _check_project_inventory_contract(root: Path, failures: list[str]) -> None:
         if marker in frontend:
             failures.append(f"v2-web/src/api/services.ts: retired mutating run-scan route must remain absent: {marker}")
 
+    forbidden_markers = {
+        "v2-api/app/api/routes/collector_transfer.py": (
+            "inventory/import",
+            "import_inventory",
+            "CollectorImportRow",
+        ),
+        "v2-api/app/models.py": ("CollectorImportRow", "collector_import_rows"),
+        "v2-api/app/services/collector_transfer.py": (
+            "CollectorImportRow",
+            "import_collector_inventory",
+            "collector_import_rows",
+        ),
+        "v2-api/alembic/versions/0015_collector_transfer_workbench.py": (
+            "collector_import_rows",
+        ),
+        "v2-web/src/api/services.ts": ("importCollectorInventory",),
+        "v2-web/src/api/types.ts": ("CollectorInventoryImportResult",),
+        "v2-web/src/views/CollectorInventoryView.vue": (
+            "批量导入",
+            "开始批量盘点",
+            "import-view",
+        ),
+    }
+    friendly = {
+        "inventory/import": "retired collector inventory import",
+        "import_inventory": "retired collector inventory import",
+        "CollectorImportRow": "CollectorImportRow",
+        "collector_import_rows": "collector_import_rows",
+        "import_collector_inventory": "retired collector inventory import",
+        "importCollectorInventory": "retired collector inventory import",
+        "CollectorInventoryImportResult": "retired collector inventory import",
+        "批量导入": "batch inventory UI",
+        "开始批量盘点": "batch inventory UI",
+        "import-view": "batch inventory UI",
+    }
+    for path, markers in forbidden_markers.items():
+        text = _read(root, path, failures)
+        for marker in markers:
+            if marker in text:
+                failures.append(f"{path}: {friendly[marker]} must remain retired")
+
+    design_path = "docs/superpowers/specs/2026-08-23-collector-transfer-workbench-design.md"
+    design = _read(root, design_path, failures)
+    for marker in (
+        "新采集器台账只通过手机网站逐个扫码建立",
+        "不提供 Excel 或照片批量导入",
+        "系统原有总清单、施工资料等导入能力不受此业务边界影响",
+    ):
+        if marker not in design:
+            failures.append(f"{design_path}: retired-batch-import boundary is missing: {marker}")
+
 
 def _check_release_tools(root: Path, failures: list[str]) -> None:
     requirements = {
@@ -119,7 +187,7 @@ def _check_release_tools(root: Path, failures: list[str]) -> None:
             '"scripts/verify_v3_2_7_release.py"',
             '"scripts/test_verify_v3_2_7_release.py"',
             '"ops/releases/V3.2.7.md"',
-            'with_name("verify_v3_2_7_release.py")',
+            "verify_v327_archive_source_contract",
         ),
         "scripts/verify_release_sop.py": (
             '"scripts/verify_v3_2_7_release.py"',
@@ -165,6 +233,14 @@ def _check_source_release_record(root: Path, failures: list[str]) -> None:
             failures.append(f"{RELEASE_PATH}: release boundary is missing: {marker}")
 
 
+def _check_irreversible_migration_warning(root: Path, failures: list[str]) -> None:
+    manifest_path = "RELEASE_MANIFEST.md"
+    manifest = _read(root, manifest_path, failures)
+    warning = "V3.1-V3.2 migrations `0006` through `0016` are production-irreversible"
+    if warning not in manifest:
+        failures.append(f"{manifest_path}: irreversible migration warning must include 0016")
+
+
 def collect_failures(root: Path, phase: str) -> list[str]:
     root = Path(root)
     failures: list[str] = []
@@ -175,6 +251,7 @@ def collect_failures(root: Path, phase: str) -> list[str]:
             failures.append(f"{path}: required V3.2.7 file is missing")
     _check_version_surfaces(root, failures)
     _check_project_inventory_contract(root, failures)
+    _check_irreversible_migration_warning(root, failures)
     _check_release_tools(root, failures)
     if phase == "source":
         _check_source_release_record(root, failures)

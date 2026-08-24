@@ -231,6 +231,7 @@ Copy-ReleaseItem "docs\PROJECT_DECISIONS.md" "docs\PROJECT_DECISIONS.md"
 Copy-ReleaseItem "docs\STATIC_TO_VUE_MIGRATION.md" "docs\STATIC_TO_VUE_MIGRATION.md"
 Copy-ReleaseItem "docs\database\postgresql-schema.md" "docs\database\postgresql-schema.md"
 Copy-ReleaseItem "docs\sop" "docs\sop"
+Copy-ReleaseItem "docs\superpowers\specs\2026-08-23-collector-transfer-workbench-design.md" "docs\superpowers\specs\2026-08-23-collector-transfer-workbench-design.md"
 Copy-ReleaseItem "ops" "ops"
 
 Copy-ReleaseItem "infra" "infra"
@@ -555,6 +556,7 @@ $manifest = @"
 - Confirm /docs, /redoc, and /openapi.json return 404 in production
 - Enable HTTPS before real project data is exposed
 - Configure PostgreSQL backup before production import
+- V3.1-V3.2 migrations ``0006`` through ``0016`` are production-irreversible; never run Alembic downgrade. Application rollback keeps the forward schema, and data rollback requires a validated pre-upgrade PostgreSQL backup.
 - Use build/server-release packages for production deployment
 - Record each production release under ops/releases/
 "@

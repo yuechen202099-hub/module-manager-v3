@@ -74,7 +74,7 @@
 - Confirm /docs, /redoc, and /openapi.json return 404 in production
 - Enable HTTPS before real project data is exposed
 - Configure PostgreSQL backup before production import
-- V3.1-V3.2 migrations `0006` through `0014` are production-irreversible; never run Alembic downgrade. Application rollback keeps the forward schema, and data rollback requires a validated pre-upgrade PostgreSQL backup.
+- V3.1-V3.2 migrations `0006` through `0016` are production-irreversible; never run Alembic downgrade. Application rollback keeps the forward schema, and data rollback requires a validated pre-upgrade PostgreSQL backup.
 - Use `build/server-release/` packages for production deployment
 - Record each production release under `ops/releases/`
 - V3.2.0 的历史生产证据仅保留在 `ops/releases/V3.2.0.md`。

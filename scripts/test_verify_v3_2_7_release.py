@@ -17,9 +17,12 @@ CONTRACT_PATHS = (
     "scripts/verify_release_sop.py",
     "scripts/verify_v3_2_7_release.py",
     "scripts/test_verify_v3_2_7_release.py",
+    "docs/superpowers/specs/2026-08-23-collector-transfer-workbench-design.md",
+    "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
     "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
     "v2-api/app/api/routes/collector_transfer.py",
     "v2-api/app/main.py",
+    "v2-api/app/models.py",
     "v2-api/app/services/collector_transfer.py",
     "v2-api/app/services/ops_status.py",
     "v2-api/pyproject.toml",
@@ -29,6 +32,7 @@ CONTRACT_PATHS = (
     "v2-api/tests/test_collector_transfer_service.py",
     "v2-web/index.html",
     "v2-web/src/api/services.ts",
+    "v2-web/src/api/types.ts",
     "v2-web/src/components/AppLayout.vue",
     "v2-web/src/constants/releaseNotes.ts",
     "v2-web/src/views/CollectorInventoryView.vue",
@@ -94,3 +98,26 @@ def test_source_contract_rejects_wrong_project_inventory_migration_head(tmp_path
         encoding="utf-8",
     )
     assert_rejected(repo, "20260824_0016")
+
+
+def test_source_contract_rejects_retired_batch_import_service(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "v2-api/app/services/collector_transfer.py"
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\ndef import_collector_inventory(): ...\n",
+        encoding="utf-8",
+    )
+
+    assert_rejected(repo, "retired collector inventory import")
+
+
+def test_source_contract_requires_0016_irreversible_migration_warning(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "RELEASE_MANIFEST.md"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("0016", "0015", 1),
+        encoding="utf-8",
+    )
+
+    assert_rejected(repo, "irreversible")

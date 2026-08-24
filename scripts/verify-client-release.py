@@ -9,10 +9,43 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
+
+V327_CONTRACT_INPUTS = frozenset(
+    {
+        "AGENTS.md",
+        "RELEASE_MANIFEST.md",
+        "docs/superpowers/specs/2026-08-23-collector-transfer-workbench-design.md",
+        "ops/releases/V3.2.7.md",
+        "scripts/build-client-release.ps1",
+        "scripts/verify-client-release.py",
+        "scripts/verify_release_sop.py",
+        "scripts/verify_v3_2_7_release.py",
+        "scripts/test_verify_v3_2_7_release.py",
+        "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
+        "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
+        "v2-api/app/api/routes/collector_transfer.py",
+        "v2-api/app/main.py",
+        "v2-api/app/models.py",
+        "v2-api/app/services/collector_transfer.py",
+        "v2-api/app/services/ops_status.py",
+        "v2-api/pyproject.toml",
+        "v2-api/scripts/verify_v3_1_release.py",
+        "v2-api/tests/test_collector_transfer_api.py",
+        "v2-api/tests/test_collector_transfer_service.py",
+        "v2-api/tests/test_v3_1_release.py",
+        "v2-web/index.html",
+        "v2-web/src/api/services.ts",
+        "v2-web/src/api/types.ts",
+        "v2-web/src/components/AppLayout.vue",
+        "v2-web/src/constants/releaseNotes.ts",
+        "v2-web/src/views/CollectorInventoryView.vue",
+    }
+)
 
 REQUIRED_FILES = {
     "SOURCE_COMMIT",
@@ -225,7 +258,7 @@ REQUIRED_FILES = {
     "v2-web/src/utils/dataCenterDrilldown.ts",
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
-}
+} | V327_CONTRACT_INPUTS
 
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
@@ -377,14 +410,24 @@ def load_release_truth_parser():
     return module
 
 
-def load_current_release_verifier():
-    path = Path(__file__).with_name("verify_v3_2_7_release.py")
-    spec = importlib.util.spec_from_file_location("package_v326_release", path)
-    if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.7 release verifier")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def verify_v327_archive_source_contract(archive: zipfile.ZipFile):
+    with tempfile.TemporaryDirectory(prefix="module-manager-v327-contract-") as temporary_root:
+        extracted_root = Path(temporary_root)
+        for relative_path in V327_CONTRACT_INPUTS:
+            target = extracted_root / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(archive.read(relative_path))
+
+        verifier_path = extracted_root / "scripts" / "verify_v3_2_7_release.py"
+        spec = importlib.util.spec_from_file_location("archive_v327_release_contract", verifier_path)
+        if spec is None or spec.loader is None:
+            fail("Unable to load archived V3.2.7 release verifier")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        failures = module.collect_failures(extracted_root, "attestation")
+        if failures:
+            fail("V3.2.7 archive source contract failed: " + " | ".join(failures))
+        return module
 
 
 def fail(message: str) -> None:
@@ -659,11 +702,9 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
             fail("Release manifest must define exactly one semantic Version")
         package_version = manifest_versions[0]
-        current_release = load_current_release_verifier()
-        if package_version != current_release.VERSION:
+        if package_version != "3.2.7":
             fail(
-                f"Release manifest Version must match the current V3.2.7 source contract: "
-                f"{current_release.VERSION}"
+                "Release manifest Version must match the archived V3.2.7 source contract: 3.2.7"
             )
         verify_release_markdown_documents(archive, names, package_version)
         static_index = (
@@ -748,6 +789,10 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         deployed_version,
         candidate_version,
     )
+    with zipfile.ZipFile(zip_path) as archive:
+        archived_release = verify_v327_archive_source_contract(archive)
+    if archived_release.VERSION != package_version:
+        fail("Archived V3.2.7 release verifier version must match the release manifest Version")
 
     print(f"[OK] release zip exists: {zip_path}")
     print(f"[OK] release zip size: {zip_path.stat().st_size} bytes")

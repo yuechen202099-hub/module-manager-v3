@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 from pathlib import Path
-import shutil
+import subprocess
+import tarfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_PATH = ROOT / "scripts" / "verify_v3_2_6_release.py"
+HISTORICAL_SOURCE_COMMIT = "a6339ee5a15c76068ab9ed08f42c595458f48093"
 
 CONTRACT_PATHS = (
     "AGENTS.md",
@@ -71,12 +74,15 @@ def load_verifier():
 
 def copy_contract_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
-    for relative_path in CONTRACT_PATHS:
-        source = ROOT / relative_path
-        assert source.is_file(), f"contract fixture source is missing: {relative_path}"
-        target = repo / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+    repo.mkdir()
+    archived = subprocess.run(
+        ["git", "archive", "--format=tar", HISTORICAL_SOURCE_COMMIT, *CONTRACT_PATHS],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    )
+    with tarfile.open(fileobj=io.BytesIO(archived.stdout)) as snapshot:
+        snapshot.extractall(repo, filter="data")
     return repo
 
 
@@ -85,7 +91,7 @@ def assert_rejected(repo: Path, expected: str) -> None:
     assert any(expected in failure for failure in failures), failures
 
 
-def test_current_v326_source_contract_passes(tmp_path: Path) -> None:
+def test_historical_v326_source_snapshot_satisfies_contract(tmp_path: Path) -> None:
     repo = copy_contract_repo(tmp_path)
     assert load_verifier().collect_failures(repo, "source") == []
 

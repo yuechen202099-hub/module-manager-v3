@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
-import shutil
+import io
 import subprocess
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -17,6 +18,7 @@ PACKAGING_BRANCH_GUARD = """$sourceBranch = (& git branch --show-current).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.5") {
     throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.5."
 }"""
+HISTORICAL_SOURCE_COMMIT = "03513918e7d331c14fa567e0de286d0410796ef8"
 
 
 def load_verifier():
@@ -60,16 +62,14 @@ def tmp_repo(tmp_path: Path) -> TemporaryRepository:
     verifier = load_verifier()
     destination = tmp_path / "repo"
     destination.mkdir()
-    for relative_path in verifier.CONTRACT_PATHS:
-        source = ROOT / relative_path
-        if not source.exists():
-            continue
-        target = destination / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_dir():
-            shutil.copytree(source, target, dirs_exist_ok=True)
-        else:
-            shutil.copy2(source, target)
+    archived = subprocess.run(
+        ["git", "archive", "--format=tar", HISTORICAL_SOURCE_COMMIT, *verifier.CONTRACT_PATHS],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    )
+    with tarfile.open(fileobj=io.BytesIO(archived.stdout)) as snapshot:
+        snapshot.extractall(destination, filter="data")
     release_path = destination / "ops/releases/V3.2.5.md"
     release_path.write_text(
         release_path.read_text(encoding="utf-8")
@@ -89,8 +89,8 @@ def assert_rejected(tmp_repo: TemporaryRepository, marker: str) -> None:
     assert any(marker in failure for failure in failures), failures
 
 
-def test_current_tree_satisfies_v325_contract() -> None:
-    assert load_verifier().main(["--phase", "attestation"]) == 0
+def test_historical_v325_source_snapshot_satisfies_contract(tmp_repo: TemporaryRepository) -> None:
+    assert failures_for(tmp_repo, "source") == []
 
 
 def test_cli_rejects_unexpected_arguments() -> None:
@@ -786,7 +786,14 @@ def test_package_attestation_binds_real_zip_source_size_and_hash(tmp_path: Path)
 
 def test_v325_phase_lifecycle_accepts_source_and_attestation_only() -> None:
     verifier = load_verifier()
-    attested = (ROOT / "ops" / "releases" / "V3.2.5.md").read_text(encoding="utf-8")
+    attested = subprocess.run(
+        ["git", "show", f"{HISTORICAL_SOURCE_COMMIT}:ops/releases/V3.2.5.md"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout
     source = attested.replace("- Local Verification: passed", "- Local Verification: not run", 1).replace(
         "- Package: passed", "- Package: pending", 1
     )
