@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Iterator, Literal
+from uuid import UUID
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
@@ -33,9 +34,10 @@ class CreateTransferRunRequest(BaseModel):
     name: str = Field(default="采集器盘点", min_length=1, max_length=200)
 
 
-class ScanCollectorRequest(BaseModel):
+class InventoryScanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    project_id: str = Field(min_length=1, max_length=64)
     collector_no: str = Field(min_length=1, max_length=255)
 
 
@@ -169,9 +171,21 @@ def list_transfer_projects(request: Request):
     )
 
 
-def saved_image_is_registered(*, team_id: str, stored: dict[str, object]) -> bool:
+InventoryStatus = Literal["direct", "available", "reserved", "used", "awaiting_photo"]
+
+
+def saved_image_is_registered(
+    *,
+    team_id: str,
+    project_id: str,
+    stored: dict[str, object],
+) -> bool:
     sha256 = normalize_identifier(stored.get("sha256"))
     object_key = normalize_identifier(stored.get("storage_key") or stored.get("url"))
+    try:
+        project_uuid = UUID(normalize_identifier(project_id))
+    except (ValueError, TypeError, AttributeError):
+        return False
     if not sha256 or not object_key:
         return False
     with SessionLocal() as session:
@@ -179,6 +193,7 @@ def saved_image_is_registered(*, team_id: str, stored: dict[str, object]) -> boo
             session.scalar(
                 select(CollectorPhoto.id).where(
                     CollectorPhoto.team_id == team_id,
+                    CollectorPhoto.project_id == project_uuid,
                     CollectorPhoto.sha256 == sha256,
                     CollectorPhoto.object_key == object_key,
                 )
@@ -190,11 +205,13 @@ def saved_image_is_registered(*, team_id: str, stored: dict[str, object]) -> boo
 def cleanup_unregistered_saved_images(
     *,
     team_id: str,
+    project_id: str,
     saved_objects: list[dict[str, object]],
 ) -> None:
     for stored in saved_objects:
         if stored.get("created_new") and not saved_image_is_registered(
             team_id=team_id,
+            project_id=project_id,
             stored=stored,
         ):
             delete_saved_image(stored)
@@ -218,11 +235,26 @@ def run_detail(run_id: str, request: Request):
     return call_service(request, lambda service: service.list_workbench(run_id=run_id))
 
 
-@router.post("/runs/{run_id}/scan")
-def scan_collector(run_id: str, payload: ScanCollectorRequest, request: Request):
+@router.post("/inventory/scan")
+def scan_inventory(payload: InventoryScanRequest, request: Request):
     return call_service(
         request,
-        lambda service: service.scan_collector(run_id=run_id, collector_no=payload.collector_no),
+        lambda service: service.scan_inventory(
+            project_id=payload.project_id,
+            collector_no=payload.collector_no,
+        ),
+    )
+
+
+@router.get("/inventory")
+def list_inventory(
+    request: Request,
+    project_id: str = Query(min_length=1, max_length=64),
+    status: InventoryStatus | None = Query(default=None),
+):
+    return call_service(
+        request,
+        lambda service: service.list_inventory(project_id=project_id, status=status),
     )
 
 
@@ -260,43 +292,71 @@ def set_workbench_item_status(item_id: str, payload: WorkbenchItemStatusRequest,
     )
 
 
-@router.post("/runs/{run_id}/collectors/{collector_id}/photo")
-async def upload_collector_photo(
-    run_id: str,
-    collector_id: str,
+@router.post("/inventory")
+async def register_inventory(
     request: Request,
+    project_id: str = Form(min_length=1, max_length=64),
+    collector_no: str = Form(min_length=1, max_length=255),
     file: UploadFile = File(...),
 ):
     team_id, _actor = request_identity(request)
+    submitted_fields = set((await request.form()).keys())
+    unexpected_fields = sorted(submitted_fields - {"project_id", "collector_no", "file"})
+    if unexpected_fields:
+        return error_response(
+            request,
+            code="validation_error",
+            message="请求包含未允许的字段。",
+            details={"unexpected_fields": unexpected_fields},
+            status_code=422,
+        )
+    normalized_project_id = normalize_identifier(project_id)
+    normalized_collector_no = normalize_identifier(collector_no)
+    if not normalized_project_id:
+        return service_error_response(request, ValueError("project_id is required"))
+    if not normalized_collector_no:
+        return service_error_response(request, ValueError("collector_no is required"))
     content = await file.read()
-    filename = normalize_identifier(file.filename) or f"{collector_id}.jpg"
+    filename = normalize_identifier(file.filename) or f"{normalized_collector_no}.jpg"
     try:
         stored = save_image_bytes(
-            scope="collector-transfer",
+            scope="collector-inventory",
             filename=filename,
             content=content,
             content_type=file.content_type or "",
             team_id=team_id,
-            group_id=run_id,
-            key_hint=f"{collector_id}-{run_id}",
+            group_id=normalized_project_id,
+            key_hint=f"{normalized_collector_no}-{normalized_project_id}",
             cleanup_safe=True,
         )
     except ValueError as exc:
         return service_error_response(request, exc)
     try:
         with service_for_request(request) as service:
-            result = service.register_photo(
-                run_id=run_id,
-                collector_id=collector_id,
+            result = service.register_inventory(
+                project_id=normalized_project_id,
+                collector_no=normalized_collector_no,
                 original_filename=filename,
                 stored=stored,
                 byte_size=len(content),
             )
     except (KeyError, ValueError) as exc:
-        cleanup_unregistered_saved_images(team_id=team_id, saved_objects=[stored])
+        cleanup_unregistered_saved_images(
+            team_id=team_id,
+            project_id=normalized_project_id,
+            saved_objects=[stored],
+        )
         return service_error_response(request, exc)
     except Exception:
-        cleanup_unregistered_saved_images(team_id=team_id, saved_objects=[stored])
+        cleanup_unregistered_saved_images(
+            team_id=team_id,
+            project_id=normalized_project_id,
+            saved_objects=[stored],
+        )
         raise
-    cleanup_unregistered_saved_images(team_id=team_id, saved_objects=[stored])
+    cleanup_unregistered_saved_images(
+        team_id=team_id,
+        project_id=normalized_project_id,
+        saved_objects=[stored],
+    )
     return ok(request, result)

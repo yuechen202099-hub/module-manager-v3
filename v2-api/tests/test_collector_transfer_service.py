@@ -529,6 +529,34 @@ def test_archived_project_inventory_request_has_zero_side_effects(db_session: Se
     assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 0
 
 
+def test_cross_team_and_unknown_projects_have_zero_inventory_side_effects(
+    db_session: Session,
+) -> None:
+    """Catches authenticated team scope being bypassed by a caller-supplied project ID."""
+    db_session.add(Team(id="team-2", name="另一个团队"))
+    foreign_project = Project(
+        id=uuid4(),
+        team_id="team-2",
+        code=f"P-{uuid4().hex[:8]}",
+        name="其他团队项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(foreign_project)
+    db_session.commit()
+
+    for rejected_project_id in (foreign_project.id, uuid4()):
+        with pytest.raises(KeyError):
+            service(db_session).scan_inventory(
+                project_id=str(rejected_project_id),
+                collector_no="FORBIDDEN-001",
+            )
+
+    assert db_session.scalar(select(func.count(PhysicalCollector.id))) == 0
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 0
+    assert db_session.scalar(select(func.count(CollectorScanEvent.id))) == 0
+
+
 def test_existing_groups_project_to_only_the_two_confirmed_install_photo_slots() -> None:
     """Catches reintroducing before-box or collector photos into a meter install item."""
     group = SimpleNamespace(
@@ -1136,18 +1164,27 @@ def test_saved_image_registration_scope_includes_inactive_database_ownership(
 
     assert routes.saved_image_is_registered(
         team_id="team-1",
+        project_id=str(physical.project_id),
         stored={"sha256": "d" * 64, "storage_key": photo.object_key},
     ) is True
     assert routes.saved_image_is_registered(
         team_id="team-2",
+        project_id=str(physical.project_id),
         stored={"sha256": "d" * 64, "storage_key": photo.object_key},
     ) is False
     assert routes.saved_image_is_registered(
         team_id="team-1",
+        project_id=str(uuid4()),
+        stored={"sha256": "d" * 64, "storage_key": photo.object_key},
+    ) is False
+    assert routes.saved_image_is_registered(
+        team_id="team-1",
+        project_id=str(physical.project_id),
         stored={"sha256": "e" * 64, "storage_key": photo.object_key},
     ) is False
     assert routes.saved_image_is_registered(
         team_id="team-1",
+        project_id=str(physical.project_id),
         stored={"sha256": "d" * 64, "storage_key": "collector-transfer/other.jpg"},
     ) is False
 
@@ -1157,19 +1194,18 @@ def test_single_photo_reuse_deletes_the_new_unreferenced_saved_object(
     monkeypatch,
 ) -> None:
     """Catches successful SHA reuse leaking the newly saved object whose key was not persisted."""
-    run = transfer_run(db_session)
+    current_project_id = project_id(db_session)
     physical = PhysicalCollector(
         id=uuid4(),
         team_id="team-1",
-        project_id=run.project_id,
+        project_id=current_project_id,
         collector_no="C-REUSE",
         pool_status="available",
     )
     db_session.add(physical)
     db_session.commit()
     old_photo = collector_photo(db_session, physical, sha256="f" * 64)
-    service(db_session).scan_collector(run_id=str(run.id), collector_no=physical.collector_no)
-    new_key = "collector-transfer/new-upload-C-REUSE.jpg"
+    new_key = "collector-inventory/new-upload-C-REUSE.jpg"
     deleted: list[str] = []
     monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
     monkeypatch.setattr(
@@ -1192,8 +1228,9 @@ def test_single_photo_reuse_deletes_the_new_unreferenced_saved_object(
     client = TestClient(main_module.create_app())
 
     response = client.post(
-        f"/collector-transfer/runs/{run.id}/collectors/{physical.id}/photo",
+        "/collector-transfer/inventory",
         headers=_route_auth_headers(),
+        data={"project_id": str(current_project_id), "collector_no": physical.collector_no},
         files={"file": ("C-REUSE.jpg", b"same-image-content", "image/jpeg")},
     )
 
@@ -1419,42 +1456,6 @@ def test_register_photo_requires_scan_provenance_in_the_same_run(db_session: Ses
 
     db_session.rollback()
     assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 0
-
-
-def test_cross_run_photo_upload_has_stable_api_conflict_and_cleans_saved_file(
-    db_session: Session,
-    monkeypatch,
-) -> None:
-    """Catches an A-scan/B-upload returning a generic error or leaking its unregistered file."""
-    run_a = transfer_run(db_session)
-    run_b = transfer_run(db_session)
-    scanned = service(db_session).scan_collector(run_id=str(run_a.id), collector_no="C-API-PROVENANCE")
-    saved = {
-        "url": "/static/uploads/collector-transfer/C-API-PROVENANCE.jpg",
-        "sha256": "65" * 32,
-        "storage_type": "local_upload",
-        "storage_key": "collector-transfer/C-API-PROVENANCE.jpg",
-        "content_type": "image/jpeg",
-        "created_new": True,
-    }
-    deleted: list[str] = []
-    monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
-    monkeypatch.setattr(routes, "save_image_bytes", lambda **_kwargs: saved)
-    monkeypatch.setattr(
-        routes,
-        "delete_saved_image",
-        lambda stored: deleted.append(str(stored["storage_key"])),
-    )
-
-    response = TestClient(main_module.create_app()).post(
-        f"/collector-transfer/runs/{run_b.id}/collectors/{scanned['collector_id']}/photo",
-        headers=_route_auth_headers(username="constructor-a"),
-        files={"file": ("C-API-PROVENANCE.jpg", b"cross-run", "image/jpeg")},
-    )
-
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "scan_provenance_required"
-    assert deleted == ["collector-transfer/C-API-PROVENANCE.jpg"]
 
 
 def test_direct_scan_refreshes_and_returns_transactional_run_totals(db_session: Session) -> None:

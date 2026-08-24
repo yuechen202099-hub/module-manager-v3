@@ -42,6 +42,36 @@ class FakeCollectorTransferService:
             "add_to_pool": False,
         }
 
+    def scan_inventory(self, *, project_id: str, collector_no: str) -> dict:
+        self.calls.append(
+            ("scan_inventory", {"project_id": project_id, "collector_no": collector_no})
+        )
+        return {
+            "collector_id": "collector-1",
+            "collector_no": collector_no,
+            "decision": "direct_reuse",
+            "requires_photo": False,
+            "add_to_pool": False,
+            "pool_status": "direct",
+            "photo": {"id": "photo-1"},
+        }
+
+    def register_inventory(self, **payload) -> dict:
+        self.calls.append(("register_inventory", payload))
+        return {
+            "collector_id": "collector-1",
+            "collector_no": payload["collector_no"],
+            "pool_status": "available",
+        }
+
+    def list_inventory(self, *, project_id: str, status: str | None = None) -> dict:
+        self.calls.append(("list_inventory", {"project_id": project_id, "status": status}))
+        return {
+            "items": [{"collector_id": "collector-1", "collector_no": "000123", "pool_status": "available"}],
+            "total": 1,
+            "stats": {"direct": 0, "available": 1, "reserved": 0, "used": 0, "awaiting_photo": 0},
+        }
+
     def allocate(self, *, run_id: str) -> dict:
         self.calls.append(("allocate", run_id))
         raise PoolInsufficientError(required=3, available=2)
@@ -203,15 +233,15 @@ def test_cancelled_batch_inventory_import_route_is_not_registered(monkeypatch) -
     assert service.calls == []
 
 
-def test_mobile_scan_contract_only_returns_inventory_decision(monkeypatch) -> None:
+def test_mobile_scan_contract_requires_project_but_no_run(monkeypatch) -> None:
     """Catches mixing customer-platform entry fields into the mobile inventory endpoint."""
     service = FakeCollectorTransferService()
     client = client_with_service(monkeypatch, service)
 
     response = client.post(
-        "/collector-transfer/runs/run-1/scan",
+        "/collector-transfer/inventory/scan",
         headers=auth_headers(),
-        json={"collector_no": "000123"},
+        json={"project_id": "11111111-1111-1111-1111-111111111111", "collector_no": "000123"},
     )
 
     assert response.status_code == 200
@@ -221,8 +251,67 @@ def test_mobile_scan_contract_only_returns_inventory_decision(monkeypatch) -> No
         "decision": "direct_reuse",
         "requires_photo": False,
         "add_to_pool": False,
+        "pool_status": "direct",
+        "photo": {"id": "photo-1"},
     }
     assert "client_platform" not in response.text
+    assert service.calls == [
+        (
+            "scan_inventory",
+            {
+                "project_id": "11111111-1111-1111-1111-111111111111",
+                "collector_no": "000123",
+            },
+        )
+    ]
+
+
+def test_old_run_scoped_mobile_mutations_are_not_registered(monkeypatch) -> None:
+    """Catches the retired batch prerequisite remaining callable beside the project inventory API."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+
+    old_scan = client.post(
+        "/collector-transfer/runs/run-1/scan",
+        headers=auth_headers(),
+        json={"collector_no": "000123"},
+    )
+    old_photo = client.post(
+        "/collector-transfer/runs/run-1/collectors/collector-1/photo",
+        headers=auth_headers(),
+        files={"file": ("000123.jpg", b"old-route", "image/jpeg")},
+    )
+
+    assert old_scan.status_code == 404
+    assert old_photo.status_code == 404
+    assert service.calls == []
+
+
+def test_project_inventory_list_accepts_only_known_status_filters(monkeypatch) -> None:
+    """Catches list requests regaining a run selector or accepting an unbounded status value."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+
+    response = client.get(
+        "/collector-transfer/inventory",
+        headers=auth_headers(),
+        params={"project_id": "11111111-1111-1111-1111-111111111111", "status": "available"},
+    )
+    invalid = client.get(
+        "/collector-transfer/inventory",
+        headers=auth_headers(),
+        params={"project_id": "11111111-1111-1111-1111-111111111111", "status": "mystery"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["total"] == 1
+    assert invalid.status_code == 422
+    assert service.calls == [
+        (
+            "list_inventory",
+            {"project_id": "11111111-1111-1111-1111-111111111111", "status": "available"},
+        )
+    ]
 
 
 def test_pool_shortage_is_a_conflict_with_no_partial_success_payload(monkeypatch) -> None:
@@ -331,34 +420,53 @@ def test_workbench_completion_is_an_explicit_manual_confirmation(monkeypatch) ->
     ]
 
 
-def test_mobile_photo_upload_passes_validated_storage_metadata_to_the_transaction(monkeypatch) -> None:
+def test_project_inventory_photo_passes_barcode_and_validated_storage_atomically(monkeypatch) -> None:
     """Catches exposing a pool collector before the uploaded image is durably registered."""
     service = FakeCollectorTransferService()
     client = client_with_service(monkeypatch, service)
+    storage_calls: list[dict[str, object]] = []
+
+    def save_inventory_image(**payload):
+        storage_calls.append(payload)
+        return {
+            "url": "/static/uploads/collector-inventory/000123.jpg",
+            "sha256": "a" * 64,
+            "storage_type": "local_upload",
+            "storage_key": "collector-inventory/000123.jpg",
+            "content_type": "image/jpeg",
+        }
+
     monkeypatch.setattr(
         routes,
         "save_image_bytes",
-        lambda **_kwargs: {
-            "url": "/static/uploads/collector-transfer/000123.jpg",
-            "sha256": "a" * 64,
-            "storage_type": "local_upload",
-            "storage_key": "collector-transfer/000123.jpg",
-            "content_type": "image/jpeg",
-        },
+        save_inventory_image,
     )
 
     response = client.post(
-        "/collector-transfer/runs/run-1/collectors/collector-1/photo",
+        "/collector-transfer/inventory",
         headers=auth_headers(),
+        data={
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "collector_no": "000123",
+        },
         files={"file": ("000123.jpg", b"validated-by-storage-layer", "image/jpeg")},
     )
 
     assert response.status_code == 200
-    assert response.json()["data"] == {"collector_id": "collector-1", "pool_status": "available"}
+    assert response.json()["data"] == {
+        "collector_id": "collector-1",
+        "collector_no": "000123",
+        "pool_status": "available",
+    }
     call_name, payload = service.calls[0]
-    assert call_name == "register_photo"
+    assert call_name == "register_inventory"
+    assert payload["project_id"] == "11111111-1111-1111-1111-111111111111"
+    assert payload["collector_no"] == "000123"
     assert payload["byte_size"] == len(b"validated-by-storage-layer")
     assert payload["stored"]["sha256"] == "a" * 64
+    assert storage_calls[0]["scope"] == "collector-inventory"
+    assert storage_calls[0]["group_id"] == "11111111-1111-1111-1111-111111111111"
+    assert "000123" in str(storage_calls[0]["key_hint"])
 
 
 def test_mobile_photo_validation_error_uses_the_stable_api_error_shape(monkeypatch) -> None:
@@ -372,8 +480,12 @@ def test_mobile_photo_validation_error_uses_the_stable_api_error_shape(monkeypat
     monkeypatch.setattr(routes, "save_image_bytes", reject_image)
 
     response = client.post(
-        "/collector-transfer/runs/run-1/collectors/collector-1/photo",
+        "/collector-transfer/inventory",
         headers=auth_headers(),
+        data={
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "collector_no": "000123",
+        },
         files={"file": ("000123.txt", b"not-an-image", "text/plain")},
     )
 
@@ -382,15 +494,72 @@ def test_mobile_photo_validation_error_uses_the_stable_api_error_shape(monkeypat
     assert service.calls == []
 
 
+def test_project_inventory_photo_rejects_customer_platform_credentials(monkeypatch) -> None:
+    """Catches the multipart inventory endpoint silently accepting customer-platform secrets."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+    storage_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        routes,
+        "save_image_bytes",
+        lambda **payload: storage_calls.append(payload),
+    )
+
+    response = client.post(
+        "/collector-transfer/inventory",
+        headers=auth_headers(),
+        data={
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "collector_no": "000123",
+            "client_username": "customer",
+            "client_password": "secret",
+            "client_session": "session-cookie",
+        },
+        files={"file": ("000123.jpg", b"valid-looking-image", "image/jpeg")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert storage_calls == []
+    assert service.calls == []
+
+
+def test_project_inventory_photo_rejects_blank_barcode_before_storage(monkeypatch) -> None:
+    """Catches whitespace-only barcode text creating an upload before service validation."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+    storage_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        routes,
+        "save_image_bytes",
+        lambda **payload: storage_calls.append(payload),
+    )
+
+    response = client.post(
+        "/collector-transfer/inventory",
+        headers=auth_headers(),
+        data={
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "collector_no": "   ",
+        },
+        files={"file": ("blank.jpg", b"valid-looking-image", "image/jpeg")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert storage_calls == []
+    assert service.calls == []
+
+
 def test_mobile_photo_sha_conflict_returns_409_and_removes_new_orphan(monkeypatch) -> None:
     """Catches a concurrent cross-collector SHA conflict leaking storage or returning 400/500."""
     service = FakeCollectorTransferService()
     client = client_with_service(monkeypatch, service)
     stored = {
-        "url": "/static/uploads/collector-transfer/conflict.jpg",
+        "url": "/static/uploads/collector-inventory/conflict.jpg",
         "sha256": "c" * 64,
         "storage_type": "local_upload",
-        "storage_key": "collector-transfer/conflict.jpg",
+        "storage_key": "collector-inventory/conflict.jpg",
         "content_type": "image/jpeg",
         "created_new": True,
     }
@@ -402,17 +571,21 @@ def test_mobile_photo_sha_conflict_returns_409_and_removes_new_orphan(monkeypatc
     def reject_reuse(**_kwargs):
         raise CollectorPhotoConflictError("photo content is already bound to another physical collector")
 
-    monkeypatch.setattr(service, "register_photo", reject_reuse)
+    monkeypatch.setattr(service, "register_inventory", reject_reuse)
 
     response = client.post(
-        "/collector-transfer/runs/run-1/collectors/collector-2/photo",
+        "/collector-transfer/inventory",
         headers=auth_headers(),
+        data={
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "collector_no": "collector-2",
+        },
         files={"file": ("collector-2.jpg", b"duplicate-image", "image/jpeg")},
     )
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "photo_conflict"
-    assert deleted == ["collector-transfer/conflict.jpg"]
+    assert deleted == ["collector-inventory/conflict.jpg"]
 
 
 @pytest.mark.parametrize(
@@ -426,8 +599,12 @@ def test_mobile_photo_sha_conflict_returns_409_and_removes_new_orphan(monkeypatc
             "not_found",
         ),
         (
-            "scan_collector",
-            ("POST", "/collector-transfer/runs/run-1/scan", {"collector_no": "000123"}),
+            "scan_inventory",
+            (
+                "POST",
+                "/collector-transfer/inventory/scan",
+                {"project_id": "project-1", "collector_no": "000123"},
+            ),
             ValueError("collector is already used"),
             400,
             "invalid_request",
@@ -524,9 +701,9 @@ def test_production_roles_and_token_identity_protect_collector_transfer(monkeypa
         headers=headers["reviewer"],
     )
     constructor_scan = client.post(
-        "/collector-transfer/runs/run-1/scan",
+        "/collector-transfer/inventory/scan",
         headers={**headers["constructor"], "X-Team-Id": "spoofed-team"},
-        json={"collector_no": "000123"},
+        json={"project_id": "project-1", "collector_no": "000123"},
     )
     constructor_read = client.get(
         "/collector-transfer/runs",
@@ -635,11 +812,11 @@ def test_request_models_reject_team_actor_and_customer_platform_credentials(monk
     client = client_with_service(monkeypatch, service)
 
     response = client.post(
-        "/collector-transfer/runs",
+        "/collector-transfer/inventory/scan",
         headers={**auth_headers(team_id="trusted-token-team"), "X-Team-Id": "spoofed-header-team"},
         json={
             "project_id": "project-1",
-            "name": "盘点",
+            "collector_no": "000123",
             "team_id": "spoofed-team",
             "actor": "spoofed-admin",
             "client_username": "customer",
