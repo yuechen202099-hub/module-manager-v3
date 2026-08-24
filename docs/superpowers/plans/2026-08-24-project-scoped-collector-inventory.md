@@ -469,7 +469,7 @@ it('cancelling a non-direct photo never calls registration', async () => {
 
 - [ ] **Step 2: Run the component test and confirm red**
 
-Run from `v2-web`: `npm test -- --run src/views/__tests__/CollectorInventoryView.spec.ts`
+Run from `v2-web`: `npm run test:collector-transfer`
 
 - [ ] **Step 3: Replace API types and service functions**
 
@@ -491,7 +491,7 @@ Upload failure retains `collectorNo` and the local object URL only in component 
 
 ```powershell
 Push-Location v2-web
-npm test -- --run src/views/__tests__/CollectorInventoryView.spec.ts src/views/__tests__/CollectorInventoryRouting.spec.ts src/views/__tests__/CollectorBatchManagementView.spec.ts src/views/__tests__/CollectorWorkbenchView.spec.ts
+npm run test:collector-transfer
 npm run type-check
 npm run build
 Pop-Location
@@ -543,7 +543,8 @@ Expected: command exits 0; timeout or missing final summary is not a pass.
 
 ```powershell
 Push-Location v2-web
-npm test -- --run
+npm run test:components
+npm run test:collector-transfer
 npm run type-check
 npm run build
 Pop-Location
