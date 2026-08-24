@@ -186,15 +186,27 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
-  it('lets an administrator allocate the photographed replacement pool from the mobile inventory flow', async () => {
-    serviceMocks.allocateCollectorPool.mockResolvedValue({ run_id: 'run-1', assignment_count: 1, assignments: [] })
+  it('keeps team-scoped collector projects out of the global project loader state', async () => {
+    workspaceMock.projects = [{ id: 'local-test', name: '模块更换项目' }]
+    workspaceMock.activeProject = { id: 'local-test', name: '模块更换项目' }
+    serviceMocks.fetchCollectorTransferProjects.mockResolvedValue([{ id: 'project-1', name: '城南改造' }])
     const wrapper = await mountPage()
 
-    await wrapper.get('[data-testid="allocate-pool"]').trigger('click')
-    await flushPromises()
+    const projectIdentity = wrapper.get('[data-testid="project-identity"]').text()
+    const globalProjects = workspaceMock.projects
+    const globalActiveProject = workspaceMock.activeProject
+    wrapper.unmount()
 
-    expect(serviceMocks.allocateCollectorPool).toHaveBeenCalledWith('run-1')
-    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenLastCalledWith('project-1')
+    expect(projectIdentity).toContain('城南改造')
+    expect(globalProjects).toEqual([{ id: 'local-test', name: '模块更换项目' }])
+    expect(globalActiveProject).toEqual({ id: 'local-test', name: '模块更换项目' })
+  })
+
+  it('keeps random allocation out of the mobile inventory flow', async () => {
+    const wrapper = await mountPage()
+
+    expect(wrapper.find('[data-testid="allocate-pool"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('替换池分配')
     wrapper.unmount()
   })
 

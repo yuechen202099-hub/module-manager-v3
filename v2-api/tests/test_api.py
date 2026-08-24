@@ -5764,6 +5764,7 @@ def test_direct_workspace_routes_redirect_to_app_shell() -> None:
         "/account-management",
         "/sync-config",
         "/collector-inventory",
+        "/collector-batches",
         "/collector-workbench",
     ]:
         assert_vue_shell_response(client.get(path, follow_redirects=False))

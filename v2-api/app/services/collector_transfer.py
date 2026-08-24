@@ -129,13 +129,6 @@ def meter_sources_from_groups(groups: Iterable[object], photos: Iterable[object]
             normalize_identifier(getattr(module_meter, "asset_no", ""))
             if module_meter is not None
             else ""
-        ) or next(
-            (
-                normalize_identifier(getattr(photo, "asset_no", ""))
-                for photo in group_photos
-                if normalize_identifier(getattr(photo, "asset_no", ""))
-            ),
-            "",
         ) or _raw_value(raw_data, "module_asset_no", "模块资产编号", "模块号", "construction_module_asset_no")
         meter_no = normalize_identifier(getattr(group, "display_meter_no", ""))
         source_diagnostics: list[str] = []
@@ -283,6 +276,31 @@ class PostgresCollectorTransferService:
             "diagnostics": list(run.diagnostics or []),
             "created_at": run.created_at.isoformat() if run.created_at else None,
         }
+
+    def _refresh_allocation_stats(self, run: CollectorTransferRun) -> int:
+        active_assignment_count = int(
+            self.session.scalar(
+                select(func.count(CollectorAssignment.id)).where(
+                    CollectorAssignment.run_id == run.id,
+                    CollectorAssignment.status.in_(("reserved", "used")),
+                )
+            )
+            or 0
+        )
+        available_pool_count = int(
+            self.session.scalar(
+                select(func.count(PhysicalCollector.id)).where(
+                    PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.pool_status == "available",
+                )
+            )
+            or 0
+        )
+        stats = dict(run.stats or {})
+        stats["assignment_count"] = active_assignment_count
+        stats["pool_available_count"] = available_pool_count
+        run.stats = stats
+        return active_assignment_count
 
     def create_run(self, *, project_id: str, name: str) -> dict[str, object]:
         project_uuid = _uuid(project_id, "project_id")
@@ -522,7 +540,8 @@ class PostgresCollectorTransferService:
                     or_(
                         CollectorAssignment.requirement_id == requirement.id,
                         CollectorAssignment.physical_collector_id == physical.id,
-                    )
+                    ),
+                    CollectorAssignment.status.in_(("reserved", "used")),
                 )
                 .with_for_update()
             )
@@ -902,15 +921,7 @@ class PostgresCollectorTransferService:
         if not requirements:
             result = []
         run.status = "allocated"
-        stats = dict(run.stats or {})
-        stats["assignment_count"] = int(
-            self.session.scalar(
-                select(func.count(CollectorAssignment.id)).where(CollectorAssignment.run_id == run.id)
-            )
-            or len(result)
-        )
-        stats["pool_available_count"] = max(0, len(physical_collectors) - len(result))
-        run.stats = stats
+        self._refresh_allocation_stats(run)
         self._audit(
             action="collector_transfer.random_allocated",
             entity_type="collector_transfer_run",
@@ -920,6 +931,109 @@ class PostgresCollectorTransferService:
         )
         self.session.commit()
         return {"run_id": str(run.id), "assignment_count": len(result), "assignments": result}
+
+    def rollback_assignment(self, *, assignment_id: str) -> dict[str, str]:
+        assignment = self.session.scalar(
+            select(CollectorAssignment)
+            .where(
+                CollectorAssignment.id == _uuid(assignment_id, "assignment_id"),
+                CollectorAssignment.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if assignment is None:
+            raise KeyError(assignment_id)
+        if assignment.status == "rolled_back":
+            return {
+                "assignment_id": str(assignment.id),
+                "run_id": str(assignment.run_id),
+                "status": "rolled_back",
+            }
+
+        requirement = self.session.scalar(
+            select(CollectorRequirement)
+            .where(
+                CollectorRequirement.id == assignment.requirement_id,
+                CollectorRequirement.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        physical = self.session.scalar(
+            select(PhysicalCollector)
+            .where(
+                PhysicalCollector.id == assignment.physical_collector_id,
+                PhysicalCollector.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if requirement is None or physical is None:
+            raise ValueError("assignment resources are missing")
+        run = self._run(str(assignment.run_id), lock=True)
+        workbench_items = list(
+            self.session.scalars(
+                select(CollectorWorkbenchItem)
+                .where(
+                    CollectorWorkbenchItem.assignment_id == assignment.id,
+                    CollectorWorkbenchItem.team_id == self.team_id,
+                )
+                .with_for_update()
+            ).all()
+        )
+
+        assignment.status = "rolled_back"
+        assignment.used_at = None
+        requirement.status = "unmatched"
+        physical.pool_status = "available" if self._active_collector_photo(physical.id) else "awaiting_photo"
+        for item in workbench_items:
+            self.session.delete(item)
+        self.session.flush()
+
+        terminal = self.session.scalar(
+            select(CollectorTransferTerminal)
+            .where(CollectorTransferTerminal.id == requirement.terminal_id)
+            .with_for_update()
+        )
+        if terminal is not None:
+            total = int(
+                self.session.scalar(
+                    select(func.count(CollectorWorkbenchItem.id)).where(
+                        CollectorWorkbenchItem.terminal_id == terminal.id
+                    )
+                )
+                or 0
+            )
+            completed_count = int(
+                self.session.scalar(
+                    select(func.count(CollectorWorkbenchItem.id)).where(
+                        CollectorWorkbenchItem.terminal_id == terminal.id,
+                        CollectorWorkbenchItem.status == "completed",
+                    )
+                )
+                or 0
+            )
+            terminal.completed_item_count = completed_count
+            terminal.status = "ready" if not total else ("completed" if completed_count >= total else "in_progress")
+
+        active_assignment_count = self._refresh_allocation_stats(run)
+        run.status = "allocated" if active_assignment_count else "inventory"
+        self._audit(
+            action="collector_transfer.assignment_rolled_back",
+            entity_type="collector_assignment",
+            entity_id=assignment.id,
+            project_id=run.project_id,
+            payload={
+                "run_id": str(run.id),
+                "requirement_id": str(requirement.id),
+                "physical_collector_id": str(physical.id),
+                "removed_workbench_items": len(workbench_items),
+            },
+        )
+        self.session.commit()
+        return {
+            "assignment_id": str(assignment.id),
+            "run_id": str(run.id),
+            "status": "rolled_back",
+        }
 
     def list_workbench(self, *, run_id: str) -> dict[str, object]:
         run = self._run(run_id)

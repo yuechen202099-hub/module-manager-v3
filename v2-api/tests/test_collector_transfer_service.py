@@ -193,6 +193,25 @@ def test_existing_groups_project_to_only_the_two_confirmed_install_photo_slots()
     assert projection.sources[0].collector_no == "C-001"
 
 
+def test_module_source_ignores_after_box_asset_number_when_module_meter_is_blank() -> None:
+    """Catches an unrelated evidence photo silently winning the module barcode fallback."""
+    group = SimpleNamespace(
+        id="group-asset-source",
+        terminal="T-001",
+        installation_address="测试地址",
+        display_meter_no="METER-001",
+        raw_data={"module_asset_no": "RAW-MODULE-001"},
+    )
+    photos = [
+        SimpleNamespace(id="module", group_id="group-asset-source", category="module_meter", collector="C-001", asset_no="", is_active=True),
+        SimpleNamespace(id="after", group_id="group-asset-source", category="after_box", collector="C-001", asset_no="AFTER-BOX-INCORRECT", is_active=True),
+    ]
+
+    projection = meter_sources_from_groups([group], photos)
+
+    assert projection.sources[0].module_no == "RAW-MODULE-001"
+
+
 def test_projection_preserves_a_blank_terminal_group_in_its_own_blocked_snapshot() -> None:
     """Catches silently combining or dropping blank-terminal groups instead of keeping a blocked meter item."""
     group = SimpleNamespace(

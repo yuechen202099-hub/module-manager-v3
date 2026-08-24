@@ -163,23 +163,32 @@ def test_real_postgres_pool_shortage_has_zero_allocation_side_effects(postgres_s
 
 
 def test_real_postgres_rolled_back_assignment_releases_requirement_and_collector(postgres_session_factory) -> None:
-    """Catches a historical rollback permanently consuming a requirement or physical collector."""
+    """Catches a rollback that only changes the index status but leaves resources and workbench state consumed."""
     team_id, run_id, requirement_ids = seed_allocation_state(postgres_session_factory, pool_size=1)
     with postgres_session_factory() as session:
+        service = PostgresCollectorTransferService(session=session, team_id=team_id, actor="task7-admin")
+        allocated = service.allocate(run_id=run_id)
+        assignment_id = allocated["assignments"][0]["assignment_id"]
+        rolled_back = service.rollback_assignment(assignment_id=assignment_id)
+
+    assert allocated["assignment_count"] == 1
+    assert rolled_back == {"assignment_id": assignment_id, "run_id": run_id, "status": "rolled_back"}
+
+    with postgres_session_factory() as session:
+        assignment = session.get(CollectorAssignment, assignment_id)
+        requirement = session.get(CollectorRequirement, requirement_ids[0])
         physical = session.scalar(select(PhysicalCollector).where(PhysicalCollector.team_id == team_id))
-        photo = session.scalar(select(CollectorPhoto).where(CollectorPhoto.physical_collector_id == physical.id))
-        session.add(
-            CollectorAssignment(
-                run_id=run_id,
-                team_id=team_id,
-                requirement_id=requirement_ids[0],
-                physical_collector_id=physical.id,
-                collector_photo_id=photo.id,
-                assignment_mode="random",
-                status="rolled_back",
-            )
-        )
-        session.commit()
+        workbench_items = list(session.scalars(select(CollectorWorkbenchItem).where(CollectorWorkbenchItem.run_id == run_id)))
+        run = session.get(CollectorTransferRun, run_id)
+        audit_actions = list(session.scalars(select(AuditLog.action).where(AuditLog.team_id == team_id)))
+
+    assert assignment.status == "rolled_back"
+    assert requirement.status == "unmatched"
+    assert physical.pool_status == "available"
+    assert workbench_items == []
+    assert run.status == "inventory"
+    assert run.stats["assignment_count"] == 0
+    assert "collector_transfer.assignment_rolled_back" in audit_actions
 
     with postgres_session_factory() as session:
         result = PostgresCollectorTransferService(session=session, team_id=team_id, actor="task7").allocate(run_id=run_id)
@@ -194,5 +203,6 @@ def test_real_postgres_rolled_back_assignment_releases_requirement_and_collector
     assert result["assignment_count"] == 1
     assert len(assignments) == 2
     assert sorted(assignment.status for assignment in assignments) == ["reserved", "rolled_back"]
+    assert sum(assignment.status in {"reserved", "used"} for assignment in assignments) == 1
     assert requirement.status == "assigned"
     assert physical.pool_status == "reserved"

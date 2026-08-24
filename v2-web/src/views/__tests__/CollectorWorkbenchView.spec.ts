@@ -217,6 +217,20 @@ describe('collector workbench route and navigation', () => {
     expect(route?.components?.default).toBeTruthy()
   })
 
+  it('registers a separate administrator-only collector batch-management page', () => {
+    const page = findStaticPage('collector-batches')
+    expect(page).toMatchObject({
+      routePath: '/collector-batches',
+      roles: ['admin'],
+      migrationStatus: 'native_vue',
+    })
+
+    const route = router.getRoutes().find((item) => item.name === 'collector-batches')
+    expect(route?.path).toBe('/collector-batches')
+    expect(route?.meta.roles).toEqual(['admin'])
+    expect(route?.components?.default).toBeTruthy()
+  })
+
   it.each(['constructor', 'admin'])('renders the workbench entry in AppLayout navigation for %s', async (role) => {
     authMock.user = { role, roles: [role], teamId: 'team-1' }
     const wrapper = mount(AppLayout, {
@@ -304,6 +318,22 @@ describe('CollectorWorkbenchView data and evidence anatomy', () => {
     expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
     expect(wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.value).toBe('project-1')
     wrapper.unmount()
+  })
+
+  it('keeps team-scoped collector projects out of the global project loader state', async () => {
+    workspaceMock.projects = [{ id: 'local-test', name: '模块更换项目' }]
+    workspaceMock.activeProject = { id: 'local-test', name: '模块更换项目' }
+    serviceMocks.fetchCollectorTransferProjects.mockResolvedValue([{ id: 'project-1', name: '城南改造' }])
+    const wrapper = await mountWorkbench()
+
+    const selectedProject = wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.value
+    const globalProjects = workspaceMock.projects
+    const globalActiveProject = workspaceMock.activeProject
+    wrapper.unmount()
+
+    expect(selectedProject).toBe('project-1')
+    expect(globalProjects).toEqual([{ id: 'local-test', name: '模块更换项目' }])
+    expect(globalActiveProject).toEqual({ id: 'local-test', name: '模块更换项目' })
   })
 
   it('loads the selected project run and lets the operator choose a terminal through the API', async () => {

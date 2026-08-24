@@ -10,6 +10,7 @@ const nativePageComponents = {
   'global-search': () => import('@/views/GlobalSearchView.vue'),
   construction: () => import('@/views/ConstructionView.vue'),
   'collector-inventory': () => import('@/views/CollectorInventoryView.vue'),
+  'collector-batches': () => import('@/views/CollectorBatchManagementView.vue'),
   'collector-workbench': () => import('@/views/CollectorWorkbenchView.vue'),
   'account-management': () => import('@/views/AccountManagementView.vue'),
   'sync-config': () => import('@/views/SyncConfigView.vue'),

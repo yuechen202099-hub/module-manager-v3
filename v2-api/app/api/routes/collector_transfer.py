@@ -210,6 +210,11 @@ def allocate_collectors(run_id: str, request: Request):
     return call_service(request, lambda service: service.allocate(run_id=run_id))
 
 
+@router.post("/assignments/{assignment_id}/rollback")
+def rollback_assignment(assignment_id: str, request: Request):
+    return call_service(request, lambda service: service.rollback_assignment(assignment_id=assignment_id))
+
+
 @router.get("/runs/{run_id}/workbench")
 def list_workbench(run_id: str, request: Request):
     return call_service(request, lambda service: service.list_workbench(run_id=run_id))

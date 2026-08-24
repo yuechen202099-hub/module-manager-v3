@@ -104,6 +104,7 @@ def create_app() -> FastAPI:
                     path == "/collector-transfer/runs"
                     or path.endswith("/inventory/import")
                     or path.endswith("/allocate")
+                    or path.endswith("/rollback")
                 )
             )
             if admin_only:
@@ -313,6 +314,10 @@ def create_app() -> FastAPI:
 
     @app.get("/collector-inventory")
     def collector_inventory_page():
+        return vue_index_response()
+
+    @app.get("/collector-batches")
+    def collector_batches_page():
         return vue_index_response()
 
     @app.get("/collector-workbench")

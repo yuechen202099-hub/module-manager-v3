@@ -48,6 +48,10 @@ class FakeCollectorTransferService:
         self.calls.append(("allocate", run_id))
         raise PoolInsufficientError(required=3, available=2)
 
+    def rollback_assignment(self, *, assignment_id: str) -> dict:
+        self.calls.append(("rollback_assignment", assignment_id))
+        return {"assignment_id": assignment_id, "status": "rolled_back"}
+
     def list_workbench(self, *, run_id: str) -> dict:
         self.calls.append(("list_workbench", run_id))
         return {"run_id": run_id, "terminals": [{"id": "terminal-1", "progress": 50}]}
@@ -744,6 +748,26 @@ def test_production_roles_and_token_identity_protect_collector_transfer(monkeypa
     assert identities[0] == ("token-team", "constructor-a")
     assert admin_allocate.status_code == 409
     assert admin_allocate.json()["error"]["code"] == "pool_insufficient"
+
+
+def test_only_an_administrator_can_rollback_a_collector_assignment(monkeypatch) -> None:
+    """Catches exposing the compensating allocation operation to the mobile constructor role."""
+    service = FakeCollectorTransferService()
+    client, headers, _identities = production_client_with_service(monkeypatch, service)
+
+    constructor = client.post(
+        "/collector-transfer/assignments/assignment-1/rollback",
+        headers=headers["constructor"],
+    )
+    administrator = client.post(
+        "/collector-transfer/assignments/assignment-1/rollback",
+        headers=headers["admin"],
+    )
+
+    assert constructor.status_code == 403
+    assert administrator.status_code == 200
+    assert administrator.json()["data"] == {"assignment_id": "assignment-1", "status": "rolled_back"}
+    assert service.calls == [("rollback_assignment", "assignment-1")]
 
 
 def test_transfer_project_list_is_team_isolated_and_readable_by_constructor_and_admin(monkeypatch) -> None:

@@ -3,7 +3,6 @@ import { ElMessage } from 'element-plus'
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
 import {
-  allocateCollectorPool,
   createCollectorTransferRun,
   fetchCollectorTransferProjects,
   fetchCollectorTransferRuns,
@@ -15,6 +14,7 @@ import type {
   CollectorInventoryDecision,
   CollectorInventoryImportResult,
   CollectorTransferRun,
+  Project,
 } from '@/api/types'
 import { inventoryResultPresentation } from '@/features/collectorTransfer/state'
 import { useAuthStore } from '@/stores/auth'
@@ -29,6 +29,7 @@ type NativeBarcodeDetectorConstructor = new (options?: { formats?: string[] }) =
 
 const workspace = useWorkspaceStore()
 const auth = useAuthStore()
+const transferProjects = ref<Project[]>([])
 const runs = ref<CollectorTransferRun[]>([])
 const selectedRunId = ref('')
 const mobileView = ref<MobileView>('scan')
@@ -69,9 +70,9 @@ const isAdmin = computed(() => {
   return roles.has('admin')
 })
 const activeProject = computed(() => (
-  workspace.projects.find((item) => item.id === selectedProjectId.value)
-  || workspace.projects.find((item) => item.id === workspace.activeProject?.id)
-  || workspace.projects[0]
+  transferProjects.value.find((item) => item.id === selectedProjectId.value)
+  || transferProjects.value.find((item) => item.id === workspace.activeProject?.id)
+  || transferProjects.value[0]
   || null
 ))
 const presentation = computed(() => result.value
@@ -108,13 +109,13 @@ const runProgress = computed(() => {
 })
 
 onMounted(async () => {
-  const transferProjects = await fetchCollectorTransferProjects()
-  workspace.projects = transferProjects
+  const projects = await fetchCollectorTransferProjects()
   if (componentUnmounted) return
-  const activeWorkspaceProject = transferProjects.find(
+  transferProjects.value = projects
+  const activeWorkspaceProject = projects.find(
     (project) => project.id === workspace.activeProject?.id,
   )
-  selectedProjectId.value = activeWorkspaceProject?.id || transferProjects[0]?.id || ''
+  selectedProjectId.value = activeWorkspaceProject?.id || projects[0]?.id || ''
   setupProjectId.value = selectedProjectId.value
   if (selectedProjectId.value) await loadRuns(selectedProjectId.value)
 })
@@ -392,23 +393,6 @@ async function submitImport() {
   }
 }
 
-async function allocatePool() {
-  if (!isAdmin.value) return
-  if (!selectedRunId.value) {
-    ElMessage.warning('请先选择盘点批次')
-    return
-  }
-  loading.value = true
-  try {
-    const allocation = await allocateCollectorPool(selectedRunId.value)
-    ElMessage.success(`本地替换池已完成一次性分配：${allocation.assignment_count} 条`)
-    await loadRuns(selectedProjectId.value || activeProject.value?.id || '')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '替换池随机分配失败')
-  } finally {
-    loading.value = false
-  }
-}
 </script>
 
 <template>
@@ -433,14 +417,6 @@ async function allocatePool() {
           </select>
         </label>
         <strong>{{ runProgress }}</strong>
-        <button
-          v-if="isAdmin && selectedRunId"
-          class="pool-allocation-button"
-          type="button"
-          data-testid="allocate-pool"
-          :disabled="loading"
-          @click="allocatePool"
-        >随机分配本地替换池</button>
       </div>
 
       <main class="inventory-body">
@@ -540,7 +516,7 @@ async function allocatePool() {
         <header><h2>选择或新建盘点批次</h2><button type="button" aria-label="关闭" @click="closeSetup">×</button></header>
         <label><span>已有批次</span><select v-model="selectedRunId" @change="closeSetup"><option value="">无</option><option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option></select></label>
         <div class="setup-divider">根据现有数据新建</div>
-        <label><span>项目</span><select v-model="setupProjectId"><option v-for="project in workspace.projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
+        <label><span>项目</span><select v-model="setupProjectId"><option v-for="project in transferProjects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
         <label><span>批次名称</span><input v-model="setupName" /></label>
         <button class="primary-button wide" type="submit" :disabled="loading">生成终端与采集器需求</button>
       </form>

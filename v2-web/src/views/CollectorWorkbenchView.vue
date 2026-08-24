@@ -14,6 +14,7 @@ import type {
   CollectorWorkbenchItem,
   CollectorWorkbenchPhotoSlot,
   CollectorWorkbenchSummary,
+  Project,
 } from '@/api/types'
 import Code128Barcode from '@/components/Code128Barcode.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -31,6 +32,7 @@ type CompletionActionContext = {
 }
 
 const workspace = useWorkspaceStore()
+const transferProjects = ref<Project[]>([])
 const projectId = ref('')
 const loadedProjectId = ref('')
 const runs = ref<CollectorTransferRun[]>([])
@@ -90,11 +92,12 @@ async function bootstrapWorkspace() {
   loading.value = true
   clearRecoverableLoadError()
   try {
-    workspace.projects = await fetchCollectorTransferProjects()
-    const activeWorkspaceProject = workspace.projects.find(
+    const projects = await fetchCollectorTransferProjects()
+    transferProjects.value = projects
+    const activeWorkspaceProject = projects.find(
       (project) => project.id === workspace.activeProject?.id,
     )
-    projectId.value = activeWorkspaceProject?.id || workspace.projects[0]?.id || ''
+    projectId.value = activeWorkspaceProject?.id || projects[0]?.id || ''
     if (projectId.value) await loadRuns(projectId.value)
     else loading.value = false
   } catch (error) {
@@ -392,7 +395,7 @@ function photoUrl(slot: CollectorWorkbenchPhotoSlot['slot']) {
       <label>
         <span>当前项目</span>
         <select v-model="projectId" aria-label="当前项目" :disabled="actionPending" @change="loadRuns(projectId)">
-          <option v-for="project in workspace.projects" :key="project.id" :value="project.id">{{ project.name }}</option>
+          <option v-for="project in transferProjects" :key="project.id" :value="project.id">{{ project.name }}</option>
         </select>
       </label>
       <label>
