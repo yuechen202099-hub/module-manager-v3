@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -290,9 +290,39 @@ class PostgresCollectorTransferService:
         )
         return meter_sources_from_groups(groups, photos), photos
 
-    def _project_collector_numbers(self, project_id: UUID) -> frozenset[str]:
-        projection, _photos = self._project_meter_projection(project_id)
-        return frozenset(source.collector_no for source in projection.sources if source.collector_no)
+    def _project_has_collector_number(self, project_id: UUID, collector_no: str) -> bool:
+        photo_collector = (
+            select(func.trim(Photo.collector))
+            .where(
+                Photo.group_id == MaterialGroup.id,
+                Photo.team_id == self.team_id,
+                Photo.is_active.is_(True),
+                func.trim(func.coalesce(Photo.collector, "")) != "",
+            )
+            .order_by(Photo.sort_order, Photo.id)
+            .limit(1)
+            .correlate(MaterialGroup)
+            .scalar_subquery()
+        )
+        raw_collector = func.coalesce(
+            *(
+                func.nullif(func.trim(MaterialGroup.raw_data[key].as_string()), "")
+                for key in ("collector", "采集器", "采集器号", "construction_collector")
+            ),
+            "",
+        )
+        effective_collector = func.coalesce(photo_collector, raw_collector)
+        return bool(
+            self.session.scalar(
+                select(
+                    exists().where(
+                        MaterialGroup.team_id == self.team_id,
+                        MaterialGroup.project_id == project_id,
+                        effective_collector == collector_no,
+                    )
+                )
+            )
+        )
 
     def _audit(
         self,
@@ -538,7 +568,7 @@ class PostgresCollectorTransferService:
         photo = self._active_collector_photo(physical.id) if physical is not None else None
         decision = decide_project_inventory_scan(
             collector_no=normalized_no,
-            is_project_requirement=normalized_no in self._project_collector_numbers(project.id),
+            is_project_requirement=self._project_has_collector_number(project.id, normalized_no),
             existing_pool_status=physical.pool_status if physical is not None else None,
             has_active_photo=photo is not None,
         )
@@ -629,7 +659,7 @@ class PostgresCollectorTransferService:
         if not sha256:
             raise ValueError("sha256 is required")
 
-        is_direct = normalized_no in self._project_collector_numbers(project.id)
+        is_direct = self._project_has_collector_number(project.id, normalized_no)
         photo = self.session.scalar(
             select(CollectorPhoto).where(
                 CollectorPhoto.team_id == self.team_id,

@@ -234,6 +234,116 @@ def stored_photo(sha256_value: str) -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize(
+    ("raw_data", "photo_values", "candidate", "expected"),
+    [
+        ({"collector": "RAW-1"}, [(0, " PHOTO-1 ", True)], "PHOTO-1", True),
+        ({"collector": "RAW-1"}, [(0, "   ", True)], "RAW-1", True),
+        ({"采集器": "0000123"}, [], "0000123", True),
+        ({"采集器号": "中文-采集器"}, [], "中文-采集器", True),
+        ({"construction_collector": "ALIAS-4"}, [], "ALIAS-4", True),
+        ({"collector": "RAW-1"}, [(0, "INACTIVE", False)], "RAW-1", True),
+        ({"collector": "RAW-1"}, [(0, "FIRST", True), (1, "SECOND", True)], "SECOND", False),
+    ],
+)
+def test_project_has_collector_number_preserves_precedence(
+    db_session: Session,
+    raw_data: dict[str, str],
+    photo_values: list[tuple[int, str, bool]],
+    candidate: str,
+    expected: bool,
+) -> None:
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        terminal=f"T-{uuid4().hex}",
+        meter_match_key=f"M-{uuid4().hex}",
+        display_meter_no=f"M-{uuid4().hex}",
+        installation_address="有界采集器查询测试地址",
+        raw_data=raw_data,
+    )
+    db_session.add(group)
+    for sort_order, collector, is_active in photo_values:
+        db_session.add(
+            Photo(
+                id=uuid4(),
+                team_id="team-1",
+                group_id=group.id,
+                sha256=uuid4().hex * 2,
+                object_key=f"source/{uuid4().hex}.jpg",
+                collector=collector,
+                sort_order=sort_order,
+                is_active=is_active,
+            )
+        )
+    db_session.commit()
+
+    assert service(db_session)._project_has_collector_number(project.id, candidate) is expected
+
+
+def test_project_has_collector_number_does_not_match_another_project(
+    db_session: Session,
+) -> None:
+    source_project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    other_project = Project(
+        id=uuid4(),
+        team_id="team-1",
+        code=f"P-{uuid4().hex[:8]}",
+        name="另一项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(other_project)
+    db_session.add(
+        MaterialGroup(
+            id=uuid4(),
+            team_id="team-1",
+            project_id=other_project.id,
+            terminal="T-OTHER-PROJECT",
+            meter_match_key="M-OTHER-PROJECT",
+            display_meter_no="M-OTHER-PROJECT",
+            installation_address="另一项目地址",
+            raw_data={"collector": "PROJECT-ONLY"},
+        )
+    )
+    db_session.commit()
+
+    assert service(db_session)._project_has_collector_number(source_project.id, "PROJECT-ONLY") is False
+
+
+def test_project_has_collector_number_does_not_match_another_team(
+    db_session: Session,
+) -> None:
+    source_project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    foreign_project = Project(
+        id=uuid4(),
+        team_id="team-2",
+        code=f"P-{uuid4().hex[:8]}",
+        name="另一团队项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(Team(id="team-2", name="另一团队"))
+    db_session.add(foreign_project)
+    db_session.add(
+        MaterialGroup(
+            id=uuid4(),
+            team_id="team-2",
+            project_id=foreign_project.id,
+            terminal="T-OTHER-TEAM",
+            meter_match_key="M-OTHER-TEAM",
+            display_meter_no="M-OTHER-TEAM",
+            installation_address="另一团队地址",
+            raw_data={"collector": "TEAM-ONLY"},
+        )
+    )
+    db_session.commit()
+
+    assert service(db_session)._project_has_collector_number(source_project.id, "TEAM-ONLY") is False
+
+
 def actor_user(session: Session, *, username: str = "operator") -> User:
     user = User(
         id=uuid4(),
@@ -844,7 +954,11 @@ def test_project_inventory_registration_recovers_number_uniqueness_race(
         actor="operator",
     )
     monkeypatch.setattr(transfer, "_project", lambda _project_id: project)
-    monkeypatch.setattr(transfer, "_project_collector_numbers", lambda _project_id: frozenset())
+    monkeypatch.setattr(
+        transfer,
+        "_project_has_collector_number",
+        lambda _project_id, _collector_no: False,
+    )
     monkeypatch.setattr(transfer, "_actor_user_id", lambda: None)
     monkeypatch.setattr(transfer, "_audit", lambda **_payload: None)
 
@@ -888,7 +1002,11 @@ def test_project_inventory_registration_recovers_same_collector_photo_race(
         actor="operator",
     )
     monkeypatch.setattr(transfer, "_project", lambda _project_id: project)
-    monkeypatch.setattr(transfer, "_project_collector_numbers", lambda _project_id: frozenset())
+    monkeypatch.setattr(
+        transfer,
+        "_project_has_collector_number",
+        lambda _project_id, _collector_no: False,
+    )
     monkeypatch.setattr(
         transfer,
         "_locked_project_physical_collector",
