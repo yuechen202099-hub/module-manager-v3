@@ -17,6 +17,7 @@ from app.domain.collector_transfer import (
     PoolInsufficientError,
     build_terminal_snapshots,
     decide_collector_scan,
+    decide_project_inventory_scan,
     normalize_identifier,
     plan_random_assignments,
 )
@@ -35,6 +36,7 @@ from app.models import (
     Photo,
     PhysicalCollector,
     Project,
+    ProjectStatus,
     User,
 )
 from app.services.photo_storage import resolve_photo_for_response
@@ -243,6 +245,55 @@ class PostgresCollectorTransferService:
             )
         )
 
+    def _project(self, project_id: str) -> Project:
+        project = self.session.scalar(
+            select(Project).where(
+                Project.id == _uuid(project_id, "project_id"),
+                Project.team_id == self.team_id,
+                Project.status != ProjectStatus.ARCHIVED,
+                Project.archived_at.is_(None),
+            )
+        )
+        if project is None:
+            raise KeyError(project_id)
+        return project
+
+    def _project_meter_projection(
+        self,
+        project_id: UUID,
+    ) -> tuple[MeterSourceProjection, list[Photo]]:
+        groups = list(
+            self.session.scalars(
+                select(MaterialGroup)
+                .where(
+                    MaterialGroup.project_id == project_id,
+                    MaterialGroup.team_id == self.team_id,
+                )
+                .order_by(MaterialGroup.terminal, MaterialGroup.display_meter_no, MaterialGroup.id)
+            ).all()
+        )
+        group_ids = [group.id for group in groups]
+        photos = (
+            list(
+                self.session.scalars(
+                    select(Photo)
+                    .where(
+                        Photo.team_id == self.team_id,
+                        Photo.group_id.in_(group_ids),
+                        Photo.is_active.is_(True),
+                    )
+                    .order_by(Photo.group_id, Photo.sort_order, Photo.id)
+                ).all()
+            )
+            if group_ids
+            else []
+        )
+        return meter_sources_from_groups(groups, photos), photos
+
+    def _project_collector_numbers(self, project_id: UUID) -> frozenset[str]:
+        projection, _photos = self._project_meter_projection(project_id)
+        return frozenset(source.collector_no for source in projection.sources if source.collector_no)
+
     def _audit(
         self,
         *,
@@ -331,37 +382,9 @@ class PostgresCollectorTransferService:
         }
 
     def create_run(self, *, project_id: str, name: str) -> dict[str, object]:
-        project_uuid = _uuid(project_id, "project_id")
-        project = self.session.scalar(
-            select(Project).where(Project.id == project_uuid, Project.team_id == self.team_id)
-        )
-        if project is None:
-            raise KeyError(project_id)
-
-        groups = list(
-            self.session.scalars(
-                select(MaterialGroup)
-                .where(MaterialGroup.project_id == project_uuid, MaterialGroup.team_id == self.team_id)
-                .order_by(MaterialGroup.terminal, MaterialGroup.display_meter_no, MaterialGroup.id)
-            ).all()
-        )
-        group_ids = [group.id for group in groups]
-        photos = (
-            list(
-                self.session.scalars(
-                    select(Photo)
-                    .where(
-                        Photo.team_id == self.team_id,
-                        Photo.group_id.in_(group_ids),
-                        Photo.is_active.is_(True),
-                    )
-                    .order_by(Photo.group_id, Photo.sort_order, Photo.id)
-                ).all()
-            )
-            if group_ids
-            else []
-        )
-        projection = meter_sources_from_groups(groups, photos)
+        project = self._project(project_id)
+        project_uuid = project.id
+        projection, photos = self._project_meter_projection(project_uuid)
         source_photos_by_id = {str(photo.id): photo for photo in photos}
         snapshots = build_terminal_snapshots(projection.sources)
         run = CollectorTransferRun(
@@ -494,6 +517,281 @@ class PostgresCollectorTransferService:
         self.session.refresh(run)
         return self._run_summary(run)
 
+    def scan_inventory(self, *, project_id: str, collector_no: str) -> dict[str, object]:
+        project = self._project(project_id)
+        normalized_no = normalize_identifier(collector_no)
+        if not normalized_no:
+            raise ValueError("collector_no is required")
+
+        physical = self.session.scalar(
+            select(PhysicalCollector)
+            .where(
+                PhysicalCollector.team_id == self.team_id,
+                PhysicalCollector.project_id == project.id,
+                PhysicalCollector.collector_no == normalized_no,
+            )
+            .with_for_update()
+        )
+        photo = self._active_collector_photo(physical.id) if physical is not None else None
+        decision = decide_project_inventory_scan(
+            collector_no=normalized_no,
+            is_project_requirement=normalized_no in self._project_collector_numbers(project.id),
+            existing_pool_status=physical.pool_status if physical is not None else None,
+            has_active_photo=photo is not None,
+        )
+
+        if not decision.persist_confirmation:
+            return {
+                "collector_id": str(physical.id) if physical is not None else None,
+                "collector_no": normalized_no,
+                "decision": decision.kind.value,
+                "requires_photo": decision.requires_photo,
+                "add_to_pool": decision.add_to_pool,
+                "pool_status": physical.pool_status if physical is not None else None,
+                "photo": _photo_response(photo),
+            }
+
+        if physical is None:
+            physical = self._locked_project_physical_collector(
+                project_id=project.id,
+                collector_no=normalized_no,
+                initial_status="direct",
+            )
+            photo = self._active_collector_photo(physical.id)
+            decision = decide_project_inventory_scan(
+                collector_no=normalized_no,
+                is_project_requirement=True,
+                existing_pool_status=physical.pool_status,
+                has_active_photo=photo is not None,
+            )
+            if not decision.persist_confirmation:
+                return {
+                    "collector_id": str(physical.id),
+                    "collector_no": normalized_no,
+                    "decision": decision.kind.value,
+                    "requires_photo": decision.requires_photo,
+                    "add_to_pool": decision.add_to_pool,
+                    "pool_status": physical.pool_status,
+                    "photo": _photo_response(photo),
+                }
+        elif physical.pool_status not in {"reserved", "used"}:
+            physical.pool_status = "direct"
+        physical.last_scanned_at = datetime.now(UTC)
+
+        event = CollectorScanEvent(
+            run_id=None,
+            team_id=self.team_id,
+            project_id=project.id,
+            physical_collector_id=physical.id,
+            requirement_id=None,
+            scanned_value=normalized_no,
+            decision=decision.kind.value,
+            requires_photo=decision.requires_photo,
+            add_to_pool=decision.add_to_pool,
+            actor_id=self._actor_user_id(),
+        )
+        self.session.add(event)
+        self._audit(
+            action="collector_transfer.inventory_scanned",
+            entity_type="physical_collector",
+            entity_id=physical.id,
+            project_id=project.id,
+            payload={"collector_no": normalized_no, "decision": decision.kind.value},
+        )
+        self.session.commit()
+        return {
+            "collector_id": str(physical.id),
+            "collector_no": normalized_no,
+            "decision": decision.kind.value,
+            "requires_photo": decision.requires_photo,
+            "add_to_pool": decision.add_to_pool,
+            "pool_status": physical.pool_status,
+            "photo": _photo_response(photo),
+        }
+
+    def register_inventory(
+        self,
+        *,
+        project_id: str,
+        collector_no: str,
+        original_filename: str,
+        stored: Mapping[str, object],
+        byte_size: int,
+    ) -> dict[str, object]:
+        project = self._project(project_id)
+        normalized_no = normalize_identifier(collector_no)
+        if not normalized_no:
+            raise ValueError("collector_no is required")
+        sha256 = normalize_identifier(stored.get("sha256"))
+        if not sha256:
+            raise ValueError("sha256 is required")
+
+        is_direct = normalized_no in self._project_collector_numbers(project.id)
+        photo = self.session.scalar(
+            select(CollectorPhoto).where(
+                CollectorPhoto.team_id == self.team_id,
+                CollectorPhoto.project_id == project.id,
+                CollectorPhoto.sha256 == sha256,
+            )
+        )
+        if photo is not None:
+            physical = self.session.scalar(
+                select(PhysicalCollector)
+                .where(
+                    PhysicalCollector.id == photo.physical_collector_id,
+                    PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.project_id == project.id,
+                    PhysicalCollector.collector_no == normalized_no,
+                )
+                .with_for_update()
+            )
+            if physical is None:
+                raise CollectorPhotoConflictError(
+                    "photo content is already bound to another physical collector"
+                )
+        else:
+            physical = self._locked_project_physical_collector(
+                project_id=project.id,
+                collector_no=normalized_no,
+                initial_status="direct" if is_direct else "available",
+            )
+        if physical.pool_status not in {"reserved", "used"}:
+            physical.pool_status = (
+                "direct"
+                if is_direct or physical.pool_status == "direct"
+                else "available"
+            )
+        physical.last_scanned_at = datetime.now(UTC)
+
+        active_photo = self._active_collector_photo(physical.id)
+        if active_photo is not None and active_photo.sha256 != sha256:
+            raise CollectorPhotoConflictError(
+                "physical collector already has another active photo"
+            )
+
+        if photo is None:
+            candidate_photo = CollectorPhoto(
+                team_id=self.team_id,
+                project_id=project.id,
+                physical_collector_id=physical.id,
+                sha256=sha256,
+                original_filename=normalize_identifier(original_filename) or f"{normalized_no}.jpg",
+                object_key=normalize_identifier(stored.get("storage_key") or stored.get("url")),
+                image_url=normalize_identifier(stored.get("url")) or None,
+                storage_type=normalize_identifier(stored.get("storage_type")) or "local_upload",
+                content_type=normalize_identifier(stored.get("content_type")) or None,
+                byte_size=byte_size,
+                captured_at=datetime.now(UTC),
+                captured_by_id=self._actor_user_id(),
+                captured_by_username=self.actor,
+                is_active=True,
+            )
+            try:
+                with self.session.begin_nested():
+                    self.session.add(candidate_photo)
+                    self.session.flush()
+            except IntegrityError as exc:
+                photo = self.session.scalar(
+                    select(CollectorPhoto).where(
+                        CollectorPhoto.team_id == self.team_id,
+                        CollectorPhoto.project_id == project.id,
+                        CollectorPhoto.sha256 == sha256,
+                    )
+                )
+                if photo is None or photo.physical_collector_id != physical.id:
+                    raise CollectorPhotoConflictError(
+                        "photo content is already bound to another physical collector"
+                    ) from exc
+            else:
+                photo = candidate_photo
+
+        final_decision = decide_project_inventory_scan(
+            collector_no=normalized_no,
+            is_project_requirement=is_direct,
+            existing_pool_status=physical.pool_status,
+            has_active_photo=True,
+        )
+        self.session.add(
+            CollectorScanEvent(
+                run_id=None,
+                team_id=self.team_id,
+                project_id=project.id,
+                physical_collector_id=physical.id,
+                requirement_id=None,
+                scanned_value=normalized_no,
+                decision=final_decision.kind.value,
+                requires_photo=final_decision.requires_photo,
+                add_to_pool=final_decision.add_to_pool,
+                actor_id=self._actor_user_id(),
+            )
+        )
+
+        self._audit(
+            action="collector_transfer.inventory_photo_registered",
+            entity_type="collector_photo",
+            entity_id=photo.id,
+            project_id=project.id,
+            payload={"collector_id": str(physical.id), "sha256": photo.sha256},
+        )
+        self.session.commit()
+        return {
+            "collector_id": str(physical.id),
+            "collector_no": physical.collector_no,
+            "pool_status": physical.pool_status,
+            "photo": _photo_response(photo),
+        }
+
+    def list_inventory(
+        self,
+        *,
+        project_id: str,
+        status: str | None = None,
+    ) -> dict[str, object]:
+        project = self._project(project_id)
+        normalized_status = normalize_identifier(status)
+        known_statuses = ("direct", "available", "reserved", "used", "awaiting_photo")
+        if normalized_status and normalized_status not in known_statuses:
+            raise ValueError("status is invalid")
+
+        filters = (
+            PhysicalCollector.team_id == self.team_id,
+            PhysicalCollector.project_id == project.id,
+        )
+        query = select(PhysicalCollector).where(*filters)
+        if normalized_status:
+            query = query.where(PhysicalCollector.pool_status == normalized_status)
+        rows = list(
+            self.session.scalars(
+                query.order_by(
+                    PhysicalCollector.created_at.desc(),
+                    PhysicalCollector.id.desc(),
+                )
+            ).all()
+        )
+        grouped_counts = {
+            pool_status: int(count)
+            for pool_status, count in self.session.execute(
+                select(PhysicalCollector.pool_status, func.count(PhysicalCollector.id))
+                .where(*filters)
+                .group_by(PhysicalCollector.pool_status)
+            ).all()
+        }
+        stats = {pool_status: grouped_counts.get(pool_status, 0) for pool_status in known_statuses}
+        items = []
+        for row in rows:
+            photo = self._active_collector_photo(row.id)
+            items.append(
+                {
+                    "collector_id": str(row.id),
+                    "collector_no": row.collector_no,
+                    "pool_status": row.pool_status,
+                    "photo": _photo_response(photo),
+                    "last_scanned_at": row.last_scanned_at.isoformat() if row.last_scanned_at else None,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+            )
+        return {"items": items, "total": len(rows), "stats": stats}
+
     def list_runs(self, *, project_id: str | None = None) -> list[dict[str, object]]:
         query = select(CollectorTransferRun).where(CollectorTransferRun.team_id == self.team_id)
         if project_id:
@@ -511,6 +809,43 @@ class PostgresCollectorTransferService:
             )
             .order_by(CollectorPhoto.created_at.desc(), CollectorPhoto.id.desc())
         )
+
+    def _locked_project_physical_collector(
+        self,
+        *,
+        project_id: UUID,
+        collector_no: str,
+        initial_status: str,
+    ) -> PhysicalCollector:
+        query = (
+            select(PhysicalCollector)
+            .where(
+                PhysicalCollector.team_id == self.team_id,
+                PhysicalCollector.project_id == project_id,
+                PhysicalCollector.collector_no == collector_no,
+            )
+            .with_for_update()
+        )
+        physical = self.session.scalar(query)
+        if physical is not None:
+            return physical
+
+        candidate = PhysicalCollector(
+            team_id=self.team_id,
+            project_id=project_id,
+            collector_no=collector_no,
+            pool_status=initial_status,
+        )
+        try:
+            with self.session.begin_nested():
+                self.session.add(candidate)
+                self.session.flush()
+        except IntegrityError:
+            physical = self.session.scalar(query)
+            if physical is None:
+                raise
+            return physical
+        return candidate
 
     def _locked_physical_collector_for_scan(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -167,6 +168,37 @@ def service(session: Session) -> PostgresCollectorTransferService:
     return PostgresCollectorTransferService(session=session, team_id="team-1", actor="operator")
 
 
+def project_with_collector_requirement(
+    session: Session,
+    *,
+    collector_no: str,
+) -> tuple[Project, MaterialGroup]:
+    project = session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        terminal=f"T-{collector_no}",
+        meter_match_key=f"M-{collector_no}",
+        display_meter_no=f"M-{collector_no}",
+        installation_address="项目库存测试地址",
+        raw_data={"collector": collector_no},
+    )
+    session.add(group)
+    session.commit()
+    return project, group
+
+
+def stored_photo(sha256_value: str) -> dict[str, object]:
+    return {
+        "sha256": sha256_value,
+        "storage_key": f"collector-inventory/{sha256_value}.jpg",
+        "url": f"/static/uploads/collector-inventory/{sha256_value}.jpg",
+        "storage_type": "local_upload",
+        "content_type": "image/jpeg",
+    }
+
+
 def actor_user(session: Session, *, username: str = "operator") -> User:
     user = User(
         id=uuid4(),
@@ -178,6 +210,323 @@ def actor_user(session: Session, *, username: str = "operator") -> User:
     session.add(user)
     session.commit()
     return user
+
+
+def test_non_direct_project_scan_leaves_no_business_rows(db_session: Session) -> None:
+    """Catches persisting a server draft before a non-matching collector has a valid photo."""
+    current_project_id = project_id(db_session)
+
+    result = service(db_session).scan_inventory(
+        project_id=str(current_project_id),
+        collector_no=" POOL-001 ",
+    )
+
+    assert result["decision"] == "pool_needs_photo"
+    assert result["collector_no"] == "POOL-001"
+    assert db_session.scalar(select(func.count(PhysicalCollector.id))) == 0
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 0
+    assert db_session.scalar(select(func.count(CollectorScanEvent.id))) == 0
+    assert db_session.scalar(select(func.count(AuditLog.id))) == 0
+
+
+def test_direct_project_scan_without_photo_persists_only_confirmation(db_session: Session) -> None:
+    """Catches admitting a same-number collector to the random pool before its direct photo exists."""
+    project, _group = project_with_collector_requirement(db_session, collector_no="DIRECT-001")
+
+    result = service(db_session).scan_inventory(
+        project_id=str(project.id),
+        collector_no="DIRECT-001",
+    )
+
+    physical = db_session.scalar(select(PhysicalCollector))
+    assert result["decision"] == "direct_needs_photo"
+    assert result["add_to_pool"] is False
+    assert physical.project_id == project.id
+    assert physical.pool_status == "direct"
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 0
+    assert db_session.scalar(select(func.count(CollectorScanEvent.id))) == 1
+
+
+def test_non_direct_photo_atomically_creates_available_inventory(db_session: Session) -> None:
+    """Catches saving only the barcode or leaving a photographed replacement unavailable."""
+    current_project_id = project_id(db_session)
+
+    result = service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no="POOL-001",
+        original_filename="POOL-001.jpg",
+        stored=stored_photo("a1" * 32),
+        byte_size=128,
+    )
+
+    physical = db_session.scalar(select(PhysicalCollector))
+    photo = db_session.scalar(select(CollectorPhoto))
+    assert result["pool_status"] == "available"
+    assert physical.project_id == current_project_id
+    assert physical.pool_status == "available"
+    assert photo.project_id == current_project_id
+    assert photo.physical_collector_id == physical.id
+    assert db_session.scalar(select(func.count(CollectorScanEvent.id))) == 1
+
+
+def test_project_inventory_same_number_and_photo_are_idempotent(db_session: Session) -> None:
+    """Catches duplicate retries creating a second physical collector or collector photo."""
+    current_project_id = project_id(db_session)
+    first = service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no="POOL-IDEMPOTENT",
+        original_filename="POOL-IDEMPOTENT.jpg",
+        stored=stored_photo("a2" * 32),
+        byte_size=128,
+    )
+
+    second = service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no="POOL-IDEMPOTENT",
+        original_filename="retry.jpg",
+        stored=stored_photo("a2" * 32),
+        byte_size=128,
+    )
+
+    assert second["collector_id"] == first["collector_id"]
+    assert second["photo"]["id"] == first["photo"]["id"]
+    assert db_session.scalar(select(func.count(PhysicalCollector.id))) == 1
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 1
+
+
+def test_project_inventory_rejects_same_photo_for_another_collector(db_session: Session) -> None:
+    """Catches one physical collector photo being admitted under two barcodes in one project."""
+    current_project_id = project_id(db_session)
+    service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no="POOL-FIRST",
+        original_filename="POOL-FIRST.jpg",
+        stored=stored_photo("a3" * 32),
+        byte_size=128,
+    )
+
+    with pytest.raises(CollectorPhotoConflictError, match="another physical collector"):
+        service(db_session).register_inventory(
+            project_id=str(current_project_id),
+            collector_no="POOL-SECOND",
+            original_filename="POOL-SECOND.jpg",
+            stored=stored_photo("a3" * 32),
+            byte_size=128,
+        )
+
+    db_session.rollback()
+    assert db_session.scalar(select(func.count(PhysicalCollector.id))) == 1
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 1
+
+
+def test_project_inventory_rejects_a_second_active_photo_for_one_collector(
+    db_session: Session,
+) -> None:
+    """Catches a retry with different image content bypassing the one-active-photo invariant."""
+    current_project_id = project_id(db_session)
+    service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no="POOL-ONE-PHOTO",
+        original_filename="first.jpg",
+        stored=stored_photo("a4" * 32),
+        byte_size=128,
+    )
+
+    with pytest.raises(CollectorPhotoConflictError, match="active photo"):
+        service(db_session).register_inventory(
+            project_id=str(current_project_id),
+            collector_no="POOL-ONE-PHOTO",
+            original_filename="second.jpg",
+            stored=stored_photo("a5" * 32),
+            byte_size=128,
+        )
+
+    db_session.rollback()
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 1
+
+
+def test_project_inventory_allows_same_number_and_photo_in_two_projects(
+    db_session: Session,
+) -> None:
+    """Catches accidentally retaining team-wide barcode or SHA uniqueness."""
+    first_project_id = project_id(db_session)
+    second_project = Project(
+        id=uuid4(),
+        team_id="team-1",
+        code=f"P-{uuid4().hex[:8]}",
+        name="第二个项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(second_project)
+    db_session.commit()
+
+    first = service(db_session).register_inventory(
+        project_id=str(first_project_id),
+        collector_no="SAME-001",
+        original_filename="same.jpg",
+        stored=stored_photo("a6" * 32),
+        byte_size=128,
+    )
+    second = service(db_session).register_inventory(
+        project_id=str(second_project.id),
+        collector_no="SAME-001",
+        original_filename="same.jpg",
+        stored=stored_photo("a6" * 32),
+        byte_size=128,
+    )
+
+    assert first["collector_id"] != second["collector_id"]
+    assert db_session.scalar(select(func.count(PhysicalCollector.id))) == 2
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 2
+
+
+@pytest.mark.parametrize("terminal_status", ["reserved", "used"])
+def test_project_inventory_retry_never_demotes_consumed_status(
+    db_session: Session,
+    terminal_status: str,
+) -> None:
+    """Catches a repeated inventory upload returning consumed stock to the random pool."""
+    current_project_id = project_id(db_session)
+    sha256_value = ("a7" if terminal_status == "reserved" else "a8") * 32
+    registered = service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no=f"POOL-{terminal_status}",
+        original_filename="terminal.jpg",
+        stored=stored_photo(sha256_value),
+        byte_size=128,
+    )
+    physical = db_session.get(PhysicalCollector, UUID(registered["collector_id"]))
+    physical.pool_status = terminal_status
+    db_session.commit()
+
+    retried = service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no=physical.collector_no,
+        original_filename="retry.jpg",
+        stored=stored_photo(sha256_value),
+        byte_size=128,
+    )
+
+    assert retried["pool_status"] == terminal_status
+    assert db_session.get(PhysicalCollector, physical.id).pool_status == terminal_status
+
+
+def test_project_inventory_retry_never_demotes_direct_to_available(
+    db_session: Session,
+) -> None:
+    """Catches a direct confirmation entering the random pool after source data later changes."""
+    current_project_id = project_id(db_session)
+    physical = PhysicalCollector(
+        team_id="team-1",
+        project_id=current_project_id,
+        collector_no="DIRECT-PRESERVED",
+        pool_status="direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical, sha256="b5" * 32)
+
+    retried = service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no=physical.collector_no,
+        original_filename="retry.jpg",
+        stored={
+            "sha256": photo.sha256,
+            "storage_key": photo.object_key,
+            "storage_type": photo.storage_type,
+        },
+        byte_size=128,
+    )
+
+    assert retried["pool_status"] == "direct"
+    assert db_session.get(PhysicalCollector, physical.id).pool_status == "direct"
+
+
+def test_project_inventory_list_is_project_scoped_and_filters_available_only(
+    db_session: Session,
+) -> None:
+    """Catches list or pool candidates mixing direct/legacy rows or another project."""
+    current_project_id = project_id(db_session)
+    project_with_collector_requirement(db_session, collector_no="DIRECT-LIST")
+    service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no="DIRECT-LIST",
+        original_filename="direct.jpg",
+        stored=stored_photo("a9" * 32),
+        byte_size=128,
+    )
+    service(db_session).register_inventory(
+        project_id=str(current_project_id),
+        collector_no="POOL-LIST",
+        original_filename="pool.jpg",
+        stored=stored_photo("b1" * 32),
+        byte_size=128,
+    )
+    db_session.add(
+        PhysicalCollector(
+            team_id="team-1",
+            project_id=current_project_id,
+            collector_no="LEGACY-LIST",
+            pool_status="awaiting_photo",
+        )
+    )
+    other_project = Project(
+        id=uuid4(),
+        team_id="team-1",
+        code=f"P-{uuid4().hex[:8]}",
+        name="隔离项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(other_project)
+    db_session.flush()
+    db_session.add(
+        PhysicalCollector(
+            team_id="team-1",
+            project_id=other_project.id,
+            collector_no="OTHER-AVAILABLE",
+            pool_status="available",
+        )
+    )
+    db_session.commit()
+
+    complete = service(db_session).list_inventory(project_id=str(current_project_id))
+    available = service(db_session).list_inventory(
+        project_id=str(current_project_id),
+        status="available",
+    )
+
+    assert complete["total"] == 3
+    assert complete["stats"] == {
+        "direct": 1,
+        "available": 1,
+        "reserved": 0,
+        "used": 0,
+        "awaiting_photo": 1,
+    }
+    assert [item["collector_no"] for item in available["items"]] == ["POOL-LIST"]
+    assert available["total"] == 1
+
+
+def test_archived_project_inventory_request_has_zero_side_effects(db_session: Session) -> None:
+    """Catches archived projects accepting new inventory after being taken out of service."""
+    project = db_session.get(Project, project_id(db_session))
+    project.status = ProjectStatus.ARCHIVED
+    project.archived_at = datetime.now(UTC)
+    db_session.commit()
+
+    with pytest.raises(KeyError):
+        service(db_session).register_inventory(
+            project_id=str(project.id),
+            collector_no="ARCHIVED-001",
+            original_filename="archived.jpg",
+            stored=stored_photo("b2" * 32),
+            byte_size=128,
+        )
+
+    assert db_session.scalar(select(func.count(PhysicalCollector.id))) == 0
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 0
 
 
 def test_existing_groups_project_to_only_the_two_confirmed_install_photo_slots() -> None:
@@ -316,6 +665,66 @@ class _PhysicalCollectorConflictSession:
         self.commit_count += 1
 
 
+class _ProjectInventoryNumberConflictSession:
+    def __init__(self, winner: SimpleNamespace) -> None:
+        self.winner = winner
+        self.physical_lookup_count = 0
+        self.added: list[object] = []
+        self.flush_count = 0
+        self.commit_count = 0
+
+    def scalar(self, statement: object) -> object | None:
+        statement_text = str(statement)
+        if "physical_collectors.collector_no" in statement_text:
+            self.physical_lookup_count += 1
+            return self.winner if self.physical_lookup_count > 1 else None
+        return None
+
+    def add(self, record: object) -> None:
+        self.added.append(record)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+        if self.flush_count == 1:
+            raise IntegrityError("duplicate project collector", {}, RuntimeError("unique constraint"))
+
+    def begin_nested(self) -> _NestedTransaction:
+        return _NestedTransaction()
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+
+class _ProjectInventoryPhotoConflictSession:
+    def __init__(self, winner_photo: SimpleNamespace) -> None:
+        self.winner_photo = winner_photo
+        self.sha_lookup_count = 0
+        self.added: list[object] = []
+        self.flush_count = 0
+        self.commit_count = 0
+
+    def scalar(self, statement: object) -> object | None:
+        statement_text = str(statement)
+        if "collector_photos.sha256" in statement_text:
+            self.sha_lookup_count += 1
+            return self.winner_photo if self.sha_lookup_count > 1 else None
+        return None
+
+    def add(self, record: object) -> None:
+        self.added.append(record)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+        if self.flush_count == 1:
+            raise IntegrityError("duplicate project photo", {}, RuntimeError("unique constraint"))
+
+    def begin_nested(self) -> _NestedTransaction:
+        return _NestedTransaction()
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+
 def test_scan_recovers_the_physical_collector_that_won_a_unique_constraint_race(
     monkeypatch,
 ) -> None:
@@ -351,6 +760,90 @@ def test_scan_recovers_the_physical_collector_that_won_a_unique_constraint_race(
 
     assert result["collector_id"] == str(winner.id)
     assert result["pool_status"] == "awaiting_photo"
+    assert session.commit_count == 1
+
+
+def test_project_inventory_registration_recovers_number_uniqueness_race(
+    monkeypatch,
+) -> None:
+    """Catches a concurrent first registration surfacing a raw unique-constraint failure."""
+    project = SimpleNamespace(id=UUID("22222222-2222-2222-2222-222222222222"))
+    winner = SimpleNamespace(
+        id=UUID("33333333-3333-3333-3333-333333333333"),
+        collector_no="POOL-RACE",
+        pool_status="available",
+        last_scanned_at=None,
+    )
+    session = _ProjectInventoryNumberConflictSession(winner)
+    transfer = PostgresCollectorTransferService(
+        session=session,
+        team_id="team-1",
+        actor="operator",
+    )
+    monkeypatch.setattr(transfer, "_project", lambda _project_id: project)
+    monkeypatch.setattr(transfer, "_project_collector_numbers", lambda _project_id: frozenset())
+    monkeypatch.setattr(transfer, "_actor_user_id", lambda: None)
+    monkeypatch.setattr(transfer, "_audit", lambda **_payload: None)
+
+    result = transfer.register_inventory(
+        project_id=str(project.id),
+        collector_no="POOL-RACE",
+        original_filename="POOL-RACE.jpg",
+        stored=stored_photo("b3" * 32),
+        byte_size=128,
+    )
+
+    assert result["collector_id"] == str(winner.id)
+    assert result["pool_status"] == "available"
+    assert session.commit_count == 1
+
+
+def test_project_inventory_registration_recovers_same_collector_photo_race(
+    monkeypatch,
+) -> None:
+    """Catches a concurrent identical upload surfacing a raw project-SHA uniqueness error."""
+    project = SimpleNamespace(id=UUID("22222222-2222-2222-2222-222222222222"))
+    physical = SimpleNamespace(
+        id=UUID("33333333-3333-3333-3333-333333333333"),
+        collector_no="POOL-PHOTO-RACE",
+        pool_status="available",
+        last_scanned_at=None,
+    )
+    winner_photo = SimpleNamespace(
+        id=UUID("44444444-4444-4444-4444-444444444444"),
+        physical_collector_id=physical.id,
+        sha256="b4" * 32,
+        object_key="collector-inventory/winner.jpg",
+        image_url="/static/uploads/collector-inventory/winner.jpg",
+        storage_type="local_upload",
+        content_type="image/jpeg",
+    )
+    session = _ProjectInventoryPhotoConflictSession(winner_photo)
+    transfer = PostgresCollectorTransferService(
+        session=session,
+        team_id="team-1",
+        actor="operator",
+    )
+    monkeypatch.setattr(transfer, "_project", lambda _project_id: project)
+    monkeypatch.setattr(transfer, "_project_collector_numbers", lambda _project_id: frozenset())
+    monkeypatch.setattr(
+        transfer,
+        "_locked_project_physical_collector",
+        lambda **_payload: physical,
+    )
+    monkeypatch.setattr(transfer, "_actor_user_id", lambda: None)
+    monkeypatch.setattr(transfer, "_audit", lambda **_payload: None)
+
+    result = transfer.register_inventory(
+        project_id=str(project.id),
+        collector_no=physical.collector_no,
+        original_filename="POOL-PHOTO-RACE.jpg",
+        stored=stored_photo("b4" * 32),
+        byte_size=128,
+    )
+
+    assert result["photo"]["id"] == str(winner_photo.id)
+    assert result["collector_id"] == str(physical.id)
     assert session.commit_count == 1
 
 
