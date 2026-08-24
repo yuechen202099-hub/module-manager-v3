@@ -143,6 +143,14 @@ def load_v321_release_verifier():
     return module
 
 
+def test_release_builder_excludes_runtime_uploads_before_recursive_app_copy() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+
+    assert 'if ($Source -eq "v2-api\\app")' in build_script
+    assert "robocopy" in build_script
+    assert '"static\\uploads"' in build_script
+
+
 def write_release_archive(
     verifier,
     archive_path: Path,

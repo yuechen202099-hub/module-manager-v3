@@ -203,6 +203,15 @@ function Copy-ReleaseItem {
     if ($parent) {
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
     }
+    if ($Source -eq "v2-api\app") {
+        $appSource = Join-Path $root $Source
+        $runtimeUploads = Join-Path $appSource "static\uploads"
+        & robocopy $appSource $target /E /XD $runtimeUploads /NFL /NDL /NJH /NJS /NP
+        if ($LASTEXITCODE -gt 7) {
+            throw "Unable to copy application source while excluding runtime uploads. robocopy exit code: $LASTEXITCODE"
+        }
+        return
+    }
     Copy-Item -Recurse -Force -LiteralPath (Join-Path $root $Source) -Destination $target
 }
 
