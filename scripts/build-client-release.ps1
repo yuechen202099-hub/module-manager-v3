@@ -149,7 +149,11 @@ $releaseVerifiers = @(
     "scripts\verify_v3_2_5_release.py"
 )
 foreach ($releaseVerifier in $releaseVerifiers) {
-    & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
+    if ($releaseVerifier -eq "scripts\verify_v3_2_5_release.py") {
+        & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier) --phase source
+    } else {
+        & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "V3.2.5 release gate failed: $releaseVerifier"
     }

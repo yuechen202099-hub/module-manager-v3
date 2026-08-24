@@ -35,9 +35,13 @@ def test_parses_current_deployed_baseline_and_release_candidate_markers() -> Non
 def test_cli_parses_version_and_rejects_unknown_arguments() -> None:
     verifier = load_verifier()
 
-    assert verifier.parse_args(["--version", "V3.2.5"]).version == "V3.2.5"
+    args = verifier.parse_args(["--version", "V3.2.5", "--phase", "attestation"])
+    assert args.version == "V3.2.5"
+    assert args.phase == "attestation"
     with pytest.raises(SystemExit):
-        verifier.parse_args(["--version", "V3.2.5", "--unknown"])
+        verifier.parse_args(["--version", "V3.2.5", "--phase", "attestation", "--unknown"])
+    with pytest.raises(SystemExit):
+        verifier.parse_args(["--version", "V3.2.5"])
 
 
 def test_cli_version_must_match_the_release_candidate() -> None:
@@ -52,7 +56,7 @@ def test_cli_version_must_match_the_release_candidate() -> None:
 def test_cli_verifies_the_current_release_contract() -> None:
     verifier = load_verifier()
 
-    assert verifier.main(["--version", "V3.2.5"]) == 0
+    assert verifier.main(["--version", "V3.2.5", "--phase", "attestation"]) == 0
 
 
 def test_v323_nested_release_inputs_accept_parent_directory_copy_semantics() -> None:
@@ -133,9 +137,8 @@ def test_accepts_pending_candidate_after_local_verification() -> None:
 
 def test_pending_v325_record_accepts_historical_v324_reconciliation_evidence() -> None:
     verifier = load_verifier()
-    record = (ROOT / "ops" / "releases" / "V3.2.5.md").read_text(encoding="utf-8")
 
-    verifier.candidate_release_record_is_pending(record, "V3.2.5", "V3.2.2")
+    verifier.verify_v325_phase("attestation")
 
 
 @pytest.mark.parametrize(

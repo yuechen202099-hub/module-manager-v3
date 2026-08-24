@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ast
+import argparse
 import copy
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import tomllib
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +27,11 @@ DEPLOYED_BASELINE = "V3.2.2"
 MAINTENANCE_BRANCH = "production/V3/3.2.5"
 MIGRATION_REVISION = "20260724_0014"
 RELEASE_PATH = "ops/releases/V3.2.5.md"
+PACKAGED_SOURCE_COMMIT = "ef4394c687610c2ba4f65423c4801f1138c7ad41"
+PACKAGE_PATH = "build/server-release/module-manager-v2-server-3.2.5.zip"
+PACKAGE_SIZE = 1735393
+PACKAGE_SHA256 = "f741aa8d58947c4cc3490d3dc72ea1b3ae99847180a20ee6e41153f2bd55c6b7"
+VERIFICATION_PHASES = frozenset(("source", "attestation"))
 MIGRATION_PATH = "v2-api/scripts/migrate_external_photos_to_oss.py"
 MIGRATION_TEST_PATH = "v2-api/tests/test_migrate_external_photos_to_oss.py"
 V325_REQUIRED_FILES = (
@@ -808,6 +816,16 @@ if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "{MAINTENANCE_BRANCH}") {{
         )
 
 
+def check_packaging_source_phase_contract(builder: str, failures: list[str]) -> None:
+    expected_command = (
+        '& .\\.venv\\Scripts\\python.exe (Join-Path $root $releaseVerifier) --phase source'
+    )
+    if builder.count(expected_command) != 1:
+        failures.append(
+            "scripts/build-client-release.ps1: V3.2.5 packaging gate must explicitly use --phase source"
+        )
+
+
 def _check_v325_package_contract(root: Path, failures: list[str]) -> None:
     verifier_path = "scripts/verify-client-release.py"
     verifier_tree = legacy.legacy._parse_python(root, verifier_path, failures)
@@ -835,6 +853,7 @@ def _check_v325_package_contract(root: Path, failures: list[str]) -> None:
     builder_path = "scripts/build-client-release.ps1"
     builder = legacy.legacy._read(root, builder_path, failures)
     _check_packaging_branch_contract(builder, failures)
+    check_packaging_source_phase_contract(builder, failures)
     for member in (
         "scripts\\verify_v3_2_5_release.py",
         "scripts\\test_verify_v3_2_5_release.py",
@@ -869,14 +888,131 @@ def _check_v325_package_contract(root: Path, failures: list[str]) -> None:
             failures.append(f"{sop_verifier_path}: release input missing: {member}")
 
 
-def _check_release_record_and_sop(root: Path, failures: list[str]) -> None:
+def v325_release_lifecycle_failures(release: str, phase: str) -> list[str]:
+    if phase not in VERIFICATION_PHASES:
+        return [f"verification phase must be one of {sorted(VERIFICATION_PHASES)}"]
+    expected = {
+        "Status": "pending",
+        "Local Verification": "not run" if phase == "source" else "passed",
+        "Package": "pending" if phase == "source" else "passed",
+        "Production Deployment": "pending",
+        "Production Reconciliation": "pending",
+    }
+    failures: list[str] = []
+    for field, value in expected.items():
+        values = re.findall(rf"(?m)^- {re.escape(field)}:\s*(.*?)\s*$", release)
+        if values != [value]:
+            failures.append(f"{RELEASE_PATH}: {field} must equal {value} exactly once for {phase}")
+    return failures
+
+
+def _git_output(root: Path, args: list[str], failures: list[str], description: str) -> str | None:
+    result = subprocess.run(
+        ["git", *args], cwd=root, capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        failures.append(f"Git {description} failed: {result.stderr.strip() or result.stdout.strip()}")
+        return None
+    return result.stdout.strip()
+
+
+def attestation_commit_for_source(
+    root: Path, source_commit: str, release_path: str, failures: list[str]
+) -> str | None:
+    if _git_output(root, ["merge-base", "--is-ancestor", source_commit, "HEAD"], failures, "ancestry check") is None:
+        return None
+    history = _git_output(
+        root,
+        ["rev-list", "--ancestry-path", "--parents", f"{source_commit}..HEAD"],
+        failures,
+        "attestation ancestry inspection",
+    )
+    if history is None:
+        return None
+    record_only_candidates: list[tuple[str, list[str]]] = []
+    for line in history.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        changed_paths = _git_output(
+            root,
+            ["diff-tree", "--no-commit-id", "--name-only", "-r", parts[0]],
+            failures,
+            "attestation change inspection",
+        )
+        if changed_paths is None:
+            return None
+        if {path for path in changed_paths.splitlines() if path} == {release_path}:
+            record_only_candidates.append((parts[0], parts[1:]))
+    if not record_only_candidates:
+        failures.append("V3.2.5 attestation commit's only change must be ops/releases/V3.2.5.md")
+        return None
+    if len(record_only_candidates) != 1:
+        failures.append("V3.2.5 attestation must have exactly one release-record-only commit")
+        return None
+    attestation_commit, parents = record_only_candidates[0]
+    if parents != [source_commit]:
+        failures.append("V3.2.5 attestation must be exactly one immediate child of the packaged source commit")
+        return None
+    return attestation_commit
+
+
+def check_package_attestation(
+    package_path: Path,
+    source_commit: str,
+    expected_size: int,
+    expected_sha256: str,
+    failures: list[str],
+) -> None:
+    if not package_path.is_file():
+        failures.append(f"{package_path}: V3.2.5 attestation package is missing")
+        return
+    if package_path.stat().st_size != expected_size:
+        failures.append(f"{package_path}: V3.2.5 attestation package size does not match")
+    digest = hashlib.sha256(package_path.read_bytes()).hexdigest()
+    if digest != expected_sha256:
+        failures.append(f"{package_path}: V3.2.5 attestation package SHA256 does not match")
+    try:
+        with zipfile.ZipFile(package_path) as archive:
+            embedded_source = archive.read("SOURCE_COMMIT").decode("ascii").strip().lower()
+    except (KeyError, OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+        failures.append(f"{package_path}: V3.2.5 attestation package SOURCE_COMMIT is unreadable: {exc}")
+        return
+    if embedded_source != source_commit:
+        failures.append(f"{package_path}: embedded source commit does not match the release record")
+
+
+def _check_v325_attestation(root: Path, release: str, failures: list[str]) -> None:
+    source_matches = re.findall(
+        r"(?m)^- Final reviewed and packaged source commit: `([0-9a-f]{40})`;",
+        release,
+    )
+    if source_matches != [PACKAGED_SOURCE_COMMIT]:
+        failures.append(f"{RELEASE_PATH}: packaged source commit must equal {PACKAGED_SOURCE_COMMIT} exactly once")
+        return
+    attestation_commit = attestation_commit_for_source(root, PACKAGED_SOURCE_COMMIT, RELEASE_PATH, failures)
+    if attestation_commit is not None:
+        attested_release = _git_output(
+            root,
+            ["show", f"{attestation_commit}:{RELEASE_PATH}"],
+            failures,
+            "attestation release record inspection",
+        )
+        if attested_release is not None:
+            failures.extend(v325_release_lifecycle_failures(attested_release, "attestation"))
+    check_package_attestation(
+        root / PACKAGE_PATH,
+        PACKAGED_SOURCE_COMMIT,
+        PACKAGE_SIZE,
+        PACKAGE_SHA256,
+        failures,
+    )
+
+
+def _check_release_record_and_sop(root: Path, phase: str, failures: list[str]) -> None:
     release = legacy.legacy._read(root, RELEASE_PATH, failures)
     fields = {
         "Status": "pending",
-        "Local Verification": "not run",
-        "Package": "pending",
-        "Production Deployment": "pending",
-        "Production Reconciliation": "pending",
         "Rollback target": DEPLOYED_BASELINE,
         "Candidate branch": f"`{MAINTENANCE_BRANCH}`",
         "Deployed production baseline": f"`{DEPLOYED_BASELINE}`",
@@ -886,6 +1022,7 @@ def _check_release_record_and_sop(root: Path, failures: list[str]) -> None:
         values = re.findall(rf"(?m)^- {re.escape(field)}:\s*(.*?)\s*$", release)
         if values != [expected]:
             failures.append(f"{RELEASE_PATH}: {field} must equal {expected} exactly once")
+    failures.extend(v325_release_lifecycle_failures(release, phase))
     if MIGRATION_REVISION not in release:
         failures.append(f"{RELEASE_PATH}: release identity missing: {MIGRATION_REVISION}")
 
@@ -952,7 +1089,7 @@ def _check_release_record_and_sop(root: Path, failures: list[str]) -> None:
         failures.append(f"{health_path}: production health check must probe every retired path and child")
 
 
-def collect_failures(root: Path) -> list[str]:
+def collect_failures(root: Path, phase: str) -> list[str]:
     root = Path(root)
     failures: list[str] = []
     for relative_path in V325_REQUIRED_FILES:
@@ -968,20 +1105,24 @@ def collect_failures(root: Path) -> list[str]:
     legacy._check_https_handler_compatibility(root, failures)
     _check_migration_contract(root, failures)
     _check_v325_package_contract(root, failures)
-    _check_release_record_and_sop(root, failures)
+    _check_release_record_and_sop(root, phase, failures)
+    if phase == "attestation":
+        _check_v325_attestation(root, legacy.legacy._read(root, RELEASE_PATH, failures), failures)
+    elif phase != "source":
+        failures.append(f"verification phase must be one of {sorted(VERIFICATION_PHASES)}")
     return failures
 
 
 def main(argv: list[str] | None = None) -> int:
-    if argv:
-        print("verify_v3_2_5_release.py does not accept positional arguments", file=sys.stderr)
-        return 2
-    failures = collect_failures(ROOT)
+    parser = argparse.ArgumentParser(description="Verify the V3.2.5 source or attestation release contract.")
+    parser.add_argument("--phase", required=True, choices=sorted(VERIFICATION_PHASES))
+    args = parser.parse_args(argv)
+    failures = collect_failures(ROOT, args.phase)
     if failures:
         for failure in failures:
             print(f"- {failure}", file=sys.stderr)
         return 1
-    print("[OK] V3.2.5 release contract")
+    print(f"[OK] V3.2.5 {args.phase} release contract")
     return 0
 
 
