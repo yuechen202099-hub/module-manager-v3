@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from io import BytesIO
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
-from openpyxl import Workbook
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, func, select
@@ -22,7 +20,6 @@ from app.domain.collector_transfer import PoolInsufficientError
 from app.models import (
     AuditLog,
     CollectorAssignment,
-    CollectorImportRow,
     CollectorMeterItem,
     CollectorPhoto,
     CollectorRequirement,
@@ -42,9 +39,7 @@ from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorPhotoConflictError,
     PostgresCollectorTransferService,
-    collector_no_from_photo_filename,
     meter_sources_from_groups,
-    read_collector_numbers_from_workbook,
 )
 
 
@@ -246,63 +241,6 @@ def test_projection_preserves_a_blank_terminal_group_in_its_own_blocked_snapshot
         "code": "terminal_missing",
         "message": "终端地址码为空",
     }
-
-
-def workbook_bytes(headers: list[str], rows: list[list[object]]) -> bytes:
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.append(headers)
-    for row in rows:
-        sheet.append(row)
-    buffer = BytesIO()
-    workbook.save(buffer)
-    return buffer.getvalue()
-
-
-def test_excel_inventory_import_preserves_leading_zeroes_and_compatible_headers() -> None:
-    """Catches numeric coercion or requiring only one exact customer spreadsheet header."""
-    rows = read_collector_numbers_from_workbook(
-        workbook_bytes(["编号", "扫码内容", "采集器"], [[1, "ignored", "0000123"], [2, "0000456", None]])
-    )
-
-    assert rows == ((2, "0000123"), (3, "0000456"))
-
-
-def test_excel_inventory_import_uses_simple_zero_fill_display_format_for_numeric_cells() -> None:
-    """Catches a formatted numeric collector identifier silently losing its leading zeroes."""
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.append(["采集器"])
-    sheet.append([123])
-    sheet["A2"].number_format = "000000"
-    buffer = BytesIO()
-    workbook.save(buffer)
-
-    rows = read_collector_numbers_from_workbook(buffer.getvalue())
-
-    assert rows == ((2, "000123"),)
-
-
-def test_excel_inventory_import_rejects_unformatted_numeric_identifiers() -> None:
-    """Catches a numeric cell being silently stringified when its display identity is ambiguous."""
-    rows = read_collector_numbers_from_workbook(workbook_bytes(["采集器"], [[123]]))
-
-    assert rows == ((2, ""),)
-
-
-def test_excel_inventory_import_preserves_blank_rows_for_diagnostics() -> None:
-    """Catches an empty collector cell disappearing before it can be persisted as invalid."""
-    rows = read_collector_numbers_from_workbook(
-        workbook_bytes(["采集器"], [["0000123"], [None], ["0000456"]])
-    )
-
-    assert rows == ((2, "0000123"), (3, ""), (4, "0000456"))
-
-
-def test_photo_filename_is_a_collector_number_not_a_storage_path() -> None:
-    """Catches losing leading zeroes or accepting path traversal as a collector number."""
-    assert collector_no_from_photo_filename("0000123.jpg") == "0000123"
-    assert collector_no_from_photo_filename("../0000123.jpg") == ""
 
 
 class _EmptyScalarResult:
@@ -763,83 +701,6 @@ def test_single_photo_reuse_deletes_the_new_unreferenced_saved_object(
         ).all()
         assert len(photos) == 1
         assert photos[0].object_key == old_photo.object_key
-
-
-def test_batch_route_persists_one_diagnostic_per_excel_row_and_photo_input(
-    db_session: Session,
-    monkeypatch,
-) -> None:
-    """Catches blank rows, invalid filenames, or duplicate-number photos disappearing from diagnostics."""
-    run = transfer_run(db_session)
-    deleted: list[str] = []
-    monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
-
-    def save_photo(**kwargs):
-        filename = str(kwargs["filename"])
-        suffix = "jpg" if filename.endswith(".jpg") else "png"
-        return {
-            "url": f"/static/uploads/collector-transfer/{filename}",
-            "sha256": ("a" if suffix == "jpg" else "b") * 64,
-            "storage_type": "local_upload",
-            "storage_key": f"collector-transfer/{filename}",
-            "content_type": kwargs["content_type"],
-            "created_new": True,
-        }
-
-    monkeypatch.setattr(routes, "save_image_bytes", save_photo)
-    monkeypatch.setattr(
-        routes,
-        "delete_saved_image",
-        lambda stored: deleted.append(str(stored["storage_key"])),
-    )
-    client = TestClient(main_module.create_app())
-
-    response = client.post(
-        f"/collector-transfer/runs/{run.id}/inventory/import",
-        headers=_route_auth_headers(),
-        files=[
-            (
-                "workbook",
-                (
-                    "collectors.xlsx",
-                    workbook_bytes(["采集器"], [["000123"], [None]]),
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                ),
-            ),
-            ("photos", ("folder/invalid.jpg", b"invalid-name", "image/jpeg")),
-            ("photos", ("000123.jpg", b"first", "image/jpeg")),
-            ("photos", ("000123.png", b"duplicate", "image/png")),
-        ],
-    )
-
-    assert response.status_code == 200
-    payload = response.json()["data"]
-    assert payload["total"] == 5
-    assert payload["inserted"] == 2
-    assert payload["invalid"] == 2
-    assert payload["reused"] == 1
-    assert [(item["input_kind"], item["outcome"]) for item in payload["rows"]] == [
-        ("excel", "inserted"),
-        ("excel", "invalid"),
-        ("photo", "invalid"),
-        ("photo", "inserted"),
-        ("photo", "reused"),
-    ]
-    with _route_session_factory(db_session)() as verification:
-        persisted = verification.scalars(
-            select(CollectorImportRow)
-            .where(CollectorImportRow.run_id == run.id)
-            .order_by(CollectorImportRow.row_number, CollectorImportRow.id)
-        ).all()
-        assert len(persisted) == 5
-        assert [item.payload["input_kind"] for item in persisted] == [
-            "excel",
-            "excel",
-            "photo",
-            "photo",
-            "photo",
-        ]
-    assert deleted == ["collector-transfer/000123.png"]
 
 
 @pytest.mark.parametrize(("assignment_status", "physical_status", "requirement_status"), [("reserved", "reserved", "assigned"), ("used", "used", "used")])

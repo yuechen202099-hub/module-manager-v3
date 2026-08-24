@@ -46,7 +46,6 @@
 - `collector_scan_events`：每次网站扫码及系统判定，包含同号需求、是否要拍照和是否进池。
 - `collector_assignments`：需求与实物采集器的一对一持久化分配，区分 `direct` 与 `random`。
 - `collector_workbench_items`：甲方翻拍工作项，区分 `meter_install` 与 `collector_removal`，保存人工完成状态。
-- `collector_import_rows`：Excel/批量照片导入逐行诊断，不因坏行掩盖问题。
 
 数据库唯一约束负责最终兜底：一个有效需求只能有一个有效分配；一个实物采集器只能被一个有效分配占用；团队内实物采集器号唯一；单个实物的有效照片 SHA256 不重复。
 
@@ -104,20 +103,20 @@
 
 三个编号分别生成 Code 128 条形码，条码下方必须同时显示可人工核对的原始文本。页面只提供“上一项、下一项、标记已翻拍、撤销完成”；不提供甲方平台账号、表单或自动上传。
 
-## 8. Excel 与批量照片初始化
+## 8. 逐个扫码初始化
 
-手机网站是主入口，Excel 是初始化和备用入口。
+新采集器台账只通过手机网站逐个扫码建立，不提供 Excel 或照片批量导入。
 
-- Excel 至少接受 `采集器`、`采集器号`、`扫码内容` 三个兼容列名之一；编号统一按文本读取。
-- 批量照片以文件名（不含扩展名）作为采集器号。
-- 同号台账存在时复用，不创建重复采集器；同一 SHA256 的图片不重复写入。
-- 每一行都保存 `inserted`、`reused`、`needs_photo`、`invalid` 等诊断结果。
-- 导入只执行与手机扫码相同的判定规则，不绕过同号直配和一次性池约束。
+- 扫到同号采集器时，网站直接判断已有照片能否复用；能复用则无需拍照，也不加入替换池。
+- 扫到同号但无可用照片时，只对当前采集器逐个补拍，完成同号直配，不加入替换池。
+- 扫到非同号采集器时，只对当前采集器逐个补拍；照片确认后才加入一次性替换池。
+- 已登记号码和相同 SHA256 照片继续复用现有幂等与去重规则。
+- 系统原有总清单、施工资料等导入能力不受此业务边界影响。
 
 ## 9. 权限、安全与审计
 
 - 所有 API 使用认证 token 中的 `team_id`，不信任请求体或查询参数传入的团队和操作者。
-- 管理员可创建运行、批量导入、执行随机分配和回滚；施工员与管理员可使用手机扫码/补拍和翻拍工作台。
+- 管理员可创建运行、执行随机分配和回滚；施工员与管理员可使用手机逐个扫码/补拍和翻拍工作台。
 - 上传限制沿用系统图片大小、MIME 和存储安全规则；原始文件名只能作为展示和条码候选，不能直接作为路径。
 - 页面、API 和审计日志不得记录甲方平台密码或会话。
 - 新前缀 `/collector-transfer` 纳入生产认证中间件保护。
@@ -129,7 +128,6 @@
 - `GET /collector-transfer/runs/{run_id}`：运行诊断和终端汇总。
 - `POST /collector-transfer/runs/{run_id}/scan`：手机扫码并返回同号/补拍/入池判定。
 - `POST /collector-transfer/runs/{run_id}/collectors/{collector_id}/photo`：手机补拍。
-- `POST /collector-transfer/runs/{run_id}/inventory/import`：Excel 和按条码命名照片批量初始化。
 - `POST /collector-transfer/runs/{run_id}/allocate`：整笔随机一次性分配。
 - `GET /collector-transfer/runs/{run_id}/workbench`：终端工作台列表。
 - `GET /collector-transfer/runs/{run_id}/workbench/{terminal_id}`：终端完整新装/拆除数据。
@@ -145,6 +143,7 @@
 - 刷新与重启后随机分配保持不变。
 - 新装项严格只有 `module_meter` 和 `after_box` 两张来源照片。
 - 手机页面无甲方平台录入入口；桌面工作台无自动上传。
+- 手机页面无新采集器批量导入入口；已退役的 `/inventory/import` 返回 404。
 - 原 `material_groups`、`photos` 编号、照片和分类保持不变。
 
 ## 12. 上线边界

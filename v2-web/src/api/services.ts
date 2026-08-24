@@ -7,7 +7,6 @@ import type {
   ConstructionPriorityImportResult,
   ConstructionUploadPayload,
   CollectorInventoryDecision,
-  CollectorInventoryImportResult,
   CollectorAllocationResult,
   CollectorPhotoRegistration,
   CollectorTerminalWorkbench,
@@ -2934,20 +2933,6 @@ export async function uploadPhysicalCollectorPhoto(
   form.append('file', file)
   return formApi<CollectorPhotoRegistration>(
     `/collector-transfer/runs/${encodeURIComponent(runId)}/collectors/${encodeURIComponent(collectorId)}/photo`,
-    form,
-  )
-}
-
-export async function importCollectorInventory(
-  runId: string,
-  workbook: File | null,
-  photos: File[],
-): Promise<CollectorInventoryImportResult> {
-  const form = new FormData()
-  if (workbook) form.append('workbook', workbook)
-  for (const photo of photos) form.append('photos', photo)
-  return formApi<CollectorInventoryImportResult>(
-    `/collector-transfer/runs/${encodeURIComponent(runId)}/inventory/import`,
     form,
   )
 }

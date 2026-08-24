@@ -841,23 +841,6 @@ export type CollectorTerminalWorkbench = {
   items: CollectorWorkbenchItem[]
 }
 
-export type CollectorInventoryImportResult = {
-  batch_id: string
-  total: number
-  inserted: number
-  reused: number
-  needs_photo: number
-  invalid: number
-  rows: Array<{
-    row_number: number
-    input_kind: 'excel' | 'photo'
-    collector_no: string
-    outcome: 'inserted' | 'reused' | 'needs_photo' | 'invalid'
-    message: string
-    original_filename?: string
-  }>
-}
-
 export type CollectorWorkbenchItemStatus = {
   id: string
   status: 'pending' | 'completed'

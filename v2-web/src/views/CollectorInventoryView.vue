@@ -6,13 +6,11 @@ import {
   createCollectorTransferRun,
   fetchCollectorTransferProjects,
   fetchCollectorTransferRuns,
-  importCollectorInventory,
   scanPhysicalCollector,
   uploadPhysicalCollectorPhoto,
 } from '@/api/services'
 import type {
   CollectorInventoryDecision,
-  CollectorInventoryImportResult,
   CollectorTransferRun,
   Project,
 } from '@/api/types'
@@ -20,7 +18,7 @@ import { inventoryResultPresentation } from '@/features/collectorTransfer/state'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 
-type MobileView = 'scan' | 'records' | 'import'
+type MobileView = 'scan' | 'records'
 type CameraStatus = 'idle' | 'starting' | 'scanning' | 'unsupported' | 'denied'
 type UploadStatus = 'idle' | 'uploading' | 'success' | 'error'
 type DetectedBarcode = { rawValue?: string }
@@ -42,9 +40,6 @@ const cameraStatus = ref<CameraStatus>('idle')
 const scanFeedback = ref('')
 const video = ref<HTMLVideoElement | null>(null)
 const photoInput = ref<HTMLInputElement | null>(null)
-const workbookFile = ref<File | null>(null)
-const inventoryPhotos = ref<File[]>([])
-const importResult = ref<CollectorInventoryImportResult | null>(null)
 const setupOpen = ref(false)
 const selectedProjectId = ref('')
 const setupProjectId = ref('')
@@ -178,9 +173,6 @@ function clearRunContextState() {
   uploadMessage.value = ''
   completedDuplicateFeedback.value = ''
   completedCollectorNos.clear()
-  workbookFile.value = null
-  inventoryPhotos.value = []
-  importResult.value = null
   mobileView.value = 'scan'
   if (photoInput.value) photoInput.value.value = ''
 }
@@ -423,40 +415,6 @@ function releaseLocalPhotoUrl() {
   localPhotoUrl.value = ''
 }
 
-function selectWorkbook(event: Event) {
-  workbookFile.value = (event.target as HTMLInputElement).files?.[0] || null
-}
-
-function selectInventoryPhotos(event: Event) {
-  inventoryPhotos.value = Array.from((event.target as HTMLInputElement).files || [])
-}
-
-async function submitImport() {
-  if (!isAdmin.value) return
-  if (!selectedRunId.value) {
-    ElMessage.warning('请先选择盘点批次')
-    return
-  }
-  if (!workbookFile.value && !inventoryPhotos.value.length) {
-    ElMessage.warning('请选择 Excel 或按采集器号命名的照片')
-    return
-  }
-  loading.value = true
-  try {
-    importResult.value = await importCollectorInventory(
-      selectedRunId.value,
-      workbookFile.value,
-      inventoryPhotos.value,
-    )
-    ElMessage.success(`批量盘点完成，共处理 ${importResult.value.total} 条`)
-    await loadRuns(activeProject.value?.id || '')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '批量盘点失败')
-  } finally {
-    loading.value = false
-  }
-}
-
 </script>
 
 <template>
@@ -554,22 +512,11 @@ async function submitImport() {
           <div v-else class="empty-state">还没有扫码记录</div>
         </section>
 
-        <section v-else class="import-view">
-          <header><h1>Excel 与照片初始化</h1><p>照片文件名使用采集器号；导入仍执行与手机扫码相同的判定规则。</p></header>
-          <label class="upload-field"><span>采集器 Excel（可选）</span><input type="file" accept=".xlsx" @change="selectWorkbook" /><small>{{ workbookFile?.name || '支持“采集器 / 采集器号 / 扫码内容”列' }}</small></label>
-          <label class="upload-field"><span>按条码命名的照片（可多选）</span><input type="file" accept="image/*" multiple @change="selectInventoryPhotos" /><small>已选择 {{ inventoryPhotos.length }} 张</small></label>
-          <button class="primary-button wide" type="button" :disabled="loading" @click="submitImport">开始批量盘点</button>
-          <div v-if="importResult" class="import-summary">
-            <strong>处理完成 · {{ importResult.total }} 条</strong>
-            <div><span>新增 {{ importResult.inserted }}</span><span>复用 {{ importResult.reused }}</span><span>待补拍 {{ importResult.needs_photo }}</span><span>无效 {{ importResult.invalid }}</span></div>
-          </div>
-        </section>
       </main>
 
-      <nav class="bottom-nav" :class="{ 'two-items': !isAdmin }" aria-label="采集器盘点功能">
+      <nav class="bottom-nav two-items" aria-label="采集器盘点功能">
         <button :class="{ active: mobileView === 'scan' }" type="button" aria-label="扫码" @click="setMobileView('scan')"><span>⌗</span>扫码</button>
         <button :class="{ active: mobileView === 'records' }" type="button" aria-label="盘点记录" @click="setMobileView('records')"><span>▤</span>盘点记录</button>
-        <button v-if="isAdmin" :class="{ active: mobileView === 'import' }" type="button" aria-label="批量导入" @click="setMobileView('import')"><span>⇧</span>批量导入</button>
       </nav>
     </section>
 
@@ -754,9 +701,9 @@ button, input, select { font: inherit; }
 .upload-status.status-error { border-color: #e1b8b4; background: var(--red-soft); color: var(--red); }
 .result-actions { display: grid; gap: 9px; }
 
-.records-view, .import-view { padding: 18px 14px 24px; }
-.records-view header h1, .import-view header h1 { margin: 0 0 5px; font-size: 20px; }
-.records-view header p, .import-view header p { margin: 0 0 16px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.records-view { padding: 18px 14px 24px; }
+.records-view header h1 { margin: 0 0 5px; font-size: 20px; }
+.records-view header p { margin: 0 0 16px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .record-list { display: grid; gap: 8px; }
 .record-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr) 10px; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
 .record-index { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 9px; background: #edf1ed; font-size: 11px; font-weight: 800; }
@@ -767,14 +714,6 @@ button, input, select { font: inherit; }
 .record-list i.photo { background: #d48817; }
 .record-list i.pool { background: #c14d44; }
 .empty-state { display: grid; min-height: 280px; place-items: center; color: var(--muted); }
-
-.import-view { display: grid; gap: 12px; }
-.upload-field { display: grid; gap: 7px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
-.upload-field span { font-size: 13px; font-weight: 800; }
-.upload-field small { color: var(--muted); font-size: 11px; }
-.upload-field input { max-width: 100%; }
-.import-summary { display: grid; gap: 10px; padding: 14px; border: 1px solid #b8dcc7; border-radius: 12px; background: var(--green-soft); }
-.import-summary > div { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; color: var(--muted); font-size: 11px; }
 
 .bottom-nav { position: absolute; right: 0; bottom: 0; left: 0; z-index: 8; display: grid; height: 70px; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); background: rgba(255,255,255,.97); backdrop-filter: blur(16px); }
 .bottom-nav.two-items { grid-template-columns: repeat(2, 1fr); }
@@ -805,7 +744,7 @@ button, input, select { font: inherit; }
 
 @media (max-width: 390px) {
   .inventory-page, .phone-surface, .inventory-body, .scan-view, .manual-entry, .result-view, .collector-card { min-width: 0; max-width: 100%; }
-  .inventory-appbar, .batch-row, .manual-entry, .result-view, .records-view, .import-view { overflow-wrap: anywhere; }
+  .inventory-appbar, .batch-row, .manual-entry, .result-view, .records-view { overflow-wrap: anywhere; }
   .manual-entry > div { grid-template-columns: minmax(0, 1fr) auto; }
 }
 

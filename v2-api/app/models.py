@@ -945,24 +945,3 @@ class CollectorWorkbenchItem(Base, TimestampMixin):
     completed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     completed_by_username: Mapped[str | None] = mapped_column(String(64))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class CollectorImportRow(Base):
-    __tablename__ = "collector_import_rows"
-    __table_args__ = (
-        UniqueConstraint("run_id", "batch_id", "row_number", name="uq_collector_import_rows_batch_row"),
-        Index("ix_collector_import_rows_run_outcome", "run_id", "outcome"),
-    )
-
-    id: Mapped[uuid.UUID] = uuid_column()
-    run_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("collector_transfer_runs.id", ondelete="CASCADE"), nullable=False
-    )
-    team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
-    batch_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
-    collector_no: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
-    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

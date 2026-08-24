@@ -286,29 +286,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_collector_workbench_items_terminal_sort", "collector_workbench_items", ["terminal_id", "sort_order"])
 
-    op.create_table(
-        "collector_import_rows",
-        sa.Column("id", UUID, server_default=sa.text("gen_random_uuid()"), nullable=False),
-        sa.Column("run_id", UUID, nullable=False),
-        sa.Column("team_id", sa.String(length=64), nullable=False),
-        sa.Column("batch_id", sa.String(length=128), nullable=False),
-        sa.Column("row_number", sa.Integer(), nullable=False),
-        sa.Column("collector_no", sa.String(length=255), server_default="", nullable=False),
-        sa.Column("outcome", sa.String(length=32), nullable=False),
-        sa.Column("message", sa.Text(), server_default="", nullable=False),
-        sa.Column("payload", JSONB, server_default=sa.text("'{}'::jsonb"), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.ForeignKeyConstraint(["run_id"], ["collector_transfer_runs.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["team_id"], ["teams.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("run_id", "batch_id", "row_number", name="uq_collector_import_rows_batch_row"),
-    )
-    op.create_index("ix_collector_import_rows_run_outcome", "collector_import_rows", ["run_id", "outcome"])
-
-
 def downgrade() -> None:
-    op.drop_index("ix_collector_import_rows_run_outcome", table_name="collector_import_rows")
-    op.drop_table("collector_import_rows")
     op.drop_index("ix_collector_workbench_items_terminal_sort", table_name="collector_workbench_items")
     op.drop_table("collector_workbench_items")
     op.drop_index("uq_collector_assignments_physical_active", table_name="collector_assignments")

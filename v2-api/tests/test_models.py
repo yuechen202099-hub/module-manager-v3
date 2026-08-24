@@ -84,10 +84,14 @@ def test_collector_transfer_models_keep_source_data_in_sidecar_tables() -> None:
         "CollectorScanEvent": "collector_scan_events",
         "CollectorAssignment": "collector_assignments",
         "CollectorWorkbenchItem": "collector_workbench_items",
-        "CollectorImportRow": "collector_import_rows",
     }
 
     assert {name: getattr(models, name).__table__.name for name in expected} == expected
+
+
+def test_cancelled_collector_batch_import_has_no_persistence_model() -> None:
+    """Catches the retired batch-import ledger returning to the production schema."""
+    assert not hasattr(models, "CollectorImportRow")
 
 
 def test_collector_assignment_schema_prevents_double_consumption() -> None:

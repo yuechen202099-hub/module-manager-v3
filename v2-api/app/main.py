@@ -102,7 +102,6 @@ def create_app() -> FastAPI:
                 method == "POST"
                 and (
                     path == "/collector-transfer/runs"
-                    or path.endswith("/inventory/import")
                     or path.endswith("/allocate")
                     or path.endswith("/rollback")
                 )

@@ -4,15 +4,8 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from io import BytesIO
-from pathlib import Path
 from uuid import UUID
-from uuid import uuid4
-from xml.etree.ElementTree import ParseError as ElementTreeParseError
-from zipfile import BadZipFile
 
-from openpyxl import load_workbook
-from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -30,7 +23,6 @@ from app.domain.collector_transfer import (
 from app.models import (
     AuditLog,
     CollectorAssignment,
-    CollectorImportRow,
     CollectorMeterItem,
     CollectorPhoto,
     CollectorRequirement,
@@ -46,22 +38,6 @@ from app.models import (
     User,
 )
 from app.services.photo_storage import resolve_photo_for_response
-
-
-_WORKBOOK_PARSE_ERRORS: tuple[type[Exception], ...] = (
-    BadZipFile,
-    InvalidFileException,
-    OSError,
-    EOFError,
-    KeyError,
-    ElementTreeParseError,
-)
-try:
-    from lxml.etree import XMLSyntaxError as LxmlXMLSyntaxError
-except ImportError:
-    pass
-else:
-    _WORKBOOK_PARSE_ERRORS += (LxmlXMLSyntaxError,)
 
 
 class CollectorAllocationConflictError(ValueError):
@@ -178,62 +154,6 @@ def meter_sources_from_groups(groups: Iterable[object], photos: Iterable[object]
             )
         )
     return MeterSourceProjection(sources=tuple(sources), diagnostics=tuple(diagnostics))
-
-
-def read_collector_numbers_from_workbook(content: bytes) -> tuple[tuple[int, str], ...]:
-    if not content:
-        raise ValueError("Excel 文件为空")
-    try:
-        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
-        sheet = workbook.active
-        rows = sheet.iter_rows()
-        headers = [normalize_identifier(cell.value) for cell in next(rows, ())]
-        header_indexes = {header: index for index, header in enumerate(headers) if header}
-        preferred_indexes = [
-            header_indexes[header]
-            for header in ("采集器", "采集器号", "扫码内容")
-            if header in header_indexes
-        ]
-        if not preferred_indexes:
-            raise ValueError("Excel 缺少采集器、采集器号或扫码内容列")
-        result: list[tuple[int, str]] = []
-        for row_number, row in enumerate(rows, start=2):
-            collector_no = next(
-                (
-                    _collector_identifier_from_excel_cell(row[index])
-                    for index in preferred_indexes
-                    if index < len(row) and _collector_identifier_from_excel_cell(row[index])
-                ),
-                "",
-            )
-            result.append((row_number, collector_no))
-    except _WORKBOOK_PARSE_ERRORS as exc:
-        raise ValueError("Excel 文件无法解析") from exc
-    return tuple(result)
-
-
-def _collector_identifier_from_excel_cell(cell: object) -> str:
-    value = getattr(cell, "value", None)
-    if isinstance(value, str):
-        return normalize_identifier(value)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return ""
-    if isinstance(value, float) and not value.is_integer():
-        return ""
-    number = int(value)
-    if number < 0:
-        return ""
-    number_format = normalize_identifier(getattr(cell, "number_format", ""))
-    if not number_format or set(number_format) != {"0"}:
-        return ""
-    return f"{number:0{len(number_format)}d}"
-
-
-def collector_no_from_photo_filename(filename: str) -> str:
-    candidate = normalize_identifier(filename)
-    if not candidate or "/" in candidate or "\\" in candidate:
-        return ""
-    return normalize_identifier(Path(candidate).stem)
 
 
 def _uuid(value: object, field_name: str) -> UUID:
@@ -1551,190 +1471,3 @@ class PostgresCollectorTransferService:
         )
         self.session.commit()
         return {"id": str(item.id), "status": item.status, "completed_at": item.completed_at.isoformat() if item.completed_at else None}
-
-    def record_import_row(
-        self,
-        *,
-        run_id: str,
-        batch_id: str,
-        row_number: int,
-        collector_no: str,
-        outcome: str,
-        message: str = "",
-        payload: dict[str, object] | None = None,
-    ) -> None:
-        run = self._run(run_id)
-        self.session.add(
-            CollectorImportRow(
-                run_id=run.id,
-                team_id=self.team_id,
-                batch_id=batch_id,
-                row_number=row_number,
-                collector_no=normalize_identifier(collector_no),
-                outcome=outcome,
-                message=message,
-                payload=payload or {},
-            )
-        )
-
-    def import_inventory(
-        self,
-        *,
-        run_id: str,
-        rows: Sequence[tuple[int, str]],
-        photos_by_collector: Mapping[str, Mapping[str, object]],
-        photo_inputs: Sequence[Mapping[str, object]] = (),
-    ) -> dict[str, object]:
-        self._run(run_id)
-        batch_id = uuid4().hex
-        outcomes: list[dict[str, object]] = []
-        counters = {"inserted": 0, "reused": 0, "needs_photo": 0, "invalid": 0}
-        seen: set[str] = set()
-
-        def process_collector(
-            collector_no: str,
-            photo_payload: Mapping[str, object] | None,
-        ) -> tuple[str, str, dict[str, object], bool]:
-            try:
-                result = self.scan_collector(run_id=run_id, collector_no=collector_no)
-                photo_referenced = False
-                if photo_payload and result.get("requires_photo"):
-                    result = {
-                        **result,
-                        **self.register_photo(
-                            run_id=run_id,
-                            collector_id=str(result["collector_id"]),
-                            original_filename=str(
-                                photo_payload.get("original_filename") or f"{collector_no}.jpg"
-                            ),
-                            stored=(
-                                photo_payload.get("stored")
-                                if isinstance(photo_payload.get("stored"), Mapping)
-                                else {}
-                            ),
-                            byte_size=int(photo_payload.get("byte_size") or 0),
-                        ),
-                    }
-                    stored = photo_payload.get("stored")
-                    response_photo = result.get("photo")
-                    if isinstance(stored, Mapping) and isinstance(response_photo, Mapping):
-                        stored_key = normalize_identifier(stored.get("storage_key") or stored.get("url"))
-                        response_key = normalize_identifier(
-                            response_photo.get("object_key")
-                            or response_photo.get("storage_key")
-                            or response_photo.get("image_url")
-                        )
-                        photo_referenced = bool(stored_key and stored_key == response_key)
-                if result.get("requires_photo") and not photo_payload:
-                    return "needs_photo", "已登记，仍需手机补拍", result, False
-                if result.get("decision") == CollectorScanDecisionKind.DIRECT_REUSE.value:
-                    return "reused", "同号照片可直接复用", result, photo_referenced
-                return "inserted", "已按扫码规则登记", result, photo_referenced
-            except (KeyError, ValueError) as exc:
-                self.session.rollback()
-                return "invalid", str(exc), {}, False
-
-        def persist_diagnostic(
-            *,
-            row_number: int,
-            input_kind: str,
-            collector_no: str,
-            outcome: str,
-            message: str,
-            result: Mapping[str, object] | None = None,
-            original_filename: str = "",
-        ) -> None:
-            counters[outcome] += 1
-            diagnostic_payload = {**dict(result or {}), "input_kind": input_kind}
-            if original_filename:
-                diagnostic_payload["original_filename"] = original_filename
-            self.record_import_row(
-                run_id=run_id,
-                batch_id=batch_id,
-                row_number=int(row_number),
-                collector_no=collector_no,
-                outcome=outcome,
-                message=message,
-                payload=diagnostic_payload,
-            )
-            self.session.commit()
-            response_item: dict[str, object] = {
-                "row_number": int(row_number),
-                "input_kind": input_kind,
-                "collector_no": collector_no,
-                "outcome": outcome,
-                "message": message,
-            }
-            if original_filename:
-                response_item["original_filename"] = original_filename
-            outcomes.append(response_item)
-
-        processed: dict[str, tuple[str, str, dict[str, object], bool]] = {}
-        for row_number, raw_collector_no in rows:
-            collector_no = normalize_identifier(raw_collector_no)
-            if not collector_no:
-                outcome = "invalid"
-                message = "采集器号为空"
-                result: dict[str, object] = {}
-                photo_referenced = False
-            elif collector_no in seen:
-                outcome = "reused"
-                message = "批次内重复，已复用前一条结果"
-                result = {}
-                photo_referenced = False
-            else:
-                seen.add(collector_no)
-                outcome, message, result, photo_referenced = process_collector(
-                    collector_no,
-                    photos_by_collector.get(collector_no),
-                )
-                processed[collector_no] = (outcome, message, result, photo_referenced)
-            persist_diagnostic(
-                row_number=int(row_number),
-                input_kind="excel",
-                collector_no=collector_no,
-                outcome=outcome,
-                message=message,
-                result=result,
-            )
-
-        for photo_input in photo_inputs:
-            row_number = int(photo_input.get("row_number") or 0)
-            collector_no = normalize_identifier(photo_input.get("collector_no"))
-            original_filename = normalize_identifier(photo_input.get("original_filename"))
-            status = normalize_identifier(photo_input.get("status"))
-            if status == "invalid" or not collector_no:
-                outcome = "invalid"
-                message = normalize_identifier(photo_input.get("message")) or "照片文件名无效"
-                result = {}
-            elif status == "duplicate":
-                outcome = "reused"
-                message = normalize_identifier(photo_input.get("message")) or "同号照片已复用第一张"
-                result = {}
-            elif collector_no in processed:
-                prior_outcome, _prior_message, result, photo_referenced = processed[collector_no]
-                if prior_outcome == "invalid":
-                    outcome = "invalid"
-                    message = "关联采集器登记失败，照片未使用"
-                elif photo_referenced:
-                    outcome = "inserted"
-                    message = "照片已随 Excel 行登记"
-                else:
-                    outcome = "reused"
-                    message = "台账已有可复用照片，本次照片未使用"
-            else:
-                outcome, message, result, photo_referenced = process_collector(
-                    collector_no,
-                    photo_input,
-                )
-                processed[collector_no] = (outcome, message, result, photo_referenced)
-            persist_diagnostic(
-                row_number=row_number,
-                input_kind="photo",
-                collector_no=collector_no,
-                outcome=outcome,
-                message=message,
-                result=result,
-                original_filename=original_filename,
-            )
-        return {"batch_id": batch_id, "total": len(outcomes), **counters, "rows": outcomes}

@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from io import BytesIO
 from types import SimpleNamespace
 from uuid import UUID
-from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from openpyxl import Workbook
 
 from app import main as main_module
 from app.api.routes import collector_transfer as routes
@@ -72,11 +69,6 @@ class FakeCollectorTransferService:
     def register_photo(self, **payload) -> dict:
         self.calls.append(("register_photo", payload))
         return {"collector_id": payload["collector_id"], "pool_status": "available"}
-
-    def import_inventory(self, **payload) -> dict:
-        self.calls.append(("import_inventory", payload))
-        return {"batch_id": "batch-1", "total": len(payload["rows"]), "invalid": 0}
-
 
 def client_with_service(
     monkeypatch,
@@ -195,6 +187,20 @@ def test_create_run_uses_project_snapshot_contract(monkeypatch) -> None:
             {"project_id": "11111111-1111-1111-1111-111111111111", "name": "8月盘点"},
         )
     ]
+
+
+def test_cancelled_batch_inventory_import_route_is_not_registered(monkeypatch) -> None:
+    """Catches the retired Excel/photo batch path being exposed again."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+
+    response = client.post(
+        "/collector-transfer/runs/run-1/inventory/import",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 404
+    assert service.calls == []
 
 
 def test_mobile_scan_contract_only_returns_inventory_decision(monkeypatch) -> None:
@@ -409,226 +415,6 @@ def test_mobile_photo_sha_conflict_returns_409_and_removes_new_orphan(monkeypatc
     assert deleted == ["collector-transfer/conflict.jpg"]
 
 
-def test_corrupt_workbook_returns_stable_invalid_request(monkeypatch) -> None:
-    """Catches BadZipFile/openpyxl parser failures escaping the API as HTTP 500."""
-    service = FakeCollectorTransferService()
-    client = client_with_service(
-        monkeypatch,
-        service,
-        raise_server_exceptions=False,
-    )
-
-    response = client.post(
-        "/collector-transfer/runs/run-1/inventory/import",
-        headers=auth_headers(),
-        files={
-            "workbook": (
-                "collectors.xlsx",
-                b"this-is-not-an-xlsx-zip",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "invalid_request"
-    assert service.calls == []
-
-
-def workbook_with_corrupt_worksheet_xml() -> bytes:
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.append(["采集器"])
-    sheet.append(["000123"])
-    valid = BytesIO()
-    workbook.save(valid)
-    corrupt = BytesIO()
-    with ZipFile(BytesIO(valid.getvalue()), "r") as source, ZipFile(
-        corrupt,
-        "w",
-        compression=ZIP_DEFLATED,
-    ) as target:
-        for member in source.infolist():
-            content = source.read(member.filename)
-            if member.filename == "xl/worksheets/sheet1.xml":
-                content = b"<worksheet><sheetData><row><broken>"
-            target.writestr(member, content)
-    return corrupt.getvalue()
-
-
-def test_corrupt_worksheet_xml_returns_stable_invalid_request(monkeypatch) -> None:
-    """Catches lazy worksheet XML parse errors escaping after load_workbook succeeds."""
-    service = FakeCollectorTransferService()
-    client = client_with_service(
-        monkeypatch,
-        service,
-        raise_server_exceptions=False,
-    )
-
-    response = client.post(
-        "/collector-transfer/runs/run-1/inventory/import",
-        headers=auth_headers(),
-        files={
-            "workbook": (
-                "corrupt-sheet.xlsx",
-                workbook_with_corrupt_worksheet_xml(),
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "invalid_request"
-    assert service.calls == []
-
-
-def test_excel_and_barcode_named_photos_share_the_same_inventory_decision_path(monkeypatch) -> None:
-    """Catches creating a second import-only collector pool that bypasses mobile scan rules."""
-    service = FakeCollectorTransferService()
-    client = client_with_service(monkeypatch, service)
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.append(["采集器"])
-    sheet.append(["000123"])
-    buffer = BytesIO()
-    workbook.save(buffer)
-    monkeypatch.setattr(
-        routes,
-        "save_image_bytes",
-        lambda **kwargs: {
-            "url": f"/static/uploads/collector-transfer/{kwargs['filename']}",
-            "sha256": "b" * 64,
-            "storage_type": "local_upload",
-            "storage_key": f"collector-transfer/{kwargs['filename']}",
-            "content_type": kwargs["content_type"],
-        },
-    )
-
-    response = client.post(
-        "/collector-transfer/runs/run-1/inventory/import",
-        headers=auth_headers(),
-        files=[
-            ("workbook", ("collectors.xlsx", buffer.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
-            ("photos", ("000123.jpg", b"validated-photo", "image/jpeg")),
-        ],
-    )
-
-    assert response.status_code == 200
-    assert response.json()["data"] == {"batch_id": "batch-1", "total": 1, "invalid": 0}
-    call_name, payload = service.calls[0]
-    assert call_name == "import_inventory"
-    assert payload["rows"] == ((2, "000123"),)
-    assert payload["photos_by_collector"]["000123"]["original_filename"] == "000123.jpg"
-
-
-def test_batch_import_failure_deletes_only_the_uncommitted_photo_unit(monkeypatch) -> None:
-    """Catches cleanup deleting a prior row's photo after that row committed successfully."""
-    registered_keys: set[str] = set()
-    deleted_keys: list[str] = []
-
-    class FailingAfterFirstCommitService(FakeCollectorTransferService):
-        def import_inventory(self, **payload) -> dict:
-            first = payload["photos_by_collector"]["000123"]["stored"]
-            registered_keys.add(str(first["storage_key"]))
-            raise RuntimeError("second row failed before its photo was committed")
-
-    service = FailingAfterFirstCommitService()
-    client = client_with_service(monkeypatch, service)
-    monkeypatch.setattr(
-        routes,
-        "save_image_bytes",
-        lambda **kwargs: {
-            "url": f"/static/uploads/collector-transfer/{kwargs['filename']}",
-            "sha256": ("a" if kwargs["filename"].startswith("000123") else "b") * 64,
-            "storage_type": "local_upload",
-            "storage_key": f"collector-transfer/{kwargs['filename']}",
-            "content_type": kwargs["content_type"],
-            "created_new": True,
-        },
-    )
-    monkeypatch.setattr(
-        routes,
-        "saved_image_is_registered",
-        lambda *, team_id, stored: str(stored["storage_key"]) in registered_keys,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        routes,
-        "delete_saved_image",
-        lambda stored: deleted_keys.append(str(stored["storage_key"])),
-    )
-
-    with pytest.raises(RuntimeError, match="second row failed"):
-        client.post(
-            "/collector-transfer/runs/run-1/inventory/import",
-            headers=auth_headers(),
-            files=[
-                ("photos", ("000123.jpg", b"first", "image/jpeg")),
-                ("photos", ("000456.jpg", b"second", "image/jpeg")),
-            ],
-        )
-
-    assert deleted_keys == ["collector-transfer/000456.jpg"]
-
-
-def test_batch_import_success_cleans_only_invalid_or_unused_photo_units(monkeypatch) -> None:
-    """Catches a row-level invalid result leaking its pre-saved photo object."""
-    registered_keys: set[str] = set()
-    deleted_keys: list[str] = []
-
-    class MixedOutcomeService(FakeCollectorTransferService):
-        def import_inventory(self, **payload) -> dict:
-            first = payload["photos_by_collector"]["000123"]["stored"]
-            registered_keys.add(str(first["storage_key"]))
-            return {
-                "batch_id": "batch-mixed",
-                "total": 2,
-                "inserted": 1,
-                "invalid": 1,
-                "rows": [
-                    {"row_number": 2, "collector_no": "000123", "outcome": "inserted"},
-                    {"row_number": 3, "collector_no": "000456", "outcome": "invalid"},
-                ],
-            }
-
-    service = MixedOutcomeService()
-    client = client_with_service(monkeypatch, service)
-    monkeypatch.setattr(
-        routes,
-        "save_image_bytes",
-        lambda **kwargs: {
-            "url": f"/static/uploads/collector-transfer/{kwargs['filename']}",
-            "sha256": ("a" if kwargs["filename"].startswith("000123") else "b") * 64,
-            "storage_type": "local_upload",
-            "storage_key": f"collector-transfer/{kwargs['filename']}",
-            "content_type": kwargs["content_type"],
-            "created_new": True,
-        },
-    )
-    monkeypatch.setattr(
-        routes,
-        "saved_image_is_registered",
-        lambda *, team_id, stored: str(stored["storage_key"]) in registered_keys,
-    )
-    monkeypatch.setattr(
-        routes,
-        "delete_saved_image",
-        lambda stored: deleted_keys.append(str(stored["storage_key"])),
-    )
-
-    response = client.post(
-        "/collector-transfer/runs/run-1/inventory/import",
-        headers=auth_headers(),
-        files=[
-            ("photos", ("000123.jpg", b"first", "image/jpeg")),
-            ("photos", ("000456.jpg", b"second", "image/jpeg")),
-        ],
-    )
-
-    assert response.status_code == 200
-    assert deleted_keys == ["collector-transfer/000456.jpg"]
-
-
 @pytest.mark.parametrize(
     ("method_name", "request_spec", "error", "status_code", "code"),
     [
@@ -729,10 +515,6 @@ def test_production_roles_and_token_identity_protect_collector_transfer(monkeypa
         headers=headers["constructor"],
         json={"project_id": "project-1", "name": "盘点"},
     )
-    constructor_import = client.post(
-        "/collector-transfer/runs/run-1/inventory/import",
-        headers=headers["constructor"],
-    )
     constructor_allocate = client.post(
         "/collector-transfer/runs/run-1/allocate",
         headers=headers["constructor"],
@@ -762,7 +544,6 @@ def test_production_roles_and_token_identity_protect_collector_transfer(monkeypa
 
     assert anonymous.status_code == 401
     assert constructor_create.status_code == 403
-    assert constructor_import.status_code == 403
     assert constructor_allocate.status_code == 403
     assert reviewer_read.status_code == 403
     assert constructor_scan.status_code == 200

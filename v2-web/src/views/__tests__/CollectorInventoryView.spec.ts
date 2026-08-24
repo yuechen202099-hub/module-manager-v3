@@ -9,7 +9,6 @@ const serviceMocks = vi.hoisted(() => ({
   createCollectorTransferRun: vi.fn(),
   fetchCollectorTransferProjects: vi.fn(),
   fetchCollectorTransferRuns: vi.fn(),
-  importCollectorInventory: vi.fn(),
   scanPhysicalCollector: vi.fn(),
   uploadPhysicalCollectorPhoto: vi.fn(),
 }))
@@ -207,6 +206,14 @@ describe('CollectorInventoryView', () => {
 
     expect(wrapper.find('[data-testid="allocate-pool"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('替换池分配')
+    wrapper.unmount()
+  })
+
+  it('does not expose the cancelled batch inventory import to administrators', async () => {
+    const wrapper = await mountPage()
+
+    expect(wrapper.find('nav.bottom-nav button[aria-label="批量导入"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Excel 与照片初始化')
     wrapper.unmount()
   })
 
@@ -421,10 +428,7 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
-  it.each([
-    ['盘点记录', 'records'],
-    ['批量导入', 'import'],
-  ])('stops the camera and cancels its frame when switching to %s', async (label) => {
+  it('stops the camera and cancels its frame when switching to records', async () => {
     const stop = vi.fn()
     const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [{ stop }] })
     vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
@@ -436,7 +440,7 @@ describe('CollectorInventoryView', () => {
     await wrapper.get('[data-testid="start-camera"]').trigger('click')
     await flushPromises()
 
-    await wrapper.get(`nav.bottom-nav button[aria-label="${label}"]`).trigger('click')
+    await wrapper.get('nav.bottom-nav button[aria-label="盘点记录"]').trigger('click')
     await flushPromises()
 
     expect(stop).toHaveBeenCalledTimes(1)
@@ -531,10 +535,10 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
-  it('shows admin setup/import actions but hides them for constructors', async () => {
+  it('shows run setup to administrators but hides it from constructors', async () => {
     const adminWrapper = await mountPage()
     expect(adminWrapper.find('[aria-label="选择盘点批次"]').exists()).toBe(true)
-    expect(adminWrapper.find('nav.bottom-nav button[aria-label="批量导入"]').exists()).toBe(true)
+    expect(adminWrapper.find('nav.bottom-nav button[aria-label="批量导入"]').exists()).toBe(false)
     adminWrapper.unmount()
 
     authMock.user = { role: 'constructor', roles: ['constructor'] }

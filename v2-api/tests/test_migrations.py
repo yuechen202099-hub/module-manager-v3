@@ -201,4 +201,6 @@ def test_collector_transfer_migration_is_chained_and_enforces_one_time_assignmen
     assert "captured_by_username VARCHAR(64) DEFAULT '' NOT NULL" in upgrade
     assert "completed_by_username VARCHAR(64)" in upgrade
     assert "CONSTRAINT ck_physical_collectors_pool_status CHECK" in upgrade
+    assert "CREATE TABLE collector_import_rows" not in upgrade
+    assert "DROP TABLE collector_import_rows" not in downgrade
     assert "DROP TABLE collector_transfer_runs" in downgrade
