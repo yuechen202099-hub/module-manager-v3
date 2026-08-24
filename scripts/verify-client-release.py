@@ -88,6 +88,8 @@ REQUIRED_FILES = {
     "scripts/test_verify_v3_2_4_release.py",
     "scripts/verify_v3_2_5_release.py",
     "scripts/test_verify_v3_2_5_release.py",
+    "scripts/verify_v3_2_6_release.py",
+    "scripts/test_verify_v3_2_6_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -105,6 +107,18 @@ REQUIRED_FILES = {
     "v2-api/alembic/versions/0012_delivery_package_group_ids_gin.py",
     "v2-api/alembic/versions/0013_data_center_query_indexes.py",
     "v2-api/alembic/versions/0014_export_center_jobs.py",
+    "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
+    "v2-api/app/api/routes/collector_transfer.py",
+    "v2-api/app/domain/collector_transfer.py",
+    "v2-api/app/services/collector_transfer.py",
+    "v2-api/tests/test_collector_transfer_api.py",
+    "v2-api/tests/test_collector_transfer_domain.py",
+    "v2-api/tests/test_collector_transfer_postgres_integration.py",
+    "v2-api/tests/test_collector_transfer_service.py",
+    "v2-web/src/components/Code128Barcode.vue",
+    "v2-web/src/views/CollectorBatchManagementView.vue",
+    "v2-web/src/views/CollectorInventoryView.vue",
+    "v2-web/src/views/CollectorWorkbenchView.vue",
     "scripts/production_backup.sh",
     "scripts/cleanup_old_releases.sh",
     "scripts/production_health_check.py",
@@ -119,6 +133,7 @@ REQUIRED_FILES = {
     "ops/releases/V3.2.3.md",
     "ops/releases/V3.2.4.md",
     "ops/releases/V3.2.5.md",
+    "ops/releases/V3.2.6.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.80.md",
@@ -359,11 +374,11 @@ def load_release_truth_parser():
     return module
 
 
-def load_v325_release_verifier():
-    path = Path(__file__).with_name("verify_v3_2_5_release.py")
-    spec = importlib.util.spec_from_file_location("package_v325_release", path)
+def load_current_release_verifier():
+    path = Path(__file__).with_name("verify_v3_2_6_release.py")
+    spec = importlib.util.spec_from_file_location("package_v326_release", path)
     if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.5 release verifier")
+        fail("Unable to load V3.2.6 release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -641,10 +656,10 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
             fail("Release manifest must define exactly one semantic Version")
         package_version = manifest_versions[0]
-        current_release = load_v325_release_verifier()
+        current_release = load_current_release_verifier()
         if package_version != current_release.VERSION:
             fail(
-                f"Release manifest Version must match the current V3.2.5 source contract: "
+                f"Release manifest Version must match the current V3.2.6 source contract: "
                 f"{current_release.VERSION}"
             )
         verify_release_markdown_documents(archive, names, package_version)

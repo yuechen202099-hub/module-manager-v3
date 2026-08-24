@@ -15,7 +15,7 @@ from app.models import GroupStatus, MaterialGroup, Photo, PhotoUploadStatus
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 API_ROOT = REPOSITORY_ROOT / "v2-api"
-EXPECTED_VERSION = "3.2.5"
+EXPECTED_VERSION = "3.2.6"
 
 
 def read(relative_path: str) -> str:
@@ -657,7 +657,7 @@ def test_v3_1_package_builder_blocks_without_verified_performance_evidence() -> 
     package_sop = read("docs/sop/05-release-package-and-hash.md")
 
     assert '[string]$PerformanceReport = ""' in builder
-    assert "Performance report is required for V3.2.5 packaging" in builder
+    assert "Performance report is required for V3.2.6 packaging" in builder
     assert "verify_v3_1_release.py" in builder
     assert "--performance-report $performanceReportPath" in builder
     assert "--expected-source-commit $sourceCommit" in builder

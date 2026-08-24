@@ -27,12 +27,22 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_4_release.py",
     "scripts/verify_v3_2_5_release.py",
     "scripts/test_verify_v3_2_5_release.py",
+    "scripts/verify_v3_2_6_release.py",
+    "scripts/test_verify_v3_2_6_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
     "scripts/test_oss_local_export.py",
     "v2-api/alembic/versions/0013_data_center_query_indexes.py",
     "v2-api/alembic/versions/0014_export_center_jobs.py",
+    "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
+    "v2-api/app/api/routes/collector_transfer.py",
+    "v2-api/app/domain/collector_transfer.py",
+    "v2-api/app/services/collector_transfer.py",
+    "v2-api/tests/test_collector_transfer_api.py",
+    "v2-api/tests/test_collector_transfer_domain.py",
+    "v2-api/tests/test_collector_transfer_postgres_integration.py",
+    "v2-api/tests/test_collector_transfer_service.py",
     "v2-api/app/api/routes/groups.py",
     "v2-api/app/api/routes/exports.py",
     "v2-api/app/schemas/data_center.py",
@@ -52,12 +62,16 @@ RELEASE_INPUTS = (
     "v2-web/src/utils/dataCenterDrilldown.ts",
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
+    "v2-web/src/views/CollectorBatchManagementView.vue",
+    "v2-web/src/views/CollectorInventoryView.vue",
+    "v2-web/src/views/CollectorWorkbenchView.vue",
     "ops/releases/V3.2.0.md",
     "ops/releases/V3.2.1.md",
     "ops/releases/V3.2.2.md",
     "ops/releases/V3.2.3.md",
     "ops/releases/V3.2.4.md",
     "ops/releases/V3.2.5.md",
+    "ops/releases/V3.2.6.md",
 )
 
 REQUIRED_FILES = [
@@ -842,15 +856,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def verify_v325_phase(phase: str) -> None:
-    path = ROOT / "scripts" / "verify_v3_2_5_release.py"
-    spec = importlib.util.spec_from_file_location("verify_v3_2_5_release", path)
+def verify_current_release_phase(phase: str) -> None:
+    path = Path(__file__).with_name("verify_v3_2_6_release.py")
+    spec = importlib.util.spec_from_file_location("verify_v3_2_6_release", path)
     if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.5 release verifier")
+        fail("Unable to load V3.2.6 release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if module.main(["--phase", phase]) != 0:
-        fail(f"V3.2.5 {phase} release contract failed")
+        fail(f"V3.2.6 {phase} release contract failed")
 
 
 def validate_requested_candidate_version(version: str, agents: str) -> str:
@@ -882,7 +896,7 @@ def main(argv: list[str] | None = None) -> int:
     missing = [path for path in REQUIRED_FILES if not (ROOT / path).exists()]
     if missing:
         fail("Missing SOP files: " + ", ".join(missing))
-    verify_v325_phase(args.phase)
+    verify_current_release_phase(args.phase)
 
     readme = read("README.md")
     if "build/server-release/" not in readme:
