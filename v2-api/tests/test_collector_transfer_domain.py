@@ -6,8 +6,10 @@ from app.domain.collector_transfer import (
     CollectorScanDecisionKind,
     MeterSource,
     PoolInsufficientError,
+    ProjectInventoryDecisionKind,
     build_terminal_snapshots,
     decide_collector_scan,
+    decide_project_inventory_scan,
     plan_random_assignments,
 )
 
@@ -85,6 +87,61 @@ def test_non_matching_scan_requires_photo_before_pool_admission() -> None:
     assert decision.requirement_id is None
     assert decision.requires_photo is True
     assert decision.add_to_pool is True
+
+
+def test_project_scan_non_direct_requires_photo_without_persistence_intent() -> None:
+    """Catches creating a server-side draft as soon as a non-matching barcode is scanned."""
+    decision = decide_project_inventory_scan(
+        collector_no=" 000999 ",
+        is_project_requirement=False,
+        existing_pool_status=None,
+        has_active_photo=False,
+    )
+
+    assert decision.kind is ProjectInventoryDecisionKind.POOL_NEEDS_PHOTO
+    assert decision.persist_confirmation is False
+    assert decision.requires_photo is True
+    assert decision.add_to_pool is True
+
+
+def test_project_scan_direct_with_photo_confirms_without_pool_admission() -> None:
+    """Catches forcing a photographed same-number collector through random-pool admission."""
+    decision = decide_project_inventory_scan(
+        collector_no="000123",
+        is_project_requirement=True,
+        existing_pool_status="direct",
+        has_active_photo=True,
+    )
+
+    assert decision.kind is ProjectInventoryDecisionKind.DIRECT_REUSE
+    assert decision.persist_confirmation is True
+    assert decision.requires_photo is False
+    assert decision.add_to_pool is False
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_kind"),
+    [
+        ("reserved", ProjectInventoryDecisionKind.EXISTING_RESERVED),
+        ("used", ProjectInventoryDecisionKind.EXISTING_USED),
+    ],
+)
+def test_project_scan_never_demotes_consumed_inventory(
+    status: str,
+    expected_kind: ProjectInventoryDecisionKind,
+) -> None:
+    """Catches a repeated scan making an assigned or consumed collector reusable again."""
+    decision = decide_project_inventory_scan(
+        collector_no="C-1",
+        is_project_requirement=True,
+        existing_pool_status=status,
+        has_active_photo=True,
+    )
+
+    assert decision.kind is expected_kind
+    assert decision.persist_confirmation is False
+    assert decision.requires_photo is False
+    assert decision.add_to_pool is False
 
 
 def test_random_allocation_fails_as_a_whole_when_pool_is_insufficient() -> None:

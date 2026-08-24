@@ -53,6 +53,23 @@ class CollectorScanDecision:
     add_to_pool: bool
 
 
+class ProjectInventoryDecisionKind(str, Enum):
+    DIRECT_REUSE = "direct_reuse"
+    DIRECT_NEEDS_PHOTO = "direct_needs_photo"
+    POOL_NEEDS_PHOTO = "pool_needs_photo"
+    EXISTING_AVAILABLE = "existing_available"
+    EXISTING_RESERVED = "existing_reserved"
+    EXISTING_USED = "existing_used"
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectInventoryDecision:
+    kind: ProjectInventoryDecisionKind
+    persist_confirmation: bool
+    requires_photo: bool
+    add_to_pool: bool
+
+
 class PoolInsufficientError(ValueError):
     def __init__(self, *, required: int, available: int) -> None:
         self.required = required
@@ -134,6 +151,50 @@ def decide_collector_scan(
     return CollectorScanDecision(
         kind=CollectorScanDecisionKind.POOL_NEEDS_PHOTO,
         requirement_id=None,
+        requires_photo=True,
+        add_to_pool=True,
+    )
+
+
+def decide_project_inventory_scan(
+    *,
+    collector_no: str,
+    is_project_requirement: bool,
+    existing_pool_status: str | None,
+    has_active_photo: bool,
+) -> ProjectInventoryDecision:
+    if not normalize_identifier(collector_no):
+        raise ValueError("collector_no is required")
+
+    status = normalize_identifier(existing_pool_status)
+    terminal_states = {
+        "available": ProjectInventoryDecisionKind.EXISTING_AVAILABLE,
+        "reserved": ProjectInventoryDecisionKind.EXISTING_RESERVED,
+        "used": ProjectInventoryDecisionKind.EXISTING_USED,
+    }
+    if status in terminal_states:
+        return ProjectInventoryDecision(
+            kind=terminal_states[status],
+            persist_confirmation=False,
+            requires_photo=False,
+            add_to_pool=False,
+        )
+
+    if is_project_requirement or status == "direct":
+        return ProjectInventoryDecision(
+            kind=(
+                ProjectInventoryDecisionKind.DIRECT_REUSE
+                if has_active_photo
+                else ProjectInventoryDecisionKind.DIRECT_NEEDS_PHOTO
+            ),
+            persist_confirmation=True,
+            requires_photo=not has_active_photo,
+            add_to_pool=False,
+        )
+
+    return ProjectInventoryDecision(
+        kind=ProjectInventoryDecisionKind.POOL_NEEDS_PHOTO,
+        persist_confirmation=False,
         requires_photo=True,
         add_to_pool=True,
     )
