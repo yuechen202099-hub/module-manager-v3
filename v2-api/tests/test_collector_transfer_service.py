@@ -189,6 +189,41 @@ def project_with_collector_requirement(
     return project, group
 
 
+def complete_project_collector_source(
+    session: Session,
+    *,
+    collector_no: str,
+) -> tuple[Project, MaterialGroup]:
+    project, group = project_with_collector_requirement(session, collector_no=collector_no)
+    session.add_all(
+        (
+            Photo(
+                team_id="team-1",
+                group_id=group.id,
+                sha256=uuid4().hex * 2,
+                object_key=f"source/{collector_no}/module-meter.jpg",
+                image_url=f"/source/{collector_no}/module-meter.jpg",
+                category="module_meter",
+                collector=collector_no,
+                asset_no=f"MODULE-{collector_no}",
+                is_active=True,
+            ),
+            Photo(
+                team_id="team-1",
+                group_id=group.id,
+                sha256=uuid4().hex * 2,
+                object_key=f"source/{collector_no}/after-box.jpg",
+                image_url=f"/source/{collector_no}/after-box.jpg",
+                category="after_box",
+                collector=collector_no,
+                is_active=True,
+            ),
+        )
+    )
+    session.commit()
+    return project, group
+
+
 def stored_photo(sha256_value: str) -> dict[str, object]:
     return {
         "sha256": sha256_value,
@@ -873,6 +908,226 @@ def test_project_inventory_registration_recovers_same_collector_photo_race(
     assert result["photo"]["id"] == str(winner_photo.id)
     assert result["collector_id"] == str(physical.id)
     assert session.commit_count == 1
+
+
+def test_create_run_binds_photographed_same_project_direct_inventory(
+    db_session: Session,
+) -> None:
+    """Catches run creation ignoring a confirmed same-number collector already held by the project."""
+    project, _group = complete_project_collector_source(
+        db_session,
+        collector_no="DIRECT-BIND",
+    )
+    physical = PhysicalCollector(
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="DIRECT-BIND",
+        pool_status="direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical, sha256="b6" * 32)
+
+    created = service(db_session).create_run(project_id=str(project.id), name="直接绑定")
+
+    assignment = db_session.scalar(select(CollectorAssignment))
+    required = db_session.scalar(select(CollectorRequirement))
+    assert assignment.physical_collector_id == physical.id
+    assert assignment.collector_photo_id == photo.id
+    assert assignment.assignment_mode == "direct"
+    assert required.status == "direct_ready"
+    assert db_session.get(PhysicalCollector, physical.id).pool_status == "direct"
+    assert db_session.scalar(select(func.count(CollectorWorkbenchItem.id))) == 2
+    assert created["direct_match_count"] == 1
+    assert created["assignment_count"] == 1
+
+
+def test_create_run_keeps_same_number_without_photo_out_of_random_allocation(
+    db_session: Session,
+) -> None:
+    """Catches a known direct collector without a photo being replaced from the random pool."""
+    project, _group = complete_project_collector_source(
+        db_session,
+        collector_no="DIRECT-PENDING",
+    )
+    direct = PhysicalCollector(
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="DIRECT-PENDING",
+        pool_status="direct",
+    )
+    replacement = PhysicalCollector(
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="POOL-SHOULD-NOT-BIND",
+        pool_status="available",
+    )
+    db_session.add_all((direct, replacement))
+    db_session.commit()
+    collector_photo(db_session, replacement, sha256="b7" * 32)
+
+    created = service(db_session).create_run(project_id=str(project.id), name="待补直绑照片")
+    allocated = service(db_session).allocate(run_id=created["id"])
+
+    required = db_session.scalar(select(CollectorRequirement))
+    assert required.status == "direct_pending_photo"
+    assert allocated["assignment_count"] == 0
+    assert db_session.scalar(select(func.count(CollectorAssignment.id))) == 0
+    assert db_session.get(PhysicalCollector, replacement.id).pool_status == "available"
+
+
+def test_allocate_never_reads_available_inventory_from_another_project(
+    db_session: Session,
+) -> None:
+    """Catches team-wide pool selection consuming another current project's collector."""
+    run = transfer_run(db_session)
+    requirement(db_session, run, transfer_terminal(db_session, run), collector_no="ORIGINAL-A")
+    other_project = Project(
+        id=uuid4(),
+        team_id="team-1",
+        code=f"P-{uuid4().hex[:8]}",
+        name="项目 B",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(other_project)
+    db_session.flush()
+    foreign = PhysicalCollector(
+        team_id="team-1",
+        project_id=other_project.id,
+        collector_no="POOL-B",
+        pool_status="available",
+    )
+    db_session.add(foreign)
+    db_session.commit()
+    collector_photo(db_session, foreign, sha256="b8" * 32)
+
+    with pytest.raises(PoolInsufficientError) as raised:
+        service(db_session).allocate(run_id=str(run.id))
+
+    db_session.rollback()
+    assert raised.value.available == 0
+    assert db_session.scalar(select(func.count(CollectorAssignment.id))) == 0
+    assert db_session.get(PhysicalCollector, foreign.id).pool_status == "available"
+
+
+def test_allocate_rejects_photo_with_mismatched_project_ownership(
+    db_session: Session,
+) -> None:
+    """Catches a corrupt cross-project photo being accepted as allocation evidence."""
+    run = transfer_run(db_session)
+    requirement(db_session, run, transfer_terminal(db_session, run), collector_no="ORIGINAL-A")
+    other_project = Project(
+        id=uuid4(),
+        team_id="team-1",
+        code=f"P-{uuid4().hex[:8]}",
+        name="项目 B",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(other_project)
+    db_session.flush()
+    physical = PhysicalCollector(
+        team_id="team-1",
+        project_id=run.project_id,
+        collector_no="CORRUPT-PHOTO-PROJECT",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.flush()
+    db_session.add(
+        CollectorPhoto(
+            team_id="team-1",
+            project_id=other_project.id,
+            physical_collector_id=physical.id,
+            sha256="b9" * 32,
+            original_filename="corrupt.jpg",
+            object_key="collector-inventory/corrupt.jpg",
+            storage_type="local_upload",
+            is_active=True,
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(CollectorAllocationConflictError, match="project"):
+        service(db_session).allocate(run_id=str(run.id))
+
+    db_session.rollback()
+    assert db_session.scalar(select(func.count(CollectorAssignment.id))) == 0
+
+
+def test_workbench_completion_rejects_mismatched_inventory_project(
+    db_session: Session,
+) -> None:
+    """Catches completion consuming evidence whose photo belongs to another project."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(db_session, run, terminal, status="assigned")
+    other_project = Project(
+        id=uuid4(),
+        team_id="team-1",
+        code=f"P-{uuid4().hex[:8]}",
+        name="项目 B",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(other_project)
+    db_session.flush()
+    physical = PhysicalCollector(
+        team_id="team-1",
+        project_id=run.project_id,
+        collector_no="WORKBENCH-CORRUPT",
+        pool_status="reserved",
+    )
+    db_session.add(physical)
+    db_session.flush()
+    photo = CollectorPhoto(
+        team_id="team-1",
+        project_id=other_project.id,
+        physical_collector_id=physical.id,
+        sha256="c1" * 32,
+        original_filename="corrupt.jpg",
+        object_key="collector-inventory/workbench-corrupt.jpg",
+        storage_type="local_upload",
+        is_active=True,
+    )
+    db_session.add(photo)
+    db_session.flush()
+    assigned = CollectorAssignment(
+        run_id=run.id,
+        team_id="team-1",
+        requirement_id=required.id,
+        physical_collector_id=physical.id,
+        collector_photo_id=photo.id,
+        assignment_mode="random",
+        status="reserved",
+    )
+    db_session.add(assigned)
+    db_session.flush()
+    item = CollectorWorkbenchItem(
+        run_id=run.id,
+        terminal_id=terminal.id,
+        team_id="team-1",
+        item_kind="collector_removal",
+        source_key=str(required.id),
+        requirement_id=required.id,
+        assignment_id=assigned.id,
+        status="pending",
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    with pytest.raises(CollectorAllocationConflictError, match="project"):
+        service(db_session).set_workbench_item_status(item_id=str(item.id), completed=True)
+
+    db_session.rollback()
+    assert db_session.get(CollectorAssignment, assigned.id).status == "reserved"
+    assert db_session.get(PhysicalCollector, physical.id).pool_status == "reserved"
+    with pytest.raises(CollectorAllocationConflictError, match="project"):
+        service(db_session).rollback_assignment(assignment_id=str(assigned.id))
+
+    db_session.rollback()
+    assert db_session.get(CollectorAssignment, assigned.id).status == "reserved"
 
 
 def test_real_database_create_run_keeps_each_blank_terminal_group_as_a_blocked_meter_item(

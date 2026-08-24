@@ -33,6 +33,7 @@ from app.models import (
     Team,
 )
 from app.services.collector_transfer import (
+    CollectorPhotoConflictError,
     CollectorWorkbenchIncompleteError,
     PostgresCollectorTransferService,
 )
@@ -52,6 +53,208 @@ def postgres_session_factory():
         yield sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     finally:
         engine.dispose()
+
+
+def seed_inventory_projects(session_factory, *, project_count: int) -> tuple[str, list[str]]:
+    team_id = f"task7-inventory-{uuid4().hex}"
+    with session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Task 7 inventory concurrency"))
+        session.flush()
+        projects = [
+            Project(
+                team_id=team_id,
+                code=f"TASK7-INVENTORY-{uuid4().hex[:10]}",
+                name=f"Task 7 inventory {index + 1}",
+                status=ProjectStatus.ACTIVE,
+            )
+            for index in range(project_count)
+        ]
+        session.add_all(projects)
+        session.flush()
+        project_ids = [str(project.id) for project in projects]
+    return team_id, project_ids
+
+
+def register_inventory_once(
+    session_factory,
+    *,
+    team_id: str,
+    project_id: str,
+    collector_no: str,
+    photo_sha256: str,
+    start: Barrier,
+) -> tuple[str, str]:
+    start.wait(timeout=10)
+    with session_factory() as session:
+        try:
+            result = PostgresCollectorTransferService(
+                session=session,
+                team_id=team_id,
+                actor="task7",
+            ).register_inventory(
+                project_id=project_id,
+                collector_no=collector_no,
+                original_filename=f"{collector_no}.jpg",
+                stored={
+                    "sha256": photo_sha256,
+                    "storage_key": f"task7/{project_id}/{collector_no}.jpg",
+                    "storage_type": "local_upload",
+                    "content_type": "image/jpeg",
+                },
+                byte_size=128,
+            )
+            return "ok", str(result["collector_id"])
+        except CollectorPhotoConflictError as exc:
+            session.rollback()
+            return "conflict", str(exc)
+        except Exception as exc:  # assertion records any leaked database failure
+            session.rollback()
+            return "unexpected", f"{type(exc).__name__}: {exc}"
+
+
+def test_real_postgres_concurrent_same_project_number_commits_one_inventory_row(
+    postgres_session_factory,
+) -> None:
+    """Catches concurrent registration bypassing project collector-number uniqueness."""
+    team_id, project_ids = seed_inventory_projects(
+        postgres_session_factory,
+        project_count=1,
+    )
+    start = Barrier(3)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            register_inventory_once,
+            postgres_session_factory,
+            team_id=team_id,
+            project_id=project_ids[0],
+            collector_no="TASK7-SAME-NUMBER",
+            photo_sha256="a1" * 32,
+            start=start,
+        )
+        second = executor.submit(
+            register_inventory_once,
+            postgres_session_factory,
+            team_id=team_id,
+            project_id=project_ids[0],
+            collector_no="TASK7-SAME-NUMBER",
+            photo_sha256="a2" * 32,
+            start=start,
+        )
+        start.wait(timeout=10)
+        outcomes = [first.result(timeout=15), second.result(timeout=15)]
+
+    assert sorted(kind for kind, _detail in outcomes) == ["conflict", "ok"], outcomes
+    with postgres_session_factory() as session:
+        assert session.scalar(
+            select(func.count(PhysicalCollector.id)).where(
+                PhysicalCollector.team_id == team_id,
+                PhysicalCollector.project_id == project_ids[0],
+            )
+        ) == 1
+        assert session.scalar(
+            select(func.count(CollectorPhoto.id)).where(
+                CollectorPhoto.team_id == team_id,
+                CollectorPhoto.project_id == project_ids[0],
+            )
+        ) == 1
+
+
+def test_real_postgres_concurrent_same_photo_sha_commits_one_collector_binding(
+    postgres_session_factory,
+) -> None:
+    """Catches one photo SHA being committed to two collectors in the same project."""
+    team_id, project_ids = seed_inventory_projects(
+        postgres_session_factory,
+        project_count=1,
+    )
+    start = Barrier(3)
+    shared_sha256 = "b1" * 32
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            register_inventory_once,
+            postgres_session_factory,
+            team_id=team_id,
+            project_id=project_ids[0],
+            collector_no="TASK7-SHA-A",
+            photo_sha256=shared_sha256,
+            start=start,
+        )
+        second = executor.submit(
+            register_inventory_once,
+            postgres_session_factory,
+            team_id=team_id,
+            project_id=project_ids[0],
+            collector_no="TASK7-SHA-B",
+            photo_sha256=shared_sha256,
+            start=start,
+        )
+        start.wait(timeout=10)
+        outcomes = [first.result(timeout=15), second.result(timeout=15)]
+
+    assert sorted(kind for kind, _detail in outcomes) == ["conflict", "ok"], outcomes
+    with postgres_session_factory() as session:
+        assert session.scalar(
+            select(func.count(PhysicalCollector.id)).where(
+                PhysicalCollector.team_id == team_id,
+                PhysicalCollector.project_id == project_ids[0],
+            )
+        ) == 1
+        assert session.scalar(
+            select(func.count(CollectorPhoto.id)).where(
+                CollectorPhoto.team_id == team_id,
+                CollectorPhoto.project_id == project_ids[0],
+                CollectorPhoto.sha256 == shared_sha256,
+            )
+        ) == 1
+
+
+def test_real_postgres_same_number_and_photo_sha_are_legal_across_projects(
+    postgres_session_factory,
+) -> None:
+    """Catches project-scoped uniqueness accidentally remaining team-wide."""
+    team_id, project_ids = seed_inventory_projects(
+        postgres_session_factory,
+        project_count=2,
+    )
+    start = Barrier(3)
+    shared_sha256 = "c1" * 32
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                register_inventory_once,
+                postgres_session_factory,
+                team_id=team_id,
+                project_id=project_id,
+                collector_no="TASK7-CROSS-PROJECT",
+                photo_sha256=shared_sha256,
+                start=start,
+            )
+            for project_id in project_ids
+        ]
+        start.wait(timeout=10)
+        outcomes = [future.result(timeout=15) for future in futures]
+
+    assert [kind for kind, _detail in outcomes] == ["ok", "ok"], outcomes
+    with postgres_session_factory() as session:
+        physical_rows = list(
+            session.scalars(
+                select(PhysicalCollector).where(
+                    PhysicalCollector.team_id == team_id,
+                    PhysicalCollector.collector_no == "TASK7-CROSS-PROJECT",
+                )
+            )
+        )
+        photo_rows = list(
+            session.scalars(
+                select(CollectorPhoto).where(
+                    CollectorPhoto.team_id == team_id,
+                    CollectorPhoto.sha256 == shared_sha256,
+                )
+            )
+        )
+
+    assert {str(row.project_id) for row in physical_rows} == set(project_ids)
+    assert {str(row.project_id) for row in photo_rows} == set(project_ids)
 
 
 def seed_allocation_state(session_factory, *, pool_size: int) -> tuple[str, str, list[str]]:
@@ -151,6 +354,132 @@ def test_real_postgres_concurrent_allocation_is_stable_and_consumes_each_resourc
     assert [row.status for row in requirements] == ["assigned"]
     assert reserved == 1
     assert len(workbench_items) == 1
+
+
+def test_real_postgres_two_runs_cannot_reserve_one_project_collector(
+    postgres_session_factory,
+) -> None:
+    """Catches two runs concurrently reserving the same project inventory row."""
+    team_id = f"task7-competing-runs-{uuid4().hex}"
+    with postgres_session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Task 7 competing runs"))
+        session.flush()
+        project = Project(
+            team_id=team_id,
+            code=f"TASK7-RUNS-{uuid4().hex[:10]}",
+            name="Task 7 competing runs",
+            status=ProjectStatus.ACTIVE,
+        )
+        session.add(project)
+        session.flush()
+        physical = PhysicalCollector(
+            team_id=team_id,
+            project_id=project.id,
+            collector_no="TASK7-ONE-PHYSICAL",
+            pool_status="available",
+        )
+        session.add(physical)
+        session.flush()
+        session.add(
+            CollectorPhoto(
+                team_id=team_id,
+                project_id=project.id,
+                physical_collector_id=physical.id,
+                sha256="d1" * 32,
+                original_filename="TASK7-ONE-PHYSICAL.jpg",
+                object_key="task7/TASK7-ONE-PHYSICAL.jpg",
+                storage_type="local_upload",
+                is_active=True,
+            )
+        )
+        run_ids: list[str] = []
+        requirement_ids: list[str] = []
+        for index in range(2):
+            run = CollectorTransferRun(
+                team_id=team_id,
+                project_id=project.id,
+                name=f"Task 7 competing run {index + 1}",
+                status="inventory",
+                source_snapshot_at=datetime.now(UTC),
+                stats={},
+                diagnostics=[],
+            )
+            session.add(run)
+            session.flush()
+            terminal = CollectorTransferTerminal(
+                run_id=run.id,
+                team_id=team_id,
+                terminal_code=f"TASK7-COMPETING-{index + 1}",
+                installation_address="本地隔离验证地址",
+                status="ready",
+                meter_count=0,
+                collector_requirement_count=1,
+                diagnostics=[],
+            )
+            session.add(terminal)
+            session.flush()
+            requirement = CollectorRequirement(
+                run_id=run.id,
+                terminal_id=terminal.id,
+                team_id=team_id,
+                original_collector_no=f"ORIGINAL-{index + 1}",
+                status="unmatched",
+                sort_order=0,
+                diagnostics=[],
+            )
+            session.add(requirement)
+            session.flush()
+            run_ids.append(str(run.id))
+            requirement_ids.append(str(requirement.id))
+
+    start = Barrier(3)
+
+    def allocate_once(run_id: str) -> tuple[str, str]:
+        start.wait(timeout=10)
+        with postgres_session_factory() as session:
+            try:
+                result = PostgresCollectorTransferService(
+                    session=session,
+                    team_id=team_id,
+                    actor="task7",
+                ).allocate(run_id=run_id)
+                return "ok", str(result["assignment_count"])
+            except PoolInsufficientError as exc:
+                session.rollback()
+                return "insufficient", str(exc.available)
+            except Exception as exc:  # assertion records any leaked database failure
+                session.rollback()
+                return "unexpected", f"{type(exc).__name__}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(allocate_once, run_id) for run_id in run_ids]
+        start.wait(timeout=10)
+        outcomes = [future.result(timeout=15) for future in futures]
+
+    assert sorted(kind for kind, _detail in outcomes) == ["insufficient", "ok"], outcomes
+    with postgres_session_factory() as session:
+        assignments = list(
+            session.scalars(
+                select(CollectorAssignment).where(
+                    CollectorAssignment.run_id.in_(run_ids)
+                )
+            )
+        )
+        requirements = list(
+            session.scalars(
+                select(CollectorRequirement).where(
+                    CollectorRequirement.id.in_(requirement_ids)
+                )
+            )
+        )
+        persisted_physical = session.scalar(
+            select(PhysicalCollector).where(PhysicalCollector.id == physical.id)
+        )
+
+    assert len(assignments) == 1
+    assert len({row.physical_collector_id for row in assignments}) == 1
+    assert sorted(row.status for row in requirements) == ["assigned", "unmatched"]
+    assert persisted_physical.pool_status == "reserved"
 
 
 def test_real_postgres_pool_shortage_has_zero_allocation_side_effects(postgres_session_factory) -> None:

@@ -361,6 +361,7 @@ class PostgresCollectorTransferService:
             self.session.scalar(
                 select(func.count(PhysicalCollector.id)).where(
                     PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.project_id == run.project_id,
                     PhysicalCollector.pool_status == "available",
                 )
             )
@@ -506,6 +507,8 @@ class PostgresCollectorTransferService:
             "pool_available_count": 0,
             "assignment_count": 0,
         }
+        self._bind_direct_inventory(run)
+        self._refresh_allocation_stats(run)
         self._audit(
             action="collector_transfer.run_created",
             entity_type="collector_transfer_run",
@@ -884,6 +887,26 @@ class PostgresCollectorTransferService:
             return physical
         return candidate
 
+    def _validate_inventory_ownership(
+        self,
+        *,
+        run: CollectorTransferRun,
+        physical: PhysicalCollector,
+        photo: CollectorPhoto,
+    ) -> None:
+        if physical.team_id != self.team_id or physical.project_id != run.project_id:
+            raise CollectorAllocationConflictError(
+                "physical collector project ownership conflicts with the run"
+            )
+        if (
+            photo.team_id != self.team_id
+            or photo.project_id != run.project_id
+            or photo.physical_collector_id != physical.id
+        ):
+            raise CollectorAllocationConflictError(
+                "collector photo project ownership conflicts with the run"
+            )
+
     def _create_assignment(
         self,
         *,
@@ -893,6 +916,7 @@ class PostgresCollectorTransferService:
         photo: CollectorPhoto,
         assignment_mode: str,
     ) -> tuple[CollectorAssignment, bool]:
+        self._validate_inventory_ownership(run=run, physical=physical, photo=photo)
         candidate = CollectorAssignment(
             run_id=run.id,
             team_id=self.team_id,
@@ -972,6 +996,98 @@ class PostgresCollectorTransferService:
             )
         else:
             existing.assignment_id = assignment.id
+
+    def _bind_direct_inventory(self, run: CollectorTransferRun) -> int:
+        requirements = list(
+            self.session.scalars(
+                select(CollectorRequirement)
+                .where(
+                    CollectorRequirement.run_id == run.id,
+                    CollectorRequirement.team_id == self.team_id,
+                    CollectorRequirement.status == "unmatched",
+                )
+                .order_by(
+                    CollectorRequirement.terminal_id,
+                    CollectorRequirement.sort_order,
+                    CollectorRequirement.id,
+                )
+                .with_for_update()
+            ).all()
+        )
+        collector_numbers = {
+            requirement.original_collector_no
+            for requirement in requirements
+            if requirement.original_collector_no
+        }
+        if not collector_numbers:
+            return 0
+
+        physical_collectors = list(
+            self.session.scalars(
+                select(PhysicalCollector)
+                .where(
+                    PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.project_id == run.project_id,
+                    PhysicalCollector.collector_no.in_(collector_numbers),
+                    PhysicalCollector.pool_status.in_(("direct", "available")),
+                )
+                .order_by(PhysicalCollector.collector_no, PhysicalCollector.id)
+                .with_for_update()
+            ).all()
+        )
+        physical_by_number = {item.collector_no: item for item in physical_collectors}
+        physical_by_id = {item.id: item for item in physical_collectors}
+        photos_by_collector: dict[UUID, CollectorPhoto] = {}
+        if physical_collectors:
+            photos = self.session.scalars(
+                select(CollectorPhoto)
+                .where(
+                    CollectorPhoto.team_id == self.team_id,
+                    CollectorPhoto.physical_collector_id.in_(
+                        [item.id for item in physical_collectors]
+                    ),
+                    CollectorPhoto.is_active.is_(True),
+                )
+                .order_by(
+                    CollectorPhoto.physical_collector_id,
+                    CollectorPhoto.created_at.desc(),
+                    CollectorPhoto.id.desc(),
+                )
+                .with_for_update()
+            ).all()
+            for photo in photos:
+                physical = physical_by_id[photo.physical_collector_id]
+                self._validate_inventory_ownership(run=run, physical=physical, photo=photo)
+                photos_by_collector.setdefault(photo.physical_collector_id, photo)
+
+        bound_count = 0
+        consumed_physical_ids: set[UUID] = set()
+        for requirement in requirements:
+            physical = physical_by_number.get(requirement.original_collector_no)
+            if physical is None or physical.id in consumed_physical_ids:
+                continue
+            physical.pool_status = "direct"
+            photo = photos_by_collector.get(physical.id)
+            if photo is None:
+                requirement.status = "direct_pending_photo"
+                consumed_physical_ids.add(physical.id)
+                continue
+            assignment, _created = self._create_assignment(
+                run=run,
+                requirement=requirement,
+                physical=physical,
+                photo=photo,
+                assignment_mode="direct",
+            )
+            requirement.status = "direct_ready"
+            self._ensure_removal_workbench_item(
+                run=run,
+                requirement=requirement,
+                assignment=assignment,
+            )
+            consumed_physical_ids.add(physical.id)
+            bound_count += 1
+        return bound_count
 
     def scan_collector(self, *, run_id: str, collector_no: str) -> dict[str, object]:
         run = self._run(run_id, lock=True)
@@ -1259,12 +1375,14 @@ class PostgresCollectorTransferService:
                 select(PhysicalCollector)
                 .where(
                     PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.project_id == run.project_id,
                     PhysicalCollector.pool_status == "available",
                 )
                 .order_by(PhysicalCollector.id)
                 .with_for_update()
             ).all()
         )
+        physical_by_id = {item.id: item for item in physical_collectors}
         photos_by_collector: dict[str, CollectorPhoto] = {}
         if physical_collectors:
             photos = self.session.scalars(
@@ -1278,6 +1396,8 @@ class PostgresCollectorTransferService:
                 .with_for_update()
             ).all()
             for photo in photos:
+                physical = physical_by_id[photo.physical_collector_id]
+                self._validate_inventory_ownership(run=run, physical=physical, photo=photo)
                 photos_by_collector.setdefault(str(photo.physical_collector_id), photo)
 
         plan = plan_random_assignments(
@@ -1412,10 +1532,33 @@ class PostgresCollectorTransferService:
             )
             .with_for_update()
         )
+        assignment_photo = self.session.scalar(
+            select(CollectorPhoto)
+            .where(
+                CollectorPhoto.id == assignment.collector_photo_id,
+                CollectorPhoto.team_id == self.team_id,
+                CollectorPhoto.physical_collector_id == physical.id,
+            )
+            .with_for_update()
+        )
+        if assignment_photo is None:
+            raise ValueError("assignment photo is missing")
+        self._validate_inventory_ownership(
+            run=run,
+            physical=physical,
+            photo=assignment_photo,
+        )
 
         assignment.status = "rolled_back"
         assignment.used_at = None
-        has_photo = self._active_collector_photo(physical.id) is not None
+        active_photo = self._active_collector_photo(physical.id)
+        if active_photo is not None:
+            self._validate_inventory_ownership(
+                run=run,
+                physical=physical,
+                photo=active_photo,
+            )
+        has_photo = active_photo is not None
         if assignment.assignment_mode == "direct":
             requirement.status = "direct_ready" if has_photo else "direct_pending_photo"
             physical.pool_status = "direct"
@@ -1718,6 +1861,8 @@ class PostgresCollectorTransferService:
                 )
                 .with_for_update()
             )
+        if assignment is not None and physical is not None and photo is not None:
+            self._validate_inventory_ownership(run=run, physical=physical, photo=photo)
 
         if completed:
             reasons: list[str] = []
