@@ -221,6 +221,11 @@ def test_project_collector_inventory_migration_is_guarded_and_chained() -> None:
     assert "uq_collector_photos_team_project_sha256" in upgrade
     assert "uq_collector_photos_one_active" in upgrade
     assert "ix_collector_scan_events_project_created" in upgrade
+    assert (
+        "DROP CONSTRAINT fk_collector_scan_events_run_id_collector_transfer_runs"
+        in upgrade
+    )
+    assert "DROP CONSTRAINT collector_scan_events_run_id_fkey" not in upgrade
 
 
 def test_project_collector_inventory_migration_rejects_downgrade_before_ddl() -> None:

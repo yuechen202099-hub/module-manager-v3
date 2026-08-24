@@ -153,7 +153,7 @@ $$
         ondelete="CASCADE",
     )
     op.drop_constraint(
-        "collector_scan_events_run_id_fkey",
+        "fk_collector_scan_events_run_id_collector_transfer_runs",
         "collector_scan_events",
         type_="foreignkey",
     )
