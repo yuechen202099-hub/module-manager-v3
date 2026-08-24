@@ -190,8 +190,10 @@ def test_collector_transfer_migration_is_chained_and_enforces_one_time_assignmen
     assert "CREATE TABLE collector_transfer_runs" in upgrade
     assert "CREATE TABLE physical_collectors" in upgrade
     assert "CREATE TABLE collector_assignments" in upgrade
-    assert "CONSTRAINT uq_collector_assignments_requirement UNIQUE (requirement_id)" in upgrade
-    assert "CONSTRAINT uq_collector_assignments_physical UNIQUE (physical_collector_id)" in upgrade
+    assert "CREATE UNIQUE INDEX uq_collector_assignments_requirement_active ON collector_assignments (requirement_id) WHERE status IN ('reserved', 'used')" in upgrade
+    assert "CREATE UNIQUE INDEX uq_collector_assignments_physical_active ON collector_assignments (physical_collector_id) WHERE status IN ('reserved', 'used')" in upgrade
+    assert "CONSTRAINT uq_collector_assignments_requirement UNIQUE (requirement_id)" not in upgrade
+    assert "CONSTRAINT uq_collector_assignments_physical UNIQUE (physical_collector_id)" not in upgrade
     assert "CONSTRAINT uq_collector_photos_sha256 UNIQUE (sha256)" in upgrade
     assert "CONSTRAINT ck_physical_collectors_pool_status CHECK" in upgrade
     assert "DROP TABLE collector_transfer_runs" in downgrade

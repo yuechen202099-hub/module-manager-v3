@@ -5757,7 +5757,15 @@ def test_construction_tasks_include_meter_search_text_for_task_picker() -> None:
 
 
 def test_direct_workspace_routes_redirect_to_app_shell() -> None:
-    for path in ["/project-board", "/claim-tasks", "/construction", "/account-management", "/sync-config"]:
+    for path in [
+        "/project-board",
+        "/claim-tasks",
+        "/construction",
+        "/account-management",
+        "/sync-config",
+        "/collector-inventory",
+        "/collector-workbench",
+    ]:
         assert_vue_shell_response(client.get(path, follow_redirects=False))
     assert_export_retired(client.get("/exports", follow_redirects=False))
     response = client.get("/construction-cache", follow_redirects=False)

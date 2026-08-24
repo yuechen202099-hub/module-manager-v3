@@ -867,11 +867,21 @@ class CollectorScanEvent(Base):
 class CollectorAssignment(Base, TimestampMixin):
     __tablename__ = "collector_assignments"
     __table_args__ = (
-        UniqueConstraint("requirement_id", name="uq_collector_assignments_requirement"),
-        UniqueConstraint("physical_collector_id", name="uq_collector_assignments_physical"),
         CheckConstraint("assignment_mode IN ('direct', 'random')", name="ck_collector_assignments_mode"),
         CheckConstraint("status IN ('reserved', 'used', 'rolled_back')", name="ck_collector_assignments_status"),
         Index("ix_collector_assignments_run_status", "run_id", "status"),
+        Index(
+            "uq_collector_assignments_requirement_active",
+            "requirement_id",
+            unique=True,
+            postgresql_where=text("status IN ('reserved', 'used')"),
+        ),
+        Index(
+            "uq_collector_assignments_physical_active",
+            "physical_collector_id",
+            unique=True,
+            postgresql_where=text("status IN ('reserved', 'used')"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_column()

@@ -311,6 +311,14 @@ def create_app() -> FastAPI:
     def construction_page():
         return vue_index_response()
 
+    @app.get("/collector-inventory")
+    def collector_inventory_page():
+        return vue_index_response()
+
+    @app.get("/collector-workbench")
+    def collector_workbench_page():
+        return vue_index_response()
+
     @app.get("/construction-cache")
     def construction_cache_page():
         return RedirectResponse("/construction")

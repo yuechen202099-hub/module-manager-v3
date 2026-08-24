@@ -91,16 +91,21 @@ def test_collector_transfer_models_keep_source_data_in_sidecar_tables() -> None:
 
 
 def test_collector_assignment_schema_prevents_double_consumption() -> None:
-    """Catches removing either side of the one-requirement/one-collector contract."""
+    """Catches an active assignment losing exclusivity or a rollback retaining it forever."""
     table = models.CollectorAssignment.__table__
     unique_constraints = {
         tuple(column.name for column in constraint.columns)
         for constraint in table.constraints
         if isinstance(constraint, UniqueConstraint)
     }
+    indexes = {index.name: index for index in table.indexes}
 
-    assert ("requirement_id",) in unique_constraints
-    assert ("physical_collector_id",) in unique_constraints
+    assert ("requirement_id",) not in unique_constraints
+    assert ("physical_collector_id",) not in unique_constraints
+    assert tuple(column.name for column in indexes["uq_collector_assignments_requirement_active"].columns) == ("requirement_id",)
+    assert tuple(column.name for column in indexes["uq_collector_assignments_physical_active"].columns) == ("physical_collector_id",)
+    assert str(indexes["uq_collector_assignments_requirement_active"].dialect_options["postgresql"]["where"]) == "status IN ('reserved', 'used')"
+    assert str(indexes["uq_collector_assignments_physical_active"].dialect_options["postgresql"]["where"]) == "status IN ('reserved', 'used')"
     assert table.c.assignment_mode.type.__class__.__name__ == "String"
     assert table.c.status.type.__class__.__name__ == "String"
 

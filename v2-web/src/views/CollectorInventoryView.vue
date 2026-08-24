@@ -3,7 +3,9 @@ import { ElMessage } from 'element-plus'
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 
 import {
+  allocateCollectorPool,
   createCollectorTransferRun,
+  fetchCollectorTransferProjects,
   fetchCollectorTransferRuns,
   importCollectorInventory,
   scanPhysicalCollector,
@@ -68,7 +70,7 @@ const isAdmin = computed(() => {
 })
 const activeProject = computed(() => (
   workspace.projects.find((item) => item.id === selectedProjectId.value)
-  || workspace.activeProject
+  || workspace.projects.find((item) => item.id === workspace.activeProject?.id)
   || workspace.projects[0]
   || null
 ))
@@ -106,9 +108,13 @@ const runProgress = computed(() => {
 })
 
 onMounted(async () => {
-  if (!workspace.projects.length) await workspace.loadProjects()
+  const transferProjects = await fetchCollectorTransferProjects()
+  workspace.projects = transferProjects
   if (componentUnmounted) return
-  selectedProjectId.value = activeProject.value?.id || ''
+  const activeWorkspaceProject = transferProjects.find(
+    (project) => project.id === workspace.activeProject?.id,
+  )
+  selectedProjectId.value = activeWorkspaceProject?.id || transferProjects[0]?.id || ''
   setupProjectId.value = selectedProjectId.value
   if (selectedProjectId.value) await loadRuns(selectedProjectId.value)
 })
@@ -385,6 +391,24 @@ async function submitImport() {
     loading.value = false
   }
 }
+
+async function allocatePool() {
+  if (!isAdmin.value) return
+  if (!selectedRunId.value) {
+    ElMessage.warning('请先选择盘点批次')
+    return
+  }
+  loading.value = true
+  try {
+    const allocation = await allocateCollectorPool(selectedRunId.value)
+    ElMessage.success(`本地替换池已完成一次性分配：${allocation.assignment_count} 条`)
+    await loadRuns(selectedProjectId.value || activeProject.value?.id || '')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '替换池随机分配失败')
+  } finally {
+    loading.value = false
+  }
+}
 </script>
 
 <template>
@@ -409,6 +433,14 @@ async function submitImport() {
           </select>
         </label>
         <strong>{{ runProgress }}</strong>
+        <button
+          v-if="isAdmin && selectedRunId"
+          class="pool-allocation-button"
+          type="button"
+          data-testid="allocate-pool"
+          :disabled="loading"
+          @click="allocatePool"
+        >随机分配本地替换池</button>
       </div>
 
       <main class="inventory-body">
@@ -597,6 +629,8 @@ button, input, select { font: inherit; }
 .batch-row label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 9px; color: var(--muted); font-size: 11px; }
 .batch-row select { min-width: 0; border: 0; background: transparent; color: var(--ink); font-weight: 800; }
 .batch-row strong { color: var(--muted); font-size: 10px; font-weight: 600; }
+.pool-allocation-button { justify-self: start; border: 1px solid var(--blue); border-radius: 999px; padding: 5px 9px; background: #fff; color: var(--blue); font-size: 11px; font-weight: 800; }
+.pool-allocation-button:disabled { opacity: .55; cursor: wait; }
 .project-identity { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; margin: 0; font-size: 11px; }
 .project-identity span { color: var(--muted); }
 .project-identity strong { color: var(--ink); overflow-wrap: anywhere; }

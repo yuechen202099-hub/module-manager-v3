@@ -13,6 +13,7 @@ import { findStaticPage } from '@/router/staticPages'
 import CollectorWorkbenchView from '@/views/CollectorWorkbenchView.vue'
 
 const serviceMocks = vi.hoisted(() => ({
+  fetchCollectorTransferProjects: vi.fn(),
   fetchCollectorTransferRuns: vi.fn(),
   fetchCollectorWorkbench: vi.fn(),
   fetchCollectorTerminalWorkbench: vi.fn(),
@@ -250,6 +251,7 @@ describe('CollectorWorkbenchView data and evidence anatomy', () => {
     ]
     workspaceMock.activeProject = workspaceMock.projects[0]
     workspaceMock.loadProjects.mockResolvedValue(undefined)
+    serviceMocks.fetchCollectorTransferProjects.mockResolvedValue(structuredClone(workspaceMock.projects))
     serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([run])
     serviceMocks.fetchCollectorWorkbench.mockImplementation(async () => structuredClone(summary))
     serviceMocks.fetchCollectorTerminalWorkbench.mockImplementation(async () => structuredClone(terminalDetail))
@@ -263,10 +265,10 @@ describe('CollectorWorkbenchView data and evidence anatomy', () => {
   it('recovers when the initial project bootstrap fails and retry succeeds', async () => {
     workspaceMock.projects = []
     let attempts = 0
-    workspaceMock.loadProjects.mockImplementation(async () => {
+    serviceMocks.fetchCollectorTransferProjects.mockImplementation(async () => {
       attempts += 1
       if (attempts === 1) throw new Error('项目列表暂时不可用')
-      workspaceMock.projects = [
+      return [
         { id: 'project-1', name: '城南改造' },
         { id: 'project-2', name: '城北改造' },
       ]
@@ -280,13 +282,27 @@ describe('CollectorWorkbenchView data and evidence anatomy', () => {
     await wrapper.get('[data-testid="retry-error"]').trigger('click')
     await flushPromises()
 
-    expect(workspaceMock.loadProjects).toHaveBeenCalledTimes(2)
+    expect(serviceMocks.fetchCollectorTransferProjects).toHaveBeenCalledTimes(2)
     expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
     expect(serviceMocks.fetchCollectorWorkbench).toHaveBeenCalledWith('run-1')
     expect(serviceMocks.fetchCollectorTerminalWorkbench).toHaveBeenCalledWith('run-1', 'terminal-1')
     expect(wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.value).toBe('project-1')
     expect(wrapper.get('.barcode-card figcaption').text()).toBe('000217630119')
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('uses the transfer project list instead of a stale global workspace project', async () => {
+    workspaceMock.projects = [{ id: 'local-test', name: '模块更换项目' }]
+    workspaceMock.activeProject = { id: 'local-test', name: '模块更换项目' }
+    serviceMocks.fetchCollectorTransferProjects.mockResolvedValue([{ id: 'project-1', name: '城南改造' }])
+
+    const wrapper = await mountWorkbench()
+
+    expect(workspaceMock.loadProjects).not.toHaveBeenCalled()
+    expect(serviceMocks.fetchCollectorTransferProjects).toHaveBeenCalledTimes(1)
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
+    expect(wrapper.get<HTMLSelectElement>('[aria-label="当前项目"]').element.value).toBe('project-1')
     wrapper.unmount()
   })
 

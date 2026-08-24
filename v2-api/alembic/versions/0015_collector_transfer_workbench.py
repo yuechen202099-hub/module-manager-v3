@@ -234,10 +234,22 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["collector_photo_id"], ["collector_photos.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(["assigned_by_id"], ["users.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("requirement_id", name="uq_collector_assignments_requirement"),
-        sa.UniqueConstraint("physical_collector_id", name="uq_collector_assignments_physical"),
     )
     op.create_index("ix_collector_assignments_run_status", "collector_assignments", ["run_id", "status"])
+    op.create_index(
+        "uq_collector_assignments_requirement_active",
+        "collector_assignments",
+        ["requirement_id"],
+        unique=True,
+        postgresql_where=sa.text("status IN ('reserved', 'used')"),
+    )
+    op.create_index(
+        "uq_collector_assignments_physical_active",
+        "collector_assignments",
+        ["physical_collector_id"],
+        unique=True,
+        postgresql_where=sa.text("status IN ('reserved', 'used')"),
+    )
 
     op.create_table(
         "collector_workbench_items",
@@ -294,6 +306,8 @@ def downgrade() -> None:
     op.drop_table("collector_import_rows")
     op.drop_index("ix_collector_workbench_items_terminal_sort", table_name="collector_workbench_items")
     op.drop_table("collector_workbench_items")
+    op.drop_index("uq_collector_assignments_physical_active", table_name="collector_assignments")
+    op.drop_index("uq_collector_assignments_requirement_active", table_name="collector_assignments")
     op.drop_index("ix_collector_assignments_run_status", table_name="collector_assignments")
     op.drop_table("collector_assignments")
     op.drop_index("ix_collector_scan_events_run_created", table_name="collector_scan_events")

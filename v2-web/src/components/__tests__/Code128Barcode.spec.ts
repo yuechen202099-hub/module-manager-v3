@@ -14,6 +14,20 @@ describe('Code128Barcode', () => {
     expect(wrapper.text()).toContain('001234')
   })
 
+  it('renders bar rectangles with a ten-module quiet zone on both sides', () => {
+    const wrapper = mount(Code128Barcode, { props: { value: 'A' } })
+    const svg = wrapper.get('svg')
+    const barRects = wrapper.findAll('svg rect[x]')
+    const firstBar = barRects[0]
+    const lastBar = barRects.at(-1)
+    const [, , moduleCount] = (svg.attributes('viewBox') || '').split(' ').map(Number)
+
+    expect(barRects.length).toBeGreaterThan(0)
+    expect(firstBar.attributes('x')).toBe('10')
+    expect(barRects.every((rect) => rect.attributes('height') === '54')).toBe(true)
+    expect(moduleCount - (Number(lastBar?.attributes('x')) + Number(lastBar?.attributes('width')))).toBe(10)
+  })
+
   it('keeps every visible whitespace character in the human-readable caption', () => {
     const value = '  A  B  '
     const wrapper = mount(Code128Barcode, { props: { value } })

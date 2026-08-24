@@ -11,7 +11,7 @@ from sqlalchemy import select
 from app.core.responses import error_response, ok
 from app.core.security import decode_access_token
 from app.database import SessionLocal
-from app.models import CollectorPhoto
+from app.models import CollectorPhoto, Project
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorPhotoConflictError,
@@ -121,6 +121,31 @@ def call_service(request: Request, operation):
     except (KeyError, ValueError) as exc:
         return service_error_response(request, exc)
     return ok(request, result)
+
+
+@router.get("/projects")
+def list_transfer_projects(request: Request):
+    team_id, _actor = request_identity(request)
+    with SessionLocal() as session:
+        projects = session.scalars(
+            select(Project)
+            .where(Project.team_id == team_id, Project.status == "active")
+            .order_by(Project.created_at, Project.id)
+        ).all()
+    return ok(
+        request,
+        {
+            "items": [
+                {
+                    "id": str(project.id),
+                    "name": project.name,
+                    "status": project.status,
+                    "updated_at": project.updated_at.isoformat() if project.updated_at else None,
+                }
+                for project in projects
+            ]
+        },
+    )
 
 
 def saved_image_is_registered(*, team_id: str, stored: dict[str, object]) -> bool:

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import {
   fetchCollectorTerminalWorkbench,
+  fetchCollectorTransferProjects,
   fetchCollectorTransferRuns,
   fetchCollectorWorkbench,
   setCollectorWorkbenchItemCompleted,
@@ -89,8 +90,11 @@ async function bootstrapWorkspace() {
   loading.value = true
   clearRecoverableLoadError()
   try {
-    if (!workspace.projects.length) await workspace.loadProjects()
-    projectId.value = workspace.activeProject?.id || workspace.projects[0]?.id || ''
+    workspace.projects = await fetchCollectorTransferProjects()
+    const activeWorkspaceProject = workspace.projects.find(
+      (project) => project.id === workspace.activeProject?.id,
+    )
+    projectId.value = activeWorkspaceProject?.id || workspace.projects[0]?.id || ''
     if (projectId.value) await loadRuns(projectId.value)
     else loading.value = false
   } catch (error) {

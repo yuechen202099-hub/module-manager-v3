@@ -1,3 +1,5 @@
 *.sh text eol=lf
 v2-web/src/components/InstallerKpiDialog.vue text eol=lf
 v2-web/src/utils/installerKpi.ts text eol=lf
+v2-web/index.html text eol=lf
+v2-api/app/static/vue/index.html text eol=lf

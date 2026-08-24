@@ -5,7 +5,9 @@ import type { CollectorInventoryDecision, CollectorPhotoRegistration } from '@/a
 import CollectorInventoryView from '@/views/CollectorInventoryView.vue'
 
 const serviceMocks = vi.hoisted(() => ({
+  allocateCollectorPool: vi.fn(),
   createCollectorTransferRun: vi.fn(),
+  fetchCollectorTransferProjects: vi.fn(),
   fetchCollectorTransferRuns: vi.fn(),
   importCollectorInventory: vi.fn(),
   scanPhysicalCollector: vi.fn(),
@@ -98,6 +100,7 @@ function deferred<T>() {
 describe('CollectorInventoryView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    serviceMocks.fetchCollectorTransferProjects.mockResolvedValue([{ id: 'project-1', name: '城南改造' }])
     serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([run])
     workspaceMock.projects = [{ id: 'project-1', name: '城南改造' }]
     workspaceMock.activeProject = { id: 'project-1', name: '城南改造' }
@@ -152,7 +155,46 @@ describe('CollectorInventoryView', () => {
 
     expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('城南改造')
     expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('project-1')
+    expect(serviceMocks.fetchCollectorTransferProjects).toHaveBeenCalledTimes(1)
     expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
+    wrapper.unmount()
+  })
+
+  it('does not send a stale placeholder project id when the real project list is empty', async () => {
+    workspaceMock.projects = []
+    workspaceMock.activeProject = { id: 'local-test', name: '模块更换项目' }
+    serviceMocks.fetchCollectorTransferProjects.mockResolvedValue([])
+    const wrapper = await mountPage()
+
+    expect(serviceMocks.fetchCollectorTransferRuns).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('未选择项目')
+    expect(wrapper.get('[data-testid="project-identity"]').text()).not.toContain('local-test')
+    wrapper.unmount()
+  })
+
+  it('uses the transfer project list instead of the stale global workspace project', async () => {
+    workspaceMock.projects = [{ id: 'local-test', name: '模块更换项目' }]
+    workspaceMock.activeProject = { id: 'local-test', name: '模块更换项目' }
+    serviceMocks.fetchCollectorTransferProjects.mockResolvedValue([{ id: 'project-1', name: '城南改造' }])
+
+    const wrapper = await mountPage()
+
+    expect(workspaceMock.loadProjects).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="project-identity"]').text()).toContain('城南改造')
+    expect(wrapper.get('[data-testid="project-identity"]').text()).not.toContain('local-test')
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenCalledWith('project-1')
+    wrapper.unmount()
+  })
+
+  it('lets an administrator allocate the photographed replacement pool from the mobile inventory flow', async () => {
+    serviceMocks.allocateCollectorPool.mockResolvedValue({ run_id: 'run-1', assignment_count: 1, assignments: [] })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="allocate-pool"]').trigger('click')
+    await flushPromises()
+
+    expect(serviceMocks.allocateCollectorPool).toHaveBeenCalledWith('run-1')
+    expect(serviceMocks.fetchCollectorTransferRuns).toHaveBeenLastCalledWith('project-1')
     wrapper.unmount()
   })
 
@@ -161,6 +203,7 @@ describe('CollectorInventoryView', () => {
       { id: 'project-1', name: '城南改造' },
       { id: 'project-2', name: '城北改造' },
     ]
+    serviceMocks.fetchCollectorTransferProjects.mockResolvedValue(structuredClone(workspaceMock.projects))
     serviceMocks.fetchCollectorTransferRuns.mockImplementation(async (projectId: string) => (
       projectId === 'project-2' ? [otherProjectRun] : [run]
     ))
@@ -206,6 +249,7 @@ describe('CollectorInventoryView', () => {
       { id: 'project-1', name: '城南改造' },
       { id: 'project-2', name: '城北改造' },
     ]
+    serviceMocks.fetchCollectorTransferProjects.mockResolvedValue(structuredClone(workspaceMock.projects))
     const projectARuns = deferred<Array<typeof run>>()
     const projectBRuns = deferred<Array<typeof run>>()
     serviceMocks.fetchCollectorTransferRuns.mockImplementation((projectId: string) => (

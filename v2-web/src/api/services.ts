@@ -1342,6 +1342,26 @@ export async function fetchProjects(): Promise<Project[]> {
   return mockProjects
 }
 
+export async function fetchCollectorTransferProjects(): Promise<Project[]> {
+  const data = await api<{
+    items?: Array<{
+      id?: string
+      name?: string
+      status?: 'active' | 'archived'
+      updated_at?: string | null
+    }>
+  }>('/collector-transfer/projects')
+  return (data.items || []).map((project): Project => ({
+    id: String(project.id || ''),
+    name: project.name || '未命名项目',
+    status: project.status === 'archived' ? 'archived' : 'active',
+    totalGroups: 0,
+    completedGroups: 0,
+    exceptionGroups: 0,
+    updatedAt: project.updated_at || '',
+  })).filter((project) => Boolean(project.id))
+}
+
 export async function fetchTasks(options: { summary?: boolean } = {}): Promise<ReviewTask[]> {
   const query = options.summary ? '?summary=true' : ''
   const data = await api<{ items: BackendTask[] }>(`/local-test/tasks${query}`)

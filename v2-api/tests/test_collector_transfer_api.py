@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from io import BytesIO
 from types import SimpleNamespace
+from uuid import UUID
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
@@ -742,6 +744,61 @@ def test_production_roles_and_token_identity_protect_collector_transfer(monkeypa
     assert identities[0] == ("token-team", "constructor-a")
     assert admin_allocate.status_code == 409
     assert admin_allocate.json()["error"]["code"] == "pool_insufficient"
+
+
+def test_transfer_project_list_is_team_isolated_and_readable_by_constructor_and_admin(monkeypatch) -> None:
+    """Catches collector pages falling back to a cross-team mock project list in production."""
+
+    class CapturingSession:
+        def __init__(self) -> None:
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> bool:
+            return False
+
+        def scalars(self, statement):
+            self.statements.append(statement)
+            return SimpleNamespace(all=lambda: [
+                SimpleNamespace(
+                    id=UUID("11111111-1111-1111-1111-111111111111"),
+                    name="token-team 项目",
+                    status="active",
+                    updated_at=datetime(2026, 8, 24, 0, 0, tzinfo=timezone.utc),
+                )
+            ])
+
+    session = CapturingSession()
+    service = FakeCollectorTransferService()
+    client, headers, _identities = production_client_with_service(monkeypatch, service)
+    monkeypatch.setattr(routes, "SessionLocal", lambda: session)
+
+    constructor = client.get("/collector-transfer/projects", headers=headers["constructor"])
+    administrator = client.get("/collector-transfer/projects", headers=headers["admin"])
+    reviewer = client.get("/collector-transfer/projects", headers=headers["reviewer"])
+
+    expected = {
+        "items": [{
+            "id": "11111111-1111-1111-1111-111111111111",
+            "name": "token-team 项目",
+            "status": "active",
+            "updated_at": "2026-08-24T00:00:00+00:00",
+        }]
+    }
+    assert constructor.status_code == 200
+    assert constructor.json()["data"] == expected
+    assert administrator.status_code == 200
+    assert administrator.json()["data"] == expected
+    assert reviewer.status_code == 403
+    assert len(session.statements) == 2
+    for statement in session.statements:
+        compiled = statement.compile()
+        assert "projects.team_id" in str(compiled)
+        assert "projects.status" in str(compiled)
+        assert "token-team" in {str(value) for value in compiled.params.values()}
+        assert "active" in {str(value) for value in compiled.params.values()}
 
 
 def test_request_models_reject_team_actor_and_customer_platform_credentials(monkeypatch) -> None:
