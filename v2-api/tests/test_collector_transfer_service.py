@@ -149,7 +149,8 @@ def collector_photo(
 ) -> CollectorPhoto:
     photo = CollectorPhoto(
         id=uuid4(),
-        team_id="team-1",
+        team_id=collector.team_id,
+        project_id=collector.project_id,
         physical_collector_id=collector.id,
         sha256=sha256,
         original_filename=f"{collector.collector_no}.jpg",
@@ -540,7 +541,11 @@ def test_real_database_scan_returns_each_direct_and_pool_decision(
     no_photo_requirement = requirement(db_session, run, transfer_terminal(db_session, run, code="T-001"), collector_no="C-001")
     reusable_requirement = requirement(db_session, run, transfer_terminal(db_session, run, code="T-002"), collector_no="C-002")
     reusable_collector = PhysicalCollector(
-        id=uuid4(), team_id="team-1", collector_no="C-002", pool_status="awaiting_photo"
+        id=uuid4(),
+        team_id="team-1",
+        project_id=run.project_id,
+        collector_no="C-002",
+        pool_status="awaiting_photo",
     )
     db_session.add(reusable_collector)
     db_session.commit()
@@ -573,7 +578,11 @@ def test_real_database_rescan_never_demotes_existing_assignment_state(
     terminal = transfer_terminal(db_session, run)
     required = requirement(db_session, run, terminal, status=requirement_status)
     physical = PhysicalCollector(
-        id=uuid4(), team_id="team-1", collector_no="C-001", pool_status=physical_status
+        id=uuid4(),
+        team_id="team-1",
+        project_id=run.project_id,
+        collector_no="C-001",
+        pool_status=physical_status,
     )
     db_session.add(physical)
     db_session.commit()
@@ -621,6 +630,7 @@ def test_saved_image_registration_scope_includes_inactive_database_ownership(
     physical = PhysicalCollector(
         id=uuid4(),
         team_id="team-1",
+        project_id=project_id(db_session),
         collector_no="C-INACTIVE",
         pool_status="available",
     )
@@ -658,6 +668,7 @@ def test_single_photo_reuse_deletes_the_new_unreferenced_saved_object(
     physical = PhysicalCollector(
         id=uuid4(),
         team_id="team-1",
+        project_id=run.project_id,
         collector_no="C-REUSE",
         pool_status="available",
     )
@@ -715,7 +726,11 @@ def test_real_database_duplicate_photo_never_demotes_existing_assignment_state(
     terminal = transfer_terminal(db_session, run)
     required = requirement(db_session, run, terminal, status=requirement_status)
     physical = PhysicalCollector(
-        id=uuid4(), team_id="team-1", collector_no="C-001", pool_status=physical_status
+        id=uuid4(),
+        team_id="team-1",
+        project_id=run.project_id,
+        collector_no="C-001",
+        pool_status=physical_status,
     )
     db_session.add(physical)
     db_session.commit()
@@ -725,7 +740,7 @@ def test_real_database_duplicate_photo_never_demotes_existing_assignment_state(
         physical_collector_id=physical.id, collector_photo_id=photo.id, assignment_mode="random", status=assignment_status,
     )
     event = CollectorScanEvent(
-        id=uuid4(), run_id=run.id, team_id="team-1", physical_collector_id=physical.id,
+        id=uuid4(), run_id=run.id, team_id="team-1", project_id=run.project_id, physical_collector_id=physical.id,
         requirement_id=required.id, scanned_value="C-001", decision="direct_reuse", requires_photo=False, add_to_pool=False,
     )
     db_session.add_all((assigned, event))
@@ -749,8 +764,12 @@ def test_real_database_rejects_same_photo_sha_for_a_different_physical_collector
 ) -> None:
     """Catches cross-collector reuse before either pool state is mutated."""
     run = transfer_run(db_session)
-    first = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-FIRST", pool_status="available")
-    second = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-SECOND", pool_status="awaiting_photo")
+    first = PhysicalCollector(
+        id=uuid4(), team_id="team-1", project_id=run.project_id, collector_no="C-FIRST", pool_status="available"
+    )
+    second = PhysicalCollector(
+        id=uuid4(), team_id="team-1", project_id=run.project_id, collector_no="C-SECOND", pool_status="awaiting_photo"
+    )
     db_session.add_all((first, second))
     db_session.commit()
     existing = collector_photo(db_session, first, sha256="9" * 64)
@@ -776,14 +795,20 @@ def test_real_database_rejects_same_photo_sha_for_a_different_physical_collector
 
 def test_sqlite_unique_backstop_rejects_cross_collector_photo_sha(db_session: Session) -> None:
     """Proves the database backstop covers concurrent service races."""
-    first = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-DB-1", pool_status="available")
-    second = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-DB-2", pool_status="awaiting_photo")
+    current_project_id = project_id(db_session)
+    first = PhysicalCollector(
+        id=uuid4(), team_id="team-1", project_id=current_project_id, collector_no="C-DB-1", pool_status="available"
+    )
+    second = PhysicalCollector(
+        id=uuid4(), team_id="team-1", project_id=current_project_id, collector_no="C-DB-2", pool_status="awaiting_photo"
+    )
     db_session.add_all((first, second))
     db_session.commit()
     collector_photo(db_session, first, sha256="8" * 64)
     duplicate = CollectorPhoto(
         id=uuid4(),
         team_id="team-1",
+        project_id=current_project_id,
         physical_collector_id=second.id,
         sha256="8" * 64,
         original_filename="C-DB-2.jpg",
@@ -805,6 +830,7 @@ def test_identical_collector_photo_sha_is_scoped_per_team(db_session: Session) -
     first = PhysicalCollector(
         id=uuid4(),
         team_id="team-1",
+        project_id=project_id(db_session),
         collector_no="C-SHA-TEAM-1",
         pool_status="available",
     )
@@ -835,6 +861,7 @@ def test_identical_collector_photo_sha_is_scoped_per_team(db_session: Session) -
     second = PhysicalCollector(
         id=uuid4(),
         team_id="team-2",
+        project_id=second_run.project_id,
         collector_no="C-SHA-TEAM-2",
         pool_status="awaiting_photo",
     )
@@ -844,6 +871,7 @@ def test_identical_collector_photo_sha_is_scoped_per_team(db_session: Session) -
         CollectorScanEvent(
             run_id=second_run.id,
             team_id="team-2",
+            project_id=second_run.project_id,
             physical_collector_id=second.id,
             scanned_value=second.collector_no,
             decision="pool_needs_photo",
@@ -944,6 +972,7 @@ def test_direct_scan_refreshes_and_returns_transactional_run_totals(db_session: 
     physical = PhysicalCollector(
         id=uuid4(),
         team_id="team-1",
+        project_id=run.project_id,
         collector_no="C-DIRECT-STATS",
         pool_status="awaiting_photo",
     )
@@ -1031,6 +1060,7 @@ def test_direct_assignment_rollback_never_admits_collector_to_random_pool(
     physical = PhysicalCollector(
         id=uuid4(),
         team_id="team-1",
+        project_id=run.project_id,
         collector_no="C-DIRECT-ROLLBACK",
         pool_status="used" if assignment_status == "used" else "direct",
     )
@@ -1207,6 +1237,7 @@ def test_direct_api_cannot_complete_removal_with_inactive_bound_photo(
     physical = PhysicalCollector(
         id=uuid4(),
         team_id="team-1",
+        project_id=run.project_id,
         collector_no="C-INACTIVE-EVIDENCE",
         pool_status="reserved",
     )
@@ -1300,6 +1331,7 @@ def test_random_allocation_persists_operator_and_mapping_audit(db_session: Sessi
     physical = PhysicalCollector(
         id=uuid4(),
         team_id="team-1",
+        project_id=run.project_id,
         collector_no="C-RANDOM-FINAL",
         pool_status="available",
     )
@@ -1407,7 +1439,9 @@ def test_real_database_allocation_persists_and_retries_without_duplicate_audit(d
     run = transfer_run(db_session)
     terminal = transfer_terminal(db_session, run)
     required = requirement(db_session, run, terminal)
-    physical = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-999", pool_status="available")
+    physical = PhysicalCollector(
+        id=uuid4(), team_id="team-1", project_id=run.project_id, collector_no="C-999", pool_status="available"
+    )
     db_session.add(physical)
     db_session.commit()
     collector_photo(db_session, physical)
@@ -1432,7 +1466,9 @@ def test_real_database_assignment_conflict_leaves_session_usable_and_reports_con
     run = transfer_run(db_session)
     terminal = transfer_terminal(db_session, run)
     required = requirement(db_session, run, terminal)
-    physical = PhysicalCollector(id=uuid4(), team_id="team-1", collector_no="C-999", pool_status="available")
+    physical = PhysicalCollector(
+        id=uuid4(), team_id="team-1", project_id=run.project_id, collector_no="C-999", pool_status="available"
+    )
     db_session.add(physical)
     db_session.commit()
     photo = collector_photo(db_session, physical)
@@ -1477,6 +1513,7 @@ def test_real_database_rescan_of_random_replacement_never_returns_pool_decision(
     physical = PhysicalCollector(
         id=uuid4(),
         team_id="team-1",
+        project_id=run.project_id,
         collector_no="REPLACEMENT-999",
         pool_status=physical_status,
     )

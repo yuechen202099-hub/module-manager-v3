@@ -522,6 +522,7 @@ class PostgresCollectorTransferService:
             select(PhysicalCollector)
             .where(
                 PhysicalCollector.team_id == self.team_id,
+                PhysicalCollector.project_id == run.project_id,
                 PhysicalCollector.collector_no == collector_no,
             )
             .with_for_update()
@@ -532,6 +533,7 @@ class PostgresCollectorTransferService:
 
         candidate = PhysicalCollector(
             team_id=self.team_id,
+            project_id=run.project_id,
             collector_no=collector_no,
             pool_status="awaiting_photo",
             first_seen_run_id=run.id,
@@ -730,6 +732,7 @@ class PostgresCollectorTransferService:
         event = CollectorScanEvent(
             run_id=run.id,
             team_id=self.team_id,
+            project_id=run.project_id,
             physical_collector_id=physical.id,
             requirement_id=requirement.id if requirement is not None else None,
             scanned_value=normalized_no,
@@ -801,6 +804,7 @@ class PostgresCollectorTransferService:
         photo = self.session.scalar(
             select(CollectorPhoto).where(
                 CollectorPhoto.team_id == self.team_id,
+                CollectorPhoto.project_id == run.project_id,
                 CollectorPhoto.sha256 == sha256,
             )
         )
@@ -811,6 +815,7 @@ class PostgresCollectorTransferService:
         if photo is None:
             photo = CollectorPhoto(
                 team_id=self.team_id,
+                project_id=run.project_id,
                 physical_collector_id=physical.id,
                 sha256=sha256,
                 original_filename=normalize_identifier(original_filename) or f"{physical.collector_no}.jpg",

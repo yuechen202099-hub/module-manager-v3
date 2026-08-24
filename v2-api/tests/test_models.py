@@ -114,8 +114,8 @@ def test_collector_assignment_schema_prevents_double_consumption() -> None:
     assert table.c.status.type.__class__.__name__ == "String"
 
 
-def test_physical_collector_is_unique_per_team_and_has_explicit_pool_state() -> None:
-    """Catches duplicate physical inventory rows or implicit photo-derived availability."""
+def test_physical_collector_is_unique_per_project_and_has_explicit_pool_state() -> None:
+    """Catches one project's collector number blocking or leaking into another project."""
     table = models.PhysicalCollector.__table__
     unique_constraints = {
         tuple(column.name for column in constraint.columns)
@@ -128,12 +128,20 @@ def test_physical_collector_is_unique_per_team_and_has_explicit_pool_state() -> 
         if isinstance(constraint, CheckConstraint)
     ]
 
-    assert ("team_id", "collector_no") in unique_constraints
+    indexes = {index.name: tuple(column.name for column in index.columns) for index in table.indexes}
+
+    assert ("team_id", "project_id", "collector_no") in unique_constraints
+    assert ("team_id", "collector_no") not in unique_constraints
+    assert indexes["ix_physical_collectors_team_project_status"] == (
+        "team_id",
+        "project_id",
+        "pool_status",
+    )
     assert any("awaiting_photo" in constraint and "available" in constraint and "used" in constraint for constraint in check_constraints)
 
 
-def test_collector_photo_sha_is_unique_across_physical_collectors_in_one_team() -> None:
-    """Catches the same image content being bound to two physical collectors."""
+def test_collector_photo_sha_is_unique_per_project_and_has_one_active_photo() -> None:
+    """Catches cross-project photo blocking or two active photos for one physical collector."""
     table = models.CollectorPhoto.__table__
     unique_constraints = {
         tuple(column.name for column in constraint.columns)
@@ -142,8 +150,29 @@ def test_collector_photo_sha_is_unique_across_physical_collectors_in_one_team() 
     }
 
     assert ("sha256",) not in unique_constraints
-    assert ("team_id", "sha256") in unique_constraints
+    indexes = {index.name: index for index in table.indexes}
+
+    assert ("team_id", "project_id", "sha256") in unique_constraints
+    assert ("team_id", "sha256") not in unique_constraints
     assert ("physical_collector_id", "sha256") not in unique_constraints
+    active_index = indexes["uq_collector_photos_one_active"]
+    assert tuple(column.name for column in active_index.columns) == ("physical_collector_id",)
+    assert active_index.unique is True
+    assert str(active_index.dialect_options["postgresql"]["where"]) == "is_active"
+
+
+def test_collector_scan_event_belongs_to_project_without_requiring_a_run() -> None:
+    """Catches project inventory scans retaining a hidden batch dependency."""
+    table = models.CollectorScanEvent.__table__
+    indexes = {index.name: tuple(column.name for column in index.columns) for index in table.indexes}
+
+    assert table.c.project_id.nullable is False
+    assert table.c.run_id.nullable is True
+    assert indexes["ix_collector_scan_events_project_created"] == (
+        "team_id",
+        "project_id",
+        "created_at",
+    )
 
 
 def test_collector_transfer_models_persist_snapshot_and_operator_provenance() -> None:

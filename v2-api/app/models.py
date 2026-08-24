@@ -796,16 +796,27 @@ class CollectorRequirementMeter(Base):
 class PhysicalCollector(Base, TimestampMixin):
     __tablename__ = "physical_collectors"
     __table_args__ = (
-        UniqueConstraint("team_id", "collector_no", name="uq_physical_collectors_team_no"),
+        UniqueConstraint(
+            "team_id",
+            "project_id",
+            "collector_no",
+            name="uq_physical_collectors_team_project_no",
+        ),
         CheckConstraint(
             "pool_status IN ('awaiting_photo', 'direct', 'available', 'reserved', 'used')",
             name="ck_physical_collectors_pool_status",
         ),
-        Index("ix_physical_collectors_team_pool_status", "team_id", "pool_status"),
+        Index(
+            "ix_physical_collectors_team_project_status",
+            "team_id",
+            "project_id",
+            "pool_status",
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_column()
     team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     collector_no: Mapped[str] = mapped_column(String(255), nullable=False)
     pool_status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="awaiting_photo", server_default=text("'awaiting_photo'")
@@ -820,12 +831,25 @@ class PhysicalCollector(Base, TimestampMixin):
 class CollectorPhoto(Base, TimestampMixin):
     __tablename__ = "collector_photos"
     __table_args__ = (
-        UniqueConstraint("team_id", "sha256", name="uq_collector_photos_team_sha256"),
-        Index("ix_collector_photos_team_active", "team_id", "is_active"),
+        UniqueConstraint(
+            "team_id",
+            "project_id",
+            "sha256",
+            name="uq_collector_photos_team_project_sha256",
+        ),
+        Index("ix_collector_photos_team_project_active", "team_id", "project_id", "is_active"),
+        Index(
+            "uq_collector_photos_one_active",
+            "physical_collector_id",
+            unique=True,
+            postgresql_where=text("is_active"),
+            sqlite_where=text("is_active"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = uuid_column()
     team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     physical_collector_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("physical_collectors.id", ondelete="CASCADE"), nullable=False
     )
@@ -846,13 +870,22 @@ class CollectorPhoto(Base, TimestampMixin):
 
 class CollectorScanEvent(Base):
     __tablename__ = "collector_scan_events"
-    __table_args__ = (Index("ix_collector_scan_events_run_created", "run_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_collector_scan_events_run_created", "run_id", "created_at"),
+        Index(
+            "ix_collector_scan_events_project_created",
+            "team_id",
+            "project_id",
+            "created_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = uuid_column()
-    run_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("collector_transfer_runs.id", ondelete="CASCADE"), nullable=False
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collector_transfer_runs.id", ondelete="SET NULL"), nullable=True
     )
     team_id: Mapped[str] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     physical_collector_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("physical_collectors.id", ondelete="RESTRICT"), nullable=False
     )

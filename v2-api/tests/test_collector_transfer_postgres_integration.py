@@ -98,6 +98,7 @@ def seed_allocation_state(session_factory, *, pool_size: int) -> tuple[str, str,
         for index in range(pool_size):
             physical = PhysicalCollector(
                 team_id=team_id,
+                project_id=project.id,
                 collector_no=f"TASK7-POOL-{index + 1}",
                 pool_status="available",
             )
@@ -106,6 +107,7 @@ def seed_allocation_state(session_factory, *, pool_size: int) -> tuple[str, str,
             session.add(
                 CollectorPhoto(
                     team_id=team_id,
+                    project_id=project.id,
                     physical_collector_id=physical.id,
                     sha256=sha256(f"{team_id}:{index}".encode()).hexdigest(),
                     original_filename=f"TASK7-POOL-{index + 1}.jpg",

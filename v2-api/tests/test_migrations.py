@@ -204,3 +204,33 @@ def test_collector_transfer_migration_is_chained_and_enforces_one_time_assignmen
     assert "CREATE TABLE collector_import_rows" not in upgrade
     assert "DROP TABLE collector_import_rows" not in downgrade
     assert "DROP TABLE collector_transfer_runs" in downgrade
+
+
+def test_project_collector_inventory_migration_is_guarded_and_chained() -> None:
+    """Catches project scoping without a safe ownership backfill or database constraints."""
+    migration = load_migration_module("0016_project_scoped_collector_inventory.py")
+    upgrade = render_postgresql_ddl("upgrade", "0016_project_scoped_collector_inventory.py")
+
+    assert migration.revision == "20260824_0016"
+    assert migration.down_revision == "20260823_0015"
+    assert "ambiguous collector project ownership" in upgrade
+    assert "ALTER TABLE physical_collectors ADD COLUMN project_id UUID" in upgrade
+    assert "ALTER TABLE collector_photos ADD COLUMN project_id UUID" in upgrade
+    assert "ALTER TABLE collector_scan_events ADD COLUMN project_id UUID" in upgrade
+    assert "uq_physical_collectors_team_project_no" in upgrade
+    assert "uq_collector_photos_team_project_sha256" in upgrade
+    assert "uq_collector_photos_one_active" in upgrade
+    assert "ix_collector_scan_events_project_created" in upgrade
+
+
+def test_project_collector_inventory_migration_rejects_downgrade_before_ddl() -> None:
+    """Catches an unsafe attempt to restore team-wide uniqueness after project duplicates exist."""
+    class DdlMustNotRun:
+        def __getattr__(self, name: str):
+            pytest.fail(f"downgrade attempted destructive DDL through op.{name}")
+
+    migration = load_migration_module("0016_project_scoped_collector_inventory.py")
+    migration.op = DdlMustNotRun()
+
+    with pytest.raises(RuntimeError, match="forward-only"):
+        migration.downgrade()
