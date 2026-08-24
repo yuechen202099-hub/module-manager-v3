@@ -1,4 +1,4 @@
-import { mockProjects, mockTasks } from './mock'
+import { mockTasks } from './mock'
 import { priorityRequestBody } from './claimTasksState.mjs'
 import { parseContentDispositionFilename } from './constructionPriorityImportState.mjs'
 import type {
@@ -6,8 +6,9 @@ import type {
   ConstructionExceptionOrder,
   ConstructionPriorityImportResult,
   ConstructionUploadPayload,
-  CollectorInventoryDecision,
   CollectorAllocationResult,
+  CollectorInventoryDecision,
+  CollectorInventoryPage,
   CollectorPhotoRegistration,
   CollectorTerminalWorkbench,
   CollectorTransferRun,
@@ -1337,8 +1338,7 @@ export async function deleteUserAccount(username: string): Promise<UserAccount> 
 }
 
 export async function fetchProjects(): Promise<Project[]> {
-  await delay(60)
-  return mockProjects
+  return fetchCollectorTransferProjects()
 }
 
 export async function fetchCollectorTransferProjects(): Promise<Project[]> {
@@ -2914,27 +2914,36 @@ export async function fetchCollectorTransferRun(runId: string): Promise<Collecto
   return api<CollectorWorkbenchSummary>(`/collector-transfer/runs/${encodeURIComponent(runId)}`)
 }
 
-export async function scanPhysicalCollector(runId: string, collectorNo: string): Promise<CollectorInventoryDecision> {
+export async function scanProjectCollector(
+  projectId: string,
+  collectorNo: string,
+): Promise<CollectorInventoryDecision> {
   return api<CollectorInventoryDecision>(
-    `/collector-transfer/runs/${encodeURIComponent(runId)}/scan`,
+    '/collector-transfer/inventory/scan',
     {
       method: 'POST',
-      body: JSON.stringify({ collector_no: collectorNo }),
+      body: JSON.stringify({ project_id: projectId, collector_no: collectorNo }),
     },
   )
 }
 
-export async function uploadPhysicalCollectorPhoto(
-  runId: string,
-  collectorId: string,
+export async function registerProjectCollector(
+  projectId: string,
+  collectorNo: string,
   file: File,
 ): Promise<CollectorPhotoRegistration> {
   const form = new FormData()
+  form.append('project_id', projectId)
+  form.append('collector_no', collectorNo)
   form.append('file', file)
-  return formApi<CollectorPhotoRegistration>(
-    `/collector-transfer/runs/${encodeURIComponent(runId)}/collectors/${encodeURIComponent(collectorId)}/photo`,
-    form,
-  )
+  return formApi<CollectorPhotoRegistration>('/collector-transfer/inventory', form)
+}
+
+export async function fetchProjectCollectorInventory(
+  projectId: string,
+): Promise<CollectorInventoryPage> {
+  const query = new URLSearchParams({ project_id: projectId })
+  return api<CollectorInventoryPage>(`/collector-transfer/inventory?${query.toString()}`)
 }
 
 export async function allocateCollectorPool(runId: string): Promise<CollectorAllocationResult> {

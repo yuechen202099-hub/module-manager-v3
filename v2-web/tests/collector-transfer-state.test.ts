@@ -14,7 +14,7 @@ test('same-number reusable photo is confirmed without camera or pool admission',
 
   assert.deepEqual(result, {
     tone: 'success',
-    title: '无需拍照，已登记',
+    title: '无需拍照，已确认',
     description: '同号采集器照片可复用，不加入替换池。',
     primaryAction: '继续扫码',
   })
@@ -28,24 +28,40 @@ test('pool candidate tells the mobile operator to photograph but never to enter 
     addToPool: true,
   })
 
-  assert.equal(result.title, '需要补拍')
+  assert.equal(result.title, '需要拍照')
   assert.equal(result.description, '没有同号，补图后加入替换池。')
-  assert.equal(result.primaryAction, '立即补拍')
+  assert.equal(result.primaryAction, '立即拍照')
   assert.doesNotMatch(Object.values(result).join(''), /甲方.*录入|上传甲方/)
 })
 
 
-test('an existing assignment is shown as reuse and can never re-enter the pool', () => {
+test('reserved inventory is blocked and can never re-enter the pool', () => {
   const result = inventoryResultPresentation({
-    decision: 'assignment_reuse',
+    decision: 'existing_reserved',
     requiresPhoto: false,
     addToPool: false,
   })
 
   assert.deepEqual(result, {
-    tone: 'success',
-    title: '已有分配',
-    description: '该采集器已有分配记录，不重复入池。',
+    tone: 'warning',
+    title: '已被占用',
+    description: '该采集器已被任务预留，禁止重复使用。',
+    primaryAction: '继续扫码',
+  })
+})
+
+
+test('used inventory is a terminal blocking decision', () => {
+  const result = inventoryResultPresentation({
+    decision: 'existing_used',
+    requiresPhoto: false,
+    addToPool: false,
+  })
+
+  assert.deepEqual(result, {
+    tone: 'danger',
+    title: '已使用',
+    description: '该采集器已经使用，禁止再次加入替换池。',
     primaryAction: '继续扫码',
   })
 })

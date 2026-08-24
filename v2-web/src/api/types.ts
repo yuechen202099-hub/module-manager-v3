@@ -754,23 +754,46 @@ export type CollectorTransferRun = {
   created_at: string | null
 }
 
+export type CollectorPoolStatus = 'awaiting_photo' | 'direct' | 'available' | 'reserved' | 'used'
+
 export type CollectorInventoryDecision = {
-  collector_id: string
+  collector_id: string | null
   collector_no: string
-  decision: 'direct_reuse' | 'direct_needs_photo' | 'pool_needs_photo' | 'assignment_reuse'
+  decision:
+    | 'direct_reuse'
+    | 'direct_needs_photo'
+    | 'pool_needs_photo'
+    | 'existing_available'
+    | 'existing_reserved'
+    | 'existing_used'
   requires_photo: boolean
   add_to_pool: boolean
-  pool_status: 'awaiting_photo' | 'direct' | 'available' | 'reserved' | 'used'
-  requirement_id: string | null
+  pool_status: CollectorPoolStatus | null
   photo: CollectorTransferPhoto | null
 }
 
 export type CollectorPhotoRegistration = {
   collector_id: string
   collector_no: string
-  pool_status: 'awaiting_photo' | 'direct' | 'available' | 'reserved' | 'used'
+  pool_status: CollectorPoolStatus
   photo: CollectorTransferPhoto
-  assignment_id: string | null
+}
+
+export type CollectorInventoryItem = {
+  collector_id: string
+  collector_no: string
+  pool_status: CollectorPoolStatus
+  photo: CollectorTransferPhoto | null
+  last_scanned_at: string | null
+  created_at: string | null
+}
+
+export type CollectorInventoryStats = Record<CollectorPoolStatus, number>
+
+export type CollectorInventoryPage = {
+  items: CollectorInventoryItem[]
+  total: number
+  stats: CollectorInventoryStats
 }
 
 export type CollectorAllocation = {

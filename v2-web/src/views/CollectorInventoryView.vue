@@ -1,21 +1,18 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus'
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import {
-  createCollectorTransferRun,
-  fetchCollectorTransferProjects,
-  fetchCollectorTransferRuns,
-  scanPhysicalCollector,
-  uploadPhysicalCollectorPhoto,
+  fetchProjectCollectorInventory,
+  registerProjectCollector,
+  scanProjectCollector,
 } from '@/api/services'
 import type {
   CollectorInventoryDecision,
-  CollectorTransferRun,
-  Project,
+  CollectorInventoryPage,
+  CollectorPhotoRegistration,
 } from '@/api/types'
 import { inventoryResultPresentation } from '@/features/collectorTransfer/state'
-import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 
 type MobileView = 'scan' | 'records'
@@ -25,30 +22,31 @@ type DetectedBarcode = { rawValue?: string }
 type NativeBarcodeDetector = { detect: (source: HTMLVideoElement) => Promise<DetectedBarcode[]> }
 type NativeBarcodeDetectorConstructor = new (options?: { formats?: string[] }) => NativeBarcodeDetector
 
+const EMPTY_INVENTORY: CollectorInventoryPage = {
+  items: [],
+  total: 0,
+  stats: { direct: 0, available: 0, reserved: 0, used: 0, awaiting_photo: 0 },
+}
+
 const workspace = useWorkspaceStore()
-const auth = useAuthStore()
-const transferProjects = ref<Project[]>([])
-const runs = ref<CollectorTransferRun[]>([])
-const selectedRunId = ref('')
 const mobileView = ref<MobileView>('scan')
 const collectorNo = ref('')
 const result = ref<CollectorInventoryDecision | null>(null)
-const recent = ref<CollectorInventoryDecision[]>([])
+const inventory = ref<CollectorInventoryPage>(structuredClone(EMPTY_INVENTORY))
 const loading = ref(false)
+const inventoryLoading = ref(false)
 const cameraActive = ref(false)
 const cameraStatus = ref<CameraStatus>('idle')
 const scanFeedback = ref('')
-const video = ref<HTMLVideoElement | null>(null)
-const photoInput = ref<HTMLInputElement | null>(null)
-const setupOpen = ref(false)
-const selectedProjectId = ref('')
-const setupProjectId = ref('')
-const setupName = ref(`采集器盘点 ${new Date().toLocaleDateString('zh-CN')}`)
-const localPhotoUrl = ref('')
+const completedDuplicateFeedback = ref('')
 const uploadStatus = ref<UploadStatus>('idle')
 const uploadMessage = ref('')
-const completedDuplicateFeedback = ref('')
+const localPhotoUrl = ref('')
+const video = ref<HTMLVideoElement | null>(null)
+const photoInput = ref<HTMLInputElement | null>(null)
+const pendingPhoto = ref<File | null>(null)
 const completedCollectorNos = new Set<string>()
+
 let mediaStream: MediaStream | null = null
 let barcodeDetector: NativeBarcodeDetector | null = null
 let animationFrameId = 0
@@ -56,21 +54,12 @@ let cameraSession = 0
 let scanInFlight = false
 let lastDecodedValue = ''
 let lastDecodedAt = 0
-let loadRunsGeneration = 0
-let runContextGeneration = 0
+let inventoryGeneration = 0
+let projectContextGeneration = 0
 let componentUnmounted = false
 
-const selectedRun = computed(() => runs.value.find((item) => item.id === selectedRunId.value) || null)
-const isAdmin = computed(() => {
-  const roles = new Set([auth.user?.role, ...(auth.user?.roles || [])].filter(Boolean))
-  return roles.has('admin')
-})
-const activeProject = computed(() => (
-  transferProjects.value.find((item) => item.id === selectedProjectId.value)
-  || transferProjects.value.find((item) => item.id === workspace.activeProject?.id)
-  || transferProjects.value[0]
-  || null
-))
+const activeProject = computed(() => workspace.activeProject || null)
+const activeProjectId = computed(() => String(activeProject.value?.id || ''))
 const presentation = computed(() => result.value
   ? inventoryResultPresentation({
       decision: result.value.decision,
@@ -84,183 +73,153 @@ const photoUrl = computed(() => {
   return photo?.preview_url || photo?.image_url || photo?.thumbnail_url || ''
 })
 const poolSemantics = computed(() => {
-  if (!result.value) return ''
-  if (result.value.decision === 'assignment_reuse') return '不重复入池'
-  if (result.value.add_to_pool) return result.value.requires_photo ? '补图后加入替换池' : '已加入替换池'
-  if (result.value.decision === 'direct_needs_photo') return '直接匹配，不入池'
-  return '不加入替换池'
+  const current = result.value
+  if (!current) return ''
+  if (current.decision === 'existing_available') return '已在替换池'
+  if (current.decision === 'existing_reserved' || current.decision === 'existing_used') {
+    return '禁止重复使用'
+  }
+  if (current.add_to_pool) return current.requires_photo ? '拍照后加入替换池' : '已加入替换池'
+  if (current.decision === 'direct_needs_photo') return '直接匹配，不入池'
+  return '同号直接匹配，不进入随机池'
 })
 const registrationDetail = computed(() => {
-  if (!result.value) return ''
-  if (result.value.decision === 'assignment_reuse') return '已有分配'
-  return result.value.add_to_pool ? '替换池候选' : '同号直接匹配'
+  const current = result.value
+  if (!current) return ''
+  if (current.decision === 'existing_available') return '已登记库存'
+  if (current.decision === 'existing_reserved') return '已被任务预留'
+  if (current.decision === 'existing_used') return '已完成使用'
+  return current.add_to_pool ? '替换池候选' : '同号直接匹配'
 })
-const primaryActionLabel = computed(() => uploadStatus.value === 'error' ? '重新上传' : presentation.value?.primaryAction || '')
+const primaryActionLabel = computed(() => (
+  uploadStatus.value === 'error' && pendingPhoto.value
+    ? '重新上传'
+    : presentation.value?.primaryAction || ''
+))
 const cameraStatusMessage = computed(() => {
   if (cameraStatus.value === 'starting') return '正在请求摄像头权限…'
   if (cameraStatus.value === 'scanning') return scanFeedback.value || '连续扫码已开启'
-  if (cameraStatus.value === 'unsupported') return '此浏览器不支持摄像头扫码，请使用手工输入或外接扫码枪'
-  if (cameraStatus.value === 'denied') return '摄像头不可用，请使用手工输入或外接扫码枪'
+  if (cameraStatus.value === 'unsupported') return '浏览器不支持摄像头扫码，请手工输入或使用扫码枪'
+  if (cameraStatus.value === 'denied') return '摄像头不可用，请手工输入或使用扫码枪'
   return '手工输入与外接扫码枪始终可用'
 })
-const runProgress = computed(() => {
-  const run = selectedRun.value
-  if (!run) return '尚未选择批次'
-  return `${run.assignment_count || 0} 已分配 / ${run.collector_requirement_count || 0} 个需求`
+
+onMounted(() => {
+  if (activeProjectId.value) void loadInventory(activeProjectId.value)
 })
 
-onMounted(async () => {
-  const projects = await fetchCollectorTransferProjects()
-  if (componentUnmounted) return
-  transferProjects.value = projects
-  const activeWorkspaceProject = projects.find(
-    (project) => project.id === workspace.activeProject?.id,
-  )
-  selectedProjectId.value = activeWorkspaceProject?.id || projects[0]?.id || ''
-  setupProjectId.value = selectedProjectId.value
-  if (selectedProjectId.value) await loadRuns(selectedProjectId.value)
+watch(activeProjectId, (nextProjectId, previousProjectId) => {
+  if (nextProjectId === previousProjectId) return
+  resetProjectContext()
+  if (nextProjectId) void loadInventory(nextProjectId)
 })
 
 onUnmounted(() => {
   componentUnmounted = true
-  loadRunsGeneration += 1
-  runContextGeneration += 1
+  inventoryGeneration += 1
+  projectContextGeneration += 1
   stopCamera()
   releaseLocalPhotoUrl()
+  pendingPhoto.value = null
 })
 
-async function loadRuns(projectId = selectedProjectId.value, preferredRunId = '') {
-  if (componentUnmounted) return
-  const requestGeneration = ++loadRunsGeneration
-  clearRunContextState()
-  runs.value = []
-  selectedRunId.value = ''
+async function loadInventory(projectId: string) {
+  if (!projectId || componentUnmounted) return
+  const requestGeneration = ++inventoryGeneration
+  inventoryLoading.value = true
   try {
-    const loadedRuns = projectId ? await fetchCollectorTransferRuns(projectId) : []
+    const nextInventory = await fetchProjectCollectorInventory(projectId)
     if (
       componentUnmounted
-      || requestGeneration !== loadRunsGeneration
-      || projectId !== selectedProjectId.value
+      || requestGeneration !== inventoryGeneration
+      || projectId !== activeProjectId.value
     ) return
-    runs.value = loadedRuns
-    selectedRunId.value = runs.value.some((item) => item.id === preferredRunId)
-      ? preferredRunId
-      : runs.value[0]?.id || ''
-    if (!runs.value.length && isAdmin.value) openSetup()
+    inventory.value = nextInventory
   } catch (error) {
     if (
       componentUnmounted
-      || requestGeneration !== loadRunsGeneration
-      || projectId !== selectedProjectId.value
+      || requestGeneration !== inventoryGeneration
+      || projectId !== activeProjectId.value
     ) return
-    ElMessage.error(error instanceof Error ? error.message : '盘点批次加载失败')
+    ElMessage.error(error instanceof Error ? error.message : '采集器库存加载失败')
+  } finally {
+    if (requestGeneration === inventoryGeneration) inventoryLoading.value = false
   }
 }
 
-function clearRunContextState() {
-  runContextGeneration += 1
+function resetProjectContext() {
+  projectContextGeneration += 1
+  inventoryGeneration += 1
   scanInFlight = false
   lastDecodedValue = ''
   lastDecodedAt = 0
   loading.value = false
+  inventoryLoading.value = false
   stopCamera()
   releaseLocalPhotoUrl()
-  result.value = null
-  recent.value = []
+  pendingPhoto.value = null
   collectorNo.value = ''
-  scanFeedback.value = ''
+  result.value = null
+  inventory.value = structuredClone(EMPTY_INVENTORY)
   uploadStatus.value = 'idle'
   uploadMessage.value = ''
+  scanFeedback.value = ''
   completedDuplicateFeedback.value = ''
   completedCollectorNos.clear()
   mobileView.value = 'scan'
   if (photoInput.value) photoInput.value.value = ''
 }
 
-function handleRunChange() {
-  clearRunContextState()
-}
-
-function openSetup() {
-  setupProjectId.value = selectedProjectId.value
-  setupOpen.value = true
-}
-
-function closeSetup() {
-  setupProjectId.value = selectedProjectId.value
-  setupOpen.value = false
-}
-
-async function createRun() {
-  if (!isAdmin.value) return
-  if (!setupProjectId.value) {
+async function submitScan(rawValue = collectorNo.value) {
+  const projectId = activeProjectId.value
+  const value = rawValue.trim()
+  if (!projectId) {
     ElMessage.warning('请先选择项目')
     return
   }
-  loading.value = true
-  try {
-    const projectId = setupProjectId.value
-    const created = await createCollectorTransferRun(projectId, setupName.value.trim() || '采集器盘点')
-    selectedProjectId.value = projectId
-    await loadRuns(projectId, created.id)
-    closeSetup()
-    ElMessage.success('已根据现有数据生成终端和采集器需求')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '新建盘点批次失败')
-  } finally {
-    loading.value = false
-  }
-}
-
-async function submitScan(rawValue = collectorNo.value) {
-  const value = rawValue.trim()
-  if (!selectedRunId.value) {
-    ElMessage.warning('请先选择盘点批次')
-    openSetup()
-    return
-  }
-  const requestRunId = selectedRunId.value
-  const requestGeneration = runContextGeneration
   if (!value) {
     ElMessage.warning('请输入或扫描采集器号')
     return
   }
-  const wasCompleted = completedCollectorNos.has(value)
-  completedDuplicateFeedback.value = wasCompleted
-    ? `重复扫码：${value} 已扫码，本次正在重新确认。`
-    : ''
   if (scanInFlight) {
     scanFeedback.value = value === lastDecodedValue
       ? '已识别该采集器，正在查询，请勿重复扫码'
       : '正在处理上一条扫码，请稍候'
     return
   }
+
+  const requestGeneration = projectContextGeneration
+  completedDuplicateFeedback.value = completedCollectorNos.has(value)
+    ? `重复扫码：${value} 已处理，本次重新确认。`
+    : ''
   scanInFlight = true
   loading.value = true
   try {
-    const decision = await scanPhysicalCollector(requestRunId, value)
+    const decision = await scanProjectCollector(projectId, value)
     if (
-      requestGeneration !== runContextGeneration
-      || requestRunId !== selectedRunId.value
+      componentUnmounted
+      || requestGeneration !== projectContextGeneration
+      || projectId !== activeProjectId.value
     ) return
     releaseLocalPhotoUrl()
+    pendingPhoto.value = null
     uploadStatus.value = 'idle'
     uploadMessage.value = ''
     result.value = decision
-    completedCollectorNos.add(decision.collector_no)
     collectorNo.value = decision.collector_no
-    recent.value = [decision, ...recent.value.filter((item) => item.collector_id !== decision.collector_id)].slice(0, 20)
+    completedCollectorNos.add(decision.collector_no)
     stopCamera()
   } catch (error) {
     if (
-      requestGeneration !== runContextGeneration
-      || requestRunId !== selectedRunId.value
+      componentUnmounted
+      || requestGeneration !== projectContextGeneration
+      || projectId !== activeProjectId.value
     ) return
     ElMessage.error(error instanceof Error ? error.message : '采集器扫码判断失败')
   } finally {
     if (
-      requestGeneration === runContextGeneration
-      && requestRunId === selectedRunId.value
+      requestGeneration === projectContextGeneration
+      && projectId === activeProjectId.value
     ) {
       scanInFlight = false
       loading.value = false
@@ -269,17 +228,16 @@ async function submitScan(rawValue = collectorNo.value) {
 }
 
 async function startCamera() {
-  if (cameraActive.value) return
-  if (!selectedRunId.value) {
-    openSetup()
-    return
-  }
+  if (cameraActive.value || !activeProjectId.value) return
   result.value = null
   releaseLocalPhotoUrl()
+  pendingPhoto.value = null
   uploadStatus.value = 'idle'
   uploadMessage.value = ''
   scanFeedback.value = ''
-  const Detector = (globalThis as typeof globalThis & { BarcodeDetector?: NativeBarcodeDetectorConstructor }).BarcodeDetector
+  const Detector = (globalThis as typeof globalThis & {
+    BarcodeDetector?: NativeBarcodeDetectorConstructor
+  }).BarcodeDetector
   if (!Detector || !navigator.mediaDevices?.getUserMedia) {
     cameraStatus.value = 'unsupported'
     return
@@ -306,7 +264,7 @@ async function startCamera() {
   } catch (error) {
     stopCamera()
     cameraStatus.value = 'denied'
-    ElMessage.warning(error instanceof Error ? error.message : '无法打开摄像头，请使用手工输入')
+    ElMessage.warning(error instanceof Error ? error.message : '无法打开摄像头')
   }
 }
 
@@ -330,7 +288,11 @@ async function detectNextFrame(session: number) {
     if (value) {
       if (scanInFlight && value === lastDecodedValue) {
         scanFeedback.value = '已识别该采集器，正在查询，请勿重复扫码'
-      } else if (completedCollectorNos.has(value) || value !== lastDecodedValue || now - lastDecodedAt >= 1800) {
+      } else if (
+        completedCollectorNos.has(value)
+        || value !== lastDecodedValue
+        || now - lastDecodedAt >= 1800
+      ) {
         lastDecodedValue = value
         lastDecodedAt = now
         collectorNo.value = value
@@ -346,12 +308,114 @@ async function detectNextFrame(session: number) {
   }
 }
 
-function resetForNextScan() {
+function requestPhoto() {
+  photoInput.value?.click()
+}
+
+function handlePrimaryAction() {
+  if (!result.value?.requires_photo) {
+    resetForNextScan()
+    return
+  }
+  if (uploadStatus.value === 'error' && pendingPhoto.value) {
+    void submitPhoto(pendingPhoto.value)
+    return
+  }
+  requestPhoto()
+}
+
+function handlePhotoChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || !result.value?.requires_photo) return
+  releaseLocalPhotoUrl()
+  pendingPhoto.value = file
+  localPhotoUrl.value = URL.createObjectURL(file)
+  void submitPhoto(file)
+}
+
+async function submitPhoto(file: File) {
+  const projectId = activeProjectId.value
+  const currentDecision = result.value
+  if (!projectId || !currentDecision?.requires_photo) return
+  const requestGeneration = projectContextGeneration
+  uploadStatus.value = 'uploading'
+  uploadMessage.value = '照片上传中…'
+  loading.value = true
+  try {
+    const uploaded = await registerProjectCollector(
+      projectId,
+      currentDecision.collector_no,
+      file,
+    )
+    if (
+      componentUnmounted
+      || requestGeneration !== projectContextGeneration
+      || projectId !== activeProjectId.value
+    ) return
+    applyUploadedPhoto(currentDecision, uploaded)
+    pendingPhoto.value = null
+    uploadStatus.value = 'success'
+    uploadMessage.value = uploaded.pool_status === 'available'
+      ? '照片上传成功，已加入替换池'
+      : '上传成功，照片已完成同号确认'
+    ElMessage.success(uploadMessage.value)
+    await loadInventory(projectId)
+  } catch (error) {
+    if (
+      componentUnmounted
+      || requestGeneration !== projectContextGeneration
+      || projectId !== activeProjectId.value
+    ) return
+    uploadStatus.value = 'error'
+    uploadMessage.value = `上传失败：${error instanceof Error ? error.message : '请重试'}`
+    ElMessage.error(error instanceof Error ? error.message : '采集器照片上传失败')
+  } finally {
+    if (
+      requestGeneration === projectContextGeneration
+      && projectId === activeProjectId.value
+    ) loading.value = false
+  }
+}
+
+function applyUploadedPhoto(
+  currentDecision: CollectorInventoryDecision,
+  uploaded: CollectorPhotoRegistration,
+) {
+  result.value = {
+    ...currentDecision,
+    collector_id: uploaded.collector_id,
+    collector_no: uploaded.collector_no,
+    requires_photo: false,
+    pool_status: uploaded.pool_status,
+    photo: uploaded.photo,
+  }
+}
+
+function cancelCapture() {
+  releaseLocalPhotoUrl()
+  pendingPhoto.value = null
+  uploadStatus.value = 'idle'
+  uploadMessage.value = ''
+  if (photoInput.value) photoInput.value.value = ''
+}
+
+function cancelAndContinue() {
+  cancelCapture()
+  resetForNextScan(false)
+}
+
+function resetForNextScan(reopenCamera = true) {
   result.value = null
   collectorNo.value = ''
   completedDuplicateFeedback.value = ''
+  uploadStatus.value = 'idle'
+  uploadMessage.value = ''
+  releaseLocalPhotoUrl()
+  pendingPhoto.value = null
   mobileView.value = 'scan'
-  void startCamera()
+  if (reopenCamera) void startCamera()
 }
 
 function setMobileView(view: MobileView) {
@@ -359,113 +423,86 @@ function setMobileView(view: MobileView) {
   mobileView.value = view
 }
 
-function requestPhoto() {
-  photoInput.value?.click()
-}
-
-async function uploadPhoto(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0]
-  if (!file || !result.value || !selectedRunId.value) return
-  const requestRunId = selectedRunId.value
-  const requestGeneration = runContextGeneration
-  const decision = result.value
-  releaseLocalPhotoUrl()
-  localPhotoUrl.value = URL.createObjectURL(file)
-  uploadStatus.value = 'uploading'
-  uploadMessage.value = '照片上传中…'
-  loading.value = true
-  try {
-    const uploaded = await uploadPhysicalCollectorPhoto(requestRunId, decision.collector_id, file)
-    if (
-      requestGeneration !== runContextGeneration
-      || requestRunId !== selectedRunId.value
-    ) return
-    result.value = {
-      ...decision,
-      requires_photo: false,
-      pool_status: uploaded.pool_status as CollectorInventoryDecision['pool_status'],
-      photo: (uploaded.photo || decision.photo) as CollectorInventoryDecision['photo'],
-    }
-    recent.value = [result.value, ...recent.value.filter((item) => item.collector_id !== result.value?.collector_id)]
-    uploadStatus.value = 'success'
-    uploadMessage.value = result.value.add_to_pool
-      ? '上传成功，照片已加入替换池'
-      : '上传成功，照片已直接匹配且不入池'
-    ElMessage.success(result.value.add_to_pool ? '照片已保存，采集器已进入替换池' : '照片已保存并完成同号直配')
-  } catch (error) {
-    if (
-      requestGeneration !== runContextGeneration
-      || requestRunId !== selectedRunId.value
-    ) return
-    uploadStatus.value = 'error'
-    uploadMessage.value = `上传失败：${error instanceof Error ? error.message : '请重试'}`
-    ElMessage.error(error instanceof Error ? error.message : '采集器照片上传失败')
-  } finally {
-    if (
-      requestGeneration === runContextGeneration
-      && requestRunId === selectedRunId.value
-    ) loading.value = false
-    ;(event.target as HTMLInputElement).value = ''
-  }
-}
-
 function releaseLocalPhotoUrl() {
   if (!localPhotoUrl.value) return
   URL.revokeObjectURL(localPhotoUrl.value)
   localPhotoUrl.value = ''
 }
-
 </script>
 
 <template>
   <div class="inventory-page">
-    <section class="phone-surface" :aria-busy="loading">
+    <section class="phone-surface" :aria-busy="loading || inventoryLoading">
       <header class="inventory-appbar">
         <div>
-          <strong>采集器盘点</strong>
-          <small>手机摄像头扫码</small>
+          <strong>采集器实物登记</strong>
+          <small>打开即可扫码拍照</small>
         </div>
-        <button v-if="isAdmin" class="round-button" type="button" aria-label="选择盘点批次" @click="openSetup">•••</button>
+        <span class="live-dot">项目库存</span>
       </header>
 
-      <div class="stage-banner">仅做盘点与补拍 · 不录入甲方平台</div>
-      <div class="batch-row">
-        <p class="project-identity" data-testid="project-identity"><span>当前项目</span><strong>{{ activeProject?.name || '未选择项目' }}</strong><small>{{ activeProject?.id || '无项目编号' }}</small></p>
-        <label>
-          <span>当前批次</span>
-          <select v-model="selectedRunId" aria-label="当前盘点批次" @change="handleRunChange">
-            <option value="">请选择</option>
-            <option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option>
-          </select>
-        </label>
-        <strong>{{ runProgress }}</strong>
+      <div class="stage-banner">只做扫码、拍照和入池判断 · 不连接甲方平台</div>
+      <div v-if="activeProject" class="project-row">
+        <p class="project-identity" data-testid="project-identity">
+          <span>当前项目</span>
+          <strong>{{ activeProject.name }}</strong>
+          <small>{{ activeProject.id }}</small>
+        </p>
+        <div class="inventory-count">
+          <strong>{{ inventory.total }}</strong>
+          <span>已登记</span>
+        </div>
       </div>
 
       <main class="inventory-body">
-        <section v-if="mobileView === 'scan'" class="scan-view">
-          <div v-if="!selectedRunId" class="run-empty" data-testid="constructor-empty-state">
-            <strong>暂无可盘点批次</strong>
-            <p>{{ isAdmin ? '请先新建或选择盘点批次。' : '请联系管理员创建当前项目的盘点批次。' }}</p>
-          </div>
-          <template v-else-if="!result">
+        <section v-if="!activeProject" class="project-empty" data-testid="project-empty-state">
+          <span aria-hidden="true">⌁</span>
+          <h1>请先选择项目</h1>
+          <p>采集器库存严格按项目隔离。选择当前项目后才能扫码和拍照。</p>
+        </section>
+
+        <section v-else-if="mobileView === 'scan'" class="scan-view">
+          <template v-if="!result">
             <div class="camera-stage">
               <video v-show="cameraActive" ref="video" autoplay muted playsinline />
               <div v-if="!cameraActive" class="camera-empty">
                 <span class="camera-glyph" aria-hidden="true">⌗</span>
-                <strong>连续扫描实物条码</strong>
-                <small>摄像头只读取采集器号，不录入甲方平台</small>
-                <button class="primary-button" data-testid="start-camera" type="button" @click="startCamera">打开摄像头扫码</button>
-                <span class="camera-status" data-testid="camera-status" aria-live="polite">{{ cameraStatusMessage }}</span>
+                <strong>扫描采集器条形码</strong>
+                <small>识别后立即判断是否需要拍照</small>
+                <button
+                  class="primary-button"
+                  data-testid="start-camera"
+                  type="button"
+                  @click="startCamera"
+                >
+                  打开摄像头扫码
+                </button>
+                <span class="camera-status" data-testid="camera-status" aria-live="polite">
+                  {{ cameraStatusMessage }}
+                </span>
               </div>
               <div v-if="cameraActive" class="scan-frame"><span /></div>
-              <p v-if="cameraActive" class="scan-hint" data-testid="scan-feedback" aria-live="polite">{{ scanFeedback || '对准条形码，识别后自动判断是否需要拍照' }}</p>
+              <p
+                v-if="cameraActive"
+                class="scan-hint"
+                data-testid="scan-feedback"
+                aria-live="polite"
+              >
+                {{ scanFeedback || '对准条形码，识别后自动判断' }}
+              </p>
             </div>
 
             <form class="manual-entry" @submit.prevent="submitScan()">
-              <label for="collector-number">摄像头无法识别时，可手工输入或使用扫码枪</label>
+              <label for="collector-number">无法识别时，可手工输入或使用外接扫码枪</label>
               <div>
-                <input id="collector-number" v-model="collectorNo" inputmode="text" autocomplete="off" placeholder="扫描或输入采集器号" />
-                <button class="primary-button" type="submit" :disabled="loading">查询</button>
+                <input
+                  id="collector-number"
+                  v-model="collectorNo"
+                  inputmode="text"
+                  autocomplete="off"
+                  placeholder="扫描或输入采集器号"
+                >
+                <button class="primary-button" type="submit" :disabled="loading">判断</button>
               </div>
             </form>
           </template>
@@ -476,11 +513,23 @@ function releaseLocalPhotoUrl() {
               <h1 data-testid="decision-title">{{ presentation?.title }}</h1>
               <p>{{ presentation?.description }}</p>
             </div>
-            <p v-if="completedDuplicateFeedback" class="duplicate-feedback" data-testid="completed-duplicate-feedback" aria-live="polite">{{ completedDuplicateFeedback }}</p>
+            <p
+              v-if="completedDuplicateFeedback"
+              class="duplicate-feedback"
+              data-testid="completed-duplicate-feedback"
+              aria-live="polite"
+            >
+              {{ completedDuplicateFeedback }}
+            </p>
 
             <div class="collector-card">
               <div class="collector-preview">
-                <img v-if="photoUrl" :src="photoUrl" data-testid="photo-preview" alt="已登记的采集器照片" />
+                <img
+                  v-if="photoUrl"
+                  :src="photoUrl"
+                  data-testid="photo-preview"
+                  alt="采集器照片预览"
+                >
                 <div v-else class="device-placeholder"><span>{{ result.collector_no }}</span></div>
               </div>
               <dl>
@@ -490,263 +539,472 @@ function releaseLocalPhotoUrl() {
               </dl>
             </div>
 
-            <p class="boundary-note">本页只确认盘点结果。这里不会跳转甲方平台，也不会录入甲方平台资料。</p>
-            <p v-if="uploadStatus !== 'idle'" class="upload-status" :class="`status-${uploadStatus}`" data-testid="upload-status" aria-live="polite">{{ uploadMessage }}</p>
+            <p class="boundary-note">扫码页面不会创建批次，也不会录入或上传甲方平台。</p>
+            <p
+              v-if="uploadStatus !== 'idle'"
+              class="upload-status"
+              :class="`status-${uploadStatus}`"
+              data-testid="upload-status"
+              aria-live="polite"
+            >
+              {{ uploadMessage }}
+            </p>
             <div class="result-actions">
-              <button v-if="result.requires_photo" class="primary-button wide" data-testid="decision-primary-action" type="button" :disabled="uploadStatus === 'uploading'" @click="requestPhoto">{{ primaryActionLabel }}</button>
-              <button v-else class="primary-button wide" data-testid="decision-primary-action" type="button" @click="resetForNextScan">{{ presentation?.primaryAction }}</button>
-              <button class="secondary-button wide" type="button" @click="setMobileView('records')">查看盘点记录</button>
+              <button
+                class="primary-button wide"
+                data-testid="decision-primary-action"
+                type="button"
+                :disabled="uploadStatus === 'uploading'"
+                @click="handlePrimaryAction"
+              >
+                {{ primaryActionLabel }}
+              </button>
+              <button
+                v-if="result.requires_photo"
+                class="secondary-button wide"
+                data-testid="capture-cancel"
+                type="button"
+                :disabled="uploadStatus === 'uploading'"
+                @click="cancelAndContinue"
+              >
+                取消，继续扫码
+              </button>
+              <button class="text-button" type="button" @click="setMobileView('records')">
+                查看项目库存记录
+              </button>
             </div>
           </section>
         </section>
 
-        <section v-else-if="mobileView === 'records'" class="records-view">
-          <header><h1>本机盘点记录</h1><p>显示本次打开页面后的扫码结果。</p></header>
-          <div v-if="recent.length" class="record-list">
-            <article v-for="(item, index) in recent" :key="`${item.collector_id}-${index}`">
-              <span class="record-index">{{ recent.length - index }}</span>
-              <div><strong>{{ item.collector_no }}</strong><small>{{ inventoryResultPresentation({ decision: item.decision, requiresPhoto: item.requires_photo, addToPool: item.add_to_pool }).title }}</small></div>
-              <i :class="item.add_to_pool ? 'pool' : item.requires_photo ? 'photo' : 'direct'" />
+        <section v-else class="records-view" data-testid="inventory-records">
+          <header>
+            <div>
+              <h1>项目采集器库存</h1>
+              <p>只显示当前项目，禁止跨项目复用。</p>
+            </div>
+            <button type="button" :disabled="inventoryLoading" @click="loadInventory(activeProjectId)">刷新</button>
+          </header>
+          <div class="stat-strip">
+            <span><strong>{{ inventory.stats.direct }}</strong>同号</span>
+            <span><strong>{{ inventory.stats.available }}</strong>可用</span>
+            <span><strong>{{ inventory.stats.reserved }}</strong>已占用</span>
+            <span><strong>{{ inventory.stats.used }}</strong>已使用</span>
+          </div>
+          <div v-if="inventory.items.length" class="record-list">
+            <article v-for="item in inventory.items" :key="item.collector_id">
+              <img
+                v-if="item.photo?.thumbnail_url || item.photo?.preview_url || item.photo?.image_url"
+                :src="item.photo.thumbnail_url || item.photo.preview_url || item.photo.image_url"
+                alt="采集器缩略图"
+              >
+              <span v-else class="record-placeholder">⌗</span>
+              <div>
+                <strong>{{ item.collector_no }}</strong>
+                <small>{{ item.last_scanned_at || item.created_at || '暂无时间' }}</small>
+              </div>
+              <em :class="`status-${item.pool_status}`">{{ item.pool_status }}</em>
             </article>
           </div>
-          <div v-else class="empty-state">还没有扫码记录</div>
+          <div v-else class="empty-state">当前项目还没有采集器库存</div>
         </section>
-
       </main>
 
-      <nav class="bottom-nav two-items" aria-label="采集器盘点功能">
-        <button :class="{ active: mobileView === 'scan' }" type="button" aria-label="扫码" @click="setMobileView('scan')"><span>⌗</span>扫码</button>
-        <button :class="{ active: mobileView === 'records' }" type="button" aria-label="盘点记录" @click="setMobileView('records')"><span>▤</span>盘点记录</button>
+      <nav v-if="activeProject" class="bottom-nav" aria-label="采集器盘点功能">
+        <button
+          :class="{ active: mobileView === 'scan' }"
+          type="button"
+          aria-label="扫码"
+          @click="setMobileView('scan')"
+        >
+          <span>⌗</span>扫码
+        </button>
+        <button
+          :class="{ active: mobileView === 'records' }"
+          type="button"
+          aria-label="盘点记录"
+          @click="setMobileView('records')"
+        >
+          <span>▤</span>盘点记录
+        </button>
       </nav>
     </section>
 
-    <input ref="photoInput" class="visually-hidden" data-testid="photo-input" type="file" accept="image/*" capture="environment" :disabled="!result?.requires_photo" @change="uploadPhoto" />
-
-    <div v-if="isAdmin && setupOpen" class="setup-backdrop" @click.self="closeSetup">
-      <form class="setup-dialog" @submit.prevent="createRun">
-        <header><h2>选择或新建盘点批次</h2><button type="button" aria-label="关闭" @click="closeSetup">×</button></header>
-        <label><span>已有批次</span><select v-model="selectedRunId" @change="handleRunChange(); closeSetup()"><option value="">无</option><option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option></select></label>
-        <div class="setup-divider">根据现有数据新建</div>
-        <label><span>项目</span><select v-model="setupProjectId"><option v-for="project in transferProjects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
-        <label><span>批次名称</span><input v-model="setupName" /></label>
-        <button class="primary-button wide" type="submit" :disabled="loading">生成终端与采集器需求</button>
-      </form>
-    </div>
+    <input
+      ref="photoInput"
+      class="visually-hidden"
+      data-testid="photo-input"
+      type="file"
+      accept="image/*"
+      capture="environment"
+      :disabled="!result?.requires_photo || uploadStatus === 'uploading'"
+      @change="handlePhotoChange"
+      @cancel="cancelCapture"
+    >
   </div>
 </template>
 
 <style scoped>
 .inventory-page {
-  --ink: #17211b;
-  --muted: #68756d;
-  --line: #dbe4dc;
-  --paper: #eef2ee;
-  --green: #176b43;
-  --green-soft: #e8f5ed;
-  --amber: #9b610d;
-  --amber-soft: #fff5dc;
-  --red: #9f3630;
-  --red-soft: #fff0ee;
-  --blue: #275d7b;
-  --blue-soft: #e9f3f8;
-  min-height: calc(100dvh - 36px);
-  padding: 18px;
-  background: var(--paper);
-  color: var(--ink);
-  font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  min-height: 100%;
+  padding: 20px;
+  background:
+    radial-gradient(circle at 15% 0%, rgb(27 83 146 / 14%), transparent 34%),
+    #eef2f7;
+  color: #132238;
 }
 
-button, input, select { font: inherit; }
-
 .phone-surface {
-  position: relative;
-  display: flex;
-  width: min(100%, 460px);
-  min-height: min(820px, calc(100dvh - 36px));
+  width: min(100%, 480px);
+  min-height: calc(100vh - 40px);
   margin: 0 auto;
-  flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--line);
+  border: 1px solid #d9e1ea;
   border-radius: 28px;
-  background: #f7f9f6;
-  box-shadow: 0 22px 42px rgba(31, 47, 37, 0.16);
+  background: #f8fafc;
+  box-shadow: 0 22px 54px rgb(15 35 59 / 16%);
 }
 
 .inventory-appbar {
   display: flex;
-  min-height: 64px;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
-  background: #fff;
+  padding: 18px 20px 14px;
+  background: #102d4f;
+  color: white;
 }
 
-.inventory-appbar strong { display: block; font-size: 17px; }
-.inventory-appbar small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.inventory-appbar div,
+.project-identity {
+  display: grid;
+  gap: 3px;
+}
 
-.round-button {
-  width: 38px;
-  height: 38px;
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  background: #fff;
-  color: var(--ink);
-  font-weight: 800;
+.inventory-appbar strong { font-size: 18px; }
+.inventory-appbar small { color: #bcd0e7; }
+
+.live-dot {
+  padding: 6px 10px;
+  border: 1px solid rgb(255 255 255 / 28%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 8%);
+  font-size: 12px;
 }
 
 .stage-banner {
-  padding: 9px 13px;
-  border-bottom: 1px solid #c6dae6;
-  background: var(--blue-soft);
-  color: var(--blue);
-  font-size: 11px;
-  font-weight: 800;
+  padding: 9px 16px;
+  background: #e9f5ee;
+  color: #17643b;
+  font-size: 12px;
   text-align: center;
 }
 
-.batch-row {
-  display: grid;
-  gap: 6px;
-  padding: 10px 15px;
-  border-bottom: 1px solid var(--line);
-  background: #fff;
+.project-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid #e5ebf1;
+  background: white;
 }
 
-.batch-row label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 9px; color: var(--muted); font-size: 11px; }
-.batch-row select { min-width: 0; border: 0; background: transparent; color: var(--ink); font-weight: 800; }
-.batch-row strong { color: var(--muted); font-size: 10px; font-weight: 600; }
-.pool-allocation-button { justify-self: start; border: 1px solid var(--blue); border-radius: 999px; padding: 5px 9px; background: #fff; color: var(--blue); font-size: 11px; font-weight: 800; }
-.pool-allocation-button:disabled { opacity: .55; cursor: wait; }
-.project-identity { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; margin: 0; font-size: 11px; }
-.project-identity span { color: var(--muted); }
-.project-identity strong { color: var(--ink); overflow-wrap: anywhere; }
-.project-identity small { grid-column: 2; color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
+.project-identity { margin: 0; min-width: 0; }
+.project-identity span,
+.project-identity small { color: #718096; font-size: 12px; }
+.project-identity strong { overflow-wrap: anywhere; }
 
-.inventory-body { flex: 1; padding-bottom: 72px; }
-.scan-view { min-height: 100%; }
-.run-empty { display: grid; min-height: 390px; place-content: center; gap: 8px; padding: 24px; text-align: center; }
-.run-empty strong { font-size: 18px; }
-.run-empty p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.inventory-count {
+  display: grid;
+  flex: 0 0 auto;
+  justify-items: end;
+  color: #718096;
+  font-size: 11px;
+}
+
+.inventory-count strong { color: #17643b; font-size: 24px; line-height: 1; }
+
+.inventory-body { padding: 18px; }
+
+.project-empty,
+.empty-state {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  min-height: 300px;
+  padding: 30px;
+  color: #6a788a;
+  text-align: center;
+}
+
+.project-empty > span { font-size: 52px; color: #7d91aa; }
+.project-empty h1,
+.project-empty p { margin: 0; }
 
 .camera-stage {
   position: relative;
-  display: grid;
-  min-height: 390px;
-  place-items: center;
+  min-height: 310px;
   overflow: hidden;
-  background: #17221c;
-  color: #fff;
+  border-radius: 22px;
+  background: linear-gradient(155deg, #173554, #0c2037);
+  color: white;
 }
 
-.camera-stage::before {
+.camera-stage video {
+  width: 100%;
+  min-height: 310px;
+  object-fit: cover;
+}
+
+.camera-empty {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  min-height: 310px;
+  padding: 28px;
+  text-align: center;
+}
+
+.camera-empty small,
+.camera-status { color: #b9c9da; }
+.camera-glyph { font-size: 68px; line-height: 1; color: #71d29b; }
+.camera-status { min-height: 18px; font-size: 12px; }
+
+.scan-frame {
   position: absolute;
-  inset: 0;
-  background-image: linear-gradient(90deg, rgba(255,255,255,.07) 1px, transparent 1px), linear-gradient(rgba(255,255,255,.07) 1px, transparent 1px);
-  background-size: 32px 32px;
-  content: "";
-  opacity: .2;
+  inset: 24% 12%;
+  border: 2px solid #71d29b;
+  border-radius: 16px;
+  box-shadow: 0 0 0 999px rgb(0 0 0 / 25%);
 }
 
-.camera-stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.scan-frame span {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  left: 8px;
+  height: 2px;
+  background: #71d29b;
+  box-shadow: 0 0 10px #71d29b;
+}
 
-.camera-empty { position: relative; z-index: 1; display: grid; max-width: 270px; justify-items: center; gap: 10px; text-align: center; }
-.camera-empty strong { font-size: 18px; }
-.camera-empty small { color: #b8c4bc; line-height: 1.6; }
-.camera-status { max-width: 290px; color: #b8c4bc; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
-.camera-glyph { display: grid; width: 68px; height: 68px; place-items: center; border: 1px solid #607168; border-radius: 18px; color: #6ee3a1; font-size: 34px; }
+.scan-hint {
+  position: absolute;
+  right: 20px;
+  bottom: 14px;
+  left: 20px;
+  margin: 0;
+  font-size: 12px;
+  text-align: center;
+}
 
-.scan-frame { position: absolute; z-index: 2; width: min(78%, 320px); height: 112px; border: 2px solid #6ee3a1; border-radius: 12px; box-shadow: 0 0 0 999px rgba(0,0,0,.2); }
-.scan-frame span { position: absolute; top: 50%; right: 12px; left: 12px; height: 2px; background: #6ee3a1; box-shadow: 0 0 10px #6ee3a1; animation: scan-line 1.8s ease-in-out infinite; }
-.scan-hint { position: absolute; z-index: 3; bottom: 22px; margin: 0; padding: 8px 12px; border-radius: 22px; background: rgba(0,0,0,.55); font-size: 11px; }
+.manual-entry {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
 
-@keyframes scan-line { 0%, 100% { transform: translateY(-34px); } 50% { transform: translateY(34px); } }
+.manual-entry label { color: #5f6f82; font-size: 12px; }
+.manual-entry > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
 
-.manual-entry { margin: 14px; padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: #fff; }
-.manual-entry label { display: block; margin-bottom: 8px; color: var(--muted); font-size: 11px; }
-.manual-entry > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
-.manual-entry input, .setup-dialog input, .setup-dialog select { min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 9px; background: #fafbfa; color: var(--ink); }
+input,
+button { font: inherit; }
 
-.primary-button, .secondary-button { min-height: 42px; border-radius: 9px; padding: 10px 14px; font-weight: 800; }
-.primary-button { border: 0; background: var(--green); color: #fff; }
-.secondary-button { border: 1px solid var(--line); background: #fff; color: var(--ink); }
-.primary-button:disabled { opacity: .55; }
+input {
+  min-width: 0;
+  padding: 12px 13px;
+  border: 1px solid #ccd7e3;
+  border-radius: 12px;
+  background: white;
+  color: #132238;
+}
+
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .58; }
+
+.primary-button,
+.secondary-button,
+.text-button,
+.records-view header button {
+  min-height: 44px;
+  border-radius: 12px;
+  font-weight: 700;
+}
+
+.primary-button {
+  padding: 0 18px;
+  border: 0;
+  background: #147a4c;
+  color: white;
+}
+
+.secondary-button {
+  border: 1px solid #c8d3df;
+  background: white;
+  color: #243c58;
+}
+
+.text-button {
+  border: 0;
+  background: transparent;
+  color: #315f8c;
+}
+
 .wide { width: 100%; }
 
-.result-view { padding: 18px 15px 24px; }
-.result-heading { padding: 8px 0 15px; text-align: center; }
-.result-heading h1 { margin: 0 0 6px; font-size: 20px; }
-.result-heading p { margin: 0 auto; max-width: 320px; color: var(--muted); font-size: 12px; line-height: 1.65; }
-.result-icon { display: grid; width: 58px; height: 58px; margin: 0 auto 11px; place-items: center; border-radius: 50%; background: var(--green-soft); color: var(--green); font-size: 29px; font-weight: 900; }
-.tone-warning .result-icon { background: var(--amber-soft); color: var(--amber); }
-.tone-danger .result-icon { background: var(--red-soft); color: var(--red); }
-
-.collector-card { overflow: hidden; border: 1px solid #b8dcc7; border-radius: 14px; background: var(--green-soft); }
-.tone-warning .collector-card { border-color: #ead099; background: var(--amber-soft); }
-.tone-danger .collector-card { border-color: #ecc1bd; background: var(--red-soft); }
-.collector-preview { display: grid; min-height: 245px; place-items: center; overflow: hidden; border-bottom: 1px solid rgba(0,0,0,.08); background: #dce2dd; }
-.collector-preview img { width: 100%; height: 245px; object-fit: contain; background: #151d18; }
-.device-placeholder { position: relative; display: grid; width: 165px; height: 190px; place-items: end center; padding: 22px 12px; border: 6px solid #b8c0ba; border-radius: 12px; background: #edf0ed; box-shadow: 0 11px 20px rgba(20,30,22,.12); }
-.device-placeholder::before { position: absolute; top: 42px; color: #758078; content: "采集器照片待补拍"; font-size: 11px; }
-.device-placeholder span { width: 100%; padding: 14px 5px; background: #fff; color: var(--ink); font-size: 10px; font-weight: 800; text-align: center; overflow-wrap: anywhere; }
-.collector-card dl { margin: 0; padding: 12px; }
-.collector-card dl div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; padding: 5px 0; font-size: 12px; }
-.collector-card dt { color: var(--muted); }
-.collector-card dd { margin: 0; font-weight: 800; text-align: right; overflow-wrap: anywhere; }
-
-.boundary-note { margin: 12px 0; padding: 11px 12px; border: 1px solid rgba(0,0,0,.07); border-radius: 9px; background: #fff; color: var(--muted); font-size: 11px; line-height: 1.6; }
-.duplicate-feedback { margin: 0 0 12px; padding: 10px 12px; border: 1px solid #c6dae6; border-radius: 9px; background: var(--blue-soft); color: var(--blue); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-.upload-status { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-.upload-status.status-success { border-color: #b8dcc7; background: var(--green-soft); color: var(--green); }
-.upload-status.status-error { border-color: #e1b8b4; background: var(--red-soft); color: var(--red); }
-.result-actions { display: grid; gap: 9px; }
-
-.records-view { padding: 18px 14px 24px; }
-.records-view header h1 { margin: 0 0 5px; font-size: 20px; }
-.records-view header p { margin: 0 0 16px; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.record-list { display: grid; gap: 8px; }
-.record-list article { display: grid; grid-template-columns: 36px minmax(0, 1fr) 10px; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
-.record-index { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 9px; background: #edf1ed; font-size: 11px; font-weight: 800; }
-.record-list strong, .record-list small { display: block; }
-.record-list strong { font-size: 13px; overflow-wrap: anywhere; }
-.record-list small { margin-top: 3px; color: var(--muted); font-size: 10px; }
-.record-list i { width: 9px; height: 9px; border-radius: 50%; background: var(--green); }
-.record-list i.photo { background: #d48817; }
-.record-list i.pool { background: #c14d44; }
-.empty-state { display: grid; min-height: 280px; place-items: center; color: var(--muted); }
-
-.bottom-nav { position: absolute; right: 0; bottom: 0; left: 0; z-index: 8; display: grid; height: 70px; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); background: rgba(255,255,255,.97); backdrop-filter: blur(16px); }
-.bottom-nav.two-items { grid-template-columns: repeat(2, 1fr); }
-.bottom-nav button { display: grid; place-items: center; align-content: center; gap: 3px; border: 0; background: transparent; color: var(--muted); font-size: 10px; }
-.bottom-nav button span { font-size: 19px; }
-.bottom-nav button.active { color: var(--green); font-weight: 800; }
-
-.setup-backdrop { position: fixed; inset: 0; z-index: 90; display: grid; place-items: end center; padding: 12px; background: rgba(16,25,20,.52); }
-.setup-dialog { display: grid; width: min(100%, 460px); gap: 13px; padding: 18px; border-radius: 20px 20px 12px 12px; background: #fff; box-shadow: 0 22px 60px rgba(15,30,20,.28); }
-.setup-dialog header { display: flex; align-items: center; justify-content: space-between; }
-.setup-dialog h2 { margin: 0; font-size: 19px; }
-.setup-dialog header button { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; background: #fff; font-size: 21px; }
-.setup-dialog label { display: grid; gap: 6px; }
-.setup-dialog label span { color: var(--muted); font-size: 12px; }
-.setup-divider { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 11px; }
-.setup-divider::before, .setup-divider::after { height: 1px; flex: 1; background: var(--line); content: ""; }
-.visually-hidden { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-
-@media (max-width: 640px) {
-  .inventory-page { width: 100%; min-width: 0; max-width: 100vw; min-height: 100dvh; overflow-x: clip; padding: 0; }
-  .phone-surface { width: 100%; min-height: 100dvh; border: 0; border-radius: 0; box-shadow: none; }
-  .inventory-appbar { padding-top: calc(10px + env(safe-area-inset-top)); }
-  .inventory-body { padding-bottom: calc(72px + env(safe-area-inset-bottom)); }
-  .bottom-nav { height: calc(70px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); }
-  .setup-backdrop { padding: 0; }
-  .setup-dialog { border-radius: 20px 20px 0 0; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+.result-heading {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 8px 0 18px;
+  text-align: center;
 }
 
-@media (max-width: 390px) {
-  .inventory-page, .phone-surface, .inventory-body, .scan-view, .manual-entry, .result-view, .collector-card { min-width: 0; max-width: 100%; }
-  .inventory-appbar, .batch-row, .manual-entry, .result-view, .records-view { overflow-wrap: anywhere; }
-  .manual-entry > div { grid-template-columns: minmax(0, 1fr) auto; }
+.result-heading h1,
+.result-heading p { margin: 0; }
+.result-heading p { color: #65758a; }
+
+.result-icon {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  border-radius: 50%;
+  background: #dff4e7;
+  color: #147a4c;
+  font-size: 28px;
+  font-weight: 800;
 }
 
-@media (prefers-reduced-motion: reduce) { .scan-frame span { animation: none; } }
+.tone-warning .result-icon { background: #fff2d7; color: #a86000; }
+.tone-danger .result-icon { background: #ffe2e2; color: #a32929; }
+
+.duplicate-feedback,
+.boundary-note,
+.upload-status {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.duplicate-feedback { background: #eef3f8; color: #415a75; }
+.boundary-note { background: #eef6f1; color: #35634a; }
+.upload-status { background: #edf3fa; color: #315f8c; }
+.upload-status.status-error { background: #fff0f0; color: #a32929; }
+.upload-status.status-success { background: #e8f6ee; color: #17643b; }
+
+.collector-card {
+  overflow: hidden;
+  border: 1px solid #dce4ec;
+  border-radius: 18px;
+  background: white;
+}
+
+.collector-preview {
+  display: grid;
+  min-height: 190px;
+  place-items: center;
+  background: #e9eff5;
+}
+
+.collector-preview img { width: 100%; height: 230px; object-fit: cover; }
+.device-placeholder { display: grid; padding: 25px; place-items: center; color: #415a75; }
+.device-placeholder span { overflow-wrap: anywhere; font-weight: 800; }
+
+.collector-card dl { display: grid; gap: 0; margin: 0; padding: 4px 16px; }
+.collector-card dl div { display: grid; grid-template-columns: 80px minmax(0, 1fr); gap: 10px; padding: 11px 0; border-bottom: 1px solid #edf1f5; }
+.collector-card dl div:last-child { border-bottom: 0; }
+.collector-card dt { color: #718096; }
+.collector-card dd { margin: 0; overflow-wrap: anywhere; font-weight: 700; }
+
+.result-actions { display: grid; gap: 9px; margin-top: 14px; }
+
+.records-view header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.records-view h1,
+.records-view p { margin: 0; }
+.records-view p { color: #718096; font-size: 12px; }
+.records-view header button { min-height: 36px; padding: 0 13px; border: 1px solid #c8d3df; background: white; }
+
+.stat-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.stat-strip span {
+  display: grid;
+  justify-items: center;
+  padding: 10px 3px;
+  border-radius: 12px;
+  background: white;
+  color: #718096;
+  font-size: 10px;
+}
+
+.stat-strip strong { color: #173554; font-size: 18px; }
+.record-list { display: grid; gap: 10px; }
+
+.record-list article {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  padding: 10px;
+  border: 1px solid #e0e7ef;
+  border-radius: 14px;
+  background: white;
+}
+
+.record-list img,
+.record-placeholder { width: 52px; height: 52px; border-radius: 10px; }
+.record-list img { object-fit: cover; }
+.record-placeholder { display: grid; place-items: center; background: #e9eff5; color: #52677e; }
+.record-list article > div { display: grid; min-width: 0; gap: 4px; }
+.record-list article strong { overflow-wrap: anywhere; }
+.record-list article small { color: #8190a1; font-size: 10px; }
+.record-list em { padding: 4px 7px; border-radius: 999px; background: #edf3f8; color: #52677e; font-size: 10px; font-style: normal; }
+.record-list em.status-available { background: #e6f6ec; color: #17643b; }
+.record-list em.status-used { background: #f2e9e9; color: #923a3a; }
+
+.bottom-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-top: 1px solid #dfe7ef;
+  background: white;
+}
+
+.bottom-nav button {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  min-height: 64px;
+  border: 0;
+  background: transparent;
+  color: #718096;
+  font-size: 11px;
+}
+
+.bottom-nav button span { font-size: 22px; }
+.bottom-nav button.active { color: #147a4c; }
+
+.visually-hidden {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (max-width: 520px) {
+  .inventory-page { padding: 0; background: #f8fafc; }
+  .phone-surface { min-height: 100vh; border: 0; border-radius: 0; box-shadow: none; }
+  .inventory-body { padding: 14px; }
+}
 </style>

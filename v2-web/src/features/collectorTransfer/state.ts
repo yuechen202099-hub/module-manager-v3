@@ -16,11 +16,27 @@ export type InventoryResultPresentation = {
 }
 
 export function inventoryResultPresentation(input: InventoryDecisionInput): InventoryResultPresentation {
-  if (input.decision === 'assignment_reuse') {
+  if (input.decision === 'existing_available') {
     return {
       tone: 'success',
-      title: '已有分配',
-      description: '该采集器已有分配记录，不重复入池。',
+      title: '已在替换池',
+      description: '该采集器已登记且照片有效，无需重复拍照。',
+      primaryAction: '继续扫码',
+    }
+  }
+  if (input.decision === 'existing_reserved') {
+    return {
+      tone: 'warning',
+      title: '已被占用',
+      description: '该采集器已被任务预留，禁止重复使用。',
+      primaryAction: '继续扫码',
+    }
+  }
+  if (input.decision === 'existing_used') {
+    return {
+      tone: 'danger',
+      title: '已使用',
+      description: '该采集器已经使用，禁止再次加入替换池。',
       primaryAction: '继续扫码',
     }
   }
@@ -35,7 +51,7 @@ export function inventoryResultPresentation(input: InventoryDecisionInput): Inve
   if (!input.requiresPhoto && !input.addToPool) {
     return {
       tone: 'success',
-      title: '无需拍照，已登记',
+      title: '无需拍照，已确认',
       description: '同号采集器照片可复用，不加入替换池。',
       primaryAction: '继续扫码',
     }
@@ -43,15 +59,15 @@ export function inventoryResultPresentation(input: InventoryDecisionInput): Inve
   if (!input.addToPool) {
     return {
       tone: 'warning',
-      title: '需要补拍',
+      title: '需要拍照',
       description: '同号但缺照片，补拍后直接匹配，不入池。',
-      primaryAction: '立即补拍',
+      primaryAction: '立即拍照',
     }
   }
   return {
     tone: 'warning',
-    title: '需要补拍',
+    title: '需要拍照',
     description: '没有同号，补图后加入替换池。',
-    primaryAction: '立即补拍',
+    primaryAction: '立即拍照',
   }
 }
