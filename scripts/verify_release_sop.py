@@ -29,6 +29,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_5_release.py",
     "scripts/verify_v3_2_6_release.py",
     "scripts/test_verify_v3_2_6_release.py",
+    "scripts/verify_v3_2_7_release.py",
+    "scripts/test_verify_v3_2_7_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -72,6 +74,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.4.md",
     "ops/releases/V3.2.5.md",
     "ops/releases/V3.2.6.md",
+    "ops/releases/V3.2.7.md",
 )
 
 REQUIRED_FILES = [
@@ -764,8 +767,8 @@ def structured_deployed_release_record_has_verified_evidence(record: str, versio
         rf"(?m)^- 上线前备份：`(/opt/module-manager-v2/backups/{re.escape(version)}-[^`]+)`$",
         record,
     )
-    local_hash = re.findall(r"(?m)^- 本地 SHA256：`([0-9A-F]{64})`$", record)
-    server_hash = re.findall(r"(?m)^- 服务器 SHA256：`([0-9A-F]{64})`$", record)
+    local_hash = re.findall(r"(?m)^- 本地 SHA256：`([0-9A-Fa-f]{64})`$", record)
+    server_hash = re.findall(r"(?m)^- 服务器 SHA256：`([0-9A-Fa-f]{64})`$", record)
     return (
         len(source_commit) == 1
         and len(current_release) == 1
@@ -857,14 +860,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def verify_current_release_phase(phase: str) -> None:
-    path = Path(__file__).with_name("verify_v3_2_6_release.py")
-    spec = importlib.util.spec_from_file_location("verify_v3_2_6_release", path)
+    path = Path(__file__).with_name("verify_v3_2_7_release.py")
+    spec = importlib.util.spec_from_file_location("verify_v3_2_7_release", path)
     if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.6 release verifier")
+        fail("Unable to load V3.2.7 release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if module.main(["--phase", phase]) != 0:
-        fail(f"V3.2.6 {phase} release contract failed")
+        fail(f"V3.2.7 {phase} release contract failed")
 
 
 def validate_requested_candidate_version(version: str, agents: str) -> str:

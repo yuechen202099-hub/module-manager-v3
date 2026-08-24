@@ -16,10 +16,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 V3079_RELEASE_RECORD = "ops/releases/V3.0.79.md"
-V325_BASELINE_RELEASE_RECORD = "ops/releases/V3.2.5.md"
+V326_BASELINE_RELEASE_RECORD = "ops/releases/V3.2.6.md"
 V323_RELEASE_RECORD = "ops/releases/V3.2.3.md"
 V324_RELEASE_RECORD = "ops/releases/V3.2.4.md"
 V326_RELEASE_RECORD = "ops/releases/V3.2.6.md"
+V327_RELEASE_RECORD = "ops/releases/V3.2.7.md"
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
 VALID_SHA256 = "a" * 64
@@ -39,14 +40,14 @@ SAFETY_NOTES = (
 
 VALID_AGENTS = """# Package fixture
 
-- Deployed production baseline: `V3.2.5`.
-- Release candidate: `V3.2.6`.
-- Release-candidate maintenance branch: `production/V3/3.2.6`.
-- 当前已部署生产版本：`V3.2.5`。
-- 当前发布候选版本：`V3.2.6`。
-- 当前候选维护分支：`production/V3/3.2.6`。
+- Deployed production baseline: `V3.2.6`.
+- Release candidate: `V3.2.7`.
+- Release-candidate maintenance branch: `production/V3/3.2.7`.
+- 当前已部署生产版本：`V3.2.6`。
+- 当前发布候选版本：`V3.2.7`。
+- 当前候选维护分支：`production/V3/3.2.7`。
 """
-PENDING_RELEASE_RECORD = """# V3.2.6 Production Release Record
+PENDING_RELEASE_RECORD = """# V3.2.7 Production Release Record
 
 ## Summary
 
@@ -55,8 +56,8 @@ PENDING_RELEASE_RECORD = """# V3.2.6 Production Release Record
 - Package: pending
 - Production Deployment: pending
 - Production Reconciliation: pending
-- Rollback target: V3.2.5
-- V3.2.6 has not been deployed to production.
+- Rollback target: V3.2.6
+- V3.2.7 has not been deployed to production.
 
 ## Package
 
@@ -146,9 +147,9 @@ def write_release_archive(
     verifier,
     archive_path: Path,
     *,
-    manifest_version: str | None = "3.2.6",
+    manifest_version: str | None = "3.2.7",
     manifest_versions: list[str] | None = None,
-    static_version: str = "3.2.6",
+    static_version: str = "3.2.7",
     title_version: str | None = None,
     runtime_version: str | None = None,
     source_version: str | None = None,
@@ -191,12 +192,12 @@ def write_release_archive(
             f"-PerformanceReport .\\build\\release-evidence\\v{resolved_document_version}-task-review.json"
         ),
         "docs/CLIENT_FINAL_AUDIT.md": (ROOT / "docs/CLIENT_FINAL_AUDIT.md").read_text(encoding="utf-8"),
-        V325_BASELINE_RELEASE_RECORD: deployed_release_record(
-            "3.2.5",
+        V326_BASELINE_RELEASE_RECORD: deployed_release_record(
+            "3.2.6",
             "Status: reviewed, packaged, deployed, and verified in production",
         ),
         V324_RELEASE_RECORD: (ROOT / V324_RELEASE_RECORD).read_text(encoding="utf-8"),
-        V326_RELEASE_RECORD: release_record,
+        V327_RELEASE_RECORD: release_record,
         SOURCE_VERSION_ARTIFACT: json.dumps({"version": resolved_source_version}),
         "v2-api/app/static/vue/index.html": (
             f"<!doctype html><title>Module Manager V{resolved_title_version}</title>"
@@ -304,7 +305,7 @@ def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.2.6"' in build_script
+    assert '[string]$Version = "3.2.7"' in build_script
 
 
 def test_release_builder_embeds_the_current_source_commit() -> None:
@@ -525,7 +526,7 @@ def test_v326_build_sequence_executes_current_and_compatible_release_gates_only(
         "scripts\\verify_v3_2_0_export_center_ui.py",
         "scripts\\verify_v3_2_0_single_export_entry.py",
         "scripts\\verify_v3_2_1_installer_kpi_restore.py",
-        "scripts\\verify_v3_2_6_release.py",
+        "scripts\\verify_v3_2_7_release.py",
     )
     for verifier_path in expected:
         assert verifier_path in release_verifiers
@@ -1070,7 +1071,7 @@ def test_all_copied_operational_documents_reject_round8_stale_markers() -> None:
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.2.6")
+        verifier.verify_release_markdown_text(document_path, content, "3.2.7")
 
 
 @pytest.mark.parametrize(
@@ -1083,7 +1084,7 @@ def test_current_operational_documents_validate_against_the_package_version(docu
     verifier.verify_release_markdown_text(
         document_path,
         (ROOT / document_path).read_text(encoding="utf-8"),
-        "3.2.6",
+        "3.2.7",
     )
 
 
@@ -1186,7 +1187,10 @@ def test_archive_rejects_stale_marker_in_every_required_markdown(
         content_overrides={document_path: stale_content},
     )
 
-    with pytest.raises(AssertionError, match=re.escape(document_path)):
+    expected_message = (
+        "Release manifest Version" if document_path == "RELEASE_MANIFEST.md" else re.escape(document_path)
+    )
+    with pytest.raises(AssertionError, match=expected_message):
         verifier.verify_package(archive_path)
 
 
@@ -1341,11 +1345,11 @@ def test_archive_rejects_stale_entry_bundle_despite_current_sidecars(tmp_path: P
     write_release_archive(
         verifier,
         archive_path,
-        runtime_version="3.2.6",
-        source_version="3.2.6",
+        runtime_version="3.2.7",
+        source_version="3.2.7",
         entry_version="3.2.4",
-        unrelated_static_version="3.2.6",
-        unrelated_chunk_entry_version="3.2.6",
+        unrelated_static_version="3.2.7",
+        unrelated_chunk_entry_version="3.2.7",
     )
 
     with pytest.raises(AssertionError, match="entry bundle version"):
@@ -1423,7 +1427,7 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
     verifier = load_verifier()
     archive_path = tmp_path / "contradictory-agents.zip"
     agents = VALID_AGENTS.replace(
-        "- Deployed production baseline: `V3.2.5`.",
+            "- Deployed production baseline: `V3.2.6`.",
         "- Deployed production baseline: `V3.2.3`.",
     )
     write_release_archive(verifier, archive_path, agents=agents)
@@ -1438,7 +1442,7 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
         (
             "star-package",
             "Package",
-            "* Package: module-manager-v2-server-3.2.6.zip",
+            "* Package: module-manager-v2-server-3.2.7.zip",
         ),
         ("plus-local-verification", "Local Verification", "+ Local Verification: passed"),
         (
@@ -1474,9 +1478,9 @@ def test_archive_rejects_normalized_duplicate_candidate_lifecycle_field(
 def test_archive_rejects_deployed_record_without_live_evidence(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "unsupported-deployed-record.zip"
-    agents = VALID_AGENTS.replace("V3.2.5", "V3.2.6")
+    agents = VALID_AGENTS.replace("V3.2.6", "V3.2.7")
     record = deployed_release_record(
-        "3.2.6",
+        "3.2.7",
         "Status: reviewed, packaged, deployed, and verified in production",
     ).replace(f"| SHA256 | {VALID_SHA256} |", "| SHA256 | |")
     write_release_archive(
@@ -1549,7 +1553,7 @@ def test_archive_rejects_bare_deployed_baseline_status(tmp_path: Path) -> None:
         verifier,
         archive_path,
         content_overrides={
-            V325_BASELINE_RELEASE_RECORD: deployed_release_record("3.2.5", "Status: deployed")
+            V326_BASELINE_RELEASE_RECORD: deployed_release_record("3.2.6", "Status: deployed")
         },
     )
 
@@ -1568,13 +1572,13 @@ def test_archive_accepts_complete_deployed_baseline_status(tmp_path: Path) -> No
 def test_archive_accepts_equal_post_deploy_markers_as_one_deployed_record(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "post-deploy-equal-markers.zip"
-    agents = VALID_AGENTS.replace("V3.2.5", "V3.2.6")
+    agents = VALID_AGENTS.replace("V3.2.6", "V3.2.7")
     write_release_archive(
         verifier,
         archive_path,
         agents=agents,
         release_record=deployed_release_record(
-            "3.2.6",
+            "3.2.7",
             "Status: reviewed, packaged, deployed, and verified in production",
         ),
     )

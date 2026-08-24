@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.2.6",
+    [string]$Version = "3.2.7",
     [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
@@ -29,6 +29,8 @@ $releaseInputs = @(
     "scripts\test_verify_v3_2_5_release.py",
     "scripts\verify_v3_2_6_release.py",
     "scripts\test_verify_v3_2_6_release.py",
+    "scripts\verify_v3_2_7_release.py",
+    "scripts\test_verify_v3_2_7_release.py",
     "scripts\patch_export_retirement_nginx.py",
     "scripts\test_patch_export_retirement_nginx.py",
     "scripts\oss_local_export.py",
@@ -71,7 +73,8 @@ $releaseInputs = @(
     "ops\releases\V3.2.3.md",
     "ops\releases\V3.2.4.md",
     "ops\releases\V3.2.5.md",
-    "ops\releases\V3.2.6.md"
+    "ops\releases\V3.2.6.md",
+    "ops\releases\V3.2.7.md"
 )
 foreach ($releaseInput in $releaseInputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $root $releaseInput) -PathType Leaf)) {
@@ -84,8 +87,8 @@ if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the full Git source commit for this release."
 }
 $sourceBranch = (& git branch --show-current).Trim()
-if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.6") {
-    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.6."
+if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.7") {
+    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.7."
 }
 $worktreeChanges = @(
     git status --porcelain --untracked-files=all |
@@ -98,7 +101,7 @@ if ($worktreeChanges.Count -ne 0) {
     throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
 }
 if ([string]::IsNullOrWhiteSpace($PerformanceReport)) {
-    throw "Performance report is required for V3.2.6 packaging."
+    throw "Performance report is required for V3.2.7 packaging."
 }
 $performanceReportPath = if ([System.IO.Path]::IsPathRooted($PerformanceReport)) {
     [System.IO.Path]::GetFullPath($PerformanceReport)
@@ -155,7 +158,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "V3.1 performance evidence verification failed."
 }
 
-Write-Host "Running V3.2.6 focused release gates..."
+Write-Host "Running V3.2.7 focused release gates..."
 $releaseVerifiers = @(
     "scripts\verify_v3_2_0_role_routes.py",
     "scripts\verify_v3_2_0_data_center_ui.py",
@@ -163,16 +166,16 @@ $releaseVerifiers = @(
     "scripts\verify_v3_2_0_export_center_ui.py",
     "scripts\verify_v3_2_0_single_export_entry.py",
     "scripts\verify_v3_2_1_installer_kpi_restore.py",
-    "scripts\verify_v3_2_6_release.py"
+    "scripts\verify_v3_2_7_release.py"
 )
 foreach ($releaseVerifier in $releaseVerifiers) {
-    if ($releaseVerifier -eq "scripts\verify_v3_2_6_release.py") {
+    if ($releaseVerifier -eq "scripts\verify_v3_2_7_release.py") {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier) --phase source
     } else {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
     }
     if ($LASTEXITCODE -ne 0) {
-        throw "V3.2.6 release gate failed: $releaseVerifier"
+        throw "V3.2.7 release gate failed: $releaseVerifier"
     }
 }
 
@@ -264,6 +267,8 @@ Copy-ReleaseItem "scripts\verify_v3_2_5_release.py" "scripts\verify_v3_2_5_relea
 Copy-ReleaseItem "scripts\test_verify_v3_2_5_release.py" "scripts\test_verify_v3_2_5_release.py"
 Copy-ReleaseItem "scripts\verify_v3_2_6_release.py" "scripts\verify_v3_2_6_release.py"
 Copy-ReleaseItem "scripts\test_verify_v3_2_6_release.py" "scripts\test_verify_v3_2_6_release.py"
+Copy-ReleaseItem "scripts\verify_v3_2_7_release.py" "scripts\verify_v3_2_7_release.py"
+Copy-ReleaseItem "scripts\test_verify_v3_2_7_release.py" "scripts\test_verify_v3_2_7_release.py"
 Copy-ReleaseItem "scripts\patch_export_retirement_nginx.py" "scripts\patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\test_patch_export_retirement_nginx.py" "scripts\test_patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\oss_local_export.py" "scripts\oss_local_export.py"
@@ -523,7 +528,7 @@ $manifest = @"
 
 - Release smoke check passes unless -SkipSmoke was used
 - Source-bound V3.1 task/review performance evidence passes the release verifier
-- V3.2.0 inherited gates, immutable historical release contracts, and the active V3.2.6 collector-transfer/retired-batch-import contract pass before package staging
+- V3.2.0 inherited gates, immutable historical release contracts, and the active V3.2.7 project-scoped collector inventory contract pass before package staging
 - Demo admin and constructor login are available only for local walkthrough when enabled
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment

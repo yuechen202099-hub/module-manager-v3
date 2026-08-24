@@ -90,6 +90,8 @@ REQUIRED_FILES = {
     "scripts/test_verify_v3_2_5_release.py",
     "scripts/verify_v3_2_6_release.py",
     "scripts/test_verify_v3_2_6_release.py",
+    "scripts/verify_v3_2_7_release.py",
+    "scripts/test_verify_v3_2_7_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -134,6 +136,7 @@ REQUIRED_FILES = {
     "ops/releases/V3.2.4.md",
     "ops/releases/V3.2.5.md",
     "ops/releases/V3.2.6.md",
+    "ops/releases/V3.2.7.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.80.md",
@@ -375,10 +378,10 @@ def load_release_truth_parser():
 
 
 def load_current_release_verifier():
-    path = Path(__file__).with_name("verify_v3_2_6_release.py")
+    path = Path(__file__).with_name("verify_v3_2_7_release.py")
     spec = importlib.util.spec_from_file_location("package_v326_release", path)
     if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.6 release verifier")
+        fail("Unable to load V3.2.7 release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -659,7 +662,7 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         current_release = load_current_release_verifier()
         if package_version != current_release.VERSION:
             fail(
-                f"Release manifest Version must match the current V3.2.6 source contract: "
+                f"Release manifest Version must match the current V3.2.7 source contract: "
                 f"{current_release.VERSION}"
             )
         verify_release_markdown_documents(archive, names, package_version)
