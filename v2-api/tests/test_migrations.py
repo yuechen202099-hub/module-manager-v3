@@ -194,6 +194,11 @@ def test_collector_transfer_migration_is_chained_and_enforces_one_time_assignmen
     assert "CREATE UNIQUE INDEX uq_collector_assignments_physical_active ON collector_assignments (physical_collector_id) WHERE status IN ('reserved', 'used')" in upgrade
     assert "CONSTRAINT uq_collector_assignments_requirement UNIQUE (requirement_id)" not in upgrade
     assert "CONSTRAINT uq_collector_assignments_physical UNIQUE (physical_collector_id)" not in upgrade
-    assert "CONSTRAINT uq_collector_photos_sha256 UNIQUE (sha256)" in upgrade
+    assert "CONSTRAINT uq_collector_photos_team_sha256 UNIQUE (team_id, sha256)" in upgrade
+    assert "module_meter_photo_snapshot JSONB DEFAULT '{}'::jsonb NOT NULL" in upgrade
+    assert "after_box_photo_snapshot JSONB DEFAULT '{}'::jsonb NOT NULL" in upgrade
+    assert "assigned_by_username VARCHAR(64) DEFAULT '' NOT NULL" in upgrade
+    assert "captured_by_username VARCHAR(64) DEFAULT '' NOT NULL" in upgrade
+    assert "completed_by_username VARCHAR(64)" in upgrade
     assert "CONSTRAINT ck_physical_collectors_pool_status CHECK" in upgrade
     assert "DROP TABLE collector_transfer_runs" in downgrade

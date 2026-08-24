@@ -18,6 +18,7 @@ from app.core import security
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorPhotoConflictError,
+    CollectorRunBlockedError,
     PoolInsufficientError,
 )
 
@@ -232,6 +233,28 @@ def test_pool_shortage_is_a_conflict_with_no_partial_success_payload(monkeypatch
     assert response.json()["error"]["code"] == "pool_insufficient"
     assert response.json()["error"]["details"] == {"required": 3, "available": 2}
     assert "assignments" not in response.text
+
+
+def test_blocked_run_allocation_has_a_stable_conflict_contract(monkeypatch) -> None:
+    """Catches a blocked run falling through to the generic 400 invalid-request contract."""
+    service = FakeCollectorTransferService()
+
+    def reject_blocked_run(*, run_id: str) -> dict:
+        service.calls.append(("allocate", run_id))
+        raise CollectorRunBlockedError("批次存在资料阻断，不能执行随机分配")
+
+    monkeypatch.setattr(service, "allocate", reject_blocked_run)
+    client = client_with_service(monkeypatch, service)
+
+    response = client.post(
+        "/collector-transfer/runs/run-blocked/allocate",
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "run_blocked"
+    assert response.json()["error"]["message"] == "批次存在资料阻断，不能执行随机分配。"
+    assert service.calls == [("allocate", "run-blocked")]
 
 
 def test_workbench_endpoint_is_read_only_customer_relay_data(monkeypatch) -> None:

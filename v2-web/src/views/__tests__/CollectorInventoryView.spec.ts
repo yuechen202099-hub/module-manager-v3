@@ -459,6 +459,78 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
+  it('binds late scan responses to their originating run and allows the new run to scan', async () => {
+    const runB = { ...run, id: 'run-b', name: '城南改造 · 第四批' }
+    serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([run, runB])
+    const scanA = deferred<CollectorInventoryDecision>()
+    const scanB = deferred<CollectorInventoryDecision>()
+    serviceMocks.scanPhysicalCollector.mockImplementation((runId: string) => (
+      runId === 'run-1' ? scanA.promise : scanB.promise
+    ))
+    const wrapper = await mountPage()
+
+    await submitManualScan(wrapper)
+    await wrapper.get<HTMLSelectElement>('[aria-label="当前盘点批次"]').setValue('run-b')
+    await submitManualScan(wrapper)
+
+    expect(serviceMocks.scanPhysicalCollector).toHaveBeenNthCalledWith(1, 'run-1', 'CG-2026-0819-0036')
+    expect(serviceMocks.scanPhysicalCollector).toHaveBeenNthCalledWith(2, 'run-b', 'CG-2026-0819-0036')
+    scanB.resolve({ ...decision('pool_needs_photo', true, true), collector_no: 'RUN-B-COLLECTOR' })
+    await flushPromises()
+    expect(wrapper.get('.collector-card').text()).toContain('RUN-B-COLLECTOR')
+
+    scanA.resolve({ ...decision('direct_reuse', false, false), collector_no: 'STALE-RUN-A' })
+    await flushPromises()
+    expect(wrapper.get('.collector-card').text()).toContain('RUN-B-COLLECTOR')
+    expect(wrapper.get('.collector-card').text()).not.toContain('STALE-RUN-A')
+    wrapper.unmount()
+  })
+
+  it('clears run-bound photo state and ignores an upload response after the run changes', async () => {
+    const runB = { ...run, id: 'run-b', name: '城南改造 · 第四批' }
+    serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([run, runB])
+    serviceMocks.scanPhysicalCollector.mockResolvedValue(decision('direct_needs_photo', true, false))
+    const upload = deferred<CollectorPhotoRegistration>()
+    serviceMocks.uploadPhysicalCollectorPhoto.mockReturnValue(upload.promise)
+    const wrapper = await mountPage()
+    await submitManualScan(wrapper)
+    const input = wrapper.get<HTMLInputElement>('[data-testid="photo-input"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: [new File(['photo'], 'collector.jpg', { type: 'image/jpeg' })],
+    })
+    await input.trigger('change')
+
+    await wrapper.get<HTMLSelectElement>('[aria-label="当前盘点批次"]').setValue('run-b')
+    expect(wrapper.find('.collector-card').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="upload-status"]').exists()).toBe(false)
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:collector-preview')
+
+    upload.resolve({
+      collector_id: 'collector-direct_needs_photo',
+      collector_no: 'STALE-UPLOAD',
+      pool_status: 'direct',
+      assignment_id: 'assignment-a',
+      photo: { id: 'photo-a', preview_url: '/photos/stale.jpg' } as CollectorPhotoRegistration['photo'],
+    })
+    await flushPromises()
+    expect(wrapper.find('.collector-card').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="upload-status"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('renders neutral registration detail for an existing random assignment', async () => {
+    serviceMocks.scanPhysicalCollector.mockResolvedValue(decision('assignment_reuse', false, false))
+    const wrapper = await mountPage()
+
+    await submitManualScan(wrapper)
+
+    const registrationDetail = wrapper.get('.collector-card dl div:nth-child(2) dd').text()
+    expect(registrationDetail).toBe('已有分配')
+    expect(registrationDetail).not.toContain('同号直接匹配')
+    wrapper.unmount()
+  })
+
   it('shows admin setup/import actions but hides them for constructors', async () => {
     const adminWrapper = await mountPage()
     expect(adminWrapper.find('[aria-label="选择盘点批次"]').exists()).toBe(true)

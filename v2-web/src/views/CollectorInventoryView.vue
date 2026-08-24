@@ -62,6 +62,7 @@ let scanInFlight = false
 let lastDecodedValue = ''
 let lastDecodedAt = 0
 let loadRunsGeneration = 0
+let runContextGeneration = 0
 let componentUnmounted = false
 
 const selectedRun = computed(() => runs.value.find((item) => item.id === selectedRunId.value) || null)
@@ -94,6 +95,11 @@ const poolSemantics = computed(() => {
   if (result.value.decision === 'direct_needs_photo') return '直接匹配，不入池'
   return '不加入替换池'
 })
+const registrationDetail = computed(() => {
+  if (!result.value) return ''
+  if (result.value.decision === 'assignment_reuse') return '已有分配'
+  return result.value.add_to_pool ? '替换池候选' : '同号直接匹配'
+})
 const primaryActionLabel = computed(() => uploadStatus.value === 'error' ? '重新上传' : presentation.value?.primaryAction || '')
 const cameraStatusMessage = computed(() => {
   if (cameraStatus.value === 'starting') return '正在请求摄像头权限…'
@@ -123,6 +129,7 @@ onMounted(async () => {
 onUnmounted(() => {
   componentUnmounted = true
   loadRunsGeneration += 1
+  runContextGeneration += 1
   stopCamera()
   releaseLocalPhotoUrl()
 })
@@ -130,6 +137,7 @@ onUnmounted(() => {
 async function loadRuns(projectId = selectedProjectId.value, preferredRunId = '') {
   if (componentUnmounted) return
   const requestGeneration = ++loadRunsGeneration
+  clearRunContextState()
   runs.value = []
   selectedRunId.value = ''
   try {
@@ -152,6 +160,33 @@ async function loadRuns(projectId = selectedProjectId.value, preferredRunId = ''
     ) return
     ElMessage.error(error instanceof Error ? error.message : '盘点批次加载失败')
   }
+}
+
+function clearRunContextState() {
+  runContextGeneration += 1
+  scanInFlight = false
+  lastDecodedValue = ''
+  lastDecodedAt = 0
+  loading.value = false
+  stopCamera()
+  releaseLocalPhotoUrl()
+  result.value = null
+  recent.value = []
+  collectorNo.value = ''
+  scanFeedback.value = ''
+  uploadStatus.value = 'idle'
+  uploadMessage.value = ''
+  completedDuplicateFeedback.value = ''
+  completedCollectorNos.clear()
+  workbookFile.value = null
+  inventoryPhotos.value = []
+  importResult.value = null
+  mobileView.value = 'scan'
+  if (photoInput.value) photoInput.value.value = ''
+}
+
+function handleRunChange() {
+  clearRunContextState()
 }
 
 function openSetup() {
@@ -192,6 +227,8 @@ async function submitScan(rawValue = collectorNo.value) {
     openSetup()
     return
   }
+  const requestRunId = selectedRunId.value
+  const requestGeneration = runContextGeneration
   if (!value) {
     ElMessage.warning('请输入或扫描采集器号')
     return
@@ -209,7 +246,11 @@ async function submitScan(rawValue = collectorNo.value) {
   scanInFlight = true
   loading.value = true
   try {
-    const decision = await scanPhysicalCollector(selectedRunId.value, value)
+    const decision = await scanPhysicalCollector(requestRunId, value)
+    if (
+      requestGeneration !== runContextGeneration
+      || requestRunId !== selectedRunId.value
+    ) return
     releaseLocalPhotoUrl()
     uploadStatus.value = 'idle'
     uploadMessage.value = ''
@@ -219,10 +260,19 @@ async function submitScan(rawValue = collectorNo.value) {
     recent.value = [decision, ...recent.value.filter((item) => item.collector_id !== decision.collector_id)].slice(0, 20)
     stopCamera()
   } catch (error) {
+    if (
+      requestGeneration !== runContextGeneration
+      || requestRunId !== selectedRunId.value
+    ) return
     ElMessage.error(error instanceof Error ? error.message : '采集器扫码判断失败')
   } finally {
-    scanInFlight = false
-    loading.value = false
+    if (
+      requestGeneration === runContextGeneration
+      && requestRunId === selectedRunId.value
+    ) {
+      scanInFlight = false
+      loading.value = false
+    }
   }
 }
 
@@ -324,18 +374,25 @@ function requestPhoto() {
 async function uploadPhoto(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (!file || !result.value || !selectedRunId.value) return
+  const requestRunId = selectedRunId.value
+  const requestGeneration = runContextGeneration
+  const decision = result.value
   releaseLocalPhotoUrl()
   localPhotoUrl.value = URL.createObjectURL(file)
   uploadStatus.value = 'uploading'
   uploadMessage.value = '照片上传中…'
   loading.value = true
   try {
-    const uploaded = await uploadPhysicalCollectorPhoto(selectedRunId.value, result.value.collector_id, file)
+    const uploaded = await uploadPhysicalCollectorPhoto(requestRunId, decision.collector_id, file)
+    if (
+      requestGeneration !== runContextGeneration
+      || requestRunId !== selectedRunId.value
+    ) return
     result.value = {
-      ...result.value,
+      ...decision,
       requires_photo: false,
       pool_status: uploaded.pool_status as CollectorInventoryDecision['pool_status'],
-      photo: (uploaded.photo || result.value.photo) as CollectorInventoryDecision['photo'],
+      photo: (uploaded.photo || decision.photo) as CollectorInventoryDecision['photo'],
     }
     recent.value = [result.value, ...recent.value.filter((item) => item.collector_id !== result.value?.collector_id)]
     uploadStatus.value = 'success'
@@ -344,11 +401,18 @@ async function uploadPhoto(event: Event) {
       : '上传成功，照片已直接匹配且不入池'
     ElMessage.success(result.value.add_to_pool ? '照片已保存，采集器已进入替换池' : '照片已保存并完成同号直配')
   } catch (error) {
+    if (
+      requestGeneration !== runContextGeneration
+      || requestRunId !== selectedRunId.value
+    ) return
     uploadStatus.value = 'error'
     uploadMessage.value = `上传失败：${error instanceof Error ? error.message : '请重试'}`
     ElMessage.error(error instanceof Error ? error.message : '采集器照片上传失败')
   } finally {
-    loading.value = false
+    if (
+      requestGeneration === runContextGeneration
+      && requestRunId === selectedRunId.value
+    ) loading.value = false
     ;(event.target as HTMLInputElement).value = ''
   }
 }
@@ -411,7 +475,7 @@ async function submitImport() {
         <p class="project-identity" data-testid="project-identity"><span>当前项目</span><strong>{{ activeProject?.name || '未选择项目' }}</strong><small>{{ activeProject?.id || '无项目编号' }}</small></p>
         <label>
           <span>当前批次</span>
-          <select v-model="selectedRunId" aria-label="当前盘点批次">
+          <select v-model="selectedRunId" aria-label="当前盘点批次" @change="handleRunChange">
             <option value="">请选择</option>
             <option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option>
           </select>
@@ -463,7 +527,7 @@ async function submitImport() {
               </div>
               <dl>
                 <div><dt>采集器号</dt><dd>{{ result.collector_no }}</dd></div>
-                <div><dt>登记结果</dt><dd>{{ result.add_to_pool ? '替换池候选' : '同号直接匹配' }}</dd></div>
+                <div><dt>登记结果</dt><dd>{{ registrationDetail }}</dd></div>
                 <div><dt>替换池</dt><dd data-testid="pool-semantics">{{ poolSemantics }}</dd></div>
               </dl>
             </div>
@@ -514,7 +578,7 @@ async function submitImport() {
     <div v-if="isAdmin && setupOpen" class="setup-backdrop" @click.self="closeSetup">
       <form class="setup-dialog" @submit.prevent="createRun">
         <header><h2>选择或新建盘点批次</h2><button type="button" aria-label="关闭" @click="closeSetup">×</button></header>
-        <label><span>已有批次</span><select v-model="selectedRunId" @change="closeSetup"><option value="">无</option><option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option></select></label>
+        <label><span>已有批次</span><select v-model="selectedRunId" @change="handleRunChange(); closeSetup()"><option value="">无</option><option v-for="run in runs" :key="run.id" :value="run.id">{{ run.name }}</option></select></label>
         <div class="setup-divider">根据现有数据新建</div>
         <label><span>项目</span><select v-model="setupProjectId"><option v-for="project in transferProjects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
         <label><span>批次名称</span><input v-model="setupName" /></label>

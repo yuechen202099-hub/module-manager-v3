@@ -745,6 +745,8 @@ class CollectorMeterItem(Base, TimestampMixin):
     original_collector_no: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     module_meter_photo_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("photos.id", ondelete="RESTRICT"))
     after_box_photo_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("photos.id", ondelete="RESTRICT"))
+    module_meter_photo_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    after_box_photo_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     diagnostics: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
 
@@ -818,7 +820,7 @@ class PhysicalCollector(Base, TimestampMixin):
 class CollectorPhoto(Base, TimestampMixin):
     __tablename__ = "collector_photos"
     __table_args__ = (
-        UniqueConstraint("sha256", name="uq_collector_photos_sha256"),
+        UniqueConstraint("team_id", "sha256", name="uq_collector_photos_team_sha256"),
         Index("ix_collector_photos_team_active", "team_id", "is_active"),
     )
 
@@ -839,6 +841,7 @@ class CollectorPhoto(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     captured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     captured_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    captured_by_username: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default=text("''"))
 
 
 class CollectorScanEvent(Base):
@@ -903,6 +906,7 @@ class CollectorAssignment(Base, TimestampMixin):
         String(32), nullable=False, default="reserved", server_default=text("'reserved'")
     )
     assigned_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    assigned_by_username: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default=text("''"))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -939,6 +943,7 @@ class CollectorWorkbenchItem(Base, TimestampMixin):
     )
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     completed_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    completed_by_username: Mapped[str | None] = mapped_column(String(64))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

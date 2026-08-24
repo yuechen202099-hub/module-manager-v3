@@ -14,7 +14,7 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
@@ -32,7 +32,10 @@ from app.models import (
     ProjectStatus,
     Team,
 )
-from app.services.collector_transfer import PostgresCollectorTransferService
+from app.services.collector_transfer import (
+    CollectorWorkbenchIncompleteError,
+    PostgresCollectorTransferService,
+)
 
 
 @pytest.fixture()
@@ -172,7 +175,18 @@ def test_real_postgres_rolled_back_assignment_releases_requirement_and_collector
         rolled_back = service.rollback_assignment(assignment_id=assignment_id)
 
     assert allocated["assignment_count"] == 1
-    assert rolled_back == {"assignment_id": assignment_id, "run_id": run_id, "status": "rolled_back"}
+    assert rolled_back == {
+        "assignment_id": assignment_id,
+        "run_id": run_id,
+        "status": "rolled_back",
+        "stats": {
+            "active_assignment_count": 0,
+            "assignment_count": 0,
+            "direct_match_count": 0,
+            "random_match_count": 0,
+            "pool_available_count": 1,
+        },
+    }
 
     with postgres_session_factory() as session:
         assignment = session.get(CollectorAssignment, assignment_id)
@@ -206,3 +220,87 @@ def test_real_postgres_rolled_back_assignment_releases_requirement_and_collector
     assert sum(assignment.status in {"reserved", "used"} for assignment in assignments) == 1
     assert requirement.status == "assigned"
     assert physical.pool_status == "reserved"
+
+
+def test_real_postgres_completion_and_rollback_share_deadlock_free_lock_order(
+    postgres_session_factory,
+) -> None:
+    """Catches completion locking workbench-first while rollback locks assignment-first."""
+    team_id, run_id, _requirement_ids = seed_allocation_state(postgres_session_factory, pool_size=1)
+    with postgres_session_factory() as session:
+        allocated = PostgresCollectorTransferService(
+            session=session,
+            team_id=team_id,
+            actor="task7-admin",
+        ).allocate(run_id=run_id)
+        assignment_id = allocated["assignments"][0]["assignment_id"]
+        workbench_item_id = str(
+            session.scalar(
+                select(CollectorWorkbenchItem.id).where(
+                    CollectorWorkbenchItem.assignment_id == assignment_id
+                )
+            )
+        )
+
+    first_lock_barrier = Barrier(2)
+    engine = postgres_session_factory.kw["bind"]
+
+    def synchronize_inverted_first_locks(conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        normalized = " ".join(statement.lower().split())
+        if "for update" not in normalized:
+            return
+        conn.info["collector_transfer_lock_count"] = int(
+            conn.info.get("collector_transfer_lock_count", 0)
+        ) + 1
+        if conn.info["collector_transfer_lock_count"] != 1:
+            return
+        role = conn.info.get("collector_transfer_role")
+        is_old_first_lock = (
+            role == "complete" and "from collector_workbench_items" in normalized
+        ) or (
+            role == "rollback" and "from collector_assignments" in normalized
+        )
+        if is_old_first_lock:
+            first_lock_barrier.wait(timeout=10)
+
+    event.listen(engine, "after_cursor_execute", synchronize_inverted_first_locks)
+
+    def run_operation(role: str) -> tuple[str, str]:
+        with postgres_session_factory() as session:
+            connection = session.connection()
+            connection.info["collector_transfer_role"] = role
+            connection.info["collector_transfer_lock_count"] = 0
+            transfer = PostgresCollectorTransferService(
+                session=session,
+                team_id=team_id,
+                actor=f"task7-{role}",
+            )
+            try:
+                if role == "complete":
+                    result = transfer.set_workbench_item_status(
+                        item_id=workbench_item_id,
+                        completed=True,
+                    )
+                else:
+                    result = transfer.rollback_assignment(assignment_id=assignment_id)
+                return "ok", str(result.get("status"))
+            except KeyError:
+                session.rollback()
+                return "not_found", "404"
+            except CollectorWorkbenchIncompleteError:
+                session.rollback()
+                return "conflict", "409"
+            except Exception as exc:  # assertion below records any leaked database/deadlock failure
+                session.rollback()
+                return "unexpected", f"{type(exc).__name__}: {exc}"
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            complete_future = executor.submit(run_operation, "complete")
+            rollback_future = executor.submit(run_operation, "rollback")
+            outcomes = [complete_future.result(timeout=20), rollback_future.result(timeout=20)]
+    finally:
+        event.remove(engine, "after_cursor_execute", synchronize_inverted_first_locks)
+
+    assert all(kind != "unexpected" for kind, _detail in outcomes), outcomes
+    assert {kind for kind, _detail in outcomes}.issubset({"ok", "not_found", "conflict"})

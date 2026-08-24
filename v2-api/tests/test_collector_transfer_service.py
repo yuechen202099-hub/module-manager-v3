@@ -32,9 +32,11 @@ from app.models import (
     CollectorWorkbenchItem,
     MaterialGroup,
     PhysicalCollector,
+    Photo,
     Project,
     ProjectStatus,
     Team,
+    User,
 )
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
@@ -169,6 +171,19 @@ def service(session: Session) -> PostgresCollectorTransferService:
     return PostgresCollectorTransferService(session=session, team_id="team-1", actor="operator")
 
 
+def actor_user(session: Session, *, username: str = "operator") -> User:
+    user = User(
+        id=uuid4(),
+        team_id="team-1",
+        username=username,
+        display_name=username,
+        password_hash="test-only",
+    )
+    session.add(user)
+    session.commit()
+    return user
+
+
 def test_existing_groups_project_to_only_the_two_confirmed_install_photo_slots() -> None:
     """Catches reintroducing before-box or collector photos into a meter install item."""
     group = SimpleNamespace(
@@ -251,6 +266,28 @@ def test_excel_inventory_import_preserves_leading_zeroes_and_compatible_headers(
     )
 
     assert rows == ((2, "0000123"), (3, "0000456"))
+
+
+def test_excel_inventory_import_uses_simple_zero_fill_display_format_for_numeric_cells() -> None:
+    """Catches a formatted numeric collector identifier silently losing its leading zeroes."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["采集器"])
+    sheet.append([123])
+    sheet["A2"].number_format = "000000"
+    buffer = BytesIO()
+    workbook.save(buffer)
+
+    rows = read_collector_numbers_from_workbook(buffer.getvalue())
+
+    assert rows == ((2, "000123"),)
+
+
+def test_excel_inventory_import_rejects_unformatted_numeric_identifiers() -> None:
+    """Catches a numeric cell being silently stringified when its display identity is ambiguous."""
+    rows = read_collector_numbers_from_workbook(workbook_bytes(["采集器"], [[123]]))
+
+    assert rows == ((2, ""),)
 
 
 def test_excel_inventory_import_preserves_blank_rows_for_diagnostics() -> None:
@@ -358,6 +395,18 @@ def test_scan_recovers_the_physical_collector_that_won_a_unique_constraint_race(
     service = PostgresCollectorTransferService(session=session, team_id="team-1", actor="operator")
     monkeypatch.setattr(service, "_run", lambda _run_id, lock=False: run)
     monkeypatch.setattr(service, "_audit", lambda **_payload: None)
+    monkeypatch.setattr(service, "_actor_user_id", lambda: None)
+    monkeypatch.setattr(
+        service,
+        "_refresh_allocation_stats",
+        lambda _run: {
+            "assignment_count": 0,
+            "active_assignment_count": 0,
+            "direct_match_count": 0,
+            "random_match_count": 0,
+            "pool_available_count": 0,
+        },
+    )
 
     result = service.scan_collector(run_id=str(run.id), collector_no="000123")
 
@@ -405,6 +454,144 @@ def test_real_database_create_run_keeps_each_blank_terminal_group_as_a_blocked_m
     assert {terminal.status for terminal in terminals} == {"blocked"}
     assert len({terminal.terminal_code for terminal in terminals}) == 2
     assert {item.source_group_id for item in meter_items} == {first.id, second.id}
+
+
+def test_real_database_missing_final_module_number_blocks_run_and_allocation(
+    db_session: Session,
+) -> None:
+    """Catches a blank final module barcode leaving its terminal allocatable."""
+    group = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project_id(db_session),
+        terminal="T-MODULE-MISSING",
+        meter_match_key="MODULE-MISSING-1",
+        display_meter_no="000000000123",
+        installation_address="模块号缺失地址",
+        raw_data={"collector": "C-MODULE-MISSING"},
+    )
+    db_session.add(group)
+    db_session.flush()
+    db_session.add_all(
+        (
+            Photo(
+                team_id="team-1",
+                group_id=group.id,
+                sha256="1" * 64,
+                object_key="source/module-missing/module-meter.jpg",
+                image_url="/source/module-meter.jpg",
+                category="module_meter",
+                collector="C-MODULE-MISSING",
+                asset_no="",
+                is_active=True,
+            ),
+            Photo(
+                team_id="team-1",
+                group_id=group.id,
+                sha256="2" * 64,
+                object_key="source/module-missing/after-box.jpg",
+                image_url="/source/after-box.jpg",
+                category="after_box",
+                collector="C-MODULE-MISSING",
+                is_active=True,
+            ),
+        )
+    )
+    db_session.commit()
+
+    created = service(db_session).create_run(
+        project_id=str(project_id(db_session)),
+        name="模块缺失阻断",
+    )
+
+    assert [item["code"] for item in created["diagnostics"]] == ["module_missing"]
+    run_id = UUID(str(created["id"]))
+    terminal = db_session.scalar(
+        select(CollectorTransferTerminal).where(CollectorTransferTerminal.run_id == run_id)
+    )
+    required = db_session.scalar(
+        select(CollectorRequirement).where(CollectorRequirement.run_id == run_id)
+    )
+    assert terminal.status == "blocked"
+    assert required.status == "blocked"
+    with pytest.raises(ValueError, match="批次存在资料阻断") as raised:
+        service(db_session).allocate(run_id=str(run_id))
+    assert raised.type.__name__ == "CollectorRunBlockedError"
+
+
+def test_workbench_install_photos_are_immutable_run_snapshots(
+    db_session: Session,
+) -> None:
+    """Catches source-photo invalidation or storage edits changing an existing run's evidence."""
+    group = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project_id(db_session),
+        terminal="T-SNAPSHOT",
+        meter_match_key="SNAPSHOT-1",
+        display_meter_no="000000000456",
+        installation_address="快照地址",
+        raw_data={"collector": "C-SNAPSHOT"},
+    )
+    db_session.add(group)
+    db_session.flush()
+    source_photos = (
+        Photo(
+            team_id="team-1",
+            group_id=group.id,
+            sha256="3" * 64,
+            object_key="source/snapshot/module-meter.jpg",
+            image_url="/source/snapshot/module-meter.jpg",
+            storage_type="local_upload",
+            storage_key="source/snapshot/module-meter.jpg",
+            category="module_meter",
+            collector="C-SNAPSHOT",
+            asset_no="MODULE-SNAPSHOT",
+            is_active=True,
+        ),
+        Photo(
+            team_id="team-1",
+            group_id=group.id,
+            sha256="4" * 64,
+            object_key="source/snapshot/after-box.jpg",
+            image_url="/source/snapshot/after-box.jpg",
+            storage_type="local_upload",
+            storage_key="source/snapshot/after-box.jpg",
+            category="after_box",
+            collector="C-SNAPSHOT",
+            is_active=True,
+        ),
+    )
+    db_session.add_all(source_photos)
+    db_session.commit()
+    transfer = service(db_session)
+    created = transfer.create_run(project_id=str(project_id(db_session)), name="快照验证")
+    terminal_id = db_session.scalar(
+        select(CollectorTransferTerminal.id).where(
+            CollectorTransferTerminal.run_id == UUID(str(created["id"]))
+        )
+    )
+    before = transfer.terminal_workbench(
+        run_id=str(created["id"]),
+        terminal_id=str(terminal_id),
+    )["items"][0]["photos"]
+
+    for source in source_photos:
+        source.is_active = False
+        source.image_url = "/source/mutated.jpg"
+        source.storage_key = "source/mutated.jpg"
+        source.object_key = "source/mutated.jpg"
+    db_session.commit()
+
+    after = transfer.terminal_workbench(
+        run_id=str(created["id"]),
+        terminal_id=str(terminal_id),
+    )["items"][0]["photos"]
+    assert after == before
+    assert [slot["photo"]["storage_key"] for slot in after] == [
+        "source/snapshot/module-meter.jpg",
+        "source/snapshot/after-box.jpg",
+    ]
 
 
 def test_real_database_scan_returns_each_direct_and_pool_decision(
@@ -539,6 +726,7 @@ def test_single_photo_reuse_deletes_the_new_unreferenced_saved_object(
     db_session.add(physical)
     db_session.commit()
     old_photo = collector_photo(db_session, physical, sha256="f" * 64)
+    service(db_session).scan_collector(run_id=str(run.id), collector_no=physical.collector_no)
     new_key = "collector-transfer/new-upload-C-REUSE.jpg"
     deleted: list[str] = []
     monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
@@ -705,6 +893,7 @@ def test_real_database_rejects_same_photo_sha_for_a_different_physical_collector
     db_session.add_all((first, second))
     db_session.commit()
     existing = collector_photo(db_session, first, sha256="9" * 64)
+    service(db_session).scan_collector(run_id=str(run.id), collector_no=second.collector_no)
 
     with pytest.raises(CollectorPhotoConflictError, match="another physical collector"):
         service(db_session).register_photo(
@@ -745,10 +934,596 @@ def test_sqlite_unique_backstop_rejects_cross_collector_photo_sha(db_session: Se
 
     with pytest.raises(IntegrityError):
         db_session.commit()
-
     db_session.rollback()
     assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 1
 
+
+def test_identical_collector_photo_sha_is_scoped_per_team(db_session: Session) -> None:
+    """Catches another team's identical image blocking this team's photo registration."""
+    transfer_run(db_session)
+    first = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        collector_no="C-SHA-TEAM-1",
+        pool_status="available",
+    )
+    db_session.add(first)
+    db_session.commit()
+    existing = collector_photo(db_session, first, sha256="7" * 64)
+
+    db_session.add(Team(id="team-2", name="另一个团队"))
+    second_project = Project(
+        id=uuid4(),
+        team_id="team-2",
+        code=f"P-{uuid4().hex[:8]}",
+        name="团队二项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(second_project)
+    db_session.flush()
+    second_run = CollectorTransferRun(
+        id=uuid4(),
+        team_id="team-2",
+        project_id=second_project.id,
+        name="团队二盘点",
+        status="inventory",
+        stats={},
+        diagnostics=[],
+    )
+    second = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-2",
+        collector_no="C-SHA-TEAM-2",
+        pool_status="awaiting_photo",
+    )
+    db_session.add_all((second_run, second))
+    db_session.flush()
+    db_session.add(
+        CollectorScanEvent(
+            run_id=second_run.id,
+            team_id="team-2",
+            physical_collector_id=second.id,
+            scanned_value=second.collector_no,
+            decision="pool_needs_photo",
+            requires_photo=True,
+            add_to_pool=True,
+        )
+    )
+    db_session.commit()
+
+    registered = PostgresCollectorTransferService(
+        session=db_session,
+        team_id="team-2",
+        actor="operator-2",
+    ).register_photo(
+        run_id=str(second_run.id),
+        collector_id=str(second.id),
+        original_filename="C-SHA-TEAM-2.jpg",
+        stored={
+            "sha256": existing.sha256,
+            "storage_key": "collector-transfer/team-2/C-SHA-TEAM-2.jpg",
+            "storage_type": "local_upload",
+            "content_type": "image/jpeg",
+        },
+        byte_size=10,
+    )
+
+    assert registered["collector_id"] == str(second.id)
+    assert db_session.scalar(
+        select(func.count(CollectorPhoto.id)).where(CollectorPhoto.sha256 == existing.sha256)
+    ) == 2
+
+
+def test_register_photo_requires_scan_provenance_in_the_same_run(db_session: Session) -> None:
+    """Catches a collector scanned in run A being uploaded directly through run B."""
+    run_a = transfer_run(db_session)
+    run_b = transfer_run(db_session)
+    scanned = service(db_session).scan_collector(run_id=str(run_a.id), collector_no="C-RUN-PROVENANCE")
+
+    with pytest.raises(ValueError, match="当前批次.*扫码"):
+        service(db_session).register_photo(
+            run_id=str(run_b.id),
+            collector_id=str(scanned["collector_id"]),
+            original_filename="C-RUN-PROVENANCE.jpg",
+            stored={
+                "sha256": "6" * 64,
+                "storage_key": "collector-transfer/C-RUN-PROVENANCE.jpg",
+                "storage_type": "local_upload",
+                "content_type": "image/jpeg",
+            },
+            byte_size=10,
+        )
+
+    db_session.rollback()
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 0
+
+
+def test_cross_run_photo_upload_has_stable_api_conflict_and_cleans_saved_file(
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    """Catches an A-scan/B-upload returning a generic error or leaking its unregistered file."""
+    run_a = transfer_run(db_session)
+    run_b = transfer_run(db_session)
+    scanned = service(db_session).scan_collector(run_id=str(run_a.id), collector_no="C-API-PROVENANCE")
+    saved = {
+        "url": "/static/uploads/collector-transfer/C-API-PROVENANCE.jpg",
+        "sha256": "65" * 32,
+        "storage_type": "local_upload",
+        "storage_key": "collector-transfer/C-API-PROVENANCE.jpg",
+        "content_type": "image/jpeg",
+        "created_new": True,
+    }
+    deleted: list[str] = []
+    monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
+    monkeypatch.setattr(routes, "save_image_bytes", lambda **_kwargs: saved)
+    monkeypatch.setattr(
+        routes,
+        "delete_saved_image",
+        lambda stored: deleted.append(str(stored["storage_key"])),
+    )
+
+    response = TestClient(main_module.create_app()).post(
+        f"/collector-transfer/runs/{run_b.id}/collectors/{scanned['collector_id']}/photo",
+        headers=_route_auth_headers(username="constructor-a"),
+        files={"file": ("C-API-PROVENANCE.jpg", b"cross-run", "image/jpeg")},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "scan_provenance_required"
+    assert deleted == ["collector-transfer/C-API-PROVENANCE.jpg"]
+
+
+def test_direct_scan_refreshes_and_returns_transactional_run_totals(db_session: Session) -> None:
+    """Catches a direct assignment leaving direct and active-assignment totals stale."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    requirement(db_session, run, terminal, collector_no="C-DIRECT-STATS")
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        collector_no="C-DIRECT-STATS",
+        pool_status="awaiting_photo",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="5" * 64)
+
+    scanned = service(db_session).scan_collector(
+        run_id=str(run.id),
+        collector_no=physical.collector_no,
+    )
+
+    assert scanned["stats"] == {
+        "assignment_count": 1,
+        "active_assignment_count": 1,
+        "direct_match_count": 1,
+        "random_match_count": 0,
+        "pool_available_count": 0,
+    }
+    db_session.refresh(run)
+    assert {key: run.stats[key] for key in scanned["stats"]} == scanned["stats"]
+
+
+def test_pool_photo_allocate_and_rollback_each_refresh_run_totals(db_session: Session) -> None:
+    """Catches pool admission, random allocation, or rollback returning stale derived totals."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    requirement(db_session, run, terminal, collector_no="C-ORIGINAL-STATS")
+    scanned = service(db_session).scan_collector(run_id=str(run.id), collector_no="C-POOL-STATS")
+    assert scanned["stats"]["pool_available_count"] == 0
+
+    registered = service(db_session).register_photo(
+        run_id=str(run.id),
+        collector_id=str(scanned["collector_id"]),
+        original_filename="C-POOL-STATS.jpg",
+        stored={
+            "sha256": "a1" * 32,
+            "storage_key": "collector-transfer/C-POOL-STATS.jpg",
+            "storage_type": "local_upload",
+            "content_type": "image/jpeg",
+        },
+        byte_size=10,
+    )
+    assert registered["stats"]["pool_available_count"] == 1
+    assert registered["stats"]["assignment_count"] == 0
+
+    allocated = service(db_session).allocate(run_id=str(run.id))
+    assert allocated["stats"] == {
+        "assignment_count": 1,
+        "active_assignment_count": 1,
+        "direct_match_count": 0,
+        "random_match_count": 1,
+        "pool_available_count": 0,
+    }
+
+    rolled_back = service(db_session).rollback_assignment(
+        assignment_id=str(allocated["assignments"][0]["assignment_id"])
+    )
+    assert rolled_back["stats"] == {
+        "assignment_count": 0,
+        "active_assignment_count": 0,
+        "direct_match_count": 0,
+        "random_match_count": 0,
+        "pool_available_count": 1,
+    }
+    db_session.refresh(run)
+    assert {key: run.stats[key] for key in rolled_back["stats"]} == rolled_back["stats"]
+
+
+@pytest.mark.parametrize("assignment_status", ["reserved", "used"])
+def test_direct_assignment_rollback_never_admits_collector_to_random_pool(
+    db_session: Session,
+    assignment_status: str,
+) -> None:
+    """Catches direct rollback turning a photographed same-number collector into a pool candidate."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(
+        db_session,
+        run,
+        terminal,
+        collector_no="C-DIRECT-ROLLBACK",
+        status="used" if assignment_status == "used" else "direct_ready",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        collector_no="C-DIRECT-ROLLBACK",
+        pool_status="used" if assignment_status == "used" else "direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical, sha256=("b" if assignment_status == "used" else "c") * 64)
+    assigned = CollectorAssignment(
+        id=uuid4(),
+        run_id=run.id,
+        team_id="team-1",
+        requirement_id=required.id,
+        physical_collector_id=physical.id,
+        collector_photo_id=photo.id,
+        assignment_mode="direct",
+        status=assignment_status,
+    )
+    db_session.add(assigned)
+    db_session.flush()
+    db_session.add(
+        CollectorWorkbenchItem(
+            run_id=run.id,
+            terminal_id=terminal.id,
+            team_id="team-1",
+            item_kind="collector_removal",
+            source_key=str(required.id),
+            requirement_id=required.id,
+            assignment_id=assigned.id,
+            status="completed" if assignment_status == "used" else "pending",
+        )
+    )
+    db_session.commit()
+
+    service(db_session).rollback_assignment(assignment_id=str(assigned.id))
+
+    db_session.refresh(required)
+    db_session.refresh(physical)
+    assert required.status == "direct_ready"
+    assert physical.pool_status == "direct"
+    assert db_session.scalar(
+        select(func.count(PhysicalCollector.id)).where(
+            PhysicalCollector.id == physical.id,
+            PhysicalCollector.pool_status == "available",
+        )
+    ) == 0
+    reallocated = service(db_session).allocate(run_id=str(run.id))
+    assert reallocated["assignment_count"] == 0
+    assert db_session.scalar(
+        select(func.count(CollectorAssignment.id)).where(
+            CollectorAssignment.run_id == run.id,
+            CollectorAssignment.status.in_(("reserved", "used")),
+        )
+    ) == 0
+
+
+def test_undoing_only_completed_item_restores_ready_terminal(db_session: Session) -> None:
+    """Catches an empty-progress terminal remaining in_progress after its only item is undone."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    group = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=run.project_id,
+        terminal=terminal.terminal_code,
+        meter_match_key="UNDO-READY-1",
+        display_meter_no="000000000789",
+        installation_address="撤销地址",
+        raw_data={},
+    )
+    db_session.add(group)
+    db_session.flush()
+    meter = CollectorMeterItem(
+        run_id=run.id,
+        terminal_id=terminal.id,
+        team_id="team-1",
+        source_group_id=group.id,
+        meter_no="000000000789",
+        meter_barcode="000000000789",
+        module_no="MODULE-UNDO",
+        module_barcode="MODULE-UNDO",
+        module_meter_photo_snapshot={"id": str(uuid4()), "storage_key": "snapshots/module.jpg"},
+        after_box_photo_snapshot={"id": str(uuid4()), "storage_key": "snapshots/after.jpg"},
+        diagnostics=[],
+    )
+    db_session.add(meter)
+    db_session.flush()
+    item = CollectorWorkbenchItem(
+        run_id=run.id,
+        terminal_id=terminal.id,
+        team_id="team-1",
+        item_kind="meter_install",
+        source_key=str(meter.id),
+        meter_item_id=meter.id,
+        status="pending",
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    transfer = service(db_session)
+    transfer.set_workbench_item_status(item_id=str(item.id), completed=True)
+    transfer.set_workbench_item_status(item_id=str(item.id), completed=False)
+
+    db_session.refresh(terminal)
+    assert terminal.completed_item_count == 0
+    assert terminal.status == "ready"
+
+
+def test_direct_api_cannot_complete_meter_item_with_missing_server_evidence(
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    """Catches bypassing meter barcode/two-photo completeness through the PATCH API."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    group = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=run.project_id,
+        terminal=terminal.terminal_code,
+        meter_match_key="INVALID-COMPLETE-METER",
+        display_meter_no="000000000901",
+        installation_address="完整性地址",
+        raw_data={},
+    )
+    db_session.add(group)
+    db_session.flush()
+    meter = CollectorMeterItem(
+        run_id=run.id,
+        terminal_id=terminal.id,
+        team_id="team-1",
+        source_group_id=group.id,
+        meter_no="000000000901",
+        meter_barcode="",
+        module_no="MODULE-COMPLETE",
+        module_barcode="MODULE-COMPLETE",
+        module_meter_photo_snapshot={"id": str(uuid4()), "storage_key": "snapshots/module.jpg"},
+        after_box_photo_snapshot={},
+        diagnostics=[],
+    )
+    db_session.add(meter)
+    db_session.flush()
+    item = CollectorWorkbenchItem(
+        run_id=run.id,
+        terminal_id=terminal.id,
+        team_id="team-1",
+        item_kind="meter_install",
+        source_key=str(meter.id),
+        meter_item_id=meter.id,
+        status="pending",
+    )
+    db_session.add(item)
+    db_session.commit()
+    monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
+
+    response = TestClient(main_module.create_app()).patch(
+        f"/collector-transfer/workbench/items/{item.id}",
+        headers=_route_auth_headers(username="constructor-a"),
+        json={"completed": True},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workbench_incomplete"
+    with _route_session_factory(db_session)() as verification:
+        assert verification.get(CollectorWorkbenchItem, item.id).status == "pending"
+
+
+def test_direct_api_cannot_complete_removal_with_inactive_bound_photo(
+    db_session: Session,
+    monkeypatch,
+) -> None:
+    """Catches completing a removal after its one required collector photo became invalid."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(db_session, run, terminal, status="assigned")
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        collector_no="C-INACTIVE-EVIDENCE",
+        pool_status="reserved",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical, sha256="d" * 64)
+    photo.is_active = False
+    assigned = CollectorAssignment(
+        id=uuid4(),
+        run_id=run.id,
+        team_id="team-1",
+        requirement_id=required.id,
+        physical_collector_id=physical.id,
+        collector_photo_id=photo.id,
+        assignment_mode="random",
+        status="reserved",
+    )
+    db_session.add(assigned)
+    db_session.flush()
+    item = CollectorWorkbenchItem(
+        run_id=run.id,
+        terminal_id=terminal.id,
+        team_id="team-1",
+        item_kind="collector_removal",
+        source_key=str(required.id),
+        requirement_id=required.id,
+        assignment_id=assigned.id,
+        status="pending",
+    )
+    db_session.add(item)
+    db_session.commit()
+    monkeypatch.setattr(routes, "SessionLocal", _route_session_factory(db_session))
+
+    response = TestClient(main_module.create_app()).patch(
+        f"/collector-transfer/workbench/items/{item.id}",
+        headers=_route_auth_headers(username="constructor-a"),
+        json={"completed": True},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "workbench_incomplete"
+    with _route_session_factory(db_session)() as verification:
+        assert verification.get(CollectorWorkbenchItem, item.id).status == "pending"
+
+
+def test_direct_photo_assignment_persists_authenticated_operator_provenance(
+    db_session: Session,
+) -> None:
+    """Catches direct capture/assignment rows losing the authenticated operator."""
+    operator = actor_user(db_session)
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    requirement(db_session, run, terminal, collector_no="C-DIRECT-ACTOR")
+    transfer = service(db_session)
+    scanned = transfer.scan_collector(run_id=str(run.id), collector_no="C-DIRECT-ACTOR")
+    transfer.register_photo(
+        run_id=str(run.id),
+        collector_id=str(scanned["collector_id"]),
+        original_filename="C-DIRECT-ACTOR.jpg",
+        stored={
+            "sha256": "e" * 64,
+            "storage_key": "collector-transfer/C-DIRECT-ACTOR.jpg",
+            "storage_type": "local_upload",
+            "content_type": "image/jpeg",
+        },
+        byte_size=10,
+    )
+
+    assigned = db_session.scalar(
+        select(CollectorAssignment).where(CollectorAssignment.run_id == run.id)
+    )
+    captured = db_session.scalar(
+        select(CollectorPhoto).where(CollectorPhoto.physical_collector_id == assigned.physical_collector_id)
+    )
+    scan_event = db_session.scalar(
+        select(CollectorScanEvent).where(CollectorScanEvent.run_id == run.id)
+    )
+    assert assigned.assigned_by_id == operator.id
+    assert assigned.assigned_by_username == "operator"
+    assert captured.captured_by_id == operator.id
+    assert captured.captured_by_username == "operator"
+    assert scan_event.actor_id == operator.id
+
+
+def test_random_allocation_persists_operator_and_mapping_audit(db_session: Session) -> None:
+    """Catches random assignments and audit rows retaining only an aggregate count."""
+    operator = actor_user(db_session)
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    required = requirement(db_session, run, terminal, collector_no="C-RANDOM-ORIGINAL")
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        collector_no="C-RANDOM-FINAL",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="f" * 64)
+
+    allocated = service(db_session).allocate(run_id=str(run.id))
+
+    assigned = db_session.get(CollectorAssignment, UUID(allocated["assignments"][0]["assignment_id"]))
+    audit = db_session.scalar(
+        select(AuditLog)
+        .where(
+            AuditLog.team_id == "team-1",
+            AuditLog.action == "collector_transfer.random_allocated",
+        )
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+    )
+    assert assigned.assigned_by_id == operator.id
+    assert assigned.assigned_by_username == "operator"
+    assert audit.actor_username == "operator"
+    assert audit.payload["assigned_by"] == "operator"
+    assert audit.payload["assignments"] == [
+        {
+            "assignment_id": str(assigned.id),
+            "requirement_id": str(required.id),
+            "original_collector_no": "C-RANDOM-ORIGINAL",
+            "physical_collector_id": str(physical.id),
+            "final_collector_no": "C-RANDOM-FINAL",
+            "mode": "random",
+        }
+    ]
+
+
+def test_workbench_completion_persists_authenticated_operator_provenance(
+    db_session: Session,
+) -> None:
+    """Catches a completed workbench item omitting the authenticated completing operator."""
+    operator = actor_user(db_session)
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    group = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=run.project_id,
+        terminal=terminal.terminal_code,
+        meter_match_key="COMPLETE-ACTOR-1",
+        display_meter_no="000000001111",
+        installation_address="完成审计地址",
+        raw_data={},
+    )
+    db_session.add(group)
+    db_session.flush()
+    meter = CollectorMeterItem(
+        run_id=run.id,
+        terminal_id=terminal.id,
+        team_id="team-1",
+        source_group_id=group.id,
+        meter_no="000000001111",
+        meter_barcode="000000001111",
+        module_no="MODULE-ACTOR",
+        module_barcode="MODULE-ACTOR",
+        module_meter_photo_snapshot={"id": str(uuid4()), "storage_key": "snapshots/module-actor.jpg"},
+        after_box_photo_snapshot={"id": str(uuid4()), "storage_key": "snapshots/after-actor.jpg"},
+        diagnostics=[],
+    )
+    db_session.add(meter)
+    db_session.flush()
+    item = CollectorWorkbenchItem(
+        run_id=run.id,
+        terminal_id=terminal.id,
+        team_id="team-1",
+        item_kind="meter_install",
+        source_key=str(meter.id),
+        meter_item_id=meter.id,
+        status="pending",
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    service(db_session).set_workbench_item_status(item_id=str(item.id), completed=True)
+
+    db_session.refresh(item)
+    assert item.completed_by_id == operator.id
+    assert item.completed_by_username == "operator"
 
 def test_real_database_pool_shortage_leaves_no_allocation_side_effects(db_session: Session) -> None:
     """Catches a shortage that writes a partial assignment, state change, workbench item, or audit row."""

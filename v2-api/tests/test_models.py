@@ -137,6 +137,19 @@ def test_collector_photo_sha_is_unique_across_physical_collectors_in_one_team() 
         if isinstance(constraint, UniqueConstraint)
     }
 
-    assert ("sha256",) in unique_constraints
-    assert ("team_id", "sha256") not in unique_constraints
+    assert ("sha256",) not in unique_constraints
+    assert ("team_id", "sha256") in unique_constraints
     assert ("physical_collector_id", "sha256") not in unique_constraints
+
+
+def test_collector_transfer_models_persist_snapshot_and_operator_provenance() -> None:
+    """Catches run evidence or per-mapping operator provenance reverting to mutable lookups."""
+    meter_columns = models.CollectorMeterItem.__table__.c
+    photo_columns = models.CollectorPhoto.__table__.c
+    assignment_columns = models.CollectorAssignment.__table__.c
+    workbench_columns = models.CollectorWorkbenchItem.__table__.c
+
+    assert {"module_meter_photo_snapshot", "after_box_photo_snapshot"} <= set(meter_columns.keys())
+    assert {"captured_by_id", "captured_by_username"} <= set(photo_columns.keys())
+    assert {"assigned_by_id", "assigned_by_username"} <= set(assignment_columns.keys())
+    assert {"completed_by_id", "completed_by_username"} <= set(workbench_columns.keys())

@@ -15,6 +15,9 @@ from app.models import CollectorPhoto, Project
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorPhotoConflictError,
+    CollectorRunBlockedError,
+    CollectorScanProvenanceError,
+    CollectorWorkbenchIncompleteError,
     PoolInsufficientError,
     collector_no_from_photo_filename,
     normalize_identifier,
@@ -92,11 +95,33 @@ def service_error_response(request: Request, exc: Exception):
             message="采集器或需求已被其他分配占用，本次操作已回滚。",
             status_code=409,
         )
+    if isinstance(exc, CollectorRunBlockedError):
+        return error_response(
+            request,
+            code="run_blocked",
+            message="批次存在资料阻断，不能执行随机分配。",
+            status_code=409,
+        )
     if isinstance(exc, CollectorPhotoConflictError):
         return error_response(
             request,
             code="photo_conflict",
             message="该照片已绑定其他采集器，本次操作已回滚。",
+            status_code=409,
+        )
+    if isinstance(exc, CollectorScanProvenanceError):
+        return error_response(
+            request,
+            code="scan_provenance_required",
+            message="请先在当前批次扫描该实物采集器，再上传照片。",
+            status_code=409,
+        )
+    if isinstance(exc, CollectorWorkbenchIncompleteError):
+        return error_response(
+            request,
+            code="workbench_incomplete",
+            message="翻拍工作项资料不完整或存在阻断，不能标记完成。",
+            details={"reasons": list(exc.reasons)},
             status_code=409,
         )
     if isinstance(exc, KeyError):
