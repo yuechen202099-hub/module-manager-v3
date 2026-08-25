@@ -21,6 +21,17 @@ type UploadStatus = 'idle' | 'uploading' | 'success' | 'error'
 type DetectedBarcode = { rawValue?: string }
 type NativeBarcodeDetector = { detect: (source: HTMLVideoElement) => Promise<DetectedBarcode[]> }
 type NativeBarcodeDetectorConstructor = new (options?: { formats?: string[] }) => NativeBarcodeDetector
+type QuaggaScanner = {
+  init?: (options: unknown, callback: (error?: unknown) => void) => void
+  onDetected?: (handler: (result: unknown) => void) => void
+  offDetected?: (handler: (result: unknown) => void) => void
+  start?: () => void
+  stop?: () => void
+}
+
+const CAMERA_START_TIMEOUT_MS = 7_000
+const VIDEO_PLAY_TIMEOUT_MS = 3_000
+const QUAGGA_READERS = ['code_128_reader', 'code_39_reader', 'ean_reader', 'ean_8_reader']
 
 const EMPTY_INVENTORY: CollectorInventoryPage = {
   items: [],
@@ -51,6 +62,9 @@ let mediaStream: MediaStream | null = null
 let barcodeDetector: NativeBarcodeDetector | null = null
 let animationFrameId = 0
 let cameraSession = 0
+let quaggaActive = false
+let quaggaDetectedHandler: ((result: unknown) => void) | null = null
+const cameraTimeoutRejectors = new Map<number, (reason?: unknown) => void>()
 let scanInFlight = false
 let lastDecodedValue = ''
 let lastDecodedAt = 0
@@ -235,33 +249,44 @@ async function startCamera() {
   uploadStatus.value = 'idle'
   uploadMessage.value = ''
   scanFeedback.value = ''
-  const Detector = (globalThis as typeof globalThis & {
-    BarcodeDetector?: NativeBarcodeDetectorConstructor
-  }).BarcodeDetector
-  if (!Detector || !navigator.mediaDevices?.getUserMedia) {
+  if (globalThis.isSecureContext === false || typeof navigator.mediaDevices?.getUserMedia !== 'function') {
     cameraStatus.value = 'unsupported'
     return
   }
   const session = ++cameraSession
   cameraStatus.value = 'starting'
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: { ideal: 'environment' } },
-    })
+    const stream = await requestCameraStream()
     if (session !== cameraSession) {
-      for (const track of stream.getTracks()) track.stop()
+      stopMediaStream(stream)
       return
     }
     mediaStream = stream
-    cameraActive.value = true
-    cameraStatus.value = 'scanning'
     await nextTick()
     if (!video.value) throw new Error('摄像头画面尚未就绪')
-    video.value.srcObject = stream
-    barcodeDetector = new Detector({ formats: ['code_128', 'code_39', 'ean_13'] })
-    void detectNextFrame(session)
+    const preview = video.value
+    preview.setAttribute('playsinline', 'true')
+    preview.setAttribute('webkit-playsinline', 'true')
+    preview.autoplay = true
+    preview.muted = true
+    preview.srcObject = stream
+    await withCameraTimeout(preview.play(), VIDEO_PLAY_TIMEOUT_MS, '摄像头预览启动超时')
+    if (session !== cameraSession) return
+    cameraActive.value = true
+    cameraStatus.value = 'scanning'
+    const Detector = (globalThis as typeof globalThis & {
+      BarcodeDetector?: NativeBarcodeDetectorConstructor
+    }).BarcodeDetector
+    if (Detector) {
+      barcodeDetector = new Detector({ formats: ['code_128', 'code_39', 'ean_13'] })
+      scanFeedback.value = '相机已打开，正在使用浏览器原生识别。'
+      void detectNextFrame(session)
+      return
+    }
+    scanFeedback.value = '相机已打开，正在加载实时识别。'
+    void startQuaggaScanner(session)
   } catch (error) {
+    if (session !== cameraSession) return
     stopCamera()
     cameraStatus.value = 'denied'
     ElMessage.warning(error instanceof Error ? error.message : '无法打开摄像头')
@@ -270,41 +295,199 @@ async function startCamera() {
 
 function stopCamera() {
   cameraSession += 1
+  for (const reject of [...cameraTimeoutRejectors.values()]) reject(new Error('摄像头启动已取消'))
+  cameraTimeoutRejectors.clear()
   if (animationFrameId) cancelAnimationFrame(animationFrameId)
   animationFrameId = 0
   barcodeDetector = null
+  const quagga = getQuagga()
+  if (quaggaDetectedHandler) quagga?.offDetected?.(quaggaDetectedHandler)
+  if (quaggaActive) {
+    try {
+      quagga?.stop?.()
+    } catch {
+      // Mobile scanners can race while their stream is shutting down.
+    }
+  }
+  quaggaActive = false
+  quaggaDetectedHandler = null
   cameraActive.value = false
-  if (mediaStream) for (const track of mediaStream.getTracks()) track.stop()
+  if (mediaStream) stopMediaStream(mediaStream)
   mediaStream = null
   if (video.value) video.value.srcObject = null
+  video.value?.parentElement?.querySelectorAll('canvas, video:not(.collector-camera-preview)').forEach((node) => node.remove())
 }
 
 async function detectNextFrame(session: number) {
   if (!cameraActive.value || session !== cameraSession || !barcodeDetector || !video.value) return
   try {
     const detected = await barcodeDetector.detect(video.value)
-    const value = detected[0]?.rawValue?.trim() || ''
-    const now = Date.now()
-    if (value) {
-      if (scanInFlight && value === lastDecodedValue) {
-        scanFeedback.value = '已识别该采集器，正在查询，请勿重复扫码'
-      } else if (
-        completedCollectorNos.has(value)
-        || value !== lastDecodedValue
-        || now - lastDecodedAt >= 1800
-      ) {
-        lastDecodedValue = value
-        lastDecodedAt = now
-        collectorNo.value = value
-        void submitScan(value)
-      }
-    }
+    handleDetectedValue(detected[0]?.rawValue || '')
   } catch {
     scanFeedback.value = '本帧未识别，请继续对准条形码'
   } finally {
     if (cameraActive.value && session === cameraSession) {
       animationFrameId = requestAnimationFrame(() => void detectNextFrame(session))
     }
+  }
+}
+
+function getQuagga(): QuaggaScanner | null {
+  const source = window as typeof window & {
+    Quagga?: QuaggaScanner
+    Quagga2?: QuaggaScanner
+    exports?: { Quagga?: QuaggaScanner }
+    module?: { exports?: QuaggaScanner }
+  }
+  return source.Quagga || source.Quagga2 || source.exports?.Quagga || source.module?.exports || null
+}
+
+function withCameraTimeout<T>(promise: Promise<T>, milliseconds: number, message: string) {
+  let timer = 0
+  return new Promise<T>((resolve, reject) => {
+    const finish = (callback: () => void) => {
+      window.clearTimeout(timer)
+      cameraTimeoutRejectors.delete(timer)
+      callback()
+    }
+    timer = window.setTimeout(() => finish(() => reject(new Error(message))), milliseconds)
+    cameraTimeoutRejectors.set(timer, (reason) => finish(() => reject(reason)))
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    )
+  })
+}
+
+function stopMediaStream(stream: MediaStream) {
+  for (const track of stream.getTracks()) track.stop()
+}
+
+async function requestCameraStream() {
+  try {
+    return await withCameraTimeout(
+      navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+      }),
+      CAMERA_START_TIMEOUT_MS,
+      '后置摄像头启动超时',
+    )
+  } catch {
+    return withCameraTimeout(
+      navigator.mediaDevices.getUserMedia({ audio: false, video: true }),
+      CAMERA_START_TIMEOUT_MS,
+      '摄像头启动超时',
+    )
+  }
+}
+
+async function ensureQuaggaLoaded() {
+  if (getQuagga()?.init) return getQuagga()
+  await withCameraTimeout(
+    new Promise<void>((resolve, reject) => {
+      const existing = document.querySelector<HTMLScriptElement>('script[data-collector-quagga-loader="1"]')
+      if (existing) {
+        if (existing.dataset.loaded === '1' || getQuagga()?.init) {
+          resolve()
+          return
+        }
+        existing.addEventListener('load', () => {
+          existing.dataset.loaded = '1'
+          resolve()
+        }, { once: true })
+        existing.addEventListener('error', () => reject(new Error('QuaggaJS 加载失败')), { once: true })
+        return
+      }
+      const script = document.createElement('script')
+      script.src = '/static/vendor/quagga.min.js?v=20260615-quagga2'
+      script.async = true
+      script.dataset.collectorQuaggaLoader = '1'
+      script.onload = () => {
+        script.dataset.loaded = '1'
+        resolve()
+      }
+      script.onerror = () => reject(new Error('QuaggaJS 加载失败'))
+      document.head.appendChild(script)
+    }),
+    CAMERA_START_TIMEOUT_MS,
+    'QuaggaJS 加载超时',
+  )
+  return getQuagga()
+}
+
+async function startQuaggaScanner(session: number) {
+  try {
+    const quagga = await ensureQuaggaLoaded()
+    if (session !== cameraSession) return
+    if (!quagga?.init || !video.value?.parentElement) throw new Error('QuaggaJS 不可用')
+    await withCameraTimeout(
+      new Promise<void>((resolve, reject) => {
+        quagga.init?.(
+          {
+            inputStream: {
+              name: 'Live',
+              type: 'LiveStream',
+              target: video.value?.parentElement,
+              constraints: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                audio: false,
+              },
+            },
+            locator: { patchSize: 'medium', halfSample: true },
+            locate: true,
+            numOfWorkers: Math.min(2, Math.max(0, navigator.hardwareConcurrency || 0)),
+            frequency: 8,
+            decoder: { readers: QUAGGA_READERS },
+          },
+          (error) => (error ? reject(error) : resolve()),
+        )
+      }),
+      CAMERA_START_TIMEOUT_MS,
+      'QuaggaJS 初始化超时',
+    )
+    if (session !== cameraSession) {
+      try {
+        quagga.stop?.()
+      } catch {
+        // The late scanner must not outlive its project or component.
+      }
+      return
+    }
+    quaggaActive = true
+    quaggaDetectedHandler = (result) => handleDetectedValue(
+      (result as { codeResult?: { code?: string } })?.codeResult?.code || '',
+    )
+    quagga.onDetected?.(quaggaDetectedHandler)
+    quagga.start?.()
+    scanFeedback.value = 'QuaggaJS 正在识别条形码。'
+  } catch {
+    if (session !== cameraSession || !cameraActive.value) return
+    scanFeedback.value = '相机已打开，当前浏览器不支持实时识别，可手工输入或使用扫码枪。'
+  }
+}
+
+function handleDetectedValue(rawValue: string) {
+  const value = rawValue.trim()
+  const now = Date.now()
+  if (!value) return
+  if (scanInFlight && value === lastDecodedValue) {
+    scanFeedback.value = '已识别该采集器，正在查询，请勿重复扫码'
+  } else if (
+    completedCollectorNos.has(value)
+    || value !== lastDecodedValue
+    || now - lastDecodedAt >= 1800
+  ) {
+    lastDecodedValue = value
+    lastDecodedAt = now
+    collectorNo.value = value
+    void submitScan(value)
   }
 }
 
@@ -464,7 +647,7 @@ function releaseLocalPhotoUrl() {
         <section v-else-if="mobileView === 'scan'" class="scan-view">
           <template v-if="!result">
             <div class="camera-stage">
-              <video v-show="cameraActive" ref="video" autoplay muted playsinline />
+              <video v-show="cameraActive" ref="video" class="collector-camera-preview" autoplay muted playsinline />
               <div v-if="!cameraActive" class="camera-empty">
                 <span class="camera-glyph" aria-hidden="true">⌗</span>
                 <strong>扫描采集器条形码</strong>

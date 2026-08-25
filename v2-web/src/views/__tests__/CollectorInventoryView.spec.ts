@@ -108,10 +108,13 @@ describe('CollectorInventoryView', () => {
       createObjectURL: vi.fn(() => 'blob:collector-preview'),
       revokeObjectURL: vi.fn(),
     })
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
   })
 
   afterEach(() => {
     document.body.innerHTML = ''
+    vi.useRealTimers()
+    vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
 
@@ -315,6 +318,143 @@ describe('CollectorInventoryView', () => {
     expect(wrapper.get('[data-testid="camera-status"]').text()).toContain('摄像头不可用')
     expect(wrapper.get('#collector-number').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
+  })
+
+  it('catches a BarcodeDetector gate before getUserMedia by opening the preview without native detection', async () => {
+    const stop = vi.fn()
+    const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [{ stop }] })
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+
+    expect(getUserMedia).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('video').element.srcObject).toBeTruthy()
+    expect(wrapper.get('[data-testid="scan-feedback"]').text()).toContain('实时识别')
+    expect(wrapper.get('#collector-number').attributes('disabled')).toBeUndefined()
+    const loader = document.head.querySelector<HTMLScriptElement>('script[data-collector-quagga-loader="1"]')
+    loader?.dispatchEvent(new Event('error'))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="scan-feedback"]').text()).toContain('当前浏览器不支持实时识别')
+    loader?.remove()
+    wrapper.unmount()
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('catches removal of the generic-video retry after an environment-camera rejection', async () => {
+    const stop = vi.fn()
+    const getUserMedia = vi.fn()
+      .mockRejectedValueOnce(new Error('No rear camera'))
+      .mockResolvedValueOnce({ getTracks: () => [{ stop }] })
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+
+    expect(getUserMedia).toHaveBeenNthCalledWith(1, {
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    })
+    expect(getUserMedia).toHaveBeenNthCalledWith(2, { audio: false, video: true })
+    expect(wrapper.get('video').element.srcObject).toBeTruthy()
+    expect(wrapper.get('#collector-number').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('catches setting scanning before the native preview has played', async () => {
+    const previewStart = deferred<void>()
+    const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [] })
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockReturnValue(previewStart.promise)
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-testid="camera-status"]').text()).toContain('正在请求摄像头权限')
+    previewStart.resolve()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="scan-feedback"]').text()).not.toContain('正在请求摄像头权限')
+    wrapper.unmount()
+  })
+
+  it('catches removal of the Quagga fallback and its shared one-in-flight submission guard', async () => {
+    const detectedHandlers: Array<(result: unknown) => void> = []
+    const quagga = {
+      init: vi.fn((_options: unknown, complete: (error?: unknown) => void) => complete()),
+      onDetected: vi.fn((handler: (result: unknown) => void) => detectedHandlers.push(handler)),
+      offDetected: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    }
+    const scan = deferred<CollectorInventoryDecision>()
+    serviceMocks.scanProjectCollector.mockReturnValue(scan.promise)
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('Quagga', quagga)
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [] }) },
+    })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+    detectedHandlers[0]?.({ codeResult: { code: 'CG-2026-0819-0036' } })
+    detectedHandlers[0]?.({ codeResult: { code: 'CG-2026-0819-0036' } })
+    await flushPromises()
+
+    expect(quagga.start).toHaveBeenCalledTimes(1)
+    expect(serviceMocks.scanProjectCollector).toHaveBeenCalledTimes(1)
+    scan.resolve(decision('direct_reuse', false, false))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="decision-title"]').text()).toContain('无需拍照')
+    expect(quagga.offDetected).toHaveBeenCalledTimes(1)
+    expect(quagga.stop).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('catches a camera startup timeout that leaves manual entry in an endless starting state', async () => {
+    vi.useFakeTimers()
+    const never = new Promise<MediaStream>(() => undefined)
+    const getUserMedia = vi.fn().mockReturnValue(never)
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(14_100)
+    await flushPromises()
+
+    expect(getUserMedia).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-testid="camera-status"]').text()).toContain('摄像头不可用')
+    expect(wrapper.get('#collector-number').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('catches late camera startup retaining tracks or Quagga callbacks after unmount', async () => {
+    const startup = deferred<MediaStream>()
+    const stop = vi.fn()
+    const quagga = { init: vi.fn(), onDetected: vi.fn(), offDetected: vi.fn(), start: vi.fn(), stop: vi.fn() }
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('Quagga', quagga)
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia: vi.fn().mockReturnValue(startup.promise) } })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    wrapper.unmount()
+    startup.resolve({ getTracks: () => [{ stop }] } as unknown as MediaStream)
+    await flushPromises()
+
+    expect(stop).toHaveBeenCalledTimes(1)
+    expect(quagga.onDetected).not.toHaveBeenCalled()
+    expect(quagga.start).not.toHaveBeenCalled()
   })
 
   it('shows only inventory from the active project in the records view', async () => {
