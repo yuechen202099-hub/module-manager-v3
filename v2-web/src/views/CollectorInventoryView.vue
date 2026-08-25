@@ -256,7 +256,7 @@ async function startCamera() {
   const session = ++cameraSession
   cameraStatus.value = 'starting'
   try {
-    const stream = await requestCameraStream()
+    const stream = await requestCameraStream(session)
     if (session !== cameraSession) {
       stopMediaStream(stream)
       return
@@ -342,18 +342,29 @@ function getQuagga(): QuaggaScanner | null {
   return source.Quagga || source.Quagga2 || source.exports?.Quagga || source.module?.exports || null
 }
 
-function withCameraTimeout<T>(promise: Promise<T>, milliseconds: number, message: string) {
+function withCameraTimeout<T>(
+  promise: Promise<T>,
+  milliseconds: number,
+  message: string,
+  onLateResolution?: (value: T) => void,
+) {
   let timer = 0
+  let settled = false
   return new Promise<T>((resolve, reject) => {
     const finish = (callback: () => void) => {
+      if (settled) return false
+      settled = true
       window.clearTimeout(timer)
       cameraTimeoutRejectors.delete(timer)
       callback()
+      return true
     }
     timer = window.setTimeout(() => finish(() => reject(new Error(message))), milliseconds)
     cameraTimeoutRejectors.set(timer, (reason) => finish(() => reject(reason)))
     promise.then(
-      (value) => finish(() => resolve(value)),
+      (value) => {
+        if (!finish(() => resolve(value))) onLateResolution?.(value)
+      },
       (error) => finish(() => reject(error)),
     )
   })
@@ -363,7 +374,7 @@ function stopMediaStream(stream: MediaStream) {
   for (const track of stream.getTracks()) track.stop()
 }
 
-async function requestCameraStream() {
+async function requestCameraStream(session: number) {
   try {
     return await withCameraTimeout(
       navigator.mediaDevices.getUserMedia({
@@ -376,12 +387,15 @@ async function requestCameraStream() {
       }),
       CAMERA_START_TIMEOUT_MS,
       '后置摄像头启动超时',
+      stopMediaStream,
     )
   } catch {
+    if (session !== cameraSession) throw new Error('摄像头启动已取消')
     return withCameraTimeout(
       navigator.mediaDevices.getUserMedia({ audio: false, video: true }),
       CAMERA_START_TIMEOUT_MS,
       '摄像头启动超时',
+      stopMediaStream,
     )
   }
 }

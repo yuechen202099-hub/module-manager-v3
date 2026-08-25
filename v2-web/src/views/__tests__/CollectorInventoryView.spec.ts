@@ -438,6 +438,35 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
+  it('catches a timed-out rear-camera request that later retains tracks instead of releasing them', async () => {
+    vi.useFakeTimers()
+    const rearRequest = deferred<MediaStream>()
+    const genericRequest = deferred<MediaStream>()
+    const rearStops = [vi.fn(), vi.fn()]
+    const lateRearStream = {
+      getTracks: () => rearStops.map((stop) => ({ stop })),
+    } as unknown as MediaStream
+    const getUserMedia = vi.fn()
+      .mockReturnValueOnce(rearRequest.promise)
+      .mockReturnValueOnce(genericRequest.promise)
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(7_000)
+    await flushPromises()
+    rearRequest.resolve(lateRearStream)
+    await flushPromises()
+
+    expect(getUserMedia).toHaveBeenCalledTimes(2)
+    expect(rearStops[0]).toHaveBeenCalledTimes(1)
+    expect(rearStops[1]).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('video').element.srcObject).not.toBe(lateRearStream)
+    expect(wrapper.get('[data-testid="camera-status"]').text()).toContain('正在请求摄像头权限')
+    wrapper.unmount()
+  })
+
   it('catches late camera startup retaining tracks or Quagga callbacks after unmount', async () => {
     const startup = deferred<MediaStream>()
     const stop = vi.fn()
