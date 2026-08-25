@@ -51,6 +51,30 @@ export function isCurrentRequest(sequence: number, currentSequence: number) {
   return sequence === currentSequence
 }
 
+export function canRefreshTerminal(
+  isAdmin: boolean,
+  sourceChanged: boolean,
+  completedCount: number,
+  activeAssignmentIds: string[],
+) {
+  return isAdmin && sourceChanged && completedCount === 0 && activeAssignmentIds.length === 0
+}
+
+type MeterCompletionInput = {
+  meter_barcode: string
+  module_barcode: string
+  photos: Array<{ slot: string; photo: unknown | null }>
+}
+
+export function meterCompletionBlockers(item: MeterCompletionInput) {
+  const reasons: string[] = []
+  if (!item.meter_barcode.trim()) reasons.push('缺少表号条形码')
+  if (!item.module_barcode.trim()) reasons.push('缺少模块号条形码')
+  if (!item.photos.find((photo) => photo.slot === 'module_meter')?.photo) reasons.push('缺少电表和模块照片')
+  if (!item.photos.find((photo) => photo.slot === 'after_box')?.photo) reasons.push('缺少改造完成照片')
+  return reasons
+}
+
 export function inventoryResultPresentation(input: InventoryDecisionInput): InventoryResultPresentation {
   if (input.decision === 'existing_available') {
     return {

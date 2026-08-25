@@ -5,9 +5,11 @@ import { encodeCode128B } from '../src/features/collectorTransfer/code128.ts'
 import {
   candidateLabel,
   canReplaceMissing,
+  canRefreshTerminal,
   completionBlockers,
   inventoryResultPresentation,
   isCurrentRequest,
+  meterCompletionBlockers,
 } from '../src/features/collectorTransfer/state.ts'
 
 
@@ -131,4 +133,21 @@ test('newer global terminal request sequences reject an older response', () => {
   const current = 2
   assert.equal(isCurrentRequest(1, current), false)
   assert.equal(isCurrentRequest(2, current), true)
+})
+
+test('refresh requires an admin, changed source, zero completion, and no active random assignment', () => {
+  assert.equal(canRefreshTerminal(true, true, 0, []), true)
+  assert.equal(canRefreshTerminal(false, true, 0, []), false)
+  assert.equal(canRefreshTerminal(true, false, 0, []), false)
+  assert.equal(canRefreshTerminal(true, true, 1, []), false)
+  assert.equal(canRefreshTerminal(true, true, 0, ['assignment-1']), false)
+})
+
+test('meter completion requires exact two source slots, meter barcode, and module barcode', () => {
+  const complete = { meter_barcode: 'M-01', module_barcode: 'MOD-01', photos: [
+    { slot: 'module_meter', photo: { id: 'photo-a' } },
+    { slot: 'after_box', photo: { id: 'photo-b' } },
+  ] }
+  assert.deepEqual(meterCompletionBlockers(complete), [])
+  assert.deepEqual(meterCompletionBlockers({ ...complete, photos: [complete.photos[0]] }), ['缺少改造完成照片'])
 })

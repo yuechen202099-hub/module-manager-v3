@@ -67,6 +67,17 @@ describe('global collector workbench', () => {
     wrapper.unmount()
   })
 
+  it('renders exactly the two new-install source photos and blocks incomplete meter completion', async () => {
+    const wrapper = await mountWorkbench()
+    expect(wrapper.findAll('.meter-photos figure').map((item) => item.attributes('data-slot'))).toEqual(['module_meter', 'after_box'])
+    expect(wrapper.findAll('.meter-list .code128 figcaption').map((item) => item.text())).toEqual(['METER-01', 'MODULE-01'])
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-meter-meter-1"]').element.disabled).toBe(false)
+    serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue({ ...detail(), meter_install_items: [{ ...detail().meter_install_items[0], photos: [detail().meter_install_items[0].photos[0]] }] })
+    await wrapper.get('[aria-label="选择可翻拍终端"]').setValue('opaque-key'); await flushPromises()
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-meter-meter-1"]').element.disabled).toBe(true)
+    wrapper.unmount()
+  })
+
   it('replaces missing collectors once and reloads persisted detail', async () => {
     serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue(detail('missing')); serviceMocks.replaceGlobalTerminalMissing.mockResolvedValue({ required: 1, assigned: 1, assignments: [] })
     const wrapper = await mountWorkbench(); serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue(detail('replaced'))
@@ -84,14 +95,20 @@ describe('global collector workbench', () => {
     wrapper.unmount()
   })
 
-  it('confirms rollback, exposes source refresh, retries failures, and supports keyboard navigation', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true)); serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue({ ...detail('replaced'), source_changed: true, current_source_revision: 'revision-2' })
-    serviceMocks.rollbackCollectorAssignment.mockResolvedValue({}); serviceMocks.refreshGlobalCollectorTerminal.mockRejectedValueOnce(new Error('刷新失败')).mockResolvedValue({ workbench_terminal_id: 'terminal-1' })
-    const wrapper = await mountWorkbench(); await wrapper.get('[data-testid="rollback-assignment"]').trigger('click'); await flushPromises()
-    expect(serviceMocks.rollbackCollectorAssignment).toHaveBeenCalledWith('assignment-1'); expect(wrapper.text()).toContain('来源资料已变化')
+  it('exposes only a refreshable changed, unprogressed snapshot and retries failures', async () => {
+    serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue({ ...detail(), source_changed: true, current_source_revision: 'revision-2' })
+    serviceMocks.refreshGlobalCollectorTerminal.mockRejectedValueOnce(new Error('刷新失败')).mockResolvedValue({ workbench_terminal_id: 'terminal-1' })
+    const wrapper = await mountWorkbench(); expect(wrapper.text()).toContain('来源资料已变化')
     await wrapper.get('[data-testid="refresh-terminal"]').trigger('click'); await flushPromises(); expect(wrapper.get('[role="alert"]').text()).toContain('刷新失败')
     await wrapper.get('[data-testid="retry-error"]').trigger('click'); await flushPromises(); expect(serviceMocks.refreshGlobalCollectorTerminal).toHaveBeenCalledTimes(2)
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' })); await flushPromises(); expect(wrapper.text()).toContain('拆除 1')
+    wrapper.unmount()
+  })
+
+  it('confirms rollback but keeps refresh disabled for an active random assignment', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true)); serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue({ ...detail('replaced'), source_changed: true, current_source_revision: 'revision-2' }); serviceMocks.rollbackCollectorAssignment.mockResolvedValue({})
+    const wrapper = await mountWorkbench(); expect(wrapper.get<HTMLButtonElement>('[data-testid="refresh-terminal"]').element.disabled).toBe(true)
+    await wrapper.get('[data-testid="rollback-assignment"]').trigger('click'); await flushPromises(); expect(serviceMocks.rollbackCollectorAssignment).toHaveBeenCalledWith('assignment-1')
     vi.unstubAllGlobals(); wrapper.unmount()
   })
 
@@ -102,6 +119,40 @@ describe('global collector workbench', () => {
     serviceMocks.fetchGlobalCollectorTerminal.mockReturnValueOnce(lateDetail.promise).mockResolvedValueOnce({ ...detail(), terminal: { ...detail().terminal, id: 'terminal-2', terminal_code: 'T-002' } })
     const wrapper = mount(CollectorWorkbenchView, { attachTo: document.body }); await flushPromises(); await wrapper.get('[aria-label="选择可翻拍终端"]').setValue('new-key'); await flushPromises()
     lateDetail.resolve(detail()); await flushPromises(); expect(wrapper.text()).toContain('T-002'); expect(wrapper.text()).not.toContain('T-001 · 安装地址'); wrapper.unmount()
+  })
+
+  it('keeps failed terminal mutations and their persisted reload bound to the original terminal after selection changes', async () => {
+    const candidateB = candidate({ terminal_key: 'terminal-b', terminal_code: 'T-002' })
+    const detailB = { ...detail(), terminal: { ...detail().terminal, id: 'terminal-2', terminal_code: 'T-002' } }
+    serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValue(page([candidate(), candidateB]))
+    serviceMocks.openGlobalCollectorTerminal.mockImplementation(async (value: GlobalCollectorTerminalCandidate) => ({ workbench_terminal_id: value.terminal_key === 'terminal-b' ? 'terminal-2' : 'terminal-1', snapshot_reused: false, source_changed: false }))
+    serviceMocks.fetchGlobalCollectorTerminal.mockImplementation(async (id: string) => id === 'terminal-2' ? detailB : detail('missing'))
+    serviceMocks.replaceGlobalTerminalMissing.mockRejectedValueOnce(new Error('A 替换失败')).mockResolvedValue({ required: 1, assigned: 1, assignments: [] })
+    const wrapper = await mountWorkbench()
+    await wrapper.get('[data-testid="replace-all-missing"]').trigger('click'); await flushPromises()
+    await wrapper.get('[aria-label="选择可翻拍终端"]').setValue('terminal-b'); await flushPromises()
+    await wrapper.get('[data-testid="retry-error"]').trigger('click'); await flushPromises()
+    expect(serviceMocks.replaceGlobalTerminalMissing).toHaveBeenNthCalledWith(1, 'terminal-1')
+    expect(serviceMocks.replaceGlobalTerminalMissing).toHaveBeenNthCalledWith(2, 'terminal-1')
+    expect(serviceMocks.fetchGlobalCollectorTerminal).toHaveBeenLastCalledWith('terminal-1')
+    expect(wrapper.text()).toContain('T-002')
+    wrapper.unmount()
+  })
+
+  it('cancels a debounced candidate query when a listed terminal is selected', async () => {
+    vi.useFakeTimers()
+    const candidateB = candidate({ terminal_key: 'terminal-b', terminal_code: 'T-002' })
+    const staleCandidates = deferred<GlobalCollectorTerminalPage>()
+    serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValueOnce(page([candidate(), candidateB])).mockReturnValueOnce(staleCandidates.promise)
+    serviceMocks.openGlobalCollectorTerminal.mockImplementation(async (value: GlobalCollectorTerminalCandidate) => ({ workbench_terminal_id: value.terminal_key === 'terminal-b' ? 'terminal-2' : 'terminal-1', snapshot_reused: false, source_changed: false }))
+    serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue({ ...detail(), terminal: { ...detail().terminal, id: 'terminal-2', terminal_code: 'T-002' } })
+    const wrapper = mount(CollectorWorkbenchView, { attachTo: document.body }); await flushPromises()
+    await wrapper.get('[aria-label="选择可翻拍终端"]').setValue('旧查询')
+    await wrapper.get('[aria-label="选择可翻拍终端"]').setValue('terminal-b'); await flushPromises()
+    await vi.advanceTimersByTimeAsync(250); staleCandidates.resolve(page([candidate()])); await flushPromises()
+    expect(wrapper.text()).toContain('T-002')
+    expect(wrapper.html()).toContain('terminal-b')
+    vi.useRealTimers(); wrapper.unmount()
   })
 })
 
