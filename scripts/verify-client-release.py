@@ -449,8 +449,7 @@ def fail(message: str) -> None:
     raise AssertionError(message)
 
 
-GENERATED_SOURCE_MEMBERS = frozenset(("SOURCE_COMMIT", "RELEASE_MANIFEST.md"))
-GENERATED_VUE_PREFIX = "v2-api/app/static/vue/"
+GENERATED_SOURCE_MEMBERS = frozenset(("SOURCE_COMMIT",))
 SOURCE_BOUND_LF_SUFFIXES = frozenset(
     (
         ".conf",
@@ -500,7 +499,6 @@ def verify_archive_members_are_tracked(names: set[str], source_commit: str) -> N
     unexpected = sorted(
         name
         for name in names - tracked_names - GENERATED_SOURCE_MEMBERS
-        if not name.startswith(GENERATED_VUE_PREFIX)
     )
     if unexpected:
         fail("Release archive members not tracked by SOURCE_COMMIT: " + ", ".join(unexpected[:20]))
@@ -525,7 +523,7 @@ def verify_archive_members_match_source_commit(
     tracked_names = tracked_names_at_commit(source_commit)
     mismatches: list[str] = []
     for name in sorted(names & tracked_names):
-        if name in GENERATED_SOURCE_MEMBERS or name.startswith(GENERATED_VUE_PREFIX):
+        if name in GENERATED_SOURCE_MEMBERS:
             continue
         result = subprocess.run(
             ["git", "show", f"{source_commit}:{name}"],

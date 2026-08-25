@@ -224,10 +224,10 @@ def test_release_builder_excludes_runtime_uploads_before_recursive_app_copy() ->
     assert '"static\\uploads"' in build_script
 
 
-def test_release_builder_generates_0016_irreversible_migration_warning() -> None:
-    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+def test_committed_release_manifest_contains_0016_irreversible_migration_warning() -> None:
+    manifest = (ROOT / "RELEASE_MANIFEST.md").read_text(encoding="utf-8")
 
-    assert "V3.1-V3.2 migrations ``0006`` through ``0016`` are production-irreversible" in build_script
+    assert "V3.1-V3.2 migrations `0006` through `0016` are production-irreversible" in manifest
 
 
 def write_release_archive(
@@ -316,11 +316,28 @@ def write_release_archive(
         if name != RUNTIME_VERSION_ARTIFACT
     }
     if source_bound:
+        tracked_vue_names = subprocess.run(
+            [
+                "git",
+                "ls-tree",
+                "-r",
+                "--name-only",
+                source_commit,
+                "--",
+                "v2-api/app/static/vue",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        ).stdout.splitlines()
+        for name in tuple(archive_contents):
+            if name.startswith("v2-api/app/static/vue/"):
+                del archive_contents[name]
+        archive_contents.update({name: b"" for name in tracked_vue_names})
         for name in sorted(archive_contents):
-            if (
-                name in {"SOURCE_COMMIT", "RELEASE_MANIFEST.md"}
-                or name.startswith("v2-api/app/static/vue/")
-            ):
+            if name == "SOURCE_COMMIT":
                 continue
             committed = subprocess.run(
                 ["git", "show", f"{source_commit}:{name}"],
@@ -330,13 +347,18 @@ def write_release_archive(
             )
             archive_contents[name] = committed.stdout
     archive_contents.update(content_overrides or {})
-    if SOURCE_VERSION_ARTIFACT in names and SOURCE_VERSION_ARTIFACT not in (content_overrides or {}):
+    if (
+        not source_bound
+        and SOURCE_VERSION_ARTIFACT in names
+        and SOURCE_VERSION_ARTIFACT not in (content_overrides or {})
+    ):
         archive_contents[SOURCE_VERSION_ARTIFACT] = contents[SOURCE_VERSION_ARTIFACT]
-    archive_contents["v2-api/app/static/vue/assets/app.js"] = resolved_entry_source
-    if unrelated_chunk_entry_version:
-        archive_contents["v2-api/app/static/vue/assets/unrelated.js"] = contents[
-            "v2-api/app/static/vue/assets/unrelated.js"
-        ]
+    if not source_bound:
+        archive_contents["v2-api/app/static/vue/assets/app.js"] = resolved_entry_source
+        if unrelated_chunk_entry_version:
+            archive_contents["v2-api/app/static/vue/assets/unrelated.js"] = contents[
+                "v2-api/app/static/vue/assets/unrelated.js"
+            ]
     vue_prefix = "v2-api/app/static/vue/"
     assets = []
     for name, content in sorted(archive_contents.items()):
@@ -353,7 +375,7 @@ def write_release_archive(
     resolved_entry_sha256 = runtime_entry_sha256 or hashlib.sha256(
         resolved_entry_source.encode("utf-8")
     ).hexdigest()
-    if RUNTIME_VERSION_ARTIFACT in names:
+    if not source_bound and RUNTIME_VERSION_ARTIFACT in names:
         archive_contents[RUNTIME_VERSION_ARTIFACT] = json.dumps(
             {
                 "version": resolved_runtime_version,
@@ -464,56 +486,6 @@ def test_release_builder_rejects_non_candidate_version_before_output_mutation(
     assert archive.read_bytes() == b"preserve archive"
 
 
-def test_release_builder_manifest_reports_optional_performance_evidence_truthfully(
-    tmp_path: Path,
-) -> None:
-    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
-    failures: list[str] = []
-    function_text = load_v320_release_verifier().powershell_function_text(
-        build_script,
-        "Get-PerformanceEvidenceManifestLine",
-        "scripts/build-client-release.ps1",
-        failures,
-    )
-    assert not failures
-    harness = "\n".join(
-        (
-            function_text,
-            "$results = @(",
-            "    (Get-PerformanceEvidenceManifestLine -Verified $false),",
-            "    (Get-PerformanceEvidenceManifestLine -Verified $true)",
-            ")",
-            "$results | ConvertTo-Json -Compress",
-        )
-    )
-    harness_path = tmp_path / "performance-manifest-contract.ps1"
-    harness_path.write_text(harness, encoding="utf-8")
-
-    completed = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(harness_path),
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=30,
-        check=False,
-    )
-
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    without_report, with_report = json.loads(completed.stdout)
-    assert "not supplied" in without_report
-    assert "not run" in without_report
-    assert "passes" not in without_report
-    assert "passes the release verifier" in with_report
-
-
 def test_release_builder_embeds_the_current_source_commit() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
@@ -605,6 +577,122 @@ def test_tampered_tracked_business_file_fails_source_commit_byte_binding(tmp_pat
         verifier.verify_package(archive_path, expected_source_commit=source_commit)
 
 
+def test_tampered_release_manifest_fails_source_commit_byte_binding(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    source_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    committed_manifest = subprocess.run(
+        ["git", "show", f"{source_commit}:RELEASE_MANIFEST.md"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
+    archive_path = tmp_path / "tampered-release-manifest.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("SOURCE_COMMIT", source_commit + "\n")
+        archive.writestr(
+            "RELEASE_MANIFEST.md",
+            committed_manifest + b"\n<!-- tampered -->\n",
+        )
+
+    with zipfile.ZipFile(archive_path) as archive:
+        with pytest.raises(AssertionError, match="bytes do not match SOURCE_COMMIT"):
+            verifier.verify_archive_members_match_source_commit(
+                archive,
+                {"SOURCE_COMMIT", "RELEASE_MANIFEST.md"},
+                source_commit,
+            )
+
+
+def test_coordinated_vue_asset_and_runtime_manifest_tamper_fails_source_binding(
+    tmp_path: Path,
+) -> None:
+    verifier = load_verifier()
+    source_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    tracked_vue_assets = subprocess.run(
+        [
+            "git",
+            "ls-tree",
+            "-r",
+            "--name-only",
+            source_commit,
+            "--",
+            "v2-api/app/static/vue/assets",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.splitlines()
+    asset_path = next(path for path in tracked_vue_assets if path.endswith(".js"))
+    committed_asset = subprocess.run(
+        ["git", "show", f"{source_commit}:{asset_path}"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
+    tampered_asset = committed_asset + b"\n// coordinated package-local tamper\n"
+    runtime_manifest = json.loads(
+        subprocess.run(
+            ["git", "show", f"{source_commit}:{RUNTIME_VERSION_ARTIFACT}"],
+            cwd=ROOT,
+            capture_output=True,
+            encoding="utf-8",
+            check=True,
+        ).stdout
+    )
+    relative_asset_path = asset_path.removeprefix("v2-api/app/static/vue/")
+    asset_record = next(
+        asset for asset in runtime_manifest["assets"] if asset["path"] == relative_asset_path
+    )
+    asset_record["size"] = len(tampered_asset)
+    asset_record["sha256"] = hashlib.sha256(tampered_asset).hexdigest()
+    if runtime_manifest["entry"] == relative_asset_path:
+        runtime_manifest["entrySha256"] = asset_record["sha256"]
+    tampered_runtime_manifest = (
+        json.dumps(runtime_manifest, separators=(",", ":")) + "\n"
+    ).encode()
+    archive_path = tmp_path / "coordinated-vue-tamper.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("SOURCE_COMMIT", source_commit + "\n")
+        archive.writestr(asset_path, tampered_asset)
+        archive.writestr(RUNTIME_VERSION_ARTIFACT, tampered_runtime_manifest)
+
+    with zipfile.ZipFile(archive_path) as archive:
+        with pytest.raises(AssertionError, match="bytes do not match SOURCE_COMMIT"):
+            verifier.verify_archive_members_match_source_commit(
+                archive,
+                {"SOURCE_COMMIT", asset_path, RUNTIME_VERSION_ARTIFACT},
+                source_commit,
+            )
+
+
+def test_release_builder_packages_the_committed_manifest_with_source_phase_command() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    committed_manifest = (ROOT / "RELEASE_MANIFEST.md").read_text(encoding="utf-8")
+
+    assert 'Copy-ReleaseItem "RELEASE_MANIFEST.md" "RELEASE_MANIFEST.md"' in build_script
+    assert '$manifestPath = Join-Path $staging "RELEASE_MANIFEST.md"' not in build_script
+    assert (
+        ".\\.venv\\Scripts\\python.exe .\\scripts\\verify_release_sop.py "
+        "--version V3.2.8 --phase source"
+    ) in committed_manifest
+
+
 def test_source_bound_text_paths_have_an_explicit_lf_checkout_policy() -> None:
     paths = (
         "README.md",
@@ -628,7 +716,7 @@ def test_source_bound_text_paths_have_an_explicit_lf_checkout_policy() -> None:
     assert result.stdout.splitlines() == [f"{path}: eol: lf" for path in paths]
 
 
-def test_generated_vue_assets_are_bound_by_manifest_instead_of_git_membership() -> None:
+def test_vue_assets_must_be_tracked_by_the_expected_source_commit() -> None:
     verifier = load_verifier()
     source_commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -644,10 +732,19 @@ def test_generated_vue_assets_are_bound_by_manifest_instead_of_git_membership() 
             "SOURCE_COMMIT",
             "README.md",
             "v2-api/app/static/vue/index.html",
-            "v2-api/app/static/vue/assets/index-generated-hash.js",
+            "v2-api/app/static/vue/version.json",
         },
         source_commit,
     )
+    with pytest.raises(AssertionError, match="not tracked by SOURCE_COMMIT"):
+        verifier.verify_archive_members_are_tracked(
+            {
+                "SOURCE_COMMIT",
+                "README.md",
+                "v2-api/app/static/vue/assets/index-generated-hash.js",
+            },
+            source_commit,
+        )
 
 
 

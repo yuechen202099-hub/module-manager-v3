@@ -18,15 +18,6 @@ if ($Version -ne $requiredVersion) {
     throw "Refusing to build release version $Version. Expected exactly 3.2.8."
 }
 
-function Get-PerformanceEvidenceManifestLine {
-    param([bool]$Verified)
-
-    if ($Verified) {
-        return "- Source-bound V3.1 task/review performance evidence passes the release verifier"
-    }
-    return "- Optional source-bound V3.1 task/review performance evidence was not supplied and was not run during packaging"
-}
-
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
@@ -123,7 +114,6 @@ if ($worktreeChanges.Count -ne 0) {
     throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
 }
 $performanceReportPath = ""
-$performanceEvidenceVerified = $false
 if (-not [string]::IsNullOrWhiteSpace($PerformanceReport)) {
     $performanceReportPath = if ([System.IO.Path]::IsPathRooted($PerformanceReport)) {
         [System.IO.Path]::GetFullPath($PerformanceReport)
@@ -191,9 +181,7 @@ if ($performanceReportPath) {
     if ($LASTEXITCODE -ne 0) {
         throw "V3.1 performance evidence verification failed."
     }
-    $performanceEvidenceVerified = $true
 }
-$performanceEvidenceManifestLine = Get-PerformanceEvidenceManifestLine -Verified $performanceEvidenceVerified
 
 Write-Host "Running V3.2.8 focused release gates..."
 $releaseVerifiers = @(
@@ -296,6 +284,7 @@ Copy-ReleaseItem "README.md" "README.md"
 Copy-ReleaseItem "AGENTS.md" "AGENTS.md"
 Copy-ReleaseItem ".gitattributes" ".gitattributes"
 Copy-ReleaseItem "docker-compose.yml" "docker-compose.yml"
+Copy-ReleaseItem "RELEASE_MANIFEST.md" "RELEASE_MANIFEST.md"
 
 Copy-ReleaseItem "docs\CLIENT_ACCEPTANCE_REPORT.md" "docs\CLIENT_ACCEPTANCE_REPORT.md"
 Copy-ReleaseItem "docs\CLIENT_FINAL_AUDIT.md" "docs\CLIENT_FINAL_AUDIT.md"
@@ -560,86 +549,6 @@ Get-ChildItem -LiteralPath $staging -Recurse -File -Filter "*.sh" -Force |
         $normalized = $content -replace "`r`n", "`n" -replace "`r", "`n"
         [System.IO.File]::WriteAllText($_.FullName, $normalized, $utf8NoBom)
     }
-
-$manifestPath = Join-Path $staging "RELEASE_MANIFEST.md"
-$generatedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"
-$manifest = @"
-# Module Manager V2 Production Server Release
-
-## Package
-
-- Name: $packageName
-- Version: $Version
-- Generated at: $generatedAt
-
-## Included
-
-- FastAPI application source under v2-api/app
-- Vue production bundle under v2-api/app/static/vue
-- v2-web source required by docker-compose.yml
-- Alembic migration files
-- JSON/PostgreSQL and photo migration scripts under v2-api/scripts
-- Requirements and Dockerfile
-- Client acceptance gate, demo startup, smoke-check, strict Vue migration verification, PostgreSQL cutover audit, production-readiness verification, and release verification scripts under scripts
-- Local static review images and the demo data seed script for pre-production smoke checks
-- Nginx and systemd deployment samples under infra
-- Client acceptance, final audit, visual QA, signoff, demo, deployment, and production SOP documents under docs
-- Production release and incident record templates under ops
-
-## Excluded
-
-- Local virtual environments such as .venv
-- Local .env files and secrets
-- Python caches such as __pycache__, .pyc, and .pytest_cache
-- Generated build/runtime folders outside this release package
-
-## Demo Commands
-
-.\scripts\run-client-demo.ps1
-
-.\scripts\run-client-acceptance-gate.ps1
-
-.\scripts\build-client-release.ps1 -Version $Version
-
-.\.venv\Scripts\python.exe .\scripts\smoke-client-demo.py
-
-.\.venv\Scripts\python.exe .\scripts\verify_vue_migration_gate.py --strict-native
-
-.\.venv\Scripts\python.exe .\scripts\verify_postgres_cutover_gate.py
-
-.\.venv\Scripts\python.exe .\scripts\verify-production-readiness.py --example
-
-.\.venv\Scripts\python.exe .\scripts\verify-client-release.py
-
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V$Version
-
-## Verified During Packaging
-
-- Release smoke check passes unless -SkipSmoke was used
-$performanceEvidenceManifestLine
-- V3.2.0 inherited gates, immutable historical release records, and the active V3.2.8 scale/camera contracts pass before package staging
-- Demo admin and constructor login are available only for local walkthrough when enabled
-- Vue strict-native production pages are required
-- PostgreSQL cutover audit must be reviewed before production deployment
-- Production mode disables demo accounts by default
-- Production mode disables /docs, /redoc, and /openapi.json by default
-- Required client documents and deployment samples are present
-- Client signoff checklist is included for payment acceptance
-- Production SOP files and release record templates are present
-
-## Production Notes
-
-- Set APP_ENV=production
-- Set DEMO_AUTH_ENABLED=false
-- Replace APP_SECRET, JWT_SECRET, ADMIN_USERNAME, and ADMIN_PASSWORD
-- Confirm /docs, /redoc, and /openapi.json return 404 in production
-- Enable HTTPS before real project data is exposed
-- Configure PostgreSQL backup before production import
-- V3.1-V3.2 migrations ``0006`` through ``0016`` are production-irreversible; never run Alembic downgrade. Application rollback keeps the forward schema, and data rollback requires a validated pre-upgrade PostgreSQL backup.
-- Use build/server-release packages for production deployment
-- Record each production release under ops/releases/
-"@
-Set-Content -LiteralPath $manifestPath -Value $manifest -Encoding UTF8
 
 @"
 from pathlib import Path
