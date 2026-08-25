@@ -68,6 +68,10 @@ class CollectorDirectConflictError(ValueError):
     """A direct physical collector is already owned by another active terminal."""
 
 
+class CollectorSnapshotChangedError(ValueError):
+    """A hidden terminal snapshot cannot be refreshed while progress remains."""
+
+
 class CollectorWorkbenchIncompleteError(ValueError):
     """Workbench completion was rejected because authoritative evidence is incomplete."""
 
@@ -2560,6 +2564,10 @@ class PostgresCollectorTransferService:
 
     def allocate(self, *, run_id: str) -> dict[str, object]:
         run = self._run(run_id, lock=True)
+        if (run.stats or {}).get("workflow_kind") == "global_terminal_workbench":
+            raise CollectorRunBlockedError(
+                "global terminal workbench requires terminal-scoped replacement"
+            )
         blocked_terminal_count = int(
             self.session.scalar(
                 select(func.count(CollectorTransferTerminal.id)).where(
@@ -2681,26 +2689,356 @@ class PostgresCollectorTransferService:
             "stats": stats,
         }
 
+    def replace_terminal_missing(self, *, terminal_id: str) -> dict[str, object]:
+        terminal_uuid = _uuid(terminal_id, "terminal_id")
+        terminal_ref = self.session.execute(
+            select(
+                CollectorTransferTerminal.run_id,
+                CollectorTransferTerminal.id,
+            ).where(
+                CollectorTransferTerminal.id == terminal_uuid,
+                CollectorTransferTerminal.team_id == self.team_id,
+            )
+        ).one_or_none()
+        if terminal_ref is None:
+            raise KeyError(terminal_id)
+
+        run = self._run(str(terminal_ref.run_id), lock=True)
+        stats = dict(run.stats or {})
+        if (
+            stats.get("workflow_kind") != "global_terminal_workbench"
+            or bool(stats.get("superseded"))
+        ):
+            raise KeyError(terminal_id)
+        terminal = self.session.scalar(
+            select(CollectorTransferTerminal)
+            .where(
+                CollectorTransferTerminal.id == terminal_uuid,
+                CollectorTransferTerminal.run_id == run.id,
+                CollectorTransferTerminal.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if terminal is None:
+            raise KeyError(terminal_id)
+        if terminal.status == "blocked":
+            raise CollectorRunBlockedError("终端存在资料阻断，不能执行随机替换")
+        current_projection, current_photos = self._global_terminal_projection(
+            project_id=run.project_id,
+            terminal_code=terminal.terminal_code,
+        )
+        if current_projection.diagnostics:
+            raise CollectorRunBlockedError("终端当前来源存在资料阻断")
+        current_revision = _projection_source_revision(
+            project_id=run.project_id,
+            terminal_code=terminal.terminal_code,
+            projection=current_projection,
+            photos=current_photos,
+        )
+        if current_revision != normalize_identifier(stats.get("source_revision")):
+            raise CollectorSnapshotChangedError(
+                "terminal source changed; refresh the snapshot before replacement"
+            )
+
+        requirements = list(
+            self.session.scalars(
+                select(CollectorRequirement)
+                .where(
+                    CollectorRequirement.run_id == run.id,
+                    CollectorRequirement.terminal_id == terminal.id,
+                    CollectorRequirement.team_id == self.team_id,
+                    CollectorRequirement.status == "unmatched",
+                )
+                .order_by(CollectorRequirement.id)
+                .with_for_update()
+            ).all()
+        )
+        required = len(requirements)
+        if not requirements:
+            return {
+                "run_id": str(run.id),
+                "terminal_id": str(terminal.id),
+                "required": 0,
+                "assigned": 0,
+                "assignments": [],
+            }
+
+        physical_collectors = list(
+            self.session.scalars(
+                select(PhysicalCollector)
+                .where(
+                    PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.project_id == run.project_id,
+                    PhysicalCollector.pool_status == "available",
+                    ~exists().where(
+                        CollectorAssignment.physical_collector_id
+                        == PhysicalCollector.id,
+                        CollectorAssignment.status.in_(("reserved", "used")),
+                    ),
+                )
+                .order_by(PhysicalCollector.id)
+                .with_for_update()
+            ).all()
+        )
+        physical_by_id = {physical.id: physical for physical in physical_collectors}
+        photos_by_physical: dict[UUID, list[CollectorPhoto]] = defaultdict(list)
+        if physical_collectors:
+            photos = list(
+                self.session.scalars(
+                    select(CollectorPhoto)
+                    .where(
+                        CollectorPhoto.team_id == self.team_id,
+                        CollectorPhoto.project_id == run.project_id,
+                        CollectorPhoto.physical_collector_id.in_(physical_by_id),
+                        CollectorPhoto.is_active.is_(True),
+                    )
+                    .order_by(CollectorPhoto.physical_collector_id, CollectorPhoto.id)
+                    .with_for_update()
+                ).all()
+            )
+            for photo in photos:
+                photos_by_physical[photo.physical_collector_id].append(photo)
+
+        valid_photos = {
+            physical_id: rows[0]
+            for physical_id, rows in photos_by_physical.items()
+            if len(rows) == 1
+        }
+        plan = plan_random_assignments(
+            requirement_ids=[str(requirement.id) for requirement in requirements],
+            available_collector_ids=[
+                str(physical.id)
+                for physical in physical_collectors
+                if physical.id in valid_photos
+            ],
+        )
+        requirement_by_id = {
+            str(requirement.id): requirement for requirement in requirements
+        }
+        result: list[dict[str, str]] = []
+        for requirement_id, physical_id in plan:
+            requirement = requirement_by_id[requirement_id]
+            physical = physical_by_id[UUID(physical_id)]
+            photo = valid_photos[physical.id]
+            assignment, _created = self._create_assignment(
+                run=run,
+                requirement=requirement,
+                physical=physical,
+                photo=photo,
+                assignment_mode="random",
+            )
+            requirement.status = "assigned"
+            physical.pool_status = "reserved"
+            self._ensure_removal_workbench_item(
+                run=run,
+                requirement=requirement,
+                assignment=assignment,
+            )
+            result.append(
+                {
+                    "assignment_id": str(assignment.id),
+                    "requirement_id": requirement_id,
+                    "original_collector_no": requirement.original_collector_no,
+                    "physical_collector_id": physical_id,
+                    "final_collector_no": physical.collector_no,
+                    "mode": "random",
+                }
+            )
+
+        run.status = "allocated"
+        self._refresh_allocation_stats(run)
+        self._audit(
+            action="collector_workbench.terminal_replaced",
+            entity_type="collector_transfer_terminal",
+            entity_id=terminal.id,
+            project_id=run.project_id,
+            payload={
+                "run_id": str(run.id),
+                "terminal_id": str(terminal.id),
+                "required": required,
+                "assigned": len(result),
+                "assigned_by": self.actor,
+                "assignments": result,
+            },
+        )
+        self.session.commit()
+        return {
+            "run_id": str(run.id),
+            "terminal_id": str(terminal.id),
+            "required": required,
+            "assigned": len(result),
+            "assignments": result,
+        }
+
+    def refresh_global_terminal(self, *, terminal_id: str) -> dict[str, object]:
+        terminal_uuid = _uuid(terminal_id, "terminal_id")
+        terminal_ref = self.session.execute(
+            select(
+                CollectorTransferTerminal.run_id,
+                CollectorTransferTerminal.terminal_code,
+                CollectorTransferRun.project_id,
+            )
+            .join(
+                CollectorTransferRun,
+                CollectorTransferRun.id == CollectorTransferTerminal.run_id,
+            )
+            .where(
+                CollectorTransferTerminal.id == terminal_uuid,
+                CollectorTransferTerminal.team_id == self.team_id,
+                CollectorTransferRun.team_id == self.team_id,
+            )
+        ).one_or_none()
+        if terminal_ref is None:
+            raise KeyError(terminal_id)
+
+        self._lock_global_terminal_identity(
+            project_id=terminal_ref.project_id,
+            terminal_code=terminal_ref.terminal_code,
+        )
+        run = self._run(str(terminal_ref.run_id), lock=True)
+        stats = dict(run.stats or {})
+        if (
+            stats.get("workflow_kind") != "global_terminal_workbench"
+            or bool(stats.get("superseded"))
+        ):
+            raise KeyError(terminal_id)
+        terminal = self.session.scalar(
+            select(CollectorTransferTerminal)
+            .where(
+                CollectorTransferTerminal.id == terminal_uuid,
+                CollectorTransferTerminal.run_id == run.id,
+                CollectorTransferTerminal.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if terminal is None:
+            raise KeyError(terminal_id)
+
+        completed_count = int(
+            self.session.scalar(
+                select(func.count(CollectorWorkbenchItem.id)).where(
+                    CollectorWorkbenchItem.run_id == run.id,
+                    CollectorWorkbenchItem.terminal_id == terminal.id,
+                    CollectorWorkbenchItem.status == "completed",
+                )
+            )
+            or 0
+        )
+        active_assignment_count = int(
+            self.session.scalar(
+                select(func.count(CollectorAssignment.id))
+                .join(
+                    CollectorRequirement,
+                    CollectorRequirement.id == CollectorAssignment.requirement_id,
+                )
+                .where(
+                    CollectorAssignment.run_id == run.id,
+                    CollectorAssignment.team_id == self.team_id,
+                    CollectorAssignment.status.in_(("reserved", "used")),
+                    CollectorRequirement.terminal_id == terminal.id,
+                )
+            )
+            or 0
+        )
+        if completed_count or active_assignment_count:
+            raise CollectorSnapshotChangedError(
+                "snapshot has progress; undo completions and roll back assignments first"
+            )
+
+        projection, photos = self._global_terminal_projection(
+            project_id=run.project_id,
+            terminal_code=terminal.terminal_code,
+        )
+        current_revision = _projection_source_revision(
+            project_id=run.project_id,
+            terminal_code=terminal.terminal_code,
+            projection=projection,
+            photos=photos,
+        )
+        return self.open_global_terminal(
+            project_id=str(run.project_id),
+            terminal_code=terminal.terminal_code,
+            source_revision=current_revision,
+            terminal_key_value=terminal_key(
+                str(run.project_id),
+                terminal.terminal_code,
+            ),
+            force_refresh=True,
+        )
+
     def rollback_assignment(self, *, assignment_id: str) -> dict[str, object]:
         assignment_uuid = _uuid(assignment_id, "assignment_id")
-        run_id = self.session.scalar(
-            select(CollectorAssignment.run_id).where(
+        assignment_ref = self.session.execute(
+            select(
+                CollectorAssignment.run_id,
+                CollectorAssignment.requirement_id,
+                CollectorAssignment.physical_collector_id,
+                CollectorAssignment.collector_photo_id,
+                CollectorAssignment.status,
+            ).where(
                 CollectorAssignment.id == assignment_uuid,
                 CollectorAssignment.team_id == self.team_id,
             )
-        )
-        if run_id is None:
+        ).one_or_none()
+        if assignment_ref is None:
             raise KeyError(assignment_id)
+        if assignment_ref.status == "rolled_back":
+            return {
+                "assignment_id": str(assignment_uuid),
+                "run_id": str(assignment_ref.run_id),
+                "status": "rolled_back",
+            }
+        requirement_ref = self.session.execute(
+            select(
+                CollectorRequirement.run_id,
+                CollectorRequirement.terminal_id,
+            ).where(
+                CollectorRequirement.id == assignment_ref.requirement_id,
+                CollectorRequirement.team_id == self.team_id,
+            )
+        ).one_or_none()
+        if requirement_ref is None or requirement_ref.run_id != assignment_ref.run_id:
+            raise ValueError("assignment resources are missing")
 
-        # Collector-transfer mutation lock order: run -> assignment -> workbench
-        # -> requirement -> physical -> terminal -> evidence. Completion/undo use
-        # the same order so PostgreSQL never sees the former inverted cycle.
-        run = self._run(str(run_id), lock=True)
+        # Canonical mutation lock order:
+        # run -> terminal -> requirement -> physical -> assignment -> item -> evidence.
+        run = self._run(str(assignment_ref.run_id), lock=True)
+        terminal = self.session.scalar(
+            select(CollectorTransferTerminal)
+            .where(
+                CollectorTransferTerminal.id == requirement_ref.terminal_id,
+                CollectorTransferTerminal.run_id == run.id,
+                CollectorTransferTerminal.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        requirement = self.session.scalar(
+            select(CollectorRequirement)
+            .where(
+                CollectorRequirement.id == assignment_ref.requirement_id,
+                CollectorRequirement.run_id == run.id,
+                CollectorRequirement.terminal_id == requirement_ref.terminal_id,
+                CollectorRequirement.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        physical = self.session.scalar(
+            select(PhysicalCollector)
+            .where(
+                PhysicalCollector.id == assignment_ref.physical_collector_id,
+                PhysicalCollector.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if terminal is None or requirement is None or physical is None:
+            raise ValueError("assignment resources are missing")
         assignment = self.session.scalar(
             select(CollectorAssignment)
             .where(
                 CollectorAssignment.id == assignment_uuid,
                 CollectorAssignment.run_id == run.id,
+                CollectorAssignment.requirement_id == requirement.id,
+                CollectorAssignment.physical_collector_id == physical.id,
                 CollectorAssignment.team_id == self.team_id,
             )
             .with_for_update()
@@ -2713,52 +3051,33 @@ class PostgresCollectorTransferService:
                 "run_id": str(assignment.run_id),
                 "status": "rolled_back",
             }
-
         workbench_items = list(
             self.session.scalars(
                 select(CollectorWorkbenchItem)
                 .where(
                     CollectorWorkbenchItem.assignment_id == assignment.id,
+                    CollectorWorkbenchItem.run_id == run.id,
+                    CollectorWorkbenchItem.terminal_id == terminal.id,
                     CollectorWorkbenchItem.team_id == self.team_id,
                 )
                 .order_by(CollectorWorkbenchItem.id)
                 .with_for_update()
             ).all()
         )
-        requirement = self.session.scalar(
-            select(CollectorRequirement)
-            .where(
-                CollectorRequirement.id == assignment.requirement_id,
-                CollectorRequirement.team_id == self.team_id,
-            )
-            .with_for_update()
+        photos = list(
+            self.session.scalars(
+                select(CollectorPhoto)
+                .where(
+                    CollectorPhoto.team_id == self.team_id,
+                    CollectorPhoto.physical_collector_id == physical.id,
+                )
+                .order_by(CollectorPhoto.id)
+                .with_for_update()
+            ).all()
         )
-        physical = self.session.scalar(
-            select(PhysicalCollector)
-            .where(
-                PhysicalCollector.id == assignment.physical_collector_id,
-                PhysicalCollector.team_id == self.team_id,
-            )
-            .with_for_update()
-        )
-        if requirement is None or physical is None:
-            raise ValueError("assignment resources are missing")
-        terminal = self.session.scalar(
-            select(CollectorTransferTerminal)
-            .where(
-                CollectorTransferTerminal.id == requirement.terminal_id,
-                CollectorTransferTerminal.team_id == self.team_id,
-            )
-            .with_for_update()
-        )
-        assignment_photo = self.session.scalar(
-            select(CollectorPhoto)
-            .where(
-                CollectorPhoto.id == assignment.collector_photo_id,
-                CollectorPhoto.team_id == self.team_id,
-                CollectorPhoto.physical_collector_id == physical.id,
-            )
-            .with_for_update()
+        assignment_photo = next(
+            (photo for photo in photos if photo.id == assignment.collector_photo_id),
+            None,
         )
         if assignment_photo is None:
             raise ValueError("assignment photo is missing")
@@ -2770,7 +3089,7 @@ class PostgresCollectorTransferService:
 
         assignment.status = "rolled_back"
         assignment.used_at = None
-        active_photo = self._active_collector_photo(physical.id)
+        active_photo = next((photo for photo in photos if photo.is_active), None)
         if active_photo is not None:
             self._validate_inventory_ownership(
                 run=run,
@@ -2788,26 +3107,27 @@ class PostgresCollectorTransferService:
             self.session.delete(item)
         self.session.flush()
 
-        if terminal is not None:
-            total = int(
-                self.session.scalar(
-                    select(func.count(CollectorWorkbenchItem.id)).where(
-                        CollectorWorkbenchItem.terminal_id == terminal.id
-                    )
+        total = int(
+            self.session.scalar(
+                select(func.count(CollectorWorkbenchItem.id)).where(
+                    CollectorWorkbenchItem.terminal_id == terminal.id
                 )
-                or 0
             )
-            completed_count = int(
-                self.session.scalar(
-                    select(func.count(CollectorWorkbenchItem.id)).where(
-                        CollectorWorkbenchItem.terminal_id == terminal.id,
-                        CollectorWorkbenchItem.status == "completed",
-                    )
+            or 0
+        )
+        completed_count = int(
+            self.session.scalar(
+                select(func.count(CollectorWorkbenchItem.id)).where(
+                    CollectorWorkbenchItem.terminal_id == terminal.id,
+                    CollectorWorkbenchItem.status == "completed",
                 )
-                or 0
             )
-            terminal.completed_item_count = completed_count
-            terminal.status = "ready" if not total else ("completed" if completed_count >= total else "in_progress")
+            or 0
+        )
+        terminal.completed_item_count = completed_count
+        terminal.status = "ready" if completed_count == 0 else (
+            "completed" if total and completed_count >= total else "in_progress"
+        )
 
         stats = self._refresh_allocation_stats(run)
         run.status = "allocated" if stats["assignment_count"] else "inventory"
@@ -2818,8 +3138,10 @@ class PostgresCollectorTransferService:
             project_id=run.project_id,
             payload={
                 "run_id": str(run.id),
+                "terminal_id": str(terminal.id),
                 "requirement_id": str(requirement.id),
                 "physical_collector_id": str(physical.id),
+                "mode": assignment.assignment_mode,
                 "removed_workbench_items": len(workbench_items),
             },
         )

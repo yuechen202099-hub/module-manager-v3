@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from os import getenv
 from threading import Barrier
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, func, select
@@ -27,12 +27,16 @@ from app.models import (
     CollectorTransferRun,
     CollectorTransferTerminal,
     CollectorWorkbenchItem,
+    MaterialGroup,
     PhysicalCollector,
+    Photo,
     Project,
     ProjectStatus,
     Team,
+    TotalCatalogRow,
 )
 from app.services.collector_transfer import (
+    CollectorAllocationConflictError,
     CollectorDirectConflictError,
     CollectorPhotoConflictError,
     CollectorWorkbenchIncompleteError,
@@ -321,6 +325,163 @@ def seed_allocation_state(session_factory, *, pool_size: int) -> tuple[str, str,
                 )
             )
     return team_id, str(run.id), [str(requirement.id)]
+
+
+def seed_partial_global_terminal_state(
+    session_factory,
+) -> tuple[str, str, str, str]:
+    """Seed two requirements where one is replaced and the other remains missing."""
+    team_id = f"task7-global-race-{uuid4().hex}"
+    terminal_code = f"TASK7-GLOBAL-{uuid4().hex[:10]}"
+    with session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Task 7 global terminal race"))
+        session.flush()
+        project = Project(
+            team_id=team_id,
+            code=f"TASK7-GLOBAL-{uuid4().hex[:10]}",
+            name="Task 7 global terminal race",
+            status=ProjectStatus.ACTIVE,
+        )
+        session.add(project)
+        session.flush()
+        project_id = str(project.id)
+        for index in range(2):
+            meter_no = f"TASK7-GLOBAL-METER-{index + 1}"
+            collector_no = f"TASK7-GLOBAL-ORIGINAL-{index + 1}"
+            catalog = TotalCatalogRow(
+                id=uuid4(),
+                team_id=team_id,
+                project_id=project.id,
+                terminal=terminal_code,
+                original_meter_no=meter_no,
+                meter_match_key=meter_no,
+                installation_address="本地全局终端并发地址",
+                raw_data={},
+            )
+            group = MaterialGroup(
+                id=uuid4(),
+                team_id=team_id,
+                project_id=project.id,
+                total_catalog_row_id=catalog.id,
+                terminal=terminal_code,
+                meter_match_key=meter_no,
+                display_meter_no=meter_no,
+                installation_address="本地全局终端并发地址",
+                raw_data={
+                    "collector": collector_no,
+                    "module_asset_no": f"TASK7-MODULE-{index + 1}",
+                },
+            )
+            session.add_all((catalog, group))
+            session.flush()
+            session.add_all(
+                (
+                    Photo(
+                        team_id=team_id,
+                        group_id=group.id,
+                        sha256=sha256(
+                            f"{team_id}:source:{index}:module".encode()
+                        ).hexdigest(),
+                        object_key=f"task7/source/{group.id}/module.jpg",
+                        image_url=f"/task7/source/{group.id}/module.jpg",
+                        category="module_meter",
+                        collector=collector_no,
+                        asset_no=f"TASK7-MODULE-{index + 1}",
+                        sort_order=0,
+                        is_active=True,
+                    ),
+                    Photo(
+                        team_id=team_id,
+                        group_id=group.id,
+                        sha256=sha256(
+                            f"{team_id}:source:{index}:after".encode()
+                        ).hexdigest(),
+                        object_key=f"task7/source/{group.id}/after.jpg",
+                        image_url=f"/task7/source/{group.id}/after.jpg",
+                        category="after_box",
+                        sort_order=1,
+                        is_active=True,
+                    ),
+                )
+            )
+
+    with session_factory() as session:
+        opened = PostgresCollectorTransferService(
+            session=session,
+            team_id=team_id,
+            actor="task7-seed",
+        ).open_global_terminal(
+            project_id=project_id,
+            terminal_code=terminal_code,
+        )
+        run_id = opened["run_id"]
+        terminal_id = opened["workbench_terminal_id"]
+        run_uuid = UUID(run_id)
+        terminal_uuid = UUID(terminal_id)
+        project_uuid = UUID(project_id)
+
+    with session_factory.begin() as session:
+        requirements = list(
+            session.scalars(
+                select(CollectorRequirement)
+                .where(CollectorRequirement.run_id == run_uuid)
+                .order_by(CollectorRequirement.id)
+            )
+        )
+        physicals: list[PhysicalCollector] = []
+        photos: list[CollectorPhoto] = []
+        for index in range(2):
+            physical = PhysicalCollector(
+                team_id=team_id,
+                project_id=project_uuid,
+                collector_no=f"TASK7-GLOBAL-POOL-{index + 1}",
+                pool_status="reserved" if index == 0 else "available",
+            )
+            session.add(physical)
+            session.flush()
+            photo = CollectorPhoto(
+                team_id=team_id,
+                project_id=project_uuid,
+                physical_collector_id=physical.id,
+                sha256=sha256(f"{team_id}:pool:{index}".encode()).hexdigest(),
+                original_filename=f"{physical.collector_no}.jpg",
+                object_key=f"task7/pool/{physical.collector_no}.jpg",
+                storage_type="local_upload",
+                is_active=True,
+            )
+            session.add(photo)
+            session.flush()
+            physicals.append(physical)
+            photos.append(photo)
+        requirements[0].status = "assigned"
+        assignment = CollectorAssignment(
+            run_id=run_uuid,
+            team_id=team_id,
+            requirement_id=requirements[0].id,
+            physical_collector_id=physicals[0].id,
+            collector_photo_id=photos[0].id,
+            assignment_mode="random",
+            status="reserved",
+            assigned_by_username="task7-seed",
+        )
+        session.add(assignment)
+        session.flush()
+        session.add(
+            CollectorWorkbenchItem(
+                run_id=run_uuid,
+                terminal_id=terminal_uuid,
+                team_id=team_id,
+                item_kind="collector_removal",
+                source_key=str(requirements[0].id),
+                requirement_id=requirements[0].id,
+                assignment_id=assignment.id,
+                status="pending",
+                sort_order=2,
+            )
+        )
+        assignment_id = str(assignment.id)
+
+    return team_id, terminal_id, assignment_id, run_id
 
 
 def test_real_postgres_concurrent_allocation_is_stable_and_consumes_each_resource_once(postgres_session_factory) -> None:
@@ -779,3 +940,296 @@ def test_real_postgres_concurrent_direct_claim_allows_one_hidden_terminal(
     assert persisted_physical.pool_status == "direct"
     assert assignment_count == 0
     assert photo_count == 0
+
+
+def test_real_postgres_replace_and_rollback_share_canonical_lock_order(
+    postgres_session_factory,
+) -> None:
+    """Catches terminal replacement and rollback deadlocking or leaving mixed resource states."""
+    team_id, terminal_id, assignment_id, run_id = seed_partial_global_terminal_state(
+        postgres_session_factory
+    )
+    start = Barrier(3)
+
+    def run_operation(role: str) -> tuple[str, str]:
+        start.wait(timeout=10)
+        with postgres_session_factory() as session:
+            transfer = PostgresCollectorTransferService(
+                session=session,
+                team_id=team_id,
+                actor=f"task7-{role}",
+            )
+            try:
+                if role == "replace":
+                    result = transfer.replace_terminal_missing(
+                        terminal_id=terminal_id
+                    )
+                    return "ok", str(result["assigned"])
+                result = transfer.rollback_assignment(
+                    assignment_id=assignment_id
+                )
+                return "ok", str(result["status"])
+            except (
+                CollectorAllocationConflictError,
+                CollectorWorkbenchIncompleteError,
+                PoolInsufficientError,
+                KeyError,
+            ) as exc:
+                session.rollback()
+                return "controlled", f"{type(exc).__name__}: {exc}"
+            except Exception as exc:
+                session.rollback()
+                return "unexpected", f"{type(exc).__name__}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        replace_future = executor.submit(run_operation, "replace")
+        rollback_future = executor.submit(run_operation, "rollback")
+        start.wait(timeout=10)
+        outcomes = [
+            replace_future.result(timeout=20),
+            rollback_future.result(timeout=20),
+        ]
+
+    assert [kind for kind, _detail in outcomes] == ["ok", "ok"], outcomes
+    with postgres_session_factory() as session:
+        requirements = list(
+            session.scalars(
+                select(CollectorRequirement)
+                .where(CollectorRequirement.run_id == UUID(run_id))
+                .order_by(CollectorRequirement.id)
+            )
+        )
+        physicals = list(
+            session.scalars(
+                select(PhysicalCollector)
+                .where(PhysicalCollector.team_id == team_id)
+                .order_by(PhysicalCollector.id)
+            )
+        )
+        assignments = list(
+            session.scalars(
+                select(CollectorAssignment)
+                .where(CollectorAssignment.run_id == UUID(run_id))
+                .order_by(CollectorAssignment.id)
+            )
+        )
+        removal_items = list(
+            session.scalars(
+                select(CollectorWorkbenchItem).where(
+                    CollectorWorkbenchItem.run_id == UUID(run_id),
+                    CollectorWorkbenchItem.item_kind == "collector_removal",
+                )
+            )
+        )
+        terminal = session.get(CollectorTransferTerminal, UUID(terminal_id))
+
+    active = [row for row in assignments if row.status in {"reserved", "used"}]
+    active_requirement_ids = {row.requirement_id for row in active}
+    active_physical_ids = {row.physical_collector_id for row in active}
+    assert len(active_requirement_ids) == len(active)
+    assert len(active_physical_ids) == len(active)
+    assert 1 <= len(active) <= 2
+    assert next(
+        row for row in assignments if str(row.id) == assignment_id
+    ).status == "rolled_back"
+    assert {
+        row.id: row.status for row in requirements
+    } == {
+        row.id: ("assigned" if row.id in active_requirement_ids else "unmatched")
+        for row in requirements
+    }
+    assert {
+        row.id: row.pool_status for row in physicals
+    } == {
+        row.id: ("reserved" if row.id in active_physical_ids else "available")
+        for row in physicals
+    }
+    assert {row.assignment_id for row in removal_items} == {row.id for row in active}
+    assert terminal.completed_item_count == 0
+
+
+def test_real_postgres_replace_and_complete_share_canonical_lock_order(
+    postgres_session_factory,
+) -> None:
+    """Catches terminal replacement and completion deadlocking or losing either state transition."""
+    team_id, terminal_id, assignment_id, run_id = seed_partial_global_terminal_state(
+        postgres_session_factory
+    )
+    with postgres_session_factory() as session:
+        workbench_item_id = str(
+            session.scalar(
+                select(CollectorWorkbenchItem.id).where(
+                    CollectorWorkbenchItem.assignment_id == UUID(assignment_id)
+                )
+            )
+        )
+    start = Barrier(3)
+
+    def run_operation(role: str) -> tuple[str, str]:
+        start.wait(timeout=10)
+        with postgres_session_factory() as session:
+            transfer = PostgresCollectorTransferService(
+                session=session,
+                team_id=team_id,
+                actor=f"task7-{role}",
+            )
+            try:
+                if role == "replace":
+                    result = transfer.replace_terminal_missing(
+                        terminal_id=terminal_id
+                    )
+                    return "ok", str(result["assigned"])
+                result = transfer.set_workbench_item_status(
+                    item_id=workbench_item_id,
+                    completed=True,
+                )
+                return "ok", str(result["status"])
+            except (
+                CollectorAllocationConflictError,
+                CollectorWorkbenchIncompleteError,
+                PoolInsufficientError,
+                KeyError,
+            ) as exc:
+                session.rollback()
+                return "controlled", f"{type(exc).__name__}: {exc}"
+            except Exception as exc:
+                session.rollback()
+                return "unexpected", f"{type(exc).__name__}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        replace_future = executor.submit(run_operation, "replace")
+        complete_future = executor.submit(run_operation, "complete")
+        start.wait(timeout=10)
+        outcomes = [
+            replace_future.result(timeout=20),
+            complete_future.result(timeout=20),
+        ]
+
+    assert [kind for kind, _detail in outcomes] == ["ok", "ok"], outcomes
+    with postgres_session_factory() as session:
+        requirements = list(
+            session.scalars(
+                select(CollectorRequirement)
+                .where(CollectorRequirement.run_id == UUID(run_id))
+                .order_by(CollectorRequirement.id)
+            )
+        )
+        physicals = list(
+            session.scalars(
+                select(PhysicalCollector)
+                .where(PhysicalCollector.team_id == team_id)
+                .order_by(PhysicalCollector.id)
+            )
+        )
+        assignments = list(
+            session.scalars(
+                select(CollectorAssignment)
+                .where(
+                    CollectorAssignment.run_id == UUID(run_id),
+                    CollectorAssignment.status.in_(("reserved", "used")),
+                )
+                .order_by(CollectorAssignment.id)
+            )
+        )
+        removal_items = list(
+            session.scalars(
+                select(CollectorWorkbenchItem).where(
+                    CollectorWorkbenchItem.run_id == UUID(run_id),
+                    CollectorWorkbenchItem.item_kind == "collector_removal",
+                )
+            )
+        )
+        terminal = session.get(CollectorTransferTerminal, UUID(terminal_id))
+
+    assert len(assignments) == 2
+    assert len({row.requirement_id for row in assignments}) == 2
+    assert len({row.physical_collector_id for row in assignments}) == 2
+    assert sorted(row.status for row in assignments) == ["reserved", "used"]
+    assert sorted(row.status for row in requirements) == ["assigned", "used"]
+    assert sorted(row.pool_status for row in physicals) == ["reserved", "used"]
+    assert len(removal_items) == 2
+    assert sum(row.status == "completed" for row in removal_items) == 1
+    assert terminal.completed_item_count == 1
+    assert terminal.status == "in_progress"
+
+
+def test_real_postgres_concurrent_terminal_replacement_is_idempotent(
+    postgres_session_factory,
+) -> None:
+    """Catches two replace clicks duplicating assignments, mappings, or terminal audits."""
+    team_id, terminal_id, assignment_id, run_id = seed_partial_global_terminal_state(
+        postgres_session_factory
+    )
+    with postgres_session_factory() as session:
+        PostgresCollectorTransferService(
+            session=session,
+            team_id=team_id,
+            actor="task7-reset",
+        ).rollback_assignment(assignment_id=assignment_id)
+    start = Barrier(3)
+
+    def replace_once() -> tuple[str, int | str]:
+        start.wait(timeout=10)
+        with postgres_session_factory() as session:
+            try:
+                result = PostgresCollectorTransferService(
+                    session=session,
+                    team_id=team_id,
+                    actor="task7-replace",
+                ).replace_terminal_missing(terminal_id=terminal_id)
+                return "ok", int(result["assigned"])
+            except Exception as exc:
+                session.rollback()
+                return "unexpected", f"{type(exc).__name__}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(replace_once)
+        second = executor.submit(replace_once)
+        start.wait(timeout=10)
+        outcomes = [first.result(timeout=20), second.result(timeout=20)]
+
+    assert [kind for kind, _detail in outcomes] == ["ok", "ok"], outcomes
+    assert sorted(int(detail) for _kind, detail in outcomes) == [0, 2]
+    with postgres_session_factory() as session:
+        active_assignments = list(
+            session.scalars(
+                select(CollectorAssignment).where(
+                    CollectorAssignment.run_id == UUID(run_id),
+                    CollectorAssignment.status.in_(("reserved", "used")),
+                )
+            )
+        )
+        requirements = list(
+            session.scalars(
+                select(CollectorRequirement).where(
+                    CollectorRequirement.run_id == UUID(run_id)
+                )
+            )
+        )
+        physicals = list(
+            session.scalars(
+                select(PhysicalCollector).where(PhysicalCollector.team_id == team_id)
+            )
+        )
+        removal_items = list(
+            session.scalars(
+                select(CollectorWorkbenchItem).where(
+                    CollectorWorkbenchItem.run_id == UUID(run_id),
+                    CollectorWorkbenchItem.item_kind == "collector_removal",
+                )
+            )
+        )
+        replacement_audits = session.scalar(
+            select(func.count(AuditLog.id)).where(
+                AuditLog.team_id == team_id,
+                AuditLog.action == "collector_workbench.terminal_replaced",
+            )
+        )
+
+    assert len(active_assignments) == 2
+    assert len({row.requirement_id for row in active_assignments}) == 2
+    assert len({row.physical_collector_id for row in active_assignments}) == 2
+    assert all(row.status == "assigned" for row in requirements)
+    assert all(row.pool_status == "reserved" for row in physicals)
+    assert len(removal_items) == 2
+    assert replacement_audits == 1

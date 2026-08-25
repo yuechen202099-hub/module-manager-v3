@@ -40,6 +40,7 @@ from app.models import (
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorPhotoConflictError,
+    CollectorSnapshotChangedError,
     CollectorWorkbenchIncompleteError,
     PostgresCollectorTransferService,
     _photo_snapshot,
@@ -3615,3 +3616,506 @@ def test_direct_workbench_undo_rejects_invalidated_physical_without_writes(
     assert item.status == "completed"
     assert requirement_row.status == "used"
     assert physical.pool_status == "available"
+
+
+def test_replace_terminal_missing_assigns_every_gap_once_and_retries_idempotently(
+    db_session: Session,
+) -> None:
+    """Catches a terminal replacement allocating only part of its gaps or duplicating mappings on retry."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    for index in range(2):
+        add_global_terminal_source(
+            db_session,
+            project=project,
+            terminal_code="REPLACE-ATOMIC-001",
+            meter_no=f"REPLACE-METER-{index + 1}",
+            collector_no=f"ORIGINAL-{index + 1}",
+            authoritative_address="原子替换地址",
+        )
+    pool = [
+        PhysicalCollector(
+            id=uuid4(),
+            team_id="team-1",
+            project_id=project.id,
+            collector_no=f"POOL-ATOMIC-{index + 1}",
+            pool_status="available",
+        )
+        for index in range(2)
+    ]
+    db_session.add_all(pool)
+    db_session.commit()
+    for index, physical in enumerate(pool):
+        collector_photo(db_session, physical, sha256=f"{index + 1}" * 64)
+    candidate = service(db_session).list_global_terminals(
+        query="REPLACE-ATOMIC-001"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="REPLACE-ATOMIC-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+
+    first = service(db_session).replace_terminal_missing(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+    mapping_audit_count = db_session.scalar(
+        select(func.count(AuditLog.id)).where(
+            AuditLog.action == "collector_workbench.terminal_replaced"
+        )
+    )
+    second = service(db_session).replace_terminal_missing(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+
+    assignments = list(
+        db_session.scalars(
+            select(CollectorAssignment).where(
+                CollectorAssignment.run_id == UUID(opened["run_id"])
+            )
+        )
+    )
+    requirements = list(
+        db_session.scalars(
+            select(CollectorRequirement).where(
+                CollectorRequirement.run_id == UUID(opened["run_id"])
+            )
+        )
+    )
+    workbench_items = list(
+        db_session.scalars(
+            select(CollectorWorkbenchItem).where(
+                CollectorWorkbenchItem.run_id == UUID(opened["run_id"]),
+                CollectorWorkbenchItem.item_kind == "collector_removal",
+            )
+        )
+    )
+    assert first["required"] == 2
+    assert first["assigned"] == 2
+    assert len(first["assignments"]) == 2
+    assert len({row["physical_collector_id"] for row in first["assignments"]}) == 2
+    assert second["required"] == 0
+    assert second["assigned"] == 0
+    assert second["assignments"] == []
+    assert len(assignments) == 2
+    assert all(row.assignment_mode == "random" for row in assignments)
+    assert all(row.status == "reserved" for row in assignments)
+    assert all(row.status == "assigned" for row in requirements)
+    assert all(row.pool_status == "reserved" for row in pool)
+    assert len(workbench_items) == 2
+    assert db_session.scalar(
+        select(func.count(AuditLog.id)).where(
+            AuditLog.action == "collector_workbench.terminal_replaced"
+        )
+    ) == mapping_audit_count == 1
+
+
+def test_replace_terminal_missing_pool_shortage_has_zero_business_writes(
+    db_session: Session,
+) -> None:
+    """Catches pool shortage leaving a partial assignment, state change, work item, or audit."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    for index in range(2):
+        add_global_terminal_source(
+            db_session,
+            project=project,
+            terminal_code="REPLACE-SHORTAGE-001",
+            meter_no=f"SHORTAGE-METER-{index + 1}",
+            collector_no=f"SHORTAGE-ORIGINAL-{index + 1}",
+            authoritative_address="池不足地址",
+        )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="SHORTAGE-POOL-1",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="9" * 64)
+    candidate = service(db_session).list_global_terminals(
+        query="REPLACE-SHORTAGE-001"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="REPLACE-SHORTAGE-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    run_id = UUID(opened["run_id"])
+    terminal_id = UUID(opened["workbench_terminal_id"])
+
+    def business_state() -> dict[str, object]:
+        return {
+            "requirements": list(
+                db_session.execute(
+                    select(CollectorRequirement.id, CollectorRequirement.status)
+                    .where(CollectorRequirement.run_id == run_id)
+                    .order_by(CollectorRequirement.id)
+                ).tuples()
+            ),
+            "physicals": list(
+                db_session.execute(
+                    select(PhysicalCollector.id, PhysicalCollector.pool_status)
+                    .where(PhysicalCollector.project_id == project.id)
+                    .order_by(PhysicalCollector.id)
+                ).tuples()
+            ),
+            "assignment_count": db_session.scalar(
+                select(func.count(CollectorAssignment.id)).where(
+                    CollectorAssignment.run_id == run_id
+                )
+            ),
+            "removal_item_count": db_session.scalar(
+                select(func.count(CollectorWorkbenchItem.id)).where(
+                    CollectorWorkbenchItem.run_id == run_id,
+                    CollectorWorkbenchItem.item_kind == "collector_removal",
+                )
+            ),
+            "terminal_progress": db_session.execute(
+                select(
+                    CollectorTransferTerminal.status,
+                    CollectorTransferTerminal.completed_item_count,
+                ).where(CollectorTransferTerminal.id == terminal_id)
+            ).one(),
+            "replace_audit_count": db_session.scalar(
+                select(func.count(AuditLog.id)).where(
+                    AuditLog.action == "collector_workbench.terminal_replaced"
+                )
+            ),
+        }
+
+    before = business_state()
+    with pytest.raises(PoolInsufficientError) as raised:
+        service(db_session).replace_terminal_missing(
+            terminal_id=str(terminal_id)
+        )
+    after = business_state()
+
+    assert raised.value.required == 2
+    assert raised.value.available == 1
+    assert after == before
+
+
+def test_legacy_allocate_rejects_a_global_terminal_hidden_run(
+    db_session: Session,
+) -> None:
+    """Catches the legacy run-wide allocator bypassing terminal-scoped atomic replacement."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="HIDDEN-ALLOCATE-001",
+        meter_no="HIDDEN-ALLOCATE-METER",
+        collector_no="HIDDEN-ALLOCATE-ORIGINAL",
+        authoritative_address="隐藏运行地址",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="HIDDEN-ALLOCATE-POOL",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="8" * 64)
+    candidate = service(db_session).list_global_terminals(
+        query="HIDDEN-ALLOCATE-001"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="HIDDEN-ALLOCATE-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+
+    with pytest.raises(ValueError, match="terminal-scoped"):
+        service(db_session).allocate(run_id=opened["run_id"])
+
+    assert db_session.scalar(
+        select(func.count(CollectorAssignment.id)).where(
+            CollectorAssignment.run_id == UUID(opened["run_id"])
+        )
+    ) == 0
+    db_session.refresh(physical)
+    assert physical.pool_status == "available"
+
+
+def test_random_terminal_replacement_can_complete_undo_and_roll_back_to_missing(
+    db_session: Session,
+) -> None:
+    """Catches rollback retaining an effective mapping, consumed pool state, or removal item."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REPLACE-ROLLBACK-001",
+        meter_no="REPLACE-ROLLBACK-METER",
+        collector_no="REPLACE-ROLLBACK-ORIGINAL",
+        authoritative_address="替换回滚地址",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="REPLACE-ROLLBACK-POOL",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="7" * 64)
+    candidate = service(db_session).list_global_terminals(
+        query="REPLACE-ROLLBACK-001"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="REPLACE-ROLLBACK-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    replacement = service(db_session).replace_terminal_missing(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+    assignment_id = replacement["assignments"][0]["assignment_id"]
+    item = db_session.scalar(
+        select(CollectorWorkbenchItem).where(
+            CollectorWorkbenchItem.assignment_id == UUID(assignment_id)
+        )
+    )
+    service(db_session).set_workbench_item_status(
+        item_id=str(item.id),
+        completed=True,
+    )
+    service(db_session).set_workbench_item_status(
+        item_id=str(item.id),
+        completed=False,
+    )
+
+    rolled_back = service(db_session).rollback_assignment(
+        assignment_id=assignment_id
+    )
+    detail = service(db_session).global_terminal_detail(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+
+    assignment = db_session.get(CollectorAssignment, UUID(assignment_id))
+    requirement_row = db_session.get(
+        CollectorRequirement,
+        assignment.requirement_id,
+    )
+    db_session.refresh(physical)
+    assert rolled_back["status"] == "rolled_back"
+    assert assignment.status == "rolled_back"
+    assert requirement_row.status == "unmatched"
+    assert physical.pool_status == "available"
+    assert db_session.scalar(
+        select(func.count(CollectorWorkbenchItem.id)).where(
+            CollectorWorkbenchItem.assignment_id == assignment.id
+        )
+    ) == 0
+    terminal = db_session.get(
+        CollectorTransferTerminal,
+        UUID(opened["workbench_terminal_id"]),
+    )
+    assert terminal.completed_item_count == 0
+    assert terminal.status == "ready"
+    assert detail["collector_items"][0]["physical_state"] == "missing"
+
+
+def test_refresh_global_terminal_rejects_completed_progress_without_writes(
+    db_session: Session,
+) -> None:
+    """Catches refresh silently superseding a snapshot after re-photography progress."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REFRESH-COMPLETED-001",
+        meter_no="REFRESH-COMPLETED-METER",
+        collector_no="REFRESH-COMPLETED-COLLECTOR",
+        authoritative_address="刷新完成门禁地址",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="REFRESH-COMPLETED-001"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="REFRESH-COMPLETED-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    run_id = UUID(opened["run_id"])
+    terminal_id = UUID(opened["workbench_terminal_id"])
+    meter_item = db_session.scalar(
+        select(CollectorWorkbenchItem).where(
+            CollectorWorkbenchItem.run_id == run_id,
+            CollectorWorkbenchItem.item_kind == "meter_install",
+        )
+    )
+    service(db_session).set_workbench_item_status(
+        item_id=str(meter_item.id),
+        completed=True,
+    )
+    before_runs = db_session.scalar(
+        select(func.count(CollectorTransferRun.id)).where(
+            CollectorTransferRun.team_id == "team-1"
+        )
+    )
+    old_run = db_session.get(CollectorTransferRun, run_id)
+    old_stats = dict(old_run.stats or {})
+
+    with pytest.raises(CollectorSnapshotChangedError, match="progress"):
+        service(db_session).refresh_global_terminal(
+            terminal_id=str(terminal_id)
+        )
+
+    db_session.refresh(old_run)
+    db_session.refresh(meter_item)
+    assert dict(old_run.stats or {}) == old_stats
+    assert meter_item.status == "completed"
+    assert db_session.scalar(
+        select(func.count(CollectorTransferRun.id)).where(
+            CollectorTransferRun.team_id == "team-1"
+        )
+    ) == before_runs
+
+
+def test_refresh_global_terminal_requires_random_rollback_then_supersedes_snapshot(
+    db_session: Session,
+) -> None:
+    """Catches refresh releasing an active replacement or failing after the mapping is rolled back."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    source_group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REFRESH-ASSIGNED-001",
+        meter_no="REFRESH-ASSIGNED-METER",
+        collector_no="REFRESH-ASSIGNED-ORIGINAL",
+        authoritative_address="刷新分配门禁地址",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="REFRESH-ASSIGNED-POOL",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="5" * 64)
+    candidate = service(db_session).list_global_terminals(
+        query="REFRESH-ASSIGNED-001"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="REFRESH-ASSIGNED-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    replaced = service(db_session).replace_terminal_missing(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+    assignment_id = replaced["assignments"][0]["assignment_id"]
+    source_photo = db_session.scalar(
+        select(Photo).where(
+            Photo.group_id == source_group.id,
+            Photo.category == "after_box",
+        )
+    )
+    source_photo.sha256 = "6" * 64
+    db_session.commit()
+    old_run = db_session.get(CollectorTransferRun, UUID(opened["run_id"]))
+
+    with pytest.raises(CollectorSnapshotChangedError, match="progress"):
+        service(db_session).refresh_global_terminal(
+            terminal_id=opened["workbench_terminal_id"]
+        )
+
+    db_session.refresh(old_run)
+    assignment = db_session.get(CollectorAssignment, UUID(assignment_id))
+    assert not old_run.stats.get("superseded", False)
+    assert assignment.status == "reserved"
+    service(db_session).rollback_assignment(assignment_id=assignment_id)
+
+    refreshed = service(db_session).refresh_global_terminal(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+
+    db_session.refresh(old_run)
+    db_session.refresh(assignment)
+    db_session.refresh(physical)
+    assert refreshed["run_id"] != str(old_run.id)
+    assert old_run.stats["superseded"] is True
+    assert old_run.stats["superseded_by_run_id"] == refreshed["run_id"]
+    assert assignment.status == "rolled_back"
+    assert physical.pool_status == "available"
+
+
+def test_replace_terminal_missing_rejects_a_stale_source_snapshot_without_writes(
+    db_session: Session,
+) -> None:
+    """Catches replacement consuming pool inventory against an outdated terminal source snapshot."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    source_group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REPLACE-STALE-001",
+        meter_no="REPLACE-STALE-METER",
+        collector_no="REPLACE-STALE-ORIGINAL",
+        authoritative_address="过期快照地址",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="REPLACE-STALE-POOL",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="4" * 64)
+    candidate = service(db_session).list_global_terminals(
+        query="REPLACE-STALE-001"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="REPLACE-STALE-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    source_photo = db_session.scalar(
+        select(Photo).where(
+            Photo.group_id == source_group.id,
+            Photo.category == "after_box",
+        )
+    )
+    source_photo.sha256 = "3" * 64
+    db_session.commit()
+
+    with pytest.raises(CollectorSnapshotChangedError, match="source"):
+        service(db_session).replace_terminal_missing(
+            terminal_id=opened["workbench_terminal_id"]
+        )
+
+    db_session.refresh(physical)
+    requirement_row = db_session.scalar(
+        select(CollectorRequirement).where(
+            CollectorRequirement.run_id == UUID(opened["run_id"])
+        )
+    )
+    assert requirement_row.status == "unmatched"
+    assert physical.pool_status == "available"
+    assert db_session.scalar(
+        select(func.count(CollectorAssignment.id)).where(
+            CollectorAssignment.run_id == UUID(opened["run_id"])
+        )
+    ) == 0
+    assert db_session.scalar(
+        select(func.count(CollectorWorkbenchItem.id)).where(
+            CollectorWorkbenchItem.run_id == UUID(opened["run_id"]),
+            CollectorWorkbenchItem.item_kind == "collector_removal",
+        )
+    ) == 0
