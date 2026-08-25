@@ -439,7 +439,7 @@ def verify_v328_archive_source_contract(archive: zipfile.ZipFile):
             fail("Unable to load archived V3.2.8 release verifier")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        failures = module.collect_failures(extracted_root, "attestation")
+        failures = module.collect_failures(extracted_root, "source")
         if failures:
             fail("V3.2.8 archive source contract failed: " + " | ".join(failures))
         return module
@@ -449,7 +449,38 @@ def fail(message: str) -> None:
     raise AssertionError(message)
 
 
-def verify_archive_members_are_tracked(names: set[str], source_commit: str) -> None:
+GENERATED_SOURCE_MEMBERS = frozenset(("SOURCE_COMMIT", "RELEASE_MANIFEST.md"))
+GENERATED_VUE_PREFIX = "v2-api/app/static/vue/"
+SOURCE_BOUND_LF_SUFFIXES = frozenset(
+    (
+        ".conf",
+        ".css",
+        ".html",
+        ".ini",
+        ".js",
+        ".json",
+        ".md",
+        ".mjs",
+        ".mts",
+        ".ps1",
+        ".py",
+        ".service",
+        ".sh",
+        ".svg",
+        ".timer",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".vue",
+        ".yaml",
+        ".yml",
+    )
+)
+SOURCE_BOUND_LF_NAMES = frozenset((".gitattributes", "Dockerfile"))
+
+
+def tracked_names_at_commit(source_commit: str) -> set[str]:
     repository_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", source_commit],
@@ -461,15 +492,56 @@ def verify_archive_members_are_tracked(names: set[str], source_commit: str) -> N
     )
     if result.returncode != 0:
         fail(f"Unable to inspect SOURCE_COMMIT {source_commit}: {result.stderr.strip()}")
-    tracked_names = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-    generated_vue_prefix = "v2-api/app/static/vue/"
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def verify_archive_members_are_tracked(names: set[str], source_commit: str) -> None:
+    tracked_names = tracked_names_at_commit(source_commit)
     unexpected = sorted(
         name
-        for name in names - tracked_names - {"SOURCE_COMMIT"}
-        if not name.startswith(generated_vue_prefix)
+        for name in names - tracked_names - GENERATED_SOURCE_MEMBERS
+        if not name.startswith(GENERATED_VUE_PREFIX)
     )
     if unexpected:
         fail("Release archive members not tracked by SOURCE_COMMIT: " + ", ".join(unexpected[:20]))
+
+
+def canonical_source_bound_bytes(name: str, content: bytes) -> bytes:
+    path = PurePosixPath(name)
+    if path.name in SOURCE_BOUND_LF_NAMES or path.suffix.casefold() in SOURCE_BOUND_LF_SUFFIXES:
+        return content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    if path.name.endswith(".conf.example"):
+        return content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return content
+
+
+def verify_archive_members_match_source_commit(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    source_commit: str,
+) -> None:
+    verify_archive_members_are_tracked(names, source_commit)
+    repository_root = Path(__file__).resolve().parents[1]
+    tracked_names = tracked_names_at_commit(source_commit)
+    mismatches: list[str] = []
+    for name in sorted(names & tracked_names):
+        if name in GENERATED_SOURCE_MEMBERS or name.startswith(GENERATED_VUE_PREFIX):
+            continue
+        result = subprocess.run(
+            ["git", "show", f"{source_commit}:{name}"],
+            cwd=repository_root,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            fail(f"Unable to read SOURCE_COMMIT blob {name}")
+        if canonical_source_bound_bytes(name, archive.read(name)) != result.stdout:
+            mismatches.append(name)
+    if mismatches:
+        fail(
+            "Release archive member bytes do not match SOURCE_COMMIT: "
+            + ", ".join(mismatches[:20])
+        )
 
 
 def canonical_zip_member_name(info: zipfile.ZipInfo) -> str:
@@ -708,7 +780,11 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
                     f"Packaged SOURCE_COMMIT {source_commit} does not match expected commit "
                     f"{normalized_expected_commit}"
                 )
-            verify_archive_members_are_tracked(names, normalized_expected_commit)
+            verify_archive_members_match_source_commit(
+                archive,
+                names,
+                normalized_expected_commit,
+            )
         manifest = archive.read("RELEASE_MANIFEST.md").decode("utf-8") if "RELEASE_MANIFEST.md" in names else ""
         manifest_versions = [match.group("version") for match in MANIFEST_VERSION_LINE_PATTERN.finditer(manifest)]
         if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
@@ -842,9 +918,23 @@ def main() -> int:
         help="Require SOURCE_COMMIT in the archive to match this full Git commit.",
     )
     args = parser.parse_args()
+    expected_source_commit = args.expected_source_commit
+    if expected_source_commit is None:
+        repository_root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if result.returncode != 0:
+            fail("Official release verification requires the source Git repository or --expected-source-commit")
+        expected_source_commit = result.stdout.strip()
     verify_package(
         args.zip or default_latest_zip(),
-        expected_source_commit=args.expected_source_commit,
+        expected_source_commit=expected_source_commit,
     )
     return 0
 

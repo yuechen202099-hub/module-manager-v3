@@ -196,6 +196,13 @@ def test_cli_verifies_the_current_release_contract() -> None:
     assert verifier.main(["--version", "V3.2.8", "--phase", "source"]) == 0
 
 
+def test_cli_rejects_current_pending_candidate_as_attestation() -> None:
+    verifier = load_verifier()
+
+    with pytest.raises(AssertionError, match="attestation"):
+        verifier.main(["--version", "V3.2.8", "--phase", "attestation"])
+
+
 def test_v323_nested_release_inputs_accept_parent_directory_copy_semantics() -> None:
     verifier = load_verifier()
     build_script = "\n".join(

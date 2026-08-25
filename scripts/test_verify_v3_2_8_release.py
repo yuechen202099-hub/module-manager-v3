@@ -10,6 +10,101 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_PATH = ROOT / "scripts" / "verify_v3_2_8_release.py"
 
+ATTESTATION_FIELD_VALUES = {
+    "Status": "attested",
+    "Local Verification": "passed",
+    "Package": "passed",
+    "Production Deployment": "passed",
+    "Production Reconciliation": "passed",
+    "Rollback target": "V3.2.7",
+    "Candidate branch": "`production/V3/3.2.8`",
+    "Deployed production baseline": "`V3.2.7`",
+    "Candidate version": "`V3.2.8`",
+    "Database head": "`20260824_0016 (head)`",
+    "Source commit": "`0123456789abcdef0123456789abcdef01234567`",
+    "Archive file": "`build/server-release/module-manager-v2-server-3.2.8.zip`",
+    "SHA256": "`AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`",
+    "Server SHA256": "`AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`",
+    "Backup directory": "`C:\\Users\\Administrator\\Documents\\module-manager-production-backups\\20260825T010203Z`",
+    "Backup verification": "passed: SHA256, pg_restore -l, tar listings, schema nonempty, source metadata",
+    "Release directory": "`/opt/module-manager-v2/releases/v3.2.8-20260825_010203`",
+    "Rollback directory": "`/opt/module-manager-v2/releases/v3.2.7-20260824_173544`",
+    "Uvicorn readiness": "`127.0.0.1:8000 ready`",
+    "Local health": "`HTTP 200, version 3.2.8`",
+    "Public health": "`HTTP 200, version 3.2.8`",
+    "Smoke request count": "`1`",
+    "Smoke barcode": "`V328-SMOKE-NOT-FOUND-20260825T010204Z`",
+    "Smoke project ID": "`11111111-1111-4111-8111-111111111111`",
+    "Smoke decision": "`pool_needs_photo`",
+    "Smoke latency ms": "`123`",
+    "Smoke physical count delta": "`0`",
+    "Smoke photo count delta": "`0`",
+    "Smoke scan-event count delta": "`0`",
+    "Smoke barcode row count": "`0`",
+    "Smoke Uvicorn RSS": "`before=125829120; after=126877696`",
+    "Smoke host memory": "`before_available=734003200; after_available=725614592`",
+    "Smoke restart delta": "`0`",
+    "PostgreSQL sessions": "`idle after smoke`",
+    "Browser viewport": "`390x844`",
+    "Browser authentication": "`passed`",
+    "Browser routes": "`/collector-inventory, /collector-batches, /collector-workbench, /project-board`",
+    "Browser native BarcodeDetector": "`unavailable`",
+    "Browser real-phone camera permission": "`passed`",
+    "Browser live preview": "`passed`",
+    "Browser recognition": "`Quagga detection passed`",
+    "Browser manual input": "`passed`",
+    "Browser camera teardown": "`passed`",
+    "Client-platform requests": "`0`",
+    "Maintenance worker": "`active`",
+    "Maintenance timer": "`active`",
+    "Maintenance restoration": "`passed`",
+    "Soak health checks": "`passed`",
+    "Soak PostgreSQL sessions": "`stable`",
+    "Soak restart count delta": "`0`",
+    "Attestation": "`passed`",
+}
+
+
+def complete_attestation_record() -> str:
+    sections = {
+        "Summary": (
+            "Status", "Local Verification", "Package", "Production Deployment",
+            "Production Reconciliation", "Rollback target", "Candidate branch",
+            "Deployed production baseline", "Candidate version", "Database head",
+        ),
+        "Source and package": (
+            "Source commit", "Archive file", "SHA256", "Server SHA256",
+        ),
+        "Backup": ("Backup directory", "Backup verification"),
+        "Deployment readiness": (
+            "Release directory", "Rollback directory", "Uvicorn readiness",
+            "Local health", "Public health",
+        ),
+        "Exactly one guarded non-photo smoke": (
+            "Smoke request count", "Smoke barcode", "Smoke project ID", "Smoke decision",
+            "Smoke latency ms", "Smoke physical count delta", "Smoke photo count delta",
+            "Smoke scan-event count delta", "Smoke barcode row count", "Smoke Uvicorn RSS",
+            "Smoke host memory", "Smoke restart delta", "PostgreSQL sessions",
+        ),
+        "Authenticated browser acceptance": (
+            "Browser viewport", "Browser authentication", "Browser routes",
+            "Browser native BarcodeDetector", "Browser real-phone camera permission",
+            "Browser live preview", "Browser recognition", "Browser manual input",
+            "Browser camera teardown", "Client-platform requests",
+        ),
+        "Maintenance and soak": (
+            "Maintenance worker", "Maintenance timer", "Maintenance restoration",
+            "Soak health checks", "Soak PostgreSQL sessions", "Soak restart count delta",
+            "Attestation",
+        ),
+    }
+    lines = ["# V3.2.8 Production Release Record", ""]
+    for heading, fields in sections.items():
+        lines.extend((f"## {heading}", ""))
+        lines.extend(f"- {field}: {ATTESTATION_FIELD_VALUES[field]}" for field in fields)
+        lines.append("")
+    return "\n".join(lines)
+
 
 def load_verifier():
     assert VERIFIER_PATH.is_file(), "V3.2.8 release verifier is missing"
@@ -43,6 +138,36 @@ def assert_rejected(repo: Path, expected: str, phase: str = "source") -> None:
 def test_current_v328_source_contract_passes(tmp_path: Path) -> None:
     repo = copy_contract_repo(tmp_path)
     assert load_verifier().collect_failures(repo, "source") == []
+
+
+def test_current_pending_v328_record_fails_attestation(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+
+    assert_rejected(repo, "attestation requires", "attestation")
+
+
+def test_complete_task5_record_passes_attestation(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    (repo / "ops/releases/V3.2.8.md").write_text(
+        complete_attestation_record(),
+        encoding="utf-8",
+    )
+
+    assert load_verifier().collect_failures(repo, "attestation") == []
+
+
+@pytest.mark.parametrize("field", tuple(ATTESTATION_FIELD_VALUES))
+def test_attestation_rejects_each_mutated_task5_field(tmp_path: Path, field: str) -> None:
+    repo = copy_contract_repo(tmp_path)
+    record = complete_attestation_record()
+    expected_line = f"- {field}: {ATTESTATION_FIELD_VALUES[field]}"
+    assert record.count(expected_line) == 1
+    (repo / "ops/releases/V3.2.8.md").write_text(
+        record.replace(expected_line, f"- {field}: pending"),
+        encoding="utf-8",
+    )
+
+    assert_rejected(repo, field, "attestation")
 
 
 def test_v327_baseline_rejects_inexact_lifecycle_field(tmp_path: Path) -> None:
@@ -206,6 +331,25 @@ def test_camera_gate_rejects_preview_before_media_or_removed_quagga_fallback(tmp
 
     failures = load_verifier().collect_failures(repo, "source")
     camera_failures = [failure for failure in failures if "collector camera preview/fallback" in failure]
+    assert len(camera_failures) == 2
+
+
+def test_camera_gate_requires_quagga_late_init_regressions(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / load_verifier().CAMERA_REGRESSION_PATH
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        "catches a Quagga init timeout whose late success leaks its LiveStream",
+        "removed Quagga init timeout regression",
+    )
+    text = text.replace(
+        "catches Quagga late init success after %s",
+        "removed Quagga teardown boundary regression %s",
+    )
+    path.write_text(text, encoding="utf-8")
+
+    failures = load_verifier().collect_failures(repo, "source")
+    camera_failures = [failure for failure in failures if "collector camera regression gate" in failure]
     assert len(camera_failures) == 2
 
 

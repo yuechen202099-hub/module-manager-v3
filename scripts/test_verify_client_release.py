@@ -250,6 +250,7 @@ def write_release_archive(
     agents: str = VALID_AGENTS,
     release_record: str = PENDING_RELEASE_RECORD,
     source_commit: str = VALID_SOURCE_COMMIT,
+    source_bound: bool = False,
     omitted: set[str] | None = None,
     content_overrides: dict[str, str | bytes] | None = None,
 ) -> None:
@@ -314,6 +315,20 @@ def write_release_archive(
         for name in names
         if name != RUNTIME_VERSION_ARTIFACT
     }
+    if source_bound:
+        for name in sorted(archive_contents):
+            if (
+                name in {"SOURCE_COMMIT", "RELEASE_MANIFEST.md"}
+                or name.startswith("v2-api/app/static/vue/")
+            ):
+                continue
+            committed = subprocess.run(
+                ["git", "show", f"{source_commit}:{name}"],
+                cwd=ROOT,
+                capture_output=True,
+                check=True,
+            )
+            archive_contents[name] = committed.stdout
     archive_contents.update(content_overrides or {})
     if SOURCE_VERSION_ARTIFACT in names and SOURCE_VERSION_ARTIFACT not in (content_overrides or {}):
         archive_contents[SOURCE_VERSION_ARTIFACT] = contents[SOURCE_VERSION_ARTIFACT]
@@ -556,6 +571,61 @@ def test_archive_members_must_be_tracked_by_the_expected_source_commit() -> None
             {"SOURCE_COMMIT", "README.md", "v2-api/app/ignored-debug.log"},
             source_commit,
         )
+
+
+def test_tampered_tracked_business_file_fails_source_commit_byte_binding(tmp_path: Path) -> None:
+    verifier = load_verifier()
+    source_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    business_path = "v2-api/app/services/collector_transfer.py"
+    committed_business_source = subprocess.run(
+        ["git", "show", f"{source_commit}:{business_path}"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
+    archive_path = tmp_path / "tampered-tracked-business-file.zip"
+    write_release_archive(
+        verifier,
+        archive_path,
+        source_commit=source_commit,
+        source_bound=True,
+        content_overrides={
+            business_path: committed_business_source + b"\n# tampered without changing SOURCE_COMMIT\n",
+        },
+    )
+
+    with pytest.raises(AssertionError, match="bytes do not match SOURCE_COMMIT"):
+        verifier.verify_package(archive_path, expected_source_commit=source_commit)
+
+
+def test_source_bound_text_paths_have_an_explicit_lf_checkout_policy() -> None:
+    paths = (
+        "README.md",
+        "scripts/verify-client-release.py",
+        "scripts/build-client-release.ps1",
+        "v2-web/src/views/CollectorInventoryView.vue",
+        "v2-web/src/version.json",
+        "docker-compose.yml",
+        "infra/module-manager-v2.service",
+        "infra/nginx/module-manager-v2.conf",
+    )
+    result = subprocess.run(
+        ["git", "check-attr", "eol", "--", *paths],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+
+    assert result.stdout.splitlines() == [f"{path}: eol: lf" for path in paths]
 
 
 def test_generated_vue_assets_are_bound_by_manifest_instead_of_git_membership() -> None:

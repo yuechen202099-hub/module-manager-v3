@@ -1,5 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { reactive } from 'vue'
 
 import type { CollectorInventoryDecision, CollectorPhotoRegistration } from '@/api/types'
 import CollectorInventoryView from '@/views/CollectorInventoryView.vue'
@@ -18,13 +19,14 @@ const serviceMocks = vi.hoisted(() => ({
 const workspaceMock = vi.hoisted(() => ({
   activeProject: { id: 'project-1', name: '城南改造' } as { id: string; name: string } | null,
 }))
+const reactiveWorkspaceMock = reactive(workspaceMock)
 
 const authMock = vi.hoisted(() => ({
   user: { role: 'admin', roles: ['admin'] },
 }))
 
 vi.mock('@/api/services', () => serviceMocks)
-vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => workspaceMock }))
+vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => reactiveWorkspaceMock }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => authMock }))
 vi.mock('element-plus', () => ({
   ElMessage: { error: vi.fn(), success: vi.fn(), warning: vi.fn() },
@@ -94,7 +96,7 @@ function deferred<T>() {
 describe('CollectorInventoryView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    workspaceMock.activeProject = { id: 'project-1', name: '城南改造' }
+    reactiveWorkspaceMock.activeProject = { id: 'project-1', name: '城南改造' }
     serviceMocks.fetchProjectCollectorInventory.mockResolvedValue(structuredClone(emptyInventory))
     serviceMocks.fetchCollectorTransferProjects.mockResolvedValue([{ id: 'project-1', name: '城南改造' }])
     serviceMocks.fetchCollectorTransferRuns.mockResolvedValue([{
@@ -145,7 +147,7 @@ describe('CollectorInventoryView', () => {
   })
 
   it('shows only a safe project-selection state when there is no current project', async () => {
-    workspaceMock.activeProject = null
+    reactiveWorkspaceMock.activeProject = null
     const wrapper = await mountPage()
 
     expect(wrapper.get('[data-testid="project-empty-state"]').text()).toContain('请先选择项目')
@@ -484,6 +486,82 @@ describe('CollectorInventoryView', () => {
     expect(stop).toHaveBeenCalledTimes(1)
     expect(quagga.onDetected).not.toHaveBeenCalled()
     expect(quagga.start).not.toHaveBeenCalled()
+  })
+
+  it('catches a Quagga init timeout whose late success leaks its LiveStream', async () => {
+    vi.useFakeTimers()
+    let completeInit!: (error?: unknown) => void
+    const quagga = {
+      init: vi.fn((_options: unknown, complete: (error?: unknown) => void) => { completeInit = complete }),
+      onDetected: vi.fn(),
+      offDetected: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    }
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('Quagga', quagga)
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [] }) },
+    })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+    expect(quagga.init).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(7_000)
+    await flushPromises()
+    const stopsBeforeLateSuccess = quagga.stop.mock.calls.length
+    completeInit()
+    await flushPromises()
+
+    expect(quagga.stop.mock.calls.length).toBeGreaterThan(stopsBeforeLateSuccess)
+    expect(quagga.onDetected).not.toHaveBeenCalled()
+    expect(quagga.start).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['project change', async (wrapper: Awaited<ReturnType<typeof mountPage>>) => {
+      reactiveWorkspaceMock.activeProject = { id: 'project-2', name: '城北改造' }
+      await flushPromises()
+    }],
+    ['records view', async (wrapper: Awaited<ReturnType<typeof mountPage>>) => {
+      await wrapper.get('nav.bottom-nav button[aria-label="盘点记录"]').trigger('click')
+      await flushPromises()
+    }],
+    ['unmount', async (wrapper: Awaited<ReturnType<typeof mountPage>>) => {
+      wrapper.unmount()
+    }],
+  ])('catches Quagga late init success after %s', async (_boundary, crossBoundary) => {
+    let completeInit!: (error?: unknown) => void
+    const quagga = {
+      init: vi.fn((_options: unknown, complete: (error?: unknown) => void) => { completeInit = complete }),
+      onDetected: vi.fn(),
+      offDetected: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    }
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('Quagga', quagga)
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [] }) },
+    })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+    expect(quagga.init).toHaveBeenCalledTimes(1)
+    await crossBoundary(wrapper)
+    const stopsBeforeLateSuccess = quagga.stop.mock.calls.length
+    completeInit()
+    await flushPromises()
+
+    expect(quagga.stop.mock.calls.length).toBeGreaterThan(stopsBeforeLateSuccess)
+    expect(quagga.onDetected).not.toHaveBeenCalled()
+    expect(quagga.start).not.toHaveBeenCalled()
+    if (wrapper.exists()) wrapper.unmount()
   })
 
   it('shows only inventory from the active project in the records view', async () => {

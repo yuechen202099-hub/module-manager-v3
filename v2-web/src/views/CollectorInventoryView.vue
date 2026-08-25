@@ -28,6 +28,11 @@ type QuaggaScanner = {
   start?: () => void
   stop?: () => void
 }
+type QuaggaInitOwner = {
+  session: number
+  scanner: QuaggaScanner
+  cancelled: boolean
+}
 
 const CAMERA_START_TIMEOUT_MS = 7_000
 const VIDEO_PLAY_TIMEOUT_MS = 3_000
@@ -63,6 +68,7 @@ let barcodeDetector: NativeBarcodeDetector | null = null
 let animationFrameId = 0
 let cameraSession = 0
 let quaggaActive = false
+let quaggaInitOwner: QuaggaInitOwner | null = null
 let quaggaDetectedHandler: ((result: unknown) => void) | null = null
 const cameraTimeoutRejectors = new Map<number, (reason?: unknown) => void>()
 let scanInFlight = false
@@ -300,6 +306,11 @@ function stopCamera() {
   if (animationFrameId) cancelAnimationFrame(animationFrameId)
   animationFrameId = 0
   barcodeDetector = null
+  if (quaggaInitOwner) {
+    const owner = quaggaInitOwner
+    quaggaInitOwner = null
+    stopQuaggaInitOwner(owner)
+  }
   const quagga = getQuagga()
   if (quaggaDetectedHandler) quagga?.offDetected?.(quaggaDetectedHandler)
   if (quaggaActive) {
@@ -316,6 +327,15 @@ function stopCamera() {
   mediaStream = null
   if (video.value) video.value.srcObject = null
   video.value?.parentElement?.querySelectorAll('canvas, video:not(.collector-camera-preview)').forEach((node) => node.remove())
+}
+
+function stopQuaggaInitOwner(owner: QuaggaInitOwner) {
+  owner.cancelled = true
+  try {
+    owner.scanner.stop?.()
+  } catch {
+    // A pending init can reject stop until its late completion owns a LiveStream.
+  }
 }
 
 async function detectNextFrame(session: number) {
@@ -435,10 +455,13 @@ async function ensureQuaggaLoaded() {
 }
 
 async function startQuaggaScanner(session: number) {
+  let owner: QuaggaInitOwner | null = null
   try {
     const quagga = await ensureQuaggaLoaded()
     if (session !== cameraSession) return
     if (!quagga?.init || !video.value?.parentElement) throw new Error('QuaggaJS 不可用')
+    owner = { session, scanner: quagga, cancelled: false }
+    quaggaInitOwner = owner
     await withCameraTimeout(
       new Promise<void>((resolve, reject) => {
         quagga.init?.(
@@ -465,15 +488,13 @@ async function startQuaggaScanner(session: number) {
       }),
       CAMERA_START_TIMEOUT_MS,
       'QuaggaJS 初始化超时',
+      () => stopQuaggaInitOwner(owner as QuaggaInitOwner),
     )
-    if (session !== cameraSession) {
-      try {
-        quagga.stop?.()
-      } catch {
-        // The late scanner must not outlive its project or component.
-      }
+    if (owner.cancelled || quaggaInitOwner !== owner || session !== cameraSession) {
+      stopQuaggaInitOwner(owner)
       return
     }
+    quaggaInitOwner = null
     quaggaActive = true
     quaggaDetectedHandler = (result) => handleDetectedValue(
       (result as { codeResult?: { code?: string } })?.codeResult?.code || '',
@@ -482,6 +503,10 @@ async function startQuaggaScanner(session: number) {
     quagga.start?.()
     scanFeedback.value = 'QuaggaJS 正在识别条形码。'
   } catch {
+    if (owner && quaggaInitOwner === owner) {
+      quaggaInitOwner = null
+      stopQuaggaInitOwner(owner)
+    }
     if (session !== cameraSession || !cameraActive.value) return
     scanFeedback.value = '相机已打开，当前浏览器不支持实时识别，可手工输入或使用扫码枪。'
   }

@@ -923,7 +923,11 @@ def recovered_unattested_v327_baseline_is_documented(record: str, version: str) 
 
 
 def release_record_matches_lifecycle_state(
-    record: str, version: str, deployed_baseline: str, release_candidate_version: str
+    record: str,
+    version: str,
+    deployed_baseline: str,
+    release_candidate_version: str,
+    candidate_phase: str = "source",
 ) -> None:
     if version == deployed_baseline:
         if recovered_unattested_v327_baseline_is_documented(record, version):
@@ -931,7 +935,27 @@ def release_record_matches_lifecycle_state(
         deployed_release_record_is_verified(record, version)
         return
     if version == release_candidate_version:
-        candidate_release_record_is_pending(record, version, deployed_baseline)
+        if candidate_phase == "source":
+            candidate_release_record_is_pending(record, version, deployed_baseline)
+            return
+        if candidate_phase != "attestation":
+            fail("candidate release phase must be source or attestation")
+        required_fields = {
+            "Status": "attested",
+            "Local Verification": "passed",
+            "Package": "passed",
+            "Production Deployment": "passed",
+            "Production Reconciliation": "passed",
+            "Rollback target": deployed_baseline,
+        }
+        lifecycle_values = release_record_lifecycle_values(record, tuple(required_fields))
+        for field, expected in required_fields.items():
+            values = lifecycle_values[field]
+            if len(values) != 1 or normalize_text(values[0]).strip() != normalize_text(expected):
+                fail(
+                    f"{version} attestation release record must define "
+                    f"{field}: {expected} exactly once"
+                )
         return
     fail(f"{version} release record does not match the deployed baseline or release candidate")
 
@@ -1146,6 +1170,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate,
             deployed_baseline,
             candidate,
+            args.phase,
         )
 
     source_runtime_version = runtime_version_from_artifact(read("v2-web/src/version.json"))

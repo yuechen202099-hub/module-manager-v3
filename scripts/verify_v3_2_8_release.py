@@ -20,6 +20,82 @@ BASELINE_RELEASE_PATH = "ops/releases/V3.2.7.md"
 ARCHIVE_PATH = "build/server-release/module-manager-v2-server-3.2.8.zip"
 VERIFICATION_PHASES = frozenset(("source", "attestation"))
 
+ATTESTATION_EXACT_FIELDS = {
+    "Status": "attested",
+    "Local Verification": "passed",
+    "Package": "passed",
+    "Production Deployment": "passed",
+    "Production Reconciliation": "passed",
+    "Rollback target": DEPLOYED_BASELINE,
+    "Candidate branch": f"`{MAINTENANCE_BRANCH}`",
+    "Deployed production baseline": f"`{DEPLOYED_BASELINE}`",
+    "Candidate version": f"`{DISPLAY_VERSION}`",
+    "Database head": f"`{MIGRATION_REVISION} (head)`",
+    "Archive file": f"`{ARCHIVE_PATH}`",
+    "Backup verification": "passed: SHA256, pg_restore -l, tar listings, schema nonempty, source metadata",
+    "Uvicorn readiness": "`127.0.0.1:8000 ready`",
+    "Local health": f"`HTTP 200, version {VERSION}`",
+    "Public health": f"`HTTP 200, version {VERSION}`",
+    "Smoke request count": "`1`",
+    "Smoke decision": "`pool_needs_photo`",
+    "Smoke physical count delta": "`0`",
+    "Smoke photo count delta": "`0`",
+    "Smoke scan-event count delta": "`0`",
+    "Smoke barcode row count": "`0`",
+    "Smoke restart delta": "`0`",
+    "PostgreSQL sessions": "`idle after smoke`",
+    "Browser viewport": "`390x844`",
+    "Browser authentication": "`passed`",
+    "Browser routes": "`/collector-inventory, /collector-batches, /collector-workbench, /project-board`",
+    "Browser native BarcodeDetector": "`unavailable`",
+    "Browser real-phone camera permission": "`passed`",
+    "Browser live preview": "`passed`",
+    "Browser manual input": "`passed`",
+    "Browser camera teardown": "`passed`",
+    "Client-platform requests": "`0`",
+    "Maintenance worker": "`active`",
+    "Maintenance timer": "`active`",
+    "Maintenance restoration": "`passed`",
+    "Soak health checks": "`passed`",
+    "Soak PostgreSQL sessions": "`stable`",
+    "Soak restart count delta": "`0`",
+    "Attestation": "`passed`",
+}
+ATTESTATION_DYNAMIC_FIELDS = (
+    "Source commit",
+    "SHA256",
+    "Server SHA256",
+    "Backup directory",
+    "Release directory",
+    "Rollback directory",
+    "Smoke barcode",
+    "Smoke project ID",
+    "Smoke latency ms",
+    "Smoke Uvicorn RSS",
+    "Smoke host memory",
+    "Browser recognition",
+)
+ATTESTATION_FIELDS = tuple(ATTESTATION_EXACT_FIELDS) + ATTESTATION_DYNAMIC_FIELDS
+ATTESTATION_SOURCE_COMMIT_PATTERN = re.compile(r"`[0-9a-f]{40}`")
+ATTESTATION_SHA256_PATTERN = re.compile(r"`[0-9A-Fa-f]{64}`")
+ATTESTATION_BACKUP_DIRECTORY_PATTERN = re.compile(
+    r"`[A-Za-z]:\\Users\\[^\\`]+\\Documents\\module-manager-production-backups\\\d{8}T\d{6}Z`"
+)
+ATTESTATION_RELEASE_DIRECTORY_PATTERN = re.compile(
+    r"`/opt/module-manager-v2/releases/v3\.2\.8-[^/`]+`"
+)
+ATTESTATION_ROLLBACK_DIRECTORY_PATTERN = re.compile(
+    r"`/opt/module-manager-v2/releases/v3\.2\.7-[^/`]+`"
+)
+ATTESTATION_UUID_PATTERN = re.compile(
+    r"`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}`"
+)
+ATTESTATION_RESOURCE_PATTERN = re.compile(r"`before(?:_available)?=\d+; after(?:_available)?=\d+`")
+ATTESTATION_RECOGNITION_VALUES = {
+    "`Quagga detection passed`",
+    "`preview-only manual fallback passed`",
+}
+
 ACCEPTANCE_OR_ATTESTATION_TOPIC_PATTERN = re.compile(
     r"\b(?:acceptance|accepted|attestation|attested)\b|(?:验收|认证|签署)",
     re.IGNORECASE,
@@ -223,6 +299,8 @@ def _check_camera_contract(root: Path, failures: list[str]) -> None:
             "catches a camera startup timeout",
             "catches a timed-out rear-camera request that later retains tracks instead of releasing them",
             "catches late camera startup retaining tracks or Quagga callbacks after unmount",
+            "catches a Quagga init timeout whose late success leaks its LiveStream",
+            "catches Quagga late init success after %s",
         ),
         "collector camera regression gate",
         failures,
@@ -380,6 +458,48 @@ def _check_source_release_records(root: Path, failures: list[str]) -> None:
         )
 
 
+def _check_attestation_release_record(root: Path, failures: list[str]) -> None:
+    record = _read(root, RELEASE_PATH, failures)
+    values = _lifecycle_values(record, ATTESTATION_FIELDS)
+
+    for field, expected in ATTESTATION_EXACT_FIELDS.items():
+        actual = values[field]
+        if len(actual) != 1 or actual[0] != expected:
+            failures.append(
+                f"{RELEASE_PATH}: attestation requires {field}: {expected} exactly once"
+            )
+
+    dynamic_validators = {
+        "Source commit": lambda value: ATTESTATION_SOURCE_COMMIT_PATTERN.fullmatch(value) is not None,
+        "SHA256": lambda value: ATTESTATION_SHA256_PATTERN.fullmatch(value) is not None,
+        "Server SHA256": lambda value: ATTESTATION_SHA256_PATTERN.fullmatch(value) is not None,
+        "Backup directory": lambda value: ATTESTATION_BACKUP_DIRECTORY_PATTERN.fullmatch(value) is not None,
+        "Release directory": lambda value: ATTESTATION_RELEASE_DIRECTORY_PATTERN.fullmatch(value) is not None,
+        "Rollback directory": lambda value: ATTESTATION_ROLLBACK_DIRECTORY_PATTERN.fullmatch(value) is not None,
+        "Smoke barcode": lambda value: re.fullmatch(r"`V328-SMOKE-[^`\s]+`", value) is not None,
+        "Smoke project ID": lambda value: ATTESTATION_UUID_PATTERN.fullmatch(value) is not None,
+        "Smoke latency ms": lambda value: re.fullmatch(r"`[1-9]\d*`", value) is not None,
+        "Smoke Uvicorn RSS": lambda value: ATTESTATION_RESOURCE_PATTERN.fullmatch(value) is not None,
+        "Smoke host memory": lambda value: ATTESTATION_RESOURCE_PATTERN.fullmatch(value) is not None,
+        "Browser recognition": lambda value: value in ATTESTATION_RECOGNITION_VALUES,
+    }
+    for field, validator in dynamic_validators.items():
+        actual = values[field]
+        if len(actual) != 1 or not validator(actual[0]):
+            failures.append(
+                f"{RELEASE_PATH}: attestation requires one valid {field} value"
+            )
+
+    local_hash = values["SHA256"]
+    server_hash = values["Server SHA256"]
+    if (
+        len(local_hash) == 1
+        and len(server_hash) == 1
+        and local_hash[0].casefold() != server_hash[0].casefold()
+    ):
+        failures.append(f"{RELEASE_PATH}: Server SHA256 must equal SHA256")
+
+
 def collect_failures(root: Path, phase: str) -> list[str]:
     root = Path(root)
     failures: list[str] = []
@@ -395,6 +515,8 @@ def collect_failures(root: Path, phase: str) -> list[str]:
     _check_release_tools(root, failures)
     if phase == "source":
         _check_source_release_records(root, failures)
+    else:
+        _check_attestation_release_record(root, failures)
     return failures
 
 
