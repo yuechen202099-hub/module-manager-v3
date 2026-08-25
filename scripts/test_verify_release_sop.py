@@ -26,6 +26,17 @@ def load_verifier():
 
 def test_v328_sop_inputs_bind_scale_and_camera_release_gates() -> None:
     verifier = load_verifier()
+    global_workbench_sources = {
+        "v2-web/src/api/services.ts",
+        "v2-web/src/api/types.ts",
+        "v2-web/src/features/collectorTransfer/state.ts",
+        "v2-web/src/layouts/AppLayout.vue",
+        "v2-web/src/router/index.ts",
+        "v2-web/src/router/staticPages.ts",
+        "v2-web/src/views/CollectorWorkbenchView.vue",
+        "v2-web/src/views/__tests__/CollectorWorkbenchView.spec.ts",
+        "v2-web/tests/collector-transfer-state.test.ts",
+    }
 
     assert {
         "scripts/verify_v3_2_8_release.py",
@@ -33,7 +44,8 @@ def test_v328_sop_inputs_bind_scale_and_camera_release_gates() -> None:
         "v2-api/tests/test_collector_transfer_scale.py",
         "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts",
         "ops/releases/V3.2.8.md",
-    } <= set(verifier.RELEASE_INPUTS)
+    } | global_workbench_sources <= set(verifier.RELEASE_INPUTS)
+    assert "v2-web/src/views/CollectorBatchManagementView.vue" not in verifier.RELEASE_INPUTS
 
 
 def test_v327_recovered_unattested_baseline_is_valid_for_v328_candidate() -> None:

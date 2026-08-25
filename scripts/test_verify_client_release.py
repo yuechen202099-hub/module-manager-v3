@@ -30,6 +30,20 @@ KPI_SOURCE_PATHS = (
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
 )
+OBSOLETE_BATCH_VIEW_PATH = "v2-web/src/views/CollectorBatchManagementView.vue"
+GLOBAL_WORKBENCH_SOURCE_FILES = frozenset(
+    {
+        "v2-web/src/api/services.ts",
+        "v2-web/src/api/types.ts",
+        "v2-web/src/features/collectorTransfer/state.ts",
+        "v2-web/src/layouts/AppLayout.vue",
+        "v2-web/src/router/index.ts",
+        "v2-web/src/router/staticPages.ts",
+        "v2-web/src/views/CollectorWorkbenchView.vue",
+        "v2-web/src/views/__tests__/CollectorWorkbenchView.spec.ts",
+        "v2-web/tests/collector-transfer-state.test.ts",
+    }
+)
 V328_ARCHIVE_SOURCE_FILES = frozenset(
     {
         "docs/superpowers/specs/2026-08-23-collector-transfer-workbench-design.md",
@@ -63,7 +77,7 @@ V328_ARCHIVE_SOURCE_FILES = frozenset(
         "v2-web/src/views/CollectorInventoryView.vue",
         "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts",
     }
-)
+) | GLOBAL_WORKBENCH_SOURCE_FILES
 SAFETY_NOTES = (
     "Production mode disables demo accounts by default",
     "Production mode disables /docs, /redoc, and /openapi.json by default",
@@ -190,8 +204,14 @@ def load_v321_release_verifier():
     return module
 
 
-def test_v328_package_contract_requires_scale_and_camera_regressions() -> None:
+def test_v328_package_contract_binds_global_workbench_and_retires_batch_view() -> None:
     verifier = load_verifier()
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(
+        encoding="utf-8"
+    )
+    release_inputs_match = re.search(
+        r"\$releaseInputs\s*=\s*@\((?P<items>[\s\S]*?)\n\)", build_script
+    )
 
     assert {
         "scripts/verify_v3_2_8_release.py",
@@ -199,7 +219,43 @@ def test_v328_package_contract_requires_scale_and_camera_regressions() -> None:
         "v2-api/tests/test_collector_transfer_scale.py",
         "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts",
         "ops/releases/V3.2.8.md",
-    } <= verifier.REQUIRED_FILES
+    } | GLOBAL_WORKBENCH_SOURCE_FILES <= verifier.REQUIRED_FILES
+    assert OBSOLETE_BATCH_VIEW_PATH not in verifier.REQUIRED_FILES
+    assert release_inputs_match is not None
+    release_inputs = {
+        value.replace("\\", "/")
+        for value in re.findall(r'"([^"]+)"', release_inputs_match.group("items"))
+    }
+    assert GLOBAL_WORKBENCH_SOURCE_FILES <= release_inputs
+    assert OBSOLETE_BATCH_VIEW_PATH not in release_inputs
+
+
+def test_v328_package_contains_global_workbench_but_not_retired_batch_view(
+    tmp_path: Path,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "module-manager-v2-server-3.2.8.zip"
+    write_release_archive(verifier, archive_path)
+
+    verifier.verify_package(archive_path)
+    with zipfile.ZipFile(archive_path) as archive:
+        names = set(archive.namelist())
+
+    assert GLOBAL_WORKBENCH_SOURCE_FILES <= names
+    assert OBSOLETE_BATCH_VIEW_PATH not in names
+
+
+@pytest.mark.parametrize("missing_path", sorted(GLOBAL_WORKBENCH_SOURCE_FILES))
+def test_v328_package_rejects_missing_global_workbench_source(
+    tmp_path: Path,
+    missing_path: str,
+) -> None:
+    verifier = load_verifier()
+    archive_path = tmp_path / "module-manager-v2-server-3.2.8.zip"
+    write_release_archive(verifier, archive_path, omitted={missing_path})
+
+    with pytest.raises(AssertionError, match=re.escape(missing_path)):
+        verifier.verify_package(archive_path)
 
 
 def test_v328_package_verifier_rejects_a_v327_candidate_archive(tmp_path: Path) -> None:
@@ -255,7 +311,11 @@ def write_release_archive(
     content_overrides: dict[str, str | bytes] | None = None,
 ) -> None:
     omitted_names = set(omitted or set())
-    names = (set(verifier.REQUIRED_FILES) | {RUNTIME_VERSION_ARTIFACT, SOURCE_VERSION_ARTIFACT}) - omitted_names
+    names = (
+        set(verifier.REQUIRED_FILES)
+        | {RUNTIME_VERSION_ARTIFACT, SOURCE_VERSION_ARTIFACT}
+        | set(GLOBAL_WORKBENCH_SOURCE_FILES)
+    ) - omitted_names
     versions = manifest_versions
     if versions is None:
         versions = [] if manifest_version is None else [manifest_version]
