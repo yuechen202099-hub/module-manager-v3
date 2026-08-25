@@ -83,6 +83,10 @@ def test_v327_recovered_baseline_requires_exact_lifecycle_fields(
         "Production acceptance succeeded and V3.2.7 is fully accepted in production.",
         "V3.2.7 attestation: passed.",
         "The V3.2.7 production attestation was issued.",
+        "Production acceptance has been approved.",
+        "Production acceptance approval was granted.",
+        "V3.2.7 has received production acceptance.",
+        "Production attestation was formally signed.",
         "V3.2.7 已通过生产验收。",
     ),
 )
@@ -107,6 +111,10 @@ def test_v327_recovered_baseline_rejects_affirmative_acceptance_or_attestation(
         "V3.2.7 production acceptance is incomplete.",
         "There is no V3.2.7 attestation.",
         "V3.2.7 was not accepted in production.",
+        "Production acceptance has not been approved.",
+        "Production acceptance approval was not granted.",
+        "V3.2.7 has not received production acceptance.",
+        "Production attestation was not formally signed.",
         "V3.2.7 尚未通过生产验收。",
     ),
 )

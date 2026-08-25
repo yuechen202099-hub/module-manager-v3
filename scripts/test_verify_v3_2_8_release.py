@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 import shutil
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_PATH = ROOT / "scripts" / "verify_v3_2_8_release.py"
@@ -57,12 +59,23 @@ def test_v327_baseline_rejects_inexact_lifecycle_field(tmp_path: Path) -> None:
     assert_rejected(repo, "Package must equal 'passed' exactly once")
 
 
-def test_v327_baseline_rejects_affirmative_acceptance_claim_variant(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "claim",
+    (
+        "Production acceptance has been approved.",
+        "Production acceptance approval was granted.",
+        "V3.2.7 has received production acceptance.",
+        "Production attestation was formally signed.",
+    ),
+)
+def test_v327_baseline_rejects_affirmative_acceptance_claim_variant(
+    tmp_path: Path,
+    claim: str,
+) -> None:
     repo = copy_contract_repo(tmp_path)
     path = repo / "ops/releases/V3.2.7.md"
     path.write_text(
-        path.read_text(encoding="utf-8")
-        + "\nProduction acceptance succeeded and V3.2.7 is fully accepted in production.\n",
+        path.read_text(encoding="utf-8") + f"\n{claim}\n",
         encoding="utf-8",
     )
 
@@ -85,6 +98,29 @@ def test_v327_baseline_allows_explicitly_negated_attestation_variant(tmp_path: P
     path = repo / "ops/releases/V3.2.7.md"
     path.write_text(
         path.read_text(encoding="utf-8") + "\nThere is no V3.2.7 attestation issued.\n",
+        encoding="utf-8",
+    )
+
+    assert load_verifier().collect_failures(repo, "source") == []
+
+
+@pytest.mark.parametrize(
+    "claim",
+    (
+        "Production acceptance has not been approved.",
+        "Production acceptance approval was not granted.",
+        "V3.2.7 has not received production acceptance.",
+        "Production attestation was not formally signed.",
+    ),
+)
+def test_v327_baseline_allows_structurally_negated_review_variants(
+    tmp_path: Path,
+    claim: str,
+) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "ops/releases/V3.2.7.md"
+    path.write_text(
+        path.read_text(encoding="utf-8") + f"\n{claim}\n",
         encoding="utf-8",
     )
 

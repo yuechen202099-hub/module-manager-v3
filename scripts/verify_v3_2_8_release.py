@@ -20,28 +20,16 @@ BASELINE_RELEASE_PATH = "ops/releases/V3.2.7.md"
 ARCHIVE_PATH = "build/server-release/module-manager-v2-server-3.2.8.zip"
 VERIFICATION_PHASES = frozenset(("source", "attestation"))
 
-AFFIRMATIVE_ACCEPTANCE_PATTERNS = (
-    re.compile(
-        r"\b(?:production\s+)?acceptance\s*[:：-]?\s*(?:has\s+|was\s+|is\s+)?"
-        r"(?:passed|succeeded|successful|completed|complete|approved)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:fully\s+)?accepted(?:\s+in\s+production)?\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:production\s+)?attestation\s*[:：-]?\s*(?:has\s+|was\s+|is\s+)?"
-        r"(?:passed|succeeded|successful|completed|complete|issued|signed|approved)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:is|was|has\s+been)\s+(?:fully\s+)?attested\b", re.IGNORECASE),
-    re.compile(r"(?:已通过|已完成|成功通过)(?:生产)?验收|(?:生产)?验收(?:已)?(?:通过|成功|完成|合格)"),
-    re.compile(r"(?:生产)?(?:验收证明|认证|签署)(?:已)?(?:完成|通过|签发)"),
+ACCEPTANCE_OR_ATTESTATION_TOPIC_PATTERN = re.compile(
+    r"\b(?:acceptance|accepted|attestation|attested)\b|(?:验收|认证|签署)",
+    re.IGNORECASE,
 )
-NEGATED_ACCEPTANCE_PATTERN = re.compile(
-    r"\b(?:no|not|never|without|must\s+not|has\s+not|was\s+not|is\s+not)\b"
+EXPLICITLY_UNACCEPTED_OR_UNATTESTED_PATTERN = re.compile(
+    r"\b(?:no|not|never|without|pending|must\s+not|has\s+not|was\s+not|is\s+not)\b"
     r"[^,;.!?\n]{0,48}\b(?:v\d+\.\d+\.\d+\s+)?"
     r"(?:production\s+)?(?:acceptance|attestation|accepted|attested)\b"
     r"|\b(?:production\s+)?(?:acceptance|attestation)\b[^,;.!?\n]{0,24}"
-    r"\b(?:incomplete|pending|not\s+(?:passed|complete|issued|approved))\b"
+    r"\b(?:not|never|incomplete|pending)\b"
     r"|\bbefore\b[^,;.!?\n]{0,64}\bacceptance\b"
     r"|(?:未|无|不|尚未|不得|不能|待)[^,，;；。.!?！？\n]{0,24}(?:验收|认证|签署|证明)"
     r"|(?:验收|认证|签署|证明)[^,，;；。.!?！？\n]{0,16}(?:未|不|尚未|待)",
@@ -138,12 +126,16 @@ def _has_affirmative_acceptance_or_attestation(record: str) -> bool:
         record,
         flags=re.IGNORECASE,
     )
-    for clause in re.split(r"[,，;；。.!?！？\n]+|\b(?:and|but|however|yet)\b", protected):
+    for clause in re.split(
+        r"[,，;；。.!?！？\n]+|\b(?:and|but|however|yet)\b|(?:并且|且|但是|然而|但|却)",
+        protected,
+    ):
         normalized = _normalize(clause.replace("\ue000", "."))
-        if not normalized or NEGATED_ACCEPTANCE_PATTERN.search(normalized):
+        if not normalized or not ACCEPTANCE_OR_ATTESTATION_TOPIC_PATTERN.search(normalized):
             continue
-        if any(pattern.search(normalized) for pattern in AFFIRMATIVE_ACCEPTANCE_PATTERNS):
-            return True
+        if EXPLICITLY_UNACCEPTED_OR_UNATTESTED_PATTERN.search(normalized):
+            continue
+        return True
     return False
 
 
