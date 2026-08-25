@@ -43,6 +43,54 @@ def test_current_v328_source_contract_passes(tmp_path: Path) -> None:
     assert load_verifier().collect_failures(repo, "source") == []
 
 
+def test_v327_baseline_rejects_inexact_lifecycle_field(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "ops/releases/V3.2.7.md"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "- Package: passed",
+            "- Package: pending",
+        ),
+        encoding="utf-8",
+    )
+
+    assert_rejected(repo, "Package must equal 'passed' exactly once")
+
+
+def test_v327_baseline_rejects_affirmative_acceptance_claim_variant(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "ops/releases/V3.2.7.md"
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\nProduction acceptance succeeded and V3.2.7 is fully accepted in production.\n",
+        encoding="utf-8",
+    )
+
+    assert_rejected(repo, "must not claim affirmative production acceptance or attestation")
+
+
+def test_v327_baseline_unrelated_negation_does_not_hide_chinese_acceptance(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "ops/releases/V3.2.7.md"
+    path.write_text(
+        path.read_text(encoding="utf-8") + "\n系统未发现错误且 V3.2.7 已通过生产验收。\n",
+        encoding="utf-8",
+    )
+
+    assert_rejected(repo, "must not claim affirmative production acceptance or attestation")
+
+
+def test_v327_baseline_allows_explicitly_negated_attestation_variant(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "ops/releases/V3.2.7.md"
+    path.write_text(
+        path.read_text(encoding="utf-8") + "\nThere is no V3.2.7 attestation issued.\n",
+        encoding="utf-8",
+    )
+
+    assert load_verifier().collect_failures(repo, "source") == []
+
+
 def test_attestation_rejects_a_v327_archive_tree_as_v328(tmp_path: Path) -> None:
     repo = copy_contract_repo(tmp_path)
     replacements = {

@@ -48,6 +48,95 @@ def test_v327_recovered_unattested_baseline_is_valid_for_v328_candidate() -> Non
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "unexpected"),
+    (
+        ("Local Verification", "not run"),
+        ("Package", "pending"),
+        ("Production Deployment", "passed"),
+        ("Production Reconciliation", "passed"),
+        ("Rollback target", "V3.2.7"),
+    ),
+)
+def test_v327_recovered_baseline_requires_exact_lifecycle_fields(
+    field: str,
+    unexpected: str,
+) -> None:
+    verifier = load_verifier()
+    record = (ROOT / "ops/releases/V3.2.7.md").read_text(encoding="utf-8")
+    matching_lines = [line for line in record.splitlines() if line.startswith(f"- {field}:")]
+    assert len(matching_lines) == 1
+    record = record.replace(matching_lines[0], f"- {field}: {unexpected}")
+
+    with pytest.raises(AssertionError, match=rf"{field}: .* exactly once"):
+        verifier.release_record_matches_lifecycle_state(
+            record,
+            "V3.2.7",
+            "V3.2.7",
+            "V3.2.8",
+        )
+
+
+@pytest.mark.parametrize(
+    "claim",
+    (
+        "Production acceptance succeeded and V3.2.7 is fully accepted in production.",
+        "V3.2.7 attestation: passed.",
+        "The V3.2.7 production attestation was issued.",
+        "V3.2.7 已通过生产验收。",
+    ),
+)
+def test_v327_recovered_baseline_rejects_affirmative_acceptance_or_attestation(
+    claim: str,
+) -> None:
+    verifier = load_verifier()
+    record = (ROOT / "ops/releases/V3.2.7.md").read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="affirmative production acceptance or attestation"):
+        verifier.release_record_matches_lifecycle_state(
+            f"{record}\n{claim}\n",
+            "V3.2.7",
+            "V3.2.7",
+            "V3.2.8",
+        )
+
+
+@pytest.mark.parametrize(
+    "negated_claim",
+    (
+        "V3.2.7 production acceptance is incomplete.",
+        "There is no V3.2.7 attestation.",
+        "V3.2.7 was not accepted in production.",
+        "V3.2.7 尚未通过生产验收。",
+    ),
+)
+def test_v327_recovered_baseline_allows_explicitly_negated_acceptance_claims(
+    negated_claim: str,
+) -> None:
+    verifier = load_verifier()
+    record = (ROOT / "ops/releases/V3.2.7.md").read_text(encoding="utf-8")
+
+    verifier.release_record_matches_lifecycle_state(
+        f"{record}\n{negated_claim}\n",
+        "V3.2.7",
+        "V3.2.7",
+        "V3.2.8",
+    )
+
+
+def test_v327_acceptance_gate_does_not_let_unrelated_negation_hide_acceptance() -> None:
+    verifier = load_verifier()
+    record = (ROOT / "ops/releases/V3.2.7.md").read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="affirmative production acceptance or attestation"):
+        verifier.release_record_matches_lifecycle_state(
+            f"{record}\n系统未发现错误且 V3.2.7 已通过生产验收。\n",
+            "V3.2.7",
+            "V3.2.7",
+            "V3.2.8",
+        )
+
+
 def test_parses_current_deployed_baseline_and_release_candidate_markers() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")

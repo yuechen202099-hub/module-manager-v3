@@ -405,6 +405,100 @@ def test_release_builder_default_version_is_candidate_semantic_version() -> None
     assert '[string]$Version = "3.2.8"' in build_script
 
 
+@pytest.mark.parametrize("version", ("3.2.7", "3.2.9"))
+def test_release_builder_rejects_non_candidate_version_before_output_mutation(
+    tmp_path: Path,
+    version: str,
+) -> None:
+    script_root = tmp_path / "scripts"
+    script_root.mkdir()
+    copied_builder = script_root / "build-client-release.ps1"
+    copied_builder.write_bytes((ROOT / "scripts" / "build-client-release.ps1").read_bytes())
+    release_root = tmp_path / "build" / "server-release"
+    staging = release_root / f"module-manager-v2-server-{version}"
+    staging.mkdir(parents=True)
+    staging_sentinel = staging / "sentinel.txt"
+    staging_sentinel.write_text("preserve staging", encoding="utf-8")
+    archive = release_root / f"module-manager-v2-server-{version}.zip"
+    archive.write_bytes(b"preserve archive")
+
+    completed = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(copied_builder),
+            "-Version",
+            version,
+            "-SkipSmoke",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+
+    output = completed.stdout + completed.stderr
+    assert completed.returncode != 0
+    assert "Expected exactly 3.2.8" in output
+    assert staging_sentinel.read_text(encoding="utf-8") == "preserve staging"
+    assert archive.read_bytes() == b"preserve archive"
+
+
+def test_release_builder_manifest_reports_optional_performance_evidence_truthfully(
+    tmp_path: Path,
+) -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+    failures: list[str] = []
+    function_text = load_v320_release_verifier().powershell_function_text(
+        build_script,
+        "Get-PerformanceEvidenceManifestLine",
+        "scripts/build-client-release.ps1",
+        failures,
+    )
+    assert not failures
+    harness = "\n".join(
+        (
+            function_text,
+            "$results = @(",
+            "    (Get-PerformanceEvidenceManifestLine -Verified $false),",
+            "    (Get-PerformanceEvidenceManifestLine -Verified $true)",
+            ")",
+            "$results | ConvertTo-Json -Compress",
+        )
+    )
+    harness_path = tmp_path / "performance-manifest-contract.ps1"
+    harness_path.write_text(harness, encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness_path),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    without_report, with_report = json.loads(completed.stdout)
+    assert "not supplied" in without_report
+    assert "not run" in without_report
+    assert "passes" not in without_report
+    assert "passes the release verifier" in with_report
+
+
 def test_release_builder_embeds_the_current_source_commit() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
@@ -432,13 +526,15 @@ def test_release_builder_checks_cleanliness_before_building_into_isolated_stagin
     assert "process.env.MODULE_MANAGER_VUE_OUT_DIR" in vite_config
 
 
-def test_release_builder_removes_same_version_output_before_any_validation() -> None:
+def test_release_builder_guards_candidate_version_before_output_mutation() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
+    candidate_guard = build_script.index("Expected exactly 3.2.8")
+    release_root = build_script.index('$releaseRoot = Join-Path $root "build\\server-release"')
     remove_archive = build_script.index("Remove-Item -Force -LiteralPath $zipPath")
     first_validation = build_script.index('Write-Host "Verifying administrator release notes..."')
 
-    assert remove_archive < first_validation
+    assert candidate_guard < release_root < remove_archive < first_validation
 
 
 def test_archive_members_must_be_tracked_by_the_expected_source_commit() -> None:
@@ -1391,8 +1487,9 @@ def test_smoke_client_demo_executes_v323_retirement_and_retained_vue_contracts()
     """The release smoke must exercise live route responses, not a source marker."""
     environment = os.environ.copy()
     environment["PYTHONUTF8"] = "1"
-    environment["APP_ENV"] = "production"
-    environment["DEMO_AUTH_ENABLED"] = "false"
+    environment["STATE_BACKEND"] = "json"
+    environment["APP_ENV"] = "local"
+    environment["DEMO_AUTH_ENABLED"] = "true"
     completed = subprocess.run(
         [sys.executable, "scripts/smoke-client-demo.py"],
         cwd=ROOT,
@@ -1414,6 +1511,37 @@ def test_smoke_client_demo_executes_v323_retirement_and_retained_vue_contracts()
         "[OK] /exports returns exact V3.2.3 retirement response",
     ):
         assert marker in completed.stdout
+
+
+def test_smoke_client_demo_does_not_overwrite_the_callers_environment() -> None:
+    environment = os.environ.copy()
+    environment["PYTHONUTF8"] = "1"
+    environment["STATE_BACKEND"] = "json"
+    environment["APP_ENV"] = "local"
+    environment["DEMO_AUTH_ENABLED"] = "false"
+    probe = "\n".join(
+        (
+            "import os, runpy",
+            "runpy.run_path('scripts/smoke-client-demo.py', run_name='smoke_contract_probe')",
+            "print(os.environ['STATE_BACKEND'])",
+            "print(os.environ['APP_ENV'])",
+            "print(os.environ['DEMO_AUTH_ENABLED'])",
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.splitlines()[-3:] == ["json", "local", "false"]
 
 
 def test_archive_missing_manifest_version_fails_verification(tmp_path: Path) -> None:

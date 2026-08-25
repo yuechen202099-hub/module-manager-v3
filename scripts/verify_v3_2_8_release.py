@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 
@@ -18,6 +19,34 @@ RELEASE_PATH = "ops/releases/V3.2.8.md"
 BASELINE_RELEASE_PATH = "ops/releases/V3.2.7.md"
 ARCHIVE_PATH = "build/server-release/module-manager-v2-server-3.2.8.zip"
 VERIFICATION_PHASES = frozenset(("source", "attestation"))
+
+AFFIRMATIVE_ACCEPTANCE_PATTERNS = (
+    re.compile(
+        r"\b(?:production\s+)?acceptance\s*[:：-]?\s*(?:has\s+|was\s+|is\s+)?"
+        r"(?:passed|succeeded|successful|completed|complete|approved)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:fully\s+)?accepted(?:\s+in\s+production)?\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:production\s+)?attestation\s*[:：-]?\s*(?:has\s+|was\s+|is\s+)?"
+        r"(?:passed|succeeded|successful|completed|complete|issued|signed|approved)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:is|was|has\s+been)\s+(?:fully\s+)?attested\b", re.IGNORECASE),
+    re.compile(r"(?:已通过|已完成|成功通过)(?:生产)?验收|(?:生产)?验收(?:已)?(?:通过|成功|完成|合格)"),
+    re.compile(r"(?:生产)?(?:验收证明|认证|签署)(?:已)?(?:完成|通过|签发)"),
+)
+NEGATED_ACCEPTANCE_PATTERN = re.compile(
+    r"\b(?:no|not|never|without|must\s+not|has\s+not|was\s+not|is\s+not)\b"
+    r"[^,;.!?\n]{0,48}\b(?:v\d+\.\d+\.\d+\s+)?"
+    r"(?:production\s+)?(?:acceptance|attestation|accepted|attested)\b"
+    r"|\b(?:production\s+)?(?:acceptance|attestation)\b[^,;.!?\n]{0,24}"
+    r"\b(?:incomplete|pending|not\s+(?:passed|complete|issued|approved))\b"
+    r"|\bbefore\b[^,;.!?\n]{0,64}\bacceptance\b"
+    r"|(?:未|无|不|尚未|不得|不能|待)[^,，;；。.!?！？\n]{0,24}(?:验收|认证|签署|证明)"
+    r"|(?:验收|认证|签署|证明)[^,，;；。.!?！？\n]{0,16}(?:未|不|尚未|待)",
+    re.IGNORECASE,
+)
 
 SCALE_REGRESSION_PATH = "v2-api/tests/test_collector_transfer_scale.py"
 CAMERA_REGRESSION_PATH = "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts"
@@ -86,6 +115,36 @@ def _require_markers(
     for marker in markers:
         if marker not in text:
             failures.append(f"{path}: {label} is missing: {marker}")
+
+
+def _normalize(value: str) -> str:
+    return unicodedata.normalize("NFKC", value).casefold().strip()
+
+
+def _lifecycle_values(record: str, fields: tuple[str, ...]) -> dict[str, list[str]]:
+    values = {field: [] for field in fields}
+    for field in fields:
+        values[field] = re.findall(
+            rf"(?m)^\s*[-*+]\s*{re.escape(field)}\s*[:：]\s*(.*?)\s*$",
+            record,
+        )
+    return values
+
+
+def _has_affirmative_acceptance_or_attestation(record: str) -> bool:
+    protected = re.sub(
+        r"\bV\d+\.\d+\.\d+\b",
+        lambda match: match.group(0).replace(".", "\ue000"),
+        record,
+        flags=re.IGNORECASE,
+    )
+    for clause in re.split(r"[,，;；。.!?！？\n]+|\b(?:and|but|however|yet)\b", protected):
+        normalized = _normalize(clause.replace("\ue000", "."))
+        if not normalized or NEGATED_ACCEPTANCE_PATTERN.search(normalized):
+            continue
+        if any(pattern.search(normalized) for pattern in AFFIRMATIVE_ACCEPTANCE_PATTERNS):
+            return True
+    return False
 
 
 def _check_version_surfaces(root: Path, failures: list[str]) -> None:
@@ -281,6 +340,21 @@ def _check_source_release_records(root: Path, failures: list[str]) -> None:
             failures.append(f"{RELEASE_PATH}: release boundary is missing: {marker}")
 
     baseline = _read(root, BASELINE_RELEASE_PATH, failures)
+    expected_lifecycle = {
+        "Status": "deployed, recovered, production acceptance incomplete",
+        "Local Verification": "passed before deployment",
+        "Package": "passed",
+        "Production Deployment": "incomplete after guarded smoke incident",
+        "Production Reconciliation": "recovered with zero business-row additions",
+        "Rollback target": "V3.2.6",
+    }
+    lifecycle_values = _lifecycle_values(baseline, tuple(expected_lifecycle))
+    for field, expected in expected_lifecycle.items():
+        values = lifecycle_values[field]
+        if len(values) != 1 or _normalize(values[0]) != _normalize(expected):
+            failures.append(
+                f"{BASELINE_RELEASE_PATH}: {field} must equal {expected!r} exactly once"
+            )
     for marker in (
         "/opt/module-manager-v2/releases/v3.2.7-20260824_173544",
         DEPLOYED_BASELINE_ZIP_SHA256,
@@ -292,8 +366,10 @@ def _check_source_release_records(root: Path, failures: list[str]) -> None:
     ):
         if marker not in baseline:
             failures.append(f"{BASELINE_RELEASE_PATH}: immutable incident evidence is missing: {marker}")
-    if "V3.2.7 acceptance passed" in baseline:
-        failures.append(f"{BASELINE_RELEASE_PATH}: must not claim V3.2.7 acceptance passed")
+    if _has_affirmative_acceptance_or_attestation(baseline):
+        failures.append(
+            f"{BASELINE_RELEASE_PATH}: must not claim affirmative production acceptance or attestation"
+        )
 
 
 def collect_failures(root: Path, phase: str) -> list[str]:

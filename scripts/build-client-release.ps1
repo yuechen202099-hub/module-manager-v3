@@ -9,6 +9,23 @@ $ErrorActionPreference = "Stop"
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw "Release Version must be a semantic version such as 3.0.84."
 }
+$requiredVersion = "3.2.8"
+$protectedHistoricalVersion = "3.2.7"
+if ($Version -eq $protectedHistoricalVersion) {
+    throw "Refusing to build protected historical release $Version. Expected exactly 3.2.8."
+}
+if ($Version -ne $requiredVersion) {
+    throw "Refusing to build release version $Version. Expected exactly 3.2.8."
+}
+
+function Get-PerformanceEvidenceManifestLine {
+    param([bool]$Verified)
+
+    if ($Verified) {
+        return "- Source-bound V3.1 task/review performance evidence passes the release verifier"
+    }
+    return "- Optional source-bound V3.1 task/review performance evidence was not supplied and was not run during packaging"
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -106,6 +123,7 @@ if ($worktreeChanges.Count -ne 0) {
     throw "Refusing to package a dirty Git worktree. Commit or remove every source change first."
 }
 $performanceReportPath = ""
+$performanceEvidenceVerified = $false
 if (-not [string]::IsNullOrWhiteSpace($PerformanceReport)) {
     $performanceReportPath = if ([System.IO.Path]::IsPathRooted($PerformanceReport)) {
         [System.IO.Path]::GetFullPath($PerformanceReport)
@@ -122,6 +140,16 @@ $releaseRoot = Join-Path $root "build\server-release"
 $packageName = "module-manager-v2-server-$Version"
 $staging = Join-Path $releaseRoot $packageName
 $zipPath = Join-Path $releaseRoot "$packageName.zip"
+$protectedZipPath = Join-Path $releaseRoot "module-manager-v2-server-$protectedHistoricalVersion.zip"
+if (
+    [System.String]::Equals(
+        [System.IO.Path]::GetFullPath($zipPath),
+        [System.IO.Path]::GetFullPath($protectedZipPath),
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+) {
+    throw "Refusing to create or delete the protected V3.2.7 archive: $protectedZipPath"
+}
 
 New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
 
@@ -163,7 +191,9 @@ if ($performanceReportPath) {
     if ($LASTEXITCODE -ne 0) {
         throw "V3.1 performance evidence verification failed."
     }
+    $performanceEvidenceVerified = $true
 }
+$performanceEvidenceManifestLine = Get-PerformanceEvidenceManifestLine -Verified $performanceEvidenceVerified
 
 Write-Host "Running V3.2.8 focused release gates..."
 $releaseVerifiers = @(
@@ -203,8 +233,33 @@ finally {
 
 if (-not $SkipSmoke) {
     Write-Host "Running release smoke check before packaging..."
-    .\.venv\Scripts\python.exe .\scripts\smoke-client-demo.py
-    if ($LASTEXITCODE -ne 0) {
+    $smokeEnvironment = @{
+        "STATE_BACKEND" = "json"
+        "APP_ENV" = "local"
+        "DEMO_AUTH_ENABLED" = "true"
+    }
+    $previousSmokeEnvironment = @{}
+    foreach ($name in $smokeEnvironment.Keys) {
+        $previousSmokeEnvironment[$name] = @{
+            "Exists" = Test-Path -LiteralPath "Env:$name"
+            "Value" = [Environment]::GetEnvironmentVariable($name, "Process")
+        }
+    }
+    try {
+        foreach ($name in $smokeEnvironment.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $smokeEnvironment[$name], "Process")
+        }
+        .\.venv\Scripts\python.exe .\scripts\smoke-client-demo.py
+        $smokeExitCode = $LASTEXITCODE
+    }
+    finally {
+        foreach ($name in $previousSmokeEnvironment.Keys) {
+            $previous = $previousSmokeEnvironment[$name]
+            $value = if ($previous["Exists"]) { $previous["Value"] } else { $null }
+            [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
+    }
+    if ($smokeExitCode -ne 0) {
         throw "Release smoke check failed."
     }
 }
@@ -561,7 +616,7 @@ $manifest = @"
 ## Verified During Packaging
 
 - Release smoke check passes unless -SkipSmoke was used
-- Source-bound V3.1 task/review performance evidence passes the release verifier
+$performanceEvidenceManifestLine
 - V3.2.0 inherited gates, immutable historical release records, and the active V3.2.8 scale/camera contracts pass before package staging
 - Demo admin and constructor login are available only for local walkthrough when enabled
 - Vue strict-native production pages are required

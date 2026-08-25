@@ -300,6 +300,33 @@ RELEASE_DIRECTORY_PATTERN = re.compile(r"/opt/module-manager-v2/releases/[A-Za-z
 PUBLIC_HEALTH_URL_PATTERN = re.compile(r"https://(?:www\.)?sgcc\.online/health(?:[/?#\s]|$)", re.IGNORECASE)
 SUCCESS_STATUS_PATTERN = re.compile(r"\b(?:passed|pass|success|successful|healthy|ok)\b|通过|成功", re.IGNORECASE)
 DEPLOYED_LIFECYCLE_STATUS = "reviewed, packaged, deployed, and verified in production"
+AFFIRMATIVE_ACCEPTANCE_PATTERNS = (
+    re.compile(
+        r"\b(?:production\s+)?acceptance\s*[:：-]?\s*(?:has\s+|was\s+|is\s+)?"
+        r"(?:passed|succeeded|successful|completed|complete|approved)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:fully\s+)?accepted(?:\s+in\s+production)?\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:production\s+)?attestation\s*[:：-]?\s*(?:has\s+|was\s+|is\s+)?"
+        r"(?:passed|succeeded|successful|completed|complete|issued|signed|approved)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:is|was|has\s+been)\s+(?:fully\s+)?attested\b", re.IGNORECASE),
+    re.compile(r"(?:已通过|已完成|成功通过)(?:生产)?验收|(?:生产)?验收(?:已)?(?:通过|成功|完成|合格)"),
+    re.compile(r"(?:生产)?(?:验收证明|认证|签署)(?:已)?(?:完成|通过|签发)"),
+)
+NEGATED_ACCEPTANCE_PATTERN = re.compile(
+    r"\b(?:no|not|never|without|must\s+not|has\s+not|was\s+not|is\s+not)\b"
+    r"[^,;.!?\n]{0,48}\b(?:v\d+\.\d+\.\d+\s+)?"
+    r"(?:production\s+)?(?:acceptance|attestation|accepted|attested)\b"
+    r"|\b(?:production\s+)?(?:acceptance|attestation)\b[^,;.!?\n]{0,24}"
+    r"\b(?:incomplete|pending|not\s+(?:passed|complete|issued|approved))\b"
+    r"|\bbefore\b[^,;.!?\n]{0,64}\bacceptance\b"
+    r"|(?:未|无|不|尚未|不得|不能|待)[^,，;；。.!?！？\n]{0,24}(?:验收|认证|签署|证明)"
+    r"|(?:验收|认证|签署|证明)[^,，;；。.!?！？\n]{0,16}(?:未|不|尚未|待)",
+    re.IGNORECASE,
+)
 
 
 def fail(message: str) -> None:
@@ -708,6 +735,15 @@ def release_record_lifecycle_values(
     return values
 
 
+def release_record_has_affirmative_acceptance_or_attestation(record: str) -> bool:
+    for clause, conditional in semantic_claim_clauses(deployment_claim_prose(record)):
+        if conditional or NEGATED_ACCEPTANCE_PATTERN.search(clause):
+            continue
+        if any(pattern.search(clause) for pattern in AFFIRMATIVE_ACCEPTANCE_PATTERNS):
+            return True
+    return False
+
+
 def release_record_claims_deployed_without_live_evidence(record: str) -> bool:
     status = release_record_status(record)
     deployment_claimed = has_deployment_claim(status)
@@ -834,6 +870,30 @@ def deployed_release_record_is_verified(record: str, version: str) -> None:
 def recovered_unattested_v327_baseline_is_documented(record: str, version: str) -> bool:
     if version != "V3.2.7":
         return False
+    expected_lifecycle = {
+        "Status": "deployed, recovered, production acceptance incomplete",
+        "Local Verification": "passed before deployment",
+        "Package": "passed",
+        "Production Deployment": "incomplete after guarded smoke incident",
+        "Production Reconciliation": "recovered with zero business-row additions",
+        "Rollback target": "V3.2.6",
+    }
+    lifecycle_values = release_record_lifecycle_values(record, tuple(expected_lifecycle))
+    expected_status = expected_lifecycle["Status"]
+    status_values = lifecycle_values["Status"]
+    if len(status_values) != 1 or normalize_text(status_values[0]).strip() != normalize_text(
+        expected_status
+    ):
+        recovery_markers = ("recovered with zero business-row additions", "global OOM kill")
+        if not any(marker in record for marker in recovery_markers):
+            return False
+        fail(f"{version} recovered baseline must define Status: {expected_status} exactly once")
+    for field, expected in expected_lifecycle.items():
+        if field == "Status":
+            continue
+        values = lifecycle_values[field]
+        if len(values) != 1 or normalize_text(values[0]).strip() != normalize_text(expected):
+            fail(f"{version} recovered baseline must define {field}: {expected} exactly once")
     required = (
         "# V3.2.7 Production Release Record",
         "- Status: deployed, recovered, production acceptance incomplete",
@@ -849,7 +909,11 @@ def recovered_unattested_v327_baseline_is_documented(record: str, version: str) 
         "no V3.2.7 attestation",
         "worker and timer remain stopped",
     )
-    return all(marker in record for marker in required) and "V3.2.7 acceptance passed" not in record
+    if not all(marker in record for marker in required):
+        return False
+    if release_record_has_affirmative_acceptance_or_attestation(record):
+        fail(f"{version} recovered baseline must not claim affirmative production acceptance or attestation")
+    return True
 
 
 def release_record_matches_lifecycle_state(
