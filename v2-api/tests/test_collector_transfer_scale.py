@@ -168,10 +168,21 @@ def test_project_collector_lookup_is_bounded_at_production_cardinality(
     assert peak - baseline_current < 64 * 1024 * 1024
 
 
-def test_cancelled_asgi_scan_finishes_only_bounded_lookup_and_releases_connection(
+@pytest.mark.parametrize(
+    ("collector_no", "expected_count_delta"),
+    [
+        ("GUARANTEED-NONMATCH", (0, 0, 0)),
+        ("PHOTO-00000", (1, 0, 1)),
+    ],
+    ids=("non_direct", "direct_required"),
+)
+def test_cancelled_asgi_scan_quiesces_with_exact_bounded_outcome(
     production_scale_database,
     monkeypatch,
+    collector_no: str,
+    expected_count_delta: tuple[int, int, int],
 ) -> None:
+    """Catches a cancelled sync worker repeating writes or retaining its database connection."""
     engine, session_factory, project_id = production_scale_database
     lookup_finished = Event()
     release_handler = Event()
@@ -225,7 +236,7 @@ def test_cancelled_asgi_scan_finishes_only_bounded_lookup_and_releases_connectio
                     "/collector-transfer/inventory/scan",
                     json={
                         "project_id": str(project_id),
-                        "collector_no": "GUARANTEED-NONMATCH",
+                        "collector_no": collector_no,
                     },
                 )
             )
@@ -250,4 +261,18 @@ def test_cancelled_asgi_scan_finishes_only_bounded_lookup_and_releases_connectio
             session.scalar(select(func.count(CollectorScanEvent.id))),
         )
         assert session.scalar(select(func.count(Project.id))) == 1
-    assert after_counts == before_counts
+    expected_counts = tuple(
+        before + delta
+        for before, delta in zip(before_counts, expected_count_delta, strict=True)
+    )
+    assert after_counts == expected_counts
+    assert engine.pool.checkedout() == 0
+    with session_factory() as session:
+        followup_counts = (
+            session.scalar(select(func.count(PhysicalCollector.id))),
+            session.scalar(select(func.count(CollectorPhoto.id))),
+            session.scalar(select(func.count(CollectorScanEvent.id))),
+        )
+        assert session.scalar(select(func.count(Project.id))) == 1
+    assert followup_counts == after_counts
+    assert engine.pool.checkedout() == 0
