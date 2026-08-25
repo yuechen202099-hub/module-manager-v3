@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make collector inventory scanning and run creation safe for the 22,358-group/17,453-photo production project, then release and attest V3.2.8.
+**Goal:** Make collector inventory scanning and run creation safe for the 22,358-group/17,453-photo production project, restore collector-inventory camera loading across mobile browsers, then release and attest V3.2.8.
 
-**Architecture:** Inventory scan/register use a database-side single-candidate membership query that preserves the existing photo-first collector rule. Run creation uses ordered selected-column streaming into lightweight projection rows instead of materializing source ORM entities. V3.2.8 retains Alembic head `20260824_0016` and is packaged and deployed as a new immutable release.
+**Architecture:** Inventory scan/register use a database-side single-candidate membership query that preserves the existing photo-first collector rule. Run creation uses ordered selected-column streaming into lightweight projection rows instead of materializing source ORM entities. Collector inventory opens media independently of native `BarcodeDetector`, prefers native recognition, and falls back to the construction scanner's repository-owned QuaggaJS lifecycle. V3.2.8 retains Alembic head `20260824_0016` and is packaged and deployed as a new immutable release.
 
 **Tech Stack:** FastAPI, SQLAlchemy 2, PostgreSQL, SQLite test fixtures, pytest, Vue 3, TypeScript, PowerShell release tooling, systemd/Nginx production deployment.
 
@@ -19,6 +19,7 @@
 - Run projection may retain compact selected values required by the run, but no `MaterialGroup` or `Photo` ORM entity may be materialized.
 - The production-scale regression contains at least 22,358 groups and 17,453 active photos.
 - A disconnected/499 scan must leave no unbounded project-wide work or business-data write behind.
+- Collector inventory must request media even when native `BarcodeDetector` is absent, use the existing QuaggaJS asset as recognition fallback, keep manual entry usable on recognition failure, and release every detector/track on view, project, or component teardown.
 - V3.2.8 uses the V3.2.7 schema unchanged at Alembic head `20260824_0016`.
 - Do not overwrite the deployed V3.2.7 directory or original V3.2.7 ZIP.
 - Keep maintenance worker/timer stopped until V3.2.8 smoke and browser acceptance pass.
@@ -32,6 +33,8 @@
 - `v2-api/app/services/collector_transfer.py`: bounded project collector lookup and compact streamed source projection.
 - `v2-api/tests/test_collector_transfer_service.py`: precedence, isolation, persistence, and projection parity tests.
 - `v2-api/tests/test_collector_transfer_scale.py`: production-cardinality query-shape, ORM-materialization, memory, and disconnect regressions.
+- `v2-web/src/views/CollectorInventoryView.vue`: secure media startup, native/Quagga recognition, preview fallback, and teardown.
+- `v2-web/src/views/__tests__/CollectorInventoryView.spec.ts`: camera fallback, de-duplication, timeout, and lifecycle regressions.
 - V3.2.8 version/release files: new release verifier, package gates, release notes, V3.2.7 incident record, and V3.2.8 attestation.
 
 ### Task 1: Replace inventory full projection with a bounded collector lookup
@@ -219,7 +222,65 @@ git add -- v2-api/app/services/collector_transfer.py v2-api/tests/test_collector
 git commit -m "fix: stream collector run source projection"
 ```
 
-### Task 3: Prepare and independently review the V3.2.8 candidate
+### Task 3: Repair collector-inventory camera loading and recognition fallback
+
+**Files:**
+- Modify: `v2-web/src/views/CollectorInventoryView.vue`
+- Modify: `v2-web/src/views/__tests__/CollectorInventoryView.spec.ts`
+- Optional create only when it materially reduces duplication: `v2-web/src/utils/collectorCameraScanner.ts`
+- Read-only reference: `v2-web/src/views/ConstructionView.vue`
+
+**Interfaces:**
+- Consumes: browser media APIs, optional native `BarcodeDetector`, and `/static/vendor/quagga.min.js?v=20260615-quagga2`.
+- Produces: bounded `startCamera`/`stopCamera` lifecycle feeding the existing collector scan submission and de-duplication path.
+
+- [ ] **Step 1: Add failing camera-capability and lifecycle regressions**
+
+With no global `BarcodeDetector`, stub a working `getUserMedia` and video `play()`. Click `data-testid="start-camera"` and assert media access, visible preview/active state, and usable manual entry. Add tests for environment-camera rejection followed by generic-video success, explicit playback before active state, Quagga init/start/detection, one detected value producing one in-flight API request, bounded failure returning to manual state, and project/view/unmount cleanup during late startup.
+
+- [ ] **Step 2: Run the collector-inventory test and verify RED**
+
+```powershell
+Push-Location v2-web
+npm run test:collector-transfer -- CollectorInventoryView.spec.ts
+Pop-Location
+```
+
+Expected: the no-`BarcodeDetector` case fails because V3.2.7 returns before `getUserMedia`; each additional test must name the production mutation it catches.
+
+- [ ] **Step 3: Implement the construction-scanner media pattern without changing construction**
+
+Reject only insecure context or unavailable `getUserMedia`. Request `{ facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }` with audio false and a 7,000 ms timeout, then retry `{ video: true, audio: false }` once. Set `playsinline`, `webkit-playsinline`, `autoplay`, and `muted`; assign `srcObject`; await `video.play()` with a 3,000 ms timeout before active state.
+
+Prefer native `BarcodeDetector`. Otherwise load the existing pinned Quagga asset and feed detections into the same in-flight/completed-value guard. If Quagga load/init fails, retain preview plus manual/external-scanner entry with a recognition-only warning.
+
+- [ ] **Step 4: Make teardown race-safe**
+
+`stopCamera` must cancel native animation/timers, unregister and stop Quagga, stop all media tracks, clear `srcObject`, and invalidate late startup completions. Invoke it after a decision and on project change, view change, and unmount.
+
+- [ ] **Step 5: Verify GREEN and rendered mobile behavior**
+
+```powershell
+Push-Location v2-web
+npm run test:collector-transfer
+npm run test:components
+npm run type-check
+npm run build
+Pop-Location
+```
+
+At 390x844, verify `/collector-inventory` identity/content/console, start camera with native `BarcodeDetector` unavailable but media available, observe preview plus Quagga or preview-only fallback, confirm manual input, and prove teardown on records/view exit. Capture initial and camera-start screenshots. If the Browser runtime has no physical camera, emulate only the capability boundary and retain real-phone permission/preview as Task 5 acceptance.
+
+- [ ] **Step 6: Commit and independently review the camera slice**
+
+```powershell
+git add -- v2-web/src/views/CollectorInventoryView.vue v2-web/src/views/__tests__/CollectorInventoryView.spec.ts v2-web/src/utils/collectorCameraScanner.ts
+git commit -m "fix: load collector camera across mobile browsers"
+```
+
+Do not stage a nonexistent optional utility. Record RED/GREEN/rendered evidence and remaining real-device risk, then require clean task-scoped spec and quality review.
+
+### Task 4: Prepare and independently review the V3.2.8 candidate
 
 **Files:**
 - Modify: all current V3.2.7 source version markers and release-note consumers identified by `scripts/verify_v3_2_7_release.py`
@@ -234,7 +295,7 @@ git commit -m "fix: stream collector run source projection"
 - Create: `ops/releases/V3.2.8.md`
 
 **Interfaces:**
-- Consumes: Tasks 1-2, V3.2.7 release verifier/package contract, and production incident evidence.
+- Consumes: Tasks 1-3, V3.2.7 release verifier/package contract, and production incident evidence.
 - Produces: immutable `build/server-release/module-manager-v2-server-3.2.8.zip`, exact SHA256, source commit, clean independent review, and pending V3.2.8 release record.
 
 - [ ] **Step 1: Rename the candidate branch before version commits**
@@ -249,7 +310,7 @@ Confirm `git status --short` still contains only the protected untracked `v2-api
 
 - [ ] **Step 2: Write V3.2.8 release-gate tests and verify RED**
 
-Copy the V3.2.7 behavioral verifier contract, update the version/branch/archive names to V3.2.8, retain Alembic `20260824_0016`, and require the two scale regression files and their successful execution. Add package tests proving the V3.2.7 archive name cannot satisfy V3.2.8 verification.
+Copy the V3.2.7 behavioral verifier contract, update the version/branch/archive names to V3.2.8, retain Alembic `20260824_0016`, and require the scale regressions plus collector-inventory camera regression and their successful execution. Add package tests proving the V3.2.7 archive name cannot satisfy V3.2.8 verification.
 
 Run:
 
@@ -261,7 +322,7 @@ Expected: fail before V3.2.8 version markers/verifier integration exist.
 
 - [ ] **Step 3: Advance source/package markers and release records**
 
-Set application/package/UI/release-note versions to `3.2.8`/`V3.2.8`, candidate branch to `production/V3/3.2.8`, and database head to unchanged `20260824_0016`. Record the V3.2.7 deployment and OOM incident as incomplete/failed acceptance without claiming attestation. Create V3.2.8 notes describing bounded inventory lookup, compact streamed run projection, unchanged business contracts, and pending production acceptance.
+Set application/package/UI/release-note versions to `3.2.8`/`V3.2.8`, candidate branch to `production/V3/3.2.8`, and database head to unchanged `20260824_0016`. Record the V3.2.7 deployment and OOM incident as incomplete/failed acceptance without claiming attestation. Create V3.2.8 notes describing bounded inventory lookup, compact streamed run projection, cross-browser collector camera fallback, unchanged business contracts, and pending production acceptance.
 
 - [ ] **Step 4: Run focused, full, and source release gates**
 
@@ -288,7 +349,7 @@ Verify `SOURCE_COMMIT`, CRC/path/case/duplicate gates, static assets, unchanged 
 
 Commit source/test/version/release inputs with explicit paths; never stage `v2-api/uv.lock` or generated runtime uploads. Generate a full review package from the V3.2.7 candidate base `8db0c64` through the V3.2.8 candidate and require a clean spec-and-quality review before deployment.
 
-### Task 4: Back up, deploy, smoke, and attest V3.2.8
+### Task 5: Back up, deploy, smoke, and attest V3.2.8
 
 **Files:**
 - Modify after successful acceptance: `ops/releases/V3.2.8.md`
@@ -316,7 +377,7 @@ Before POST, generate a guaranteed nonmatching barcode and immediately print/flu
 
 - [ ] **Step 5: Perform authenticated 390x844 browser acceptance**
 
-Confirm `/collector-inventory` opens on the active project with camera/manual controls, no run selector, no import control, no batch prerequisite, and no client-platform request in console/network logs. Verify `/collector-batches`, `/collector-workbench`, and `/project-board` remain available without creating production business data.
+Confirm `/collector-inventory` opens on the active project with camera/manual controls, no run selector, no import control, no batch prerequisite, and no client-platform request in console/network logs. On a real phone, grant camera permission and require a live preview when native `BarcodeDetector` is unavailable; verify Quagga detection or the documented preview-only/manual fallback without an `unsupported` dead end. Prove closing/switching the view releases the camera. Verify `/collector-batches`, `/collector-workbench`, and `/project-board` remain available without creating production business data.
 
 - [ ] **Step 6: Restore maintenance services and run soak checks**
 
@@ -335,4 +396,3 @@ git commit -m "release: attest V3.2.8 collector scale hotfix"
 ```
 
 Confirm production `current`, `/health`, version, database head, pages, worker/timer, and resource state once more. Confirm local `git status --short` contains only protected `v2-api/uv.lock` before declaring the goal complete.
-

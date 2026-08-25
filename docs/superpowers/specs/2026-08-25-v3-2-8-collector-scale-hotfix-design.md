@@ -4,6 +4,8 @@
 
 V3.2.7 is live with Alembic head `20260824_0016`, but the first production inventory-scan smoke triggered a host-wide resource incident. The active project contains 22,358 material groups and 17,453 active source photos on a 1.6 GiB server. The scan request returned Nginx 499, PostgreSQL later reported a 7,776-second checkpoint and too many clients, and the kernel OOM killer terminated Uvicorn. No collector inventory, photo, or scan-event business row was created.
 
+Mobile acceptance also reproduced a separate collector-inventory defect: `CollectorInventoryView.startCamera` returns `unsupported` when the browser lacks native `BarcodeDetector`, before it requests media. The working construction scanner already proves the required cross-browser pattern with secure-context checks, environment-camera fallback, QuaggaJS, explicit inline playback, timeouts, and complete cleanup.
+
 The confirmed call chain is:
 
 ```text
@@ -44,6 +46,14 @@ The projection may retain the final `MeterSourceProjection` and the compact sour
 
 A disconnected inventory client may allow the already-issued bounded lookup to finish, but must not leave a project-wide projection, unbounded Python loop, or write transaction running. Non-direct scan remains read-only and produces `pool_needs_photo`. Cancellation handling is defense in depth; bounded query shape is the primary guarantee.
 
+## Collector-inventory camera lifecycle
+
+Opening the collector-inventory camera must not depend on native `BarcodeDetector`. The page first verifies secure media capability, then requests the environment camera with a generic-video retry and bounded timeouts. It explicitly configures and plays an inline muted preview before reporting the camera active.
+
+Native `BarcodeDetector` remains the preferred recognizer. When it is absent, the page loads the repository-owned `/static/vendor/quagga.min.js?v=20260615-quagga2` fallback used by the construction scanner. Both recognizers feed the same in-flight/completed-value de-duplication and scan submission path. Quagga load/init failure must leave a working preview and manual/external-scanner input available instead of reporting permission denial.
+
+Stopping, changing project or view, and unmounting must invalidate late startup completions, stop detection loops and Quagga callbacks, stop every media track, and clear `srcObject`. The accepted construction page is a read-only behavior reference for this hotfix.
+
 ## Compatibility
 
 - Existing inventory decisions and persistence boundaries do not change.
@@ -51,6 +61,7 @@ A disconnected inventory client may allow the already-issued bounded lookup to f
 - Cross-team and cross-project isolation does not change.
 - Original `material_groups` and `photos` remain read-only.
 - Mobile remains no-batch and has no import or client-platform request.
+- Manual collector entry remains available whether native recognition, Quagga recognition, or preview startup succeeds or fails.
 - V3.2.8 keeps Alembic head `20260824_0016`.
 - The unrelated untracked `v2-api/uv.lock` remains untouched.
 
@@ -60,8 +71,8 @@ A disconnected inventory client may allow the already-issued bounded lookup to f
 - Tests prove inventory lookup materializes zero `MaterialGroup` and zero `Photo` ORM objects.
 - A regression dataset contains at least 22,358 groups and 17,453 active photos and completes with bounded query count and bounded Python memory.
 - Run projection tests prove selected-column/streamed source reads and unchanged terminal/meter/collector/photo snapshots.
+- Camera tests prove media access without `BarcodeDetector`, environment-to-generic fallback, explicit playback, Quagga detection, one-submit de-duplication, timeout recovery, and cleanup during project/view/unmount races.
 - All backend/frontend/release tests pass and a new source-bound V3.2.8 ZIP is produced; the V3.2.7 ZIP and deployed release are never modified in place.
 - Production gets a fresh streamed restore-ready backup before cutover.
 - Exactly one non-photo production smoke prints the generated barcode and before counts before POST, returns `pool_needs_photo`, leaves physical/photo/event counts unchanged, and records latency and resource use.
-- Browser acceptance is performed at 390x844 before maintenance worker/timer are restored.
-
+- Browser acceptance is performed at 390x844 before maintenance worker/timer are restored, including a collector-inventory camera start without native `BarcodeDetector`; production acceptance additionally proves real-phone permission and preview.
