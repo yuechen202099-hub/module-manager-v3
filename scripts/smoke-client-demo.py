@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 API_ROOT = ROOT / "v2-api"
 EXPORT_RETIREMENT_DETAIL = "导出中心已下线，请联系管理员由 OSS 导出到本机。"
 os.environ["STATE_BACKEND"] = "json"
+os.environ["APP_ENV"] = "local"
+os.environ["DEMO_AUTH_ENABLED"] = "true"
 sys.path.insert(0, str(API_ROOT))
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="fastapi.testclient")
 warnings.filterwarnings("ignore", message="Using `httpx` with `starlette.testclient` is deprecated.*")

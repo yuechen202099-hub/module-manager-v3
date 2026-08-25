@@ -15,6 +15,8 @@ MIGRATION_REVISION = "20260824_0016"
 PREVIOUS_REVISION = "20260823_0015"
 RELEASE_PATH = "ops/releases/V3.2.7.md"
 VERIFICATION_PHASES = frozenset(("source", "attestation"))
+ORIGINAL_SOURCE_COMMIT = "8db0c64e82e98cdffa8e95ca83f6230236368b6a"
+ORIGINAL_ZIP_SHA256 = "32D2365D1F3470D2A2476E8547DAE3B12AA0B43E903C8E387548028545DB5CAC"
 
 REQUIRED_FILES = (
     "AGENTS.md",
@@ -58,33 +60,6 @@ def _read(root: Path, relative_path: str, failures: list[str]) -> str:
 def _require_once(text: str, marker: str, path: str, failures: list[str]) -> None:
     if text.count(marker) != 1:
         failures.append(f"{path}: required marker must appear exactly once: {marker}")
-
-
-def _check_version_surfaces(root: Path, failures: list[str]) -> None:
-    markers = {
-        "v2-api/app/main.py": 'version="3.2.7"',
-        "v2-api/app/services/ops_status.py": 'return "3.2.7"',
-        "v2-api/pyproject.toml": 'version = "3.2.7"',
-        "v2-api/scripts/verify_v3_1_release.py": 'EXPECTED_VERSION = "3.2.7"',
-        "v2-api/tests/test_v3_1_release.py": 'EXPECTED_VERSION = "3.2.7"',
-        "v2-web/index.html": "Module Manager V3.2.7",
-        "v2-web/src/components/AppLayout.vue": "V3.2.7",
-        "v2-web/src/constants/releaseNotes.ts": "version: 'V3.2.7'",
-        "RELEASE_MANIFEST.md": "- Version: 3.2.7",
-    }
-    for path, marker in markers.items():
-        _require_once(_read(root, path, failures), marker, path, failures)
-
-    agents = _read(root, "AGENTS.md", failures)
-    for marker in (
-        f"- Deployed production baseline: `{DEPLOYED_BASELINE}`.",
-        f"- Release candidate: `{DISPLAY_VERSION}`.",
-        f"- Release-candidate maintenance branch: `{MAINTENANCE_BRANCH}`.",
-        f"- 当前已部署生产版本：`{DEPLOYED_BASELINE}`。",
-        f"- 当前发布候选版本：`{DISPLAY_VERSION}`。",
-        f"- 当前候选维护分支：`{MAINTENANCE_BRANCH}`。",
-    ):
-        _require_once(agents, marker, "AGENTS.md", failures)
 
 
 def _check_project_inventory_contract(root: Path, failures: list[str]) -> None:
@@ -177,8 +152,6 @@ def _check_project_inventory_contract(root: Path, failures: list[str]) -> None:
 def _check_release_tools(root: Path, failures: list[str]) -> None:
     requirements = {
         "scripts/build-client-release.ps1": (
-            '[string]$Version = "3.2.7"',
-            "production/V3/3.2.7",
             "scripts\\verify_v3_2_7_release.py",
             "scripts\\test_verify_v3_2_7_release.py",
             "ops\\releases\\V3.2.7.md",
@@ -187,13 +160,11 @@ def _check_release_tools(root: Path, failures: list[str]) -> None:
             '"scripts/verify_v3_2_7_release.py"',
             '"scripts/test_verify_v3_2_7_release.py"',
             '"ops/releases/V3.2.7.md"',
-            "verify_v327_archive_source_contract",
         ),
         "scripts/verify_release_sop.py": (
             '"scripts/verify_v3_2_7_release.py"',
             '"scripts/test_verify_v3_2_7_release.py"',
             '"ops/releases/V3.2.7.md"',
-            'with_name("verify_v3_2_7_release.py")',
         ),
     }
     for path, markers in requirements.items():
@@ -206,11 +177,11 @@ def _check_release_tools(root: Path, failures: list[str]) -> None:
 def _check_source_release_record(root: Path, failures: list[str]) -> None:
     record = _read(root, RELEASE_PATH, failures)
     fields = {
-        "Status": "pending",
-        "Local Verification": ("not run", "passed"),
-        "Package": ("pending", "passed"),
-        "Production Deployment": "pending",
-        "Production Reconciliation": "pending",
+        "Status": "deployed, recovered, production acceptance incomplete",
+        "Local Verification": "passed before deployment",
+        "Package": "passed",
+        "Production Deployment": "incomplete after guarded smoke incident",
+        "Production Reconciliation": "recovered with zero business-row additions",
         "Rollback target": DEPLOYED_BASELINE,
         "Candidate branch": f"`{MAINTENANCE_BRANCH}`",
         "Deployed production baseline": f"`{DEPLOYED_BASELINE}`",
@@ -223,14 +194,21 @@ def _check_source_release_record(root: Path, failures: list[str]) -> None:
         if len(values) != 1 or values[0] not in allowed:
             failures.append(f"{RELEASE_PATH}: {field} must equal one of {allowed} exactly once")
     for marker in (
-        "current-project no-batch scanning",
-        "atomic photo admission",
-        "project isolation",
-        "unchanged client-platform boundary",
+        ORIGINAL_SOURCE_COMMIT,
+        ORIGINAL_ZIP_SHA256,
+        "/opt/module-manager-v2/releases/v3.2.7-20260824_173544",
+        r"C:\Users\Administrator\Documents\module-manager-production-backups\20260824T161047Z",
+        "HTTP `499`",
+        "global OOM kill",
+        "zero business-row additions",
+        "worker and timer remain stopped",
+        "no V3.2.7 attestation",
         MIGRATION_REVISION,
     ):
         if marker not in record:
-            failures.append(f"{RELEASE_PATH}: release boundary is missing: {marker}")
+            failures.append(f"{RELEASE_PATH}: immutable V3.2.7 evidence is missing: {marker}")
+    if "V3.2.7 acceptance passed" in record:
+        failures.append(f"{RELEASE_PATH}: must not claim V3.2.7 acceptance passed")
 
 
 def _check_irreversible_migration_warning(root: Path, failures: list[str]) -> None:
@@ -249,7 +227,6 @@ def collect_failures(root: Path, phase: str) -> list[str]:
     for path in REQUIRED_FILES:
         if not (root / path).is_file():
             failures.append(f"{path}: required V3.2.7 file is missing")
-    _check_version_surfaces(root, failures)
     _check_project_inventory_contract(root, failures)
     _check_irreversible_migration_warning(root, failures)
     _check_release_tools(root, failures)

@@ -12,6 +12,19 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.8',
+    date: '2026-08-25',
+    type: 'BUG 修复',
+    title: '采集器规模查询与移动相机兼容修复',
+    items: [
+      '盘点扫码和照片登记改为有界的单采集器查询；运行源投影改为紧凑选定列流式读取，避免项目级 ORM 全量装载。',
+      '采集器盘点在浏览器没有原生 BarcodeDetector 时仍先打开相机预览，并回退到固定版本的 QuaggaJS；识别失败时保留预览和手工输入。',
+      '项目/团队隔离、照片优先级、手机端禁止批量导入和既有 API 合同保持不变。',
+      '数据库 schema 保持 20260824_0016；本次没有新增迁移。',
+      '生产验收仍待完成：新备份、严格一次受控 smoke、390x844 浏览器验收及维护 worker/timer 恢复全部成功后才能确认。',
+    ],
+  },
+  {
     version: 'V3.2.7',
     date: '2026-08-24',
     type: '小更新',

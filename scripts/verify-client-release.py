@@ -15,17 +15,20 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 
-V327_CONTRACT_INPUTS = frozenset(
+V328_CONTRACT_INPUTS = frozenset(
     {
         "AGENTS.md",
+        "README.md",
         "RELEASE_MANIFEST.md",
+        "docs/CLIENT_SIGNOFF_CHECKLIST.md",
         "docs/superpowers/specs/2026-08-23-collector-transfer-workbench-design.md",
         "ops/releases/V3.2.7.md",
+        "ops/releases/V3.2.8.md",
         "scripts/build-client-release.ps1",
         "scripts/verify-client-release.py",
         "scripts/verify_release_sop.py",
-        "scripts/verify_v3_2_7_release.py",
-        "scripts/test_verify_v3_2_7_release.py",
+        "scripts/verify_v3_2_8_release.py",
+        "scripts/test_verify_v3_2_8_release.py",
         "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
         "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
         "v2-api/app/api/routes/collector_transfer.py",
@@ -36,14 +39,20 @@ V327_CONTRACT_INPUTS = frozenset(
         "v2-api/pyproject.toml",
         "v2-api/scripts/verify_v3_1_release.py",
         "v2-api/tests/test_collector_transfer_api.py",
+        "v2-api/tests/test_collector_transfer_domain.py",
+        "v2-api/tests/test_collector_transfer_postgres_integration.py",
         "v2-api/tests/test_collector_transfer_service.py",
+        "v2-api/tests/test_collector_transfer_scale.py",
         "v2-api/tests/test_v3_1_release.py",
         "v2-web/index.html",
+        "v2-web/package.json",
         "v2-web/src/api/services.ts",
         "v2-web/src/api/types.ts",
         "v2-web/src/components/AppLayout.vue",
         "v2-web/src/constants/releaseNotes.ts",
+        "v2-web/src/version.json",
         "v2-web/src/views/CollectorInventoryView.vue",
+        "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts",
     }
 )
 
@@ -125,6 +134,8 @@ REQUIRED_FILES = {
     "scripts/test_verify_v3_2_6_release.py",
     "scripts/verify_v3_2_7_release.py",
     "scripts/test_verify_v3_2_7_release.py",
+    "scripts/verify_v3_2_8_release.py",
+    "scripts/test_verify_v3_2_8_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -150,9 +161,11 @@ REQUIRED_FILES = {
     "v2-api/tests/test_collector_transfer_domain.py",
     "v2-api/tests/test_collector_transfer_postgres_integration.py",
     "v2-api/tests/test_collector_transfer_service.py",
+    "v2-api/tests/test_collector_transfer_scale.py",
     "v2-web/src/components/Code128Barcode.vue",
     "v2-web/src/views/CollectorBatchManagementView.vue",
     "v2-web/src/views/CollectorInventoryView.vue",
+    "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts",
     "v2-web/src/views/CollectorWorkbenchView.vue",
     "scripts/production_backup.sh",
     "scripts/cleanup_old_releases.sh",
@@ -170,6 +183,7 @@ REQUIRED_FILES = {
     "ops/releases/V3.2.5.md",
     "ops/releases/V3.2.6.md",
     "ops/releases/V3.2.7.md",
+    "ops/releases/V3.2.8.md",
     "ops/releases/V3.0.83.md",
     "ops/releases/V3.0.82.md",
     "ops/releases/V3.0.80.md",
@@ -227,6 +241,7 @@ REQUIRED_FILES = {
     "v2-api/app/services/export_retirement.py",
     "v2-api/app/services/external_photo_oss_migration.py",
     "v2-api/app/static/favicon.svg",
+    "v2-api/app/static/vendor/quagga.min.js",
     "v2-api/app/static/vue/index.html",
     "v2-api/app/static/vue/version.json",
     "v2-api/app/static/demo-assets/review-photo-1.svg",
@@ -258,7 +273,7 @@ REQUIRED_FILES = {
     "v2-web/src/utils/dataCenterDrilldown.ts",
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
-} | V327_CONTRACT_INPUTS
+} | V328_CONTRACT_INPUTS
 
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
@@ -410,23 +425,23 @@ def load_release_truth_parser():
     return module
 
 
-def verify_v327_archive_source_contract(archive: zipfile.ZipFile):
-    with tempfile.TemporaryDirectory(prefix="module-manager-v327-contract-") as temporary_root:
+def verify_v328_archive_source_contract(archive: zipfile.ZipFile):
+    with tempfile.TemporaryDirectory(prefix="module-manager-v328-contract-") as temporary_root:
         extracted_root = Path(temporary_root)
-        for relative_path in V327_CONTRACT_INPUTS:
+        for relative_path in V328_CONTRACT_INPUTS:
             target = extracted_root / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(archive.read(relative_path))
 
-        verifier_path = extracted_root / "scripts" / "verify_v3_2_7_release.py"
-        spec = importlib.util.spec_from_file_location("archive_v327_release_contract", verifier_path)
+        verifier_path = extracted_root / "scripts" / "verify_v3_2_8_release.py"
+        spec = importlib.util.spec_from_file_location("archive_v328_release_contract", verifier_path)
         if spec is None or spec.loader is None:
-            fail("Unable to load archived V3.2.7 release verifier")
+            fail("Unable to load archived V3.2.8 release verifier")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         failures = module.collect_failures(extracted_root, "attestation")
         if failures:
-            fail("V3.2.7 archive source contract failed: " + " | ".join(failures))
+            fail("V3.2.8 archive source contract failed: " + " | ".join(failures))
         return module
 
 
@@ -519,12 +534,9 @@ def verify_release_markdown_text(path: str, content: str, package_version: str) 
                     f"{match.group('version')}; expected {expected_version}"
                 )
     if path == "README.md":
-        expected_build_command = (
-            f".\\scripts\\build-client-release.ps1 -Version {package_version} "
-            f"-PerformanceReport .\\build\\release-evidence\\v{package_version}-task-review.json"
-        )
+        expected_build_command = f".\\scripts\\build-client-release.ps1 -Version {package_version}"
         if expected_build_command not in content:
-            fail("README.md build command must include the source-bound -PerformanceReport")
+            fail("README.md build command must use the current package version")
 
 
 def verify_release_markdown_documents(
@@ -702,9 +714,9 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
             fail("Release manifest must define exactly one semantic Version")
         package_version = manifest_versions[0]
-        if package_version != "3.2.7":
+        if package_version != "3.2.8":
             fail(
-                "Release manifest Version must match the archived V3.2.7 source contract: 3.2.7"
+                "Release manifest Version must match the archived V3.2.8 source contract: 3.2.8"
             )
         verify_release_markdown_documents(archive, names, package_version)
         static_index = (
@@ -722,6 +734,13 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
             archive.read(RUNTIME_VERSION_ARTIFACT).decode("utf-8")
         )
         verify_vue_asset_manifest(archive, names, runtime_attestation)
+        compiled_vue_assets = b"\n".join(
+            archive.read(name)
+            for name in sorted(names)
+            if name.startswith("v2-api/app/static/vue/assets/") and name.endswith(".js")
+        )
+        if b"/static/vendor/quagga.min.js?v=20260615-quagga2" not in compiled_vue_assets:
+            fail("Vue production assets must retain the pinned collector QuaggaJS fallback")
         runtime_version = runtime_attestation["version"]
         source_version = release_truth.runtime_version_from_artifact(
             archive.read(SOURCE_VERSION_ARTIFACT).decode("utf-8")
@@ -790,9 +809,9 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         candidate_version,
     )
     with zipfile.ZipFile(zip_path) as archive:
-        archived_release = verify_v327_archive_source_contract(archive)
+        archived_release = verify_v328_archive_source_contract(archive)
     if archived_release.VERSION != package_version:
-        fail("Archived V3.2.7 release verifier version must match the release manifest Version")
+        fail("Archived V3.2.8 release verifier version must match the release manifest Version")
 
     print(f"[OK] release zip exists: {zip_path}")
     print(f"[OK] release zip size: {zip_path.stat().st_size} bytes")

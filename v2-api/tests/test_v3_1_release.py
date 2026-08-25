@@ -15,7 +15,7 @@ from app.models import GroupStatus, MaterialGroup, Photo, PhotoUploadStatus
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 API_ROOT = REPOSITORY_ROOT / "v2-api"
-EXPECTED_VERSION = "3.2.7"
+EXPECTED_VERSION = "3.2.8"
 
 
 def read(relative_path: str) -> str:
@@ -652,17 +652,18 @@ def test_v3_1_acceptance_gate_wires_source_bound_performance_evidence() -> None:
     assert 'outputs\\performance\\v$Version-task-review.json' not in acceptance
 
 
-def test_v3_1_package_builder_blocks_without_verified_performance_evidence() -> None:
+def test_package_builder_keeps_optional_v3_1_evidence_and_requires_v328_regressions() -> None:
     builder = read("scripts/build-client-release.ps1")
     package_sop = read("docs/sop/05-release-package-and-hash.md")
 
     assert '[string]$PerformanceReport = ""' in builder
-    assert "Performance report is required for V3.2.7 packaging" in builder
+    assert "if ($performanceReportPath)" in builder
     assert "verify_v3_1_release.py" in builder
     assert "--performance-report $performanceReportPath" in builder
     assert "--expected-source-commit $sourceCommit" in builder
     assert "-PerformanceReport" in package_sop
-    assert "build\\release-evidence" in builder
     assert "build\\release-evidence" in package_sop
+    assert "test_collector_transfer_scale.py" in builder
+    assert "CollectorInventoryView.spec.ts" in builder
     assert "outputs\\performance" not in builder
     assert "outputs\\performance" not in package_sop

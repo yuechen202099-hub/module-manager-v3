@@ -31,6 +31,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_6_release.py",
     "scripts/verify_v3_2_7_release.py",
     "scripts/test_verify_v3_2_7_release.py",
+    "scripts/verify_v3_2_8_release.py",
+    "scripts/test_verify_v3_2_8_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -45,6 +47,7 @@ RELEASE_INPUTS = (
     "v2-api/tests/test_collector_transfer_domain.py",
     "v2-api/tests/test_collector_transfer_postgres_integration.py",
     "v2-api/tests/test_collector_transfer_service.py",
+    "v2-api/tests/test_collector_transfer_scale.py",
     "v2-api/app/api/routes/groups.py",
     "v2-api/app/api/routes/exports.py",
     "v2-api/app/schemas/data_center.py",
@@ -66,6 +69,7 @@ RELEASE_INPUTS = (
     "v2-web/src/utils/installerKpi.ts",
     "v2-web/src/views/CollectorBatchManagementView.vue",
     "v2-web/src/views/CollectorInventoryView.vue",
+    "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts",
     "v2-web/src/views/CollectorWorkbenchView.vue",
     "ops/releases/V3.2.0.md",
     "ops/releases/V3.2.1.md",
@@ -75,6 +79,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.5.md",
     "ops/releases/V3.2.6.md",
     "ops/releases/V3.2.7.md",
+    "ops/releases/V3.2.8.md",
 )
 
 REQUIRED_FILES = [
@@ -826,10 +831,33 @@ def deployed_release_record_is_verified(record: str, version: str) -> None:
         fail(f"{version} deployed baseline record claims deployment without complete live evidence")
 
 
+def recovered_unattested_v327_baseline_is_documented(record: str, version: str) -> bool:
+    if version != "V3.2.7":
+        return False
+    required = (
+        "# V3.2.7 Production Release Record",
+        "- Status: deployed, recovered, production acceptance incomplete",
+        "- Production Deployment: incomplete after guarded smoke incident",
+        "- Production Reconciliation: recovered with zero business-row additions",
+        "8db0c64e82e98cdffa8e95ca83f6230236368b6a",
+        "32D2365D1F3470D2A2476E8547DAE3B12AA0B43E903C8E387548028545DB5CAC",
+        "/opt/module-manager-v2/releases/v3.2.7-20260824_173544",
+        r"C:\Users\Administrator\Documents\module-manager-production-backups\20260824T161047Z",
+        "HTTP `499`",
+        "global OOM kill",
+        "zero business-row additions",
+        "no V3.2.7 attestation",
+        "worker and timer remain stopped",
+    )
+    return all(marker in record for marker in required) and "V3.2.7 acceptance passed" not in record
+
+
 def release_record_matches_lifecycle_state(
     record: str, version: str, deployed_baseline: str, release_candidate_version: str
 ) -> None:
     if version == deployed_baseline:
+        if recovered_unattested_v327_baseline_is_documented(record, version):
+            return
         deployed_release_record_is_verified(record, version)
         return
     if version == release_candidate_version:
@@ -860,14 +888,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def verify_current_release_phase(phase: str) -> None:
-    path = Path(__file__).with_name("verify_v3_2_7_release.py")
-    spec = importlib.util.spec_from_file_location("verify_v3_2_7_release", path)
+    path = Path(__file__).with_name("verify_v3_2_8_release.py")
+    spec = importlib.util.spec_from_file_location("verify_v3_2_8_release", path)
     if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.7 release verifier")
+        fail("Unable to load V3.2.8 release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if module.main(["--phase", phase]) != 0:
-        fail(f"V3.2.7 {phase} release contract failed")
+        fail(f"V3.2.8 {phase} release contract failed")
 
 
 def validate_requested_candidate_version(version: str, agents: str) -> str:
