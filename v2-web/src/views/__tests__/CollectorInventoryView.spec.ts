@@ -184,6 +184,22 @@ describe('CollectorInventoryView', () => {
     },
   )
 
+  it('keeps a same-number physical out of the website photo flow when no photo exists', async () => {
+    serviceMocks.scanProjectCollector.mockResolvedValue({
+      ...decision('direct_reuse', false, false),
+      photo: null,
+    })
+    const wrapper = await mountPage()
+
+    await submitManualScan(wrapper)
+
+    expect(wrapper.get('[data-testid="decision-title"]').text()).toContain('无需拍照')
+    expect(wrapper.text()).toContain('手上有同号实物')
+    expect(wrapper.get('[data-testid="photo-input"]').attributes('disabled')).toBeDefined()
+    expect(serviceMocks.registerProjectCollector).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('cancelling a non-direct photo never calls registration', async () => {
     serviceMocks.scanProjectCollector.mockResolvedValue(
       decision('pool_needs_photo', true, true),

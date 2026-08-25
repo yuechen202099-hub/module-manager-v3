@@ -182,13 +182,9 @@ def decide_project_inventory_scan(
 
     if is_project_requirement or status == "direct":
         return ProjectInventoryDecision(
-            kind=(
-                ProjectInventoryDecisionKind.DIRECT_REUSE
-                if has_active_photo
-                else ProjectInventoryDecisionKind.DIRECT_NEEDS_PHOTO
-            ),
+            kind=ProjectInventoryDecisionKind.DIRECT_REUSE,
             persist_confirmation=True,
-            requires_photo=not has_active_photo,
+            requires_photo=False,
             add_to_pool=False,
         )
 

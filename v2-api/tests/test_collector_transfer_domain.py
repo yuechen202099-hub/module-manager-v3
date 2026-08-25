@@ -119,6 +119,21 @@ def test_project_scan_direct_with_photo_confirms_without_pool_admission() -> Non
     assert decision.add_to_pool is False
 
 
+def test_project_requirement_without_photo_is_direct_reuse() -> None:
+    """Catches forcing an in-hand same-number collector through website photo capture."""
+    decision = decide_project_inventory_scan(
+        collector_no="00001234",
+        is_project_requirement=True,
+        existing_pool_status=None,
+        has_active_photo=False,
+    )
+
+    assert decision.kind is ProjectInventoryDecisionKind.DIRECT_REUSE
+    assert decision.persist_confirmation is True
+    assert decision.requires_photo is False
+    assert decision.add_to_pool is False
+
+
 @pytest.mark.parametrize(
     ("status", "expected_kind"),
     [

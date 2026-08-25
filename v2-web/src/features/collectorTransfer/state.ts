@@ -52,7 +52,7 @@ export function inventoryResultPresentation(input: InventoryDecisionInput): Inve
     return {
       tone: 'success',
       title: '无需拍照，已确认',
-      description: '同号采集器照片可复用，不加入替换池。',
+      description: '已确认手上有同号实物，无需在网站拍照，也不加入替换池。',
       primaryAction: '继续扫码',
     }
   }

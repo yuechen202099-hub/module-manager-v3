@@ -5,7 +5,7 @@ import { encodeCode128B } from '../src/features/collectorTransfer/code128.ts'
 import { inventoryResultPresentation } from '../src/features/collectorTransfer/state.ts'
 
 
-test('same-number reusable photo is confirmed without camera or pool admission', () => {
+test('same-number physical is confirmed without a website photo or pool admission', () => {
   const result = inventoryResultPresentation({
     decision: 'direct_reuse',
     requiresPhoto: false,
@@ -15,7 +15,7 @@ test('same-number reusable photo is confirmed without camera or pool admission',
   assert.deepEqual(result, {
     tone: 'success',
     title: '无需拍照，已确认',
-    description: '同号采集器照片可复用，不加入替换池。',
+    description: '已确认手上有同号实物，无需在网站拍照，也不加入替换池。',
     primaryAction: '继续扫码',
   })
 })

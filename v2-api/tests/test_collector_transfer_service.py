@@ -379,7 +379,7 @@ def test_non_direct_project_scan_leaves_no_business_rows(db_session: Session) ->
 
 
 def test_direct_project_scan_without_photo_persists_only_confirmation(db_session: Session) -> None:
-    """Catches admitting a same-number collector to the random pool before its direct photo exists."""
+    """Catches asking for a website photo after the same-number physical was scanned in hand."""
     project, _group = project_with_collector_requirement(db_session, collector_no="DIRECT-001")
 
     result = service(db_session).scan_inventory(
@@ -388,7 +388,8 @@ def test_direct_project_scan_without_photo_persists_only_confirmation(db_session
     )
 
     physical = db_session.scalar(select(PhysicalCollector))
-    assert result["decision"] == "direct_needs_photo"
+    assert result["decision"] == "direct_reuse"
+    assert result["requires_photo"] is False
     assert result["add_to_pool"] is False
     assert physical.project_id == project.id
     assert physical.pool_status == "direct"
@@ -1208,10 +1209,10 @@ def test_project_inventory_registration_recovers_same_collector_photo_race(
     assert session.commit_count == 1
 
 
-def test_create_run_binds_photographed_same_project_direct_inventory(
+def test_create_run_binds_same_project_direct_inventory_without_assignment_photo(
     db_session: Session,
 ) -> None:
-    """Catches run creation ignoring a confirmed same-number collector already held by the project."""
+    """Catches using a direct assignment/photo instead of the scanned physical collector itself."""
     project, _group = complete_project_collector_source(
         db_session,
         collector_no="DIRECT-BIND",
@@ -1224,20 +1225,24 @@ def test_create_run_binds_photographed_same_project_direct_inventory(
     )
     db_session.add(physical)
     db_session.commit()
-    photo = collector_photo(db_session, physical, sha256="b6" * 32)
+    retained_photo = collector_photo(db_session, physical, sha256="b6" * 32)
 
     created = service(db_session).create_run(project_id=str(project.id), name="直接绑定")
 
     assignment = db_session.scalar(select(CollectorAssignment))
     required = db_session.scalar(select(CollectorRequirement))
-    assert assignment.physical_collector_id == physical.id
-    assert assignment.collector_photo_id == photo.id
-    assert assignment.assignment_mode == "direct"
+    removal_item = db_session.scalar(
+        select(CollectorWorkbenchItem).where(CollectorWorkbenchItem.requirement_id == required.id)
+    )
+    assert assignment is None
     assert required.status == "direct_ready"
+    assert removal_item is not None
+    assert removal_item.assignment_id is None
     assert db_session.get(PhysicalCollector, physical.id).pool_status == "direct"
+    assert db_session.get(CollectorPhoto, retained_photo.id) is not None
     assert db_session.scalar(select(func.count(CollectorWorkbenchItem.id))) == 2
     assert created["direct_match_count"] == 1
-    assert created["assignment_count"] == 1
+    assert created["assignment_count"] == 0
 
 
 def test_create_run_scale_preserves_multiterminal_snapshots_requirements_and_direct_binding(
@@ -1352,7 +1357,7 @@ def test_create_run_scale_preserves_multiterminal_snapshots_requirements_and_dir
         "collector_requirement_count": 2,
         "blocked_terminal_count": 0,
         "direct_match_count": 1,
-        "assignment_count": 1,
+        "assignment_count": 0,
     }
     assert sorted(requirement.original_collector_no for requirement in requirements) == [
         "C-DIRECT",
@@ -1363,10 +1368,17 @@ def test_create_run_scale_preserves_multiterminal_snapshots_requirements_and_dir
     assert db_session.scalar(
         select(func.count(CollectorWorkbenchItem.id)).where(CollectorWorkbenchItem.run_id == run_id)
     ) == 4
-    assert len(assignments) == 1
-    assert assignments[0].physical_collector_id == direct.id
-    assert assignments[0].collector_photo_id == direct_photo.id
-    assert assignments[0].assignment_mode == "direct"
+    direct_requirement = next(
+        requirement for requirement in requirements if requirement.original_collector_no == "C-DIRECT"
+    )
+    direct_item = db_session.scalar(
+        select(CollectorWorkbenchItem).where(
+            CollectorWorkbenchItem.requirement_id == direct_requirement.id
+        )
+    )
+    assert assignments == []
+    assert direct_item is not None and direct_item.assignment_id is None
+    assert db_session.get(CollectorPhoto, direct_photo.id) is not None
 
     first_item = next(item for item in meter_items if item.source_group_id == first.id)
     expected_module_snapshot = {
@@ -1400,10 +1412,10 @@ def test_create_run_scale_preserves_multiterminal_snapshots_requirements_and_dir
     assert first_item.after_box_photo_snapshot == expected_after_snapshot
 
 
-def test_create_run_keeps_same_number_without_photo_out_of_random_allocation(
+def test_create_run_makes_same_number_without_photo_directly_rephoto_ready(
     db_session: Session,
 ) -> None:
-    """Catches a known direct collector without a photo being replaced from the random pool."""
+    """Catches leaving a scanned same-number physical blocked on a nonexistent website photo."""
     project, _group = complete_project_collector_source(
         db_session,
         collector_no="DIRECT-PENDING",
@@ -1428,7 +1440,12 @@ def test_create_run_keeps_same_number_without_photo_out_of_random_allocation(
     allocated = service(db_session).allocate(run_id=created["id"])
 
     required = db_session.scalar(select(CollectorRequirement))
-    assert required.status == "direct_pending_photo"
+    removal_item = db_session.scalar(
+        select(CollectorWorkbenchItem).where(CollectorWorkbenchItem.requirement_id == required.id)
+    )
+    assert required.status == "direct_ready"
+    assert removal_item is not None
+    assert removal_item.assignment_id is None
     assert allocated["assignment_count"] == 0
     assert db_session.scalar(select(func.count(CollectorAssignment.id))) == 0
     assert db_session.get(PhysicalCollector, replacement.id).pool_status == "available"

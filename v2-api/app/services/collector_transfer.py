@@ -466,6 +466,23 @@ class PostgresCollectorTransferService:
             )
             or 0
         )
+        direct_workbench_count = int(
+            self.session.scalar(
+                select(func.count(CollectorWorkbenchItem.id))
+                .join(
+                    CollectorRequirement,
+                    CollectorRequirement.id == CollectorWorkbenchItem.requirement_id,
+                )
+                .where(
+                    CollectorWorkbenchItem.run_id == run.id,
+                    CollectorWorkbenchItem.item_kind == "collector_removal",
+                    CollectorWorkbenchItem.assignment_id.is_(None),
+                    CollectorRequirement.status.in_(("direct_ready", "used")),
+                )
+            )
+            or 0
+        )
+        direct_match_count += direct_workbench_count
         random_match_count = int(
             self.session.scalar(
                 select(func.count(CollectorAssignment.id)).where(
@@ -1116,6 +1133,42 @@ class PostgresCollectorTransferService:
         else:
             existing.assignment_id = assignment.id
 
+    def _ensure_direct_removal_workbench_item(
+        self,
+        *,
+        run: CollectorTransferRun,
+        requirement: CollectorRequirement,
+    ) -> CollectorWorkbenchItem:
+        item = self.session.scalar(
+            select(CollectorWorkbenchItem).where(
+                CollectorWorkbenchItem.run_id == run.id,
+                CollectorWorkbenchItem.requirement_id == requirement.id,
+            )
+        )
+        if item is None:
+            meter_count = int(
+                self.session.scalar(
+                    select(func.count(CollectorMeterItem.id)).where(
+                        CollectorMeterItem.terminal_id == requirement.terminal_id
+                    )
+                )
+                or 0
+            )
+            item = CollectorWorkbenchItem(
+                run_id=run.id,
+                terminal_id=requirement.terminal_id,
+                team_id=self.team_id,
+                item_kind="collector_removal",
+                source_key=str(requirement.id),
+                requirement_id=requirement.id,
+                assignment_id=None,
+                status="pending",
+                sort_order=meter_count + requirement.sort_order,
+            )
+            self.session.add(item)
+            self.session.flush()
+        return item
+
     def _bind_direct_inventory(self, run: CollectorTransferRun) -> int:
         requirements = list(
             self.session.scalars(
@@ -1148,36 +1201,13 @@ class PostgresCollectorTransferService:
                     PhysicalCollector.team_id == self.team_id,
                     PhysicalCollector.project_id == run.project_id,
                     PhysicalCollector.collector_no.in_(collector_numbers),
-                    PhysicalCollector.pool_status.in_(("direct", "available")),
+                    PhysicalCollector.pool_status == "direct",
                 )
                 .order_by(PhysicalCollector.collector_no, PhysicalCollector.id)
                 .with_for_update()
             ).all()
         )
         physical_by_number = {item.collector_no: item for item in physical_collectors}
-        physical_by_id = {item.id: item for item in physical_collectors}
-        photos_by_collector: dict[UUID, CollectorPhoto] = {}
-        if physical_collectors:
-            photos = self.session.scalars(
-                select(CollectorPhoto)
-                .where(
-                    CollectorPhoto.team_id == self.team_id,
-                    CollectorPhoto.physical_collector_id.in_(
-                        [item.id for item in physical_collectors]
-                    ),
-                    CollectorPhoto.is_active.is_(True),
-                )
-                .order_by(
-                    CollectorPhoto.physical_collector_id,
-                    CollectorPhoto.created_at.desc(),
-                    CollectorPhoto.id.desc(),
-                )
-                .with_for_update()
-            ).all()
-            for photo in photos:
-                physical = physical_by_id[photo.physical_collector_id]
-                self._validate_inventory_ownership(run=run, physical=physical, photo=photo)
-                photos_by_collector.setdefault(photo.physical_collector_id, photo)
 
         bound_count = 0
         consumed_physical_ids: set[UUID] = set()
@@ -1186,23 +1216,10 @@ class PostgresCollectorTransferService:
             if physical is None or physical.id in consumed_physical_ids:
                 continue
             physical.pool_status = "direct"
-            photo = photos_by_collector.get(physical.id)
-            if photo is None:
-                requirement.status = "direct_pending_photo"
-                consumed_physical_ids.add(physical.id)
-                continue
-            assignment, _created = self._create_assignment(
-                run=run,
-                requirement=requirement,
-                physical=physical,
-                photo=photo,
-                assignment_mode="direct",
-            )
             requirement.status = "direct_ready"
-            self._ensure_removal_workbench_item(
+            self._ensure_direct_removal_workbench_item(
                 run=run,
                 requirement=requirement,
-                assignment=assignment,
             )
             consumed_physical_ids.add(physical.id)
             bound_count += 1
