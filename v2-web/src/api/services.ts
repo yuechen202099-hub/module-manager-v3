@@ -10,6 +10,11 @@ import type {
   CollectorInventoryDecision,
   CollectorInventoryPage,
   CollectorPhotoRegistration,
+  GlobalCollectorTerminalCandidate,
+  GlobalCollectorTerminalDetail,
+  GlobalCollectorTerminalOpenResult,
+  GlobalCollectorTerminalPage,
+  GlobalCollectorTerminalReplacementResult,
   CollectorTerminalWorkbench,
   CollectorTransferRun,
   CollectorWorkbenchItemStatus,
@@ -2973,4 +2978,49 @@ export async function setCollectorWorkbenchItemCompleted(
     method: 'PATCH',
     body: JSON.stringify({ completed }),
   })
+}
+
+export async function fetchGlobalCollectorTerminals(params: {
+  query?: string
+  state?: string
+  page?: number
+  pageSize?: number
+  includeBlocked?: boolean
+} = {}): Promise<GlobalCollectorTerminalPage> {
+  const query = new URLSearchParams()
+  if (params.query) query.set('query', params.query)
+  if (params.state) query.set('state', params.state)
+  if (params.page) query.set('page', String(params.page))
+  if (params.pageSize) query.set('page_size', String(params.pageSize))
+  if (params.includeBlocked) query.set('include_blocked', 'true')
+  const suffix = query.size ? `?${query.toString()}` : ''
+  return api<GlobalCollectorTerminalPage>(`/collector-transfer/workbench/terminals${suffix}`)
+}
+
+export async function openGlobalCollectorTerminal(candidate: Pick<GlobalCollectorTerminalCandidate, 'terminal_key' | 'project_id' | 'terminal_code' | 'source_revision'>): Promise<GlobalCollectorTerminalOpenResult> {
+  return api<GlobalCollectorTerminalOpenResult>('/collector-transfer/workbench/terminals/open', {
+    method: 'POST',
+    body: JSON.stringify({
+      terminal_key: candidate.terminal_key,
+      project_id: candidate.project_id,
+      terminal_code: candidate.terminal_code,
+      source_revision: candidate.source_revision,
+    }),
+  })
+}
+
+export async function fetchGlobalCollectorTerminal(terminalId: string): Promise<GlobalCollectorTerminalDetail> {
+  return api<GlobalCollectorTerminalDetail>(`/collector-transfer/workbench/terminals/${encodeURIComponent(terminalId)}`)
+}
+
+export async function replaceGlobalTerminalMissing(terminalId: string): Promise<GlobalCollectorTerminalReplacementResult> {
+  return api<GlobalCollectorTerminalReplacementResult>(`/collector-transfer/workbench/terminals/${encodeURIComponent(terminalId)}/replace-missing`, { method: 'POST' })
+}
+
+export async function refreshGlobalCollectorTerminal(terminalId: string): Promise<GlobalCollectorTerminalOpenResult> {
+  return api<GlobalCollectorTerminalOpenResult>(`/collector-transfer/workbench/terminals/${encodeURIComponent(terminalId)}/refresh`, { method: 'POST' })
+}
+
+export async function rollbackCollectorAssignment(assignmentId: string): Promise<void> {
+  await api(`/collector-transfer/assignments/${encodeURIComponent(assignmentId)}/rollback`, { method: 'POST' })
 }

@@ -15,6 +15,42 @@ export type InventoryResultPresentation = {
   primaryAction: string
 }
 
+type GlobalCandidateLabelInput = {
+  terminal_code: string
+  project_name: string
+  installation_address: string
+  needs_disambiguation: boolean
+}
+
+type CompletionCollectorInput = {
+  physical_state: 'present' | 'missing' | 'replaced'
+  final_collector_no: string | null
+  collector_barcode: string | null
+  photo: unknown | null
+}
+
+export function candidateLabel(candidate: GlobalCandidateLabelInput) {
+  const parts = [candidate.terminal_code]
+  if (candidate.needs_disambiguation) parts.push(candidate.project_name)
+  parts.push(candidate.installation_address)
+  return parts.filter(Boolean).join(' · ')
+}
+
+export function completionBlockers(item: CompletionCollectorInput) {
+  if (item.physical_state === 'missing') return ['该采集器没有实物，需先完成替换']
+  if (!item.final_collector_no || !item.collector_barcode) return ['缺少最终采集器号']
+  if (item.physical_state === 'replaced' && !item.photo) return ['替换采集器照片缺失']
+  return []
+}
+
+export function canReplaceMissing(isAdmin: boolean, available: number, missing: number) {
+  return isAdmin && missing > 0 && available >= missing
+}
+
+export function isCurrentRequest(sequence: number, currentSequence: number) {
+  return sequence === currentSequence
+}
+
 export function inventoryResultPresentation(input: InventoryDecisionInput): InventoryResultPresentation {
   if (input.decision === 'existing_available') {
     return {

@@ -24,7 +24,6 @@ const navigation = computed(() => {
     'global-search': Search,
     construction: FolderChecked,
     'collector-inventory': CameraFilled,
-    'collector-batches': Tickets,
     'collector-workbench': PictureFilled,
     'account-management': UserFilled,
     'sync-config': DataBoard,

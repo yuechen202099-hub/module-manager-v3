@@ -4,7 +4,6 @@ export type StaticPageKey =
   | 'global-search'
   | 'construction'
   | 'collector-inventory'
-  | 'collector-batches'
   | 'collector-workbench'
   | 'account-management'
   | 'sync-config'
@@ -59,14 +58,6 @@ export const staticPages: StaticPageRoute[] = [
     subtitle: '手机扫码与补拍',
     routePath: '/collector-inventory',
     roles: ['admin', 'constructor'],
-    migrationStatus: 'native_vue',
-  },
-  {
-    key: 'collector-batches',
-    title: '替换池批次',
-    subtitle: '管理员随机分配',
-    routePath: '/collector-batches',
-    roles: ['admin'],
     migrationStatus: 'native_vue',
   },
   {

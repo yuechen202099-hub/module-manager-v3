@@ -869,3 +869,99 @@ export type CollectorWorkbenchItemStatus = {
   status: 'pending' | 'completed'
   completed_at: string | null
 }
+
+export type GlobalCollectorTerminalState = 'ready' | 'needs_replacement' | 'pool_shortage' | 'blocked'
+export type CollectorPhysicalState = 'present' | 'missing' | 'replaced'
+export type CollectorCaptureStrategy = 'live_physical' | 'unavailable' | 'screen_photo'
+
+export type GlobalCollectorPhoto = {
+  id: string
+  image_url?: string
+  preview_url?: string
+  thumbnail_url?: string
+  canonical_image_url?: string
+}
+
+export type GlobalCollectorTerminalCandidate = {
+  terminal_key: string
+  project_id: string
+  project_name: string
+  terminal_code: string
+  installation_address: string
+  needs_disambiguation: boolean
+  meter_count: number
+  collector_count: number
+  physical_count: number
+  missing_count: number
+  pool_available_count: number
+  workflow_state: GlobalCollectorTerminalState
+  selectable: boolean
+  source_revision: string
+  diagnostics: CollectorTransferDiagnostic[]
+}
+
+export type GlobalCollectorTerminalPage = {
+  items: GlobalCollectorTerminalCandidate[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export type GlobalCollectorTerminalOpenResult = {
+  run_id?: string
+  terminal_id?: string
+  workbench_terminal_id: string
+  project_id?: string
+  terminal_code?: string
+  source_revision?: string
+  current_source_revision?: string
+  snapshot_reused: boolean
+  source_changed: boolean
+}
+
+export type CollectorRequirementWorkbenchRow = {
+  requirement_id: string
+  workbench_item_id: string | null
+  status: 'pending' | 'completed' | null
+  original_collector_no: string
+  final_collector_no: string | null
+  physical_state: CollectorPhysicalState
+  collector_barcode: string | null
+  capture_strategy: CollectorCaptureStrategy
+  assignment_id: string | null
+  photo: GlobalCollectorPhoto | null
+  diagnostics: CollectorTransferDiagnostic[]
+}
+
+export type GlobalMeterInstallWorkbenchRow = {
+  meter_item_id: string
+  workbench_item_id: string | null
+  status: 'pending' | 'completed' | null
+  meter_no: string
+  meter_barcode: string
+  module_no: string
+  module_barcode: string
+  photos: Array<{ slot: 'module_meter' | 'after_box'; label: string; photo: GlobalCollectorPhoto | null }>
+  diagnostics: CollectorTransferDiagnostic[]
+}
+
+export type GlobalCollectorTerminalDetail = {
+  run_id: string
+  project_id: string
+  terminal: { id: string; terminal_code: string; installation_address: string; status: string; diagnostics: CollectorTransferDiagnostic[] }
+  meter_install_items: GlobalMeterInstallWorkbenchRow[]
+  collector_items: CollectorRequirementWorkbenchRow[]
+  pool_summary: { required: number; available: number; shortage: number }
+  completed_count: number
+  total_count: number
+  progress: number
+  source_revision: string
+  current_source_revision: string
+  source_changed: boolean
+}
+
+export type GlobalCollectorTerminalReplacementResult = {
+  required: number
+  assigned: number
+  assignments: CollectorAllocation[]
+}

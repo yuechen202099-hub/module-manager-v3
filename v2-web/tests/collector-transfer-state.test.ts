@@ -2,7 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { encodeCode128B } from '../src/features/collectorTransfer/code128.ts'
-import { inventoryResultPresentation } from '../src/features/collectorTransfer/state.ts'
+import {
+  candidateLabel,
+  canReplaceMissing,
+  completionBlockers,
+  inventoryResultPresentation,
+  isCurrentRequest,
+} from '../src/features/collectorTransfer/state.ts'
 
 
 test('same-number physical is confirmed without a website photo or pool admission', () => {
@@ -86,4 +92,43 @@ test('a photographed pool collector transitions to a completed result and next-s
 test('Code 128 B encoding preserves the exact scanned text and checksum', () => {
   assert.deepEqual(encodeCode128B('1234'), [104, 17, 18, 19, 20, 88, 106])
   assert.throws(() => encodeCode128B('采集器'), /Code 128 B/)
+})
+
+test('global terminal helpers label duplicates, protect present completion, and require replacement evidence', () => {
+  assert.equal(candidateLabel({
+    terminal_code: 'T-001',
+    project_name: '城南项目',
+    installation_address: '安装地址',
+    needs_disambiguation: true,
+  }), 'T-001 · 城南项目 · 安装地址')
+  assert.deepEqual(completionBlockers({
+    physical_state: 'present',
+    final_collector_no: 'C-01',
+    collector_barcode: 'C-01',
+    photo: null,
+  }), [])
+  assert.deepEqual(completionBlockers({
+    physical_state: 'missing',
+    final_collector_no: null,
+    collector_barcode: null,
+    photo: null,
+  }), ['该采集器没有实物，需先完成替换'])
+  assert.deepEqual(completionBlockers({
+    physical_state: 'replaced',
+    final_collector_no: 'POOL-01',
+    collector_barcode: 'POOL-01',
+    photo: null,
+  }), ['替换采集器照片缺失'])
+})
+
+test('only an administrator with enough pool stock can replace every missing collector', () => {
+  assert.equal(canReplaceMissing(false, 2, 2), false)
+  assert.equal(canReplaceMissing(true, 1, 2), false)
+  assert.equal(canReplaceMissing(true, 2, 2), true)
+})
+
+test('newer global terminal request sequences reject an older response', () => {
+  const current = 2
+  assert.equal(isCurrentRequest(1, current), false)
+  assert.equal(isCurrentRequest(2, current), true)
 })
