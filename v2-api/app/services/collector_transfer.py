@@ -56,6 +56,10 @@ class CollectorRunBlockedError(ValueError):
     """Allocation was rejected because the run contains blocked terminal evidence."""
 
 
+class CollectorTerminalSourceBlockedError(CollectorRunBlockedError):
+    """A global terminal source cannot produce a valid re-photography snapshot."""
+
+
 class CollectorPhotoConflictError(ValueError):
     """Photo content is already bound to a different physical collector."""
 
@@ -1530,7 +1534,7 @@ class PostgresCollectorTransferService:
             terminal_code=normalized_code,
         )
         if projection.diagnostics:
-            raise CollectorRunBlockedError("terminal source is blocked")
+            raise CollectorTerminalSourceBlockedError("terminal source is blocked")
         current_revision = _projection_source_revision(
             project_id=project.id,
             terminal_code=normalized_code,
@@ -2722,13 +2726,15 @@ class PostgresCollectorTransferService:
         if terminal is None:
             raise KeyError(terminal_id)
         if terminal.status == "blocked":
-            raise CollectorRunBlockedError("终端存在资料阻断，不能执行随机替换")
+            raise CollectorTerminalSourceBlockedError(
+                "终端存在资料阻断，不能执行随机替换"
+            )
         current_projection, current_photos = self._global_terminal_projection(
             project_id=run.project_id,
             terminal_code=terminal.terminal_code,
         )
         if current_projection.diagnostics:
-            raise CollectorRunBlockedError("终端当前来源存在资料阻断")
+            raise CollectorTerminalSourceBlockedError("终端当前来源存在资料阻断")
         current_revision = _projection_source_revision(
             project_id=run.project_id,
             terminal_code=terminal.terminal_code,

@@ -14,8 +14,11 @@ from app.api.routes import collector_transfer as routes
 from app.core import security
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
+    CollectorDirectConflictError,
     CollectorPhotoConflictError,
     CollectorRunBlockedError,
+    CollectorSnapshotChangedError,
+    CollectorTerminalSourceBlockedError,
     PoolInsufficientError,
 )
 
@@ -80,6 +83,54 @@ class FakeCollectorTransferService:
         self.calls.append(("rollback_assignment", assignment_id))
         return {"assignment_id": assignment_id, "status": "rolled_back"}
 
+    def list_global_terminals(self, **payload) -> dict:
+        self.calls.append(("list_global_terminals", payload))
+        return {
+            "items": [
+                {
+                    "terminal_key": "terminal-key-1",
+                    "project_id": "project-1",
+                    "terminal_code": "T-001",
+                    "workflow_state": "ready",
+                }
+            ],
+            "page": payload["page"],
+            "page_size": payload["page_size"],
+            "total": 1,
+        }
+
+    def open_global_terminal(self, **payload) -> dict:
+        self.calls.append(("open_global_terminal", payload))
+        return {
+            "run_id": "run-1",
+            "terminal_id": "terminal-1",
+            "workbench_terminal_id": "terminal-1",
+            "source_changed": False,
+        }
+
+    def global_terminal_detail(self, *, terminal_id: str) -> dict:
+        self.calls.append(("global_terminal_detail", terminal_id))
+        return {"run_id": "run-1", "terminal": {"id": terminal_id}}
+
+    def replace_terminal_missing(self, *, terminal_id: str) -> dict:
+        self.calls.append(("replace_terminal_missing", terminal_id))
+        return {
+            "run_id": "run-1",
+            "terminal_id": terminal_id,
+            "required": 1,
+            "assigned": 1,
+            "assignments": [],
+        }
+
+    def refresh_global_terminal(self, *, terminal_id: str) -> dict:
+        self.calls.append(("refresh_global_terminal", terminal_id))
+        return {
+            "run_id": "run-2",
+            "terminal_id": "terminal-2",
+            "workbench_terminal_id": "terminal-2",
+            "source_changed": False,
+        }
+
     def list_workbench(self, *, run_id: str) -> dict:
         self.calls.append(("list_workbench", run_id))
         return {"run_id": run_id, "terminals": [{"id": "terminal-1", "progress": 50}]}
@@ -137,7 +188,7 @@ def auth_headers(
 def production_client_with_service(
     monkeypatch,
     service: FakeCollectorTransferService,
-) -> tuple[TestClient, dict[str, dict[str, str]], list[tuple[str, str]]]:
+) -> tuple[TestClient, dict[str, dict[str, str]], list[routes.RequestIdentity]]:
     settings = SimpleNamespace(
         app_env="production",
         allowed_origins=["https://example.test"],
@@ -150,7 +201,7 @@ def production_client_with_service(
     )
     monkeypatch.setattr(main_module, "settings", settings)
     monkeypatch.setattr(security, "settings", settings)
-    identities: list[tuple[str, str]] = []
+    identities: list[routes.RequestIdentity] = []
 
     @contextmanager
     def fake_service_for_request(request):
@@ -181,7 +232,9 @@ def test_request_identity_decodes_bearer_claims_and_ignores_team_header() -> Non
 
     identity = routes.request_identity(request)
 
-    assert identity == ("token-team", "constructor-a")
+    assert identity.team_id == "token-team"
+    assert identity.actor == "constructor-a"
+    assert identity.roles == frozenset({"admin"})
     assert request.state.auth["team_id"] == "token-team"
 
 
@@ -616,6 +669,39 @@ def test_mobile_photo_sha_conflict_returns_409_and_removes_new_orphan(monkeypatc
             409,
             "allocation_conflict",
         ),
+        (
+            "global_terminal_detail",
+            ("GET", "/collector-transfer/workbench/terminals/terminal-1", None),
+            CollectorDirectConflictError("direct conflict"),
+            409,
+            "direct_conflict",
+        ),
+        (
+            "replace_terminal_missing",
+            (
+                "POST",
+                "/collector-transfer/workbench/terminals/terminal-1/replace-missing",
+                None,
+            ),
+            CollectorSnapshotChangedError("source changed"),
+            409,
+            "snapshot_changed",
+        ),
+        (
+            "open_global_terminal",
+            (
+                "POST",
+                "/collector-transfer/workbench/terminals/open",
+                {
+                    "terminal_key": "terminal-key-1",
+                    "project_id": "project-1",
+                    "terminal_code": "T-001",
+                },
+            ),
+            CollectorTerminalSourceBlockedError("terminal source is blocked"),
+            409,
+            "terminal_source_blocked",
+        ),
     ],
 )
 def test_service_errors_have_stable_http_contracts(
@@ -681,6 +767,149 @@ def test_failed_service_call_rolls_back_the_request_session(monkeypatch) -> None
     assert session.rollback_count == 1
 
 
+def test_global_terminal_routes_enforce_role_matrix_before_service_mutations(
+    monkeypatch,
+) -> None:
+    """Catches constructors replacing, rolling back, refreshing, or using the legacy allocator."""
+    service = FakeCollectorTransferService()
+    client, headers, _identities = production_client_with_service(monkeypatch, service)
+    open_body = {
+        "terminal_key": "terminal-key-1",
+        "project_id": "11111111-1111-1111-1111-111111111111",
+        "terminal_code": "T-001",
+        "source_revision": "a" * 64,
+    }
+
+    constructor_list = client.get(
+        "/collector-transfer/workbench/terminals",
+        headers=headers["constructor"],
+        params={"query": "T-001", "state": "ready", "page": 2, "page_size": 25},
+    )
+    constructor_open = client.post(
+        "/collector-transfer/workbench/terminals/open",
+        headers=headers["constructor"],
+        json=open_body,
+    )
+    constructor_detail = client.get(
+        "/collector-transfer/workbench/terminals/terminal-1",
+        headers=headers["constructor"],
+    )
+    constructor_complete = client.patch(
+        "/collector-transfer/workbench/items/item-1",
+        headers=headers["constructor"],
+        json={"completed": True},
+    )
+    forbidden_responses = [
+        client.get(
+            "/collector-transfer/workbench/terminals",
+            headers=headers["constructor"],
+            params={"include_blocked": "true"},
+        ),
+        client.post(
+            "/collector-transfer/workbench/terminals/terminal-1/replace-missing",
+            headers=headers["constructor"],
+        ),
+        client.post(
+            "/collector-transfer/workbench/terminals/terminal-1/refresh",
+            headers=headers["constructor"],
+        ),
+        client.post(
+            "/collector-transfer/assignments/assignment-1/rollback",
+            headers=headers["constructor"],
+        ),
+        client.post(
+            "/collector-transfer/runs/run-1/allocate",
+            headers=headers["constructor"],
+        ),
+    ]
+
+    assert constructor_list.status_code == 200
+    assert constructor_open.status_code == 200
+    assert constructor_detail.status_code == 200
+    assert constructor_complete.status_code == 200
+    assert [response.status_code for response in forbidden_responses] == [403] * 5
+    assert all(
+        response.json()["error"]["code"] == "forbidden"
+        for response in forbidden_responses
+    )
+    assert [name for name, _payload in service.calls] == [
+        "list_global_terminals",
+        "open_global_terminal",
+        "global_terminal_detail",
+        "set_workbench_item_status",
+    ]
+
+    administrator_responses = [
+        client.post(
+            "/collector-transfer/workbench/terminals/terminal-1/replace-missing",
+            headers=headers["admin"],
+        ),
+        client.post(
+            "/collector-transfer/workbench/terminals/terminal-1/refresh",
+            headers=headers["admin"],
+        ),
+        client.post(
+            "/collector-transfer/assignments/assignment-1/rollback",
+            headers=headers["admin"],
+        ),
+    ]
+    assert [response.status_code for response in administrator_responses] == [200] * 3
+    assert [name for name, _payload in service.calls[-3:]] == [
+        "replace_terminal_missing",
+        "refresh_global_terminal",
+        "rollback_assignment",
+    ]
+
+
+def test_global_terminal_request_models_reject_invalid_or_spoofed_input(
+    monkeypatch,
+) -> None:
+    """Catches unbounded queries or client-supplied identity fields reaching the service."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+    headers = auth_headers(role="admin")
+    invalid_responses = [
+        client.get(
+            "/collector-transfer/workbench/terminals",
+            headers=headers,
+            params={"state": "unknown"},
+        ),
+        client.get(
+            "/collector-transfer/workbench/terminals",
+            headers=headers,
+            params={"page_size": 101},
+        ),
+        client.post(
+            "/collector-transfer/workbench/terminals/open",
+            headers=headers,
+            json={
+                "terminal_key": "",
+                "project_id": "project-1",
+                "terminal_code": "T-001",
+            },
+        ),
+        client.post(
+            "/collector-transfer/workbench/terminals/open",
+            headers=headers,
+            json={
+                "terminal_key": "terminal-key-1",
+                "project_id": "project-1",
+                "terminal_code": "T-001",
+                "team_id": "spoofed-team",
+                "actor": "spoofed-admin",
+                "roles": ["admin"],
+            },
+        ),
+    ]
+
+    assert [response.status_code for response in invalid_responses] == [422] * 4
+    assert all(
+        response.json()["error"]["code"] == "validation_error"
+        for response in invalid_responses
+    )
+    assert service.calls == []
+
+
 def test_production_roles_and_token_identity_protect_collector_transfer(monkeypatch) -> None:
     """Catches trusting spoofed team headers or allowing constructors to run admin-only actions."""
     service = FakeCollectorTransferService()
@@ -726,7 +955,11 @@ def test_production_roles_and_token_identity_protect_collector_transfer(monkeypa
     assert constructor_scan.status_code == 200
     assert constructor_read.status_code == 200
     assert constructor_workbench_update.status_code == 200
-    assert identities[0] == ("token-team", "constructor-a")
+    assert identities[0] == routes.RequestIdentity(
+        "token-team",
+        "constructor-a",
+        frozenset({"constructor"}),
+    )
     assert admin_allocate.status_code == 409
     assert admin_allocate.json()["error"]["code"] == "pool_insufficient"
 

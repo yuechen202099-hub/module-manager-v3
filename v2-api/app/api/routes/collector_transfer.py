@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from typing import Iterator, Literal
+from typing import Literal, NamedTuple
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -14,9 +15,12 @@ from app.database import SessionLocal
 from app.models import CollectorPhoto, Project
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
+    CollectorDirectConflictError,
     CollectorPhotoConflictError,
     CollectorRunBlockedError,
     CollectorScanProvenanceError,
+    CollectorSnapshotChangedError,
+    CollectorTerminalSourceBlockedError,
     CollectorWorkbenchIncompleteError,
     PoolInsufficientError,
     normalize_identifier,
@@ -47,7 +51,39 @@ class WorkbenchItemStatusRequest(BaseModel):
     completed: bool
 
 
-def request_identity(request: Request) -> tuple[str, str]:
+class OpenGlobalTerminalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    terminal_key: str = Field(min_length=1, max_length=2048)
+    project_id: str = Field(min_length=1, max_length=64)
+    terminal_code: str = Field(min_length=1, max_length=255)
+    source_revision: str = Field(default="", max_length=64)
+
+
+class RequestIdentity(NamedTuple):
+    team_id: str
+    actor: str
+    roles: frozenset[str]
+
+
+def roles_from_payload(payload: Mapping[str, object]) -> frozenset[str]:
+    values: list[object] = [payload.get("role")]
+    raw_roles = payload.get("roles")
+    if isinstance(raw_roles, (list, tuple, set, frozenset)):
+        values.extend(raw_roles)
+    elif raw_roles is not None:
+        values.append(raw_roles)
+    return frozenset(
+        role
+        for role in (
+            normalize_identifier(value).lower()
+            for value in values
+        )
+        if role
+    )
+
+
+def request_identity(request: Request) -> RequestIdentity:
     payload = getattr(request.state, "auth", None) or {}
     if not payload:
         authorization = normalize_identifier(request.headers.get("Authorization"))
@@ -62,23 +98,45 @@ def request_identity(request: Request) -> tuple[str, str]:
     actor = normalize_identifier(payload.get("username") or payload.get("sub"))
     if not team_id or not actor:
         raise HTTPException(status_code=401, detail="Authenticated team and actor are required")
-    return team_id, actor
+    return RequestIdentity(team_id, actor, roles_from_payload(payload))
+
+
+class CollectorForbiddenError(ValueError):
+    """An authenticated user lacks the administrator role for a mutation."""
+
+
+def require_admin(request: Request) -> RequestIdentity:
+    identity = request_identity(request)
+    if "admin" not in identity.roles:
+        raise CollectorForbiddenError("administrator role is required")
+    return identity
 
 
 @contextmanager
 def service_for_request(request: Request) -> Iterator[object]:
     from app.services.collector_transfer import PostgresCollectorTransferService
 
-    team_id, actor = request_identity(request)
+    identity = request_identity(request)
     with SessionLocal() as session:
         try:
-            yield PostgresCollectorTransferService(session=session, team_id=team_id, actor=actor)
+            yield PostgresCollectorTransferService(
+                session=session,
+                team_id=identity.team_id,
+                actor=identity.actor,
+            )
         except BaseException:
             session.rollback()
             raise
 
 
 def service_error_response(request: Request, exc: Exception):
+    if isinstance(exc, CollectorForbiddenError):
+        return error_response(
+            request,
+            code="forbidden",
+            message="仅管理员可以执行该操作。",
+            status_code=403,
+        )
     if isinstance(exc, PoolInsufficientError):
         return error_response(
             request,
@@ -92,6 +150,27 @@ def service_error_response(request: Request, exc: Exception):
             request,
             code="allocation_conflict",
             message="采集器或需求已被其他分配占用，本次操作已回滚。",
+            status_code=409,
+        )
+    if isinstance(exc, CollectorDirectConflictError):
+        return error_response(
+            request,
+            code="direct_conflict",
+            message="同号实物已被另一个有效终端占用。",
+            status_code=409,
+        )
+    if isinstance(exc, CollectorSnapshotChangedError):
+        return error_response(
+            request,
+            code="snapshot_changed",
+            message="终端来源或快照进度已变化，请刷新后重试。",
+            status_code=409,
+        )
+    if isinstance(exc, CollectorTerminalSourceBlockedError):
+        return error_response(
+            request,
+            code="terminal_source_blocked",
+            message="终端来源资料不满足翻拍要求。",
             status_code=409,
         )
     if isinstance(exc, CollectorRunBlockedError):
@@ -146,13 +225,21 @@ def call_service(request: Request, operation):
         return service_error_response(request, exc)
     return ok(request, result)
 
+
+def call_admin_service(request: Request, operation):
+    try:
+        require_admin(request)
+    except CollectorForbiddenError as exc:
+        return service_error_response(request, exc)
+    return call_service(request, operation)
+
 @router.get("/projects")
 def list_transfer_projects(request: Request):
-    team_id, _actor = request_identity(request)
+    identity = request_identity(request)
     with SessionLocal() as session:
         projects = session.scalars(
             select(Project)
-            .where(Project.team_id == team_id, Project.status == "active")
+            .where(Project.team_id == identity.team_id, Project.status == "active")
             .order_by(Project.created_at, Project.id)
         ).all()
     return ok(
@@ -172,6 +259,7 @@ def list_transfer_projects(request: Request):
 
 
 InventoryStatus = Literal["direct", "available", "reserved", "used", "awaiting_photo"]
+GlobalTerminalState = Literal["ready", "needs_replacement", "pool_shortage", "blocked"]
 
 
 def saved_image_is_registered(
@@ -260,12 +348,81 @@ def list_inventory(
 
 @router.post("/runs/{run_id}/allocate")
 def allocate_collectors(run_id: str, request: Request):
-    return call_service(request, lambda service: service.allocate(run_id=run_id))
+    return call_admin_service(
+        request,
+        lambda service: service.allocate(run_id=run_id),
+    )
 
 
 @router.post("/assignments/{assignment_id}/rollback")
 def rollback_assignment(assignment_id: str, request: Request):
-    return call_service(request, lambda service: service.rollback_assignment(assignment_id=assignment_id))
+    return call_admin_service(
+        request,
+        lambda service: service.rollback_assignment(assignment_id=assignment_id),
+    )
+
+
+@router.get("/workbench/terminals")
+def list_global_terminals(
+    request: Request,
+    query: str = Query(default="", max_length=255),
+    state: GlobalTerminalState | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    include_blocked: bool = Query(default=False),
+):
+    if include_blocked:
+        try:
+            require_admin(request)
+        except CollectorForbiddenError as exc:
+            return service_error_response(request, exc)
+    return call_service(
+        request,
+        lambda service: service.list_global_terminals(
+            query=query,
+            state=state,
+            page=page,
+            page_size=page_size,
+            include_blocked=include_blocked,
+        ),
+    )
+
+
+@router.post("/workbench/terminals/open")
+def open_global_terminal(payload: OpenGlobalTerminalRequest, request: Request):
+    return call_service(
+        request,
+        lambda service: service.open_global_terminal(
+            project_id=payload.project_id,
+            terminal_code=payload.terminal_code,
+            source_revision=payload.source_revision,
+            terminal_key_value=payload.terminal_key,
+        ),
+    )
+
+
+@router.get("/workbench/terminals/{terminal_id}")
+def global_terminal_detail(terminal_id: str, request: Request):
+    return call_service(
+        request,
+        lambda service: service.global_terminal_detail(terminal_id=terminal_id),
+    )
+
+
+@router.post("/workbench/terminals/{terminal_id}/replace-missing")
+def replace_terminal_missing(terminal_id: str, request: Request):
+    return call_admin_service(
+        request,
+        lambda service: service.replace_terminal_missing(terminal_id=terminal_id),
+    )
+
+
+@router.post("/workbench/terminals/{terminal_id}/refresh")
+def refresh_global_terminal(terminal_id: str, request: Request):
+    return call_admin_service(
+        request,
+        lambda service: service.refresh_global_terminal(terminal_id=terminal_id),
+    )
 
 
 @router.get("/runs/{run_id}/workbench")
@@ -299,7 +456,7 @@ async def register_inventory(
     collector_no: str = Form(min_length=1, max_length=255),
     file: UploadFile = File(...),
 ):
-    team_id, _actor = request_identity(request)
+    identity = request_identity(request)
     submitted_fields = set((await request.form()).keys())
     unexpected_fields = sorted(submitted_fields - {"project_id", "collector_no", "file"})
     if unexpected_fields:
@@ -324,7 +481,7 @@ async def register_inventory(
             filename=filename,
             content=content,
             content_type=file.content_type or "",
-            team_id=team_id,
+            team_id=identity.team_id,
             group_id=normalized_project_id,
             key_hint=f"{normalized_collector_no}-{normalized_project_id}",
             cleanup_safe=True,
@@ -342,20 +499,20 @@ async def register_inventory(
             )
     except (KeyError, ValueError) as exc:
         cleanup_unregistered_saved_images(
-            team_id=team_id,
+            team_id=identity.team_id,
             project_id=normalized_project_id,
             saved_objects=[stored],
         )
         return service_error_response(request, exc)
     except Exception:
         cleanup_unregistered_saved_images(
-            team_id=team_id,
+            team_id=identity.team_id,
             project_id=normalized_project_id,
             saved_objects=[stored],
         )
         raise
     cleanup_unregistered_saved_images(
-        team_id=team_id,
+        team_id=identity.team_id,
         project_id=normalized_project_id,
         saved_objects=[stored],
     )
