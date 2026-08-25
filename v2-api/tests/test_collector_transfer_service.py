@@ -40,6 +40,7 @@ from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorPhotoConflictError,
     PostgresCollectorTransferService,
+    _photo_snapshot,
     meter_sources_from_groups,
 )
 
@@ -769,6 +770,182 @@ def test_projection_preserves_a_blank_terminal_group_in_its_own_blocked_snapshot
     }
 
 
+def test_project_meter_projection_preserves_full_orm_parity_without_loading_source_entities(
+    db_session: Session,
+) -> None:
+    """Catches selected-column projection changing precedence/snapshots or hydrating source ORM rows."""
+    current_project_id = project_id(db_session)
+    blank_group = MaterialGroup(
+        id=UUID("a0000000-0000-0000-0000-000000000001"),
+        team_id="team-1",
+        project_id=current_project_id,
+        terminal=" ",
+        meter_match_key="PROJECTION-BLANK",
+        display_meter_no="",
+        installation_address="空终端地址",
+        raw_data={"collector": "RAW-COLLECTOR", "module_asset_no": "RAW-MODULE"},
+    )
+    photographed_group = MaterialGroup(
+        id=UUID("a0000000-0000-0000-0000-000000000002"),
+        team_id="team-1",
+        project_id=current_project_id,
+        terminal="T-002",
+        meter_match_key="PROJECTION-PHOTO",
+        display_meter_no="M-002",
+        installation_address="照片优先地址",
+        raw_data={"collector": "RAW-SHOULD-LOSE"},
+    )
+    missing_group = MaterialGroup(
+        id=UUID("a0000000-0000-0000-0000-000000000003"),
+        team_id="team-1",
+        project_id=current_project_id,
+        terminal="T-003",
+        meter_match_key="PROJECTION-MISSING",
+        display_meter_no="M-003",
+        installation_address="诊断地址",
+        raw_data={},
+    )
+    local_module = Photo(
+        id=UUID("b0000000-0000-0000-0000-000000000001"),
+        team_id="team-1",
+        group_id=blank_group.id,
+        sha256="1" * 64,
+        object_key="source/local-module.jpg",
+        image_url="/source/local-module.jpg",
+        storage_type="local_upload",
+        storage_key="source/local-module.jpg",
+        content_type="image/jpeg",
+        category="module_meter",
+        collector=" ",
+        asset_no=" ",
+        sort_order=0,
+        is_active=True,
+    )
+    local_after = Photo(
+        id=UUID("b0000000-0000-0000-0000-000000000002"),
+        team_id="team-1",
+        group_id=blank_group.id,
+        sha256="2" * 64,
+        object_key="source/local-after.jpg",
+        image_url="/source/local-after.jpg",
+        category="after_box",
+        collector="",
+        sort_order=1,
+        is_active=True,
+    )
+    inactive = Photo(
+        id=UUID("b0000000-0000-0000-0000-000000000003"),
+        team_id="team-1",
+        group_id=blank_group.id,
+        sha256="3" * 64,
+        object_key="source/inactive.jpg",
+        category="before_box",
+        collector="INACTIVE-MUST-NOT-WIN",
+        sort_order=-1,
+        is_active=False,
+    )
+    oss_module = Photo(
+        id=UUID("b0000000-0000-0000-0000-000000000004"),
+        team_id="team-1",
+        group_id=photographed_group.id,
+        sha256="4" * 64,
+        object_key="source/oss-module.jpg",
+        storage_type="oss",
+        storage_bucket="evidence-bucket",
+        storage_key="project/oss-module.jpg",
+        content_type="image/jpeg",
+        category="module_meter",
+        collector="",
+        asset_no="MODULE-PHOTO",
+        sort_order=0,
+        is_active=True,
+    )
+    oss_after = Photo(
+        id=UUID("b0000000-0000-0000-0000-000000000005"),
+        team_id="team-1",
+        group_id=photographed_group.id,
+        sha256="5" * 64,
+        object_key="source/oss-after.jpg",
+        storage_type="oss",
+        storage_bucket="evidence-bucket",
+        storage_key="project/oss-after.jpg",
+        category="after_box",
+        collector="PHOTO-COLLECTOR",
+        sort_order=1,
+        is_active=True,
+    )
+    reference_groups = (blank_group, photographed_group, missing_group)
+    reference_photos = (local_module, local_after, inactive, oss_module, oss_after)
+    db_session.add_all((*reference_groups, *reference_photos))
+    db_session.commit()
+    expected_projection = meter_sources_from_groups(reference_groups, reference_photos)
+    expected_snapshots = {
+        str(local_module.id): {
+            "id": str(local_module.id),
+            "image_url": "/source/local-module.jpg",
+            "object_key": "source/local-module.jpg",
+            "storage_type": "local_upload",
+            "storage_key": "source/local-module.jpg",
+            "storage_bucket": "",
+            "sha256": "1" * 64,
+            "content_type": "image/jpeg",
+        },
+        str(oss_module.id): {
+            "id": str(oss_module.id),
+            "image_url": "",
+            "object_key": "source/oss-module.jpg",
+            "storage_type": "oss",
+            "storage_key": "project/oss-module.jpg",
+            "storage_bucket": "evidence-bucket",
+            "sha256": "4" * 64,
+            "content_type": "image/jpeg",
+        },
+    }
+    loaded_source_entities: list[object] = []
+    recorded_selects: list[str] = []
+
+    def record_loaded(_session: Session, instance: object) -> None:
+        if isinstance(instance, (MaterialGroup, Photo)):
+            loaded_source_entities.append(instance)
+
+    def record_sql(_connection, _cursor, statement, _parameters, _context, _executemany) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            recorded_selects.append(statement)
+
+    with Session(db_session.bind) as projection_session:
+        event.listen(projection_session, "loaded_as_persistent", record_loaded)
+        event.listen(db_session.bind, "before_cursor_execute", record_sql)
+        try:
+            projection, photos = service(projection_session)._project_meter_projection(current_project_id)
+        finally:
+            event.remove(db_session.bind, "before_cursor_execute", record_sql)
+            event.remove(projection_session, "loaded_as_persistent", record_loaded)
+
+    source_selects = [
+        statement
+        for statement in recorded_selects
+        if "FROM MATERIAL_GROUPS" in statement.upper() or "FROM PHOTOS" in statement.upper()
+    ]
+    assert projection == expected_projection
+    assert projection.diagnostics == (
+        {"group_id": str(blank_group.id), "code": "terminal_missing", "message": "终端地址码为空"},
+        {"group_id": str(blank_group.id), "code": "meter_missing", "message": "meter_missing"},
+        {"group_id": str(missing_group.id), "code": "collector_missing", "message": "collector_missing"},
+        {"group_id": str(missing_group.id), "code": "module_missing", "message": "module_missing"},
+        {"group_id": str(missing_group.id), "code": "module_meter_photo_missing", "message": "module_meter_photo_missing"},
+        {"group_id": str(missing_group.id), "code": "after_box_photo_missing", "message": "after_box_photo_missing"},
+    )
+    photos_by_id = {str(photo.id): photo for photo in photos}
+    assert _photo_snapshot(photos_by_id[str(local_module.id)]) == expected_snapshots[str(local_module.id)]
+    assert _photo_snapshot(photos_by_id[str(oss_module.id)]) == expected_snapshots[str(oss_module.id)]
+    assert loaded_source_entities == []
+    assert len(source_selects) == 2
+    assert "ORDER BY MATERIAL_GROUPS.TERMINAL, MATERIAL_GROUPS.DISPLAY_METER_NO, MATERIAL_GROUPS.ID" in source_selects[0].upper()
+    assert "JOIN MATERIAL_GROUPS ON PHOTOS.GROUP_ID = MATERIAL_GROUPS.ID" in source_selects[1].upper()
+    assert "ORDER BY PHOTOS.GROUP_ID, PHOTOS.SORT_ORDER, PHOTOS.ID" in source_selects[1].upper()
+    assert not any("GROUP_ID IN (" in statement.upper() for statement in source_selects)
+
+
 class _EmptyScalarResult:
     def all(self) -> list[object]:
         return []
@@ -1061,6 +1238,166 @@ def test_create_run_binds_photographed_same_project_direct_inventory(
     assert db_session.scalar(select(func.count(CollectorWorkbenchItem.id))) == 2
     assert created["direct_match_count"] == 1
     assert created["assignment_count"] == 1
+
+
+def test_create_run_scale_preserves_multiterminal_snapshots_requirements_and_direct_binding(
+    db_session: Session,
+) -> None:
+    """Catches the streamed source path changing run rows, deduplication, snapshots, workbench, or direct binding."""
+    current_project_id = project_id(db_session)
+
+    def add_complete_group(
+        *,
+        terminal: str,
+        meter_no: str,
+        collector_no: str,
+        storage_prefix: str,
+    ) -> tuple[MaterialGroup, Photo, Photo]:
+        group = MaterialGroup(
+            id=uuid4(),
+            team_id="team-1",
+            project_id=current_project_id,
+            terminal=terminal,
+            meter_match_key=f"KEY-{meter_no}",
+            display_meter_no=meter_no,
+            installation_address=f"地址-{terminal}",
+            raw_data={"collector": collector_no},
+        )
+        module = Photo(
+            id=uuid4(),
+            team_id="team-1",
+            group_id=group.id,
+            sha256=uuid4().hex * 2,
+            object_key=f"{storage_prefix}/module.jpg",
+            image_url=f"/{storage_prefix}/module.jpg",
+            storage_type="oss",
+            storage_bucket="run-snapshot-bucket",
+            storage_key=f"{storage_prefix}/module.jpg",
+            content_type="image/jpeg",
+            category="module_meter",
+            collector=collector_no,
+            asset_no=f"MODULE-{meter_no}",
+            sort_order=0,
+            is_active=True,
+        )
+        after = Photo(
+            id=uuid4(),
+            team_id="team-1",
+            group_id=group.id,
+            sha256=uuid4().hex * 2,
+            object_key=f"{storage_prefix}/after.jpg",
+            image_url=f"/{storage_prefix}/after.jpg",
+            storage_type="local_upload",
+            storage_key=f"{storage_prefix}/after.jpg",
+            content_type="image/jpeg",
+            category="after_box",
+            collector=collector_no,
+            sort_order=1,
+            is_active=True,
+        )
+        db_session.add_all((group, module, after))
+        return group, module, after
+
+    first, first_module, first_after = add_complete_group(
+        terminal="T-SHARED",
+        meter_no="M-001",
+        collector_no="C-SHARED",
+        storage_prefix="run-scale/first",
+    )
+    second, _second_module, _second_after = add_complete_group(
+        terminal="T-SHARED",
+        meter_no="M-002",
+        collector_no="C-SHARED",
+        storage_prefix="run-scale/second",
+    )
+    direct_group, _direct_module, _direct_after = add_complete_group(
+        terminal="T-DIRECT",
+        meter_no="M-003",
+        collector_no="C-DIRECT",
+        storage_prefix="run-scale/direct",
+    )
+    direct = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=current_project_id,
+        collector_no="C-DIRECT",
+        pool_status="direct",
+    )
+    db_session.add(direct)
+    db_session.commit()
+    direct_photo = collector_photo(db_session, direct, sha256="d0" * 32)
+
+    created = service(db_session).create_run(project_id=str(current_project_id), name="规模路径一致性")
+    run_id = UUID(str(created["id"]))
+    requirements = db_session.scalars(
+        select(CollectorRequirement).where(CollectorRequirement.run_id == run_id)
+    ).all()
+    meter_items = db_session.scalars(
+        select(CollectorMeterItem).where(CollectorMeterItem.run_id == run_id)
+    ).all()
+    assignments = db_session.scalars(
+        select(CollectorAssignment).where(CollectorAssignment.run_id == run_id)
+    ).all()
+
+    assert {key: created[key] for key in (
+        "terminal_count",
+        "meter_count",
+        "collector_requirement_count",
+        "blocked_terminal_count",
+        "direct_match_count",
+        "assignment_count",
+    )} == {
+        "terminal_count": 2,
+        "meter_count": 3,
+        "collector_requirement_count": 2,
+        "blocked_terminal_count": 0,
+        "direct_match_count": 1,
+        "assignment_count": 1,
+    }
+    assert sorted(requirement.original_collector_no for requirement in requirements) == [
+        "C-DIRECT",
+        "C-SHARED",
+    ]
+    assert len(meter_items) == 3
+    assert {item.source_group_id for item in meter_items} == {first.id, second.id, direct_group.id}
+    assert db_session.scalar(
+        select(func.count(CollectorWorkbenchItem.id)).where(CollectorWorkbenchItem.run_id == run_id)
+    ) == 4
+    assert len(assignments) == 1
+    assert assignments[0].physical_collector_id == direct.id
+    assert assignments[0].collector_photo_id == direct_photo.id
+    assert assignments[0].assignment_mode == "direct"
+
+    first_item = next(item for item in meter_items if item.source_group_id == first.id)
+    expected_module_snapshot = {
+        "id": str(first_module.id),
+        "image_url": "/run-scale/first/module.jpg",
+        "object_key": "run-scale/first/module.jpg",
+        "storage_type": "oss",
+        "storage_key": "run-scale/first/module.jpg",
+        "storage_bucket": "run-snapshot-bucket",
+        "sha256": first_module.sha256,
+        "content_type": "image/jpeg",
+    }
+    expected_after_snapshot = {
+        "id": str(first_after.id),
+        "image_url": "/run-scale/first/after.jpg",
+        "object_key": "run-scale/first/after.jpg",
+        "storage_type": "local_upload",
+        "storage_key": "run-scale/first/after.jpg",
+        "storage_bucket": "",
+        "sha256": first_after.sha256,
+        "content_type": "image/jpeg",
+    }
+    assert first_item.module_meter_photo_snapshot == expected_module_snapshot
+    assert first_item.after_box_photo_snapshot == expected_after_snapshot
+
+    first_module.storage_key = "mutated/module.jpg"
+    first_after.storage_key = "mutated/after.jpg"
+    db_session.commit()
+    db_session.expire(first_item)
+    assert first_item.module_meter_photo_snapshot == expected_module_snapshot
+    assert first_item.after_box_photo_snapshot == expected_after_snapshot
 
 
 def test_create_run_keeps_same_number_without_photo_out_of_random_allocation(

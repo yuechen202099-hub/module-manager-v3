@@ -109,6 +109,33 @@ class MeterSourceProjection:
     diagnostics: tuple[dict[str, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _ProjectGroupRow:
+    id: UUID
+    terminal: str | None
+    display_meter_no: str
+    installation_address: str
+    raw_data: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectPhotoRow:
+    id: UUID
+    group_id: UUID
+    collector: str | None
+    asset_no: str | None
+    category: str | None
+    sort_order: int
+    is_active: bool
+    image_url: str | None
+    object_key: str
+    storage_type: str | None
+    storage_key: str | None
+    storage_bucket: str | None
+    sha256: str
+    content_type: str | None
+
+
 def _raw_value(raw_data: object, *keys: str) -> str:
     if not isinstance(raw_data, Mapping):
         return ""
@@ -205,7 +232,7 @@ def _photo_value(photo: object, field: str) -> object:
     return getattr(photo, field, "")
 
 
-def _photo_snapshot(photo: Photo | None) -> dict[str, object]:
+def _photo_snapshot(photo: Photo | _ProjectPhotoRow | None) -> dict[str, object]:
     if photo is None:
         return {}
     return {
@@ -295,33 +322,57 @@ class PostgresCollectorTransferService:
     def _project_meter_projection(
         self,
         project_id: UUID,
-    ) -> tuple[MeterSourceProjection, list[Photo]]:
-        groups = list(
-            self.session.scalars(
-                select(MaterialGroup)
-                .where(
-                    MaterialGroup.project_id == project_id,
-                    MaterialGroup.team_id == self.team_id,
-                )
-                .order_by(MaterialGroup.terminal, MaterialGroup.display_meter_no, MaterialGroup.id)
-            ).all()
-        )
-        group_ids = [group.id for group in groups]
-        photos = (
-            list(
-                self.session.scalars(
-                    select(Photo)
-                    .where(
-                        Photo.team_id == self.team_id,
-                        Photo.group_id.in_(group_ids),
-                        Photo.is_active.is_(True),
-                    )
-                    .order_by(Photo.group_id, Photo.sort_order, Photo.id)
-                ).all()
+    ) -> tuple[MeterSourceProjection, list[_ProjectPhotoRow]]:
+        group_statement = (
+            select(
+                MaterialGroup.id,
+                MaterialGroup.terminal,
+                MaterialGroup.display_meter_no,
+                MaterialGroup.installation_address,
+                MaterialGroup.raw_data,
             )
-            if group_ids
-            else []
+            .where(
+                MaterialGroup.project_id == project_id,
+                MaterialGroup.team_id == self.team_id,
+            )
+            .order_by(MaterialGroup.terminal, MaterialGroup.display_meter_no, MaterialGroup.id)
+            .execution_options(yield_per=1_000)
         )
+        groups = [
+            _ProjectGroupRow(*row)
+            for row in self.session.execute(group_statement).tuples()
+        ]
+        photo_statement = (
+            select(
+                Photo.id,
+                Photo.group_id,
+                Photo.collector,
+                Photo.asset_no,
+                Photo.category,
+                Photo.sort_order,
+                Photo.is_active,
+                Photo.image_url,
+                Photo.object_key,
+                Photo.storage_type,
+                Photo.storage_key,
+                Photo.storage_bucket,
+                Photo.sha256,
+                Photo.content_type,
+            )
+            .join(MaterialGroup, Photo.group_id == MaterialGroup.id)
+            .where(
+                MaterialGroup.team_id == self.team_id,
+                MaterialGroup.project_id == project_id,
+                Photo.team_id == self.team_id,
+                Photo.is_active.is_(True),
+            )
+            .order_by(Photo.group_id, Photo.sort_order, Photo.id)
+            .execution_options(yield_per=1_000)
+        )
+        photos = [
+            _ProjectPhotoRow(*row)
+            for row in self.session.execute(photo_statement).tuples()
+        ]
         return meter_sources_from_groups(groups, photos), photos
 
     def _project_has_collector_number(self, project_id: UUID, collector_no: str) -> bool:

@@ -71,7 +71,7 @@ def production_scale_database(tmp_path_factory):
             batch_end = min(batch_start + 1_000, PRODUCTION_GROUP_COUNT)
             rows = []
             for index in range(batch_start, batch_end):
-                group_id = uuid4()
+                group_id = UUID(int=(0xA << 124) | index)
                 group_ids.append(group_id)
                 rows.append(
                     {
@@ -92,7 +92,7 @@ def production_scale_database(tmp_path_factory):
                 Photo.__table__.insert(),
                 [
                     {
-                        "id": uuid4(),
+                        "id": UUID(int=(0xB << 124) | index),
                         "team_id": "team-1",
                         "group_id": group_ids[index],
                         "sha256": f"{index:064x}",
@@ -166,6 +166,53 @@ def test_project_collector_lookup_is_bounded_at_production_cardinality(
         for statement in recorded_selects
     )
     assert peak - baseline_current < 64 * 1024 * 1024
+
+
+def test_project_meter_projection_streams_selected_columns_at_production_cardinality(
+    production_scale_database,
+) -> None:
+    """Catches run projection hydrating source ORM rows, generating an ID IN-list, or exceeding its memory gate."""
+    engine, session_factory, project_id = production_scale_database
+    loaded_source_entities: list[object] = []
+    recorded_selects: list[str] = []
+
+    with session_factory() as session:
+        def record_loaded(_session: Session, instance: object) -> None:
+            if isinstance(instance, (MaterialGroup, Photo)):
+                loaded_source_entities.append(instance)
+
+        def record_sql(_connection, _cursor, statement, _parameters, _context, _executemany) -> None:
+            if statement.lstrip().upper().startswith("SELECT"):
+                recorded_selects.append(statement)
+
+        event.listen(session, "loaded_as_persistent", record_loaded)
+        event.listen(engine, "before_cursor_execute", record_sql)
+        gc.collect()
+        tracemalloc.start()
+        baseline_current, _ = tracemalloc.get_traced_memory()
+        try:
+            projection, _photos = PostgresCollectorTransferService(
+                session=session,
+                team_id="team-1",
+                actor="scale-test",
+            )._project_meter_projection(project_id)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+            event.remove(engine, "before_cursor_execute", record_sql)
+            event.remove(session, "loaded_as_persistent", record_loaded)
+
+    source_selects = [
+        statement
+        for statement in recorded_selects
+        if "FROM MATERIAL_GROUPS" in statement.upper() or "FROM PHOTOS" in statement.upper()
+    ]
+    assert len(projection.sources) == PRODUCTION_GROUP_COUNT
+    assert len(_photos) == PRODUCTION_PHOTO_COUNT
+    assert loaded_source_entities == []
+    assert len(source_selects) <= 2
+    assert not any("GROUP_ID IN (" in statement.upper() for statement in source_selects)
+    assert peak - baseline_current < 256 * 1024 * 1024
 
 
 @pytest.mark.parametrize(
