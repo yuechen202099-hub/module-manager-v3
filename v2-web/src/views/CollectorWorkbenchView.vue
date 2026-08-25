@@ -18,6 +18,7 @@ import { useAuthStore } from '@/stores/auth'
 const auth = useAuthStore()
 const candidates = ref<GlobalCollectorTerminalCandidate[]>([])
 const selectedKey = ref('')
+const terminalInput = ref('')
 const detail = ref<GlobalCollectorTerminalDetail | null>(null)
 const activeIndex = ref(0)
 const loading = ref(false)
@@ -80,7 +81,7 @@ async function loadCandidates(query = '') {
 }
 function searchCandidates(event: Event) {
   const value = (event.target as HTMLInputElement).value
-  const direct = candidates.value.find((candidate) => candidate.terminal_key === value)
+  const direct = candidates.value.find((candidate) => candidateLabel(candidate) === value || candidate.terminal_key === value)
   if (direct) {
     if (searchTimer) window.clearTimeout(searchTimer)
     searchTimer = 0
@@ -106,7 +107,8 @@ async function openCandidate(candidate: GlobalCollectorTerminalCandidate) {
     if (!isCurrentRequest(sequence, selectionRequest)) return
     const loaded = await fetchGlobalCollectorTerminal(opened.workbench_terminal_id)
     if (!isCurrentRequest(sequence, selectionRequest)) return
-    selectedKey.value = candidate.terminal_key
+    if (selectedKey.value !== candidate.terminal_key) selectedKey.value = candidate.terminal_key
+    terminalInput.value = candidateLabel(candidate)
     detail.value = loaded
     activeIndex.value = 0
   } catch (error) {
@@ -195,7 +197,7 @@ function handleKeydown(event: KeyboardEvent) {
 <template>
   <main class="collector-workbench" :aria-busy="loading">
     <header class="page-heading"><div><h1>甲方平台翻拍工作台</h1><p>按全局终端打开隐藏快照，掌机直接对屏翻拍。</p></div><p>本页仅辅助人工翻拍与人工录入，不会登录或自动上传甲方平台。</p></header>
-    <label class="terminal-picker"><span>选择可翻拍终端</span><input v-model="selectedKey" list="collector-terminal-candidates" aria-label="选择可翻拍终端" placeholder="输入终端号或安装地址" @input="searchCandidates" /><datalist id="collector-terminal-candidates"><option v-for="candidate in candidates" :key="candidate.terminal_key" :value="candidate.terminal_key">{{ candidateLabel(candidate) }} · 表 {{ candidate.meter_count }} · 采集器 {{ candidate.collector_count }} · {{ stateLabel(candidate) }}</option></datalist></label>
+    <label class="terminal-picker"><span>选择可翻拍终端</span><input v-model="terminalInput" list="collector-terminal-candidates" aria-label="选择可翻拍终端" placeholder="输入终端号或安装地址" @input="searchCandidates" /><datalist id="collector-terminal-candidates"><option v-for="candidate in candidates" :key="candidate.terminal_key" :value="candidateLabel(candidate)">表 {{ candidate.meter_count }} · 采集器 {{ candidate.collector_count }} · {{ stateLabel(candidate) }}</option></datalist></label>
     <aside v-if="errorMessage" role="alert" class="recoverable-error">{{ errorMessage }} <button type="button" data-testid="retry-error" @click="retryAction?.()">重试</button></aside>
     <section v-if="detail" class="workspace">
       <header><strong>{{ detail.terminal.terminal_code }} · {{ detail.terminal.installation_address }}</strong><span>完成 {{ detail.completed_count }} / {{ detail.total_count }}</span></header>

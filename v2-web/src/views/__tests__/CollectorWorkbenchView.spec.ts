@@ -55,6 +55,67 @@ describe('global collector workbench', () => {
     wrapper.unmount()
   })
 
+  it('shows the readable terminal and address label after the initial candidate opens', async () => {
+    const wrapper = await mountWorkbench()
+    const picker = wrapper.get<HTMLInputElement>('[aria-label="选择可翻拍终端"]')
+    const options = wrapper.findAll<HTMLDataListElement>('#collector-terminal-candidates option')
+
+    expect(picker.element.value).toBe('T-001 · 安装地址')
+    expect(picker.element.value).not.toContain('opaque-key')
+    expect(options.map((option) => option.attributes('value'))).toEqual(['T-001 · 安装地址'])
+    expect(options[0].attributes('value')).not.toContain('城南项目')
+    wrapper.unmount()
+  })
+
+  it('selects a duplicate terminal by its readable project label while opening the opaque candidate identity', async () => {
+    const duplicate = candidate({
+      terminal_key: 'duplicate-opaque-key',
+      project_id: 'project-2',
+      project_name: '城北项目',
+      terminal_code: 'T-001',
+      installation_address: '北路 2 号',
+      needs_disambiguation: true,
+      source_revision: 'revision-2',
+    })
+    serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValue(page([candidate(), duplicate]))
+    const wrapper = await mountWorkbench()
+    const picker = wrapper.get<HTMLInputElement>('[aria-label="选择可翻拍终端"]')
+
+    expect(wrapper.findAll('#collector-terminal-candidates option').map((option) => option.attributes('value'))).toEqual([
+      'T-001 · 安装地址',
+      'T-001 · 城北项目 · 北路 2 号',
+    ])
+    await picker.setValue('T-001 · 城北项目 · 北路 2 号')
+    await flushPromises()
+
+    expect(picker.element.value).toBe('T-001 · 城北项目 · 北路 2 号')
+    expect(picker.element.value).not.toContain('duplicate-opaque-key')
+    expect(serviceMocks.openGlobalCollectorTerminal).toHaveBeenLastCalledWith({
+      terminal_key: 'duplicate-opaque-key',
+      project_id: 'project-2',
+      terminal_code: 'T-001',
+      source_revision: 'revision-2',
+    })
+    wrapper.unmount()
+  })
+
+  it('keeps the readable selected value at the 390x844 viewport', async () => {
+    const originalWidth = window.innerWidth
+    const originalHeight = window.innerHeight
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 })
+    try {
+      const wrapper = await mountWorkbench()
+      const picker = wrapper.get<HTMLInputElement>('[aria-label="选择可翻拍终端"]')
+      expect(picker.element.value).toBe('T-001 · 安装地址')
+      expect(picker.element.value).not.toContain('opaque-key')
+      wrapper.unmount()
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight })
+    }
+  })
+
   it('renders present, missing, and replaced collector contracts without a camera', async () => {
     const wrapper = await mountWorkbench()
     expect(wrapper.text()).toContain('有实物'); expect(wrapper.text()).toContain('无需网站照片，请直接拿实物翻拍'); expect(wrapper.find('[data-testid="complete-and-next"]').exists()).toBe(true)
@@ -196,7 +257,9 @@ describe('global collector workbench', () => {
     await wrapper.get('[aria-label="选择可翻拍终端"]').setValue('terminal-b'); await flushPromises()
     await vi.advanceTimersByTimeAsync(250); staleCandidates.resolve(page([candidate()])); await flushPromises()
     expect(wrapper.text()).toContain('T-002')
-    expect(wrapper.html()).toContain('terminal-b')
+    expect(wrapper.get<HTMLInputElement>('[aria-label="选择可翻拍终端"]').element.value).toBe('T-002 · 安装地址')
+    expect(wrapper.html()).not.toContain('terminal-b')
+    expect(serviceMocks.openGlobalCollectorTerminal).toHaveBeenLastCalledWith(expect.objectContaining({ terminal_key: 'terminal-b', project_id: 'project-1', terminal_code: 'T-002', source_revision: 'revision-1' }))
     vi.useRealTimers(); wrapper.unmount()
   })
 })
