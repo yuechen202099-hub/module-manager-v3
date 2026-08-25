@@ -10,6 +10,7 @@ import {
   inventoryResultPresentation,
   isCurrentRequest,
   meterCompletionBlockers,
+  normalizeMeterPhotoSlots,
 } from '../src/features/collectorTransfer/state.ts'
 
 
@@ -149,5 +150,25 @@ test('meter completion requires exact two source slots, meter barcode, and modul
     { slot: 'after_box', photo: { id: 'photo-b' } },
   ] }
   assert.deepEqual(meterCompletionBlockers(complete), [])
-  assert.deepEqual(meterCompletionBlockers({ ...complete, photos: [complete.photos[0]] }), ['缺少改造完成照片'])
+  assert.deepEqual(meterCompletionBlockers({ ...complete, photos: [complete.photos[0]] }), [
+    '新装来源照片必须恰好两项',
+    '新装来源照片槽位必须唯一且完整',
+  ])
+})
+
+test('meter photo normalization always exposes only fixed slots and rejects duplicate or extra raw evidence', () => {
+  const complete = [
+    { slot: 'after_box', photo: { id: 'after' } },
+    { slot: 'module_meter', photo: { id: 'meter' } },
+  ]
+  assert.deepEqual(normalizeMeterPhotoSlots(complete).map((slot) => [slot.slot, slot.label, slot.photo]), [
+    ['module_meter', '电表和模块', { id: 'meter' }],
+    ['after_box', '改造完成', { id: 'after' }],
+  ])
+  const duplicate = [...complete, { slot: 'module_meter', photo: { id: 'duplicate' } }]
+  assert.deepEqual(normalizeMeterPhotoSlots(duplicate).map((slot) => slot.photo), [null, null])
+  assert.ok(meterCompletionBlockers({ meter_barcode: 'M', module_barcode: 'MOD', photos: duplicate }).includes('新装来源照片必须恰好两项'))
+  const unknown = [{ slot: 'module_meter', photo: { id: 'meter' } }, { slot: 'unrecognized', photo: { id: 'unknown' } }]
+  assert.deepEqual(normalizeMeterPhotoSlots(unknown).map((slot) => slot.photo), [null, null])
+  assert.deepEqual(meterCompletionBlockers({ meter_barcode: 'M', module_barcode: 'MOD', photos: unknown }), ['新装来源照片槽位必须唯一且完整'])
 })

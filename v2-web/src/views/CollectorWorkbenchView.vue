@@ -12,7 +12,7 @@ import {
 } from '@/api/services'
 import type { CollectorRequirementWorkbenchRow, GlobalCollectorTerminalCandidate, GlobalCollectorTerminalDetail } from '@/api/types'
 import Code128Barcode from '@/components/Code128Barcode.vue'
-import { canRefreshTerminal, canReplaceMissing, candidateLabel, completionBlockers, isCurrentRequest, meterCompletionBlockers } from '@/features/collectorTransfer/state'
+import { canRefreshTerminal, canReplaceMissing, candidateLabel, completionBlockers, isCurrentRequest, meterCompletionBlockers, normalizeMeterPhotoSlots } from '@/features/collectorTransfer/state'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -178,6 +178,11 @@ async function completeMeter(item: GlobalCollectorTerminalDetail['meter_install_
   if (!terminalId || !item.workbench_item_id || meterCompletionBlockers(item).length || mutationPending.value) return
   await executeCompletion(terminalId, item.workbench_item_id, true)
 }
+async function reopenMeter(item: GlobalCollectorTerminalDetail['meter_install_items'][number]) {
+  const terminalId = detail.value?.terminal.id
+  if (!terminalId || !item.workbench_item_id || mutationPending.value) return
+  await executeCompletion(terminalId, item.workbench_item_id, false)
+}
 function move(delta: number) { activeIndex.value = Math.max(0, Math.min(collectorItems.value.length - 1, activeIndex.value + delta)) }
 function handleKeydown(event: KeyboardEvent) {
   if (event.target instanceof Element && event.target.matches('input, textarea, select')) return
@@ -197,7 +202,7 @@ function handleKeydown(event: KeyboardEvent) {
       <p v-if="detail.source_changed" class="warning">来源资料已变化；请在没有进度和有效分配时刷新快照。</p>
       <section class="pool-summary"><span>缺口 {{ detail.pool_summary.required }}</span><span>需要 {{ detail.pool_summary.required }} / 可用 {{ detail.pool_summary.available }}</span><button v-if="isAdmin" type="button" data-testid="replace-all-missing" :disabled="!canReplace || mutationPending" @click="replaceMissing">一键替换全部无实物采集器</button><button v-if="isAdmin && detail.source_changed" type="button" data-testid="refresh-terminal" :disabled="!canRefresh || mutationPending" @click="refreshTerminal">刷新来源快照</button></section>
       <section class="collector-list"><article v-for="(item, index) in collectorItems" :key="item.requirement_id" class="collector-card" :class="{ active: index === activeIndex }" @click="activeIndex = index"><h2>{{ item.original_collector_no }}</h2><template v-if="item.physical_state === 'present'"><strong>有实物</strong><p>无需网站照片，请直接拿实物翻拍</p><Code128Barcode :value="item.collector_barcode || ''" /></template><template v-else-if="item.physical_state === 'missing'"><strong>无实物</strong><p>该采集器没有实物，需先完成替换</p></template><template v-else><strong>已替换</strong><p>替换后号码：{{ item.final_collector_no }}</p><Code128Barcode :value="item.collector_barcode || ''" /><img v-if="imageUrl(item.photo)" :src="imageUrl(item.photo)" alt="替换采集器照片" /><button v-if="isAdmin && item.assignment_id" type="button" data-testid="rollback-assignment" :disabled="mutationPending" @click.stop="rollback(item)">回滚替换</button></template><ul v-if="index === activeIndex && activeBlockers.length"><li v-for="reason in activeBlockers" :key="reason">{{ reason }}</li></ul></article></section>
-      <section class="meter-list"><h2>新装 {{ detail.meter_install_items.length }}</h2><article v-for="item in detail.meter_install_items" :key="item.meter_item_id"><Code128Barcode :value="item.meter_barcode" /><Code128Barcode :value="item.module_barcode" /><div class="meter-photos"><figure v-for="slot in item.photos.filter((photo) => photo.slot === 'module_meter' || photo.slot === 'after_box')" :key="slot.slot" :data-slot="slot.slot"><figcaption>{{ slot.label }}</figcaption><img v-if="imageUrl(slot.photo)" :src="imageUrl(slot.photo)" :alt="slot.label" /><span v-else>照片缺失</span></figure></div><button v-if="item.status !== 'completed'" type="button" :data-testid="`complete-meter-${item.meter_item_id}`" :disabled="!item.workbench_item_id || meterCompletionBlockers(item).length > 0 || mutationPending" @click="completeMeter(item)">标记新装完成</button></article></section>
+      <section class="meter-list"><h2>新装 {{ detail.meter_install_items.length }}</h2><article v-for="item in detail.meter_install_items" :key="item.meter_item_id"><Code128Barcode :value="item.meter_barcode" /><Code128Barcode :value="item.module_barcode" /><div class="meter-photos"><figure v-for="slot in normalizeMeterPhotoSlots(item.photos)" :key="slot.slot" :data-slot="slot.slot"><figcaption>{{ slot.label }}</figcaption><img v-if="imageUrl(slot.photo)" :src="imageUrl(slot.photo)" :alt="slot.label" /><span v-else>照片缺失</span></figure></div><button v-if="item.status === 'completed'" type="button" :data-testid="`undo-meter-${item.meter_item_id}`" :disabled="!item.workbench_item_id || mutationPending" @click="reopenMeter(item)">撤销完成</button><button v-else type="button" :data-testid="`complete-meter-${item.meter_item_id}`" :disabled="!item.workbench_item_id || meterCompletionBlockers(item).length > 0 || mutationPending" @click="completeMeter(item)">标记已翻拍</button></article></section>
       <footer class="controls"><span>拆除 {{ collectorItems.length }}</span><button type="button" aria-label="上一条" @click="move(-1)">上一条</button><button type="button" aria-label="下一条" @click="move(1)">下一条</button><button v-if="activeItem?.status === 'completed'" type="button" data-testid="undo-completion" @click="setCompleted(false)">撤销完成</button><button v-else-if="activeItem?.physical_state !== 'missing'" type="button" data-testid="complete-and-next" :disabled="!canComplete || mutationPending" @click="setCompleted(true)">标记完成并下一条</button></footer>
     </section>
     <p v-else-if="!loading" class="empty-state">请选择可翻拍终端</p>

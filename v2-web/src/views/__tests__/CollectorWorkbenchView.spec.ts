@@ -75,6 +75,19 @@ describe('global collector workbench', () => {
     serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue({ ...detail(), meter_install_items: [{ ...detail().meter_install_items[0], photos: [detail().meter_install_items[0].photos[0]] }] })
     await wrapper.get('[aria-label="选择可翻拍终端"]').setValue('opaque-key'); await flushPromises()
     expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-meter-meter-1"]').element.disabled).toBe(true)
+    serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue({ ...detail(), meter_install_items: [{ ...detail().meter_install_items[0], photos: [...detail().meter_install_items[0].photos, { slot: 'module_meter', label: '重复', photo }] }] })
+    await wrapper.get('[aria-label="选择可翻拍终端"]').setValue('opaque-key'); await flushPromises()
+    expect(wrapper.findAll('.meter-photos figure')).toHaveLength(2)
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-meter-meter-1"]').element.disabled).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('reopens a completed meter with its original workbench item id', async () => {
+    serviceMocks.fetchGlobalCollectorTerminal.mockResolvedValue({ ...detail(), meter_install_items: [{ ...detail().meter_install_items[0], status: 'completed' }] })
+    const wrapper = await mountWorkbench()
+    expect(wrapper.get('[data-testid="undo-meter-meter-1"]').text()).toContain('撤销完成')
+    await wrapper.get('[data-testid="undo-meter-meter-1"]').trigger('click'); await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenCalledWith('meter-workbench-1', false)
     wrapper.unmount()
   })
 
@@ -137,6 +150,38 @@ describe('global collector workbench', () => {
     expect(serviceMocks.fetchGlobalCollectorTerminal).toHaveBeenLastCalledWith('terminal-1')
     expect(wrapper.text()).toContain('T-002')
     wrapper.unmount()
+  })
+
+  it('keeps every retried terminal mutation bound to A after selecting B', async () => {
+    const candidateB = candidate({ terminal_key: 'terminal-b', terminal_code: 'T-002' })
+    const detailB = { ...detail(), terminal: { ...detail().terminal, id: 'terminal-2', terminal_code: 'T-002' } }
+    const completedCollector = { ...detail(), collector_items: [{ ...detail().collector_items[0], status: 'completed' }] }
+    const completedMeter = { ...detail(), meter_install_items: [{ ...detail().meter_install_items[0], status: 'completed' }] }
+    const cases = [
+      { name: 'refresh', detailA: { ...detail(), source_changed: true, current_source_revision: 'revision-2' }, selector: '[data-testid="refresh-terminal"]', reject: () => serviceMocks.refreshGlobalCollectorTerminal.mockRejectedValueOnce(new Error('A 刷新失败')).mockResolvedValue({}), expectCalls: () => expect(serviceMocks.refreshGlobalCollectorTerminal).toHaveBeenNthCalledWith(2, 'terminal-1') },
+      { name: 'rollback', detailA: detail('replaced'), selector: '[data-testid="rollback-assignment"]', reject: () => serviceMocks.rollbackCollectorAssignment.mockRejectedValueOnce(new Error('A 回滚失败')).mockResolvedValue({}), expectCalls: () => expect(serviceMocks.rollbackCollectorAssignment).toHaveBeenNthCalledWith(2, 'assignment-1') },
+      { name: 'complete collector', detailA: detail(), selector: '[data-testid="complete-and-next"]', reject: () => serviceMocks.setCollectorWorkbenchItemCompleted.mockRejectedValueOnce(new Error('A 采集器完成失败')).mockResolvedValue({}), expectCalls: () => expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenNthCalledWith(2, 'collector-workbench-1', true) },
+      { name: 'reopen collector', detailA: completedCollector, selector: '[data-testid="undo-completion"]', reject: () => serviceMocks.setCollectorWorkbenchItemCompleted.mockRejectedValueOnce(new Error('A 采集器撤销失败')).mockResolvedValue({}), expectCalls: () => expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenNthCalledWith(2, 'collector-workbench-1', false) },
+      { name: 'complete meter', detailA: detail(), selector: '[data-testid="complete-meter-meter-1"]', reject: () => serviceMocks.setCollectorWorkbenchItemCompleted.mockRejectedValueOnce(new Error('A 电表完成失败')).mockResolvedValue({}), expectCalls: () => expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenNthCalledWith(2, 'meter-workbench-1', true) },
+      { name: 'reopen meter', detailA: completedMeter, selector: '[data-testid="undo-meter-meter-1"]', reject: () => serviceMocks.setCollectorWorkbenchItemCompleted.mockRejectedValueOnce(new Error('A 电表撤销失败')).mockResolvedValue({}), expectCalls: () => expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenNthCalledWith(2, 'meter-workbench-1', false) },
+    ]
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    for (const mutation of cases) {
+      vi.clearAllMocks()
+      serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValue(page([candidate(), candidateB]))
+      serviceMocks.openGlobalCollectorTerminal.mockImplementation(async (value: GlobalCollectorTerminalCandidate) => ({ workbench_terminal_id: value.terminal_key === 'terminal-b' ? 'terminal-2' : 'terminal-1', snapshot_reused: false, source_changed: false }))
+      serviceMocks.fetchGlobalCollectorTerminal.mockImplementation(async (id: string) => id === 'terminal-2' ? detailB : mutation.detailA)
+      mutation.reject()
+      const wrapper = await mountWorkbench()
+      await wrapper.get(mutation.selector).trigger('click'); await flushPromises()
+      await wrapper.get('[aria-label="选择可翻拍终端"]').setValue('terminal-b'); await flushPromises()
+      await wrapper.get('[data-testid="retry-error"]').trigger('click'); await flushPromises()
+      mutation.expectCalls()
+      expect(serviceMocks.fetchGlobalCollectorTerminal).toHaveBeenLastCalledWith('terminal-1')
+      expect(wrapper.text(), mutation.name).toContain('T-002')
+      wrapper.unmount()
+    }
+    vi.unstubAllGlobals()
   })
 
   it('cancels a debounced candidate query when a listed terminal is selected', async () => {

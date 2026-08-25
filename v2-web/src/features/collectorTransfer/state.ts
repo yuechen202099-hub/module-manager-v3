@@ -66,10 +66,31 @@ type MeterCompletionInput = {
   photos: Array<{ slot: string; photo: unknown | null }>
 }
 
+const meterPhotoSlots = [
+  { slot: 'module_meter', label: '电表和模块' },
+  { slot: 'after_box', label: '改造完成' },
+] as const
+
+function hasExactMeterPhotoSlots(photos: MeterCompletionInput['photos']) {
+  return photos.length === meterPhotoSlots.length
+    && meterPhotoSlots.every((expected) => photos.filter((photo) => photo.slot === expected.slot).length === 1)
+}
+
+export function normalizeMeterPhotoSlots(photos: MeterCompletionInput['photos']) {
+  if (!hasExactMeterPhotoSlots(photos)) return meterPhotoSlots.map((expected) => ({ ...expected, photo: null }))
+  return meterPhotoSlots.map((expected) => ({
+    ...expected,
+    photo: photos.find((photo) => photo.slot === expected.slot)?.photo || null,
+  }))
+}
+
 export function meterCompletionBlockers(item: MeterCompletionInput) {
   const reasons: string[] = []
   if (!item.meter_barcode.trim()) reasons.push('缺少表号条形码')
   if (!item.module_barcode.trim()) reasons.push('缺少模块号条形码')
+  if (item.photos.length !== meterPhotoSlots.length) reasons.push('新装来源照片必须恰好两项')
+  if (!hasExactMeterPhotoSlots(item.photos)) reasons.push('新装来源照片槽位必须唯一且完整')
+  if (reasons.some((reason) => reason.startsWith('新装来源照片'))) return reasons
   if (!item.photos.find((photo) => photo.slot === 'module_meter')?.photo) reasons.push('缺少电表和模块照片')
   if (!item.photos.find((photo) => photo.slot === 'after_box')?.photo) reasons.push('缺少改造完成照片')
   return reasons
