@@ -30,9 +30,12 @@ EXPLICITLY_UNACCEPTED_OR_UNATTESTED_PATTERN = re.compile(
     r"(?:production\s+)?(?:acceptance|attestation|accepted|attested)\b"
     r"|\b(?:production\s+)?(?:acceptance|attestation)\b[^,;.!?\n]{0,24}"
     r"\b(?:not|never|incomplete|pending)\b"
-    r"|\bbefore\b[^,;.!?\n]{0,64}\bacceptance\b"
     r"|(?:未|无|不|尚未|不得|不能|待)[^,，;；。.!?！？\n]{0,24}(?:验收|认证|签署|证明)"
     r"|(?:验收|认证|签署|证明)[^,，;；。.!?！？\n]{0,16}(?:未|不|尚未|待)",
+    re.IGNORECASE,
+)
+ACCEPTANCE_INCOMPLETE_BEFORE_COMPLETION_PATTERN = re.compile(
+    r"\bbefore\b[^,;.!?\n]{0,64}\bacceptance\b\s+completed\b",
     re.IGNORECASE,
 )
 
@@ -131,11 +134,24 @@ def _has_affirmative_acceptance_or_attestation(record: str) -> bool:
         protected,
     ):
         normalized = _normalize(clause.replace("\ue000", "."))
-        if not normalized or not ACCEPTANCE_OR_ATTESTATION_TOPIC_PATTERN.search(normalized):
+        if not normalized:
             continue
-        if EXPLICITLY_UNACCEPTED_OR_UNATTESTED_PATTERN.search(normalized):
+        topic_matches = list(ACCEPTANCE_OR_ATTESTATION_TOPIC_PATTERN.finditer(normalized))
+        if not topic_matches:
             continue
-        return True
+        for index in range(len(topic_matches)):
+            previous_end = topic_matches[index - 1].end() if index else 0
+            next_start = (
+                topic_matches[index + 1].start()
+                if index + 1 < len(topic_matches)
+                else len(normalized)
+            )
+            local_context = normalized[previous_end:next_start]
+            if EXPLICITLY_UNACCEPTED_OR_UNATTESTED_PATTERN.search(local_context):
+                continue
+            if ACCEPTANCE_INCOMPLETE_BEFORE_COMPLETION_PATTERN.search(local_context):
+                continue
+            return True
     return False
 
 

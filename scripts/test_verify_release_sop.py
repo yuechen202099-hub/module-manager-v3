@@ -145,6 +145,22 @@ def test_v327_acceptance_gate_does_not_let_unrelated_negation_hide_acceptance() 
         )
 
 
+def test_v327_acceptance_gate_checks_each_topic_occurrence() -> None:
+    verifier = load_verifier()
+
+    assert verifier.release_record_has_affirmative_acceptance_or_attestation(
+        "No acceptance evidence was recorded before production acceptance was approved."
+    )
+
+
+def test_v327_acceptance_gate_allows_each_locally_negated_topic_occurrence() -> None:
+    verifier = load_verifier()
+
+    assert not verifier.release_record_has_affirmative_acceptance_or_attestation(
+        "No acceptance evidence was recorded because production acceptance was not approved."
+    )
+
+
 def test_parses_current_deployed_baseline_and_release_candidate_markers() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")

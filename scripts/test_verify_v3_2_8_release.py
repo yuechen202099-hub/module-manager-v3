@@ -93,6 +93,30 @@ def test_v327_baseline_unrelated_negation_does_not_hide_chinese_acceptance(tmp_p
     assert_rejected(repo, "must not claim affirmative production acceptance or attestation")
 
 
+def test_v327_baseline_checks_each_acceptance_topic_occurrence(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "ops/releases/V3.2.7.md"
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\nNo acceptance evidence was recorded before production acceptance was approved.\n",
+        encoding="utf-8",
+    )
+
+    assert_rejected(repo, "must not claim affirmative production acceptance or attestation")
+
+
+def test_v327_baseline_allows_each_locally_negated_topic_occurrence(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "ops/releases/V3.2.7.md"
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "\nNo acceptance evidence was recorded because production acceptance was not approved.\n",
+        encoding="utf-8",
+    )
+
+    assert load_verifier().collect_failures(repo, "source") == []
+
+
 def test_v327_baseline_allows_explicitly_negated_attestation_variant(tmp_path: Path) -> None:
     repo = copy_contract_repo(tmp_path)
     path = repo / "ops/releases/V3.2.7.md"

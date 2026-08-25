@@ -310,9 +310,12 @@ EXPLICITLY_UNACCEPTED_OR_UNATTESTED_PATTERN = re.compile(
     r"(?:production\s+)?(?:acceptance|attestation|accepted|attested)\b"
     r"|\b(?:production\s+)?(?:acceptance|attestation)\b[^,;.!?\n]{0,24}"
     r"\b(?:not|never|incomplete|pending)\b"
-    r"|\bbefore\b[^,;.!?\n]{0,64}\bacceptance\b"
     r"|(?:未|无|不|尚未|不得|不能|待)[^,，;；。.!?！？\n]{0,24}(?:验收|认证|签署|证明)"
     r"|(?:验收|认证|签署|证明)[^,，;；。.!?！？\n]{0,16}(?:未|不|尚未|待)",
+    re.IGNORECASE,
+)
+ACCEPTANCE_INCOMPLETE_BEFORE_COMPLETION_PATTERN = re.compile(
+    r"\bbefore\b[^,;.!?\n]{0,64}\bacceptance\b\s+completed\b",
     re.IGNORECASE,
 )
 
@@ -726,11 +729,24 @@ def release_record_lifecycle_values(
 def release_record_has_affirmative_acceptance_or_attestation(record: str) -> bool:
     prose = re.sub(r"(?:并且|且)", "\n", deployment_claim_prose(record))
     for clause, conditional in semantic_claim_clauses(prose):
-        if not ACCEPTANCE_OR_ATTESTATION_TOPIC_PATTERN.search(clause):
+        topic_matches = list(ACCEPTANCE_OR_ATTESTATION_TOPIC_PATTERN.finditer(clause))
+        if not topic_matches:
             continue
-        if conditional or EXPLICITLY_UNACCEPTED_OR_UNATTESTED_PATTERN.search(clause):
+        if conditional:
             continue
-        return True
+        for index in range(len(topic_matches)):
+            previous_end = topic_matches[index - 1].end() if index else 0
+            next_start = (
+                topic_matches[index + 1].start()
+                if index + 1 < len(topic_matches)
+                else len(clause)
+            )
+            local_context = clause[previous_end:next_start]
+            if EXPLICITLY_UNACCEPTED_OR_UNATTESTED_PATTERN.search(local_context):
+                continue
+            if ACCEPTANCE_INCOMPLETE_BEFORE_COMPLETION_PATTERN.search(local_context):
+                continue
+            return True
     return False
 
 
