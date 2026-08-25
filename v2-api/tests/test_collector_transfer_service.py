@@ -34,6 +34,7 @@ from app.models import (
     Project,
     ProjectStatus,
     Team,
+    TotalCatalogRow,
     User,
 )
 from app.services.collector_transfer import (
@@ -223,6 +224,76 @@ def complete_project_collector_source(
     )
     session.commit()
     return project, group
+
+
+def add_global_terminal_source(
+    session: Session,
+    *,
+    project: Project,
+    terminal_code: str,
+    meter_no: str,
+    collector_no: str,
+    authoritative_address: str,
+    snapshot_address: str = "资料组快照地址",
+    raw_collector_no: str | None = None,
+) -> MaterialGroup:
+    """Create one complete source row using the real catalog/photo precedence contract."""
+    catalog = TotalCatalogRow(
+        id=uuid4(),
+        team_id=project.team_id,
+        project_id=project.id,
+        terminal=terminal_code,
+        original_meter_no=meter_no,
+        meter_match_key=meter_no,
+        installation_address=authoritative_address,
+        raw_data={},
+    )
+    group = MaterialGroup(
+        id=uuid4(),
+        team_id=project.team_id,
+        project_id=project.id,
+        total_catalog_row_id=catalog.id,
+        terminal=terminal_code,
+        meter_match_key=meter_no,
+        display_meter_no=meter_no,
+        installation_address=snapshot_address,
+        raw_data={
+            "collector": raw_collector_no or collector_no,
+            "module_asset_no": f"MODULE-{meter_no}",
+        },
+    )
+    session.add_all((catalog, group))
+    session.flush()
+    session.add_all(
+        (
+            Photo(
+                id=uuid4(),
+                team_id=project.team_id,
+                group_id=group.id,
+                sha256=uuid4().hex * 2,
+                object_key=f"global/{group.id}/module-meter.jpg",
+                image_url=f"/global/{group.id}/module-meter.jpg",
+                category="module_meter",
+                collector=collector_no,
+                asset_no=f"MODULE-{meter_no}",
+                sort_order=0,
+                is_active=True,
+            ),
+            Photo(
+                id=uuid4(),
+                team_id=project.team_id,
+                group_id=group.id,
+                sha256=uuid4().hex * 2,
+                object_key=f"global/{group.id}/after-box.jpg",
+                image_url=f"/global/{group.id}/after-box.jpg",
+                category="after_box",
+                sort_order=1,
+                is_active=True,
+            ),
+        )
+    )
+    session.flush()
+    return group
 
 
 def stored_photo(sha256_value: str) -> dict[str, object]:
@@ -2781,3 +2852,356 @@ def test_real_database_rescan_of_random_replacement_never_returns_pool_decision(
     assert required.status == requirement_status
     assert assigned.assignment_mode == "random"
     assert assigned.status == assignment_status
+
+
+def test_global_terminal_candidates_keep_project_identity_and_aggregate_real_source_rules(
+    db_session: Session,
+) -> None:
+    """Catches cross-project merging or candidate counts drifting from source precedence."""
+    project_a = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    project_a.code = "P-SOUTH"
+    project_a.name = "城南项目"
+    project_b = Project(
+        id=uuid4(),
+        team_id="team-1",
+        code="P-NORTH",
+        name="城北项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(project_b)
+    group_a1 = add_global_terminal_source(
+        db_session,
+        project=project_a,
+        terminal_code=" T-001 ",
+        meter_no="000000000001",
+        collector_no="PHOTO-DIRECT",
+        raw_collector_no="RAW-IGNORED",
+        authoritative_address="权威-A",
+        snapshot_address="旧地址-A1",
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project_a,
+        terminal_code="T-001",
+        meter_no="000000000002",
+        collector_no="PHOTO-DIRECT",
+        raw_collector_no="RAW-IGNORED-2",
+        authoritative_address="权威-A",
+        snapshot_address="旧地址-A2",
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project_b,
+        terminal_code="T-001",
+        meter_no="000000000003",
+        collector_no="MISSING-B",
+        authoritative_address="权威-B",
+    )
+    db_session.add(
+        PhysicalCollector(
+            id=uuid4(),
+            team_id="team-1",
+            project_id=project_a.id,
+            collector_no="PHOTO-DIRECT",
+            pool_status="direct",
+        )
+    )
+    pool_collector = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project_b.id,
+        collector_no="POOL-B",
+        pool_status="available",
+    )
+    db_session.add(pool_collector)
+    db_session.commit()
+    collector_photo(db_session, pool_collector, sha256="b" * 64)
+
+    page = service(db_session).list_global_terminals(query="T-001")
+
+    assert {(row["project_id"], row["terminal_code"]) for row in page["items"]} == {
+        (str(project_a.id), "T-001"),
+        (str(project_b.id), "T-001"),
+    }
+    assert all(row["needs_disambiguation"] for row in page["items"])
+    by_project = {row["project_id"]: row for row in page["items"]}
+    candidate_a = by_project[str(project_a.id)]
+    candidate_b = by_project[str(project_b.id)]
+    assert candidate_a["installation_address"] == "权威-A"
+    assert candidate_a["meter_count"] == 2
+    assert candidate_a["collector_count"] == 1
+    assert candidate_a["physical_count"] == 1
+    assert candidate_a["missing_count"] == 0
+    assert candidate_a["workflow_state"] == "ready"
+    assert candidate_a["selectable"] is True
+    assert candidate_b["meter_count"] == 1
+    assert candidate_b["collector_count"] == 1
+    assert candidate_b["physical_count"] == 0
+    assert candidate_b["missing_count"] == 1
+    assert candidate_b["pool_available_count"] == 1
+    assert candidate_b["workflow_state"] == "needs_replacement"
+    assert len(candidate_a["source_revision"]) == 64
+
+    original_revision = candidate_a["source_revision"]
+    source_photo = db_session.scalar(
+        select(Photo).where(
+            Photo.group_id == group_a1.id,
+            Photo.category == "module_meter",
+        )
+    )
+    source_photo.sha256 = "f" * 64
+    db_session.commit()
+    refreshed = service(db_session).list_global_terminals(query="T-001")
+    refreshed_a = next(row for row in refreshed["items"] if row["project_id"] == str(project_a.id))
+    assert refreshed_a["source_revision"] != original_revision
+
+
+def test_global_terminal_candidates_block_conflicts_and_bound_filters(
+    db_session: Session,
+) -> None:
+    """Catches team leaks, leading-zero collapse, blocked leakage, and unbounded pages."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    project.code = "P-LOCAL"
+    project.name = "本地项目"
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="000000",
+        meter_no="CONFLICT-1",
+        collector_no="CONFLICT-C1",
+        authoritative_address="冲突地址-甲",
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="000000",
+        meter_no="CONFLICT-2",
+        collector_no="CONFLICT-C2",
+        authoritative_address="冲突地址-乙",
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="000123",
+        meter_no="LEADING-1",
+        collector_no="LEADING-C1",
+        authoritative_address="前导零地址",
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="123",
+        meter_no="PLAIN-1",
+        collector_no="PLAIN-C1",
+        authoritative_address="普通地址",
+    )
+    db_session.add(Team(id="team-2", name="其他团队"))
+    foreign_project = Project(
+        id=uuid4(),
+        team_id="team-2",
+        code="P-FOREIGN",
+        name="其他团队项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(foreign_project)
+    add_global_terminal_source(
+        db_session,
+        project=foreign_project,
+        terminal_code="FOREIGN-ONLY",
+        meter_no="FOREIGN-1",
+        collector_no="FOREIGN-C1",
+        authoritative_address="外部团队地址",
+    )
+    db_session.commit()
+
+    first_default_page = service(db_session).list_global_terminals(page_size=1)
+    assert [row["terminal_code"] for row in first_default_page["items"]] == ["000123"]
+    assert first_default_page["total"] == 2
+
+    default_page = service(db_session).list_global_terminals(page_size=999)
+    assert default_page["page_size"] == 100
+    assert all(row["workflow_state"] != "blocked" for row in default_page["items"])
+    assert all(row["terminal_code"] != "FOREIGN-ONLY" for row in default_page["items"])
+
+    blocked_page = service(db_session).list_global_terminals(
+        state="blocked",
+        include_blocked=True,
+    )
+    assert [row["terminal_code"] for row in blocked_page["items"]] == ["000000"]
+    assert blocked_page["items"][0]["workflow_state"] == "blocked"
+    assert blocked_page["items"][0]["selectable"] is False
+    assert {item["code"] for item in blocked_page["items"][0]["diagnostics"]} == {
+        "installation_address_conflict"
+    }
+
+    leading = service(db_session).list_global_terminals(query="000123")
+    assert [row["terminal_code"] for row in leading["items"]] == ["000123"]
+    assert leading["items"][0]["terminal_key"] != service(db_session).list_global_terminals(
+        query="普通地址"
+    )["items"][0]["terminal_key"]
+
+
+def test_open_global_terminal_creates_one_terminal_snapshot_and_reuses_revision(
+    db_session: Session,
+) -> None:
+    """Catches global open creating a project-wide run or duplicating an unchanged snapshot."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="OPEN-001",
+        meter_no="OPEN-METER-1",
+        collector_no="OPEN-COLLECTOR-1",
+        authoritative_address="打开终端地址",
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="OTHER-001",
+        meter_no="OTHER-METER-1",
+        collector_no="OTHER-COLLECTOR-1",
+        authoritative_address="其他终端地址",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(query="OPEN-001")["items"][0]
+
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code=" OPEN-001 ",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+
+    run = db_session.get(CollectorTransferRun, UUID(opened["run_id"]))
+    terminals = db_session.scalars(
+        select(CollectorTransferTerminal).where(
+            CollectorTransferTerminal.run_id == run.id
+        )
+    ).all()
+    assert opened["snapshot_reused"] is False
+    assert opened["source_changed"] is False
+    assert run.stats["workflow_kind"] == "global_terminal_workbench"
+    assert run.stats["source_revision"] == candidate["source_revision"]
+    assert run.stats["source_terminal_code"] == "OPEN-001"
+    assert len(terminals) == 1
+    assert terminals[0].terminal_code == "OPEN-001"
+    assert db_session.scalar(
+        select(func.count(CollectorMeterItem.id)).where(
+            CollectorMeterItem.run_id == run.id
+        )
+    ) == 1
+
+    reopened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="OPEN-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    assert reopened["run_id"] == opened["run_id"]
+    assert reopened["workbench_terminal_id"] == opened["workbench_terminal_id"]
+    assert reopened["snapshot_reused"] is True
+
+
+def test_open_global_terminal_supersedes_untouched_snapshot_after_source_change(
+    db_session: Session,
+) -> None:
+    """Catches stale untouched snapshots being reused after selected photo evidence changes."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REFRESH-001",
+        meter_no="REFRESH-METER-1",
+        collector_no="REFRESH-COLLECTOR-1",
+        authoritative_address="自动刷新地址",
+    )
+    db_session.commit()
+    first_candidate = service(db_session).list_global_terminals(query="REFRESH-001")["items"][0]
+    first = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="REFRESH-001",
+        source_revision=first_candidate["source_revision"],
+        terminal_key_value=first_candidate["terminal_key"],
+    )
+    source_photo = db_session.scalar(
+        select(Photo).where(
+            Photo.group_id == group.id,
+            Photo.category == "module_meter",
+        )
+    )
+    source_photo.sha256 = "e" * 64
+    db_session.commit()
+    changed_candidate = service(db_session).list_global_terminals(query="REFRESH-001")["items"][0]
+
+    changed = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="REFRESH-001",
+        source_revision=changed_candidate["source_revision"],
+        terminal_key_value=changed_candidate["terminal_key"],
+    )
+
+    old_run = db_session.get(CollectorTransferRun, UUID(first["run_id"]))
+    assert changed["run_id"] != first["run_id"]
+    assert changed["snapshot_reused"] is False
+    assert changed["source_changed"] is False
+    assert old_run.stats["superseded"] is True
+    assert old_run.stats["superseded_by_run_id"] == changed["run_id"]
+
+
+def test_open_global_terminal_preserves_progressed_snapshot_after_source_change(
+    db_session: Session,
+) -> None:
+    """Catches source refresh silently replacing a snapshot with completed re-photo progress."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="PROGRESSED-001",
+        meter_no="PROGRESSED-METER-1",
+        collector_no="PROGRESSED-COLLECTOR-1",
+        authoritative_address="进度保护地址",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(query="PROGRESSED-001")["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="PROGRESSED-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    item_id = db_session.scalar(
+        select(CollectorWorkbenchItem.id).where(
+            CollectorWorkbenchItem.run_id == UUID(opened["run_id"]),
+            CollectorWorkbenchItem.item_kind == "meter_install",
+        )
+    )
+    service(db_session).set_workbench_item_status(
+        item_id=str(item_id),
+        completed=True,
+    )
+    source_photo = db_session.scalar(
+        select(Photo).where(
+            Photo.group_id == group.id,
+            Photo.category == "after_box",
+        )
+    )
+    source_photo.sha256 = "d" * 64
+    db_session.commit()
+    changed_candidate = service(db_session).list_global_terminals(query="PROGRESSED-001")["items"][0]
+
+    preserved = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="PROGRESSED-001",
+        source_revision=changed_candidate["source_revision"],
+        terminal_key_value=changed_candidate["terminal_key"],
+    )
+
+    old_run = db_session.get(CollectorTransferRun, UUID(opened["run_id"]))
+    assert preserved["run_id"] == opened["run_id"]
+    assert preserved["snapshot_reused"] is True
+    assert preserved["source_changed"] is True
+    assert preserved["current_source_revision"] == changed_candidate["source_revision"]
+    assert not old_run.stats.get("superseded", False)
+    assert db_session.get(CollectorWorkbenchItem, item_id).status == "completed"

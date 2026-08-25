@@ -215,6 +215,48 @@ def test_project_meter_projection_streams_selected_columns_at_production_cardina
     assert peak - baseline_current < 256 * 1024 * 1024
 
 
+def test_global_terminal_candidate_page_is_bounded_at_production_cardinality(
+    production_scale_database,
+) -> None:
+    """Catches candidate paging hydrating source rows or building project-sized IN lists."""
+    engine, session_factory, _project_id = production_scale_database
+    loaded_source_entities: list[object] = []
+    recorded_selects: list[str] = []
+
+    with session_factory() as session:
+        def record_loaded(_session: Session, instance: object) -> None:
+            if isinstance(instance, (MaterialGroup, Photo)):
+                loaded_source_entities.append(instance)
+
+        def record_sql(_connection, _cursor, statement, _parameters, _context, _executemany) -> None:
+            if statement.lstrip().upper().startswith("SELECT"):
+                recorded_selects.append(statement)
+
+        event.listen(session, "loaded_as_persistent", record_loaded)
+        event.listen(engine, "before_cursor_execute", record_sql)
+        try:
+            result = PostgresCollectorTransferService(
+                session=session,
+                team_id="team-1",
+                actor="scale-test",
+            ).list_global_terminals(page=1, page_size=50, include_blocked=True)
+        finally:
+            event.remove(engine, "before_cursor_execute", record_sql)
+            event.remove(session, "loaded_as_persistent", record_loaded)
+
+    source_selects = [
+        statement
+        for statement in recorded_selects
+        if "FROM MATERIAL_GROUPS" in statement.upper() or "FROM PHOTOS" in statement.upper()
+    ]
+    assert result["page_size"] == 50
+    assert len(result["items"]) == 50
+    assert result["total"] == PRODUCTION_GROUP_COUNT
+    assert loaded_source_entities == []
+    assert len(source_selects) <= 6
+    assert not any(statement.count("?") > 1_000 for statement in source_selects)
+
+
 @pytest.mark.parametrize(
     ("collector_no", "expected_count_delta"),
     [

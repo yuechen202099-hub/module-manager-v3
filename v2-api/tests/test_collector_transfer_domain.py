@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.domain import collector_transfer as collector_transfer_domain
 from app.domain.collector_transfer import (
     CollectorScanDecisionKind,
     MeterSource,
@@ -132,6 +133,41 @@ def test_project_requirement_without_photo_is_direct_reuse() -> None:
     assert decision.persist_confirmation is True
     assert decision.requires_photo is False
     assert decision.add_to_pool is False
+
+
+def test_terminal_key_preserves_leading_zeroes_and_project_identity() -> None:
+    """Catches merging same-code terminals across projects or normalizing away leading zeroes."""
+    project_a = "11111111-1111-1111-1111-111111111111"
+    project_b = "22222222-2222-2222-2222-222222222222"
+
+    assert collector_transfer_domain.terminal_key(project_a, " 000123 ") == collector_transfer_domain.terminal_key(project_a, "000123")
+    assert collector_transfer_domain.terminal_key(project_a, "000123") != collector_transfer_domain.terminal_key(project_b, "000123")
+    assert collector_transfer_domain.terminal_key(project_a, "000123") != collector_transfer_domain.terminal_key(project_a, "123")
+
+
+def test_source_revision_is_order_stable_and_photo_sensitive() -> None:
+    """Catches reusing a hidden snapshot after its selected photo evidence changed."""
+    rows = [
+        {
+            "group_id": "g-2",
+            "meter_no": "M-002",
+            "collector_no": "C-001",
+            "module_meter_photo_id": "photo-2",
+            "module_meter_photo_sha256": "22" * 32,
+        },
+        {
+            "group_id": "g-1",
+            "meter_no": "M-001",
+            "collector_no": "C-001",
+            "module_meter_photo_id": "photo-1",
+            "module_meter_photo_sha256": "11" * 32,
+        },
+    ]
+    changed = [dict(row) for row in rows]
+    changed[0]["module_meter_photo_sha256"] = "33" * 32
+
+    assert collector_transfer_domain.terminal_source_revision(reversed(rows)) == collector_transfer_domain.terminal_source_revision(rows)
+    assert collector_transfer_domain.terminal_source_revision(rows) != collector_transfer_domain.terminal_source_revision(changed)
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import random
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -10,6 +13,42 @@ from enum import Enum
 def normalize_identifier(value: object) -> str:
     """Normalize surrounding whitespace while preserving the identifier text."""
     return str(value or "").strip()
+
+
+def terminal_key(project_id: str, terminal_code: str) -> str:
+    normalized_project_id = normalize_identifier(project_id)
+    normalized_terminal_code = normalize_identifier(terminal_code)
+    if not normalized_project_id:
+        raise ValueError("project_id is required")
+    if not normalized_terminal_code:
+        raise ValueError("terminal_code is required")
+    raw = json.dumps(
+        [normalized_project_id, normalized_terminal_code],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def terminal_source_revision(rows: Iterable[Mapping[str, object]]) -> str:
+    canonical_rows = [dict(row) for row in rows]
+    canonical_rows.sort(
+        key=lambda row: json.dumps(
+            row,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    )
+    payload = json.dumps(
+        canonical_rows,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

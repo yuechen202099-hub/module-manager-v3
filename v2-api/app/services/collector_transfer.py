@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import String, exists, func, or_, select
+from sqlalchemy import String, and_, case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
@@ -22,6 +23,8 @@ from app.domain.collector_transfer import (
     decide_project_inventory_scan,
     normalize_identifier,
     plan_random_assignments,
+    terminal_key,
+    terminal_source_revision,
 )
 from app.models import (
     AuditLog,
@@ -39,6 +42,7 @@ from app.models import (
     PhysicalCollector,
     Project,
     ProjectStatus,
+    TotalCatalogRow,
     User,
 )
 from app.services.photo_storage import resolve_photo_for_response
@@ -111,6 +115,16 @@ class MeterSourceProjection:
 
 @dataclass(frozen=True, slots=True)
 class _ProjectGroupRow:
+    id: UUID
+    terminal: str | None
+    display_meter_no: str
+    installation_address: str
+    raw_data: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _GlobalTerminalGroupRow:
+    project_id: UUID
     id: UUID
     terminal: str | None
     display_meter_no: str
@@ -219,6 +233,39 @@ def meter_sources_from_groups(groups: Iterable[object], photos: Iterable[object]
     return MeterSourceProjection(sources=tuple(sources), diagnostics=tuple(diagnostics))
 
 
+def _with_terminal_address_diagnostics(
+    projection: MeterSourceProjection,
+) -> MeterSourceProjection:
+    addresses = sorted(
+        {
+            normalize_identifier(source.installation_address)
+            for source in projection.sources
+            if normalize_identifier(source.installation_address)
+        }
+    )
+    diagnostics = list(projection.diagnostics)
+    if not addresses:
+        diagnostics.append(
+            {
+                "group_id": "",
+                "code": "installation_address_missing",
+                "message": "安装地址为空",
+            }
+        )
+    elif len(addresses) > 1:
+        diagnostics.append(
+            {
+                "group_id": "",
+                "code": "installation_address_conflict",
+                "message": "安装地址冲突：" + "、".join(addresses),
+            }
+        )
+    return MeterSourceProjection(
+        sources=projection.sources,
+        diagnostics=tuple(diagnostics),
+    )
+
+
 def _uuid(value: object, field_name: str) -> UUID:
     try:
         return UUID(normalize_identifier(value))
@@ -274,6 +321,40 @@ def _snapshot_has_photo_evidence(snapshot: object) -> bool:
             or snapshot.get("image_url")
         )
     )
+
+
+def _projection_source_revision(
+    *,
+    project_id: UUID,
+    terminal_code: str,
+    projection: MeterSourceProjection,
+    photos: Iterable[_ProjectPhotoRow],
+) -> str:
+    photos_by_id = {str(photo.id): photo for photo in photos}
+    revision_rows: list[dict[str, object]] = []
+    for source in projection.sources:
+        revision_rows.append(
+            {
+                "project_id": str(project_id),
+                "terminal_code": normalize_identifier(terminal_code),
+                "installation_address": normalize_identifier(
+                    source.installation_address
+                ),
+                "group_id": source.group_id,
+                "meter_no": source.meter_no,
+                "module_no": source.module_no,
+                "collector_no": source.collector_no,
+                "module_meter_photo": _photo_snapshot(
+                    photos_by_id.get(
+                        normalize_identifier(source.module_meter_photo_id)
+                    )
+                ),
+                "after_box_photo": _photo_snapshot(
+                    photos_by_id.get(normalize_identifier(source.after_box_photo_id))
+                ),
+            }
+        )
+    return terminal_source_revision(revision_rows)
 
 
 class PostgresCollectorTransferService:
@@ -374,6 +455,648 @@ class PostgresCollectorTransferService:
             for row in self.session.execute(photo_statement).tuples()
         ]
         return meter_sources_from_groups(groups, photos), photos
+
+    def _global_terminal_projection(
+        self,
+        *,
+        project_id: UUID,
+        terminal_code: str,
+    ) -> tuple[MeterSourceProjection, list[_ProjectPhotoRow]]:
+        normalized_code = normalize_identifier(terminal_code)
+        if not normalized_code:
+            raise ValueError("terminal_code is required")
+        normalized_terminal = _sql_identifier_strip(
+            func.coalesce(MaterialGroup.terminal, "")
+        )
+        authoritative_address = func.coalesce(
+            func.nullif(
+                _sql_identifier_strip(
+                    func.coalesce(TotalCatalogRow.installation_address, "")
+                ),
+                "",
+            ),
+            _sql_identifier_strip(
+                func.coalesce(MaterialGroup.installation_address, "")
+            ),
+        )
+        source_predicates = (
+            MaterialGroup.team_id == self.team_id,
+            MaterialGroup.project_id == project_id,
+            normalized_terminal == normalized_code,
+        )
+        groups = [
+            _ProjectGroupRow(*row)
+            for row in self.session.execute(
+                select(
+                    MaterialGroup.id,
+                    normalized_terminal,
+                    MaterialGroup.display_meter_no,
+                    authoritative_address,
+                    MaterialGroup.raw_data,
+                )
+                .outerjoin(
+                    TotalCatalogRow,
+                    and_(
+                        TotalCatalogRow.id == MaterialGroup.total_catalog_row_id,
+                        TotalCatalogRow.project_id == MaterialGroup.project_id,
+                        or_(
+                            TotalCatalogRow.team_id == self.team_id,
+                            TotalCatalogRow.team_id.is_(None),
+                        ),
+                    ),
+                )
+                .where(*source_predicates)
+                .order_by(
+                    MaterialGroup.display_meter_no,
+                    MaterialGroup.id,
+                )
+            ).tuples()
+        ]
+        if not groups:
+            raise KeyError(normalized_code)
+        photos = [
+            _ProjectPhotoRow(*row)
+            for row in self.session.execute(
+                select(
+                    Photo.id,
+                    Photo.group_id,
+                    Photo.collector,
+                    Photo.asset_no,
+                    Photo.category,
+                    Photo.sort_order,
+                    Photo.is_active,
+                    Photo.image_url,
+                    Photo.object_key,
+                    Photo.storage_type,
+                    Photo.storage_key,
+                    Photo.storage_bucket,
+                    Photo.sha256,
+                    Photo.content_type,
+                )
+                .join(MaterialGroup, Photo.group_id == MaterialGroup.id)
+                .where(
+                    *source_predicates,
+                    Photo.team_id == self.team_id,
+                    Photo.is_active.is_(True),
+                )
+                .order_by(Photo.group_id, Photo.sort_order, Photo.id)
+            ).tuples()
+        ]
+        return (
+            _with_terminal_address_diagnostics(
+                meter_sources_from_groups(groups, photos)
+            ),
+            photos,
+        )
+
+    def list_global_terminals(
+        self,
+        *,
+        query: str = "",
+        state: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+        include_blocked: bool = False,
+    ) -> dict[str, object]:
+        normalized_state = normalize_identifier(state).lower() or None
+        allowed_states = {"ready", "needs_replacement", "pool_shortage", "blocked"}
+        if normalized_state is not None and normalized_state not in allowed_states:
+            raise ValueError("state is invalid")
+        bounded_page = max(1, int(page))
+        bounded_page_size = min(100, max(1, int(page_size)))
+        search_text = normalize_identifier(query)
+
+        normalized_terminal = _sql_identifier_strip(func.coalesce(MaterialGroup.terminal, ""))
+        authoritative_address = func.coalesce(
+            func.nullif(
+                _sql_identifier_strip(func.coalesce(TotalCatalogRow.installation_address, "")),
+                "",
+            ),
+            _sql_identifier_strip(func.coalesce(MaterialGroup.installation_address, "")),
+        )
+        selected_photo_collector = (
+            select(_sql_identifier_strip(Photo.collector))
+            .where(
+                Photo.group_id == MaterialGroup.id,
+                Photo.team_id == self.team_id,
+                Photo.is_active.is_(True),
+                _sql_identifier_strip(func.coalesce(Photo.collector, "")) != "",
+            )
+            .order_by(Photo.sort_order, Photo.id)
+            .limit(1)
+            .correlate(MaterialGroup)
+            .scalar_subquery()
+        )
+        raw_collector = func.coalesce(
+            *(
+                func.nullif(
+                    _sql_identifier_strip(
+                        MaterialGroup.raw_data[key].as_string()
+                    ),
+                    "",
+                )
+                for key in (
+                    "collector",
+                    "采集器",
+                    "采集器号",
+                    "construction_collector",
+                )
+            ),
+            "",
+        )
+        effective_collector = func.coalesce(
+            selected_photo_collector,
+            raw_collector,
+        )
+        selected_module_asset = (
+            select(_sql_identifier_strip(func.coalesce(Photo.asset_no, "")))
+            .where(
+                Photo.group_id == MaterialGroup.id,
+                Photo.team_id == self.team_id,
+                Photo.is_active.is_(True),
+                Photo.category == "module_meter",
+            )
+            .order_by(Photo.sort_order, Photo.id)
+            .limit(1)
+            .correlate(MaterialGroup)
+            .scalar_subquery()
+        )
+        raw_module = func.coalesce(
+            *(
+                func.nullif(
+                    _sql_identifier_strip(
+                        MaterialGroup.raw_data[key].as_string()
+                    ),
+                    "",
+                )
+                for key in (
+                    "module_asset_no",
+                    "模块资产编号",
+                    "模块号",
+                    "construction_module_asset_no",
+                )
+            ),
+            "",
+        )
+        effective_module = func.coalesce(
+            func.nullif(selected_module_asset, ""),
+            raw_module,
+        )
+        has_module_meter_photo = exists().where(
+            Photo.group_id == MaterialGroup.id,
+            Photo.team_id == self.team_id,
+            Photo.is_active.is_(True),
+            Photo.category == "module_meter",
+        )
+        has_after_box_photo = exists().where(
+            Photo.group_id == MaterialGroup.id,
+            Photo.team_id == self.team_id,
+            Photo.is_active.is_(True),
+            Photo.category == "after_box",
+        )
+        complete_source = and_(
+            _sql_identifier_strip(
+                func.coalesce(MaterialGroup.display_meter_no, "")
+            )
+            != "",
+            effective_collector != "",
+            effective_module != "",
+            has_module_meter_photo,
+            has_after_box_photo,
+            authoritative_address != "",
+        )
+        active_project_predicates = (
+            Project.team_id == self.team_id,
+            Project.status == ProjectStatus.ACTIVE,
+            Project.archived_at.is_(None),
+        )
+        identity_statement = (
+            select(
+                Project.id.label("project_id"),
+                Project.code.label("project_code"),
+                Project.name.label("project_name"),
+                normalized_terminal.label("terminal_code"),
+            )
+            .join(MaterialGroup, MaterialGroup.project_id == Project.id)
+            .outerjoin(
+                TotalCatalogRow,
+                and_(
+                    TotalCatalogRow.id == MaterialGroup.total_catalog_row_id,
+                    TotalCatalogRow.project_id == MaterialGroup.project_id,
+                    or_(
+                        TotalCatalogRow.team_id == self.team_id,
+                        TotalCatalogRow.team_id.is_(None),
+                    ),
+                ),
+            )
+            .where(
+                *active_project_predicates,
+                MaterialGroup.team_id == self.team_id,
+                normalized_terminal != "",
+            )
+        )
+        grouped_identity = identity_statement.group_by(
+            Project.id,
+            Project.code,
+            Project.name,
+            normalized_terminal,
+        )
+        address_count = func.count(
+            func.distinct(func.nullif(authoritative_address, ""))
+        )
+        incomplete_count = func.sum(
+            case((complete_source, 0), else_=1)
+        )
+        if search_text:
+            pattern = f"%{search_text}%"
+            grouped_identity = grouped_identity.having(
+                func.sum(
+                    case(
+                        (
+                            or_(
+                                normalized_terminal.ilike(pattern),
+                                authoritative_address.ilike(pattern),
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                )
+                > 0
+            )
+        if normalized_state == "blocked":
+            grouped_identity = grouped_identity.having(
+                or_(incomplete_count > 0, address_count != 1)
+            )
+        elif not include_blocked or normalized_state is not None:
+            grouped_identity = grouped_identity.having(
+                incomplete_count == 0,
+                address_count == 1,
+            )
+        identity_subquery = grouped_identity.subquery()
+
+        duplicate_counts = (
+            select(
+                normalized_terminal.label("terminal_code"),
+                func.count(func.distinct(Project.id)).label("project_count"),
+            )
+            .join(MaterialGroup, MaterialGroup.project_id == Project.id)
+            .where(
+                *active_project_predicates,
+                MaterialGroup.team_id == self.team_id,
+                normalized_terminal != "",
+            )
+            .group_by(normalized_terminal)
+            .subquery()
+        )
+        total = int(
+            self.session.scalar(select(func.count()).select_from(identity_subquery))
+            or 0
+        )
+        identity_rows = self.session.execute(
+            select(
+                identity_subquery.c.project_id,
+                identity_subquery.c.project_code,
+                identity_subquery.c.project_name,
+                identity_subquery.c.terminal_code,
+                duplicate_counts.c.project_count,
+            )
+            .join(
+                duplicate_counts,
+                duplicate_counts.c.terminal_code == identity_subquery.c.terminal_code,
+            )
+            .order_by(
+                identity_subquery.c.terminal_code,
+                identity_subquery.c.project_name,
+                identity_subquery.c.project_code,
+                identity_subquery.c.project_id,
+            )
+            .offset((bounded_page - 1) * bounded_page_size)
+            .limit(bounded_page_size)
+        ).mappings().all()
+        if not identity_rows:
+            return {
+                "items": [],
+                "page": bounded_page,
+                "page_size": bounded_page_size,
+                "total": total,
+            }
+
+        candidate_keys = [
+            (row["project_id"], normalize_identifier(row["terminal_code"]))
+            for row in identity_rows
+        ]
+        source_key_predicate = or_(
+            *(
+                and_(
+                    MaterialGroup.project_id == project_id,
+                    normalized_terminal == terminal_code,
+                )
+                for project_id, terminal_code in candidate_keys
+            )
+        )
+        group_rows = [
+            _GlobalTerminalGroupRow(*row)
+            for row in self.session.execute(
+                select(
+                    MaterialGroup.project_id,
+                    MaterialGroup.id,
+                    normalized_terminal,
+                    MaterialGroup.display_meter_no,
+                    authoritative_address,
+                    MaterialGroup.raw_data,
+                )
+                .outerjoin(
+                    TotalCatalogRow,
+                    and_(
+                        TotalCatalogRow.id == MaterialGroup.total_catalog_row_id,
+                        TotalCatalogRow.project_id == MaterialGroup.project_id,
+                        or_(
+                            TotalCatalogRow.team_id == self.team_id,
+                            TotalCatalogRow.team_id.is_(None),
+                        ),
+                    ),
+                )
+                .where(
+                    MaterialGroup.team_id == self.team_id,
+                    source_key_predicate,
+                )
+                .order_by(
+                    MaterialGroup.project_id,
+                    normalized_terminal,
+                    MaterialGroup.display_meter_no,
+                    MaterialGroup.id,
+                )
+            ).tuples()
+        ]
+        photo_rows = [
+            _ProjectPhotoRow(*row)
+            for row in self.session.execute(
+                select(
+                    Photo.id,
+                    Photo.group_id,
+                    Photo.collector,
+                    Photo.asset_no,
+                    Photo.category,
+                    Photo.sort_order,
+                    Photo.is_active,
+                    Photo.image_url,
+                    Photo.object_key,
+                    Photo.storage_type,
+                    Photo.storage_key,
+                    Photo.storage_bucket,
+                    Photo.sha256,
+                    Photo.content_type,
+                )
+                .join(MaterialGroup, Photo.group_id == MaterialGroup.id)
+                .where(
+                    MaterialGroup.team_id == self.team_id,
+                    Photo.team_id == self.team_id,
+                    Photo.is_active.is_(True),
+                    source_key_predicate,
+                )
+                .order_by(
+                    MaterialGroup.project_id,
+                    normalized_terminal,
+                    Photo.group_id,
+                    Photo.sort_order,
+                    Photo.id,
+                )
+            ).tuples()
+        ]
+
+        groups_by_key: dict[tuple[UUID, str], list[_GlobalTerminalGroupRow]] = defaultdict(list)
+        group_key_by_id: dict[UUID, tuple[UUID, str]] = {}
+        for group in group_rows:
+            key = (group.project_id, normalize_identifier(group.terminal))
+            groups_by_key[key].append(group)
+            group_key_by_id[group.id] = key
+        photos_by_key: dict[tuple[UUID, str], list[_ProjectPhotoRow]] = defaultdict(list)
+        for photo in photo_rows:
+            key = group_key_by_id.get(photo.group_id)
+            if key is not None:
+                photos_by_key[key].append(photo)
+
+        source_payloads: dict[tuple[UUID, str], dict[str, object]] = {}
+        collector_pairs: list[tuple[UUID, str]] = []
+        for key in candidate_keys:
+            projection = _with_terminal_address_diagnostics(
+                meter_sources_from_groups(
+                    groups_by_key.get(key, ()),
+                    photos_by_key.get(key, ()),
+                )
+            )
+            snapshots = build_terminal_snapshots(projection.sources)
+            snapshot = snapshots[0] if snapshots else None
+            requirements = (
+                tuple(
+                    normalize_identifier(item.original_collector_no)
+                    for item in snapshot.collector_requirements
+                )
+                if snapshot is not None
+                else ()
+            )
+            collector_pairs.extend((key[0], collector_no) for collector_no in requirements)
+            source_payloads[key] = {
+                "projection": projection,
+                "snapshot": snapshot,
+                "requirements": requirements,
+            }
+
+        direct_claims: dict[tuple[UUID, str], set[str]] = defaultdict(set)
+        for chunk_start in range(0, len(collector_pairs), 400):
+            chunk = collector_pairs[chunk_start : chunk_start + 400]
+            if not chunk:
+                continue
+            for project_id, collector_no in self.session.execute(
+                select(
+                    PhysicalCollector.project_id,
+                    PhysicalCollector.collector_no,
+                ).where(
+                    PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.pool_status == "direct",
+                    or_(
+                        *(
+                            and_(
+                                PhysicalCollector.project_id == project_id,
+                                PhysicalCollector.collector_no == collector_no,
+                            )
+                            for project_id, collector_no in chunk
+                        )
+                    ),
+                )
+            ).tuples():
+                direct_claims[(project_id, collector_no)].add(collector_no)
+
+        project_ids = sorted({project_id for project_id, _terminal_code in candidate_keys}, key=str)
+        pool_counts = {
+            project_id: int(available_count)
+            for project_id, available_count in self.session.execute(
+                select(
+                    PhysicalCollector.project_id,
+                    func.count(func.distinct(PhysicalCollector.id)),
+                )
+                .join(
+                    CollectorPhoto,
+                    and_(
+                        CollectorPhoto.physical_collector_id == PhysicalCollector.id,
+                        CollectorPhoto.team_id == self.team_id,
+                        CollectorPhoto.is_active.is_(True),
+                    ),
+                )
+                .where(
+                    PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.project_id.in_(project_ids),
+                    PhysicalCollector.pool_status == "available",
+                )
+                .group_by(PhysicalCollector.project_id)
+            ).tuples()
+        }
+
+        hidden_key_predicate = or_(
+            *(
+                and_(
+                    CollectorTransferRun.project_id == project_id,
+                    _sql_identifier_strip(CollectorTransferTerminal.terminal_code)
+                    == terminal_code,
+                )
+                for project_id, terminal_code in candidate_keys
+            )
+        )
+        progressed_claims: dict[tuple[UUID, str], set[str]] = defaultdict(set)
+        assignment_rows = self.session.execute(
+            select(
+                CollectorTransferRun.project_id,
+                CollectorTransferTerminal.terminal_code,
+                CollectorRequirement.original_collector_no,
+                CollectorTransferRun.stats,
+            )
+            .join(
+                CollectorRequirement,
+                CollectorRequirement.run_id == CollectorTransferRun.id,
+            )
+            .join(
+                CollectorTransferTerminal,
+                CollectorTransferTerminal.id == CollectorRequirement.terminal_id,
+            )
+            .join(
+                CollectorAssignment,
+                CollectorAssignment.requirement_id == CollectorRequirement.id,
+            )
+            .where(
+                CollectorTransferRun.team_id == self.team_id,
+                CollectorAssignment.status.in_(("reserved", "used")),
+                hidden_key_predicate,
+            )
+        ).tuples()
+        direct_item_rows = self.session.execute(
+            select(
+                CollectorTransferRun.project_id,
+                CollectorTransferTerminal.terminal_code,
+                CollectorRequirement.original_collector_no,
+                CollectorTransferRun.stats,
+            )
+            .join(
+                CollectorRequirement,
+                CollectorRequirement.run_id == CollectorTransferRun.id,
+            )
+            .join(
+                CollectorTransferTerminal,
+                CollectorTransferTerminal.id == CollectorRequirement.terminal_id,
+            )
+            .join(
+                CollectorWorkbenchItem,
+                CollectorWorkbenchItem.requirement_id == CollectorRequirement.id,
+            )
+            .where(
+                CollectorTransferRun.team_id == self.team_id,
+                CollectorWorkbenchItem.assignment_id.is_(None),
+                CollectorRequirement.status.in_(("direct_ready", "used")),
+                hidden_key_predicate,
+            )
+        ).tuples()
+        for project_id, terminal_code, collector_no, stats in (
+            *assignment_rows,
+            *direct_item_rows,
+        ):
+            metadata = stats if isinstance(stats, Mapping) else {}
+            if metadata.get("workflow_kind") != "global_terminal_workbench":
+                continue
+            if bool(metadata.get("superseded")):
+                continue
+            progressed_claims[
+                (project_id, normalize_identifier(terminal_code))
+            ].add(normalize_identifier(collector_no))
+
+        items: list[dict[str, object]] = []
+        for identity in identity_rows:
+            project_id = identity["project_id"]
+            terminal_code = normalize_identifier(identity["terminal_code"])
+            key = (project_id, terminal_code)
+            payload = source_payloads[key]
+            projection = payload["projection"]
+            snapshot = payload["snapshot"]
+            requirements = tuple(payload["requirements"])
+            addresses = sorted(
+                {
+                    normalize_identifier(source.installation_address)
+                    for source in projection.sources
+                    if normalize_identifier(source.installation_address)
+                }
+            )
+            diagnostics = list(projection.diagnostics)
+
+            claimed_numbers = set(progressed_claims.get(key, set()))
+            for original_collector_no in requirements:
+                if direct_claims.get((project_id, original_collector_no)):
+                    claimed_numbers.add(original_collector_no)
+            physical_count = len(set(requirements) & claimed_numbers)
+            missing_count = max(0, len(requirements) - physical_count)
+            pool_available_count = pool_counts.get(project_id, 0)
+            if diagnostics:
+                workflow_state = "blocked"
+            elif missing_count == 0:
+                workflow_state = "ready"
+            elif pool_available_count >= missing_count:
+                workflow_state = "needs_replacement"
+            else:
+                workflow_state = "pool_shortage"
+
+            candidate = {
+                "terminal_key": terminal_key(str(project_id), terminal_code),
+                "project_id": str(project_id),
+                "project_name": normalize_identifier(identity["project_name"]),
+                "project_code": normalize_identifier(identity["project_code"]),
+                "terminal_code": terminal_code,
+                "installation_address": "、".join(addresses),
+                "needs_disambiguation": int(identity["project_count"] or 0) > 1,
+                "meter_count": len(snapshot.meters) if snapshot is not None else 0,
+                "collector_count": len(requirements),
+                "physical_count": physical_count,
+                "missing_count": missing_count,
+                "pool_available_count": pool_available_count,
+                "workflow_state": workflow_state,
+                "selectable": workflow_state != "blocked",
+                "source_revision": _projection_source_revision(
+                    project_id=project_id,
+                    terminal_code=terminal_code,
+                    projection=projection,
+                    photos=photos_by_key.get(key, ()),
+                ),
+                "diagnostics": diagnostics,
+            }
+            if normalized_state is not None and workflow_state != normalized_state:
+                continue
+            if workflow_state == "blocked" and not include_blocked:
+                continue
+            items.append(candidate)
+
+        return {
+            "items": items,
+            "page": bounded_page,
+            "page_size": bounded_page_size,
+            "total": total,
+        }
 
     def _project_has_collector_number(self, project_id: UUID, collector_no: str) -> bool:
         stripped_photo_collector = _sql_identifier_strip(Photo.collector)
@@ -518,15 +1241,19 @@ class PostgresCollectorTransferService:
             "pool_available_count": available_pool_count,
         }
 
-    def create_run(self, *, project_id: str, name: str) -> dict[str, object]:
-        project = self._project(project_id)
-        project_uuid = project.id
-        projection, photos = self._project_meter_projection(project_uuid)
-        source_photos_by_id = {str(photo.id): photo for photo in photos}
+    def _create_run_from_projection(
+        self,
+        *,
+        project: Project,
+        name: str,
+        projection: MeterSourceProjection,
+        source_photos_by_id: Mapping[str, _ProjectPhotoRow],
+        stats_extra: Mapping[str, object] | None = None,
+    ) -> CollectorTransferRun:
         snapshots = build_terminal_snapshots(projection.sources)
         run = CollectorTransferRun(
             team_id=self.team_id,
-            project_id=project_uuid,
+            project_id=project.id,
             name=normalize_identifier(name) or "采集器盘点",
             status="inventory",
             diagnostics=list(projection.diagnostics),
@@ -540,15 +1267,16 @@ class PostgresCollectorTransferService:
         diagnostics_by_group: dict[str, list[dict[str, str]]] = defaultdict(list)
         for diagnostic in projection.diagnostics:
             diagnostics_by_group[diagnostic["group_id"]].append(diagnostic)
+        global_diagnostics = diagnostics_by_group.get("", [])
 
         requirement_count = 0
         blocked_terminal_count = 0
         for terminal_index, snapshot in enumerate(snapshots):
-            terminal_diagnostics = [
+            terminal_diagnostics = [*global_diagnostics, *(
                 diagnostic
                 for meter_source in snapshot.meters
                 for diagnostic in diagnostics_by_group.get(meter_source.group_id, [])
-            ]
+            )]
             terminal_status = "blocked" if terminal_diagnostics else "ready"
             if terminal_status == "blocked":
                 blocked_terminal_count += 1
@@ -634,7 +1362,7 @@ class PostgresCollectorTransferService:
                         )
                     )
 
-        run.stats = {
+        stats: dict[str, object] = {
             "terminal_count": len(snapshots),
             "meter_count": len(projection.sources),
             "collector_requirement_count": requirement_count,
@@ -643,18 +1371,232 @@ class PostgresCollectorTransferService:
             "pool_available_count": 0,
             "assignment_count": 0,
         }
+        stats.update(dict(stats_extra or {}))
+        run.stats = stats
         self._bind_direct_inventory(run)
         self._refresh_allocation_stats(run)
+        return run
+
+    def create_run(self, *, project_id: str, name: str) -> dict[str, object]:
+        project = self._project(project_id)
+        projection, photos = self._project_meter_projection(project.id)
+        run = self._create_run_from_projection(
+            project=project,
+            name=name,
+            projection=projection,
+            source_photos_by_id={str(photo.id): photo for photo in photos},
+        )
         self._audit(
             action="collector_transfer.run_created",
             entity_type="collector_transfer_run",
             entity_id=run.id,
-            project_id=project_uuid,
+            project_id=project.id,
             payload=dict(run.stats),
         )
         self.session.commit()
         self.session.refresh(run)
         return self._run_summary(run)
+
+    def _lock_global_terminal_identity(
+        self,
+        *,
+        project_id: UUID,
+        terminal_code: str,
+    ) -> None:
+        bind = self.session.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        lock_material = (
+            f"{self.team_id}\x1f{project_id}\x1f{normalize_identifier(terminal_code)}"
+        ).encode("utf-8")
+        lock_id = int.from_bytes(
+            hashlib.sha256(lock_material).digest()[:8],
+            byteorder="big",
+            signed=True,
+        )
+        self.session.execute(select(func.pg_advisory_xact_lock(lock_id)))
+
+    def _active_global_terminal_run(
+        self,
+        *,
+        project_id: UUID,
+        terminal_code: str,
+    ) -> CollectorTransferRun | None:
+        workflow_kind = CollectorTransferRun.stats["workflow_kind"].as_string()
+        source_terminal_code = CollectorTransferRun.stats[
+            "source_terminal_code"
+        ].as_string()
+        superseded = CollectorTransferRun.stats["superseded"].as_boolean()
+        return self.session.scalar(
+            select(CollectorTransferRun)
+            .where(
+                CollectorTransferRun.team_id == self.team_id,
+                CollectorTransferRun.project_id == project_id,
+                workflow_kind == "global_terminal_workbench",
+                source_terminal_code == normalize_identifier(terminal_code),
+                or_(superseded.is_(None), superseded.is_(False)),
+            )
+            .order_by(
+                CollectorTransferRun.created_at.desc(),
+                CollectorTransferRun.id.desc(),
+            )
+            .limit(1)
+        )
+
+    def _global_run_has_progress(self, run: CollectorTransferRun) -> bool:
+        completed_count = int(
+            self.session.scalar(
+                select(func.count(CollectorWorkbenchItem.id)).where(
+                    CollectorWorkbenchItem.run_id == run.id,
+                    CollectorWorkbenchItem.status == "completed",
+                )
+            )
+            or 0
+        )
+        active_assignment_count = int(
+            self.session.scalar(
+                select(func.count(CollectorAssignment.id)).where(
+                    CollectorAssignment.run_id == run.id,
+                    CollectorAssignment.status.in_(("reserved", "used")),
+                )
+            )
+            or 0
+        )
+        return completed_count > 0 or active_assignment_count > 0
+
+    def _global_terminal_open_result(
+        self,
+        *,
+        run: CollectorTransferRun,
+        snapshot_reused: bool,
+        source_changed: bool,
+        current_source_revision: str,
+    ) -> dict[str, object]:
+        terminal = self.session.scalar(
+            select(CollectorTransferTerminal).where(
+                CollectorTransferTerminal.run_id == run.id,
+                CollectorTransferTerminal.team_id == self.team_id,
+            )
+        )
+        if terminal is None:
+            raise KeyError(str(run.id))
+        stats = dict(run.stats or {})
+        return {
+            "run_id": str(run.id),
+            "terminal_id": str(terminal.id),
+            "workbench_terminal_id": str(terminal.id),
+            "project_id": str(run.project_id),
+            "terminal_code": terminal.terminal_code,
+            "source_revision": normalize_identifier(stats.get("source_revision")),
+            "current_source_revision": current_source_revision,
+            "snapshot_reused": snapshot_reused,
+            "source_changed": source_changed,
+        }
+
+    def open_global_terminal(
+        self,
+        *,
+        project_id: str,
+        terminal_code: str,
+        source_revision: str = "",
+        terminal_key_value: str = "",
+        force_refresh: bool = False,
+    ) -> dict[str, object]:
+        project = self._project(project_id)
+        normalized_code = normalize_identifier(terminal_code)
+        if not normalized_code:
+            raise ValueError("terminal_code is required")
+        expected_key = terminal_key(str(project.id), normalized_code)
+        supplied_key = normalize_identifier(terminal_key_value)
+        if supplied_key and supplied_key != expected_key:
+            raise ValueError("terminal_key is invalid")
+
+        self._lock_global_terminal_identity(
+            project_id=project.id,
+            terminal_code=normalized_code,
+        )
+        projection, photos = self._global_terminal_projection(
+            project_id=project.id,
+            terminal_code=normalized_code,
+        )
+        if projection.diagnostics:
+            raise CollectorRunBlockedError("terminal source is blocked")
+        current_revision = _projection_source_revision(
+            project_id=project.id,
+            terminal_code=normalized_code,
+            projection=projection,
+            photos=photos,
+        )
+        requested_revision = normalize_identifier(source_revision)
+        active_run = self._active_global_terminal_run(
+            project_id=project.id,
+            terminal_code=normalized_code,
+        )
+        if active_run is not None:
+            stored_revision = normalize_identifier(
+                (active_run.stats or {}).get("source_revision")
+            )
+            if stored_revision == current_revision and not force_refresh:
+                return self._global_terminal_open_result(
+                    run=active_run,
+                    snapshot_reused=True,
+                    source_changed=bool(
+                        requested_revision and requested_revision != current_revision
+                    ),
+                    current_source_revision=current_revision,
+                )
+            if self._global_run_has_progress(active_run):
+                return self._global_terminal_open_result(
+                    run=active_run,
+                    snapshot_reused=True,
+                    source_changed=True,
+                    current_source_revision=current_revision,
+                )
+            active_stats = dict(active_run.stats or {})
+            active_stats["superseded"] = True
+            active_run.stats = active_stats
+
+        run = self._create_run_from_projection(
+            project=project,
+            name=f"全局翻拍/{normalized_code}/{current_revision[:8]}",
+            projection=projection,
+            source_photos_by_id={str(photo.id): photo for photo in photos},
+            stats_extra={
+                "workflow_kind": "global_terminal_workbench",
+                "source_revision": current_revision,
+                "source_terminal_code": normalized_code,
+                "source_terminal_key": expected_key,
+                "superseded": False,
+            },
+        )
+        if active_run is not None:
+            active_stats = dict(active_run.stats or {})
+            active_stats["superseded_by_run_id"] = str(run.id)
+            active_run.stats = active_stats
+            self._audit(
+                action="collector_workbench.snapshot_superseded",
+                entity_type="collector_transfer_run",
+                entity_id=active_run.id,
+                project_id=project.id,
+                payload={"superseded_by_run_id": str(run.id)},
+            )
+        self._audit(
+            action="collector_workbench.snapshot_created",
+            entity_type="collector_transfer_run",
+            entity_id=run.id,
+            project_id=project.id,
+            payload=dict(run.stats or {}),
+        )
+        self.session.commit()
+        self.session.refresh(run)
+        return self._global_terminal_open_result(
+            run=run,
+            snapshot_reused=False,
+            source_changed=bool(
+                requested_revision and requested_revision != current_revision
+            ),
+            current_source_revision=current_revision,
+        )
 
     def scan_inventory(self, *, project_id: str, collector_no: str) -> dict[str, object]:
         project = self._project(project_id)
