@@ -33,6 +33,7 @@ from app.models import (
     Team,
 )
 from app.services.collector_transfer import (
+    CollectorDirectConflictError,
     CollectorPhotoConflictError,
     CollectorWorkbenchIncompleteError,
     PostgresCollectorTransferService,
@@ -635,3 +636,146 @@ def test_real_postgres_completion_and_rollback_share_deadlock_free_lock_order(
 
     assert all(kind != "unexpected" for kind, _detail in outcomes), outcomes
     assert {kind for kind, _detail in outcomes}.issubset({"ok", "not_found", "conflict"})
+
+
+def test_real_postgres_concurrent_direct_claim_allows_one_hidden_terminal(
+    postgres_session_factory,
+) -> None:
+    """Catches two terminal reconciliations claiming one direct physical after racing past ownership checks."""
+    team_id = f"task7-direct-claim-{uuid4().hex}"
+    with postgres_session_factory.begin() as session:
+        session.add(Team(id=team_id, name="Task 7 direct claim"))
+        session.flush()
+        project = Project(
+            team_id=team_id,
+            code=f"TASK7-DIRECT-{uuid4().hex[:10]}",
+            name="Task 7 direct claim",
+            status=ProjectStatus.ACTIVE,
+        )
+        session.add(project)
+        session.flush()
+        physical = PhysicalCollector(
+            team_id=team_id,
+            project_id=project.id,
+            collector_no="TASK7-SHARED-DIRECT",
+            pool_status="direct",
+        )
+        session.add(physical)
+        terminal_ids: list[str] = []
+        for index in range(2):
+            terminal_code = f"TASK7-DIRECT-T-{index + 1}"
+            run = CollectorTransferRun(
+                team_id=team_id,
+                project_id=project.id,
+                name=f"Task 7 direct run {index + 1}",
+                status="inventory",
+                stats={
+                    "workflow_kind": "global_terminal_workbench",
+                    "source_terminal_code": terminal_code,
+                    "source_revision": f"revision-{index + 1}",
+                    "superseded": False,
+                },
+                diagnostics=[],
+            )
+            session.add(run)
+            session.flush()
+            terminal = CollectorTransferTerminal(
+                run_id=run.id,
+                team_id=team_id,
+                terminal_code=terminal_code,
+                installation_address="并发直接实物地址",
+                status="ready",
+                meter_count=0,
+                collector_requirement_count=1,
+                diagnostics=[],
+            )
+            session.add(terminal)
+            session.flush()
+            session.add(
+                CollectorRequirement(
+                    run_id=run.id,
+                    terminal_id=terminal.id,
+                    team_id=team_id,
+                    original_collector_no="TASK7-SHARED-DIRECT",
+                    status="unmatched",
+                    sort_order=0,
+                    diagnostics=[],
+                )
+            )
+            terminal_ids.append(str(terminal.id))
+
+    start = Barrier(3)
+
+    def reconcile_once(terminal_id: str) -> tuple[str, str]:
+        start.wait(timeout=10)
+        with postgres_session_factory() as session:
+            transfer = PostgresCollectorTransferService(
+                session=session,
+                team_id=team_id,
+                actor="task7-direct",
+            )
+            try:
+                result = transfer.global_terminal_detail(
+                    terminal_id=terminal_id
+                )
+                session.scalar(select(func.count(Team.id)))
+                return "ok", str(result["collector_items"][0]["physical_state"])
+            except CollectorDirectConflictError as exc:
+                session.rollback()
+                session.scalar(select(func.count(Team.id)))
+                return "direct_conflict", str(exc)
+            except Exception as exc:
+                session.rollback()
+                return "unexpected", f"{type(exc).__name__}: {exc}"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(reconcile_once, terminal_id)
+            for terminal_id in terminal_ids
+        ]
+        start.wait(timeout=10)
+        outcomes = [future.result(timeout=20) for future in futures]
+
+    assert sorted(kind for kind, _detail in outcomes) == [
+        "direct_conflict",
+        "ok",
+    ], outcomes
+    with postgres_session_factory() as session:
+        direct_items = list(
+            session.scalars(
+                select(CollectorWorkbenchItem)
+                .join(
+                    CollectorRequirement,
+                    CollectorRequirement.id
+                    == CollectorWorkbenchItem.requirement_id,
+                )
+                .where(
+                    CollectorWorkbenchItem.team_id == team_id,
+                    CollectorWorkbenchItem.assignment_id.is_(None),
+                    CollectorRequirement.original_collector_no
+                    == "TASK7-SHARED-DIRECT",
+                    CollectorRequirement.status == "direct_ready",
+                )
+            )
+        )
+        persisted_physical = session.scalar(
+            select(PhysicalCollector).where(
+                PhysicalCollector.team_id == team_id,
+                PhysicalCollector.collector_no == "TASK7-SHARED-DIRECT",
+            )
+        )
+        assignment_count = session.scalar(
+            select(func.count(CollectorAssignment.id)).where(
+                CollectorAssignment.team_id == team_id
+            )
+        )
+        photo_count = session.scalar(
+            select(func.count(CollectorPhoto.id)).where(
+                CollectorPhoto.team_id == team_id
+            )
+        )
+
+    assert len(direct_items) == 1
+    assert persisted_physical.pool_status == "direct"
+    assert assignment_count == 0
+    assert photo_count == 0

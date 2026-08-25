@@ -40,6 +40,7 @@ from app.models import (
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorPhotoConflictError,
+    CollectorWorkbenchIncompleteError,
     PostgresCollectorTransferService,
     _photo_snapshot,
     meter_sources_from_groups,
@@ -3205,3 +3206,412 @@ def test_open_global_terminal_preserves_progressed_snapshot_after_source_change(
     assert preserved["current_source_revision"] == changed_candidate["source_revision"]
     assert not old_run.stats.get("superseded", False)
     assert db_session.get(CollectorWorkbenchItem, item_id).status == "completed"
+
+
+def test_global_terminal_detail_projects_present_missing_and_replaced_collectors(
+    db_session: Session,
+) -> None:
+    """Catches the workbench hiding missing requirements or treating direct items as photo-backed replacements."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    for meter_no, collector_no in (
+        ("DETAIL-METER-1", "DIRECT-001"),
+        ("DETAIL-METER-2", "MISSING-001"),
+        ("DETAIL-METER-3", "ORIGINAL-001"),
+    ):
+        add_global_terminal_source(
+            db_session,
+            project=project,
+            terminal_code="DETAIL-001",
+            meter_no=meter_no,
+            collector_no=collector_no,
+            authoritative_address="详情测试地址",
+        )
+    direct = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="DIRECT-001",
+        pool_status="direct",
+    )
+    replacement = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="POOL-REPLACED-001",
+        pool_status="available",
+    )
+    spare = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="POOL-SPARE-001",
+        pool_status="available",
+    )
+    db_session.add_all((direct, replacement, spare))
+    db_session.commit()
+    replacement_photo = collector_photo(db_session, replacement, sha256="c" * 64)
+    collector_photo(db_session, spare, sha256="a" * 64)
+    candidate = service(db_session).list_global_terminals(query="DETAIL-001")["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="DETAIL-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    run_id = UUID(opened["run_id"])
+    terminal_id = UUID(opened["workbench_terminal_id"])
+    replaced_requirement = db_session.scalar(
+        select(CollectorRequirement).where(
+            CollectorRequirement.run_id == run_id,
+            CollectorRequirement.original_collector_no == "ORIGINAL-001",
+        )
+    )
+    replacement.pool_status = "reserved"
+    replaced_requirement.status = "assigned"
+    assignment = CollectorAssignment(
+        id=uuid4(),
+        run_id=run_id,
+        team_id="team-1",
+        requirement_id=replaced_requirement.id,
+        physical_collector_id=replacement.id,
+        collector_photo_id=replacement_photo.id,
+        assignment_mode="random",
+        status="reserved",
+    )
+    db_session.add(assignment)
+    db_session.flush()
+    db_session.add(
+        CollectorWorkbenchItem(
+            id=uuid4(),
+            run_id=run_id,
+            terminal_id=terminal_id,
+            team_id="team-1",
+            item_kind="collector_removal",
+            source_key=str(replaced_requirement.id),
+            requirement_id=replaced_requirement.id,
+            assignment_id=assignment.id,
+            status="pending",
+            sort_order=20,
+        )
+    )
+    db_session.commit()
+
+    detail = service(db_session).global_terminal_detail(
+        terminal_id=str(terminal_id)
+    )
+
+    assert len(detail["meter_install_items"]) == 3
+    assert all(
+        [slot["slot"] for slot in row["photos"]]
+        == ["module_meter", "after_box"]
+        for row in detail["meter_install_items"]
+    )
+    assert [row["physical_state"] for row in detail["collector_items"]] == [
+        "present",
+        "missing",
+        "replaced",
+    ]
+    present, missing, replaced = detail["collector_items"]
+    assert present["final_collector_no"] == "DIRECT-001"
+    assert present["capture_strategy"] == "live_physical"
+    assert present["photo"] is None
+    assert present["assignment_id"] is None
+    assert missing["workbench_item_id"] is None
+    assert missing["final_collector_no"] is None
+    assert missing["capture_strategy"] == "unavailable"
+    assert replaced["final_collector_no"] == "POOL-REPLACED-001"
+    assert replaced["collector_barcode"] == "POOL-REPLACED-001"
+    assert replaced["capture_strategy"] == "screen_photo"
+    assert replaced["assignment_id"] == str(assignment.id)
+    assert replaced["photo"]["sha256"] == "c" * 64
+    assert detail["pool_summary"] == {
+        "required": 1,
+        "available": 1,
+        "shortage": 0,
+    }
+
+
+def test_global_terminal_detail_reconciles_late_direct_inventory_once(
+    db_session: Session,
+) -> None:
+    """Catches a same-number physical scan after snapshot creation remaining missing or duplicating work items."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="LATE-DIRECT-001",
+        meter_no="LATE-DIRECT-METER",
+        collector_no="LATE-DIRECT-COLLECTOR",
+        authoritative_address="后补实物地址",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(query="LATE-DIRECT-001")["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="LATE-DIRECT-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="LATE-DIRECT-COLLECTOR",
+        pool_status="direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+
+    first = service(db_session).global_terminal_detail(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+    second = service(db_session).global_terminal_detail(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+
+    requirement_row = db_session.scalar(
+        select(CollectorRequirement).where(
+            CollectorRequirement.run_id == UUID(opened["run_id"])
+        )
+    )
+    assert first["collector_items"][0]["physical_state"] == "present"
+    assert second["collector_items"] == first["collector_items"]
+    assert requirement_row.status == "direct_ready"
+    assert db_session.scalar(
+        select(func.count(CollectorWorkbenchItem.id)).where(
+            CollectorWorkbenchItem.requirement_id == requirement_row.id
+        )
+    ) == 1
+    assert db_session.scalar(
+        select(func.count(AuditLog.id)).where(
+            AuditLog.action == "collector_workbench.direct_bound"
+        )
+    ) == 1
+
+
+def test_global_terminal_detail_rejects_direct_physical_owned_by_another_terminal(
+    db_session: Session,
+) -> None:
+    """Catches one same-number physical collector being claimed by two active hidden terminals."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    for terminal_code, meter_no in (
+        ("OWNER-001", "OWNER-METER-1"),
+        ("CLAIMANT-001", "CLAIMANT-METER-1"),
+    ):
+        add_global_terminal_source(
+            db_session,
+            project=project,
+            terminal_code=terminal_code,
+            meter_no=meter_no,
+            collector_no="SHARED-DIRECT-001",
+            authoritative_address=f"{terminal_code}地址",
+        )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="SHARED-DIRECT-001",
+        pool_status="direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    owner_candidate = service(db_session).list_global_terminals(query="OWNER-001")["items"][0]
+    owner = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="OWNER-001",
+        source_revision=owner_candidate["source_revision"],
+        terminal_key_value=owner_candidate["terminal_key"],
+    )
+    physical.pool_status = "available"
+    db_session.commit()
+    claimant_candidate = service(db_session).list_global_terminals(query="CLAIMANT-001")["items"][0]
+    claimant = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="CLAIMANT-001",
+        source_revision=claimant_candidate["source_revision"],
+        terminal_key_value=claimant_candidate["terminal_key"],
+    )
+    physical.pool_status = "direct"
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="already claimed"):
+        service(db_session).global_terminal_detail(
+            terminal_id=claimant["workbench_terminal_id"]
+        )
+
+    owner_item = db_session.scalar(
+        select(CollectorWorkbenchItem).where(
+            CollectorWorkbenchItem.run_id == UUID(owner["run_id"]),
+            CollectorWorkbenchItem.item_kind == "collector_removal",
+        )
+    )
+    assert owner_item is not None
+
+
+def test_direct_workbench_completion_and_undo_use_physical_without_assignment(
+    db_session: Session,
+) -> None:
+    """Catches direct completion requiring a fake assignment/photo or failing to restore direct state on undo."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="DIRECT-COMPLETE-001",
+        meter_no="DIRECT-COMPLETE-METER",
+        collector_no="DIRECT-COMPLETE-COLLECTOR",
+        authoritative_address="直接完成地址",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="DIRECT-COMPLETE-COLLECTOR",
+        pool_status="direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(query="DIRECT-COMPLETE-001")["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="DIRECT-COMPLETE-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    requirement_row = db_session.scalar(
+        select(CollectorRequirement).where(
+            CollectorRequirement.run_id == UUID(opened["run_id"])
+        )
+    )
+    item = db_session.scalar(
+        select(CollectorWorkbenchItem).where(
+            CollectorWorkbenchItem.requirement_id == requirement_row.id
+        )
+    )
+
+    completed = service(db_session).set_workbench_item_status(
+        item_id=str(item.id),
+        completed=True,
+    )
+    db_session.refresh(requirement_row)
+    db_session.refresh(physical)
+    assert completed["status"] == "completed"
+    assert requirement_row.status == "used"
+    assert physical.pool_status == "used"
+    assert db_session.scalar(select(func.count(CollectorAssignment.id))) == 0
+
+    reopened = service(db_session).set_workbench_item_status(
+        item_id=str(item.id),
+        completed=False,
+    )
+    db_session.refresh(requirement_row)
+    db_session.refresh(physical)
+    assert reopened["status"] == "pending"
+    assert requirement_row.status == "direct_ready"
+    assert physical.pool_status == "direct"
+
+
+def test_direct_workbench_completion_rejects_missing_physical_provenance(
+    db_session: Session,
+) -> None:
+    """Catches a direct item completing after its same-number physical confirmation is invalidated."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="DIRECT-BROKEN-001",
+        meter_no="DIRECT-BROKEN-METER",
+        collector_no="DIRECT-BROKEN-COLLECTOR",
+        authoritative_address="直接阻断地址",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="DIRECT-BROKEN-COLLECTOR",
+        pool_status="direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(query="DIRECT-BROKEN-001")["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="DIRECT-BROKEN-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    item_id = db_session.scalar(
+        select(CollectorWorkbenchItem.id).where(
+            CollectorWorkbenchItem.run_id == UUID(opened["run_id"]),
+            CollectorWorkbenchItem.item_kind == "collector_removal",
+        )
+    )
+    physical.pool_status = "available"
+    db_session.commit()
+
+    with pytest.raises(CollectorWorkbenchIncompleteError, match="同号实物"):
+        service(db_session).set_workbench_item_status(
+            item_id=str(item_id),
+            completed=True,
+        )
+
+
+def test_direct_workbench_undo_rejects_invalidated_physical_without_writes(
+    db_session: Session,
+) -> None:
+    """Catches undo restoring an invalidated same-number physical to direct inventory."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="DIRECT-UNDO-BROKEN-001",
+        meter_no="DIRECT-UNDO-BROKEN-METER",
+        collector_no="DIRECT-UNDO-BROKEN-COLLECTOR",
+        authoritative_address="直接撤销阻断地址",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="DIRECT-UNDO-BROKEN-COLLECTOR",
+        pool_status="direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="DIRECT-UNDO-BROKEN-001"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="DIRECT-UNDO-BROKEN-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    requirement_row = db_session.scalar(
+        select(CollectorRequirement).where(
+            CollectorRequirement.run_id == UUID(opened["run_id"])
+        )
+    )
+    item = db_session.scalar(
+        select(CollectorWorkbenchItem).where(
+            CollectorWorkbenchItem.requirement_id == requirement_row.id
+        )
+    )
+    service(db_session).set_workbench_item_status(
+        item_id=str(item.id),
+        completed=True,
+    )
+    physical.pool_status = "available"
+    db_session.commit()
+
+    with pytest.raises(CollectorWorkbenchIncompleteError, match="同号实物"):
+        service(db_session).set_workbench_item_status(
+            item_id=str(item.id),
+            completed=False,
+        )
+
+    db_session.refresh(item)
+    db_session.refresh(requirement_row)
+    db_session.refresh(physical)
+    assert item.status == "completed"
+    assert requirement_row.status == "used"
+    assert physical.pool_status == "available"
