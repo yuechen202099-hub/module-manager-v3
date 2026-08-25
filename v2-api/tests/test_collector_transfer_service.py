@@ -244,6 +244,9 @@ def stored_photo(sha256_value: str) -> dict[str, object]:
         ({"construction_collector": "ALIAS-4"}, [], "ALIAS-4", True),
         ({"collector": "RAW-1"}, [(0, "INACTIVE", False)], "RAW-1", True),
         ({"collector": "RAW-1"}, [(0, "FIRST", True), (1, "SECOND", True)], "SECOND", False),
+        ({"collector": "RAW-TAB"}, [(0, "\tPHOTO-TAB\n", True)], "PHOTO-TAB", True),
+        ({"collector": "\tRAW-FALLBACK\r\n"}, [(0, "\t\n", True)], "RAW-FALLBACK", True),
+        ({"collector": "RAW-1"}, [(0, "\nPHOTO\tINNER\t", True)], "PHOTO\tINNER", True),
     ],
 )
 def test_project_has_collector_number_preserves_precedence(

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import gc
 import tracemalloc
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from threading import Event
-from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
@@ -167,13 +168,14 @@ def test_project_collector_lookup_is_bounded_at_production_cardinality(
     assert peak - baseline_current < 64 * 1024 * 1024
 
 
-def test_cancelled_sync_scan_finishes_only_bounded_lookup_and_releases_connection(
+def test_cancelled_asgi_scan_finishes_only_bounded_lookup_and_releases_connection(
     production_scale_database,
     monkeypatch,
 ) -> None:
     engine, session_factory, project_id = production_scale_database
     lookup_finished = Event()
     release_handler = Event()
+    handler_finished = Event()
     original_lookup = PostgresCollectorTransferService._project_has_collector_number
 
     def observed_lookup(self, scoped_project_id: UUID, candidate: str) -> bool:
@@ -184,16 +186,19 @@ def test_cancelled_sync_scan_finishes_only_bounded_lookup_and_releases_connectio
 
     @contextmanager
     def real_service_for_request(_request):
-        with session_factory() as session:
-            try:
-                yield PostgresCollectorTransferService(
-                    session=session,
-                    team_id="team-1",
-                    actor="cancelled-client",
-                )
-            except BaseException:
-                session.rollback()
-                raise
+        try:
+            with session_factory() as session:
+                try:
+                    yield PostgresCollectorTransferService(
+                        session=session,
+                        team_id="team-1",
+                        actor="cancelled-client",
+                    )
+                except BaseException:
+                    session.rollback()
+                    raise
+        finally:
+            handler_finished.set()
 
     monkeypatch.setattr(
         PostgresCollectorTransferService,
@@ -202,14 +207,8 @@ def test_cancelled_sync_scan_finishes_only_bounded_lookup_and_releases_connectio
     )
     monkeypatch.setattr(routes, "service_for_request", real_service_for_request)
     monkeypatch.setattr(routes, "ok", lambda _request, result: result)
-    request = SimpleNamespace(
-        state=SimpleNamespace(auth={"team_id": "team-1", "username": "cancelled-client"}),
-        headers={},
-    )
-    payload = routes.InventoryScanRequest(
-        project_id=str(project_id),
-        collector_no="GUARANTEED-NONMATCH",
-    )
+    app = FastAPI()
+    app.include_router(routes.router)
 
     with session_factory() as session:
         before_counts = (
@@ -218,14 +217,31 @@ def test_cancelled_sync_scan_finishes_only_bounded_lookup_and_releases_connectio
             session.scalar(select(func.count(CollectorScanEvent.id))),
         )
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        route_call = executor.submit(routes.scan_inventory, payload, request)
-        assert lookup_finished.wait(timeout=10)
-        assert route_call.cancel() is False
-        release_handler.set()
-        response = route_call.result(timeout=10)
+    async def cancel_in_flight_request() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            request_task = asyncio.create_task(
+                client.post(
+                    "/collector-transfer/inventory/scan",
+                    json={
+                        "project_id": str(project_id),
+                        "collector_no": "GUARANTEED-NONMATCH",
+                    },
+                )
+            )
+            assert await asyncio.to_thread(lookup_finished.wait, 10)
+            assert request_task.cancel() is True
+            assert request_task.cancelling() == 1
+            release_handler.set()
+            with pytest.raises(asyncio.CancelledError):
+                await request_task
+            assert await asyncio.to_thread(handler_finished.wait, 10)
 
-    assert response["decision"] == "pool_needs_photo"
+    try:
+        asyncio.run(cancel_in_flight_request())
+    finally:
+        release_handler.set()
+
     assert engine.pool.checkedout() == 0
     with session_factory() as session:
         after_counts = (

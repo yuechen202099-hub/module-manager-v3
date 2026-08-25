@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import String, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.functions import FunctionElement
 
 from app.domain.collector_transfer import (
     CollectorScanDecision,
@@ -67,6 +69,38 @@ class CollectorWorkbenchIncompleteError(ValueError):
 
 
 _MISSING_TERMINAL_PREFIX = "__missing_terminal__:"
+_IDENTIFIER_BOUNDARY_WHITESPACE = (
+    "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
+
+class _IdentifierBoundaryStrip(FunctionElement):
+    type = String()
+    inherit_cache = True
+
+
+def _compile_boundary_strip(function_name: str, element, compiler, **kwargs) -> str:
+    arguments = ", ".join(
+        compiler.process(argument, **kwargs)
+        for argument in element.clauses
+    )
+    return f"{function_name}({arguments})"
+
+
+@compiles(_IdentifierBoundaryStrip, "sqlite")
+def _compile_sqlite_boundary_strip(element, compiler, **kwargs) -> str:
+    return _compile_boundary_strip("trim", element, compiler, **kwargs)
+
+
+@compiles(_IdentifierBoundaryStrip, "postgresql")
+def _compile_postgresql_boundary_strip(element, compiler, **kwargs) -> str:
+    return _compile_boundary_strip("btrim", element, compiler, **kwargs)
+
+
+def _sql_identifier_strip(value):
+    return _IdentifierBoundaryStrip(value, _IDENTIFIER_BOUNDARY_WHITESPACE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,13 +325,14 @@ class PostgresCollectorTransferService:
         return meter_sources_from_groups(groups, photos), photos
 
     def _project_has_collector_number(self, project_id: UUID, collector_no: str) -> bool:
+        stripped_photo_collector = _sql_identifier_strip(Photo.collector)
         photo_collector = (
-            select(func.trim(Photo.collector))
+            select(stripped_photo_collector)
             .where(
                 Photo.group_id == MaterialGroup.id,
                 Photo.team_id == self.team_id,
                 Photo.is_active.is_(True),
-                func.trim(func.coalesce(Photo.collector, "")) != "",
+                _sql_identifier_strip(func.coalesce(Photo.collector, "")) != "",
             )
             .order_by(Photo.sort_order, Photo.id)
             .limit(1)
@@ -306,7 +341,10 @@ class PostgresCollectorTransferService:
         )
         raw_collector = func.coalesce(
             *(
-                func.nullif(func.trim(MaterialGroup.raw_data[key].as_string()), "")
+                func.nullif(
+                    _sql_identifier_strip(MaterialGroup.raw_data[key].as_string()),
+                    "",
+                )
                 for key in ("collector", "采集器", "采集器号", "construction_collector")
             ),
             "",
