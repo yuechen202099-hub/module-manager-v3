@@ -24,7 +24,9 @@ def main() -> int:
     assert "'task-hall': () => import('@/views/TaskHallView.vue')" not in router_source
     assert "path: 'task-hall'" in router_source
     assert "redirect: '/global-search'" in router_source
-    assert "/global-search?group_id=" in router_source
+    assert "path: '/review-workbench'" in router_source
+    assert "query: { group_id: String(to.params.groupId || '') }" in router_source
+    assert "/global-search?group_id=" not in router_source
     assert "value: 'reviewer'" not in account_page
     assert "function invalidateLegacySession" in services_source
     assert "function normalizeLegacySessionRoles" in services_source

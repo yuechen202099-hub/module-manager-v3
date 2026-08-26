@@ -944,6 +944,19 @@ def test_v320_release_inputs_are_packaged_and_required() -> None:
         assert f'"{path}"' in release_verifier
 
 
+def test_v320_role_route_gate_tracks_canonical_review_workbench_redirect() -> None:
+    role_route_verifier = (ROOT / "scripts" / "verify_v3_2_0_role_routes.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'assert "path: \'/review-workbench\'" in router_source' in role_route_verifier
+    assert (
+        'assert "query: { group_id: String(to.params.groupId || \'\') }" in router_source'
+        in role_route_verifier
+    )
+    assert 'assert "/global-search?group_id=" not in router_source' in role_route_verifier
+
+
 def test_v321_installer_kpi_release_inputs_are_packaged_and_required() -> None:
     verifier = load_verifier()
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
