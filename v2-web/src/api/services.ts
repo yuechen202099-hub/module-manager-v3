@@ -110,6 +110,7 @@ type BackendDataCenterRow = {
   construction_status?: string
   archive_status?: string
   exception_status?: string
+  status?: string
   updated_at?: string
   photos?: BackendPhoto[]
   audit?: Array<Record<string, unknown>>
@@ -1024,6 +1025,7 @@ function mapDataCenterRow(raw: BackendDataCenterRow): DataCenterRow {
     constructionStatus: raw.construction_status || 'unconstructed',
     archiveStatus: raw.archive_status || 'unarchived',
     exceptionStatus: raw.exception_status || '',
+    reviewStatus: raw.status || 'pending',
     updatedAt: raw.updated_at || '',
   }
 }
@@ -1661,6 +1663,22 @@ export async function fetchDataCenterDetail(
     { signal },
   )
   return mapDataCenterDetail(data)
+}
+
+export async function reviewDataCenterGroup(
+  groupId: string,
+  status: 'approved' | 'incomplete' | 'exception',
+  note = '',
+  exceptionNote = '',
+): Promise<MaterialGroup> {
+  const data = await api<BackendGroup>(
+    `/groups/data-center/groups/${encodeURIComponent(groupId)}/review`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ status, note, exception_note: exceptionNote }),
+    },
+  )
+  return mapGroup(data)
 }
 
 export async function updateDataCenterGroup(
