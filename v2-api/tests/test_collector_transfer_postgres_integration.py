@@ -529,8 +529,10 @@ def test_real_postgres_concurrent_allocation_is_stable_and_consumes_each_resourc
             select(func.count(PhysicalCollector.id)).where(PhysicalCollector.team_id == team_id, PhysicalCollector.pool_status == "reserved")
         )
 
-    assert sorted(int(item["assignment_count"]) for item in outcomes) == [1, 1]
-    assert sorted(len(item["assignments"]) for item in outcomes) == [0, 1]
+    assert sorted(
+        (int(item["assignment_count"]), len(item["assignments"]))
+        for item in outcomes
+    ) == [(0, 0), (1, 1)]
     assert len(assignments) == 1
     assert len({row.requirement_id for row in assignments}) == 1
     assert len({row.physical_collector_id for row in assignments}) == 1
