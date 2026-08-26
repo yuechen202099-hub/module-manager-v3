@@ -20,6 +20,7 @@ from app.database import Base
 from app.models import (
     CollectorPhoto,
     CollectorScanEvent,
+    GroupBarcodeVerification,
     MaterialGroup,
     Photo,
     PhysicalCollector,
@@ -130,7 +131,7 @@ def test_project_collector_lookup_is_bounded_at_production_cardinality(
 
     with session_factory() as session:
         def record_loaded(_session: Session, instance: object) -> None:
-            if isinstance(instance, (MaterialGroup, Photo)):
+            if isinstance(instance, (GroupBarcodeVerification, MaterialGroup, Photo)):
                 loaded_source_entities.append(instance)
 
         def record_sql(_connection, _cursor, statement, _parameters, _context, _executemany) -> None:
@@ -253,6 +254,7 @@ def test_global_terminal_candidate_page_is_bounded_at_production_cardinality(
     assert len(result["items"]) == 50
     assert result["total"] == PRODUCTION_GROUP_COUNT
     assert loaded_source_entities == []
+    assert len(recorded_selects) <= 12
     assert len(source_selects) <= 6
     assert not any(statement.count("?") > 1_000 for statement in source_selects)
 

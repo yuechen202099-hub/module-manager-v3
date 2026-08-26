@@ -28,6 +28,8 @@ from app.models import (
     CollectorTransferRun,
     CollectorTransferTerminal,
     CollectorWorkbenchItem,
+    GroupBarcodeVerification,
+    GroupStatus,
     MaterialGroup,
     PhysicalCollector,
     Photo,
@@ -43,6 +45,7 @@ from app.services.collector_transfer import (
     CollectorSnapshotChangedError,
     CollectorWorkbenchIncompleteError,
     PostgresCollectorTransferService,
+    TerminalNotFoundError,
     _photo_snapshot,
     meter_sources_from_groups,
 )
@@ -238,6 +241,9 @@ def add_global_terminal_source(
     authoritative_address: str,
     snapshot_address: str = "资料组快照地址",
     raw_collector_no: str | None = None,
+    legacy_id: str | None = None,
+    status: GroupStatus = GroupStatus.APPROVED,
+    barcode_status: str = "passed",
 ) -> MaterialGroup:
     """Create one complete source row using the real catalog/photo precedence contract."""
     catalog = TotalCatalogRow(
@@ -255,10 +261,13 @@ def add_global_terminal_source(
         team_id=project.team_id,
         project_id=project.id,
         total_catalog_row_id=catalog.id,
+        legacy_id=legacy_id or meter_no,
         terminal=terminal_code,
         meter_match_key=meter_no,
         display_meter_no=meter_no,
         installation_address=snapshot_address,
+        status=status,
+        photo_count=2,
         raw_data={
             "collector": raw_collector_no or collector_no,
             "module_asset_no": f"MODULE-{meter_no}",
@@ -294,6 +303,56 @@ def add_global_terminal_source(
             ),
         )
     )
+    session.add(
+        GroupBarcodeVerification(
+            id=uuid4(),
+            team_id=project.team_id,
+            group_id=group.id,
+            status=barcode_status,
+            meter_matched=barcode_status in {"passed", "manual_confirmed"},
+            module_matched=barcode_status in {"passed", "manual_confirmed"},
+            collector_matched=barcode_status in {"passed", "manual_confirmed"},
+            recognition_source="test",
+        )
+    )
+    session.flush()
+    return group
+
+
+def add_unconstructed_global_terminal_source(
+    session: Session,
+    *,
+    project: Project,
+    terminal_code: str,
+    meter_no: str,
+    authoritative_address: str,
+    legacy_id: str | None = None,
+) -> MaterialGroup:
+    catalog = TotalCatalogRow(
+        id=uuid4(),
+        team_id=project.team_id,
+        project_id=project.id,
+        terminal=terminal_code,
+        original_meter_no=meter_no,
+        meter_match_key=meter_no,
+        installation_address=authoritative_address,
+        raw_data={},
+    )
+    group = MaterialGroup(
+        id=uuid4(),
+        team_id=project.team_id,
+        project_id=project.id,
+        total_catalog_row_id=catalog.id,
+        legacy_id=legacy_id or meter_no,
+        terminal=terminal_code,
+        meter_match_key=meter_no,
+        display_meter_no=meter_no,
+        installation_address=f"旧-{authoritative_address}",
+        status=GroupStatus.UNREVIEWED,
+        photo_count=0,
+        raw_data={},
+    )
+    session.add_all((catalog, group))
     session.flush()
     return group
 
@@ -2959,6 +3018,73 @@ def test_global_terminal_candidates_keep_project_identity_and_aggregate_real_sou
     assert refreshed_a["source_revision"] != original_revision
 
 
+def test_global_terminal_candidates_include_mixed_construction_review_counts(
+    db_session: Session,
+) -> None:
+    """Catches an unconstructed meter hiding a terminal or blocking its constructed review queue."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="MIXED-001",
+        meter_no="M-READY",
+        collector_no="C-SHARED",
+        authoritative_address="混合终端地址",
+        legacy_id="g-ready",
+        status=GroupStatus.APPROVED,
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="MIXED-001",
+        meter_no="M-REVIEW",
+        collector_no="C-SHARED",
+        authoritative_address="混合终端地址",
+        legacy_id="g-review",
+        status=GroupStatus.UNREVIEWED,
+    )
+    catalog = TotalCatalogRow(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        terminal="MIXED-001",
+        original_meter_no="M-UNBUILT",
+        meter_match_key="M-UNBUILT",
+        installation_address="混合终端地址",
+        raw_data={},
+    )
+    unbuilt = MaterialGroup(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        total_catalog_row_id=catalog.id,
+        legacy_id="g-unbuilt",
+        terminal="MIXED-001",
+        meter_match_key="M-UNBUILT",
+        display_meter_no="M-UNBUILT",
+        installation_address="旧混合终端地址",
+        status=GroupStatus.UNREVIEWED,
+        photo_count=0,
+        raw_data={},
+    )
+    db_session.add_all((catalog, unbuilt))
+    db_session.commit()
+
+    candidate = service(db_session).list_global_terminals(
+        query="MIXED-001",
+        include_blocked=True,
+    )["items"][0]
+
+    assert candidate["constructed_meter_count"] == 2
+    assert candidate["unconstructed_meter_count"] == 1
+    assert candidate["review_ready_count"] == 1
+    assert candidate["review_required_count"] == 1
+    assert candidate["workflow_state"] == "needs_review"
+    assert candidate["selectable"] is True
+    assert candidate["terminal_code"] == "MIXED-001"
+    assert candidate["terminal_key"] != "MIXED-001"
+
+
 def test_global_terminal_candidates_block_conflicts_and_bound_filters(
     db_session: Session,
 ) -> None:
@@ -3043,6 +3169,316 @@ def test_global_terminal_candidates_block_conflicts_and_bound_filters(
     assert leading["items"][0]["terminal_key"] != service(db_session).list_global_terminals(
         query="普通地址"
     )["items"][0]["terminal_key"]
+
+
+def test_review_workbench_open_keeps_mixed_terminal_locked_without_hidden_run(
+    db_session: Session,
+) -> None:
+    """Catches creating hidden re-photo state before every constructed meter is reviewed."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REVIEW-MIXED-001",
+        meter_no="M-READY",
+        collector_no="C-SHARED",
+        authoritative_address="统一打开混合地址",
+        legacy_id="g-ready",
+        status=GroupStatus.APPROVED,
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REVIEW-MIXED-001",
+        meter_no="M-REVIEW",
+        collector_no="C-SHARED",
+        authoritative_address="统一打开混合地址",
+        legacy_id="g-review",
+        status=GroupStatus.UNREVIEWED,
+    )
+    add_unconstructed_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REVIEW-MIXED-001",
+        meter_no="M-UNBUILT",
+        authoritative_address="统一打开混合地址",
+        legacy_id="g-unbuilt",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="REVIEW-MIXED-001",
+        include_blocked=True,
+    )["items"][0]
+    before = db_session.scalar(select(func.count(CollectorTransferRun.id)))
+
+    result = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert result["workflow_state"] == "needs_review"
+    assert result["rephoto"] is None
+    assert result["constructed_meter_count"] == 2
+    assert result["unconstructed_meter_count"] == 1
+    assert [row["group_id"] for row in result["meters"]] == [
+        "g-ready",
+        "g-review",
+        "g-unbuilt",
+    ]
+    assert db_session.scalar(select(func.count(CollectorTransferRun.id))) == before
+
+
+def test_review_workbench_open_all_unconstructed_is_zero_write(
+    db_session: Session,
+) -> None:
+    """Catches allocating collector or re-photo rows for a terminal with no construction."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_unconstructed_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="NO-CONSTRUCTION-001",
+        meter_no="M-NONE",
+        authoritative_address="未施工地址",
+        legacy_id="g-none",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="NO-CONSTRUCTION-001",
+        include_blocked=True,
+    )["items"][0]
+    before = db_session.scalar(select(func.count(CollectorTransferRun.id)))
+
+    result = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert result["workflow_state"] == "no_construction"
+    assert result["rephoto"] is None
+    assert result["meters"][0]["construction_state"] == "unconstructed"
+    assert db_session.scalar(select(func.count(CollectorTransferRun.id))) == before
+
+
+def test_review_workbench_open_ready_terminal_creates_and_reuses_one_snapshot(
+    db_session: Session,
+) -> None:
+    """Catches duplicate hidden runs for an unchanged fully reviewed terminal."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REVIEW-READY-001",
+        meter_no="M-READY",
+        collector_no="C-READY",
+        authoritative_address="统一打开就绪地址",
+        legacy_id="g-ready",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="REVIEW-READY-001",
+        include_blocked=True,
+    )["items"][0]
+    before = db_session.scalar(select(func.count(CollectorTransferRun.id)))
+
+    first = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+    reopened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert first["rephoto"] is not None
+    assert reopened["rephoto"]["run_id"] == first["rephoto"]["run_id"]
+    assert first["source_revision"] == candidate["source_revision"]
+    assert db_session.scalar(select(func.count(CollectorTransferRun.id))) == before + 1
+
+
+def test_review_workbench_open_rejects_another_team_terminal_key(
+    db_session: Session,
+) -> None:
+    """Catches treating the opaque key as authorization across team boundaries."""
+    db_session.add(Team(id="team-2", name="另一团队"))
+    foreign_project = Project(
+        id=uuid4(),
+        team_id="team-2",
+        code="P-FOREIGN-REVIEW",
+        name="外部审阅项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    db_session.add(foreign_project)
+    add_global_terminal_source(
+        db_session,
+        project=foreign_project,
+        terminal_code="FOREIGN-REVIEW-001",
+        meter_no="M-FOREIGN",
+        collector_no="C-FOREIGN",
+        authoritative_address="外部审阅地址",
+    )
+    db_session.commit()
+    foreign_service = PostgresCollectorTransferService(
+        session=db_session,
+        team_id="team-2",
+        actor="foreign",
+    )
+    foreign_candidate = foreign_service.list_global_terminals(
+        query="FOREIGN-REVIEW-001",
+        include_blocked=True,
+    )["items"][0]
+
+    with pytest.raises(TerminalNotFoundError):
+        service(db_session).open_review_workbench_terminal(
+            terminal_key_value=foreign_candidate["terminal_key"],
+            source_revision=foreign_candidate["source_revision"],
+        )
+
+
+def test_review_workbench_unconstructed_change_does_not_supersede_snapshot(
+    db_session: Session,
+) -> None:
+    """Catches unrelated unconstructed edits invalidating a reviewed re-photo snapshot."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="UNBUILT-CHANGE-001",
+        meter_no="M-READY",
+        collector_no="C-READY",
+        authoritative_address="未施工变更地址",
+    )
+    unbuilt = add_unconstructed_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="UNBUILT-CHANGE-001",
+        meter_no="M-UNBUILT",
+        authoritative_address="未施工变更地址",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="UNBUILT-CHANGE-001",
+        include_blocked=True,
+    )["items"][0]
+    first = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+    unbuilt.display_meter_no = "M-UNBUILT-CHANGED"
+    unbuilt.status = GroupStatus.REJECTED
+    unbuilt.exception_note = "未施工资料说明变更"
+    unbuilt.raw_data = {"collector": "C-IGNORED"}
+    db_session.commit()
+
+    reopened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert reopened["source_revision"] == candidate["source_revision"]
+    assert reopened["rephoto"]["run_id"] == first["rephoto"]["run_id"]
+    assert reopened["rephoto"]["source_changed"] is False
+
+
+def test_review_workbench_constructed_change_supersedes_untouched_snapshot(
+    db_session: Session,
+) -> None:
+    """Catches reusing an untouched snapshot after constructed photo evidence changes."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REVIEW-SUPERSEDE-001",
+        meter_no="M-READY",
+        collector_no="C-READY",
+        authoritative_address="统一刷新地址",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="REVIEW-SUPERSEDE-001",
+        include_blocked=True,
+    )["items"][0]
+    first = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+    source_photo = db_session.scalar(
+        select(Photo).where(
+            Photo.group_id == group.id,
+            Photo.category == "module_meter",
+        )
+    )
+    source_photo.sha256 = "e" * 64
+    db_session.commit()
+    changed_candidate = service(db_session).list_global_terminals(
+        query="REVIEW-SUPERSEDE-001",
+        include_blocked=True,
+    )["items"][0]
+
+    changed = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=changed_candidate["terminal_key"],
+        source_revision=changed_candidate["source_revision"],
+    )
+
+    old_run = db_session.get(CollectorTransferRun, UUID(first["rephoto"]["run_id"]))
+    assert changed["rephoto"]["run_id"] != first["rephoto"]["run_id"]
+    assert old_run.stats["superseded"] is True
+    assert old_run.stats["superseded_by_run_id"] == changed["rephoto"]["run_id"]
+
+
+def test_review_workbench_constructed_change_preserves_progressed_snapshot(
+    db_session: Session,
+) -> None:
+    """Catches replacing historical completed rows after constructed evidence changes."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REVIEW-PROGRESS-001",
+        meter_no="M-READY",
+        collector_no="C-READY",
+        authoritative_address="统一进度地址",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="REVIEW-PROGRESS-001",
+        include_blocked=True,
+    )["items"][0]
+    first = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+    meter_item_id = db_session.scalar(
+        select(CollectorWorkbenchItem.id).where(
+            CollectorWorkbenchItem.run_id == UUID(first["rephoto"]["run_id"]),
+            CollectorWorkbenchItem.item_kind == "meter_install",
+        )
+    )
+    service(db_session).set_workbench_item_status(
+        item_id=str(meter_item_id),
+        completed=True,
+    )
+    source_photo = db_session.scalar(
+        select(Photo).where(
+            Photo.group_id == group.id,
+            Photo.category == "after_box",
+        )
+    )
+    source_photo.sha256 = "d" * 64
+    db_session.commit()
+    changed_candidate = service(db_session).list_global_terminals(
+        query="REVIEW-PROGRESS-001",
+        include_blocked=True,
+    )["items"][0]
+
+    preserved = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=changed_candidate["terminal_key"],
+        source_revision=changed_candidate["source_revision"],
+    )
+
+    assert preserved["rephoto"]["run_id"] == first["rephoto"]["run_id"]
+    assert preserved["rephoto"]["source_changed"] is True
+    assert preserved["rephoto"]["meter_install_items"][0]["status"] == "completed"
 
 
 def test_open_global_terminal_creates_one_terminal_snapshot_and_reuses_revision(

@@ -19,12 +19,20 @@ from app.domain.collector_transfer import (
     MeterSource,
     PoolInsufficientError,
     build_terminal_snapshots,
+    decode_terminal_key,
     decide_collector_scan,
     decide_project_inventory_scan,
     normalize_identifier,
     plan_random_assignments,
     terminal_key,
     terminal_source_revision,
+)
+from app.domain.terminal_review import (
+    ReviewMeterEvidence,
+    ReviewPhotoEvidence,
+    TerminalReviewProjection,
+    derive_terminal_workflow_state,
+    project_terminal_review,
 )
 from app.models import (
     AuditLog,
@@ -37,6 +45,7 @@ from app.models import (
     CollectorTransferRun,
     CollectorTransferTerminal,
     CollectorWorkbenchItem,
+    GroupBarcodeVerification,
     MaterialGroup,
     Photo,
     PhysicalCollector,
@@ -45,6 +54,8 @@ from app.models import (
     TotalCatalogRow,
     User,
 )
+from app.services.barcode_verification_contract import resolve_persisted_barcode_verification
+from app.services.local_simulation import is_placeholder_formal_identity_value
 from app.services.photo_storage import resolve_photo_for_response
 
 
@@ -74,6 +85,10 @@ class CollectorDirectConflictError(ValueError):
 
 class CollectorSnapshotChangedError(ValueError):
     """A hidden terminal snapshot cannot be refreshed while progress remains."""
+
+
+class TerminalNotFoundError(KeyError):
+    """The opaque terminal identity is absent from the authenticated team."""
 
 
 class CollectorWorkbenchIncompleteError(ValueError):
@@ -128,9 +143,13 @@ class MeterSourceProjection:
 @dataclass(frozen=True, slots=True)
 class _ProjectGroupRow:
     id: UUID
+    legacy_id: str | None
+    status: object
     terminal: str | None
     display_meter_no: str
     installation_address: str
+    photo_count: int
+    exception_note: str | None
     raw_data: Mapping[str, object]
 
 
@@ -138,9 +157,13 @@ class _ProjectGroupRow:
 class _GlobalTerminalGroupRow:
     project_id: UUID
     id: UUID
+    legacy_id: str | None
+    status: object
     terminal: str | None
     display_meter_no: str
     installation_address: str
+    photo_count: int
+    exception_note: str | None
     raw_data: Mapping[str, object]
 
 
@@ -160,6 +183,15 @@ class _ProjectPhotoRow:
     storage_bucket: str | None
     sha256: str
     content_type: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalReviewBundle:
+    project_id: UUID
+    terminal_code: str
+    projection: TerminalReviewProjection
+    photos: tuple[_ProjectPhotoRow, ...]
+    review_rows: tuple[dict[str, object], ...]
 
 
 def _raw_value(raw_data: object, *keys: str) -> str:
@@ -276,6 +308,124 @@ def _with_terminal_address_diagnostics(
         sources=projection.sources,
         diagnostics=tuple(diagnostics),
     )
+
+
+def _status_text(value: object) -> str:
+    return normalize_identifier(getattr(value, "value", value)).lower()
+
+
+def _review_projection_from_rows(
+    groups: Sequence[_ProjectGroupRow | _GlobalTerminalGroupRow],
+    photos: Sequence[_ProjectPhotoRow],
+    verification_by_group: Mapping[UUID, Mapping[str, object]],
+) -> tuple[TerminalReviewProjection, tuple[dict[str, object], ...]]:
+    source_projection = _with_terminal_address_diagnostics(
+        meter_sources_from_groups(groups, photos)
+    )
+    source_by_group = {source.group_id: source for source in source_projection.sources}
+    photos_by_group: dict[str, list[_ProjectPhotoRow]] = defaultdict(list)
+    for item in photos:
+        photos_by_group[str(item.group_id)].append(item)
+
+    addresses = {
+        normalize_identifier(source.installation_address)
+        for source in source_projection.sources
+        if normalize_identifier(source.installation_address)
+    }
+    has_address_conflict = len(addresses) != 1
+    evidence_rows: list[ReviewMeterEvidence] = []
+    for group in groups:
+        internal_group_id = str(group.id)
+        source = source_by_group[internal_group_id]
+        identity_blockers: list[str] = []
+        for value, code in (
+            (source.terminal_code, "terminal_missing"),
+            (source.meter_no, "meter_missing"),
+            (source.module_no, "module_missing"),
+            (source.collector_no, "collector_missing"),
+        ):
+            if is_placeholder_formal_identity_value(value):
+                identity_blockers.append(code)
+
+        source_blockers: list[str] = []
+        if normalize_identifier(group.exception_note):
+            source_blockers.append("exception_open")
+        if has_address_conflict:
+            source_blockers.append("address_conflict")
+
+        raw_data = group.raw_data if isinstance(group.raw_data, Mapping) else {}
+        persisted_verification = resolve_persisted_barcode_verification(
+            verification_by_group.get(group.id),
+            raw_data,
+            [],
+        )
+        barcode_status = normalize_identifier(
+            (persisted_verification or {}).get("status")
+        ).lower()
+        if not barcode_status:
+            nested_verification = raw_data.get("barcode_verification")
+            if isinstance(nested_verification, Mapping):
+                compatibility_status = normalize_identifier(
+                    nested_verification.get("status")
+                ).lower()
+                if compatibility_status == "manual":
+                    barcode_status = compatibility_status
+
+        group_photos = tuple(photos_by_group.get(internal_group_id, ()))
+        evidence_rows.append(
+            ReviewMeterEvidence(
+                group_id=internal_group_id,
+                status=_status_text(group.status),
+                terminal_code=source.terminal_code,
+                installation_address=source.installation_address,
+                meter_no=source.meter_no,
+                collector_no=source.collector_no,
+                module_no=source.module_no,
+                persisted_photo_count=max(0, int(group.photo_count or 0)),
+                active_photos=tuple(
+                    ReviewPhotoEvidence(
+                        id=str(item.id),
+                        category=normalize_identifier(item.category).lower(),
+                        sha256=normalize_identifier(item.sha256),
+                    )
+                    for item in group_photos
+                ),
+                barcode_status=barcode_status,
+                identity_blockers=tuple(identity_blockers),
+                source_blockers=tuple(source_blockers),
+            )
+        )
+
+    projection = project_terminal_review(evidence_rows)
+    meter_by_group = {
+        item.group_id: item
+        for item in (*projection.constructed_meters, *projection.unconstructed_meters)
+    }
+    review_rows: list[dict[str, object]] = []
+    for group in sorted(
+        groups,
+        key=lambda item: (
+            normalize_identifier(item.display_meter_no),
+            normalize_identifier(item.legacy_id),
+            str(item.id),
+        ),
+    ):
+        internal_group_id = str(group.id)
+        meter_projection = meter_by_group[internal_group_id]
+        source = source_by_group[internal_group_id]
+        review_rows.append(
+            {
+                "group_id": normalize_identifier(group.legacy_id) or internal_group_id,
+                "meter_no": source.meter_no,
+                "module_no": source.module_no,
+                "collector_no": source.collector_no,
+                "construction_state": meter_projection.construction_state,
+                "review_ready": meter_projection.review_ready,
+                "blockers": list(meter_projection.blockers),
+                "review_status": _status_text(group.status),
+            }
+        )
+    return projection, tuple(review_rows)
 
 
 def _uuid(value: object, field_name: str) -> UUID:
@@ -419,9 +569,13 @@ class PostgresCollectorTransferService:
         group_statement = (
             select(
                 MaterialGroup.id,
+                MaterialGroup.legacy_id,
+                MaterialGroup.status,
                 MaterialGroup.terminal,
                 MaterialGroup.display_meter_no,
                 MaterialGroup.installation_address,
+                MaterialGroup.photo_count,
+                MaterialGroup.exception_note,
                 MaterialGroup.raw_data,
             )
             .where(
@@ -501,9 +655,13 @@ class PostgresCollectorTransferService:
             for row in self.session.execute(
                 select(
                     MaterialGroup.id,
+                    MaterialGroup.legacy_id,
+                    MaterialGroup.status,
                     normalized_terminal,
                     MaterialGroup.display_meter_no,
                     authoritative_address,
+                    MaterialGroup.photo_count,
+                    MaterialGroup.exception_note,
                     MaterialGroup.raw_data,
                 )
                 .outerjoin(
@@ -561,6 +719,147 @@ class PostgresCollectorTransferService:
             photos,
         )
 
+    def _barcode_verifications_for_groups(
+        self,
+        group_ids: Sequence[UUID],
+    ) -> dict[UUID, Mapping[str, object]]:
+        if not group_ids:
+            return {}
+        rows = self.session.execute(
+            select(
+                GroupBarcodeVerification.group_id,
+                GroupBarcodeVerification.status,
+                GroupBarcodeVerification.evidence_fingerprint,
+                GroupBarcodeVerification.evidence_version,
+                GroupBarcodeVerification.meter_matched,
+                GroupBarcodeVerification.module_matched,
+                GroupBarcodeVerification.collector_matched,
+                GroupBarcodeVerification.recognition_source,
+                GroupBarcodeVerification.attempt_count,
+                GroupBarcodeVerification.invalidation_reason,
+                GroupBarcodeVerification.invalidated_by,
+                GroupBarcodeVerification.invalidated_at,
+                GroupBarcodeVerification.auto_archive_status,
+                GroupBarcodeVerification.auto_archived_at,
+                GroupBarcodeVerification.auto_archive_error,
+                GroupBarcodeVerification.updated_at,
+            ).where(
+                GroupBarcodeVerification.team_id == self.team_id,
+                GroupBarcodeVerification.group_id.in_(tuple(group_ids)),
+            )
+        ).mappings()
+        return {
+            row["group_id"]: dict(row)
+            for row in rows
+        }
+
+    def _terminal_review_bundle(
+        self,
+        *,
+        project_id: UUID,
+        terminal_code: str,
+        lock_groups: bool = False,
+    ) -> _TerminalReviewBundle:
+        normalized_code = normalize_identifier(terminal_code)
+        if not normalized_code:
+            raise ValueError("terminal_code is required")
+        normalized_terminal = _sql_identifier_strip(
+            func.coalesce(MaterialGroup.terminal, "")
+        )
+        authoritative_address = func.coalesce(
+            func.nullif(
+                _sql_identifier_strip(
+                    func.coalesce(TotalCatalogRow.installation_address, "")
+                ),
+                "",
+            ),
+            _sql_identifier_strip(
+                func.coalesce(MaterialGroup.installation_address, "")
+            ),
+        )
+        predicates = (
+            MaterialGroup.team_id == self.team_id,
+            MaterialGroup.project_id == project_id,
+            normalized_terminal == normalized_code,
+        )
+        group_statement = (
+            select(
+                MaterialGroup.id,
+                MaterialGroup.legacy_id,
+                MaterialGroup.status,
+                normalized_terminal,
+                MaterialGroup.display_meter_no,
+                authoritative_address,
+                MaterialGroup.photo_count,
+                MaterialGroup.exception_note,
+                MaterialGroup.raw_data,
+            )
+            .outerjoin(
+                TotalCatalogRow,
+                and_(
+                    TotalCatalogRow.id == MaterialGroup.total_catalog_row_id,
+                    TotalCatalogRow.project_id == MaterialGroup.project_id,
+                    or_(
+                        TotalCatalogRow.team_id == self.team_id,
+                        TotalCatalogRow.team_id.is_(None),
+                    ),
+                ),
+            )
+            .where(*predicates)
+            .order_by(MaterialGroup.display_meter_no, MaterialGroup.id)
+        )
+        if lock_groups:
+            group_statement = group_statement.with_for_update()
+        groups = [
+            _ProjectGroupRow(*row)
+            for row in self.session.execute(group_statement).tuples()
+        ]
+        if not groups:
+            raise TerminalNotFoundError(normalized_code)
+        photos = tuple(
+            _ProjectPhotoRow(*row)
+            for row in self.session.execute(
+                select(
+                    Photo.id,
+                    Photo.group_id,
+                    Photo.collector,
+                    Photo.asset_no,
+                    Photo.category,
+                    Photo.sort_order,
+                    Photo.is_active,
+                    Photo.image_url,
+                    Photo.object_key,
+                    Photo.storage_type,
+                    Photo.storage_key,
+                    Photo.storage_bucket,
+                    Photo.sha256,
+                    Photo.content_type,
+                )
+                .join(MaterialGroup, Photo.group_id == MaterialGroup.id)
+                .where(
+                    *predicates,
+                    Photo.team_id == self.team_id,
+                    Photo.is_active.is_(True),
+                )
+                .order_by(Photo.group_id, Photo.sort_order, Photo.id)
+            ).tuples()
+        )
+        verification_by_group = self._barcode_verifications_for_groups(
+            [group.id for group in groups]
+        )
+        projection, review_rows = _review_projection_from_rows(
+            groups,
+            photos,
+            verification_by_group,
+        )
+        return _TerminalReviewBundle(
+            project_id=project_id,
+            terminal_code=normalized_code,
+            projection=projection,
+            photos=photos,
+            review_rows=review_rows,
+        )
+
     def list_global_terminals(
         self,
         *,
@@ -571,7 +870,16 @@ class PostgresCollectorTransferService:
         include_blocked: bool = False,
     ) -> dict[str, object]:
         normalized_state = normalize_identifier(state).lower() or None
-        allowed_states = {"ready", "needs_replacement", "pool_shortage", "blocked"}
+        allowed_states = {
+            "no_construction",
+            "needs_review",
+            "blocked",
+            "needs_replacement",
+            "pool_shortage",
+            "ready",
+            "in_progress",
+            "completed",
+        }
         if normalized_state is not None and normalized_state not in allowed_states:
             raise ValueError("state is invalid")
         bounded_page = max(1, int(page))
@@ -728,6 +1036,7 @@ class PostgresCollectorTransferService:
                             or_(
                                 normalized_terminal.ilike(pattern),
                                 authoritative_address.ilike(pattern),
+                                MaterialGroup.legacy_id.ilike(pattern),
                             ),
                             1,
                         ),
@@ -736,13 +1045,8 @@ class PostgresCollectorTransferService:
                 )
                 > 0
             )
-        if normalized_state == "blocked":
+        if not include_blocked and normalized_state != "blocked":
             grouped_identity = grouped_identity.having(
-                or_(incomplete_count > 0, address_count != 1)
-            )
-        elif not include_blocked or normalized_state is not None:
-            grouped_identity = grouped_identity.having(
-                incomplete_count == 0,
                 address_count == 1,
             )
         identity_subquery = grouped_identity.subquery()
@@ -813,9 +1117,13 @@ class PostgresCollectorTransferService:
                 select(
                     MaterialGroup.project_id,
                     MaterialGroup.id,
+                    MaterialGroup.legacy_id,
+                    MaterialGroup.status,
                     normalized_terminal,
                     MaterialGroup.display_meter_no,
                     authoritative_address,
+                    MaterialGroup.photo_count,
+                    MaterialGroup.exception_note,
                     MaterialGroup.raw_data,
                 )
                 .outerjoin(
@@ -889,30 +1197,34 @@ class PostgresCollectorTransferService:
             if key is not None:
                 photos_by_key[key].append(photo)
 
+        verification_by_group = self._barcode_verifications_for_groups(
+            [group.id for group in group_rows]
+        )
+
         source_payloads: dict[tuple[UUID, str], dict[str, object]] = {}
         collector_pairs: list[tuple[UUID, str]] = []
         for key in candidate_keys:
-            projection = _with_terminal_address_diagnostics(
+            legacy_projection = _with_terminal_address_diagnostics(
                 meter_sources_from_groups(
                     groups_by_key.get(key, ()),
                     photos_by_key.get(key, ()),
                 )
             )
-            snapshots = build_terminal_snapshots(projection.sources)
-            snapshot = snapshots[0] if snapshots else None
-            requirements = (
-                tuple(
-                    normalize_identifier(item.original_collector_no)
-                    for item in snapshot.collector_requirements
-                )
-                if snapshot is not None
-                else ()
+            projection, review_rows = _review_projection_from_rows(
+                groups_by_key.get(key, ()),
+                photos_by_key.get(key, ()),
+                verification_by_group,
+            )
+            requirements = tuple(
+                normalize_identifier(item.original_collector_no)
+                for item in projection.collector_requirements
             )
             collector_pairs.extend((key[0], collector_no) for collector_no in requirements)
             source_payloads[key] = {
                 "projection": projection,
-                "snapshot": snapshot,
+                "review_rows": review_rows,
                 "requirements": requirements,
+                "diagnostics": legacy_projection.diagnostics,
             }
 
         direct_claims: dict[tuple[UUID, str], set[str]] = defaultdict(set)
@@ -1047,16 +1359,20 @@ class PostgresCollectorTransferService:
             key = (project_id, terminal_code)
             payload = source_payloads[key]
             projection = payload["projection"]
-            snapshot = payload["snapshot"]
+            review_rows = tuple(payload["review_rows"])
             requirements = tuple(payload["requirements"])
             addresses = sorted(
                 {
                     normalize_identifier(source.installation_address)
-                    for source in projection.sources
+                    for source in (
+                        item.source
+                        for item in projection.constructed_meters
+                        if item.source is not None
+                    )
                     if normalize_identifier(source.installation_address)
                 }
             )
-            diagnostics = list(projection.diagnostics)
+            diagnostics = list(payload["diagnostics"])
 
             claimed_numbers = set(progressed_claims.get(key, set()))
             for original_collector_no in requirements:
@@ -1065,14 +1381,16 @@ class PostgresCollectorTransferService:
             physical_count = len(set(requirements) & claimed_numbers)
             missing_count = max(0, len(requirements) - physical_count)
             pool_available_count = pool_counts.get(project_id, 0)
-            if diagnostics:
-                workflow_state = "blocked"
-            elif missing_count == 0:
-                workflow_state = "ready"
-            elif pool_available_count >= missing_count:
-                workflow_state = "needs_replacement"
-            else:
-                workflow_state = "pool_shortage"
+            workflow_state = derive_terminal_workflow_state(
+                projection,
+                missing_collector_count=missing_count,
+                pool_available_count=pool_available_count,
+                snapshot_state=(
+                    "in_progress"
+                    if progressed_claims.get(key)
+                    else None
+                ),
+            )
 
             candidate = {
                 "terminal_key": terminal_key(str(project_id), terminal_code),
@@ -1082,19 +1400,18 @@ class PostgresCollectorTransferService:
                 "terminal_code": terminal_code,
                 "installation_address": "、".join(addresses),
                 "needs_disambiguation": int(identity["project_count"] or 0) > 1,
-                "meter_count": len(snapshot.meters) if snapshot is not None else 0,
+                "meter_count": len(projection.constructed_meters),
                 "collector_count": len(requirements),
                 "physical_count": physical_count,
                 "missing_count": missing_count,
                 "pool_available_count": pool_available_count,
                 "workflow_state": workflow_state,
                 "selectable": workflow_state != "blocked",
-                "source_revision": _projection_source_revision(
-                    project_id=project_id,
-                    terminal_code=terminal_code,
-                    projection=projection,
-                    photos=photos_by_key.get(key, ()),
-                ),
+                "source_revision": projection.source_revision,
+                "constructed_meter_count": len(projection.constructed_meters),
+                "unconstructed_meter_count": len(projection.unconstructed_meters),
+                "review_ready_count": projection.review_ready_count,
+                "review_required_count": projection.review_required_count,
                 "diagnostics": diagnostics,
             }
             if normalized_state is not None and workflow_state != normalized_state:
@@ -1535,12 +1852,10 @@ class PostgresCollectorTransferService:
         )
         if projection.diagnostics:
             raise CollectorTerminalSourceBlockedError("terminal source is blocked")
-        current_revision = _projection_source_revision(
+        current_revision = self._terminal_review_bundle(
             project_id=project.id,
             terminal_code=normalized_code,
-            projection=projection,
-            photos=photos,
-        )
+        ).projection.source_revision
         requested_revision = normalize_identifier(source_revision)
         active_run = self._active_global_terminal_run(
             project_id=project.id,
@@ -1624,6 +1939,223 @@ class PostgresCollectorTransferService:
                 requested_revision and requested_revision != current_revision
             ),
             current_source_revision=current_revision,
+        )
+
+    def _review_workbench_result(
+        self,
+        *,
+        project: Project,
+        bundle: _TerminalReviewBundle,
+        workflow_state: str,
+        rephoto: dict[str, object] | None,
+    ) -> dict[str, object]:
+        addresses = sorted(
+            {
+                normalize_identifier(item.source.installation_address)
+                for item in bundle.projection.constructed_meters
+                if item.source is not None
+                and normalize_identifier(item.source.installation_address)
+            }
+        )
+        review_blockers = [
+            {
+                "group_id": row["group_id"],
+                "codes": list(row["blockers"]),
+            }
+            for row in bundle.review_rows
+            if row["construction_state"] == "constructed" and row["blockers"]
+        ]
+        return {
+            "terminal": {
+                "terminal_key": terminal_key(
+                    str(project.id),
+                    bundle.terminal_code,
+                ),
+                "project_id": str(project.id),
+                "terminal_code": bundle.terminal_code,
+                "installation_address": "、".join(addresses),
+            },
+            "workflow_state": workflow_state,
+            "source_revision": bundle.projection.source_revision,
+            "constructed_meter_count": len(bundle.projection.constructed_meters),
+            "unconstructed_meter_count": len(bundle.projection.unconstructed_meters),
+            "review_ready_count": bundle.projection.review_ready_count,
+            "review_required_count": bundle.projection.review_required_count,
+            "review_blockers": review_blockers,
+            "meters": list(bundle.review_rows),
+            "rephoto": rephoto,
+        }
+
+    def open_review_workbench_terminal(
+        self,
+        *,
+        terminal_key_value: str,
+        source_revision: str = "",
+    ) -> dict[str, object]:
+        decoded_project_id, decoded_terminal_code = decode_terminal_key(
+            terminal_key_value
+        )
+        try:
+            project = self._project(decoded_project_id)
+        except (KeyError, ValueError) as exc:
+            raise TerminalNotFoundError(decoded_terminal_code) from exc
+        normalized_code = normalize_identifier(decoded_terminal_code)
+        self._lock_global_terminal_identity(
+            project_id=project.id,
+            terminal_code=normalized_code,
+        )
+        try:
+            bundle = self._terminal_review_bundle(
+                project_id=project.id,
+                terminal_code=normalized_code,
+                lock_groups=True,
+            )
+        except TerminalNotFoundError:
+            raise
+
+        locked_state = derive_terminal_workflow_state(
+            bundle.projection,
+            missing_collector_count=0,
+            pool_available_count=0,
+            snapshot_state=None,
+        )
+        if locked_state in {"no_construction", "needs_review", "blocked"}:
+            return self._review_workbench_result(
+                project=project,
+                bundle=bundle,
+                workflow_state=locked_state,
+                rephoto=None,
+            )
+
+        current_revision = bundle.projection.source_revision
+        requested_revision = normalize_identifier(source_revision)
+        expected_key = terminal_key(str(project.id), normalized_code)
+        active_run = self._active_global_terminal_run(
+            project_id=project.id,
+            terminal_code=normalized_code,
+        )
+        run: CollectorTransferRun
+        snapshot_reused = False
+        source_changed = bool(
+            requested_revision and requested_revision != current_revision
+        )
+        superseded_run: CollectorTransferRun | None = None
+        if active_run is not None:
+            stored_revision = normalize_identifier(
+                (active_run.stats or {}).get("source_revision")
+            )
+            if stored_revision == current_revision:
+                run = active_run
+                snapshot_reused = True
+            elif self._global_run_has_progress(active_run):
+                run = active_run
+                snapshot_reused = True
+                source_changed = True
+            else:
+                active_stats = dict(active_run.stats or {})
+                active_stats["superseded"] = True
+                active_run.stats = active_stats
+                superseded_run = active_run
+                active_run = None
+
+        if active_run is None:
+            snapshot_projection = MeterSourceProjection(
+                sources=bundle.projection.rephoto_sources,
+                diagnostics=(),
+            )
+            run = self._create_run_from_projection(
+                project=project,
+                name=f"全局翻拍/{normalized_code}/{current_revision[:8]}",
+                projection=snapshot_projection,
+                source_photos_by_id={str(photo.id): photo for photo in bundle.photos},
+                stats_extra={
+                    "workflow_kind": "global_terminal_workbench",
+                    "source_revision": current_revision,
+                    "source_terminal_code": normalized_code,
+                    "source_terminal_key": expected_key,
+                    "superseded": False,
+                },
+                bind_direct_inventory=False,
+            )
+            hidden_terminal = self.session.scalar(
+                select(CollectorTransferTerminal).where(
+                    CollectorTransferTerminal.run_id == run.id,
+                    CollectorTransferTerminal.team_id == self.team_id,
+                )
+            )
+            if hidden_terminal is None:
+                raise KeyError(str(run.id))
+            self._reconcile_direct_requirements(
+                run=run,
+                terminal=hidden_terminal,
+            )
+            self._refresh_allocation_stats(run)
+            if superseded_run is not None:
+                superseded_stats = dict(superseded_run.stats or {})
+                superseded_stats["superseded_by_run_id"] = str(run.id)
+                superseded_run.stats = superseded_stats
+                self._audit(
+                    action="collector_workbench.snapshot_superseded",
+                    entity_type="collector_transfer_run",
+                    entity_id=superseded_run.id,
+                    project_id=project.id,
+                    payload={"superseded_by_run_id": str(run.id)},
+                )
+            self._audit(
+                action="collector_workbench.snapshot_created",
+                entity_type="collector_transfer_run",
+                entity_id=run.id,
+                project_id=project.id,
+                payload=dict(run.stats or {}),
+            )
+            self.session.commit()
+            self.session.refresh(run)
+
+        hidden_terminal = self.session.scalar(
+            select(CollectorTransferTerminal).where(
+                CollectorTransferTerminal.run_id == run.id,
+                CollectorTransferTerminal.team_id == self.team_id,
+            )
+        )
+        if hidden_terminal is None:
+            raise KeyError(str(run.id))
+        rephoto = self.global_terminal_detail(terminal_id=str(hidden_terminal.id))
+        stored_revision = normalize_identifier((run.stats or {}).get("source_revision"))
+        source_changed = source_changed or stored_revision != current_revision
+        rephoto["source_revision"] = stored_revision
+        rephoto["current_source_revision"] = current_revision
+        rephoto["source_changed"] = source_changed
+        rephoto["snapshot_reused"] = snapshot_reused
+
+        completed_count = int(rephoto.get("completed_count") or 0)
+        total_count = int(rephoto.get("total_count") or 0)
+        collector_items = rephoto.get("collector_items")
+        has_random_progress = bool(
+            isinstance(collector_items, list)
+            and any(
+                isinstance(item, Mapping)
+                and item.get("physical_state") == "replaced"
+                for item in collector_items
+            )
+        )
+        snapshot_state: str | None = None
+        if total_count and completed_count >= total_count:
+            snapshot_state = "completed"
+        elif completed_count or has_random_progress:
+            snapshot_state = "in_progress"
+        pool_summary = rephoto.get("pool_summary")
+        pool_payload = pool_summary if isinstance(pool_summary, Mapping) else {}
+        workflow_state = derive_terminal_workflow_state(
+            bundle.projection,
+            missing_collector_count=int(pool_payload.get("required") or 0),
+            pool_available_count=int(pool_payload.get("available") or 0),
+            snapshot_state=snapshot_state,
+        )
+        return self._review_workbench_result(
+            project=project,
+            bundle=bundle,
+            workflow_state=workflow_state,
+            rephoto=rephoto,
         )
 
     def scan_inventory(self, *, project_id: str, collector_no: str) -> dict[str, object]:
@@ -2735,12 +3267,10 @@ class PostgresCollectorTransferService:
         )
         if current_projection.diagnostics:
             raise CollectorTerminalSourceBlockedError("终端当前来源存在资料阻断")
-        current_revision = _projection_source_revision(
+        current_revision = self._terminal_review_bundle(
             project_id=run.project_id,
             terminal_code=terminal.terminal_code,
-            projection=current_projection,
-            photos=current_photos,
-        )
+        ).projection.source_revision
         if current_revision != normalize_identifier(stats.get("source_revision")):
             raise CollectorSnapshotChangedError(
                 "terminal source changed; refresh the snapshot before replacement"
@@ -2955,12 +3485,10 @@ class PostgresCollectorTransferService:
             project_id=run.project_id,
             terminal_code=terminal.terminal_code,
         )
-        current_revision = _projection_source_revision(
+        current_revision = self._terminal_review_bundle(
             project_id=run.project_id,
             terminal_code=terminal.terminal_code,
-            projection=projection,
-            photos=photos,
-        )
+        ).projection.source_revision
         return self.open_global_terminal(
             project_id=str(run.project_id),
             terminal_code=terminal.terminal_code,
@@ -3464,17 +3992,12 @@ class PostgresCollectorTransferService:
         total_count = len(meter_install_items) + len(collector_items)
         stored_revision = normalize_identifier(stats.get("source_revision"))
         try:
-            current_projection, current_photos = self._global_terminal_projection(
+            current_bundle = self._terminal_review_bundle(
                 project_id=run.project_id,
                 terminal_code=terminal.terminal_code,
             )
-            current_revision = _projection_source_revision(
-                project_id=run.project_id,
-                terminal_code=terminal.terminal_code,
-                projection=current_projection,
-                photos=current_photos,
-            )
-        except KeyError:
+            current_revision = current_bundle.projection.source_revision
+        except (KeyError, TerminalNotFoundError):
             current_revision = ""
         return {
             "run_id": str(run.id),
