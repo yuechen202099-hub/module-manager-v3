@@ -6,6 +6,7 @@ import {
   candidateLabel,
   canReplaceMissing,
   canRefreshTerminal,
+  canMutateRephoto,
   completionBlockers,
   inventoryResultPresentation,
   isCurrentRequest,
@@ -134,6 +135,13 @@ test('newer global terminal request sequences reject an older response', () => {
   const current = 2
   assert.equal(isCurrentRequest(1, current), false)
   assert.equal(isCurrentRequest(2, current), true)
+})
+
+test('rephoto mutations require an opened snapshot whose source has not changed', () => {
+  assert.equal(canMutateRephoto(null), false)
+  assert.equal(canMutateRephoto({ rephoto: null, source_changed: false }), false)
+  assert.equal(canMutateRephoto({ rephoto: {}, source_changed: true }), false)
+  assert.equal(canMutateRephoto({ rephoto: {}, source_changed: false }), true)
 })
 
 test('refresh requires an admin, changed source, zero completion, and no active random assignment', () => {

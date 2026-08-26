@@ -1,0 +1,133 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { GlobalCollectorTerminalCandidate, GlobalCollectorTerminalDetail, GlobalCollectorTerminalPage, ReviewWorkbenchOpenResult } from '@/api/types'
+import ReviewRephotoWorkbenchView from '@/views/ReviewRephotoWorkbenchView.vue'
+
+const serviceMocks = vi.hoisted(() => ({
+  fetchGlobalCollectorTerminals: vi.fn(), openReviewWorkbenchTerminal: vi.fn(),
+  replaceGlobalTerminalMissing: vi.fn(), rollbackCollectorAssignment: vi.fn(),
+  refreshGlobalCollectorTerminal: vi.fn(), setCollectorWorkbenchItemCompleted: vi.fn(),
+}))
+const authMock = vi.hoisted(() => ({ user: { role: 'admin', roles: ['admin'] } }))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => authMock }))
+vi.mock('@/api/services', () => serviceMocks)
+vi.mock('@/components/data-center/DataCenterGroupReviewPanel.vue', () => ({
+  default: {
+    props: ['groupId', 'rephotoItem', 'defaultStage'], emits: ['updated', 'review-decided'],
+    template: '<section class="review-panel-stub"><button data-testid="approve-review" @click="$emit(\'review-decided\', \'approved\')">通过</button></section>',
+  },
+}))
+
+const photo = { id: 'photo-1', image_url: '/api/photos/1', preview_url: '/api/photos/1' }
+const candidate = (overrides: Partial<GlobalCollectorTerminalCandidate> = {}): GlobalCollectorTerminalCandidate => ({
+  terminal_key: 'opaque-key', project_id: 'project-1', project_name: '城南项目', terminal_code: 'T-001', installation_address: '安装地址',
+  needs_disambiguation: false, meter_count: 2, collector_count: 2, physical_count: 1, missing_count: 1, pool_available_count: 2,
+  workflow_state: 'needs_review', selectable: true, source_revision: 'revision-1', constructed_meter_count: 2, unconstructed_meter_count: 1, review_ready_count: 1, review_required_count: 1, diagnostics: [], ...overrides,
+})
+const rephoto = (state: 'present' | 'missing' | 'replaced' = 'missing'): GlobalCollectorTerminalDetail => ({
+  run_id: 'run-1', project_id: 'project-1', terminal: { id: 'terminal-1', terminal_code: 'T-001', installation_address: '安装地址', status: 'ready', diagnostics: [] },
+  meter_install_items: [
+    { meter_item_id: 'meter-a', workbench_item_id: 'meter-workbench-a', status: 'pending', meter_no: 'M-A', meter_barcode: 'M-A', module_no: 'MOD-A', module_barcode: 'MOD-A', photos: [{ slot: 'module_meter', label: '电表和模块', photo }, { slot: 'after_box', label: '改造完成', photo }], diagnostics: [] },
+    { meter_item_id: 'meter-b', workbench_item_id: 'meter-workbench-b', status: 'pending', meter_no: 'M-B', meter_barcode: 'M-B', module_no: 'MOD-B', module_barcode: 'MOD-B', photos: [{ slot: 'module_meter', label: '电表和模块', photo }, { slot: 'after_box', label: '改造完成', photo }], diagnostics: [] },
+  ],
+  collector_items: [
+    { requirement_id: 'collector-a', workbench_item_id: 'collector-workbench-a', status: 'pending', original_collector_no: 'C-01', physical_state: 'present', final_collector_no: 'C-01', collector_barcode: 'C-01', capture_strategy: 'live_physical', assignment_id: null, photo: null, diagnostics: [] },
+    { requirement_id: 'collector-b', workbench_item_id: 'collector-workbench-b', status: 'pending', original_collector_no: 'C-01', physical_state: state, final_collector_no: state === 'replaced' ? 'POOL-01' : state === 'present' ? 'C-01' : null, collector_barcode: state === 'replaced' ? 'POOL-01' : state === 'present' ? 'C-01' : null, capture_strategy: state === 'replaced' ? 'screen_photo' : state === 'present' ? 'live_physical' : 'unavailable', assignment_id: state === 'replaced' ? 'assignment-1' : null, photo: state === 'replaced' ? photo : null, diagnostics: [] },
+  ],
+  pool_summary: { required: state === 'missing' ? 1 : 0, available: 2, shortage: 0 }, completed_count: 0, total_count: 4, progress: 0, source_revision: 'revision-1', current_source_revision: 'revision-1', source_changed: false,
+})
+const open = (overrides: Partial<ReviewWorkbenchOpenResult> = {}): ReviewWorkbenchOpenResult => ({
+  terminal: { terminal_key: 'opaque-key', project_id: 'project-1', terminal_code: 'T-001', installation_address: '安装地址' }, workflow_state: 'needs_review', source_revision: 'revision-1',
+  constructed_meter_count: 2, unconstructed_meter_count: 1, review_ready_count: 1, review_required_count: 1,
+  review_blockers: [{ group_id: 'group-a', codes: ['资料不全'] }],
+  meters: [
+    { group_id: 'group-a', meter_no: 'M-A', module_no: 'MOD-A', collector_no: 'C-01', construction_state: 'constructed', review_status: '待审阅', review_ready: false, blockers: ['资料不全'] },
+    { group_id: 'group-b', meter_no: 'M-B', module_no: 'MOD-B', collector_no: 'C-01', construction_state: 'constructed', review_status: '已通过', review_ready: true, blockers: [] },
+    { group_id: 'group-c', meter_no: 'M-C', module_no: 'MOD-C', collector_no: 'C-02', construction_state: 'unconstructed', review_status: '未施工', review_ready: false, blockers: [] },
+  ], rephoto: null, ...overrides,
+})
+const page = (items: GlobalCollectorTerminalCandidate[]): GlobalCollectorTerminalPage => ({ items, page: 1, page_size: 50, total: items.length })
+function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done }); return { promise, resolve } }
+async function mountWorkbench() { const wrapper = mount(ReviewRephotoWorkbenchView, { attachTo: document.body }); await flushPromises(); return wrapper }
+
+describe('review rephoto workbench', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValue(page([candidate()]))
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open())
+    serviceMocks.replaceGlobalTerminalMissing.mockResolvedValue({ required: 1, assigned: 1, assignments: [] })
+    serviceMocks.rollbackCollectorAssignment.mockResolvedValue({})
+    serviceMocks.refreshGlobalCollectorTerminal.mockResolvedValue({})
+    serviceMocks.setCollectorWorkbenchItemCompleted.mockResolvedValue({})
+  })
+
+  it('locks every rephoto mutation until each constructed meter is review-ready', async () => {
+    const wrapper = await mountWorkbench()
+    expect(wrapper.text()).toContain('T-001')
+    expect(wrapper.text()).toContain('未施工，不参与本次翻拍')
+    expect(wrapper.findAll('.rephoto-mutation').every((button) => (button.element as HTMLButtonElement).disabled)).toBe(true)
+    expect(wrapper.findAll('.rephoto-slot')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('reopens after a review decision and then shows two slots per constructed meter with deduplicated collectors', async () => {
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValueOnce(open()).mockResolvedValueOnce(open({ workflow_state: 'needs_replacement', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto() }))
+    const wrapper = await mountWorkbench()
+    await wrapper.get('[data-testid="approve-review"]').trigger('click'); await flushPromises()
+    expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenCalledTimes(2)
+    expect(wrapper.findAll('.rephoto-slot')).toHaveLength(4)
+    expect(wrapper.findAll('.collector-card')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('sends only opaque terminal identity and revision to unified open', async () => {
+    const wrapper = await mountWorkbench()
+    expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenCalledWith({ terminal_key: 'opaque-key', source_revision: 'revision-1' })
+    expect(JSON.stringify(serviceMocks.openReviewWorkbenchTerminal.mock.calls)).not.toMatch(/project-1|T-001/)
+    wrapper.unmount()
+  })
+
+  it('does not let a late search response replace a newer opened terminal', async () => {
+    const late = deferred<GlobalCollectorTerminalPage>()
+    serviceMocks.fetchGlobalCollectorTerminals.mockReturnValueOnce(late.promise).mockResolvedValueOnce(page([candidate({ terminal_key: 'new-key', terminal_code: 'T-002' })]))
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ terminal: { terminal_key: 'new-key', project_id: 'project-1', terminal_code: 'T-002', installation_address: '新地址' } }))
+    const wrapper = mount(ReviewRephotoWorkbenchView, { attachTo: document.body }); await flushPromises()
+    await wrapper.get('[aria-label="输入终端号"]').setValue('T-002'); await wrapper.get('[data-testid="search-terminal"]').trigger('click'); await flushPromises()
+    late.resolve(page([candidate()])); await flushPromises()
+    expect(wrapper.text()).toContain('T-002'); expect(wrapper.text()).not.toContain('T-001')
+    wrapper.unmount()
+  })
+
+  it('does not complete during shortage', async () => {
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ workflow_state: 'pool_shortage', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('missing') }))
+    const wrapper = await mountWorkbench()
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-terminal"]').element.disabled).toBe(true)
+    await wrapper.get('[data-testid="replace-all-missing"]').trigger('click'); await flushPromises()
+    expect(serviceMocks.replaceGlobalTerminalMissing).not.toHaveBeenCalled()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('replacement followed by rollback returns to missing', async () => {
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValueOnce(open({ workflow_state: 'needs_replacement', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('missing') })).mockResolvedValue(open({ workflow_state: 'needs_replacement', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('replaced') }))
+    const wrapper = await mountWorkbench()
+    await wrapper.get('[data-testid="replace-all-missing"]').trigger('click'); await flushPromises()
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ workflow_state: 'needs_replacement', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('missing') }))
+    await wrapper.get('[data-testid="rollback-assignment"]').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('无实物')
+    wrapper.unmount()
+  })
+
+  it('disables every mutation after a changed source and never requests a camera or non-local URL', async () => {
+    vi.stubGlobal('fetch', vi.fn())
+    const getUserMedia = vi.fn()
+    Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia } })
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ workflow_state: 'ready', rephoto: { ...rephoto('present'), source_changed: true } }))
+    const wrapper = await mountWorkbench()
+    expect(wrapper.findAll('.rephoto-mutation').every((button) => (button.element as HTMLButtonElement).disabled)).toBe(true)
+    expect(getUserMedia).not.toHaveBeenCalled()
+    expect(wrapper.findAll('img').every((image) => String(image.attributes('src')).startsWith('/'))).toBe(true)
+    vi.unstubAllGlobals(); wrapper.unmount()
+  })
+})

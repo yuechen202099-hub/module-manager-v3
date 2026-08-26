@@ -15,6 +15,7 @@ import type {
   GlobalCollectorTerminalOpenResult,
   GlobalCollectorTerminalPage,
   GlobalCollectorTerminalReplacementResult,
+  ReviewWorkbenchOpenResult,
   CollectorTerminalWorkbench,
   CollectorTransferRun,
   CollectorWorkbenchItemStatus,
@@ -3024,6 +3025,13 @@ export async function openGlobalCollectorTerminal(candidate: Pick<GlobalCollecto
       terminal_code: candidate.terminal_code,
       source_revision: candidate.source_revision,
     }),
+  })
+}
+
+export async function openReviewWorkbenchTerminal(candidate: Pick<GlobalCollectorTerminalCandidate, 'terminal_key' | 'source_revision'>): Promise<ReviewWorkbenchOpenResult> {
+  return api<ReviewWorkbenchOpenResult>('/collector-transfer/review-workbench/terminals/open', {
+    method: 'POST',
+    body: JSON.stringify({ terminal_key: candidate.terminal_key, source_revision: candidate.source_revision }),
   })
 }
 

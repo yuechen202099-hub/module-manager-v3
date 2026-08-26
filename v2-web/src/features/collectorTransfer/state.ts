@@ -60,6 +60,10 @@ export function canRefreshTerminal(
   return isAdmin && sourceChanged && completedCount === 0 && activeAssignmentIds.length === 0
 }
 
+export function canMutateRephoto(openResult: { rephoto: unknown | null; source_changed?: boolean } | null) {
+  return Boolean(openResult?.rephoto !== null && openResult?.source_changed === false)
+}
+
 type MeterCompletionInput = {
   meter_barcode: string
   module_barcode: string

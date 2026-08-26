@@ -871,7 +871,9 @@ export type CollectorWorkbenchItemStatus = {
   completed_at: string | null
 }
 
-export type GlobalCollectorTerminalState = 'ready' | 'needs_replacement' | 'pool_shortage' | 'blocked'
+export type GlobalCollectorTerminalState =
+  | 'no_construction' | 'needs_review' | 'blocked' | 'needs_replacement'
+  | 'pool_shortage' | 'ready' | 'in_progress' | 'completed'
 export type CollectorPhysicalState = 'present' | 'missing' | 'replaced'
 export type CollectorCaptureStrategy = 'live_physical' | 'unavailable' | 'screen_photo'
 
@@ -898,6 +900,10 @@ export type GlobalCollectorTerminalCandidate = {
   workflow_state: GlobalCollectorTerminalState
   selectable: boolean
   source_revision: string
+  constructed_meter_count?: number
+  unconstructed_meter_count?: number
+  review_ready_count?: number
+  review_required_count?: number
   diagnostics: CollectorTransferDiagnostic[]
 }
 
@@ -918,6 +924,36 @@ export type GlobalCollectorTerminalOpenResult = {
   current_source_revision?: string
   snapshot_reused: boolean
   source_changed: boolean
+}
+
+export type ReviewWorkbenchBlocker = { group_id: string; codes: string[] }
+export type ReviewWorkbenchCandidateCounts = {
+  constructed_meter_count: number
+  unconstructed_meter_count: number
+  review_ready_count: number
+  review_required_count: number
+}
+export type ReviewWorkbenchMeter = {
+  group_id: string
+  meter_no: string
+  module_no: string
+  collector_no: string
+  construction_state: 'constructed' | 'unconstructed'
+  review_status: string
+  review_ready: boolean
+  blockers: string[]
+}
+export type ReviewWorkbenchOpenResult = {
+  terminal: { terminal_key: string; project_id: string; terminal_code: string; installation_address: string }
+  workflow_state: GlobalCollectorTerminalState
+  source_revision: string
+  constructed_meter_count: number
+  unconstructed_meter_count: number
+  review_ready_count: number
+  review_required_count: number
+  review_blockers: ReviewWorkbenchBlocker[]
+  meters: ReviewWorkbenchMeter[]
+  rephoto: GlobalCollectorTerminalDetail | null
 }
 
 export type CollectorRequirementWorkbenchRow = {
