@@ -20,6 +20,10 @@ from app.services.collector_transfer import (
     CollectorSnapshotChangedError,
     CollectorTerminalSourceBlockedError,
     PoolInsufficientError,
+    TerminalNoConstructedMeterError,
+    TerminalNotFoundError,
+    TerminalReviewRequiredError,
+    TerminalSourceChangedError,
 )
 
 
@@ -106,6 +110,23 @@ class FakeCollectorTransferService:
             "terminal_id": "terminal-1",
             "workbench_terminal_id": "terminal-1",
             "source_changed": False,
+        }
+
+    def open_review_workbench_terminal(self, **payload) -> dict:
+        self.calls.append(("open_review_workbench_terminal", payload))
+        return {
+            "terminal": {
+                "terminal_key": "opaque-key",
+                "project_id": "project-1",
+                "terminal_code": "T-001",
+            },
+            "workflow_state": "ready",
+            "source_revision": "a" * 64,
+            "meters": [{"group_id": "g-1", "meter_no": "M-001"}],
+            "rephoto": {
+                "meter_items": [{"meter_no": "M-001"}],
+                "collector_items": [{"collector_no": "C-001"}],
+            },
         }
 
     def global_terminal_detail(self, *, terminal_id: str) -> dict:
@@ -205,7 +226,7 @@ def production_client_with_service(
 
     @contextmanager
     def fake_service_for_request(request):
-        identities.append(routes.request_identity(request))
+        identities.append(routes.require_admin(request))
         yield service
 
     monkeypatch.setattr(routes, "service_for_request", fake_service_for_request)
@@ -249,6 +270,147 @@ def test_request_identity_rejects_x_team_header_without_bearer_token() -> None:
         routes.request_identity(request)
 
     assert raised.value.status_code == 401
+
+
+def test_admin_opens_ready_review_workbench_terminal_with_opaque_identity(monkeypatch) -> None:
+    """Catches reintroducing project or terminal identity fields at the unified API boundary."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+
+    response = client.post(
+        "/collector-transfer/review-workbench/terminals/open",
+        headers=auth_headers(),
+        json={"terminal_key": "opaque-key", "source_revision": "a" * 64},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["rephoto"] == {
+        "meter_items": [{"meter_no": "M-001"}],
+        "collector_items": [{"collector_no": "C-001"}],
+    }
+    assert service.calls == [
+        (
+            "open_review_workbench_terminal",
+            {"terminal_key_value": "opaque-key", "source_revision": "a" * 64},
+        )
+    ]
+
+
+def test_locked_review_workbench_terminal_returns_no_rephoto(monkeypatch) -> None:
+    """Catches exposing re-photo controls while the authorized terminal remains review-locked."""
+    service = FakeCollectorTransferService()
+
+    def locked(**payload) -> dict:
+        service.calls.append(("open_review_workbench_terminal", payload))
+        return {
+            "terminal": {"terminal_key": "opaque-key", "terminal_code": "T-001"},
+            "workflow_state": "needs_review",
+            "source_revision": "a" * 64,
+            "review_blockers": [
+                {
+                    "group_id": "g-1",
+                    "codes": ["review_not_approved", "barcode_verification_required"],
+                }
+            ],
+            "rephoto": None,
+        }
+
+    monkeypatch.setattr(service, "open_review_workbench_terminal", locked)
+    client = client_with_service(monkeypatch, service)
+
+    response = client.post(
+        "/collector-transfer/review-workbench/terminals/open",
+        headers=auth_headers(),
+        json={"terminal_key": "opaque-key", "source_revision": "a" * 64},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["workflow_state"] == "needs_review"
+    assert response.json()["data"]["rephoto"] is None
+
+
+@pytest.mark.parametrize("extra_field", ["project_id", "terminal_code", "actor"])
+def test_review_workbench_open_rejects_extra_identity_fields(monkeypatch, extra_field) -> None:
+    """Catches callers bypassing the opaque key with client-supplied resource or actor identity."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+
+    response = client.post(
+        "/collector-transfer/review-workbench/terminals/open",
+        headers=auth_headers(),
+        json={
+            "terminal_key": "opaque-key",
+            "source_revision": "a" * 64,
+            extra_field: "spoofed",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert service.calls == []
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code", "code", "expected_details"),
+    [
+        (TerminalNotFoundError("foreign-terminal"), 404, "terminal_not_found", None),
+        (
+            TerminalNoConstructedMeterError("no constructed meter"),
+            409,
+            "terminal_has_no_constructed_meter",
+            None,
+        ),
+        (
+            TerminalReviewRequiredError(
+                [
+                    SimpleNamespace(
+                        group_id="g-1",
+                        blockers=("review_not_approved", "barcode_verification_required"),
+                    )
+                ]
+            ),
+            409,
+            "terminal_review_required",
+            {
+                "group_ids": ["g-1"],
+                "blockers": [
+                    {
+                        "group_id": "g-1",
+                        "codes": ["review_not_approved", "barcode_verification_required"],
+                    }
+                ],
+            },
+        ),
+        (TerminalSourceChangedError("changed"), 409, "terminal_source_changed", None),
+    ],
+)
+def test_review_workbench_open_maps_terminal_errors_without_resource_disclosure(
+    monkeypatch,
+    error,
+    status_code,
+    code,
+    expected_details,
+) -> None:
+    """Catches leaking cross-team identity or unstable review-gate errors through the unified route."""
+    service = FakeCollectorTransferService()
+
+    def fail(**_payload):
+        raise error
+
+    monkeypatch.setattr(service, "open_review_workbench_terminal", fail)
+    client = client_with_service(monkeypatch, service, raise_server_exceptions=False)
+
+    response = client.post(
+        "/collector-transfer/review-workbench/terminals/open",
+        headers=auth_headers(),
+        json={"terminal_key": "opaque-key", "source_revision": "a" * 64},
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["error"]["code"] == code
+    assert "foreign-terminal" not in response.text
+    if expected_details is not None:
+        assert response.json()["error"]["details"] == expected_details
 
 
 def test_create_run_uses_project_snapshot_contract(monkeypatch) -> None:
@@ -756,7 +918,13 @@ def test_failed_service_call_rolls_back_the_request_session(monkeypatch) -> None
     session = TrackedSession()
     monkeypatch.setattr(routes, "SessionLocal", lambda: session)
     request = SimpleNamespace(
-        state=SimpleNamespace(auth={"team_id": "team-1", "username": "admin-a"}),
+        state=SimpleNamespace(
+            auth={
+                "team_id": "team-1",
+                "username": "admin-a",
+                "roles": ["admin"],
+            }
+        ),
         headers={},
     )
 
@@ -823,21 +991,16 @@ def test_global_terminal_routes_enforce_role_matrix_before_service_mutations(
         ),
     ]
 
-    assert constructor_list.status_code == 200
-    assert constructor_open.status_code == 200
-    assert constructor_detail.status_code == 200
-    assert constructor_complete.status_code == 200
+    assert constructor_list.status_code == 403
+    assert constructor_open.status_code == 403
+    assert constructor_detail.status_code == 403
+    assert constructor_complete.status_code == 403
     assert [response.status_code for response in forbidden_responses] == [403] * 5
     assert all(
         response.json()["error"]["code"] == "forbidden"
         for response in forbidden_responses
     )
-    assert [name for name, _payload in service.calls] == [
-        "list_global_terminals",
-        "open_global_terminal",
-        "global_terminal_detail",
-        "set_workbench_item_status",
-    ]
+    assert service.calls == []
 
     administrator_responses = [
         client.post(
@@ -952,13 +1115,13 @@ def test_production_roles_and_token_identity_protect_collector_transfer(monkeypa
     assert constructor_create.status_code == 403
     assert constructor_allocate.status_code == 403
     assert reviewer_read.status_code == 403
-    assert constructor_scan.status_code == 200
-    assert constructor_read.status_code == 200
-    assert constructor_workbench_update.status_code == 200
+    assert constructor_scan.status_code == 403
+    assert constructor_read.status_code == 403
+    assert constructor_workbench_update.status_code == 403
     assert identities[0] == routes.RequestIdentity(
         "token-team",
-        "constructor-a",
-        frozenset({"constructor"}),
+        "admin-a",
+        frozenset({"admin"}),
     )
     assert admin_allocate.status_code == 409
     assert admin_allocate.json()["error"]["code"] == "pool_insufficient"
@@ -984,8 +1147,8 @@ def test_only_an_administrator_can_rollback_a_collector_assignment(monkeypatch) 
     assert service.calls == [("rollback_assignment", "assignment-1")]
 
 
-def test_transfer_project_list_is_team_isolated_and_readable_by_constructor_and_admin(monkeypatch) -> None:
-    """Catches collector pages falling back to a cross-team mock project list in production."""
+def test_transfer_project_list_is_team_isolated_and_admin_only(monkeypatch) -> None:
+    """Catches collector project discovery opening storage for non-administrators."""
 
     class CapturingSession:
         def __init__(self) -> None:
@@ -1025,12 +1188,11 @@ def test_transfer_project_list_is_team_isolated_and_readable_by_constructor_and_
             "updated_at": "2026-08-24T00:00:00+00:00",
         }]
     }
-    assert constructor.status_code == 200
-    assert constructor.json()["data"] == expected
+    assert constructor.status_code == 403
     assert administrator.status_code == 200
     assert administrator.json()["data"] == expected
     assert reviewer.status_code == 403
-    assert len(session.statements) == 2
+    assert len(session.statements) == 1
     for statement in session.statements:
         compiled = statement.compile()
         assert "projects.team_id" in str(compiled)

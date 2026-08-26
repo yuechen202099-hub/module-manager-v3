@@ -23,6 +23,10 @@ from app.services.collector_transfer import (
     CollectorTerminalSourceBlockedError,
     CollectorWorkbenchIncompleteError,
     PoolInsufficientError,
+    TerminalNoConstructedMeterError,
+    TerminalNotFoundError,
+    TerminalReviewRequiredError,
+    TerminalSourceChangedError,
     normalize_identifier,
 )
 from app.services.photo_storage import delete_saved_image, save_image_bytes
@@ -57,6 +61,13 @@ class OpenGlobalTerminalRequest(BaseModel):
     terminal_key: str = Field(min_length=1, max_length=2048)
     project_id: str = Field(min_length=1, max_length=64)
     terminal_code: str = Field(min_length=1, max_length=255)
+    source_revision: str = Field(default="", max_length=64)
+
+
+class OpenReviewWorkbenchTerminalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    terminal_key: str = Field(min_length=1, max_length=2048)
     source_revision: str = Field(default="", max_length=64)
 
 
@@ -116,7 +127,7 @@ def require_admin(request: Request) -> RequestIdentity:
 def service_for_request(request: Request) -> Iterator[object]:
     from app.services.collector_transfer import PostgresCollectorTransferService
 
-    identity = request_identity(request)
+    identity = require_admin(request)
     with SessionLocal() as session:
         try:
             yield PostgresCollectorTransferService(
@@ -136,6 +147,45 @@ def service_error_response(request: Request, exc: Exception):
             code="forbidden",
             message="仅管理员可以执行该操作。",
             status_code=403,
+        )
+    if isinstance(exc, TerminalNotFoundError):
+        return error_response(
+            request,
+            code="terminal_not_found",
+            message="请求的终端不存在。",
+            status_code=404,
+        )
+    if isinstance(exc, TerminalNoConstructedMeterError):
+        return error_response(
+            request,
+            code="terminal_has_no_constructed_meter",
+            message="该终端没有已施工表计，不能进入翻拍工作台。",
+            status_code=409,
+        )
+    if isinstance(exc, TerminalReviewRequiredError):
+        blockers = [
+            {
+                "group_id": meter.group_id,
+                "codes": list(meter.blockers),
+            }
+            for meter in exc.meters
+        ]
+        return error_response(
+            request,
+            code="terminal_review_required",
+            message="该终端仍有资料组未通过正式审阅。",
+            details={
+                "group_ids": [item["group_id"] for item in blockers],
+                "blockers": blockers,
+            },
+            status_code=409,
+        )
+    if isinstance(exc, TerminalSourceChangedError):
+        return error_response(
+            request,
+            code="terminal_source_changed",
+            message="终端来源资料已变化，请刷新后重试。",
+            status_code=409,
         )
     if isinstance(exc, PoolInsufficientError):
         return error_response(
@@ -235,7 +285,10 @@ def call_admin_service(request: Request, operation):
 
 @router.get("/projects")
 def list_transfer_projects(request: Request):
-    identity = request_identity(request)
+    try:
+        identity = require_admin(request)
+    except CollectorForbiddenError as exc:
+        return service_error_response(request, exc)
     with SessionLocal() as session:
         projects = session.scalars(
             select(Project)
@@ -401,6 +454,20 @@ def open_global_terminal(payload: OpenGlobalTerminalRequest, request: Request):
     )
 
 
+@router.post("/review-workbench/terminals/open")
+def open_review_workbench_terminal(
+    payload: OpenReviewWorkbenchTerminalRequest,
+    request: Request,
+):
+    return call_admin_service(
+        request,
+        lambda service: service.open_review_workbench_terminal(
+            terminal_key_value=payload.terminal_key,
+            source_revision=payload.source_revision,
+        ),
+    )
+
+
 @router.get("/workbench/terminals/{terminal_id}")
 def global_terminal_detail(terminal_id: str, request: Request):
     return call_service(
@@ -456,7 +523,10 @@ async def register_inventory(
     collector_no: str = Form(min_length=1, max_length=255),
     file: UploadFile = File(...),
 ):
-    identity = request_identity(request)
+    try:
+        identity = require_admin(request)
+    except CollectorForbiddenError as exc:
+        return service_error_response(request, exc)
     submitted_fields = set((await request.form()).keys())
     unexpected_fields = sorted(submitted_fields - {"project_id", "collector_no", "file"})
     if unexpected_fields:

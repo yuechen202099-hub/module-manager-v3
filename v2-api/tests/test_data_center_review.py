@@ -4,7 +4,11 @@ from copy import deepcopy
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 
+from app import main as main_module
+from app.api.routes import groups as groups_routes
+from app.core import security
 from app.services import local_simulation
 from app.services import state_repository as repository
 from app.services.group_barcode_verification import evaluate_group_eligibility
@@ -96,6 +100,77 @@ def json_review_repo(monkeypatch: pytest.MonkeyPatch) -> repository.JsonStateRep
 
 def _latest_group() -> dict:
     return local_simulation.get_state()["groups"][0]
+
+
+def _review_headers(*, username: str, role: str, team_id: str) -> dict[str, str]:
+    token = security.create_access_token(
+        {
+            "sub": username,
+            "username": username,
+            "roles": [role],
+            "team_id": team_id,
+        }
+    )
+    return {"Authorization": f"bearer {token}"}
+
+
+def test_admin_can_approve_data_center_group_and_audit_actor(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches bypassing review_group and therefore losing its durable actor/audit path."""
+    state = local_simulation.get_state()
+    team_id = state["team_id"]
+    state["tasks"][0]["claimed_by"] = "admin"
+    state["groups"][0]["status"] = "pending"
+    before_events = len(state["review_events"])
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+
+    response = client.patch(
+        "/groups/data-center/groups/g-1/review",
+        headers=_review_headers(username="admin", role="admin", team_id=team_id),
+        json={"status": "approved", "note": "资料核对完成"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "approved"
+    committed = local_simulation.get_state()
+    assert len(committed["review_events"]) == before_events + 1
+    assert committed["review_events"][-1]["group_id"] == "g-1"
+    assert committed["review_events"][-1]["reviewer"] == "admin"
+    assert committed["review_events"][-1]["note"] == "资料核对完成"
+
+
+@pytest.mark.parametrize("status", ["approved", "incomplete", "exception"])
+def test_constructor_cannot_decide_data_center_review_before_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+    status: str,
+) -> None:
+    """Catches repository access or state mutation before the administrator dependency rejects."""
+    state = local_simulation.get_state()
+    team_id = state["team_id"]
+    before = deepcopy(state)
+    repository_accesses = 0
+
+    def counted_repository():
+        nonlocal repository_accesses
+        repository_accesses += 1
+        return json_review_repo
+
+    monkeypatch.setattr(groups_routes, "state_repository", counted_repository)
+    client = TestClient(main_module.create_app())
+
+    response = client.patch(
+        "/groups/data-center/groups/g-1/review",
+        headers=_review_headers(username="constructor", role="constructor", team_id=team_id),
+        json={"status": status, "note": "x", "exception_note": "x"},
+    )
+
+    assert response.status_code == 403
+    assert repository_accesses == 0
+    assert local_simulation.get_state() == before
 
 
 def _audit_has_before_after(action: str, field: str) -> bool:

@@ -36,6 +36,12 @@ class DataCenterGroupPatchRequest(BaseModel):
     source_page: str = "data_center"
 
 
+class DataCenterReviewDecisionRequest(BaseModel):
+    status: Literal["approved", "incomplete", "exception"]
+    note: str = ""
+    exception_note: str = ""
+
+
 class DataCenterPhotoClassifyRequest(BaseModel):
     category: str = ""
     reason: str = ""
@@ -253,6 +259,32 @@ def update_data_center_group(
             actor=_admin_actor(admin_payload),
             reason=payload.reason,
             source_page=payload.source_page,
+        )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
+
+
+@router.patch("/data-center/groups/{group_id}/review")
+def decide_data_center_group_review(
+    group_id: str,
+    payload: DataCenterReviewDecisionRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().review_group(
+            group_id,
+            status=payload.status,
+            reviewer=_admin_actor(admin_payload),
+            note=payload.note,
+            exception_note=payload.exception_note,
         )
         invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
     except KeyError as exc:
@@ -543,4 +575,3 @@ def sign_photo_upload(group_id: int, request: Request):
 @router.post("/{group_id}/photos/complete-upload")
 def complete_photo_upload(group_id: int, request: Request):
     return ok(request, {"group_id": group_id, "status": "completed"})
-
