@@ -99,10 +99,73 @@ describe('review rephoto workbench', () => {
     wrapper.unmount()
   })
 
+  it('keeps the zero-result safety state when an earlier terminal open resolves late', async () => {
+    const lateOpen = deferred<ReviewWorkbenchOpenResult>()
+    serviceMocks.openReviewWorkbenchTerminal.mockReturnValueOnce(lateOpen.promise)
+    serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValueOnce(page([candidate()])).mockResolvedValueOnce(page([]))
+    const wrapper = mount(ReviewRephotoWorkbenchView, { attachTo: document.body }); await flushPromises()
+
+    await wrapper.get('[aria-label="输入终端号"]').setValue('不存在的终端')
+    await wrapper.get('[data-testid="search-terminal"]').trigger('click'); await flushPromises()
+    lateOpen.resolve(open())
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('未找到唯一可授权终端，请重新搜索。')
+    expect(wrapper.text()).not.toContain('终端 T-001')
+    wrapper.unmount()
+  })
+
+  it('loads the next bounded terminal candidate page instead of hard-coding page one', async () => {
+    serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValueOnce({ ...page([candidate()]), total: 51 }).mockResolvedValueOnce({ ...page([candidate({ terminal_key: 'page-two', terminal_code: 'T-002' })]), page: 2, total: 51 })
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="next-candidate-page"]').trigger('click'); await flushPromises()
+
+    expect(serviceMocks.fetchGlobalCollectorTerminals).toHaveBeenLastCalledWith({ query: '', page: 2, pageSize: 50, includeBlocked: true })
+    expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenLastCalledWith({ terminal_key: 'page-two', source_revision: 'revision-1' })
+    wrapper.unmount()
+  })
+
+  it('opens the unique group deep-link candidate and selects the requested constructed meter', async () => {
+    window.history.replaceState({}, '', '/review-workbench?group_id=group-b')
+    try {
+      const wrapper = await mountWorkbench()
+      expect(serviceMocks.fetchGlobalCollectorTerminals).toHaveBeenCalledWith(expect.objectContaining({ query: 'group-b' }))
+      expect(wrapper.get('.meter-row.active strong').text()).toBe('M-B')
+      wrapper.unmount()
+    } finally {
+      window.history.replaceState({}, '', '/')
+    }
+  })
+
+  it('selects a deep-linked unconstructed group without creating rephoto slots', async () => {
+    window.history.replaceState({}, '', '/review-workbench?group_id=group-c')
+    try {
+      const wrapper = await mountWorkbench()
+      expect(wrapper.get('.meter-row.unconstructed.active strong').text()).toBe('M-C')
+      expect(wrapper.findAll('.rephoto-slot')).toHaveLength(0)
+      wrapper.unmount()
+    } finally {
+      window.history.replaceState({}, '', '/')
+    }
+  })
+
+  it('completes the workbench item belonging to the visible deduplicated collector card', async () => {
+    const withTwoCollectors = rephoto('present')
+    withTwoCollectors.collector_items[1] = { ...withTwoCollectors.collector_items[1], original_collector_no: 'C-02', final_collector_no: 'C-02', collector_barcode: 'C-02' }
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ workflow_state: 'ready', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: withTwoCollectors }))
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="complete-collector-collector-b"]').trigger('click'); await flushPromises()
+
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenCalledWith('collector-workbench-b', true)
+    wrapper.unmount()
+  })
+
   it('does not complete during shortage', async () => {
     serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ workflow_state: 'pool_shortage', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('missing') }))
     const wrapper = await mountWorkbench()
-    expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-terminal"]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="complete-collector-collector-b"]').element.disabled).toBe(true)
     await wrapper.get('[data-testid="replace-all-missing"]').trigger('click'); await flushPromises()
     expect(serviceMocks.replaceGlobalTerminalMissing).not.toHaveBeenCalled()
     expect(serviceMocks.setCollectorWorkbenchItemCompleted).not.toHaveBeenCalled()
