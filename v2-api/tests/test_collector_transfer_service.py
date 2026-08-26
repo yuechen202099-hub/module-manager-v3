@@ -46,6 +46,8 @@ from app.services.collector_transfer import (
     CollectorWorkbenchIncompleteError,
     PostgresCollectorTransferService,
     TerminalNotFoundError,
+    TerminalReviewRequiredError,
+    TerminalSourceChangedError,
     _photo_snapshot,
     meter_sources_from_groups,
 )
@@ -3481,6 +3483,268 @@ def test_review_workbench_constructed_change_preserves_progressed_snapshot(
     assert preserved["rephoto"]["meter_install_items"][0]["status"] == "completed"
 
 
+def mutation_fingerprint(session: Session) -> dict[str, object]:
+    """Return all business rows a rejected workbench mutation could change."""
+    session.flush()
+    return {
+        "runs": [
+            tuple(row)
+            for row in session.execute(
+                select(
+                    CollectorTransferRun.id,
+                    CollectorTransferRun.status,
+                    CollectorTransferRun.stats,
+                ).order_by(CollectorTransferRun.id)
+            ).tuples()
+        ],
+        "requirements": [
+            tuple(row)
+            for row in session.execute(
+                select(
+                    CollectorRequirement.id,
+                    CollectorRequirement.status,
+                ).order_by(CollectorRequirement.id)
+            ).tuples()
+        ],
+        "assignments": [
+            tuple(row)
+            for row in session.execute(
+                select(
+                    CollectorAssignment.id,
+                    CollectorAssignment.status,
+                    CollectorAssignment.used_at,
+                ).order_by(CollectorAssignment.id)
+            ).tuples()
+        ],
+        "physicals": [
+            tuple(row)
+            for row in session.execute(
+                select(
+                    PhysicalCollector.id,
+                    PhysicalCollector.pool_status,
+                ).order_by(PhysicalCollector.id)
+            ).tuples()
+        ],
+        "items": [
+            tuple(row)
+            for row in session.execute(
+                select(
+                    CollectorWorkbenchItem.id,
+                    CollectorWorkbenchItem.status,
+                    CollectorWorkbenchItem.assignment_id,
+                ).order_by(CollectorWorkbenchItem.id)
+            ).tuples()
+        ],
+        "terminals": [
+            tuple(row)
+            for row in session.execute(
+                select(
+                    CollectorTransferTerminal.id,
+                    CollectorTransferTerminal.status,
+                    CollectorTransferTerminal.completed_item_count,
+                ).order_by(CollectorTransferTerminal.id)
+            ).tuples()
+        ],
+        "audit_count": session.scalar(select(func.count(AuditLog.id))),
+    }
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["replace_missing", "rollback", "refresh", "complete_meter", "complete_collector"],
+)
+def test_every_collector_mutation_rechecks_terminal_review_gate_without_writes(
+    db_session: Session,
+    operation: str,
+) -> None:
+    """Catches any collector mutation trusting a once-ready hidden snapshot."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code=f"REVIEW-GATE-{operation}",
+        meter_no=f"M-{operation}",
+        collector_no=f"C-{operation}",
+        authoritative_address="审阅复检地址",
+    )
+    pool = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no=f"POOL-{operation}",
+        pool_status="available",
+    )
+    db_session.add(pool)
+    db_session.commit()
+    collector_photo(db_session, pool, sha256=uuid4().hex * 2)
+    candidate = service(db_session).list_global_terminals(
+        query=f"REVIEW-GATE-{operation}",
+        include_blocked=True,
+    )["items"][0]
+    opened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+    rephoto = opened["rephoto"]
+    terminal_id = rephoto["terminal"]["id"]
+    assignment_id: str | None = None
+    item_id: str | None = None
+    if operation in {"rollback", "complete_collector"}:
+        replacement = service(db_session).replace_terminal_missing(
+            terminal_id=terminal_id
+        )
+        assignment_id = replacement["assignments"][0]["assignment_id"]
+        detail = service(db_session).global_terminal_detail(terminal_id=terminal_id)
+        item_id = detail["collector_items"][0]["workbench_item_id"]
+    elif operation == "complete_meter":
+        item_id = rephoto["meter_install_items"][0]["workbench_item_id"]
+
+    group.status = GroupStatus.UNREVIEWED
+    db_session.commit()
+    before = mutation_fingerprint(db_session)
+
+    with pytest.raises(TerminalReviewRequiredError):
+        if operation == "replace_missing":
+            service(db_session).replace_terminal_missing(terminal_id=terminal_id)
+        elif operation == "rollback":
+            service(db_session).rollback_assignment(assignment_id=assignment_id)
+        elif operation == "refresh":
+            service(db_session).refresh_global_terminal(terminal_id=terminal_id)
+        else:
+            service(db_session).set_workbench_item_status(
+                item_id=item_id,
+                completed=True,
+            )
+
+    assert mutation_fingerprint(db_session) == before
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["replace_missing", "rollback", "refresh", "complete_meter", "complete_collector"],
+)
+def test_every_collector_mutation_rejects_source_changed_active_photo_without_writes(
+    db_session: Session,
+    operation: str,
+) -> None:
+    """Catches every mutation accepting an old snapshot after an active source SHA changes."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code=f"SOURCE-GATE-{operation}",
+        meter_no=f"SOURCE-M-{operation}",
+        collector_no=f"SOURCE-C-{operation}",
+        authoritative_address="源图复检地址",
+    )
+    pool = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no=f"SOURCE-POOL-{operation}",
+        pool_status="available",
+    )
+    db_session.add(pool)
+    db_session.commit()
+    collector_photo(db_session, pool, sha256=uuid4().hex * 2)
+    candidate = service(db_session).list_global_terminals(
+        query=f"SOURCE-GATE-{operation}",
+        include_blocked=True,
+    )["items"][0]
+    opened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+    rephoto = opened["rephoto"]
+    assert rephoto is not None
+    terminal_id = rephoto["terminal"]["id"]
+    assignment_id: str | None = None
+    item_id: str | None = None
+    if operation in {"rollback", "complete_collector"}:
+        replacement = service(db_session).replace_terminal_missing(
+            terminal_id=terminal_id
+        )
+        assignment_id = replacement["assignments"][0]["assignment_id"]
+        detail = service(db_session).global_terminal_detail(terminal_id=terminal_id)
+        item_id = detail["collector_items"][0]["workbench_item_id"]
+    elif operation == "complete_meter":
+        item_id = rephoto["meter_install_items"][0]["workbench_item_id"]
+
+    source_photo = db_session.scalar(
+        select(Photo)
+        .where(Photo.group_id == group.id, Photo.is_active.is_(True))
+        .order_by(Photo.sort_order, Photo.id)
+    )
+    assert source_photo is not None
+    source_photo.sha256 = uuid4().hex * 2
+    db_session.commit()
+    before = mutation_fingerprint(db_session)
+
+    with pytest.raises(TerminalSourceChangedError):
+        if operation == "replace_missing":
+            service(db_session).replace_terminal_missing(terminal_id=terminal_id)
+        elif operation == "rollback":
+            service(db_session).rollback_assignment(assignment_id=assignment_id)
+        elif operation == "refresh":
+            service(db_session).refresh_global_terminal(terminal_id=terminal_id)
+        else:
+            service(db_session).set_workbench_item_status(
+                item_id=item_id,
+                completed=True,
+            )
+
+    assert mutation_fingerprint(db_session) == before
+
+
+def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
+    db_session: Session,
+) -> None:
+    """Catches reopening a terminal before its final constructed meter is approved."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    terminal_code = "FINAL-APPROVAL-001"
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code=terminal_code,
+        meter_no="FINAL-APPROVAL-M-1",
+        collector_no="FINAL-APPROVAL-C-1",
+        authoritative_address="最终审批解锁地址",
+    )
+    final_group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code=terminal_code,
+        meter_no="FINAL-APPROVAL-M-2",
+        collector_no="FINAL-APPROVAL-C-2",
+        authoritative_address="最终审批解锁地址",
+        status=GroupStatus.UNREVIEWED,
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query=terminal_code,
+        include_blocked=True,
+    )["items"][0]
+    locked = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert locked["workflow_state"] == "needs_review"
+    assert locked["review_required_count"] == 1
+    assert locked["rephoto"] is None
+
+    final_group.status = GroupStatus.APPROVED
+    db_session.commit()
+    unlocked = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+    )
+
+    assert unlocked["review_required_count"] == 0
+    assert unlocked["workflow_state"] in {"needs_replacement", "pool_shortage", "ready"}
+    assert unlocked["rephoto"] is not None
+    assert len(unlocked["rephoto"]["meter_install_items"]) == 2
+
+
 def test_open_global_terminal_creates_one_terminal_snapshot_and_reuses_revision(
     db_session: Session,
 ) -> None:
@@ -4279,6 +4543,39 @@ def test_legacy_allocate_rejects_a_global_terminal_hidden_run(
     assert physical.pool_status == "available"
 
 
+def test_legacy_allocate_rechecks_hidden_terminal_review_before_generic_rejection(
+    db_session: Session,
+) -> None:
+    """Catches the old global-run shortcut masking a newly required review."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="HIDDEN-ALLOCATE-REVIEW",
+        meter_no="HIDDEN-ALLOCATE-REVIEW-METER",
+        collector_no="HIDDEN-ALLOCATE-REVIEW-ORIGINAL",
+        authoritative_address="隐藏运行审阅地址",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="HIDDEN-ALLOCATE-REVIEW"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="HIDDEN-ALLOCATE-REVIEW",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    group.status = GroupStatus.UNREVIEWED
+    db_session.commit()
+    before = mutation_fingerprint(db_session)
+
+    with pytest.raises(TerminalReviewRequiredError):
+        service(db_session).allocate(run_id=opened["run_id"])
+
+    assert mutation_fingerprint(db_session) == before
+
+
 def test_random_terminal_replacement_can_complete_undo_and_roll_back_to_missing(
     db_session: Session,
 ) -> None:
@@ -4422,7 +4719,7 @@ def test_refresh_global_terminal_rejects_completed_progress_without_writes(
 def test_refresh_global_terminal_requires_random_rollback_then_supersedes_snapshot(
     db_session: Session,
 ) -> None:
-    """Catches refresh releasing an active replacement or failing after the mapping is rolled back."""
+    """Catches source changes blocking both refresh and rollback until review is current."""
     project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
     source_group = add_global_terminal_source(
         db_session,
@@ -4474,20 +4771,13 @@ def test_refresh_global_terminal_requires_random_rollback_then_supersedes_snapsh
     assignment = db_session.get(CollectorAssignment, UUID(assignment_id))
     assert not old_run.stats.get("superseded", False)
     assert assignment.status == "reserved"
-    service(db_session).rollback_assignment(assignment_id=assignment_id)
+    with pytest.raises(TerminalSourceChangedError):
+        service(db_session).rollback_assignment(assignment_id=assignment_id)
 
-    refreshed = service(db_session).refresh_global_terminal(
-        terminal_id=opened["workbench_terminal_id"]
-    )
-
-    db_session.refresh(old_run)
     db_session.refresh(assignment)
     db_session.refresh(physical)
-    assert refreshed["run_id"] != str(old_run.id)
-    assert old_run.stats["superseded"] is True
-    assert old_run.stats["superseded_by_run_id"] == refreshed["run_id"]
-    assert assignment.status == "rolled_back"
-    assert physical.pool_status == "available"
+    assert assignment.status == "reserved"
+    assert physical.pool_status == "reserved"
 
 
 def test_replace_terminal_missing_rejects_a_stale_source_snapshot_without_writes(

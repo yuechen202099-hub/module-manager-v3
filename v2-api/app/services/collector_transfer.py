@@ -29,6 +29,7 @@ from app.domain.collector_transfer import (
 )
 from app.domain.terminal_review import (
     ReviewMeterEvidence,
+    ReviewMeterProjection,
     ReviewPhotoEvidence,
     TerminalReviewProjection,
     derive_terminal_workflow_state,
@@ -85,6 +86,22 @@ class CollectorDirectConflictError(ValueError):
 
 class CollectorSnapshotChangedError(ValueError):
     """A hidden terminal snapshot cannot be refreshed while progress remains."""
+
+
+class TerminalReviewRequiredError(ValueError):
+    """At least one constructed meter has not passed the current review gate."""
+
+    def __init__(self, meters: Sequence[ReviewMeterProjection]) -> None:
+        self.meters = tuple(meters)
+        super().__init__("terminal review is required")
+
+
+class TerminalNoConstructedMeterError(CollectorRunBlockedError):
+    """A terminal with no constructed meter cannot have re-photo mutations."""
+
+
+class TerminalSourceChangedError(CollectorSnapshotChangedError):
+    """The constructed review evidence no longer matches the hidden snapshot."""
 
 
 class TerminalNotFoundError(KeyError):
@@ -722,11 +739,12 @@ class PostgresCollectorTransferService:
     def _barcode_verifications_for_groups(
         self,
         group_ids: Sequence[UUID],
+        *,
+        lock_rows: bool = False,
     ) -> dict[UUID, Mapping[str, object]]:
         if not group_ids:
             return {}
-        rows = self.session.execute(
-            select(
+        statement = select(
                 GroupBarcodeVerification.group_id,
                 GroupBarcodeVerification.status,
                 GroupBarcodeVerification.evidence_fingerprint,
@@ -747,7 +765,9 @@ class PostgresCollectorTransferService:
                 GroupBarcodeVerification.team_id == self.team_id,
                 GroupBarcodeVerification.group_id.in_(tuple(group_ids)),
             )
-        ).mappings()
+        if lock_rows:
+            statement = statement.with_for_update()
+        rows = self.session.execute(statement).mappings()
         return {
             row["group_id"]: dict(row)
             for row in rows
@@ -816,36 +836,40 @@ class PostgresCollectorTransferService:
         ]
         if not groups:
             raise TerminalNotFoundError(normalized_code)
+        photo_statement = (
+            select(
+                Photo.id,
+                Photo.group_id,
+                Photo.collector,
+                Photo.asset_no,
+                Photo.category,
+                Photo.sort_order,
+                Photo.is_active,
+                Photo.image_url,
+                Photo.object_key,
+                Photo.storage_type,
+                Photo.storage_key,
+                Photo.storage_bucket,
+                Photo.sha256,
+                Photo.content_type,
+            )
+            .join(MaterialGroup, Photo.group_id == MaterialGroup.id)
+            .where(
+                *predicates,
+                Photo.team_id == self.team_id,
+                Photo.is_active.is_(True),
+            )
+            .order_by(Photo.group_id, Photo.sort_order, Photo.id)
+        )
+        if lock_groups:
+            photo_statement = photo_statement.with_for_update()
         photos = tuple(
             _ProjectPhotoRow(*row)
-            for row in self.session.execute(
-                select(
-                    Photo.id,
-                    Photo.group_id,
-                    Photo.collector,
-                    Photo.asset_no,
-                    Photo.category,
-                    Photo.sort_order,
-                    Photo.is_active,
-                    Photo.image_url,
-                    Photo.object_key,
-                    Photo.storage_type,
-                    Photo.storage_key,
-                    Photo.storage_bucket,
-                    Photo.sha256,
-                    Photo.content_type,
-                )
-                .join(MaterialGroup, Photo.group_id == MaterialGroup.id)
-                .where(
-                    *predicates,
-                    Photo.team_id == self.team_id,
-                    Photo.is_active.is_(True),
-                )
-                .order_by(Photo.group_id, Photo.sort_order, Photo.id)
-            ).tuples()
+            for row in self.session.execute(photo_statement).tuples()
         )
         verification_by_group = self._barcode_verifications_for_groups(
-            [group.id for group in groups]
+            [group.id for group in groups],
+            lock_rows=lock_groups,
         )
         projection, review_rows = _review_projection_from_rows(
             groups,
@@ -859,6 +883,49 @@ class PostgresCollectorTransferService:
             photos=photos,
             review_rows=review_rows,
         )
+
+    def _require_terminal_review_ready(
+        self,
+        *,
+        run: CollectorTransferRun,
+        terminal: CollectorTransferTerminal,
+        client_source_revision: str = "",
+    ) -> TerminalReviewProjection:
+        bundle = self._terminal_review_bundle(
+            project_id=run.project_id,
+            terminal_code=terminal.terminal_code,
+            lock_groups=True,
+        )
+        projection = bundle.projection
+        if not projection.constructed_meters:
+            raise TerminalNoConstructedMeterError(
+                "terminal has no constructed meter"
+            )
+        if projection.hard_blocked:
+            raise CollectorTerminalSourceBlockedError(
+                "terminal source is blocked by current review evidence"
+            )
+        if projection.review_required_count:
+            raise TerminalReviewRequiredError(
+                tuple(
+                    item
+                    for item in projection.constructed_meters
+                    if not item.review_ready
+                )
+            )
+        stored_revision = normalize_identifier(
+            (run.stats or {}).get("source_revision")
+        )
+        requested_revision = normalize_identifier(client_source_revision)
+        if (
+            stored_revision != projection.source_revision
+            or requested_revision
+            and requested_revision != projection.source_revision
+        ):
+            raise TerminalSourceChangedError(
+                "terminal source changed; refresh the snapshot first"
+            )
+        return projection
 
     def list_global_terminals(
         self,
@@ -3099,11 +3166,54 @@ class PostgresCollectorTransferService:
         }
 
     def allocate(self, *, run_id: str) -> dict[str, object]:
-        run = self._run(run_id, lock=True)
+        run = self._run(run_id)
         if (run.stats or {}).get("workflow_kind") == "global_terminal_workbench":
+            run_uuid = _uuid(run_id, "run_id")
+            global_terminal_ref = self.session.execute(
+                select(
+                    CollectorTransferRun.project_id,
+                    CollectorTransferTerminal.id,
+                    CollectorTransferTerminal.terminal_code,
+                )
+                .outerjoin(
+                    CollectorTransferTerminal,
+                    and_(
+                        CollectorTransferTerminal.run_id == CollectorTransferRun.id,
+                        CollectorTransferTerminal.team_id == self.team_id,
+                    ),
+                )
+                .where(
+                    CollectorTransferRun.id == run_uuid,
+                    CollectorTransferRun.team_id == self.team_id,
+                )
+                .order_by(CollectorTransferTerminal.id)
+                .limit(1)
+            ).one_or_none()
+            if global_terminal_ref is None:
+                raise KeyError(run_id)
+            if global_terminal_ref.id is None:
+                raise KeyError(run_id)
+            self._lock_global_terminal_identity(
+                project_id=global_terminal_ref.project_id,
+                terminal_code=global_terminal_ref.terminal_code,
+            )
+            run = self._run(run_id, lock=True)
+            terminal = self.session.scalar(
+                select(CollectorTransferTerminal)
+                .where(
+                    CollectorTransferTerminal.id == global_terminal_ref.id,
+                    CollectorTransferTerminal.run_id == run.id,
+                    CollectorTransferTerminal.team_id == self.team_id,
+                )
+                .with_for_update()
+            )
+            if terminal is None:
+                raise KeyError(run_id)
+            self._require_terminal_review_ready(run=run, terminal=terminal)
             raise CollectorRunBlockedError(
                 "global terminal workbench requires terminal-scoped replacement"
             )
+        run = self._run(run_id, lock=True)
         blocked_terminal_count = int(
             self.session.scalar(
                 select(func.count(CollectorTransferTerminal.id)).where(
@@ -3231,14 +3341,28 @@ class PostgresCollectorTransferService:
             select(
                 CollectorTransferTerminal.run_id,
                 CollectorTransferTerminal.id,
+                CollectorTransferTerminal.terminal_code,
+                CollectorTransferRun.project_id,
+            )
+            .join(
+                CollectorTransferRun,
+                CollectorTransferRun.id == CollectorTransferTerminal.run_id,
             ).where(
                 CollectorTransferTerminal.id == terminal_uuid,
                 CollectorTransferTerminal.team_id == self.team_id,
+                CollectorTransferRun.team_id == self.team_id,
             )
         ).one_or_none()
         if terminal_ref is None:
             raise KeyError(terminal_id)
 
+        # Canonical mutation lock order:
+        # advisory terminal identity -> run -> terminal -> source evidence ->
+        # requirement -> physical -> assignment -> workbench item.
+        self._lock_global_terminal_identity(
+            project_id=terminal_ref.project_id,
+            terminal_code=terminal_ref.terminal_code,
+        )
         run = self._run(str(terminal_ref.run_id), lock=True)
         stats = dict(run.stats or {})
         if (
@@ -3257,23 +3381,10 @@ class PostgresCollectorTransferService:
         )
         if terminal is None:
             raise KeyError(terminal_id)
+        self._require_terminal_review_ready(run=run, terminal=terminal)
         if terminal.status == "blocked":
             raise CollectorTerminalSourceBlockedError(
                 "终端存在资料阻断，不能执行随机替换"
-            )
-        current_projection, current_photos = self._global_terminal_projection(
-            project_id=run.project_id,
-            terminal_code=terminal.terminal_code,
-        )
-        if current_projection.diagnostics:
-            raise CollectorTerminalSourceBlockedError("终端当前来源存在资料阻断")
-        current_revision = self._terminal_review_bundle(
-            project_id=run.project_id,
-            terminal_code=terminal.terminal_code,
-        ).projection.source_revision
-        if current_revision != normalize_identifier(stats.get("source_revision")):
-            raise CollectorSnapshotChangedError(
-                "terminal source changed; refresh the snapshot before replacement"
             )
 
         requirements = list(
@@ -3480,19 +3591,12 @@ class PostgresCollectorTransferService:
             raise CollectorSnapshotChangedError(
                 "snapshot has progress; undo completions and roll back assignments first"
             )
+        self._require_terminal_review_ready(run=run, terminal=terminal)
 
-        projection, photos = self._global_terminal_projection(
-            project_id=run.project_id,
-            terminal_code=terminal.terminal_code,
-        )
-        current_revision = self._terminal_review_bundle(
-            project_id=run.project_id,
-            terminal_code=terminal.terminal_code,
-        ).projection.source_revision
         return self.open_global_terminal(
             project_id=str(run.project_id),
             terminal_code=terminal.terminal_code,
-            source_revision=current_revision,
+            source_revision=normalize_identifier(stats.get("source_revision")),
             terminal_key_value=terminal_key(
                 str(run.project_id),
                 terminal.terminal_code,
@@ -3533,9 +3637,38 @@ class PostgresCollectorTransferService:
         ).one_or_none()
         if requirement_ref is None or requirement_ref.run_id != assignment_ref.run_id:
             raise ValueError("assignment resources are missing")
+        terminal_identity = self.session.execute(
+            select(
+                CollectorTransferRun.project_id,
+                CollectorTransferRun.stats,
+                CollectorTransferTerminal.terminal_code,
+            )
+            .join(
+                CollectorTransferRun,
+                CollectorTransferRun.id == CollectorTransferTerminal.run_id,
+            )
+            .where(
+                CollectorTransferTerminal.id == requirement_ref.terminal_id,
+                CollectorTransferTerminal.run_id == assignment_ref.run_id,
+                CollectorTransferTerminal.team_id == self.team_id,
+                CollectorTransferRun.team_id == self.team_id,
+            )
+        ).one_or_none()
+        if terminal_identity is None:
+            raise ValueError("assignment resources are missing")
 
         # Canonical mutation lock order:
-        # run -> terminal -> requirement -> physical -> assignment -> item -> evidence.
+        # advisory terminal identity -> run -> terminal -> source evidence ->
+        # requirement -> physical -> assignment -> workbench item.
+        is_global_terminal_workbench = (
+            (terminal_identity.stats or {}).get("workflow_kind")
+            == "global_terminal_workbench"
+        )
+        if is_global_terminal_workbench:
+            self._lock_global_terminal_identity(
+                project_id=terminal_identity.project_id,
+                terminal_code=terminal_identity.terminal_code,
+            )
         run = self._run(str(assignment_ref.run_id), lock=True)
         terminal = self.session.scalar(
             select(CollectorTransferTerminal)
@@ -3546,6 +3679,10 @@ class PostgresCollectorTransferService:
             )
             .with_for_update()
         )
+        if terminal is None:
+            raise ValueError("assignment resources are missing")
+        if is_global_terminal_workbench:
+            self._require_terminal_review_ready(run=run, terminal=terminal)
         requirement = self.session.scalar(
             select(CollectorRequirement)
             .where(
@@ -3564,7 +3701,7 @@ class PostgresCollectorTransferService:
             )
             .with_for_update()
         )
-        if terminal is None or requirement is None or physical is None:
+        if requirement is None or physical is None:
             raise ValueError("assignment resources are missing")
         assignment = self.session.scalar(
             select(CollectorAssignment)
@@ -4169,9 +4306,38 @@ class PostgresCollectorTransferService:
         )
         if item_ref.assignment_id is not None and assignment_ref is None:
             raise CollectorWorkbenchIncompleteError(("拆除分配不存在或已失效",))
+        terminal_identity = self.session.execute(
+            select(
+                CollectorTransferRun.project_id,
+                CollectorTransferRun.stats,
+                CollectorTransferTerminal.terminal_code,
+            )
+            .join(
+                CollectorTransferRun,
+                CollectorTransferRun.id == CollectorTransferTerminal.run_id,
+            )
+            .where(
+                CollectorTransferTerminal.id == item_ref.terminal_id,
+                CollectorTransferTerminal.run_id == item_ref.run_id,
+                CollectorTransferTerminal.team_id == self.team_id,
+                CollectorTransferRun.team_id == self.team_id,
+            )
+        ).one_or_none()
+        if terminal_identity is None:
+            raise CollectorWorkbenchIncompleteError(("终端快照不存在",))
 
         # Canonical mutation lock order:
-        # run -> terminal -> requirement -> physical -> assignment -> item -> evidence.
+        # advisory terminal identity -> run -> terminal -> source evidence ->
+        # requirement -> physical -> assignment -> workbench item.
+        is_global_terminal_workbench = (
+            (terminal_identity.stats or {}).get("workflow_kind")
+            == "global_terminal_workbench"
+        )
+        if is_global_terminal_workbench:
+            self._lock_global_terminal_identity(
+                project_id=terminal_identity.project_id,
+                terminal_code=terminal_identity.terminal_code,
+            )
         run = self._run(str(item_ref.run_id), lock=True)
         terminal = self.session.scalar(
             select(CollectorTransferTerminal)
@@ -4184,6 +4350,8 @@ class PostgresCollectorTransferService:
         )
         if terminal is None:
             raise CollectorWorkbenchIncompleteError(("终端快照不存在",))
+        if is_global_terminal_workbench:
+            self._require_terminal_review_ready(run=run, terminal=terminal)
 
         requirement_id = item_ref.requirement_id or (
             assignment_ref.requirement_id if assignment_ref is not None else None

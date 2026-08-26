@@ -27,6 +27,8 @@ from app.models import (
     CollectorTransferRun,
     CollectorTransferTerminal,
     CollectorWorkbenchItem,
+    GroupBarcodeVerification,
+    GroupStatus,
     MaterialGroup,
     PhysicalCollector,
     Photo,
@@ -41,6 +43,8 @@ from app.services.collector_transfer import (
     CollectorPhotoConflictError,
     CollectorWorkbenchIncompleteError,
     PostgresCollectorTransferService,
+    TerminalReviewRequiredError,
+    TerminalSourceChangedError,
 )
 
 
@@ -363,10 +367,13 @@ def seed_partial_global_terminal_state(
                 team_id=team_id,
                 project_id=project.id,
                 total_catalog_row_id=catalog.id,
+                legacy_id=f"task7-global-{index + 1}",
                 terminal=terminal_code,
                 meter_match_key=meter_no,
                 display_meter_no=meter_no,
                 installation_address="本地全局终端并发地址",
+                status=GroupStatus.APPROVED,
+                photo_count=2,
                 raw_data={
                     "collector": collector_no,
                     "module_asset_no": f"TASK7-MODULE-{index + 1}",
@@ -402,6 +409,18 @@ def seed_partial_global_terminal_state(
                         sort_order=1,
                         is_active=True,
                     ),
+                )
+            )
+            session.add(
+                GroupBarcodeVerification(
+                    id=uuid4(),
+                    team_id=team_id,
+                    group_id=group.id,
+                    status="passed",
+                    meter_matched=True,
+                    module_matched=True,
+                    collector_matched=True,
+                    recognition_source="task7",
                 )
             )
 
@@ -1233,3 +1252,124 @@ def test_real_postgres_concurrent_terminal_replacement_is_idempotent(
     assert all(row.pool_status == "reserved" for row in physicals)
     assert len(removal_items) == 2
     assert replacement_audits == 1
+
+
+def test_real_postgres_terminal_review_change_after_terminal_lock_is_deadlock_free_and_atomic(
+    postgres_session_factory,
+) -> None:
+    """Catches a source-photo review change deadlocking replacement or leaking a partial pool allocation."""
+    team_id, terminal_id, _assignment_id, run_id = seed_partial_global_terminal_state(
+        postgres_session_factory
+    )
+    terminal_locked = Barrier(2)
+    source_committed = Barrier(2)
+    engine = postgres_session_factory.kw["bind"]
+
+    def pause_after_terminal_lock(
+        conn, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        normalized = " ".join(statement.lower().split())
+        if (
+            conn.info.get("collector_transfer_role") == "replace"
+            and not conn.info.get("terminal_review_pause_seen")
+            and "from collector_transfer_terminals" in normalized
+            and "for update" in normalized
+        ):
+            conn.info["terminal_review_pause_seen"] = True
+            terminal_locked.wait(timeout=10)
+            source_committed.wait(timeout=10)
+
+    event.listen(engine, "after_cursor_execute", pause_after_terminal_lock)
+
+    def replace_after_source_change() -> tuple[str, str]:
+        with postgres_session_factory() as session:
+            connection = session.connection()
+            connection.info["collector_transfer_role"] = "replace"
+            try:
+                PostgresCollectorTransferService(
+                    session=session,
+                    team_id=team_id,
+                    actor="task7-replace",
+                ).replace_terminal_missing(terminal_id=terminal_id)
+                return "unexpected", "replacement accepted changed source"
+            except TerminalSourceChangedError:
+                session.rollback()
+                return "terminal_source_changed", "ok"
+            except TerminalReviewRequiredError:
+                session.rollback()
+                return "terminal_review_required", "ok"
+            except Exception as exc:
+                session.rollback()
+                return "unexpected", f"{type(exc).__name__}: {exc}"
+
+    def change_active_source_photo() -> tuple[str, str]:
+        terminal_locked.wait(timeout=10)
+        try:
+            with postgres_session_factory.begin() as session:
+                photo = session.scalar(
+                    select(Photo)
+                    .join(MaterialGroup, MaterialGroup.id == Photo.group_id)
+                    .where(
+                        MaterialGroup.team_id == team_id,
+                        MaterialGroup.terminal
+                        == session.scalar(
+                            select(CollectorTransferTerminal.terminal_code).where(
+                                CollectorTransferTerminal.id == UUID(terminal_id)
+                            )
+                        ),
+                        Photo.is_active.is_(True),
+                    )
+                    .order_by(Photo.group_id, Photo.sort_order, Photo.id)
+                    .with_for_update()
+                )
+                assert photo is not None
+                photo.sha256 = sha256(f"{team_id}:changed-source".encode()).hexdigest()
+            return "source_changed", "ok"
+        finally:
+            source_committed.wait(timeout=10)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            replacement = executor.submit(replace_after_source_change)
+            source_change = executor.submit(change_active_source_photo)
+            outcomes = [
+                replacement.result(timeout=20),
+                source_change.result(timeout=20),
+            ]
+    finally:
+        event.remove(engine, "after_cursor_execute", pause_after_terminal_lock)
+
+    assert ("source_changed", "ok") in outcomes, outcomes
+    assert any(
+        outcome[0] in {"terminal_source_changed", "terminal_review_required"}
+        for outcome in outcomes
+    ), outcomes
+    assert all(outcome[0] != "unexpected" for outcome in outcomes), outcomes
+    with postgres_session_factory() as session:
+        assignments = list(
+            session.scalars(
+                select(CollectorAssignment)
+                .where(CollectorAssignment.run_id == UUID(run_id))
+                .order_by(CollectorAssignment.id)
+            )
+        )
+        requirements = list(
+            session.scalars(
+                select(CollectorRequirement)
+                .where(CollectorRequirement.run_id == UUID(run_id))
+                .order_by(CollectorRequirement.id)
+            )
+        )
+        physicals = list(
+            session.scalars(
+                select(PhysicalCollector)
+                .where(PhysicalCollector.team_id == team_id)
+                .order_by(PhysicalCollector.id)
+            )
+        )
+
+    assert len(assignments) == 1
+    assert [row.status for row in requirements].count("assigned") == 1
+    assert [row.status for row in requirements].count("unmatched") == 1
+    assert [row.pool_status for row in physicals].count("reserved") == 1
+    assert [row.pool_status for row in physicals].count("available") == 1
