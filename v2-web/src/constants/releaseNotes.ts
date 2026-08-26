@@ -12,6 +12,18 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.9',
+    date: '2026-08-26',
+    type: 'BUG 修复',
+    title: '采集器盘点扫码紧急修复',
+    items: [
+      '盘点页复用现场施工的 QuaggaJS 扫码顺序，不再先占用原生摄像头导致只有画面但无法识别条码。',
+      'QuaggaJS 不可用时才回退原生预览与 BarcodeDetector，手工输入仍可使用。',
+      '扫码器启动中途失败、项目切换、页面切换或卸载时均会清理回调和摄像头流，避免两路摄像头竞争。',
+      '项目隔离、同号直用、需拍照判定和采集器池规则保持不变；本次无数据库迁移。',
+    ],
+  },
+  {
     version: 'V3.2.8',
     date: '2026-08-25',
     type: 'BUG 修复',

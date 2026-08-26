@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 
-EXPECTED_VERSION = "3.2.8"
+EXPECTED_VERSION = "3.2.9"
 EXPECTED_MIGRATION = "v2-api/alembic/versions/0006_group_barcode_verification.py"
 
 
