@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+import hashlib
 import importlib.util
 import json
 import re
@@ -33,6 +34,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_7_release.py",
     "scripts/verify_v3_2_8_release.py",
     "scripts/test_verify_v3_2_8_release.py",
+    "scripts/verify_v3_2_10_release.py",
+    "scripts/test_verify_v3_2_10_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -40,14 +43,18 @@ RELEASE_INPUTS = (
     "v2-api/alembic/versions/0013_data_center_query_indexes.py",
     "v2-api/alembic/versions/0014_export_center_jobs.py",
     "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
+    "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
     "v2-api/app/api/routes/collector_transfer.py",
     "v2-api/app/domain/collector_transfer.py",
+    "v2-api/app/domain/terminal_review.py",
     "v2-api/app/services/collector_transfer.py",
     "v2-api/tests/test_collector_transfer_api.py",
     "v2-api/tests/test_collector_transfer_domain.py",
     "v2-api/tests/test_collector_transfer_postgres_integration.py",
     "v2-api/tests/test_collector_transfer_service.py",
     "v2-api/tests/test_collector_transfer_scale.py",
+    "v2-api/tests/test_data_center_review.py",
+    "v2-api/tests/test_terminal_review_domain.py",
     "v2-api/app/api/routes/groups.py",
     "v2-api/app/api/routes/exports.py",
     "v2-api/app/schemas/data_center.py",
@@ -63,6 +70,7 @@ RELEASE_INPUTS = (
     "v2-api/tests/test_migrate_external_photos_to_oss.py",
     "v2-web/src/components/data-center/DataCenterFilters.vue",
     "v2-web/src/components/data-center/DataCenterReviewDialog.vue",
+    "v2-web/src/components/data-center/DataCenterGroupReviewPanel.vue",
     "v2-web/src/composables/useDataCenterQuery.ts",
     "v2-web/src/utils/dataCenterDrilldown.ts",
     "v2-web/src/components/InstallerKpiDialog.vue",
@@ -75,8 +83,9 @@ RELEASE_INPUTS = (
     "v2-web/src/router/staticPages.ts",
     "v2-web/src/views/CollectorInventoryView.vue",
     "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts",
-    "v2-web/src/views/CollectorWorkbenchView.vue",
-    "v2-web/src/views/__tests__/CollectorWorkbenchView.spec.ts",
+    "v2-web/src/views/ReviewRephotoWorkbenchView.vue",
+    "v2-web/src/views/__tests__/CollectorInventoryRouting.spec.ts",
+    "v2-web/src/views/__tests__/ReviewRephotoWorkbenchView.spec.ts",
     "v2-web/tests/collector-transfer-state.test.ts",
     "ops/releases/V3.2.0.md",
     "ops/releases/V3.2.1.md",
@@ -87,6 +96,8 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.6.md",
     "ops/releases/V3.2.7.md",
     "ops/releases/V3.2.8.md",
+    "ops/releases/V3.2.9.md",
+    "ops/releases/V3.2.10.md",
 )
 
 REQUIRED_FILES = [
@@ -929,6 +940,15 @@ def recovered_unattested_v327_baseline_is_documented(record: str, version: str) 
     return True
 
 
+def verified_v329_hotfix_baseline_is_documented(record: str, version: str) -> bool:
+    if version != "V3.2.9":
+        return False
+    expected_sha256 = "ba333764f85ed83908b2d5a4ed2cf0b4118a623f37328b514474c5d04c253243"
+    if hashlib.sha256(record.encode("utf-8")).hexdigest() != expected_sha256:
+        fail("V3.2.9 deployed hotfix record must remain byte-identical to production proof commit 8a4bcd6")
+    return True
+
+
 def release_record_matches_lifecycle_state(
     record: str,
     version: str,
@@ -937,6 +957,8 @@ def release_record_matches_lifecycle_state(
     candidate_phase: str = "source",
 ) -> None:
     if version == deployed_baseline:
+        if verified_v329_hotfix_baseline_is_documented(record, version):
+            return
         if recovered_unattested_v327_baseline_is_documented(record, version):
             return
         deployed_release_record_is_verified(record, version)
@@ -988,15 +1010,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def verify_current_release_phase(phase: str) -> None:
-    path = Path(__file__).with_name("verify_v3_2_8_release.py")
-    spec = importlib.util.spec_from_file_location("verify_v3_2_8_release", path)
+def verify_current_release_phase(phase: str, version: str | None = None) -> None:
+    candidate = version or release_candidate(read("AGENTS.md"))
+    if candidate == "V3.2.10":
+        path = Path(__file__).with_name("verify_v3_2_10_release.py")
+        module_name = "verify_v3_2_10_release"
+    else:
+        path = Path(__file__).with_name("verify_v3_2_8_release.py")
+        module_name = "verify_v3_2_8_release"
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        fail("Unable to load V3.2.8 release verifier")
+        fail(f"Unable to load {candidate} release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if module.main(["--phase", phase]) != 0:
-        fail(f"V3.2.8 {phase} release contract failed")
+        fail(f"{candidate} {phase} release contract failed")
 
 
 def validate_requested_candidate_version(version: str, agents: str) -> str:
@@ -1028,7 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
     missing = [path for path in REQUIRED_FILES if not (ROOT / path).exists()]
     if missing:
         fail("Missing SOP files: " + ", ".join(missing))
-    verify_current_release_phase(args.phase)
+    verify_current_release_phase(args.phase, args.version)
 
     readme = read("README.md")
     if "build/server-release/" not in readme:

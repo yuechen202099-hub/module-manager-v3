@@ -56,6 +56,55 @@ V328_CONTRACT_INPUTS = frozenset(
     }
 )
 
+V3210_CONTRACT_INPUTS = frozenset(
+    {
+        "AGENTS.md",
+        "RELEASE_MANIFEST.md",
+        "docs/AGENT_REQUIRED_READING.md",
+        "docs/sop/README.md",
+        "docs/superpowers/specs/2026-08-26-unified-terminal-review-rephoto-workbench-design.md",
+        "ops/releases/V3.2.9.md",
+        "ops/releases/V3.2.10.md",
+        "scripts/build-client-release.ps1",
+        "scripts/verify-client-release.py",
+        "scripts/verify_release_sop.py",
+        "scripts/verify_v3_2_10_release.py",
+        "scripts/test_verify_v3_2_10_release.py",
+        "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
+        "v2-api/app/api/routes/collector_transfer.py",
+        "v2-api/app/api/routes/groups.py",
+        "v2-api/app/domain/terminal_review.py",
+        "v2-api/app/main.py",
+        "v2-api/app/services/collector_transfer.py",
+        "v2-api/app/services/ops_status.py",
+        "v2-api/pyproject.toml",
+        "v2-api/scripts/verify_v3_1_release.py",
+        "v2-api/tests/test_collector_transfer_api.py",
+        "v2-api/tests/test_collector_transfer_postgres_integration.py",
+        "v2-api/tests/test_collector_transfer_scale.py",
+        "v2-api/tests/test_collector_transfer_service.py",
+        "v2-api/tests/test_data_center_review.py",
+        "v2-api/tests/test_terminal_review_domain.py",
+        "v2-api/tests/test_v3_1_release.py",
+        "v2-web/index.html",
+        "v2-web/package.json",
+        "v2-web/src/api/services.ts",
+        "v2-web/src/api/types.ts",
+        "v2-web/src/components/AppLayout.vue",
+        "v2-web/src/components/data-center/DataCenterGroupReviewPanel.vue",
+        "v2-web/src/constants/releaseNotes.ts",
+        "v2-web/src/features/collectorTransfer/state.ts",
+        "v2-web/src/router/index.ts",
+        "v2-web/src/router/staticPages.ts",
+        "v2-web/src/version.json",
+        "v2-web/src/views/CollectorInventoryView.vue",
+        "v2-web/src/views/ReviewRephotoWorkbenchView.vue",
+        "v2-web/src/views/__tests__/CollectorInventoryRouting.spec.ts",
+        "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts",
+        "v2-web/src/views/__tests__/ReviewRephotoWorkbenchView.spec.ts",
+    }
+)
+
 REQUIRED_FILES = {
     "SOURCE_COMMIT",
     "README.md",
@@ -154,6 +203,7 @@ REQUIRED_FILES = {
     "v2-api/alembic/versions/0013_data_center_query_indexes.py",
     "v2-api/alembic/versions/0014_export_center_jobs.py",
     "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
+    "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
     "v2-api/app/api/routes/collector_transfer.py",
     "v2-api/app/domain/collector_transfer.py",
     "v2-api/app/services/collector_transfer.py",
@@ -169,8 +219,9 @@ REQUIRED_FILES = {
     "v2-web/src/router/staticPages.ts",
     "v2-web/src/views/CollectorInventoryView.vue",
     "v2-web/src/views/__tests__/CollectorInventoryView.spec.ts",
-    "v2-web/src/views/CollectorWorkbenchView.vue",
-    "v2-web/src/views/__tests__/CollectorWorkbenchView.spec.ts",
+    "v2-web/src/views/ReviewRephotoWorkbenchView.vue",
+    "v2-web/src/views/__tests__/CollectorInventoryRouting.spec.ts",
+    "v2-web/src/views/__tests__/ReviewRephotoWorkbenchView.spec.ts",
     "v2-web/tests/collector-transfer-state.test.ts",
     "scripts/production_backup.sh",
     "scripts/cleanup_old_releases.sh",
@@ -278,7 +329,42 @@ REQUIRED_FILES = {
     "v2-web/src/utils/dataCenterDrilldown.ts",
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
-} | V328_CONTRACT_INPUTS
+} | V328_CONTRACT_INPUTS | V3210_CONTRACT_INPUTS
+
+V3210_ONLY_REQUIRED_FILES = frozenset(
+    {
+        "docs/AGENT_REQUIRED_READING.md",
+        "docs/superpowers/specs/2026-08-26-unified-terminal-review-rephoto-workbench-design.md",
+        "ops/releases/V3.2.9.md",
+        "ops/releases/V3.2.10.md",
+        "scripts/verify_v3_2_10_release.py",
+        "scripts/test_verify_v3_2_10_release.py",
+        "v2-api/app/domain/terminal_review.py",
+        "v2-api/tests/test_data_center_review.py",
+        "v2-api/tests/test_terminal_review_domain.py",
+        "v2-web/src/components/data-center/DataCenterGroupReviewPanel.vue",
+        "v2-web/src/views/ReviewRephotoWorkbenchView.vue",
+        "v2-web/src/views/__tests__/CollectorInventoryRouting.spec.ts",
+        "v2-web/src/views/__tests__/ReviewRephotoWorkbenchView.spec.ts",
+    }
+)
+V328_WORKBENCH_REQUIRED_FILES = frozenset(
+    {
+        "v2-web/src/views/CollectorWorkbenchView.vue",
+        "v2-web/src/views/__tests__/CollectorWorkbenchView.spec.ts",
+    }
+)
+V328_REQUIRED_FILES = frozenset(
+    (REQUIRED_FILES - V3210_ONLY_REQUIRED_FILES) | V328_WORKBENCH_REQUIRED_FILES
+)
+
+
+def required_files_for_version(version: str) -> frozenset[str]:
+    if version == "3.2.8":
+        return V328_REQUIRED_FILES
+    if version == "3.2.10":
+        return frozenset(REQUIRED_FILES)
+    fail(f"Release manifest Version must match a supported archived source contract: {version}")
 
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
@@ -447,6 +533,26 @@ def verify_v328_archive_source_contract(archive: zipfile.ZipFile):
         failures = module.collect_failures(extracted_root, "source")
         if failures:
             fail("V3.2.8 archive source contract failed: " + " | ".join(failures))
+        return module
+
+
+def verify_v3210_archive_source_contract(archive: zipfile.ZipFile):
+    with tempfile.TemporaryDirectory(prefix="module-manager-v3210-contract-") as temporary_root:
+        extracted_root = Path(temporary_root)
+        for relative_path in V3210_CONTRACT_INPUTS:
+            target = extracted_root / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(archive.read(relative_path))
+
+        verifier_path = extracted_root / "scripts" / "verify_v3_2_10_release.py"
+        spec = importlib.util.spec_from_file_location("archive_v3210_release_contract", verifier_path)
+        if spec is None or spec.loader is None:
+            fail("Unable to load archived V3.2.10 release verifier")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        failures = module.collect_failures(extracted_root, "source")
+        if failures:
+            fail("V3.2.10 archive source contract failed: " + " | ".join(failures))
         return module
 
 
@@ -768,7 +874,27 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
 
     with zipfile.ZipFile(zip_path) as archive:
         names = set(validated_zip_file_names(archive))
-        missing = sorted(REQUIRED_FILES - names)
+        bootstrap_missing = sorted({"SOURCE_COMMIT", "RELEASE_MANIFEST.md"} - names)
+        if bootstrap_missing:
+            fail("Missing required release files: " + ", ".join(bootstrap_missing))
+        manifest = archive.read("RELEASE_MANIFEST.md").decode("utf-8")
+        manifest_versions = [
+            match.group("version")
+            for match in MANIFEST_VERSION_LINE_PATTERN.finditer(manifest)
+        ]
+        if (
+            len(manifest_versions) != 1
+            or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None
+        ):
+            fail("Release manifest must define exactly one semantic Version")
+        package_version = manifest_versions[0]
+        if package_version not in {"3.2.8", "3.2.10"}:
+            fail(
+                "Release manifest Version must match a supported archived source contract: "
+                "3.2.8 or 3.2.10"
+            )
+        required_files = required_files_for_version(package_version)
+        missing = sorted(required_files - names)
         if missing:
             fail("Missing required release files: " + ", ".join(missing))
         source_commit = archive.read("SOURCE_COMMIT").decode("ascii").strip().lower()
@@ -787,15 +913,6 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
                 archive,
                 names,
                 normalized_expected_commit,
-            )
-        manifest = archive.read("RELEASE_MANIFEST.md").decode("utf-8") if "RELEASE_MANIFEST.md" in names else ""
-        manifest_versions = [match.group("version") for match in MANIFEST_VERSION_LINE_PATTERN.finditer(manifest)]
-        if len(manifest_versions) != 1 or SEMANTIC_VERSION_PATTERN.fullmatch(manifest_versions[0]) is None:
-            fail("Release manifest must define exactly one semantic Version")
-        package_version = manifest_versions[0]
-        if package_version != "3.2.8":
-            fail(
-                "Release manifest Version must match the archived V3.2.8 source contract: 3.2.8"
             )
         verify_release_markdown_documents(archive, names, package_version)
         static_index = (
@@ -888,13 +1005,17 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         candidate_version,
     )
     with zipfile.ZipFile(zip_path) as archive:
-        archived_release = verify_v328_archive_source_contract(archive)
+        archived_release = (
+            verify_v3210_archive_source_contract(archive)
+            if package_version == "3.2.10"
+            else verify_v328_archive_source_contract(archive)
+        )
     if archived_release.VERSION != package_version:
-        fail("Archived V3.2.8 release verifier version must match the release manifest Version")
+        fail("Archived release verifier version must match the release manifest Version")
 
     print(f"[OK] release zip exists: {zip_path}")
     print(f"[OK] release zip size: {zip_path.stat().st_size} bytes")
-    print(f"[OK] required files: {len(REQUIRED_FILES)}")
+    print(f"[OK] required files: {len(required_files)}")
     print(f"[OK] source commit: {source_commit}")
     print("[OK] release manifest contains production safety notes")
     print("[OK] no forbidden local/cache files")
