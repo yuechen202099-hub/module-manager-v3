@@ -93,6 +93,18 @@ function deferred<T>() {
   return { promise, reject, resolve }
 }
 
+function stubUnavailableConstructionScanner() {
+  const quagga = {
+    init: vi.fn((_options: unknown, complete: (error?: unknown) => void) => complete(new Error('Quagga unavailable'))),
+    onDetected: vi.fn(),
+    offDetected: vi.fn(),
+    start: vi.fn(),
+    stop: vi.fn(),
+  }
+  vi.stubGlobal('Quagga', quagga)
+  return quagga
+}
+
 describe('CollectorInventoryView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -292,7 +304,38 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
-  it('uses BarcodeDetector continuously, deduplicates an in-flight value, and stops camera tracks', async () => {
+  it('reuses the construction Quagga scanner before opening a competing native camera stream', async () => {
+    const detectedHandlers: Array<(result: unknown) => void> = []
+    const quagga = {
+      init: vi.fn((_options: unknown, complete: (error?: unknown) => void) => complete()),
+      onDetected: vi.fn((handler: (result: unknown) => void) => detectedHandlers.push(handler)),
+      offDetected: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    }
+    const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [] })
+    const nativeDetect = vi.fn().mockResolvedValue([])
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('Quagga', quagga)
+    vi.stubGlobal('BarcodeDetector', class { detect = nativeDetect })
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    serviceMocks.scanProjectCollector.mockResolvedValue(decision('direct_reuse', false, false))
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+
+    expect(quagga.init).toHaveBeenCalledTimes(1)
+    expect(quagga.start).toHaveBeenCalledTimes(1)
+    expect(getUserMedia).not.toHaveBeenCalled()
+    expect(nativeDetect).not.toHaveBeenCalled()
+    detectedHandlers[0]?.({ codeResult: { code: 'CG-2026-0819-0036' } })
+    await flushPromises()
+    expect(serviceMocks.scanProjectCollector).toHaveBeenCalledWith('project-1', 'CG-2026-0819-0036')
+    wrapper.unmount()
+  })
+
+  it('uses BarcodeDetector continuously after the construction scanner is unavailable, deduplicates an in-flight value, and stops camera tracks', async () => {
     const scan = deferred<CollectorInventoryDecision>()
     serviceMocks.scanProjectCollector.mockReturnValue(scan.promise)
     const stop = vi.fn()
@@ -308,6 +351,7 @@ describe('CollectorInventoryView', () => {
       .mockResolvedValueOnce([{ rawValue: 'CG-2026-0819-0036' }])
       .mockResolvedValueOnce([{ rawValue: 'CG-2026-0819-0036' }])
     vi.stubGlobal('BarcodeDetector', class { detect = detect })
+    stubUnavailableConstructionScanner()
     const wrapper = await mountPage()
 
     await wrapper.get('[data-testid="start-camera"]').trigger('click')
@@ -328,6 +372,7 @@ describe('CollectorInventoryView', () => {
     const getUserMedia = vi.fn().mockRejectedValue(new Error('NotAllowedError'))
     vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
     vi.stubGlobal('BarcodeDetector', class { detect = vi.fn() })
+    stubUnavailableConstructionScanner()
     const wrapper = await mountPage()
 
     await wrapper.get('[data-testid="start-camera"]').trigger('click')
@@ -343,6 +388,7 @@ describe('CollectorInventoryView', () => {
     const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [{ stop }] })
     vi.stubGlobal('isSecureContext', true)
     vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    stubUnavailableConstructionScanner()
     const wrapper = await mountPage()
 
     await wrapper.get('[data-testid="start-camera"]').trigger('click')
@@ -350,13 +396,8 @@ describe('CollectorInventoryView', () => {
 
     expect(getUserMedia).toHaveBeenCalledTimes(1)
     expect(wrapper.get('video').element.srcObject).toBeTruthy()
-    expect(wrapper.get('[data-testid="scan-feedback"]').text()).toContain('实时识别')
+    expect(wrapper.get('[data-testid="scan-feedback"]').text()).toContain('现场扫码工具不可用')
     expect(wrapper.get('#collector-number').attributes('disabled')).toBeUndefined()
-    const loader = document.head.querySelector<HTMLScriptElement>('script[data-collector-quagga-loader="1"]')
-    loader?.dispatchEvent(new Event('error'))
-    await flushPromises()
-    expect(wrapper.get('[data-testid="scan-feedback"]').text()).toContain('当前浏览器不支持实时识别')
-    loader?.remove()
     wrapper.unmount()
     expect(stop).toHaveBeenCalledTimes(1)
   })
@@ -368,6 +409,7 @@ describe('CollectorInventoryView', () => {
       .mockResolvedValueOnce({ getTracks: () => [{ stop }] })
     vi.stubGlobal('isSecureContext', true)
     vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    stubUnavailableConstructionScanner()
     const wrapper = await mountPage()
 
     await wrapper.get('[data-testid="start-camera"]').trigger('click')
@@ -389,6 +431,7 @@ describe('CollectorInventoryView', () => {
     const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [] })
     vi.stubGlobal('isSecureContext', true)
     vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    stubUnavailableConstructionScanner()
     vi.spyOn(HTMLMediaElement.prototype, 'play').mockReturnValue(previewStart.promise)
     const wrapper = await mountPage()
 
@@ -444,6 +487,7 @@ describe('CollectorInventoryView', () => {
     const getUserMedia = vi.fn().mockReturnValue(never)
     vi.stubGlobal('isSecureContext', true)
     vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    stubUnavailableConstructionScanner()
     const wrapper = await mountPage()
 
     await wrapper.get('[data-testid="start-camera"]').trigger('click')
@@ -469,6 +513,7 @@ describe('CollectorInventoryView', () => {
       .mockReturnValueOnce(genericRequest.promise)
     vi.stubGlobal('isSecureContext', true)
     vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    stubUnavailableConstructionScanner()
     const wrapper = await mountPage()
 
     await wrapper.get('[data-testid="start-camera"]').trigger('click')
@@ -488,13 +533,13 @@ describe('CollectorInventoryView', () => {
   it('catches late camera startup retaining tracks or Quagga callbacks after unmount', async () => {
     const startup = deferred<MediaStream>()
     const stop = vi.fn()
-    const quagga = { init: vi.fn(), onDetected: vi.fn(), offDetected: vi.fn(), start: vi.fn(), stop: vi.fn() }
+    const quagga = stubUnavailableConstructionScanner()
     vi.stubGlobal('isSecureContext', true)
-    vi.stubGlobal('Quagga', quagga)
     vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia: vi.fn().mockReturnValue(startup.promise) } })
     const wrapper = await mountPage()
 
     await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
     wrapper.unmount()
     startup.resolve({ getTracks: () => [{ stop }] } as unknown as MediaStream)
     await flushPromises()
