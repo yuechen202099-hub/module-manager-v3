@@ -10,7 +10,7 @@ const nativePageComponents = {
   'global-search': () => import('@/views/GlobalSearchView.vue'),
   construction: () => import('@/views/ConstructionView.vue'),
   'collector-inventory': () => import('@/views/CollectorInventoryView.vue'),
-  'collector-workbench': () => import('@/views/CollectorWorkbenchView.vue'),
+  'review-workbench': () => import('@/views/ReviewRephotoWorkbenchView.vue'),
   'account-management': () => import('@/views/AccountManagementView.vue'),
   'sync-config': () => import('@/views/SyncConfigView.vue'),
 } as const
@@ -72,7 +72,11 @@ const router = createRouter({
         },
         {
           path: 'collector-batches',
-          redirect: '/collector-workbench',
+          redirect: '/review-workbench',
+        },
+        {
+          path: 'collector-workbench',
+          redirect: '/review-workbench',
         },
         {
           path: 'projects',
@@ -96,8 +100,10 @@ const router = createRouter({
         },
         {
           path: 'review/:groupId',
-          redirect: (to) =>
-            `/global-search?group_id=${encodeURIComponent(String(to.params.groupId || ''))}&page=1&page_size=20&review=1`,
+          redirect: (to) => ({
+            path: '/review-workbench',
+            query: { group_id: String(to.params.groupId || '') },
+          }),
         },
       ],
     },
@@ -114,18 +120,23 @@ router.beforeEach(async (to) => {
     return defaultRouteForRole(auth.user?.role)
   }
 
+  if (!to.meta.public && !auth.user) {
+    try {
+      await auth.hydrateFromLegacySession()
+    } catch {
+      auth.logout()
+      return { name: 'login', query: { redirect: to.fullPath } }
+    }
+  }
+
+  const role = auth.user?.role || ''
+  const roles = new Set<string>([role, ...(auth.user?.roles || [])].filter(Boolean).map(String))
+  if (roles.has('constructor') && !roles.has('admin') && to.path !== '/construction' && to.path !== '/login') {
+    return { name: 'construction' }
+  }
+
   const allowedRoles = (to.meta.roles as string[] | undefined) || []
   if (allowedRoles.length) {
-    if (!auth.user) {
-      try {
-        await auth.hydrateFromLegacySession()
-      } catch {
-        auth.logout()
-        return { name: 'login', query: { redirect: to.fullPath } }
-      }
-    }
-    const role = auth.user?.role || ''
-    const roles = new Set<string>([role, ...(auth.user?.roles || [])].filter(Boolean).map(String))
     const isAllowed = allowedRoles.some((item) => roles.has(item)) || roles.has('admin')
     if (!isAllowed) {
       return defaultRouteForRole(role)

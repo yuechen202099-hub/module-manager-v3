@@ -17,20 +17,23 @@ const workspace = useWorkspaceStore()
 
 const pageTitle = computed(() => String(route.meta.title || '模块更换项目管理器'))
 const navigation = computed(() => {
-  const role = auth.user?.role || 'reviewer'
   const iconMap = {
     'project-board': DataBoard,
     'claim-tasks': Tickets,
     'global-search': Search,
     construction: FolderChecked,
     'collector-inventory': CameraFilled,
-    'collector-workbench': PictureFilled,
+    'review-workbench': PictureFilled,
     'account-management': UserFilled,
     'sync-config': DataBoard,
   }
+  const roles = new Set<string>([auth.user?.role, ...(auth.user?.roles || [])].filter(Boolean).map(String))
+  if (roles.has('constructor') && !roles.has('admin')) {
+    return staticPages.filter((page) => page.key === 'construction').map((page) => ({ ...page, icon: iconMap[page.key] }))
+  }
   return staticPages
     .filter((page) => page.key !== 'sync-config')
-    .filter((page) => !page.roles.length || page.roles.includes(role) || role === 'admin')
+    .filter((page) => !page.roles.length || page.roles.some((pageRole) => roles.has(pageRole)))
     .map((page) => ({ ...page, icon: iconMap[page.key] }))
 })
 
