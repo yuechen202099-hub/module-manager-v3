@@ -28,7 +28,8 @@ const props = withDefaults(defineProps<{
   groupId: string
   rephotoItem?: GlobalMeterInstallWorkbenchRow | null
   defaultStage?: 'source' | 'rephoto'
-}>(), { rephotoItem: null, defaultStage: 'source' })
+  classificationOnly?: boolean
+}>(), { rephotoItem: null, defaultStage: 'source', classificationOnly: false })
 
 const emit = defineEmits<{
   (event: 'updated', detail: DataCenterDetail): void
@@ -43,6 +44,7 @@ const selectedPhotoId = ref('')
 const errorMessage = ref('')
 const inspector = ref<InstanceType<typeof ReviewImageInspector> | null>(null)
 const photoObjectUrls = reactive(new Map<string, string>())
+const pendingCategories = reactive<Record<string, string>>({})
 const activeStage = ref<'source' | 'rephoto'>(props.rephotoItem ? props.defaultStage : 'source')
 let detailAbortController: AbortController | null = null
 let photoAbortController: AbortController | null = null
@@ -78,6 +80,22 @@ const categoryOptions = [
   { value: 'after_box', label: '施工后' },
   { value: 'other', label: '其他' },
 ]
+const classificationCategoryOptions = [
+  { value: 'before_box', label: '表箱整体改造前' },
+  { value: 'collector_barcode', label: '采集器条形码' },
+  { value: 'module_meter', label: '模块与电能表' },
+  { value: 'after_box', label: '表箱整体改造后' },
+]
+const classificationCategoryValues = new Set(classificationCategoryOptions.map((item) => item.value))
+const classificationCompletedCount = computed(() => Object.values(pendingCategories)
+  .filter((category) => classificationCategoryValues.has(category)).length)
+const classificationTotalCount = computed(() => detail.value?.photos.length || 0)
+const classificationChanges = computed(() => detail.value?.photos.flatMap((photo) => {
+  const category = pendingCategories[photo.id] || 'unclassified'
+  return category !== photo.category && classificationCategoryValues.has(category)
+    ? [{ photoId: photo.id, category }]
+    : []
+}) || [])
 const rephotoSlots = computed(() => {
   const definitions: Array<{ slot: 'module_meter' | 'after_box'; label: string }> = [
     { slot: 'module_meter', label: '电表和模块照片' },
@@ -152,6 +170,8 @@ function applyDetail(next: DataCenterDetail) {
   if (!next.photos.some((photo) => photo.id === selectedPhotoId.value)) {
     selectedPhotoId.value = next.photos[0]?.id || ''
   }
+  for (const photoId of Object.keys(pendingCategories)) delete pendingCategories[photoId]
+  for (const photo of next.photos) pendingCategories[photo.id] = photo.category || 'unclassified'
 }
 
 async function loadDetail(): Promise<DataCenterDetail | null> {
@@ -245,6 +265,34 @@ async function classifyActivePhoto(category: string) {
     await reloadAfterMutation(owner)
   } catch (error) {
     showMutationError(owner, error, '分类失败')
+  } finally {
+    finishMutation(owner)
+  }
+}
+
+function setPendingCategory(photoId: string, event: Event) {
+  pendingCategories[photoId] = (event.target as HTMLSelectElement).value
+}
+
+async function saveClassifications() {
+  if (!detail.value || !classificationChanges.value.length) return
+  const currentDetail = detail.value
+  const changes = [...classificationChanges.value]
+  const owner = beginMutation(currentDetail.id)
+  try {
+    for (const change of changes) {
+      await classifyDataCenterGroupPhoto(
+        currentDetail.id,
+        change.photoId,
+        change.category,
+        '审阅与翻拍照片分类',
+      )
+      if (!isCurrentMutation(owner)) return
+    }
+    ElMessage.success('照片分类已保存')
+    await reloadAfterMutation(owner)
+  } catch (error) {
+    showMutationError(owner, error, '分类保存失败')
   } finally {
     finishMutation(owner)
   }
@@ -440,6 +488,47 @@ onBeforeUnmount(cleanupDetail)
     <el-alert v-if="errorMessage" :title="errorMessage" type="error" show-icon :closable="false" />
     <el-skeleton v-if="loading" :rows="8" animated />
 
+    <section v-else-if="detail && props.classificationOnly" class="classification-only-panel">
+      <header class="classification-heading">
+        <strong>照片分类 {{ classificationCompletedCount }}/{{ classificationTotalCount }}</strong>
+        <span>将未分类照片归入已有的四种资料类型</span>
+      </header>
+      <div class="classification-photo-grid">
+        <article v-for="photo in detail.photos" :key="photo.id" class="classification-photo-card">
+          <div class="classification-photo-frame">
+            <img
+              v-if="photoObjectUrls.get(photo.id)"
+              :src="photoObjectUrls.get(photo.id)"
+              :alt="photo.categoryLabel || photo.name || '待分类照片'"
+            />
+            <span v-else>图片加载中</span>
+          </div>
+          <select
+            :value="pendingCategories[photo.id] || 'unclassified'"
+            :aria-label="`照片 ${photo.name || photo.id} 分类`"
+            :data-testid="`photo-category-${photo.id}`"
+            :disabled="saving"
+            @change="setPendingCategory(photo.id, $event)"
+          >
+            <option value="unclassified" disabled>请选择照片类型</option>
+            <option v-for="item in classificationCategoryOptions" :key="item.value" :value="item.value">
+              {{ item.label }}
+            </option>
+          </select>
+          <span :class="classificationCategoryValues.has(pendingCategories[photo.id]) ? 'classified' : 'unclassified'">
+            {{ classificationCategoryValues.has(pendingCategories[photo.id]) ? '已分类' : '未分类' }}
+          </span>
+        </article>
+      </div>
+      <button
+        type="button"
+        class="save-classifications"
+        data-testid="save-photo-classifications"
+        :disabled="saving || !classificationChanges.length"
+        @click="saveClassifications"
+      >{{ saving ? '保存中…' : '保存分类' }}</button>
+    </section>
+
     <div v-else-if="detail" class="review-layout">
       <section class="photo-pane">
         <div v-if="props.rephotoItem" class="stage-switch" aria-label="资料位置">
@@ -553,6 +642,20 @@ onBeforeUnmount(cleanupDetail)
 
 <style scoped>
 .data-center-group-review-panel { min-width: 0; }
+.classification-only-panel { display: grid; gap: 14px; min-width: 0; }
+.classification-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.classification-heading strong { color: var(--v2-text-strong, #172033); font-size: 15px; }
+.classification-heading span { color: var(--v2-text-muted, #7a8798); font-size: 13px; }
+.classification-photo-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+.classification-photo-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; }
+.classification-photo-frame { grid-column: 1 / -1; display: grid; place-items: center; aspect-ratio: 4 / 2.35; overflow: hidden; border: 1px solid var(--v2-border, #dce3ec); border-radius: 6px; background: var(--v2-surface-soft, #f6f8fb); color: var(--v2-text-muted, #7a8798); }
+.classification-photo-frame img { width: 100%; height: 100%; object-fit: cover; }
+.classification-photo-card select { width: 100%; min-width: 0; height: 34px; padding: 0 30px 0 10px; border: 1px solid var(--v2-border, #dce3ec); border-radius: 6px; background: #fff; color: var(--v2-text, #2f3a4a); font: inherit; }
+.classification-photo-card > span { white-space: nowrap; font-size: 12px; }
+.classification-photo-card > span.classified { color: var(--el-color-success, #67c23a); }
+.classification-photo-card > span.unclassified { color: var(--el-color-warning, #e6a23c); }
+.save-classifications { justify-self: center; min-width: 92px; min-height: 36px; padding: 0 18px; border: 1px solid var(--v2-accent, #1677ff); border-radius: 6px; background: var(--v2-accent, #1677ff); color: #fff; cursor: pointer; }
+.save-classifications:disabled { cursor: not-allowed; opacity: .55; }
 .review-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr); gap: 14px; min-height: 640px; }
 .photo-pane, .review-pane { display: grid; align-content: start; gap: 10px; min-width: 0; }
 .source-stage { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 10px; }
@@ -580,5 +683,10 @@ onBeforeUnmount(cleanupDetail)
 .audit-table { width: 100%; }
 @media (max-width: 900px) {
   .review-layout, .field-grid, .category-grid, .rephoto-identifiers, .rephoto-slots { grid-template-columns: 1fr; }
+  .classification-photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .classification-heading { align-items: flex-start; flex-direction: column; }
+  .classification-photo-grid { grid-template-columns: 1fr; }
 }
 </style>

@@ -14,8 +14,9 @@ vi.mock('@/stores/auth', () => ({ useAuthStore: () => authMock }))
 vi.mock('@/api/services', () => serviceMocks)
 vi.mock('@/components/data-center/DataCenterGroupReviewPanel.vue', () => ({
   default: {
-    props: ['groupId', 'rephotoItem', 'defaultStage'], emits: ['updated', 'review-decided'],
-    template: '<section class="review-panel-stub"><button data-testid="approve-review" @click="$emit(\'review-decided\', \'approved\')">通过</button></section>',
+    name: 'DataCenterGroupReviewPanel',
+    props: ['groupId', 'rephotoItem', 'defaultStage', 'classificationOnly'], emits: ['updated', 'review-decided'],
+    template: '<section class="review-panel-stub"><span>照片分类</span><button data-testid="save-classification" @click="$emit(\'updated\', {})">保存分类</button></section>',
   },
 }))
 
@@ -66,17 +67,28 @@ describe('review rephoto workbench', () => {
     const wrapper = await mountWorkbench()
     expect(wrapper.text()).toContain('T-001')
     expect(wrapper.text()).toContain('未施工，不参与本次翻拍')
+    expect(wrapper.find('.workbench-grid').exists()).toBe(false)
+    expect(wrapper.find('.meter-queue').exists()).toBe(false)
+    expect(wrapper.find('.review-actions').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('正式通过')
+    expect(wrapper.text()).not.toContain('资料不全')
+    expect(wrapper.text()).not.toContain('退回异常')
+    expect(wrapper.getComponent({ name: 'DataCenterGroupReviewPanel' }).props('classificationOnly')).toBe(true)
     expect(wrapper.findAll('.rephoto-mutation').every((button) => (button.element as HTMLButtonElement).disabled)).toBe(true)
-    expect(wrapper.findAll('.rephoto-slot')).toHaveLength(0)
+    expect(wrapper.findAll('.rephoto-slot')).toHaveLength(2)
+    expect(wrapper.findAll('.rephoto-slot img')).toHaveLength(0)
     wrapper.unmount()
   })
 
-  it('reopens after a review decision and then shows two slots per constructed meter with deduplicated collectors', async () => {
+  it('reopens after photo classification and then shows two slots per constructed meter with deduplicated collectors', async () => {
     serviceMocks.openReviewWorkbenchTerminal.mockResolvedValueOnce(open()).mockResolvedValueOnce(open({ workflow_state: 'needs_replacement', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto() }))
     const wrapper = await mountWorkbench()
-    await wrapper.get('[data-testid="approve-review"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="save-classification"]').trigger('click'); await flushPromises()
     expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenCalledTimes(2)
-    expect(wrapper.findAll('.rephoto-slot')).toHaveLength(4)
+    expect(wrapper.findAll('.rephoto-slot')).toHaveLength(2)
+    await wrapper.get('[data-testid="meter-record-group-b"]').trigger('click')
+    expect(wrapper.findAll('.rephoto-slot')).toHaveLength(2)
+    expect(wrapper.get('.meter-record.is-expanded .meter-number').text()).toContain('M-B')
     expect(wrapper.findAll('.collector-card')).toHaveLength(1)
     wrapper.unmount()
   })
@@ -131,7 +143,7 @@ describe('review rephoto workbench', () => {
     try {
       const wrapper = await mountWorkbench()
       expect(serviceMocks.fetchGlobalCollectorTerminals).toHaveBeenCalledWith(expect.objectContaining({ query: 'group-b' }))
-      expect(wrapper.get('.meter-row.active strong').text()).toBe('M-B')
+      expect(wrapper.get('.meter-record.is-expanded .meter-number').text()).toContain('M-B')
       wrapper.unmount()
     } finally {
       window.history.replaceState({}, '', '/')
@@ -142,7 +154,7 @@ describe('review rephoto workbench', () => {
     window.history.replaceState({}, '', '/review-workbench?group_id=group-c')
     try {
       const wrapper = await mountWorkbench()
-      expect(wrapper.get('.meter-row.unconstructed.active strong').text()).toBe('M-C')
+      expect(wrapper.get('.meter-record.unconstructed-record.is-expanded .meter-number').text()).toContain('M-C')
       expect(wrapper.findAll('.rephoto-slot')).toHaveLength(0)
       wrapper.unmount()
     } finally {

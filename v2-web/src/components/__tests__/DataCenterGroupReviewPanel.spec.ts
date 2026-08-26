@@ -77,6 +77,7 @@ function mountPanel(props: {
   groupId: string
   rephotoItem?: GlobalMeterInstallWorkbenchRow | null
   defaultStage?: 'source' | 'rephoto'
+  classificationOnly?: boolean
 }) {
   return mount(DataCenterGroupReviewPanel, {
     props,
@@ -308,6 +309,51 @@ describe('DataCenterGroupReviewPanel', () => {
     expect(wrapper.text()).toContain(`审阅状态：${status}`)
     expect(wrapper.emitted('review-decided')).toEqual([[status]])
     expect(wrapper.emitted('updated')?.at(-1)?.[0]).toMatchObject({ id: 'g-review' })
+    wrapper.unmount()
+  })
+
+  it('uses the classification-only mode to archive photos into the four existing categories', async () => {
+    const classificationDetail = {
+      ...detailFixture('g-classification'),
+      classificationStatus: 'pending',
+      photos: [
+        { id: 'photo-before', url: '', name: 'photo-before', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
+        { id: 'photo-collector', url: '', name: 'photo-collector', status: 'valid', category: 'collector_barcode', categoryLabel: '采集器条形码' },
+        { id: 'photo-module', url: '', name: 'photo-module', status: 'valid', category: 'module_meter', categoryLabel: '模块与电能表' },
+        { id: 'photo-after', url: '', name: 'photo-after', status: 'valid', category: 'after_box', categoryLabel: '表箱整体改造后' },
+      ],
+    } satisfies DataCenterDetail
+    apiMock.fetchDataCenterDetail.mockResolvedValue(classificationDetail)
+    apiMock.fetchGroupPhotoObjectUrl.mockImplementation((_groupId, photoId: string) => Promise.resolve(`blob:${photoId}`))
+
+    const wrapper = mountPanel({ groupId: 'g-classification', classificationOnly: true })
+    await flushPromises()
+
+    expect(wrapper.findAll('.classification-photo-card')).toHaveLength(4)
+    expect(wrapper.text()).toContain('照片分类 3/4')
+    expect(wrapper.text()).toContain('表箱整体改造前')
+    expect(wrapper.text()).toContain('采集器条形码')
+    expect(wrapper.text()).toContain('模块与电能表')
+    expect(wrapper.text()).toContain('表箱整体改造后')
+    expect(wrapper.text()).not.toContain('正式通过')
+    expect(wrapper.text()).not.toContain('资料不全')
+    expect(wrapper.text()).not.toContain('异常 / 回退')
+
+    await wrapper.get('[data-testid="photo-category-photo-before"]').setValue('before_box')
+    expect(wrapper.text()).toContain('照片分类 4/4')
+    await wrapper.get('[data-testid="save-photo-classifications"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.classifyDataCenterGroupPhoto).toHaveBeenCalledTimes(1)
+    expect(apiMock.classifyDataCenterGroupPhoto).toHaveBeenCalledWith(
+      'g-classification',
+      'photo-before',
+      'before_box',
+      '审阅与翻拍照片分类',
+    )
+    expect(apiMock.reviewDataCenterGroup).not.toHaveBeenCalled()
+    expect(apiMock.returnDataCenterGroupToException).not.toHaveBeenCalled()
+    expect(wrapper.emitted('updated')?.at(-1)?.[0]).toMatchObject({ id: 'g-classification' })
     wrapper.unmount()
   })
 

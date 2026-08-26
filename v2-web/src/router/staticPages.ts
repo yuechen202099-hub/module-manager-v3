@@ -62,7 +62,7 @@ export const staticPages: StaticPageRoute[] = [
   },
   {
     key: 'review-workbench',
-    title: '审阅与翻拍工作台',
+    title: '审阅与翻拍',
     subtitle: '甲方平台资料人工翻拍辅助',
     routePath: '/review-workbench',
     roles: ['admin'],
