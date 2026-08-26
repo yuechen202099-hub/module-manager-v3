@@ -262,13 +262,24 @@ async function startCamera() {
   const session = ++cameraSession
   cameraStatus.value = 'starting'
   try {
+    await nextTick()
+    cameraActive.value = true
+    scanFeedback.value = '正在加载现场施工扫码工具。'
+    if (await startQuaggaScanner(session)) {
+      if (session !== cameraSession) return
+      cameraStatus.value = 'scanning'
+      return
+    }
+    if (session !== cameraSession) return
+    cameraActive.value = false
+    video.value?.parentElement?.querySelectorAll('canvas, video:not(.collector-camera-preview)').forEach((node) => node.remove())
+
     const stream = await requestCameraStream(session)
     if (session !== cameraSession) {
       stopMediaStream(stream)
       return
     }
     mediaStream = stream
-    await nextTick()
     if (!video.value) throw new Error('摄像头画面尚未就绪')
     const preview = video.value
     preview.setAttribute('playsinline', 'true')
@@ -289,8 +300,7 @@ async function startCamera() {
       void detectNextFrame(session)
       return
     }
-    scanFeedback.value = '相机已打开，正在加载实时识别。'
-    void startQuaggaScanner(session)
+    scanFeedback.value = '相机已打开，现场扫码工具不可用，可手工输入或使用扫码枪。'
   } catch (error) {
     if (session !== cameraSession) return
     stopCamera()
@@ -502,13 +512,13 @@ async function startQuaggaScanner(session: number) {
     quagga.onDetected?.(quaggaDetectedHandler)
     quagga.start?.()
     scanFeedback.value = 'QuaggaJS 正在识别条形码。'
+    return true
   } catch {
     if (owner && quaggaInitOwner === owner) {
       quaggaInitOwner = null
       stopQuaggaInitOwner(owner)
     }
-    if (session !== cameraSession || !cameraActive.value) return
-    scanFeedback.value = '相机已打开，当前浏览器不支持实时识别，可手工输入或使用扫码枪。'
+    return false
   }
 }
 
