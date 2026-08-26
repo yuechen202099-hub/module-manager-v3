@@ -1,7 +1,8 @@
 # Unified Terminal Review and Re-photo Workbench Design
 
-**Target release:** V3.2.9  
-**Base source:** V3.2.8 commit `4c69dd7584d6c0d7fcf6a90f43560165577eeef0`  
+**Target release:** V3.2.10
+
+**Production baseline:** V3.2.9 source commit `f02f5e7229918f5d8e4b7412dc18c5405cc50049`; the feature lineage began on V3.2.8 commit `4c69dd7584d6c0d7fcf6a90f43560165577eeef0` and carries the V3.2.9 Quagga-first scanner source/tests forward.
 **Status:** approved approach A; pending written-spec review
 
 ## Goal
@@ -20,7 +21,7 @@ Restore the old review-workbench interaction as the single administrator workflo
 - Same-number physical collectors remain direct, photo-free inventory confirmations. Missing collectors may use audited random one-time replacement.
 - Only administrators can see or call the integrated review/re-photo workflow.
 - Constructor accounts have only the construction collection page. They cannot see or directly open review, re-photo, collector inventory, project, data-center, account, or sync pages.
-- V3.2.8 remains immutable. This change ships as a new V3.2.9 release and never overwrites the deployed V3.2.8 directory or package.
+- V3.2.9 remains immutable. This change ships as a new V3.2.10 release and never overwrites the deployed V3.2.9 directory, package, tag, branch, or release record.
 
 ## Non-goals
 
@@ -36,9 +37,9 @@ Restore the old review-workbench interaction as the single administrator workflo
 
 - `DataCenterReviewDialog.vue` contains the current production review behavior: protected image loading, photo classification, field correction, barcode rescan, region scan, manual confirmation, exception return, and review reset.
 - `ReviewView.vue` contains the retired three-column visual structure, but its `workspace` store and group/task APIs are obsolete and must not become authoritative again.
-- `CollectorWorkbenchView.vue` contains the V3.2.8 global terminal picker, fixed two-slot meter display, present/missing/replaced collector states, atomic replacement, rollback, completion, and stale-response handling.
+- `CollectorWorkbenchView.vue` contains the V3.2.9 global terminal picker, fixed two-slot meter display, present/missing/replaced collector states, atomic replacement, rollback, completion, and stale-response handling.
 - `PostgresCollectorTransferService` contains bounded terminal paging, source projection, hidden single-terminal snapshots, tenant checks, collector de-duplication, allocation locking, and audit behavior.
-- Existing group review persistence (`MaterialGroup.status`, `reviewed_at`, review/barcode/photo data) is sufficient; V3.2.9 should remain on Alembic head `20260824_0016`.
+- Existing group review persistence (`MaterialGroup.status`, `reviewed_at`, review/barcode/photo data) is sufficient; V3.2.10 should remain on Alembic head `20260824_0016`.
 
 ## Authoritative Workflow State
 
@@ -255,19 +256,19 @@ The page never calls a camera API. It presents source material for a handheld de
 
 - Focused backend and frontend matrices, PostgreSQL concurrency tests, type-check, production build, and full repository suite must finish with explicit zero-failure summaries.
 - Rebuild tracked Vue assets from the final source commit.
-- Build a new source-bound V3.2.9 ZIP; verify `SOURCE_COMMIT`, manifest bytes, CRC/path/case/duplicate rules, Vue asset binding, and forbidden files.
+- Build a new source-bound V3.2.10 ZIP; verify `SOURCE_COMMIT`, manifest bytes, CRC/path/case/duplicate rules, Vue asset binding, V3.2.9 scanner-regression markers, and forbidden files.
 - Never package `v2-api/uv.lock`, `.env`, uploads, backups, caches, or repository metadata.
 
 ## Production Rollout and Rollback
 
-- Deploy V3.2.9 to a new immutable release directory; never overwrite V3.2.8.
-- Capture a fresh local streamed backup and exact V3.2.8 rollback directory immediately before cutover.
+- Deploy V3.2.10 to a new immutable release directory; never overwrite V3.2.9.
+- Capture a fresh local streamed backup and exact V3.2.9 rollback directory immediately before cutover.
 - Keep maintenance services in their captured state until listener, health, version, route, authorization, read-only mixed-terminal, and real-browser acceptance pass.
 - Wait for a real Uvicorn listener on `127.0.0.1:8000`; systemd `active` alone is insufficient.
 - Production acceptance uses authenticated read-only terminals unless a designated test terminal is explicitly approved. It must not approve a real group, allocate a real collector, or complete a real re-photo item.
 - Verify an administrator can see the unified page and a constructor can see only construction.
 - Verify old URLs redirect to `/review-workbench` and the page makes no customer-platform network request.
-- Roll back atomically to the captured V3.2.8 release on listener, health, authorization, data-integrity, or workbench failure.
+- Roll back atomically to the captured V3.2.9 release on listener, health, authorization, data-integrity, or workbench failure.
 
 ## Acceptance Criteria
 
@@ -281,4 +282,4 @@ The change is complete only when all of the following are proven:
 6. Review, random replacement, rollback, and completion remain audited and tenant-safe.
 7. Constructor accounts can access only construction collection and receive 403/redirect elsewhere.
 8. Legacy review/collector/batch URLs converge on the unified administrator workflow without breaking data-center saved links.
-9. V3.2.9 passes local, package, browser, production, rollback, and requirement-by-requirement verification.
+9. V3.2.10 passes local, package, browser, production, rollback, and requirement-by-requirement verification without regressing the V3.2.9 inventory scanner hotfix.

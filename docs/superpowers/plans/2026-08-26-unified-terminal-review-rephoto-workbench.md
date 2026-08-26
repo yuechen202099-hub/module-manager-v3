@@ -1,4 +1,4 @@
-# V3.2.9 Unified Terminal Review and Re-photo Workbench Implementation Plan
+# V3.2.10 Unified Terminal Review and Re-photo Workbench Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -12,7 +12,8 @@
 
 ## Global Constraints
 
-- 目标版本只能是 `V3.2.9`，维护分支只能是 `production/V3/3.2.9`；已部署的 V3.2.8 源码、ZIP 和 release 目录不可改写。
+- 目标版本只能是 `V3.2.10`，维护分支只能是 `production/V3/3.2.10`；已部署的 V3.2.9 源码、ZIP、tag、发布记录和 release 目录不可改写。
+- V3.2.10 必须包含已上线的 V3.2.9 盘点 Quagga-first 扫码修复及启动失败清理回归；后续构建或发布不得把盘点页回退为 native-first。
 - 数据库保持 Alembic head `20260824_0016`；本计划不新增迁移。若现有表无法表达状态，停止执行并重新打开规格评审，不能自行加迁移。
 - 已施工的定义是“存在至少一张活动源照片，或资料组持久化施工照片数大于 0”；未审阅但有照片的表计仍属于已施工。
 - 未施工表计显示为 `未施工，不参与本次翻拍`，不计入审阅锁、来源版本、表计翻拍项、采集器需求或隐藏运行。
@@ -54,9 +55,9 @@
 - `v2-web/src/views/__tests__/CollectorInventoryRouting.spec.ts`: 管理员/施工员路由、导航和旧 URL 兼容测试。
 - `v2-web/src/router/index.ts`, `v2-web/src/router/staticPages.ts`, `v2-web/src/layouts/AppLayout.vue`: 规范页面、旧路由收敛和施工员仅施工页策略。
 - `v2-api/app/static/vue/**`: 最终源码提交后重新构建的 Vue 静态资产。
-- `AGENTS.md`, `RELEASE_MANIFEST.md`, `v2-api/pyproject.toml`, `v2-api/app/main.py`, `v2-api/app/services/ops_status.py`, `v2-api/scripts/verify_v3_1_release.py`, `v2-api/tests/test_v3_1_release.py`, `v2-web/package.json`, `v2-web/index.html`, `v2-web/src/components/AppLayout.vue`, `v2-web/src/version.json`, `v2-web/src/constants/releaseNotes.ts`: V3.2.9 版本事实。
-- `scripts/build-client-release.ps1`, `scripts/verify-client-release.py`, `scripts/verify_release_sop.py`, `scripts/verify_v3_2_9_release.py` 及对应测试：V3.2.9 源码/包/验收门禁，同时保留 V3.2.8 历史验证器不变。
-- `ops/releases/V3.2.9.md`: 本地、包、生产、回滚和逐条验收证据。
+- `AGENTS.md`, `RELEASE_MANIFEST.md`, `v2-api/pyproject.toml`, `v2-api/app/main.py`, `v2-api/app/services/ops_status.py`, `v2-api/scripts/verify_v3_1_release.py`, `v2-api/tests/test_v3_1_release.py`, `v2-web/package.json`, `v2-web/index.html`, `v2-web/src/components/AppLayout.vue`, `v2-web/src/version.json`, `v2-web/src/constants/releaseNotes.ts`: V3.2.10 版本事实。
+- `scripts/build-client-release.ps1`, `scripts/verify-client-release.py`, `scripts/verify_release_sop.py`, `scripts/verify_v3_2_10_release.py` 及对应测试：V3.2.10 源码/包/验收门禁，同时保留 V3.2.9 发布记录和历史验证行为不变。
+- `ops/releases/V3.2.10.md`: 本地、包、生产、回滚和逐条验收证据；`ops/releases/V3.2.9.md` 仅作已发布历史保留。
 
 ### Task 1: 建立纯终端审阅投影
 
@@ -326,7 +327,7 @@ class _TerminalReviewBundle:
 
 - [ ] **Step 3: 改造候选分页并确认 GREEN**
 
-候选第一页先用数据库聚合确定终端身份和数量，再只对这一页调用轻量 bundle；不得按生产总终端数逐个发查询。候选响应保留 V3.2.8 字段，并新增四个计数和扩展状态。运行 Step 1 命令，Expected: PASS，且规模测试显示查询数不随总项目表计线性增长。
+候选第一页先用数据库聚合确定终端身份和数量，再只对这一页调用轻量 bundle；不得按生产总终端数逐个发查询。候选响应保留 V3.2.9 字段，并新增四个计数和扩展状态。运行 Step 1 命令，Expected: PASS，且规模测试显示查询数不随总项目表计线性增长。
 
 - [ ] **Step 4: 写出统一打开的零隐藏运行测试并确认 RED**
 
@@ -834,7 +835,7 @@ git commit --only -m "test: gate unified review rephoto workflow" -- v2-api/test
 
 若生产文件没有修复，不要把它们放进该提交；按 `git diff --name-only` 缩小显式路径。
 
-### Task 9: 建立 V3.2.9 版本与不可变发布门禁
+### Task 9: 建立 V3.2.10 版本与不可变发布门禁
 
 **Files:**
 - Modify: `AGENTS.md`
@@ -852,56 +853,56 @@ git commit --only -m "test: gate unified review rephoto workflow" -- v2-api/test
 - Modify: `scripts/build-client-release.ps1`
 - Modify: `scripts/verify-client-release.py`
 - Modify: `scripts/verify_release_sop.py`
-- Create: `scripts/verify_v3_2_9_release.py`
-- Create: `scripts/test_verify_v3_2_9_release.py`
+- Create: `scripts/verify_v3_2_10_release.py`
+- Create: `scripts/test_verify_v3_2_10_release.py`
 - Modify: `scripts/test_verify_client_release.py`
 - Modify: `scripts/test_verify_release_sop.py`
-- Create: `ops/releases/V3.2.9.md`
+- Create: `ops/releases/V3.2.10.md`
 
 **Interfaces:**
-- Consumes: 完成的功能与测试提交，历史 V3.2.8 验证器/记录作为只读模板。
-- Produces: 全部运行时版本 `3.2.9`、候选 `V3.2.9`、分支 `production/V3/3.2.9`、包名 `module-manager-v2-server-3.2.9.zip` 和三阶段 verifier。
+- Consumes: 完成的功能与测试提交，已发布 V3.2.9 记录与发布门禁作为只读基线。
+- Produces: 全部运行时版本 `3.2.10`、候选 `V3.2.10`、分支 `production/V3/3.2.10`、包名 `module-manager-v2-server-3.2.10.zip` 和三阶段 verifier。
 
-- [ ] **Step 1: 复制并改写 V3.2.9 verifier 测试，确认 RED**
+- [ ] **Step 1: 复制并改写 V3.2.10 verifier 测试，确认 RED**
 
-保留 `scripts/verify_v3_2_8_release.py` 与其测试原样，新建 3.2.9 测试，要求：准确版本/分支/包/记录；新领域、API、页面、角色测试必须存在并执行；迁移头不变；包禁止 `.env`, uploads, backups, caches, repository metadata, `uv.lock`；V3.2.8 ZIP 不能满足 3.2.9。
+保留 V3.2.9 已发布记录、tag 和历史验证行为原样，新建 3.2.10 测试，要求：准确版本/分支/包/记录；新领域、API、页面、角色和 V3.2.9 盘点扫码回归测试必须存在并执行；迁移头不变；包禁止 `.env`, uploads, backups, caches, repository metadata, `uv.lock`；V3.2.9 ZIP 不能满足 3.2.10。
 
 ```powershell
-& 'C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\collector-transfer-workbench\v2-api\.venv\Scripts\python.exe' -m pytest scripts/test_verify_v3_2_9_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py -q
+& 'C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\collector-transfer-workbench\v2-api\.venv\Scripts\python.exe' -m pytest scripts/test_verify_v3_2_10_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py -q
 ```
 
-Expected: FAIL before the V3.2.9 facts and verifier exist.
+Expected: FAIL before the V3.2.10 facts and verifier exist.
 
 - [ ] **Step 2: 更新全部版本事实和候选记录**
 
-`AGENTS.md` 标记当前已部署 `V3.2.8`、当前候选 `V3.2.9`、候选分支 `production/V3/3.2.9`。运行时、manifest、Web、发布说明全部改为 3.2.9。`ops/releases/V3.2.9.md` 先记录功能、测试栏目、Alembic head、包路径、回滚目标 `/opt/module-manager-v2/releases/v3.2.8-20260826T000859Z` 和所有生产字段为 pending；不能预填成功证据。
+`AGENTS.md` 标记当前已部署 `V3.2.9`、当前候选 `V3.2.10`、候选分支 `production/V3/3.2.10`。运行时、manifest、Web、发布说明全部改为 3.2.10。`ops/releases/V3.2.10.md` 先记录功能、测试栏目、Alembic head、包路径、回滚目标 `/opt/module-manager-v2/releases/v3.2.9-20260826T075447Z` 和所有生产字段为 pending；不能预填成功证据。
 
 - [ ] **Step 3: 实现 source/package/attestation verifier**
 
-`verify_v3_2_9_release.py` 延续 V3.2.8 的源码绑定、CRC、路径大小写/重复、Vue 资产绑定和 attestation 规则；新增必需文件/测试 marker。`build-client-release.ps1` 只允许当前分支构建 3.2.9，并调用新的 verifier；`verify-client-release.py` 根据 manifest 版本加载归档内 3.2.9 verifier，不能把历史 3.2.8 verifier改成当前版。
+`verify_v3_2_10_release.py` 延续已上线版本的源码绑定、CRC、路径大小写/重复、Vue 资产绑定和 attestation 规则；新增必需文件/测试 marker 及盘点 Quagga-first 回归 marker。`build-client-release.ps1` 只允许当前分支构建 3.2.10，并调用新的 verifier；`verify-client-release.py` 根据 manifest 版本加载归档内 3.2.10 verifier，不能改写 V3.2.9 的已发布记录。
 
 - [ ] **Step 4: 运行发布源码门禁并提交**
 
 ```powershell
-& 'C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\collector-transfer-workbench\v2-api\.venv\Scripts\python.exe' -m pytest scripts/test_verify_v3_2_9_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py v2-api/tests/test_v3_1_release.py -q
-& 'C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\collector-transfer-workbench\v2-api\.venv\Scripts\python.exe' scripts/verify_v3_2_9_release.py --phase source
-& 'C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\collector-transfer-workbench\v2-api\.venv\Scripts\python.exe' scripts/verify_release_sop.py --version V3.2.9 --phase source
+& 'C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\collector-transfer-workbench\v2-api\.venv\Scripts\python.exe' -m pytest scripts/test_verify_v3_2_10_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py v2-api/tests/test_v3_1_release.py -q
+& 'C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\collector-transfer-workbench\v2-api\.venv\Scripts\python.exe' scripts/verify_v3_2_10_release.py --phase source
+& 'C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\collector-transfer-workbench\v2-api\.venv\Scripts\python.exe' scripts/verify_release_sop.py --version V3.2.10 --phase source
 git diff --check
 ```
 
 Expected: all pass。
 
 ```powershell
-git add -- AGENTS.md RELEASE_MANIFEST.md v2-api/pyproject.toml v2-api/app/main.py v2-api/app/services/ops_status.py v2-api/scripts/verify_v3_1_release.py v2-api/tests/test_v3_1_release.py v2-web/package.json v2-web/index.html v2-web/src/components/AppLayout.vue v2-web/src/version.json v2-web/src/constants/releaseNotes.ts scripts/build-client-release.ps1 scripts/verify-client-release.py scripts/verify_release_sop.py scripts/verify_v3_2_9_release.py scripts/test_verify_v3_2_9_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py ops/releases/V3.2.9.md
-git commit --only -m "release: prepare V3.2.9 review rephoto workbench" -- AGENTS.md RELEASE_MANIFEST.md v2-api/pyproject.toml v2-api/app/main.py v2-api/app/services/ops_status.py v2-api/scripts/verify_v3_1_release.py v2-api/tests/test_v3_1_release.py v2-web/package.json v2-web/index.html v2-web/src/components/AppLayout.vue v2-web/src/version.json v2-web/src/constants/releaseNotes.ts scripts/build-client-release.ps1 scripts/verify-client-release.py scripts/verify_release_sop.py scripts/verify_v3_2_9_release.py scripts/test_verify_v3_2_9_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py ops/releases/V3.2.9.md
+git add -- AGENTS.md RELEASE_MANIFEST.md v2-api/pyproject.toml v2-api/app/main.py v2-api/app/services/ops_status.py v2-api/scripts/verify_v3_1_release.py v2-api/tests/test_v3_1_release.py v2-web/package.json v2-web/index.html v2-web/src/components/AppLayout.vue v2-web/src/version.json v2-web/src/constants/releaseNotes.ts scripts/build-client-release.ps1 scripts/verify-client-release.py scripts/verify_release_sop.py scripts/verify_v3_2_10_release.py scripts/test_verify_v3_2_10_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py ops/releases/V3.2.10.md
+git commit --only -m "release: prepare V3.2.10 review rephoto workbench" -- AGENTS.md RELEASE_MANIFEST.md v2-api/pyproject.toml v2-api/app/main.py v2-api/app/services/ops_status.py v2-api/scripts/verify_v3_1_release.py v2-api/tests/test_v3_1_release.py v2-web/package.json v2-web/index.html v2-web/src/components/AppLayout.vue v2-web/src/version.json v2-web/src/constants/releaseNotes.ts scripts/build-client-release.ps1 scripts/verify-client-release.py scripts/verify_release_sop.py scripts/verify_v3_2_10_release.py scripts/test_verify_v3_2_10_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py ops/releases/V3.2.10.md
 ```
 
 ### Task 10: 全量验证、渲染验收并构建源码绑定包
 
 **Files:**
 - Modify: `v2-api/app/static/vue/**`
-- Modify: `ops/releases/V3.2.9.md`
-- Generate: `build/server-release/module-manager-v2-server-3.2.9.zip`
+- Modify: `ops/releases/V3.2.10.md`
+- Generate: `build/server-release/module-manager-v2-server-3.2.10.zip`
 
 **Interfaces:**
 - Consumes: Tasks 1-9 的最终提交。
@@ -936,18 +937,18 @@ Expected: 所有测试、类型和 build 明确通过。
 
 - [ ] **Step 4: 重建并提交跟踪的 Vue 资产和本地证据**
 
-使用仓库现有前端同步路径把最终 build 复制到 `v2-api/app/static/vue`。在 `ops/releases/V3.2.9.md` 记录精确命令、通过/跳过数和本地 viewport 证据，生产字段继续 pending。
+使用仓库现有前端同步路径把最终 build 复制到 `v2-api/app/static/vue`。在 `ops/releases/V3.2.10.md` 记录精确命令、通过/跳过数和本地 viewport 证据，生产字段继续 pending。
 
 ```powershell
-git add -- v2-api/app/static/vue ops/releases/V3.2.9.md
-git commit --only -m "release: build V3.2.9 web assets" -- v2-api/app/static/vue ops/releases/V3.2.9.md
+git add -- v2-api/app/static/vue ops/releases/V3.2.10.md
+git commit --only -m "release: build V3.2.10 web assets" -- v2-api/app/static/vue ops/releases/V3.2.10.md
 ```
 
 - [ ] **Step 5: 从最终 commit 重新跑 source gates**
 
 ```powershell
-& $python scripts/verify_v3_2_9_release.py --phase source
-& $python scripts/verify_release_sop.py --version V3.2.9 --phase source
+& $python scripts/verify_v3_2_10_release.py --phase source
+& $python scripts/verify_release_sop.py --version V3.2.10 --phase source
 git diff --check
 git status --short
 ```
@@ -957,31 +958,31 @@ Expected: gates pass；状态干净，或最多只显示未跟踪受保护 `v2-a
 - [ ] **Step 6: 构建新的不可变 ZIP 并验证所有绑定**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build-client-release.ps1 -Version 3.2.9
-& $python scripts/verify-client-release.py build/server-release/module-manager-v2-server-3.2.9.zip
-& $python scripts/verify_v3_2_9_release.py --phase package --package build/server-release/module-manager-v2-server-3.2.9.zip
-Get-FileHash -Algorithm SHA256 -LiteralPath build/server-release/module-manager-v2-server-3.2.9.zip
+powershell -ExecutionPolicy Bypass -File scripts/build-client-release.ps1 -Version 3.2.10
+& $python scripts/verify-client-release.py build/server-release/module-manager-v2-server-3.2.10.zip
+& $python scripts/verify_v3_2_10_release.py --phase package --package build/server-release/module-manager-v2-server-3.2.10.zip
+Get-FileHash -Algorithm SHA256 -LiteralPath build/server-release/module-manager-v2-server-3.2.10.zip
 ```
 
 打开 ZIP 验证 `SOURCE_COMMIT` 等于最终 HEAD、根 `RELEASE_MANIFEST.md` 字节满足 EOL 规则、Vue `version.json` 覆盖所有 asset、CRC/path/case/duplicate 全过，并且没有 `.env`、uploads、backups、cache、`.git` 或 `uv.lock`。
 
 - [ ] **Step 7: 冻结候选并记录外部证据**
 
-把最终 HEAD、ZIP SHA256、文件长度和验证器输出保存到仓库外 `C:\Users\Administrator\Documents\module-manager-production-backups\V3.2.9-candidate-evidence.txt`。构包后不得修改跟踪文件；任何改动都必须重新 commit、重新全量验证和重新构包。
+把最终 HEAD、ZIP SHA256、文件长度和验证器输出保存到仓库外 `C:\Users\Administrator\Documents\module-manager-production-backups\V3.2.10-candidate-evidence.txt`。构包后不得修改跟踪文件；任何改动都必须重新 commit、重新全量验证和重新构包。
 
 ### Task 11: 新备份、不可变生产发布、回滚和验收
 
 **Files:**
-- Modify only after successful production acceptance: `ops/releases/V3.2.9.md`
+- Modify only after successful production acceptance: `ops/releases/V3.2.10.md`
 - Local recovery root: `Join-Path 'C:\Users\Administrator\Documents\module-manager-production-backups' (Get-Date -Format 'yyyyMMdd-HHmmss')`，由下面 PowerShell 变量创建并打印准确路径。
 
 **Interfaces:**
-- Consumes: Task 10 的已验证 ZIP/SHA256/commit，服务器 `root@www.sgcc.online`，密钥 `C:\Users\Administrator\Downloads\XXXXXX.pem`，当前 rollback `/opt/module-manager-v2/releases/v3.2.8-20260826T000859Z`。
-- Produces: 新的服务器路径 `release_dir="/opt/module-manager-v2/releases/v3.2.9-$release_stamp"`（`release_stamp=$(date -u +%Y%m%dT%H%M%SZ)`）、可恢复本地备份、真实 Uvicorn listener、只读业务验收、原子回滚证明和最终 attestation。
+- Consumes: Task 10 的已验证 ZIP/SHA256/commit，服务器 `root@www.sgcc.online`，密钥 `C:\Users\Administrator\Downloads\XXXXXX.pem`，当前 rollback `/opt/module-manager-v2/releases/v3.2.9-20260826T075447Z`。
+- Produces: 新的服务器路径 `release_dir="/opt/module-manager-v2/releases/v3.2.10-$release_stamp"`（`release_stamp=$(date -u +%Y%m%dT%H%M%SZ)`）、可恢复本地备份、真实 Uvicorn listener、只读业务验收、原子回滚证明和最终 attestation。
 
 - [ ] **Step 1: 读取生产现状并冻结回滚边界**
 
-用不打印秘密的 SSH 命令记录：`readlink -f /opt/module-manager-v2/current`、版本/commit、Alembic current/head、主服务/维护 worker/timer 状态、`127.0.0.1:8000` 实际 listener/PID、`/health`、磁盘/内存/swap、PostgreSQL 活动和 retained releases。要求当前仍是 `/opt/module-manager-v2/releases/v3.2.8-20260826T000859Z`、版本 3.2.8、head `20260824_0016`。SSH、数据库、磁盘或 listener 不稳定立即停止；本发布不清理任何 release 或 backup。
+用不打印秘密的 SSH 命令记录：`readlink -f /opt/module-manager-v2/current`、版本/commit、Alembic current/head、主服务/维护 worker/timer 状态、`127.0.0.1:8000` 实际 listener/PID、`/health`、磁盘/内存/swap、PostgreSQL 活动和 retained releases。要求当前仍是 `/opt/module-manager-v2/releases/v3.2.9-20260826T075447Z`、版本 3.2.9、head `20260824_0016`。SSH、数据库、磁盘或 listener 不稳定立即停止；本发布不清理任何 release 或 backup。
 
 - [ ] **Step 2: 创建并验证新的本地流式备份**
 
@@ -998,11 +999,11 @@ $backupRoot
 
 - [ ] **Step 3: 上传并准备新的不可变 release**
 
-只上传 `module-manager-v2-server-3.2.9.zip`，比较本地/服务器 SHA256。在服务器用 UTC 时间创建全新 `/opt/module-manager-v2/releases/v3.2.9-$release_stamp`，禁止覆盖任何同名路径；解压、`unzip -t`、恢复 `.env` 链接/权限但不打印内容、安装依赖、设置 owner/group 和 `chmod -R g-w,g+rX`，以 `modulemgr` 导入 Pillow 与 `app.main`，运行归档 verifier，确认 Alembic 仍是 `20260824_0016`。
+只上传 `module-manager-v2-server-3.2.10.zip`，比较本地/服务器 SHA256。在服务器用 UTC 时间创建全新 `/opt/module-manager-v2/releases/v3.2.10-$release_stamp`，禁止覆盖任何同名路径；解压、`unzip -t`、恢复 `.env` 链接/权限但不打印内容、安装依赖、设置 owner/group 和 `chmod -R g-w,g+rX`，以 `modulemgr` 导入 Pillow 与 `app.main`，运行归档 verifier，确认 Alembic 仍是 `20260824_0016`。
 
 - [ ] **Step 4: 原子切换并证明真实监听**
 
-原子重指 `current`，重启主服务；循环检查直到 Uvicorn 确实监听 `127.0.0.1:8000`，不能只相信 systemd `active`。要求本机与公网 `/health` 均 HTTP 200/version 3.2.9，`/project-board` 与 `/review-workbench` 可达，三个旧 URL 收敛到规范页。任一失败立即把 symlink 原子恢复到记录的 V3.2.8 目录并重启、等待旧 listener/health 恢复。
+原子重指 `current`，重启主服务；循环检查直到 Uvicorn 确实监听 `127.0.0.1:8000`，不能只相信 systemd `active`。要求本机与公网 `/health` 均 HTTP 200/version 3.2.10，`/project-board` 与 `/review-workbench` 可达，三个旧 URL 收敛到规范页。任一失败立即把 symlink 原子恢复到记录的 V3.2.9 目录并重启、等待旧 listener/health 恢复。
 
 - [ ] **Step 5: 做不修改真实业务数据的生产验收**
 
@@ -1016,20 +1017,20 @@ $backupRoot
 
 - [ ] **Step 7: 执行可回滚性核对**
 
-不实际扰动健康生产时，用只读方式核对 V3.2.8 rollback 目录、服务 unit、`.env`、备份清单和恢复命令。若 Step 4-6 发生任何健康、授权、数据完整性或工作台失败，实际执行原子 symlink 回滚到 `/opt/module-manager-v2/releases/v3.2.8-20260826T000859Z`，等待 3.2.8 listener/health，保持数据库 head 不变，并记录失败证据；不能留在半切换状态。
+不实际扰动健康生产时，用只读方式核对 V3.2.9 rollback 目录、服务 unit、`.env`、备份清单和恢复命令。若 Step 4-6 发生任何健康、授权、数据完整性或工作台失败，实际执行原子 symlink 回滚到 `/opt/module-manager-v2/releases/v3.2.9-20260826T075447Z`，等待 3.2.9 listener/health，保持数据库 head 不变，并记录失败证据；不能留在半切换状态。
 
 - [ ] **Step 8: 写入最终 attestation 并逐条复核规格**
 
-把 source commit、本地/服务器 ZIP SHA256、备份路径及验证、release/rollback 目录、Alembic head、listener/health、路由、管理员/施工员权限、零写入终端证据、无相机/甲方请求、维护状态和观察结果写入 `ops/releases/V3.2.9.md`。
+把 source commit、本地/服务器 ZIP SHA256、备份路径及验证、release/rollback 目录、Alembic head、listener/health、路由、管理员/施工员权限、零写入终端证据、无相机/甲方请求、维护状态和观察结果写入 `ops/releases/V3.2.10.md`。
 
 ```powershell
-& $python scripts/verify_v3_2_9_release.py --phase attestation
-& $python scripts/verify_release_sop.py --version V3.2.9 --phase attestation
-git add -- ops/releases/V3.2.9.md AGENTS.md
-git commit --only -m "release: attest V3.2.9 unified review workbench" -- ops/releases/V3.2.9.md AGENTS.md
+& $python scripts/verify_v3_2_10_release.py --phase attestation
+& $python scripts/verify_release_sop.py --version V3.2.10 --phase attestation
+git add -- ops/releases/V3.2.10.md AGENTS.md
+git commit --only -m "release: attest V3.2.10 unified review workbench" -- ops/releases/V3.2.10.md AGENTS.md
 ```
 
-只有所有证据真实存在后，才把 `AGENTS.md` 当前生产版本更新为 V3.2.9 并清空候选标记。最后重新核对生产 current/commit/hash、listener、health、head、页面、权限、维护服务、日志/资源、回滚目录、本地备份和 `git status`。
+只有所有证据真实存在后，才把 `AGENTS.md` 当前生产版本更新为 V3.2.10 并清空候选标记。最后重新核对生产 current/commit/hash、listener、health、head、页面、权限、维护服务、日志/资源、回滚目录、本地备份和 `git status`。
 
 ---
 
