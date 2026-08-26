@@ -210,17 +210,17 @@ def test_cli_version_must_match_the_release_candidate() -> None:
         verifier.validate_requested_candidate_version("V3.1.1", agents)
 
 
-def test_cli_verifies_the_current_release_contract() -> None:
+def test_cli_verifies_the_current_attestation_contract() -> None:
     verifier = load_verifier()
 
-    assert verifier.main(["--version", "V3.2.10", "--phase", "source"]) == 0
+    assert verifier.main(["--version", "V3.2.10", "--phase", "attestation"]) == 0
 
 
-def test_cli_rejects_current_pending_candidate_as_attestation() -> None:
+def test_cli_rejects_current_attested_candidate_as_source() -> None:
     verifier = load_verifier()
 
-    with pytest.raises(AssertionError, match="attestation"):
-        verifier.main(["--version", "V3.2.10", "--phase", "attestation"])
+    with pytest.raises(AssertionError, match="source"):
+        verifier.main(["--version", "V3.2.10", "--phase", "source"])
 
 
 def test_v323_nested_release_inputs_accept_parent_directory_copy_semantics() -> None:
@@ -299,10 +299,10 @@ def test_accepts_pending_candidate_after_local_verification() -> None:
     verifier.candidate_release_record_is_pending(record, "V3.1.0", "V3.0.84")
 
 
-def test_current_v328_source_phase_is_checked() -> None:
+def test_current_v3210_attestation_phase_is_checked() -> None:
     verifier = load_verifier()
 
-    verifier.verify_current_release_phase("source")
+    verifier.verify_current_release_phase("attestation")
 
 
 @pytest.mark.parametrize(

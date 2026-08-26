@@ -31,6 +31,20 @@ def copy_contract_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def mark_candidate_pending(repo: Path) -> None:
+    path = repo / "ops/releases/V3.2.10.md"
+    text = path.read_text(encoding="utf-8")
+    replacements = {
+        "- Status: attested": "- Status: pending",
+        "- Production Deployment: passed": "- Production Deployment: pending",
+        "- Production Reconciliation: passed": "- Production Reconciliation: pending",
+    }
+    for current, pending in replacements.items():
+        assert current in text
+        text = text.replace(current, pending, 1)
+    path.write_text(text, encoding="utf-8")
+
+
 def assert_rejected(repo: Path, expected: str, *, phase: str = "source", package_path: Path | None = None) -> None:
     failures = load_verifier().collect_failures(repo, phase, package_path=package_path)
     assert any(expected in failure for failure in failures), failures
@@ -44,8 +58,11 @@ def write_minimal_package(path: Path, *, version: str = "3.2.10", extra: tuple[s
             archive.writestr(name, content)
 
 
-def test_current_v3210_source_contract_passes() -> None:
-    assert load_verifier().collect_failures(ROOT, "source") == []
+def test_current_v3210_source_contract_passes_for_pending_candidate(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    mark_candidate_pending(repo)
+
+    assert load_verifier().collect_failures(repo, "source") == []
 
 
 def test_production_v329_record_is_byte_locked(tmp_path: Path) -> None:
@@ -124,8 +141,15 @@ def test_release_gate_keeps_alembic_at_0016(tmp_path: Path) -> None:
     assert_rejected(repo, "20260824_0016")
 
 
-def test_pending_candidate_record_fails_attestation() -> None:
-    assert_rejected(ROOT, "attestation requires", phase="attestation")
+def test_pending_candidate_record_fails_attestation(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    mark_candidate_pending(repo)
+
+    assert_rejected(repo, "attestation requires", phase="attestation")
+
+
+def test_attested_candidate_record_passes_attestation_without_pending_lifecycle_gate() -> None:
+    assert load_verifier().collect_failures(ROOT, "attestation") == []
 
 
 def test_v329_archive_cannot_satisfy_v3210_package_gate(tmp_path: Path) -> None:

@@ -235,7 +235,12 @@ def _field_values(record: str, field: str) -> list[str]:
     return re.findall(rf"(?m)^\s*[-*+]\s*{re.escape(field)}\s*[:：]\s*(.*?)\s*$", record)
 
 
-def _check_source(root: Path, failures: list[str]) -> None:
+def _check_source(
+    root: Path,
+    failures: list[str],
+    *,
+    require_pending_lifecycle: bool = True,
+) -> None:
     for relative_path in REQUIRED_FILES:
         if not (root / relative_path).is_file():
             failures.append(f"{relative_path}: required V3.2.10 file is missing")
@@ -285,11 +290,12 @@ def _check_source(root: Path, failures: list[str]) -> None:
                 f"{BASELINE_RELEASE_PATH}: SHA256 must remain {PRODUCTION_RECORD_SHA256}; got {digest}"
             )
 
-    candidate = _read(root, RELEASE_PATH, failures)
-    for field, allowed in PENDING_FIELDS.items():
-        values = _field_values(candidate, field)
-        if len(values) != 1 or values[0] not in allowed:
-            failures.append(f"{RELEASE_PATH}: {field} must equal one of {allowed} exactly once")
+    if require_pending_lifecycle:
+        candidate = _read(root, RELEASE_PATH, failures)
+        for field, allowed in PENDING_FIELDS.items():
+            values = _field_values(candidate, field)
+            if len(values) != 1 or values[0] not in allowed:
+                failures.append(f"{RELEASE_PATH}: {field} must equal one of {allowed} exactly once")
 
     migration = _read(root, "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py", failures)
     _require_once(migration, f'revision = "{MIGRATION_REVISION}"', "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py", failures)
@@ -441,7 +447,7 @@ def collect_failures(
     elif phase == "package":
         _check_package(root, package_path, failures)
     else:
-        _check_source(root, failures)
+        _check_source(root, failures, require_pending_lifecycle=False)
         _check_attestation(root, failures)
     return failures
 
