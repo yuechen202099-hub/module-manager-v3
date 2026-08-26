@@ -323,6 +323,10 @@ def create_app() -> FastAPI:
     def collector_workbench_page():
         return vue_index_response()
 
+    @app.get("/review-workbench")
+    def review_workbench_page():
+        return vue_index_response()
+
     @app.get("/construction-cache")
     def construction_cache_page():
         return RedirectResponse("/construction")

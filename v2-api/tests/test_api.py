@@ -5766,6 +5766,7 @@ def test_direct_workspace_routes_redirect_to_app_shell() -> None:
         "/collector-inventory",
         "/collector-batches",
         "/collector-workbench",
+        "/review-workbench",
     ]:
         assert_vue_shell_response(client.get(path, follow_redirects=False))
     assert_export_retired(client.get("/exports", follow_redirects=False))

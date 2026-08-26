@@ -74,6 +74,20 @@ def test_unified_workbench_source_is_required(tmp_path: Path) -> None:
     assert_rejected(repo, "ReviewRephotoWorkbenchView.vue")
 
 
+def test_direct_review_workbench_shell_route_is_required(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "v2-api/app/main.py"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            '@app.get("/review-workbench")',
+            '# removed direct review workbench shell route',
+        ),
+        encoding="utf-8",
+    )
+
+    assert_rejected(repo, "V3.2.10 unified workbench gate")
+
+
 def test_unified_workbench_role_and_redirect_markers_are_required(tmp_path: Path) -> None:
     repo = copy_contract_repo(tmp_path)
     path = repo / "v2-web/src/router/index.ts"

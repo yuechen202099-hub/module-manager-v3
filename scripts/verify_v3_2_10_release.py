@@ -85,6 +85,9 @@ VERSION_SURFACES = {
 }
 
 FEATURE_MARKERS = {
+    "v2-api/app/main.py": (
+        '@app.get("/review-workbench")',
+    ),
     "v2-api/app/domain/terminal_review.py": (
         "def project_terminal_review(",
         "def derive_terminal_workflow_state(",
