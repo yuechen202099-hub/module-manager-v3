@@ -12,9 +12,14 @@ const authMock = vi.hoisted(() => ({
   hydrateFromLegacySession: vi.fn(async () => undefined),
   logout: vi.fn(),
 }))
+const workspaceMock = vi.hoisted(() => ({
+  projects: [] as Array<{ id: string; name: string }>,
+  activeProject: null,
+  loadProjects: vi.fn(async () => undefined),
+}))
 
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => authMock }))
-vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => ({ projects: [{ id: 'project-1', name: '测试项目' }], activeProject: null, loadProjects: vi.fn() }) }))
+vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => workspaceMock }))
 vi.mock('@/api/services', () => ({ fetchScanImportJob: vi.fn(), startScanImportJob: vi.fn() }))
 
 async function visibleNavigationTitles() {
@@ -37,6 +42,8 @@ describe('collector inventory routing', () => {
     authMock.user = { role: 'constructor', roles: ['constructor'], teamId: 'team-1' }
     authMock.displayName = '施工员甲'
     authMock.hydrateFromLegacySession.mockImplementation(async () => undefined)
+    workspaceMock.projects = []
+    workspaceMock.loadProjects.mockImplementation(async () => undefined)
     await router.push('/construction')
     await router.isReady()
   })
@@ -75,6 +82,12 @@ describe('collector inventory routing', () => {
     }
 
     expect(await visibleNavigationTitles()).toEqual(['施工采集'])
+  })
+
+  it('does not request the administrator project list from the constructor shell', async () => {
+    await visibleNavigationTitles()
+
+    expect(workspaceMock.loadProjects).not.toHaveBeenCalled()
   })
 
   it('hydrates an authenticated session into a constructor before enforcing the global route gate', async () => {

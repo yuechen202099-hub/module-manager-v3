@@ -68,7 +68,7 @@ const shellJobTone = ref<'info' | 'success' | 'danger'>('info')
 
 onMounted(() => {
   void auth.hydrateFromLegacySession().catch(() => undefined)
-  if (!workspace.projects.length) {
+  if (isAdmin.value && !workspace.projects.length) {
     void workspace.loadProjects()
   }
   window.addEventListener('message', handleShellMessage)
