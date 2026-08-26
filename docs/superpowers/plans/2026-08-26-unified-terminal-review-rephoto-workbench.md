@@ -839,6 +839,8 @@ git commit --only -m "test: gate unified review rephoto workflow" -- v2-api/test
 
 **Files:**
 - Modify: `AGENTS.md`
+- Modify: `docs/AGENT_REQUIRED_READING.md`
+- Modify: `docs/sop/README.md`
 - Modify: `RELEASE_MANIFEST.md`
 - Modify: `v2-api/pyproject.toml`
 - Modify: `v2-api/app/main.py`
@@ -857,15 +859,16 @@ git commit --only -m "test: gate unified review rephoto workflow" -- v2-api/test
 - Create: `scripts/test_verify_v3_2_10_release.py`
 - Modify: `scripts/test_verify_client_release.py`
 - Modify: `scripts/test_verify_release_sop.py`
+- Restore unchanged from production proof commit `8a4bcd6`: `ops/releases/V3.2.9.md`
 - Create: `ops/releases/V3.2.10.md`
 
 **Interfaces:**
-- Consumes: 完成的功能与测试提交，已发布 V3.2.9 记录与发布门禁作为只读基线。
+- Consumes: 完成的功能与测试提交；生产证明提交 `8a4bcd6` 中的 `ops/releases/V3.2.9.md` 及已发布 V3.2.9 门禁作为只读基线。
 - Produces: 全部运行时版本 `3.2.10`、候选 `V3.2.10`、分支 `production/V3/3.2.10`、包名 `module-manager-v2-server-3.2.10.zip` 和三阶段 verifier。
 
 - [ ] **Step 1: 复制并改写 V3.2.10 verifier 测试，确认 RED**
 
-保留 V3.2.9 已发布记录、tag 和历史验证行为原样，新建 3.2.10 测试，要求：准确版本/分支/包/记录；新领域、API、页面、角色和 V3.2.9 盘点扫码回归测试必须存在并执行；迁移头不变；包禁止 `.env`, uploads, backups, caches, repository metadata, `uv.lock`；V3.2.9 ZIP 不能满足 3.2.10。
+先从生产证明提交 `8a4bcd6` 原样恢复 `ops/releases/V3.2.9.md`，并用 blob hash/字节比较锁定其内容；保留 V3.2.9 已发布记录、tag 和历史验证行为原样。新建 3.2.10 测试，要求：准确版本/分支/包/记录；新领域、API、页面、角色和 V3.2.9 盘点扫码回归测试必须存在并执行；迁移头不变；包禁止 `.env`, uploads, backups, caches, repository metadata, `uv.lock`；V3.2.9 ZIP 不能满足 3.2.10。
 
 ```powershell
 & 'C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\collector-transfer-workbench\v2-api\.venv\Scripts\python.exe' -m pytest scripts/test_verify_v3_2_10_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py -q
@@ -875,7 +878,7 @@ Expected: FAIL before the V3.2.10 facts and verifier exist.
 
 - [ ] **Step 2: 更新全部版本事实和候选记录**
 
-`AGENTS.md` 标记当前已部署 `V3.2.9`、当前候选 `V3.2.10`、候选分支 `production/V3/3.2.10`。运行时、manifest、Web、发布说明全部改为 3.2.10。`ops/releases/V3.2.10.md` 先记录功能、测试栏目、Alembic head、包路径、回滚目标 `/opt/module-manager-v2/releases/v3.2.9-20260826T075447Z` 和所有生产字段为 pending；不能预填成功证据。
+`AGENTS.md`、`docs/AGENT_REQUIRED_READING.md` 和 `docs/sop/README.md` 统一标记当前已部署 `V3.2.9`、当前候选 `V3.2.10`、候选分支 `production/V3/3.2.10`。运行时、manifest、Web、发布说明全部改为 3.2.10。`ops/releases/V3.2.10.md` 先记录功能、测试栏目、Alembic head、包路径、回滚目标 `/opt/module-manager-v2/releases/v3.2.9-20260826T075447Z` 和所有生产字段为 pending；不能预填成功证据。`ops/releases/V3.2.9.md` 必须与 `8a4bcd6` 中的 blob 字节一致，不得为候选版本改写历史事实。
 
 - [ ] **Step 3: 实现 source/package/attestation verifier**
 
@@ -893,8 +896,8 @@ git diff --check
 Expected: all pass。
 
 ```powershell
-git add -- AGENTS.md RELEASE_MANIFEST.md v2-api/pyproject.toml v2-api/app/main.py v2-api/app/services/ops_status.py v2-api/scripts/verify_v3_1_release.py v2-api/tests/test_v3_1_release.py v2-web/package.json v2-web/index.html v2-web/src/components/AppLayout.vue v2-web/src/version.json v2-web/src/constants/releaseNotes.ts scripts/build-client-release.ps1 scripts/verify-client-release.py scripts/verify_release_sop.py scripts/verify_v3_2_10_release.py scripts/test_verify_v3_2_10_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py ops/releases/V3.2.10.md
-git commit --only -m "release: prepare V3.2.10 review rephoto workbench" -- AGENTS.md RELEASE_MANIFEST.md v2-api/pyproject.toml v2-api/app/main.py v2-api/app/services/ops_status.py v2-api/scripts/verify_v3_1_release.py v2-api/tests/test_v3_1_release.py v2-web/package.json v2-web/index.html v2-web/src/components/AppLayout.vue v2-web/src/version.json v2-web/src/constants/releaseNotes.ts scripts/build-client-release.ps1 scripts/verify-client-release.py scripts/verify_release_sop.py scripts/verify_v3_2_10_release.py scripts/test_verify_v3_2_10_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py ops/releases/V3.2.10.md
+git add -- AGENTS.md docs/AGENT_REQUIRED_READING.md docs/sop/README.md RELEASE_MANIFEST.md v2-api/pyproject.toml v2-api/app/main.py v2-api/app/services/ops_status.py v2-api/scripts/verify_v3_1_release.py v2-api/tests/test_v3_1_release.py v2-web/package.json v2-web/index.html v2-web/src/components/AppLayout.vue v2-web/src/version.json v2-web/src/constants/releaseNotes.ts scripts/build-client-release.ps1 scripts/verify-client-release.py scripts/verify_release_sop.py scripts/verify_v3_2_10_release.py scripts/test_verify_v3_2_10_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py ops/releases/V3.2.9.md ops/releases/V3.2.10.md
+git commit --only -m "release: prepare V3.2.10 review rephoto workbench" -- AGENTS.md docs/AGENT_REQUIRED_READING.md docs/sop/README.md RELEASE_MANIFEST.md v2-api/pyproject.toml v2-api/app/main.py v2-api/app/services/ops_status.py v2-api/scripts/verify_v3_1_release.py v2-api/tests/test_v3_1_release.py v2-web/package.json v2-web/index.html v2-web/src/components/AppLayout.vue v2-web/src/version.json v2-web/src/constants/releaseNotes.ts scripts/build-client-release.ps1 scripts/verify-client-release.py scripts/verify_release_sop.py scripts/verify_v3_2_10_release.py scripts/test_verify_v3_2_10_release.py scripts/test_verify_client_release.py scripts/test_verify_release_sop.py ops/releases/V3.2.9.md ops/releases/V3.2.10.md
 ```
 
 ### Task 10: 全量验证、渲染验收并构建源码绑定包
