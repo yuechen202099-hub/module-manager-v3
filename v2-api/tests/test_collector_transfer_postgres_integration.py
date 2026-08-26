@@ -362,6 +362,8 @@ def seed_partial_global_terminal_state(
                 installation_address="本地全局终端并发地址",
                 raw_data={},
             )
+            session.add(catalog)
+            session.flush()
             group = MaterialGroup(
                 id=uuid4(),
                 team_id=team_id,
@@ -379,7 +381,7 @@ def seed_partial_global_terminal_state(
                     "module_asset_no": f"TASK7-MODULE-{index + 1}",
                 },
             )
-            session.add_all((catalog, group))
+            session.add(group)
             session.flush()
             session.add_all(
                 (

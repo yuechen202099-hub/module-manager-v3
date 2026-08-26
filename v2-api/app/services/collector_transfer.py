@@ -802,6 +802,41 @@ class PostgresCollectorTransferService:
             MaterialGroup.project_id == project_id,
             normalized_terminal == normalized_code,
         )
+        if lock_groups:
+            locked_group_rows = list(
+                self.session.execute(
+                    select(
+                        MaterialGroup.id,
+                        MaterialGroup.total_catalog_row_id,
+                    )
+                    .where(*predicates)
+                    .order_by(MaterialGroup.display_meter_no, MaterialGroup.id)
+                    .with_for_update(of=MaterialGroup)
+                ).tuples()
+            )
+            if not locked_group_rows:
+                raise TerminalNotFoundError(normalized_code)
+            catalog_row_ids = sorted(
+                {
+                    row.total_catalog_row_id
+                    for row in locked_group_rows
+                    if row.total_catalog_row_id is not None
+                }
+            )
+            if catalog_row_ids:
+                self.session.execute(
+                    select(TotalCatalogRow.id)
+                    .where(
+                        TotalCatalogRow.id.in_(catalog_row_ids),
+                        TotalCatalogRow.project_id == project_id,
+                        or_(
+                            TotalCatalogRow.team_id == self.team_id,
+                            TotalCatalogRow.team_id.is_(None),
+                        ),
+                    )
+                    .order_by(TotalCatalogRow.id)
+                    .with_for_update(of=TotalCatalogRow)
+                ).all()
         group_statement = (
             select(
                 MaterialGroup.id,
@@ -828,8 +863,6 @@ class PostgresCollectorTransferService:
             .where(*predicates)
             .order_by(MaterialGroup.display_meter_no, MaterialGroup.id)
         )
-        if lock_groups:
-            group_statement = group_statement.with_for_update()
         groups = [
             _ProjectGroupRow(*row)
             for row in self.session.execute(group_statement).tuples()
@@ -862,7 +895,7 @@ class PostgresCollectorTransferService:
             .order_by(Photo.group_id, Photo.sort_order, Photo.id)
         )
         if lock_groups:
-            photo_statement = photo_statement.with_for_update()
+            photo_statement = photo_statement.with_for_update(of=Photo)
         photos = tuple(
             _ProjectPhotoRow(*row)
             for row in self.session.execute(photo_statement).tuples()
@@ -3620,12 +3653,6 @@ class PostgresCollectorTransferService:
         ).one_or_none()
         if assignment_ref is None:
             raise KeyError(assignment_id)
-        if assignment_ref.status == "rolled_back":
-            return {
-                "assignment_id": str(assignment_uuid),
-                "run_id": str(assignment_ref.run_id),
-                "status": "rolled_back",
-            }
         requirement_ref = self.session.execute(
             select(
                 CollectorRequirement.run_id,
@@ -3683,6 +3710,12 @@ class PostgresCollectorTransferService:
             raise ValueError("assignment resources are missing")
         if is_global_terminal_workbench:
             self._require_terminal_review_ready(run=run, terminal=terminal)
+        if assignment_ref.status == "rolled_back":
+            return {
+                "assignment_id": str(assignment_uuid),
+                "run_id": str(assignment_ref.run_id),
+                "status": "rolled_back",
+            }
         requirement = self.session.scalar(
             select(CollectorRequirement)
             .where(
@@ -4545,6 +4578,7 @@ class PostgresCollectorTransferService:
                 raise CollectorWorkbenchIncompleteError(("缺少已确认同号实物",))
             requirement.status = "used" if completed else "direct_ready"
             physical.pool_status = "used" if completed else "direct"
+        self.session.flush()
         total = int(
             self.session.scalar(
                 select(func.count(CollectorWorkbenchItem.id)).where(

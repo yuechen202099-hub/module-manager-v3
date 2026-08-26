@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles
@@ -36,6 +37,8 @@ from app.models import (
     Project,
     ProjectStatus,
     Team,
+    Task,
+    TaskStatus,
     TotalCatalogRow,
     User,
 )
@@ -51,6 +54,7 @@ from app.services.collector_transfer import (
     _photo_snapshot,
     meter_sources_from_groups,
 )
+from app.services.state_repository import PostgresStateRepository
 
 
 @compiles(JSONB, "sqlite")
@@ -3549,6 +3553,52 @@ def mutation_fingerprint(session: Session) -> dict[str, object]:
     }
 
 
+def test_review_gate_compiles_postgres_valid_outer_join_lock_shape(
+    db_session: Session,
+) -> None:
+    """Catches a nullable TotalCatalogRow outer join being locked as a PostgreSQL target."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="POSTGRES-LOCK-SHAPE",
+        meter_no="POSTGRES-LOCK-SHAPE-METER",
+        collector_no="POSTGRES-LOCK-SHAPE-COLLECTOR",
+        authoritative_address="PostgreSQL lock shape address",
+    )
+    db_session.commit()
+    statements: list[str] = []
+
+    def capture_postgres_shape(orm_execute_state) -> None:
+        statements.append(
+            str(orm_execute_state.statement.compile(dialect=postgresql.dialect()))
+        )
+
+    event.listen(db_session, "do_orm_execute", capture_postgres_shape)
+    try:
+        service(db_session)._terminal_review_bundle(
+            project_id=project.id,
+            terminal_code="POSTGRES-LOCK-SHAPE",
+            lock_groups=True,
+        )
+    finally:
+        event.remove(db_session, "do_orm_execute", capture_postgres_shape)
+
+    locking_statements = [item for item in statements if "FOR UPDATE" in item]
+    assert any(
+        "FROM material_groups" in item and "FOR UPDATE OF material_groups" in item
+        for item in locking_statements
+    ), locking_statements
+    assert any(
+        "FROM total_catalog_rows" in item
+        and "FOR UPDATE OF total_catalog_rows" in item
+        for item in locking_statements
+    )
+    assert not any(
+        "LEFT OUTER JOIN total_catalog_rows" in item for item in locking_statements
+    )
+
+
 @pytest.mark.parametrize(
     "operation",
     ["replace_missing", "rollback", "refresh", "complete_meter", "complete_collector"],
@@ -3698,6 +3748,7 @@ def test_every_collector_mutation_rejects_source_changed_active_photo_without_wr
 
 def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
     db_session: Session,
+    monkeypatch,
 ) -> None:
     """Catches reopening a terminal before its final constructed meter is approved."""
     project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
@@ -3719,6 +3770,19 @@ def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
         authoritative_address="最终审批解锁地址",
         status=GroupStatus.UNREVIEWED,
     )
+    review_task = Task(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        legacy_id=9001,
+        terminal=terminal_code,
+        title="Final approval review task",
+        status=TaskStatus.DRAFT,
+        review_claimed_by="terminal-reviewer",
+        raw_data={},
+    )
+    final_group.legacy_task_id = review_task.legacy_id
+    db_session.add(review_task)
     db_session.commit()
     candidate = service(db_session).list_global_terminals(
         query=terminal_code,
@@ -3733,16 +3797,130 @@ def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
     assert locked["review_required_count"] == 1
     assert locked["rephoto"] is None
 
-    final_group.status = GroupStatus.APPROVED
-    db_session.commit()
+    repository = PostgresStateRepository()
+    monkeypatch.setattr(
+        "app.services.state_repository.local_simulation.current_team_id",
+        lambda: "team-1",
+    )
+    monkeypatch.setattr(
+        repository,
+        "_session",
+        lambda: Session(bind=db_session.get_bind(), expire_on_commit=False),
+    )
+    monkeypatch.setattr(
+        repository,
+        "_enqueue_delivery_cache_after_commit",
+        lambda *_args, **_kwargs: None,
+    )
+    persisted = repository.review_group(
+        final_group.legacy_id,
+        "approved",
+        "terminal-reviewer",
+        note="final constructed meter approved",
+    )
     unlocked = service(db_session).open_review_workbench_terminal(
         terminal_key_value=candidate["terminal_key"],
     )
 
+    assert persisted["status"] == "approved"
+    approved_group = db_session.get(MaterialGroup, final_group.id)
+    assert approved_group.reviewer == "terminal-reviewer"
+    assert approved_group.reviewed_at is not None
     assert unlocked["review_required_count"] == 0
     assert unlocked["workflow_state"] in {"needs_replacement", "pool_shortage", "ready"}
     assert unlocked["rephoto"] is not None
     assert len(unlocked["rephoto"]["meter_install_items"]) == 2
+
+
+def test_repeated_rollback_rechecks_review_gate_without_writes(
+    db_session: Session,
+) -> None:
+    """Catches an idempotent rollback bypassing terminal review after its source is invalidated."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="REPEATED-ROLLBACK-REVIEW",
+        meter_no="REPEATED-ROLLBACK-METER",
+        collector_no="REPEATED-ROLLBACK-ORIGINAL",
+        authoritative_address="Repeated rollback review address",
+    )
+    pool = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="REPEATED-ROLLBACK-POOL",
+        pool_status="available",
+    )
+    db_session.add(pool)
+    db_session.commit()
+    collector_photo(db_session, pool, sha256=uuid4().hex * 2)
+    candidate = service(db_session).list_global_terminals(
+        query="REPEATED-ROLLBACK-REVIEW",
+    )["items"][0]
+    opened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+    replacement = service(db_session).replace_terminal_missing(
+        terminal_id=opened["rephoto"]["terminal"]["id"]
+    )
+    assignment_id = replacement["assignments"][0]["assignment_id"]
+    service(db_session).rollback_assignment(assignment_id=assignment_id)
+    group.status = GroupStatus.UNREVIEWED
+    db_session.commit()
+    before = mutation_fingerprint(db_session)
+
+    with pytest.raises(TerminalReviewRequiredError):
+        service(db_session).rollback_assignment(assignment_id=assignment_id)
+
+    assert mutation_fingerprint(db_session) == before
+
+
+def test_completion_updates_terminal_count_with_autoflush_disabled(
+    db_session: Session,
+) -> None:
+    """Catches completion counting the pre-update item state in PostgreSQL-style sessions."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="AUTOFLUSH-COMPLETION-COUNT",
+        meter_no="AUTOFLUSH-COMPLETION-METER",
+        collector_no="AUTOFLUSH-COMPLETION-ORIGINAL",
+        authoritative_address="Autoflush completion count address",
+    )
+    pool = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="AUTOFLUSH-COMPLETION-POOL",
+        pool_status="available",
+    )
+    db_session.add(pool)
+    db_session.commit()
+    collector_photo(db_session, pool, sha256=uuid4().hex * 2)
+    candidate = service(db_session).list_global_terminals(
+        query="AUTOFLUSH-COMPLETION-COUNT",
+    )["items"][0]
+    opened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+    terminal_id = opened["rephoto"]["terminal"]["id"]
+    replacement = service(db_session).replace_terminal_missing(terminal_id=terminal_id)
+    item_id = service(db_session).global_terminal_detail(terminal_id=terminal_id)[
+        "collector_items"
+    ][0]["workbench_item_id"]
+    db_session.autoflush = False
+    try:
+        service(db_session).set_workbench_item_status(item_id=item_id, completed=True)
+    finally:
+        db_session.autoflush = True
+
+    terminal = db_session.get(CollectorTransferTerminal, UUID(terminal_id))
+    assert terminal.completed_item_count == 1
+    assert terminal.status == "in_progress"
 
 
 def test_open_global_terminal_creates_one_terminal_snapshot_and_reuses_revision(
