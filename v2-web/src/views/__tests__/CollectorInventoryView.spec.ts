@@ -335,6 +335,32 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
+  it('stops a partially started construction scanner before native fallback opens the camera', async () => {
+    const detectedHandlers: Array<(result: unknown) => void> = []
+    const quagga = {
+      init: vi.fn((_options: unknown, complete: (error?: unknown) => void) => complete()),
+      onDetected: vi.fn((handler: (result: unknown) => void) => detectedHandlers.push(handler)),
+      offDetected: vi.fn(),
+      start: vi.fn(() => { throw new Error('Quagga start failed') }),
+      stop: vi.fn(),
+    }
+    const getUserMedia = vi.fn().mockResolvedValue({ getTracks: () => [] })
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('Quagga', quagga)
+    vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } })
+    const wrapper = await mountPage()
+
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+
+    expect(quagga.onDetected).toHaveBeenCalledTimes(1)
+    expect(quagga.offDetected).toHaveBeenCalledWith(detectedHandlers[0])
+    expect(quagga.stop).toHaveBeenCalledTimes(1)
+    expect(getUserMedia).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('video').element.srcObject).toBeTruthy()
+    wrapper.unmount()
+  })
+
   it('uses BarcodeDetector continuously after the construction scanner is unavailable, deduplicates an in-flight value, and stops camera tracks', async () => {
     const scan = deferred<CollectorInventoryDecision>()
     serviceMocks.scanProjectCollector.mockReturnValue(scan.promise)

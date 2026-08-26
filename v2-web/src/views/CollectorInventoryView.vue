@@ -466,6 +466,7 @@ async function ensureQuaggaLoaded() {
 
 async function startQuaggaScanner(session: number) {
   let owner: QuaggaInitOwner | null = null
+  let detectedHandler: ((result: unknown) => void) | null = null
   try {
     const quagga = await ensureQuaggaLoaded()
     if (session !== cameraSession) return
@@ -504,20 +505,24 @@ async function startQuaggaScanner(session: number) {
       stopQuaggaInitOwner(owner)
       return
     }
-    quaggaInitOwner = null
-    quaggaActive = true
-    quaggaDetectedHandler = (result) => handleDetectedValue(
+    detectedHandler = (result) => handleDetectedValue(
       (result as { codeResult?: { code?: string } })?.codeResult?.code || '',
     )
-    quagga.onDetected?.(quaggaDetectedHandler)
+    quagga.onDetected?.(detectedHandler)
     quagga.start?.()
+    quaggaDetectedHandler = detectedHandler
+    quaggaActive = true
+    quaggaInitOwner = null
     scanFeedback.value = 'QuaggaJS 正在识别条形码。'
     return true
   } catch {
-    if (owner && quaggaInitOwner === owner) {
-      quaggaInitOwner = null
+    if (owner) {
+      if (detectedHandler) owner.scanner.offDetected?.(detectedHandler)
       stopQuaggaInitOwner(owner)
+      if (quaggaInitOwner === owner) quaggaInitOwner = null
     }
+    if (quaggaDetectedHandler === detectedHandler) quaggaDetectedHandler = null
+    quaggaActive = false
     return false
   }
 }
