@@ -240,6 +240,46 @@ describe('DataCenterGroupReviewPanel', () => {
     wrapper.unmount()
   })
 
+  it('keeps the active review locked when a stale field correction completes', async () => {
+    const fieldCorrectionRequest = deferred<{ changedFields: string[] }>()
+    const reviewRequest = deferred<MaterialGroup>()
+    const loadedGroupIds: string[] = []
+    apiMock.fetchDataCenterDetail.mockImplementation((_kind, groupId: string) => {
+      loadedGroupIds.push(groupId)
+      return Promise.resolve(detailFixture(groupId))
+    })
+    apiMock.fetchGroupPhotoObjectUrl.mockImplementation((_groupId, photoId: string) => Promise.resolve(`blob:${photoId}`))
+    apiMock.updateDataCenterGroup.mockImplementation(() => fieldCorrectionRequest.promise)
+    apiMock.reviewDataCenterGroup.mockImplementation(() => reviewRequest.promise)
+
+    const wrapper = mountPanel({ groupId: 'g-1' })
+    await flushPromises()
+    await buttonByText(wrapper, '字段修正').trigger('click')
+    await flushPromises()
+    await wrapper.setProps({ groupId: 'g-2' })
+    await flushPromises()
+    await buttonByText(wrapper, '正式通过').trigger('click')
+    await flushPromises()
+
+    fieldCorrectionRequest.resolve({ changedFields: ['meter_no'] })
+    await flushPromises()
+
+    expect(loadedGroupIds).toEqual(['g-1', 'g-2'])
+    expect(buttonByText(wrapper, '正式通过').attributes()).toHaveProperty('disabled')
+    expect(wrapper.emitted('updated')).toBeUndefined()
+    expect(wrapper.emitted('review-decided')).toBeUndefined()
+
+    reviewRequest.resolve({ id: 'g-2', status: 'approved' } as MaterialGroup)
+    await flushPromises()
+
+    expect(loadedGroupIds).toEqual(['g-1', 'g-2', 'g-2'])
+    expect(buttonByText(wrapper, '正式通过').attributes()).not.toHaveProperty('disabled')
+    expect(wrapper.emitted('updated')).toHaveLength(1)
+    expect(wrapper.emitted('updated')?.[0]?.[0]).toMatchObject({ id: 'g-2' })
+    expect(wrapper.emitted('review-decided')).toEqual([['approved']])
+    wrapper.unmount()
+  })
+
   it.each([
     ['正式通过', 'approved'],
     ['资料不全', 'incomplete'],

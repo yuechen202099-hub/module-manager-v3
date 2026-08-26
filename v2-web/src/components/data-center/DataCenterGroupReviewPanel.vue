@@ -49,6 +49,15 @@ let photoAbortController: AbortController | null = null
 let detailSerial = 0
 let photoSerial = 0
 let groupSerial = 0
+let mutationSerial = 0
+
+type MutationOwner = {
+  token: number
+  groupId: string
+  groupSerial: number
+}
+
+let activeMutationOwner: MutationOwner | null = null
 
 const form = reactive({
   meterNo: '',
@@ -95,6 +104,8 @@ function revokeAllPhotoUrls() {
 
 function cleanupDetail() {
   groupSerial += 1
+  mutationSerial += 1
+  activeMutationOwner = null
   detailSerial += 1
   photoSerial += 1
   detailAbortController?.abort()
@@ -108,6 +119,29 @@ function cleanupDetail() {
   loading.value = false
   imageLoading.value = false
   saving.value = false
+}
+
+function beginMutation(groupId: string): MutationOwner {
+  const owner = { token: ++mutationSerial, groupId, groupSerial }
+  activeMutationOwner = owner
+  saving.value = true
+  return owner
+}
+
+function isCurrentMutation(owner: MutationOwner) {
+  return activeMutationOwner?.token === owner.token
+    && props.groupId === owner.groupId
+    && groupSerial === owner.groupSerial
+}
+
+function finishMutation(owner: MutationOwner) {
+  if (!isCurrentMutation(owner)) return
+  activeMutationOwner = null
+  saving.value = false
+}
+
+function showMutationError(owner: MutationOwner, error: unknown, fallback: string) {
+  if (isCurrentMutation(owner)) ElMessage.error(error instanceof Error ? error.message : fallback)
 }
 
 function applyDetail(next: DataCenterDetail) {
@@ -171,60 +205,70 @@ async function loadPhotoObjectUrls(next: DataCenterDetail, ownerSerial: number) 
   }
 }
 
-async function reloadAfterMutation() {
+async function reloadAfterMutation(owner: MutationOwner) {
+  if (!isCurrentMutation(owner)) return null
   const next = await loadDetail()
-  if (next) emit('updated', next)
+  if (!next || !isCurrentMutation(owner)) return null
+  emit('updated', next)
   return next
 }
 
 async function saveFields() {
   if (!detail.value) return
-  saving.value = true
+  const currentDetail = detail.value
+  const owner = beginMutation(currentDetail.id)
   try {
     const patch: Record<string, string> = {}
-    if (form.meterNo.trim() !== detail.value.meterNo) patch.meter_no = form.meterNo.trim()
-    if (form.collector.trim() !== detail.value.collector) patch.collector = form.collector.trim()
-    if (form.moduleAssetNo.trim() !== detail.value.moduleAssetNo) patch.module_asset_no = form.moduleAssetNo.trim()
-    const result = await updateDataCenterGroup(detail.value.id, patch, form.reason.trim() || '数据中台字段修正')
+    if (form.meterNo.trim() !== currentDetail.meterNo) patch.meter_no = form.meterNo.trim()
+    if (form.collector.trim() !== currentDetail.collector) patch.collector = form.collector.trim()
+    if (form.moduleAssetNo.trim() !== currentDetail.moduleAssetNo) patch.module_asset_no = form.moduleAssetNo.trim()
+    const result = await updateDataCenterGroup(currentDetail.id, patch, form.reason.trim() || '数据中台字段修正')
+    if (!isCurrentMutation(owner)) return
     ElMessage.success(result.changedFields.length ? '已保存字段修正' : '没有字段变化')
-    await reloadAfterMutation()
+    await reloadAfterMutation(owner)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '保存失败')
+    showMutationError(owner, error, '保存失败')
   } finally {
-    saving.value = false
+    finishMutation(owner)
   }
 }
 
 async function classifyActivePhoto(category: string) {
   if (!detail.value || !activePhoto.value) return
-  saving.value = true
+  const groupId = detail.value.id
+  const photoId = activePhoto.value.id
+  const owner = beginMutation(groupId)
   try {
-    await classifyDataCenterGroupPhoto(detail.value.id, activePhoto.value.id, category, form.reason.trim() || '数据中台照片分类')
+    await classifyDataCenterGroupPhoto(groupId, photoId, category, form.reason.trim() || '数据中台照片分类')
+    if (!isCurrentMutation(owner)) return
     ElMessage.success('已分类')
-    await reloadAfterMutation()
+    await reloadAfterMutation(owner)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '分类失败')
+    showMutationError(owner, error, '分类失败')
   } finally {
-    saving.value = false
+    finishMutation(owner)
   }
 }
 
 async function rescanActivePhoto() {
   if (!detail.value || !activePhoto.value) return
-  saving.value = true
+  const groupId = detail.value.id
+  const photo = activePhoto.value
+  const owner = beginMutation(groupId)
   try {
     await rescanDataCenterGroupPhotoBarcode(
-      detail.value.id,
-      activePhoto.value.id,
-      activePhoto.value.category || '',
+      groupId,
+      photo.id,
+      photo.category || '',
       form.reason.trim() || '数据中台重新扫码',
     )
+    if (!isCurrentMutation(owner)) return
     ElMessage.success('重新扫码完成')
-    await reloadAfterMutation()
+    await reloadAfterMutation(owner)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '重新扫码失败')
+    showMutationError(owner, error, '重新扫码失败')
   } finally {
-    saving.value = false
+    finishMutation(owner)
   }
 }
 
@@ -234,14 +278,17 @@ function targetField(type: RegionScanResult['barcodeType']) {
 
 async function handleRegionScan(request: { barcodeType: RegionScanResult['barcodeType']; region: RegionScanResult['region'] }) {
   if (!detail.value || !activePhoto.value) return
-  saving.value = true
+  const groupId = detail.value.id
+  const photoId = activePhoto.value.id
+  const owner = beginMutation(groupId)
   try {
     const result = await scanDataCenterGroupPhotoRegion(
-      detail.value.id,
-      activePhoto.value.id,
+      groupId,
+      photoId,
       request,
       form.reason.trim() || '数据中台框选扫码',
     )
+    if (!isCurrentMutation(owner)) return
     const value = (result.normalizedValues[0] || result.values[0] || '').trim()
     if (!value) {
       ElMessage.warning('当前选区未识别到可用内容')
@@ -252,97 +299,104 @@ async function handleRegionScan(request: { barcodeType: RegionScanResult['barcod
       confirmButtonText: '确认写入',
       cancelButtonText: '取消',
     })
+    if (!isCurrentMutation(owner)) return
     form[targetField(result.barcodeType)] = value
     inspector.value?.finishSubmission()
   } catch (error) {
-    if (error !== 'cancel') ElMessage.error(error instanceof Error ? error.message : '框选扫码失败')
+    if (error !== 'cancel') showMutationError(owner, error, '框选扫码失败')
   } finally {
-    saving.value = false
+    finishMutation(owner)
   }
 }
 
 async function manualConfirm() {
   if (!detail.value) return
+  const currentDetail = detail.value
   const reason = form.reason.trim()
   if (!reason) {
     ElMessage.warning('请填写人工确认原因')
     return
   }
+  const owner = beginMutation(currentDetail.id)
   try {
-    await ElMessageBox.confirm('确认以当前字段和照片证据人工通过扫码？', '人工确认', {
-      type: 'warning',
-      confirmButtonText: '人工确认',
-      cancelButtonText: '取消',
-    })
-  } catch {
-    return
-  }
-  saving.value = true
-  try {
-    const result = await confirmDataCenterGroupBarcode(detail.value.id, {
+    try {
+      await ElMessageBox.confirm('确认以当前字段和照片证据人工通过扫码？', '人工确认', {
+        type: 'warning',
+        confirmButtonText: '人工确认',
+        cancelButtonText: '取消',
+      })
+    } catch {
+      return
+    }
+    if (!isCurrentMutation(owner)) return
+    const result = await confirmDataCenterGroupBarcode(currentDetail.id, {
       meterNo: form.meterNo.trim(),
       moduleAssetNo: form.moduleAssetNo.trim(),
       collector: form.collector.trim(),
       reason,
-      photoIds: detail.value.photos.map((photo) => photo.id),
+      photoIds: currentDetail.photos.map((photo) => photo.id),
     })
+    if (!isCurrentMutation(owner)) return
     ElMessage.success(result.deliveryPackageJobStatus ? '已人工确认并排队' : '已人工确认')
-    await reloadAfterMutation()
+    await reloadAfterMutation(owner)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '人工确认失败')
+    showMutationError(owner, error, '人工确认失败')
   } finally {
-    saving.value = false
+    finishMutation(owner)
   }
 }
 
 async function returnException() {
   if (!detail.value) return
-  saving.value = true
+  const groupId = detail.value.id
+  const owner = beginMutation(groupId)
   try {
-    await returnDataCenterGroupToException(detail.value.id, {
+    await returnDataCenterGroupToException(groupId, {
       category: form.exceptionCategory,
       note: form.exceptionNote.trim() || form.reason.trim() || '数据中台退回异常',
       reason: form.reason.trim() || form.exceptionNote.trim() || '数据中台退回异常',
     })
+    if (!isCurrentMutation(owner)) return
     ElMessage.success('已退回异常')
-    await reloadAfterMutation()
+    await reloadAfterMutation(owner)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '退回异常失败')
+    showMutationError(owner, error, '退回异常失败')
   } finally {
-    saving.value = false
+    finishMutation(owner)
   }
 }
 
 async function resetGroup(kind: 'unreviewed' | 'unconstructed') {
   if (!detail.value) return
+  const groupId = detail.value.id
+  const owner = beginMutation(groupId)
   try {
-    await ElMessageBox.confirm(kind === 'unreviewed' ? '确认回退至未审阅？' : '确认回退至未施工？', '回退', {
-      type: kind === 'unconstructed' ? 'error' : 'warning',
-      confirmButtonText: '确认回退',
-      cancelButtonText: '取消',
-    })
-  } catch {
-    return
-  }
-  saving.value = true
-  try {
-    if (kind === 'unreviewed') await resetAdminGroupToUnreviewed(detail.value.id, form.resetReason)
-    else await resetAdminGroupToUnconstructed(detail.value.id, form.resetReason)
+    try {
+      await ElMessageBox.confirm(kind === 'unreviewed' ? '确认回退至未审阅？' : '确认回退至未施工？', '回退', {
+        type: kind === 'unconstructed' ? 'error' : 'warning',
+        confirmButtonText: '确认回退',
+        cancelButtonText: '取消',
+      })
+    } catch {
+      return
+    }
+    if (!isCurrentMutation(owner)) return
+    if (kind === 'unreviewed') await resetAdminGroupToUnreviewed(groupId, form.resetReason)
+    else await resetAdminGroupToUnconstructed(groupId, form.resetReason)
+    if (!isCurrentMutation(owner)) return
     ElMessage.success('已回退')
-    await reloadAfterMutation()
+    await reloadAfterMutation(owner)
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '回退失败')
+    showMutationError(owner, error, '回退失败')
   } finally {
-    saving.value = false
+    finishMutation(owner)
   }
 }
 
 async function decideReview(status: 'approved' | 'incomplete') {
   if (!detail.value) return
   const requestedGroupId = detail.value.id
-  const ownerGroupSerial = groupSerial
-  const isCurrentGroup = () => props.groupId === requestedGroupId && groupSerial === ownerGroupSerial
-  saving.value = true
+  const owner = beginMutation(requestedGroupId)
   try {
     await reviewDataCenterGroup(
       requestedGroupId,
@@ -350,15 +404,15 @@ async function decideReview(status: 'approved' | 'incomplete') {
       form.reason.trim(),
       status === 'incomplete' ? form.exceptionNote.trim() : '',
     )
-    if (!isCurrentGroup()) return
-    const next = await reloadAfterMutation()
+    if (!isCurrentMutation(owner)) return
+    const next = await reloadAfterMutation(owner)
     if (!next) return
     emit('review-decided', status)
     ElMessage.success(status === 'approved' ? '已正式通过' : '已标记资料不全')
   } catch (error) {
-    if (isCurrentGroup()) ElMessage.error(error instanceof Error ? error.message : '审阅决定失败')
+    showMutationError(owner, error, '审阅决定失败')
   } finally {
-    if (isCurrentGroup()) saving.value = false
+    finishMutation(owner)
   }
 }
 
