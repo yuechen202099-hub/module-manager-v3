@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import random
@@ -28,6 +29,31 @@ def terminal_key(project_id: str, terminal_code: str) -> str:
         separators=(",", ":"),
     )
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def decode_terminal_key(value: str) -> tuple[str, str]:
+    encoded = normalize_identifier(value)
+    if not encoded:
+        raise ValueError("terminal_key is required")
+    try:
+        raw = base64.b64decode(
+            encoded + "=" * (-len(encoded) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError, json.JSONDecodeError, binascii.Error) as exc:
+        raise ValueError("terminal_key is invalid") from exc
+    if (
+        not isinstance(payload, list)
+        or len(payload) != 2
+        or not all(isinstance(item, str) for item in payload)
+    ):
+        raise ValueError("terminal_key is invalid")
+    project_id, terminal_code = map(normalize_identifier, payload)
+    if not project_id or not terminal_code:
+        raise ValueError("terminal_key is invalid")
+    return project_id, terminal_code
 
 
 def terminal_source_revision(rows: Iterable[Mapping[str, object]]) -> str:

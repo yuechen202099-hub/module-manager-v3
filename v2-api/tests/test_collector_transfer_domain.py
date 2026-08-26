@@ -9,9 +9,11 @@ from app.domain.collector_transfer import (
     PoolInsufficientError,
     ProjectInventoryDecisionKind,
     build_terminal_snapshots,
+    decode_terminal_key,
     decide_collector_scan,
     decide_project_inventory_scan,
     plan_random_assignments,
+    terminal_key,
 )
 
 
@@ -143,6 +145,26 @@ def test_terminal_key_preserves_leading_zeroes_and_project_identity() -> None:
     assert collector_transfer_domain.terminal_key(project_a, " 000123 ") == collector_transfer_domain.terminal_key(project_a, "000123")
     assert collector_transfer_domain.terminal_key(project_a, "000123") != collector_transfer_domain.terminal_key(project_b, "000123")
     assert collector_transfer_domain.terminal_key(project_a, "000123") != collector_transfer_domain.terminal_key(project_a, "123")
+
+
+def test_terminal_key_round_trip_preserves_arbitrary_identifier_text() -> None:
+    """Catches decoding a key with lossy identifier normalization."""
+    encoded = terminal_key("7d0ea83b-7621-4b56-95bf-f32cf444ee93", "00001234-A")
+
+    assert decode_terminal_key(encoded) == (
+        "7d0ea83b-7621-4b56-95bf-f32cf444ee93",
+        "00001234-A",
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "%%%%", "W10=", "WyIiLCIxMjMiXQ", "WyJwIiwidCJd%%%%"],
+)
+def test_decode_terminal_key_rejects_malformed_or_blank_parts(value: str) -> None:
+    """Catches accepting malformed keys as project or terminal authority."""
+    with pytest.raises(ValueError, match="terminal_key"):
+        decode_terminal_key(value)
 
 
 def test_source_revision_is_order_stable_and_photo_sensitive() -> None:
