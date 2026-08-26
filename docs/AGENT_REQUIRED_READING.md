@@ -5,12 +5,12 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.2.6`
-- 当前生产应用基线：`V3.2.5`
-- 当前发布候选版本：`V3.2.6`
-- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.5-20260823_030829`
-- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.5-20260823_030829`
-- 当前生产提交：`ef4394c687610c2ba4f65423c4801f1138c7ad41`
+- 生产维护分支：`production/V3/3.2.9`
+- 当前生产应用基线：`V3.2.9`
+- 当前发布候选版本：`V3.2.9`
+- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.9-20260826T075447Z`
+- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.8-20260826T000859Z`
+- 当前生产源码提交：`f02f5e7229918f5d8e4b7412dc18c5405cc50049`
 - 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.2.0`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
 - worktree 路径里的 `production-v3.0.24` 是创建时名称，不代表当前线上版本。
