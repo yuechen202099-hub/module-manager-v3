@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from functools import lru_cache
 import importlib.util
 from pathlib import Path
-import shutil
+import subprocess
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_PATH = ROOT / "scripts" / "verify_v3_2_8_release.py"
+V328_SOURCE_COMMIT = "253ff0679238d50a874433301fdc7bd82ceb6223"
 
 ATTESTATION_FIELD_VALUES = {
     "Status": "attested",
@@ -115,18 +117,32 @@ def load_verifier():
     return module
 
 
+@lru_cache(maxsize=1)
+def frozen_contract_files() -> tuple[tuple[str, bytes], ...]:
+    verifier = load_verifier()
+    files: list[tuple[str, bytes]] = []
+    for relative_path in verifier.REQUIRED_FILES:
+        result = subprocess.run(
+            ("git", "show", f"{V328_SOURCE_COMMIT}:{relative_path}"),
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"frozen V3.2.8 fixture is missing {relative_path}: "
+            f"{result.stderr.decode(errors='replace')}"
+        )
+        files.append((relative_path, result.stdout))
+    return tuple(files)
+
+
 def copy_contract_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
-    verifier = load_verifier()
-    for relative_path in verifier.REQUIRED_FILES:
-        source = ROOT / relative_path
+    for relative_path, content in frozen_contract_files():
         target = repo / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_file():
-            shutil.copy2(source, target)
-        else:
-            assert relative_path == verifier.RELEASE_PATH
-            target.write_text("# Pending V3.2.8 fixture\n", encoding="utf-8")
+        target.write_bytes(content)
     return repo
 
 
