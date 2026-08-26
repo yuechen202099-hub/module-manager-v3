@@ -957,6 +957,30 @@ def test_v320_role_route_gate_tracks_canonical_review_workbench_redirect() -> No
     assert 'assert "/global-search?group_id=" not in router_source' in role_route_verifier
 
 
+def test_v320_data_center_ui_gate_accepts_extracted_group_review_panel() -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "verify_v3_2_0_data_center_ui.py")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_v320_single_export_gate_accepts_canonical_review_workbench_redirect() -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "verify_v3_2_0_single_export_entry.py")],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_v321_installer_kpi_release_inputs_are_packaged_and_required() -> None:
     verifier = load_verifier()
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")

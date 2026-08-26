@@ -21,6 +21,7 @@ def main() -> None:
     global_search = read("v2-web/src/views/GlobalSearchView.vue")
     filters = read("v2-web/src/components/data-center/DataCenterFilters.vue")
     dialog = read("v2-web/src/components/data-center/DataCenterReviewDialog.vue")
+    group_review_panel = read("v2-web/src/components/data-center/DataCenterGroupReviewPanel.vue")
     query_composable = read("v2-web/src/composables/useDataCenterQuery.ts")
     services = read("v2-web/src/api/services.ts")
     groups_route = read("v2-api/app/api/routes/groups.py")
@@ -49,10 +50,10 @@ def main() -> None:
         "data center pagination must expose only the supported page sizes",
     )
     assert_contains(global_search, "DataCenterReviewDialog", "global search must use the unified review dialog")
-    assert_contains(dialog, "重新扫码", "review dialog must expose rescan")
-    assert_contains(dialog, "人工确认", "review dialog must expose manual confirmation")
-    assert_contains(dialog, "框选扫码", "review dialog must expose region scan")
-    assert "完成审阅" not in dialog, "ordinary complete-review action is forbidden in unified dialog"
+    assert_contains(group_review_panel, "重新扫码", "review panel must expose rescan")
+    assert_contains(group_review_panel, "人工确认", "review panel must expose manual confirmation")
+    assert_contains(group_review_panel, "框选扫码", "review panel must expose region scan")
+    assert "完成审阅" not in group_review_panel, "ordinary complete-review action is forbidden in unified panel"
     assert_contains(query_composable, "router.replace", "query composable must synchronize filters into the URL")
     assert_contains(query_composable, "AbortController", "query composable must cancel stale data-center requests")
     assert_contains(query_composable, "hasPhotos", "query composable must track the precise has-photos drilldown key")
@@ -250,9 +251,9 @@ def main() -> None:
         '@router.post("/data-center/groups/{group_id}/photos/{photo_id}/region-scan")',
         "backend must expose admin data-center region scan endpoint",
     )
-    assert "classifyPhotoWithGroup" not in dialog, "formal data-center dialog must not use local-test classify"
-    assert "rescanPhotoBarcode" not in dialog, "formal data-center dialog must not use local-test rescan"
-    assert "scanGroupPhotoRegion" not in dialog, "formal data-center dialog must not use local-test region scan"
+    assert "classifyPhotoWithGroup" not in group_review_panel, "formal data-center panel must not use local-test classify"
+    assert "rescanPhotoBarcode" not in group_review_panel, "formal data-center panel must not use local-test rescan"
+    assert "scanGroupPhotoRegion" not in group_review_panel, "formal data-center panel must not use local-test region scan"
     assert_contains(
         services,
         "signal?: AbortSignal",
@@ -274,19 +275,19 @@ def main() -> None:
         "backend must expose admin data-center return exception endpoint",
     )
     assert_contains(
-        dialog,
+        group_review_panel,
         "photoAbortController",
-        "dialog must abort in-flight photo fetches on cleanup",
+        "review panel must abort in-flight photo fetches on cleanup",
     )
     assert_contains(
-        dialog,
+        group_review_panel,
         "fetchGroupPhotoObjectUrl(next.id, photo.id, 'preview',",
-        "dialog must pass AbortSignal into photo object URL fetch",
+        "review panel must pass AbortSignal into photo object URL fetch",
     )
     assert_contains(
-        dialog,
+        group_review_panel,
         "returnDataCenterGroupToException",
-        "formal group dialog must use the data-center return exception service",
+        "formal group review panel must use the data-center return exception service",
     )
     assert_contains(
         dialog,

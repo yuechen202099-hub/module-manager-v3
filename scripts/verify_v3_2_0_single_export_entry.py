@@ -148,9 +148,15 @@ def main() -> None:
     contains(router_source, "path: 'review/:groupId'", "router legacy review redirect")
     contains(
         router_source,
-        "/global-search?group_id=${encodeURIComponent(String(to.params.groupId || ''))}&page=1&page_size=20&review=1",
+        "path: '/review-workbench'",
+        "router legacy review redirect destination",
+    )
+    contains(
+        router_source,
+        "query: { group_id: String(to.params.groupId || '') }",
         "router legacy review redirect query",
     )
+    not_contains(router_source, "/global-search?group_id=", "router retired global-search review redirect")
     not_contains(router_source, "TaskHallView", "router legacy hall component")
     ensure(
         RETIRED_EXPORT_ROUTE_RE.search(router_source) is None,
