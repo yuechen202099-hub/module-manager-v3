@@ -48,6 +48,7 @@ let detailAbortController: AbortController | null = null
 let photoAbortController: AbortController | null = null
 let detailSerial = 0
 let photoSerial = 0
+let groupSerial = 0
 
 const form = reactive({
   meterNo: '',
@@ -93,6 +94,7 @@ function revokeAllPhotoUrls() {
 }
 
 function cleanupDetail() {
+  groupSerial += 1
   detailSerial += 1
   photoSerial += 1
   detailAbortController?.abort()
@@ -105,6 +107,7 @@ function cleanupDetail() {
   errorMessage.value = ''
   loading.value = false
   imageLoading.value = false
+  saving.value = false
 }
 
 function applyDetail(next: DataCenterDetail) {
@@ -336,22 +339,26 @@ async function resetGroup(kind: 'unreviewed' | 'unconstructed') {
 
 async function decideReview(status: 'approved' | 'incomplete') {
   if (!detail.value) return
+  const requestedGroupId = detail.value.id
+  const ownerGroupSerial = groupSerial
+  const isCurrentGroup = () => props.groupId === requestedGroupId && groupSerial === ownerGroupSerial
   saving.value = true
   try {
     await reviewDataCenterGroup(
-      detail.value.id,
+      requestedGroupId,
       status,
       form.reason.trim(),
       status === 'incomplete' ? form.exceptionNote.trim() : '',
     )
+    if (!isCurrentGroup()) return
     const next = await reloadAfterMutation()
     if (!next) return
     emit('review-decided', status)
     ElMessage.success(status === 'approved' ? '已正式通过' : '已标记资料不全')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '审阅决定失败')
+    if (isCurrentGroup()) ElMessage.error(error instanceof Error ? error.message : '审阅决定失败')
   } finally {
-    saving.value = false
+    if (isCurrentGroup()) saving.value = false
   }
 }
 

@@ -335,7 +335,7 @@ export type DataCenterRow = {
   constructionStatus: string
   archiveStatus: string
   exceptionStatus: string
-  reviewStatus?: string
+  reviewStatus: string
   updatedAt: string
 }
 

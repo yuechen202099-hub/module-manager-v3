@@ -21,7 +21,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject }
 }
 
-function detailFixture(id: string, auditAction = `loaded-${id}`): DataCenterDetail {
+function detailFixture(id: string, auditAction = `loaded-${id}`, reviewStatus = 'pending'): DataCenterDetail {
   return {
     kind: 'group',
     id,
@@ -43,7 +43,7 @@ function detailFixture(id: string, auditAction = `loaded-${id}`): DataCenterDeta
     constructionStatus: 'constructed',
     archiveStatus: 'unarchived',
     exceptionStatus: '',
-    reviewStatus: 'pending',
+    reviewStatus,
     updatedAt: '2026-08-26T00:00:00Z',
     photos: [{
       id: `photo-${id}`,
@@ -168,14 +168,21 @@ describe('DataCenterGroupReviewPanel', () => {
     wrapper.unmount()
   })
 
-  it('aborts stale protected images and revokes late, replaced, and unmounted object URLs', async () => {
-    const photoRequests = new Map<string, Deferred<string>>()
+  it('aborts stale protected images and revokes every late, same-photo replacement, and unmounted URL exactly once', async () => {
+    const photoRequests = new Map<string, Array<Deferred<string>>>()
     const photoSignals = new Map<string, AbortSignal>()
+    const createdUrls: string[] = []
+    const resolvePhoto = (request: Deferred<string> | undefined, objectUrl: string) => {
+      createdUrls.push(objectUrl)
+      request?.resolve(objectUrl)
+    }
     apiMock.fetchDataCenterDetail.mockImplementation((_kind, groupId: string) => Promise.resolve(detailFixture(groupId)))
     apiMock.fetchGroupPhotoObjectUrl.mockImplementation(
       (groupId: string, _photoId: string, _kind: string, _version: string, signal: AbortSignal) => {
         const request = deferred<string>()
-        photoRequests.set(groupId, request)
+        const requests = photoRequests.get(groupId) || []
+        requests.push(request)
+        photoRequests.set(groupId, requests)
         photoSignals.set(groupId, signal)
         return request.promise
       },
@@ -186,22 +193,51 @@ describe('DataCenterGroupReviewPanel', () => {
     await wrapper.setProps({ groupId: 'g-2' })
 
     expect(photoSignals.get('g-1')?.aborted).toBe(true)
-    photoRequests.get('g-2')?.resolve('blob:g-2')
+    resolvePhoto(photoRequests.get('g-2')?.[0], 'blob:g-2')
     await flushPromises()
-    photoRequests.get('g-1')?.resolve('blob:g-1-late')
+    resolvePhoto(photoRequests.get('g-1')?.[0], 'blob:g-1-late')
     await flushPromises()
-    expect((URL.revokeObjectURL as ReturnType<typeof vi.fn>).mock.calls.flat()).toContain('blob:g-1-late')
 
-    await wrapper.setProps({ groupId: 'g-3' })
+    await buttonByText(wrapper, '字段修正').trigger('click')
     await flushPromises()
-    expect((URL.revokeObjectURL as ReturnType<typeof vi.fn>).mock.calls.flat()).toContain('blob:g-2')
-    photoRequests.get('g-3')?.resolve('blob:g-3')
+    resolvePhoto(photoRequests.get('g-2')?.[1], 'blob:g-2-replacement')
     await flushPromises()
     wrapper.unmount()
 
-    expect((URL.revokeObjectURL as ReturnType<typeof vi.fn>).mock.calls.flat()).toEqual(
-      expect.arrayContaining(['blob:g-1-late', 'blob:g-2', 'blob:g-3']),
-    )
+    const revokedUrls = (URL.revokeObjectURL as ReturnType<typeof vi.fn>).mock.calls.flat()
+    expect(revokedUrls).toHaveLength(createdUrls.length)
+    expect(new Set(revokedUrls).size).toBe(createdUrls.length)
+    expect([...revokedUrls].sort()).toEqual([...createdUrls].sort())
+  })
+
+  it('discards a review completion when the initiating group is no longer active', async () => {
+    const reviewRequest = deferred<MaterialGroup>()
+    const loadedGroupIds: string[] = []
+    apiMock.fetchDataCenterDetail.mockImplementation((_kind, groupId: string) => {
+      loadedGroupIds.push(groupId)
+      return Promise.resolve(detailFixture(groupId))
+    })
+    apiMock.fetchGroupPhotoObjectUrl.mockImplementation((_groupId, photoId: string) => Promise.resolve(`blob:${photoId}`))
+    apiMock.reviewDataCenterGroup.mockImplementation(() => reviewRequest.promise)
+
+    const wrapper = mountPanel({ groupId: 'g-1' })
+    await flushPromises()
+    await buttonByText(wrapper, '正式通过').trigger('click')
+    await flushPromises()
+    await wrapper.setProps({ groupId: 'g-2' })
+    await flushPromises()
+    const updatedBeforeCompletion = wrapper.emitted('updated')?.length || 0
+    const decidedBeforeCompletion = wrapper.emitted('review-decided')?.length || 0
+
+    reviewRequest.resolve({ id: 'g-1', status: 'approved' } as MaterialGroup)
+    await flushPromises()
+
+    expect(loadedGroupIds).toEqual(['g-1', 'g-2'])
+    expect(wrapper.text()).toContain('meter-g-2')
+    expect(wrapper.text()).not.toContain('meter-g-1')
+    expect(wrapper.emitted('updated')?.length || 0).toBe(updatedBeforeCompletion)
+    expect(wrapper.emitted('review-decided')?.length || 0).toBe(decidedBeforeCompletion)
+    wrapper.unmount()
   })
 
   it.each([
@@ -211,7 +247,7 @@ describe('DataCenterGroupReviewPanel', () => {
     let reviewStatus = 'pending'
     const reviewRequests: Array<{ groupId: string; status: string; note: string; exceptionNote: string }> = []
     apiMock.fetchDataCenterDetail.mockImplementation((_kind, groupId: string) => Promise.resolve(
-      detailFixture(groupId, reviewStatus === 'pending' ? 'server-pending' : `server-${reviewStatus}`),
+      detailFixture(groupId, reviewStatus === 'pending' ? 'server-pending' : `server-${reviewStatus}`, reviewStatus),
     ))
     apiMock.fetchGroupPhotoObjectUrl.mockImplementation((_groupId, photoId: string) => Promise.resolve(`blob:${photoId}:${reviewStatus}`))
     apiMock.reviewDataCenterGroup.mockImplementation((groupId, nextStatus, note, exceptionNote) => {
@@ -229,6 +265,7 @@ describe('DataCenterGroupReviewPanel', () => {
 
     expect(reviewRequests).toEqual([{ groupId: 'g-review', status, note: '', exceptionNote: '' }])
     expect(wrapper.text()).toContain(`server-${status}`)
+    expect(wrapper.text()).toContain(`审阅状态：${status}`)
     expect(wrapper.emitted('review-decided')).toEqual([[status]])
     expect(wrapper.emitted('updated')?.at(-1)?.[0]).toMatchObject({ id: 'g-review' })
     wrapper.unmount()

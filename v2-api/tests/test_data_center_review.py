@@ -142,6 +142,42 @@ def test_admin_can_approve_data_center_group_and_audit_actor(
     assert committed["review_events"][-1]["note"] == "资料核对完成"
 
 
+@pytest.mark.parametrize("status", ["approved", "incomplete"])
+def test_data_center_review_status_survives_list_and_detail_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+    status: str,
+) -> None:
+    """Catches dropping the persisted review state at the data-center serialization boundary."""
+    state = local_simulation.get_state()
+    team_id = state["team_id"]
+    state["tasks"][0]["claimed_by"] = "admin"
+    state["groups"][0]["status"] = "pending"
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+    headers = _review_headers(username="admin", role="admin", team_id=team_id)
+
+    decision = client.patch(
+        "/groups/data-center/groups/g-1/review",
+        headers=headers,
+        json={"status": status, "note": "reviewed", "exception_note": "missing" if status == "incomplete" else ""},
+    )
+    detail = client.get("/groups/data-center/group/g-1", headers=headers)
+    listing = client.get("/groups/data-center", headers=headers)
+
+    assert decision.status_code == 200
+    assert detail.status_code == 200
+    assert listing.status_code == 200
+    persisted = _latest_group()["status"]
+    list_row = next(item for item in listing.json()["data"]["items"] if item["id"] == "g-1")
+    observed = {
+        "persisted": persisted,
+        "detail": detail.json()["data"].get("status"),
+        "list": list_row.get("status"),
+    }
+    assert observed == {"persisted": status, "detail": status, "list": status}
+
+
 @pytest.mark.parametrize("status", ["approved", "incomplete", "exception"])
 def test_constructor_cannot_decide_data_center_review_before_repository(
     monkeypatch: pytest.MonkeyPatch,

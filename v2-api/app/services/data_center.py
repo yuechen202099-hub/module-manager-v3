@@ -176,6 +176,7 @@ def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
         "construction_status": construction_status_from_group(group, photo_count),
         "archive_status": archive_status_from_group(group, photos),
         "exception_status": exception_status_from_group(group),
+        "status": str(group.get("status") or "pending").strip() or "pending",
         "updated_at": group.get("updated_at") or group.get("last_photo_imported_at") or "",
     }
 

@@ -181,6 +181,7 @@ export function useDataCenterQuery() {
       constructionStatus: '',
       archiveStatus: '',
       exceptionStatus: '',
+      reviewStatus: 'pending',
       updatedAt: '',
     }
   })
