@@ -791,6 +791,16 @@ export type CollectorInventoryItem = {
   created_at: string | null
 }
 
+export type CollectorNumberRecognitionMethod = 'manual' | 'barcode' | 'ocr'
+
+export type CollectorNumberCorrectionRequest = {
+  expectedCollectorNo: string
+  expectedPhotoSha256: string
+  collectorNo: string
+  recognitionMethod: CollectorNumberRecognitionMethod
+  region: NormalizedRegion | null
+}
+
 export type CollectorInventoryStats = Record<CollectorPoolStatus, number>
 
 export type CollectorInventoryPage = {

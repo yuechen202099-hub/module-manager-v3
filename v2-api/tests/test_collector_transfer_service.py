@@ -54,6 +54,7 @@ from app.services.collector_transfer import (
     _photo_snapshot,
     meter_sources_from_groups,
 )
+from app.services import photo_barcode_check
 from app.services.state_repository import PostgresStateRepository
 
 
@@ -837,6 +838,269 @@ def test_project_inventory_list_is_project_scoped_and_filters_available_only(
     }
     assert [item["collector_no"] for item in available["items"]] == ["POOL-LIST"]
     assert available["total"] == 1
+
+
+def test_inventory_photo_region_scan_uses_the_current_project_photo(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches scanning a thumbnail, foreign photo, or whole image instead of the selected region."""
+    current_project_id = project_id(db_session)
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=current_project_id,
+        collector_no="OCR-WRONG",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical, sha256="c1" * 32)
+    observed: dict[str, object] = {}
+
+    def scan(photo_payload, barcode_type, region):
+        observed.update(
+            photo=photo_payload,
+            barcode_type=barcode_type,
+            region=dict(region),
+        )
+        return {
+            "barcode_type": "collector",
+            "values": ["COLLECTOR-001"],
+            "normalized_values": ["COLLECTOR-001"],
+            "method": "barcode",
+            "region": dict(region),
+        }
+
+    monkeypatch.setattr(photo_barcode_check, "scan_photo_region", scan)
+    selected = {"x": 0.1, "y": 0.2, "width": 0.7, "height": 0.3}
+
+    result = service(db_session).scan_inventory_photo_region(
+        project_id=str(current_project_id),
+        collector_id=str(physical.id),
+        expected_collector_no="OCR-WRONG",
+        expected_photo_sha256=photo.sha256,
+        region=selected,
+    )
+
+    assert result["normalized_values"] == ["COLLECTOR-001"]
+    assert observed["barcode_type"] == "collector"
+    assert observed["region"] == selected
+    assert observed["photo"] == {
+        "id": str(photo.id),
+        "image_url": "",
+        "object_key": photo.object_key,
+        "storage_type": "local_upload",
+        "sha256": photo.sha256,
+        "content_type": "",
+    }
+
+
+def test_inventory_photo_region_scan_rejects_a_stale_photo_snapshot(
+    db_session: Session,
+) -> None:
+    """Catches a stale modal scanning a newly replaced collector photo."""
+    current_project_id = project_id(db_session)
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=current_project_id,
+        collector_no="OCR-WRONG",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="c3" * 32)
+
+    with pytest.raises(ValueError) as raised:
+        service(db_session).scan_inventory_photo_region(
+            project_id=str(current_project_id),
+            collector_id=str(physical.id),
+            expected_collector_no="OCR-WRONG",
+            expected_photo_sha256="stale-photo-sha",
+            region={"x": 0.1, "y": 0.2, "width": 0.7, "height": 0.3},
+        )
+
+    assert type(raised.value).__name__ == "CollectorInventorySnapshotChangedError"
+
+
+def test_inventory_number_correction_reuses_the_photo_and_rematches_direct(
+    db_session: Session,
+) -> None:
+    """Catches a corrected same-number collector remaining in the random replacement pool."""
+    project, _group = project_with_collector_requirement(
+        db_session,
+        collector_no="DIRECT-CORRECTED",
+    )
+    actor_user(db_session)
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="OCR-WRONG",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical, sha256="c2" * 32)
+    selected = {"x": 0.12, "y": 0.22, "width": 0.66, "height": 0.24}
+
+    result = service(db_session).correct_inventory_number(
+        project_id=str(project.id),
+        collector_id=str(physical.id),
+        expected_collector_no="OCR-WRONG",
+        expected_photo_sha256=photo.sha256,
+        collector_no="DIRECT-CORRECTED",
+        recognition_method="barcode",
+        region=selected,
+    )
+
+    db_session.refresh(physical)
+    db_session.refresh(photo)
+    event = db_session.scalar(
+        select(CollectorScanEvent)
+        .where(CollectorScanEvent.physical_collector_id == physical.id)
+        .order_by(CollectorScanEvent.created_at.desc(), CollectorScanEvent.id.desc())
+    )
+    audit = db_session.scalar(
+        select(AuditLog).where(
+            AuditLog.action == "collector_transfer.inventory_number_corrected",
+            AuditLog.entity_id == physical.id,
+        )
+    )
+
+    assert result["collector_no"] == "DIRECT-CORRECTED"
+    assert result["decision"] == "direct_reuse"
+    assert result["pool_status"] == "direct"
+    assert physical.collector_no == "DIRECT-CORRECTED"
+    assert physical.pool_status == "direct"
+    assert photo.physical_collector_id == physical.id
+    assert event.scanned_value == "DIRECT-CORRECTED"
+    assert event.decision == "direct_reuse"
+    assert audit.actor_username == "operator"
+    assert audit.payload == {
+        "before_collector_no": "OCR-WRONG",
+        "after_collector_no": "DIRECT-CORRECTED",
+        "before_pool_status": "available",
+        "after_pool_status": "direct",
+        "recognition_method": "barcode",
+        "region": selected,
+        "photo_id": str(photo.id),
+        "photo_sha256": photo.sha256,
+    }
+
+
+def test_inventory_number_correction_without_photo_requires_a_photo_for_pool(
+    db_session: Session,
+) -> None:
+    """Catches a corrected non-matching collector entering the pool without evidence."""
+    current_project_id = project_id(db_session)
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=current_project_id,
+        collector_no="DIRECT-WRONG",
+        pool_status="direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+
+    result = service(db_session).correct_inventory_number(
+        project_id=str(current_project_id),
+        collector_id=str(physical.id),
+        expected_collector_no="DIRECT-WRONG",
+        expected_photo_sha256="",
+        collector_no="POOL-CORRECTED",
+        recognition_method="manual",
+        region=None,
+    )
+
+    db_session.refresh(physical)
+    assert result["requires_photo"] is True
+    assert result["pool_status"] == "awaiting_photo"
+    assert physical.collector_no == "POOL-CORRECTED"
+    assert physical.pool_status == "awaiting_photo"
+
+
+@pytest.mark.parametrize("pool_status", ["reserved", "used"])
+def test_inventory_number_correction_blocks_consumed_collectors(
+    db_session: Session,
+    pool_status: str,
+) -> None:
+    """Catches editing an allocated collector without first rolling its assignment back."""
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project_id(db_session),
+        collector_no=f"LOCKED-{pool_status}",
+        pool_status=pool_status,
+    )
+    db_session.add(physical)
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="rollback") as raised:
+        service(db_session).correct_inventory_number(
+            project_id=str(physical.project_id),
+            collector_id=str(physical.id),
+            expected_collector_no=physical.collector_no,
+            expected_photo_sha256="",
+            collector_no=f"CORRECTED-{pool_status}",
+            recognition_method="manual",
+            region=None,
+        )
+
+    assert type(raised.value).__name__ == "CollectorInventoryAssignmentLockedError"
+    db_session.refresh(physical)
+    assert physical.collector_no == f"LOCKED-{pool_status}"
+
+
+def test_inventory_number_correction_rejects_stale_or_duplicate_targets(
+    db_session: Session,
+) -> None:
+    """Catches stale pages overwriting newer numbers or silently merging two physical devices."""
+    current_project_id = project_id(db_session)
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=current_project_id,
+        collector_no="CURRENT-NO",
+        pool_status="available",
+    )
+    duplicate = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=current_project_id,
+        collector_no="DUPLICATE-NO",
+        pool_status="available",
+    )
+    db_session.add_all([physical, duplicate])
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="changed") as stale:
+        service(db_session).correct_inventory_number(
+            project_id=str(current_project_id),
+            collector_id=str(physical.id),
+            expected_collector_no="STALE-NO",
+            expected_photo_sha256="",
+            collector_no="NEW-NO",
+            recognition_method="manual",
+            region=None,
+        )
+    with pytest.raises(ValueError, match="already exists") as duplicate_error:
+        service(db_session).correct_inventory_number(
+            project_id=str(current_project_id),
+            collector_id=str(physical.id),
+            expected_collector_no="CURRENT-NO",
+            expected_photo_sha256="",
+            collector_no="DUPLICATE-NO",
+            recognition_method="manual",
+            region=None,
+        )
+
+    assert type(stale.value).__name__ == "CollectorInventorySnapshotChangedError"
+    assert type(duplicate_error.value).__name__ == "CollectorInventoryNumberConflictError"
+    db_session.refresh(physical)
+    assert physical.collector_no == "CURRENT-NO"
 
 
 def test_archived_project_inventory_request_has_zero_side_effects(db_session: Session) -> None:

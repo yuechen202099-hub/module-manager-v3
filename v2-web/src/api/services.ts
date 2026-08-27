@@ -9,6 +9,7 @@ import type {
   CollectorAllocationResult,
   CollectorInventoryDecision,
   CollectorInventoryPage,
+  CollectorNumberCorrectionRequest,
   CollectorPhotoRegistration,
   GlobalCollectorTerminalCandidate,
   GlobalCollectorTerminalDetail,
@@ -2991,6 +2992,49 @@ export async function fetchProjectCollectorInventory(
 ): Promise<CollectorInventoryPage> {
   const query = new URLSearchParams({ project_id: projectId })
   return api<CollectorInventoryPage>(`/collector-transfer/inventory?${query.toString()}`)
+}
+
+export async function scanCollectorInventoryPhotoRegion(
+  projectId: string,
+  collectorId: string,
+  expectedCollectorNo: string,
+  expectedPhotoSha256: string,
+  region: RegionScanResult['region'],
+): Promise<RegionScanResult> {
+  const data = await api<BackendRegionScanResult>(
+    `/collector-transfer/inventory/${encodeURIComponent(collectorId)}/photo/region-scan`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        project_id: projectId,
+        expected_collector_no: expectedCollectorNo,
+        expected_photo_sha256: expectedPhotoSha256,
+        region,
+      }),
+    },
+  )
+  return mapRegionScanResult(data)
+}
+
+export async function correctProjectCollectorNumber(
+  projectId: string,
+  collectorId: string,
+  request: CollectorNumberCorrectionRequest,
+): Promise<CollectorInventoryDecision> {
+  return api<CollectorInventoryDecision>(
+    `/collector-transfer/inventory/${encodeURIComponent(collectorId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({
+        project_id: projectId,
+        expected_collector_no: request.expectedCollectorNo,
+        expected_photo_sha256: request.expectedPhotoSha256,
+        collector_no: request.collectorNo,
+        recognition_method: request.recognitionMethod,
+        region: request.region,
+      }),
+    },
+  )
 }
 
 export async function allocateCollectorPool(runId: string): Promise<CollectorAllocationResult> {

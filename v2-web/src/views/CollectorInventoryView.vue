@@ -3,14 +3,19 @@ import { ElMessage } from 'element-plus'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import {
+  correctProjectCollectorNumber,
   fetchProjectCollectorInventory,
   registerProjectCollector,
+  scanCollectorInventoryPhotoRegion,
   scanProjectCollector,
 } from '@/api/services'
 import type {
   CollectorInventoryDecision,
+  CollectorInventoryItem,
   CollectorInventoryPage,
+  CollectorNumberRecognitionMethod,
   CollectorPhotoRegistration,
+  NormalizedRegion,
 } from '@/api/types'
 import { inventoryResultPresentation } from '@/features/collectorTransfer/state'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -62,6 +67,14 @@ const localPhotoUrl = ref('')
 const video = ref<HTMLVideoElement | null>(null)
 const photoInput = ref<HTMLInputElement | null>(null)
 const pendingPhoto = ref<File | null>(null)
+const correctionItem = ref<CollectorInventoryItem | null>(null)
+const correctionNo = ref('')
+const correctionRegion = ref<NormalizedRegion | null>(null)
+const correctionRecognitionMethod = ref<CollectorNumberRecognitionMethod>('manual')
+const correctionSuggestion = ref('')
+const correctionScanning = ref(false)
+const correctionSaving = ref(false)
+const selectionStart = ref<{ x: number; y: number } | null>(null)
 const completedCollectorNos = new Set<string>()
 
 let mediaStream: MediaStream | null = null
@@ -124,6 +137,36 @@ const cameraStatusMessage = computed(() => {
   if (cameraStatus.value === 'denied') return '摄像头不可用，请手工输入或使用扫码枪'
   return '手工输入与外接扫码枪始终可用'
 })
+const correctionLocked = computed(() => (
+  correctionItem.value?.pool_status === 'reserved' || correctionItem.value?.pool_status === 'used'
+))
+const correctionPhotoUrl = computed(() => {
+  const photo = correctionItem.value?.photo
+  return photo?.canonical_image_url
+    || photo?.preview_url
+    || photo?.image_url
+    || photo?.thumbnail_url
+    || ''
+})
+const correctionSelectionStyle = computed(() => {
+  const region = correctionRegion.value
+  if (!region) return {}
+  return {
+    left: `${region.x * 100}%`,
+    top: `${region.y * 100}%`,
+    width: `${region.width * 100}%`,
+    height: `${region.height * 100}%`,
+  }
+})
+const correctionCanConfirm = computed(() => {
+  const item = correctionItem.value
+  return Boolean(
+    item
+    && !correctionLocked.value
+    && correctionNo.value.trim()
+    && correctionNo.value.trim() !== item.collector_no,
+  )
+})
 
 onMounted(() => {
   if (activeProjectId.value) void loadInventory(activeProjectId.value)
@@ -179,6 +222,7 @@ function resetProjectContext() {
   stopCamera()
   releaseLocalPhotoUrl()
   pendingPhoto.value = null
+  closeInventoryCorrection()
   collectorNo.value = ''
   result.value = null
   inventory.value = structuredClone(EMPTY_INVENTORY)
@@ -667,6 +711,138 @@ function setMobileView(view: MobileView) {
   mobileView.value = view
 }
 
+function openInventoryCorrection(item: CollectorInventoryItem) {
+  correctionItem.value = item
+  correctionNo.value = item.collector_no
+  correctionRegion.value = null
+  correctionRecognitionMethod.value = 'manual'
+  correctionSuggestion.value = ''
+  correctionScanning.value = false
+  correctionSaving.value = false
+  selectionStart.value = null
+}
+
+function closeInventoryCorrection() {
+  correctionItem.value = null
+  correctionNo.value = ''
+  correctionRegion.value = null
+  correctionRecognitionMethod.value = 'manual'
+  correctionSuggestion.value = ''
+  correctionScanning.value = false
+  correctionSaving.value = false
+  selectionStart.value = null
+}
+
+function normalizedPointer(event: PointerEvent) {
+  const target = event.currentTarget as HTMLElement | null
+  if (!target) return null
+  const rect = target.getBoundingClientRect()
+  if (!rect.width || !rect.height) return null
+  const clamp = (value: number) => Math.min(1, Math.max(0, value))
+  return {
+    x: clamp((event.clientX - rect.left) / rect.width),
+    y: clamp((event.clientY - rect.top) / rect.height),
+  }
+}
+
+function updateCorrectionRegion(event: PointerEvent) {
+  const start = selectionStart.value
+  const point = normalizedPointer(event)
+  if (!start || !point) return
+  const round = (value: number) => Number(value.toFixed(4))
+  correctionRegion.value = {
+    x: round(Math.min(start.x, point.x)),
+    y: round(Math.min(start.y, point.y)),
+    width: round(Math.abs(point.x - start.x)),
+    height: round(Math.abs(point.y - start.y)),
+  }
+}
+
+function beginCorrectionRegion(event: PointerEvent) {
+  if (correctionLocked.value || !correctionPhotoUrl.value) return
+  const point = normalizedPointer(event)
+  if (!point) return
+  selectionStart.value = point
+  correctionRegion.value = { x: point.x, y: point.y, width: 0, height: 0 }
+  correctionSuggestion.value = ''
+}
+
+function moveCorrectionRegion(event: PointerEvent) {
+  updateCorrectionRegion(event)
+}
+
+function finishCorrectionRegion(event: PointerEvent) {
+  updateCorrectionRegion(event)
+  selectionStart.value = null
+}
+
+function markCorrectionManual() {
+  correctionRecognitionMethod.value = 'manual'
+  correctionSuggestion.value = ''
+  correctionRegion.value = null
+}
+
+async function scanCorrectionRegion() {
+  const item = correctionItem.value
+  const region = correctionRegion.value
+  const photo = item?.photo
+  const projectId = activeProjectId.value
+  if (!item || !photo || !projectId || !region || correctionLocked.value) return
+  if (region.width <= 0 || region.height <= 0) return
+  correctionScanning.value = true
+  try {
+    const recognized = await scanCollectorInventoryPhotoRegion(
+      projectId,
+      item.collector_id,
+      item.collector_no,
+      photo.sha256 || '',
+      region,
+    )
+    const suggestion = recognized.normalizedValues[0] || recognized.values[0] || ''
+    if (!suggestion) {
+      correctionSuggestion.value = '框选区域未识别到编号，请重新框选或手工输入。'
+      return
+    }
+    correctionNo.value = suggestion
+    correctionRecognitionMethod.value = recognized.method === 'ocr' ? 'ocr' : 'barcode'
+    correctionRegion.value = { ...recognized.region }
+    correctionSuggestion.value = `识别建议：${suggestion}。仅作建议，确认后才会修改。`
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '框选区域识别失败')
+  } finally {
+    correctionScanning.value = false
+  }
+}
+
+async function confirmInventoryCorrection() {
+  const item = correctionItem.value
+  const projectId = activeProjectId.value
+  if (!item || !projectId || !correctionCanConfirm.value) return
+  correctionSaving.value = true
+  try {
+    await correctProjectCollectorNumber(
+      projectId,
+      item.collector_id,
+      {
+        expectedCollectorNo: item.collector_no,
+        expectedPhotoSha256: item.photo?.sha256 || '',
+        collectorNo: correctionNo.value.trim(),
+        recognitionMethod: correctionRecognitionMethod.value,
+        region: correctionRecognitionMethod.value === 'manual'
+          ? null
+          : correctionRegion.value,
+      },
+    )
+    await loadInventory(projectId)
+    ElMessage.success('采集器编号已修改并重新匹配')
+    closeInventoryCorrection()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '采集器编号修改失败')
+  } finally {
+    correctionSaving.value = false
+  }
+}
+
 function releaseLocalPhotoUrl() {
   if (!localPhotoUrl.value) return
   URL.revokeObjectURL(localPhotoUrl.value)
@@ -826,12 +1002,20 @@ function releaseLocalPhotoUrl() {
           </div>
           <div v-if="inventory.items.length" class="record-list">
             <article v-for="item in inventory.items" :key="item.collector_id">
-              <img
-                v-if="item.photo?.thumbnail_url || item.photo?.preview_url || item.photo?.image_url"
-                :src="item.photo.thumbnail_url || item.photo.preview_url || item.photo.image_url"
-                alt="采集器缩略图"
+              <button
+                class="record-photo-button"
+                type="button"
+                data-testid="open-inventory-photo"
+                :aria-label="`查看并校正采集器 ${item.collector_no}`"
+                @click="openInventoryCorrection(item)"
               >
-              <span v-else class="record-placeholder">⌗</span>
+                <img
+                  v-if="item.photo?.thumbnail_url || item.photo?.preview_url || item.photo?.image_url"
+                  :src="item.photo.thumbnail_url || item.photo.preview_url || item.photo.image_url"
+                  alt="采集器缩略图"
+                >
+                <span v-else class="record-placeholder">⌗</span>
+              </button>
               <div>
                 <strong>{{ item.collector_no }}</strong>
                 <small>{{ item.last_scanned_at || item.created_at || '暂无时间' }}</small>
@@ -892,6 +1076,101 @@ function releaseLocalPhotoUrl() {
           <p class="scan-hint" data-testid="scan-feedback" aria-live="polite">
             {{ scanFeedback || '将采集器条形码横向放入框内' }}
           </p>
+        </div>
+      </section>
+    </div>
+
+    <div
+      v-if="correctionItem"
+      class="correction-backdrop"
+      data-testid="inventory-photo-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="采集器照片与编号校正"
+      @click.self="closeInventoryCorrection"
+    >
+      <section class="correction-panel">
+        <header class="correction-head">
+          <div>
+            <strong>采集器照片与编号校正</strong>
+            <span>{{ correctionItem.collector_no }} · {{ correctionItem.pool_status }}</span>
+          </div>
+          <button type="button" aria-label="关闭校正" @click="closeInventoryCorrection">×</button>
+        </header>
+
+        <div v-if="correctionPhotoUrl" class="correction-photo-wrap">
+          <div
+            class="correction-selection-surface"
+            data-testid="inventory-photo-selection-surface"
+            @pointerdown.prevent="beginCorrectionRegion"
+            @pointermove.prevent="moveCorrectionRegion"
+            @pointerup.prevent="finishCorrectionRegion"
+          >
+            <img
+              :src="correctionPhotoUrl"
+              data-testid="inventory-photo-large-image"
+              alt="采集器原始大图"
+              draggable="false"
+            >
+            <span
+              v-if="correctionRegion && correctionRegion.width > 0 && correctionRegion.height > 0"
+              class="correction-selection-box"
+              :style="correctionSelectionStyle"
+            />
+          </div>
+          <p v-if="!correctionLocked">在照片上拖动框选条码区域，再点击识别。</p>
+        </div>
+        <div v-else class="correction-no-photo">该采集器暂无照片，可直接手工修改编号。</div>
+
+        <p
+          v-if="correctionLocked"
+          class="correction-locked"
+          data-testid="inventory-correction-locked"
+        >
+          该采集器已占用或已使用，请先回滚分配后再修改编号。
+        </p>
+
+        <div v-if="!correctionLocked && correctionPhotoUrl" class="correction-scan-action">
+          <button
+            type="button"
+            data-testid="scan-inventory-photo-region"
+            :disabled="!correctionRegion || correctionRegion.width <= 0 || correctionRegion.height <= 0 || correctionScanning"
+            @click="scanCorrectionRegion"
+          >
+            {{ correctionScanning ? '识别中…' : '识别框选区域' }}
+          </button>
+        </div>
+        <p
+          v-if="correctionSuggestion"
+          class="correction-suggestion"
+          data-testid="inventory-recognition-suggestion"
+          aria-live="polite"
+        >
+          {{ correctionSuggestion }}
+        </p>
+
+        <label class="correction-number-field">
+          <span>采集器编号</span>
+          <input
+            v-model="correctionNo"
+            data-testid="inventory-correction-number"
+            autocomplete="off"
+            :disabled="correctionLocked || correctionSaving"
+            @input="markCorrectionManual"
+          >
+        </label>
+        <div class="correction-actions">
+          <button type="button" class="secondary-button" @click="closeInventoryCorrection">关闭</button>
+          <button
+            v-if="!correctionLocked"
+            type="button"
+            class="primary-button"
+            data-testid="confirm-inventory-number-correction"
+            :disabled="!correctionCanConfirm || correctionSaving"
+            @click="confirmInventoryCorrection"
+          >
+            {{ correctionSaving ? '保存中…' : '确认修改并重新匹配' }}
+          </button>
         </div>
       </section>
     </div>
@@ -1294,9 +1573,12 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   background: white;
 }
 
+.record-photo-button,
 .record-list img,
 .record-placeholder { width: 52px; height: 52px; border-radius: 10px; }
 .record-list img { object-fit: cover; }
+.record-photo-button { overflow: hidden; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.record-photo-button:focus-visible { outline: 3px solid rgba(20, 122, 76, 0.3); outline-offset: 2px; }
 .record-placeholder { display: grid; place-items: center; background: #e9eff5; color: #52677e; }
 .record-list article > div { display: grid; min-width: 0; gap: 4px; }
 .record-list article strong { overflow-wrap: anywhere; }
@@ -1304,6 +1586,89 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .record-list em { padding: 4px 7px; border-radius: 999px; background: #edf3f8; color: #52677e; font-size: 10px; font-style: normal; }
 .record-list em.status-available { background: #e6f6ec; color: #17643b; }
 .record-list em.status-used { background: #f2e9e9; color: #923a3a; }
+
+.correction-backdrop {
+  position: fixed;
+  z-index: 90;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(10, 24, 40, 0.72);
+}
+
+.correction-panel {
+  display: grid;
+  width: min(680px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 18px;
+  background: white;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.3);
+}
+
+.correction-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.correction-head div { display: grid; gap: 3px; }
+.correction-head span { color: #718096; font-size: 12px; }
+.correction-head button { width: 40px; height: 40px; border: 0; border-radius: 50%; background: #edf2f7; font-size: 24px; }
+
+.correction-photo-wrap { display: grid; justify-items: center; gap: 8px; }
+.correction-photo-wrap p { margin: 0; color: #52677e; font-size: 12px; }
+
+.correction-selection-surface {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #17212c;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+.correction-selection-surface img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: 52vh;
+  object-fit: contain;
+}
+
+.correction-selection-box {
+  position: absolute;
+  border: 2px solid #34d399;
+  background: rgba(52, 211, 153, 0.16);
+  box-shadow: 0 0 0 9999px rgba(3, 11, 19, 0.36);
+  pointer-events: none;
+}
+
+.correction-no-photo,
+.correction-locked,
+.correction-suggestion {
+  margin: 0;
+  padding: 11px 12px;
+  border-radius: 10px;
+}
+
+.correction-no-photo { background: #eef3f8; color: #52677e; }
+.correction-locked { background: #fff2dc; color: #8a5200; }
+.correction-suggestion { background: #e8f6ee; color: #17643b; }
+.correction-scan-action { display: flex; justify-content: center; }
+.correction-scan-action button { min-height: 42px; padding: 0 16px; border: 1px solid #9bcdb2; border-radius: 10px; background: #eef9f2; color: #17643b; font-weight: 700; }
+
+.correction-number-field { display: grid; gap: 6px; font-weight: 700; }
+.correction-number-field input { min-height: 44px; padding: 0 12px; border: 1px solid #c8d3df; border-radius: 10px; font: inherit; }
+.correction-actions { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; }
+.correction-actions button { min-height: 44px; border-radius: 10px; font-weight: 700; }
 
 .bottom-nav {
   display: grid;

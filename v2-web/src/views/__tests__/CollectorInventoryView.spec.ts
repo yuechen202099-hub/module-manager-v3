@@ -10,7 +10,9 @@ const serviceMocks = vi.hoisted(() => ({
   fetchCollectorTransferProjects: vi.fn(),
   fetchCollectorTransferRuns: vi.fn(),
   fetchProjectCollectorInventory: vi.fn(),
+  correctProjectCollectorNumber: vi.fn(),
   registerProjectCollector: vi.fn(),
+  scanCollectorInventoryPhotoRegion: vi.fn(),
   scanPhysicalCollector: vi.fn(),
   scanProjectCollector: vi.fn(),
   uploadPhysicalCollectorPhoto: vi.fn(),
@@ -69,6 +71,34 @@ const emptyInventory = {
   items: [],
   total: 0,
   stats: { direct: 0, available: 0, reserved: 0, used: 0, awaiting_photo: 0 },
+}
+
+function inventoryWithCollector(poolStatus: 'direct' | 'available' | 'reserved' | 'used' = 'available') {
+  return {
+    items: [{
+      collector_id: 'collector-1',
+      collector_no: 'OCR-WRONG',
+      pool_status: poolStatus,
+      photo: {
+        id: 'photo-1',
+        canonical_image_url: '/photos/full.jpg',
+        preview_url: '/photos/preview.jpg',
+        thumbnail_url: '/photos/thumb.jpg',
+        image_url: '/photos/image.jpg',
+        sha256: 'c2'.repeat(32),
+      },
+      last_scanned_at: '2026-08-24T10:00:00Z',
+      created_at: '2026-08-24T10:00:00Z',
+    }],
+    total: 1,
+    stats: {
+      direct: poolStatus === 'direct' ? 1 : 0,
+      available: poolStatus === 'available' ? 1 : 0,
+      reserved: poolStatus === 'reserved' ? 1 : 0,
+      used: poolStatus === 'used' ? 1 : 0,
+      awaiting_photo: 0,
+    },
+  }
 }
 
 async function mountPage() {
@@ -705,6 +735,119 @@ describe('CollectorInventoryView', () => {
     expect(serviceMocks.fetchProjectCollectorInventory).toHaveBeenCalledWith('project-1')
     wrapper.unmount()
   })
+
+  it('opens the original collector photo in a large correction dialog', async () => {
+    serviceMocks.fetchProjectCollectorInventory.mockResolvedValue(inventoryWithCollector())
+    const wrapper = await mountPage()
+    await wrapper.get('nav.bottom-nav button[aria-label="盘点记录"]').trigger('click')
+
+    await wrapper.get('[data-testid="open-inventory-photo"]').trigger('click')
+
+    expect(wrapper.get('[data-testid="inventory-photo-dialog"]').attributes('aria-modal')).toBe('true')
+    expect(wrapper.get<HTMLImageElement>('[data-testid="inventory-photo-large-image"]').attributes('src'))
+      .toBe('/photos/full.jpg')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="inventory-correction-number"]').element.value)
+      .toBe('OCR-WRONG')
+    wrapper.unmount()
+  })
+
+  it('uses the manually selected photo region as a suggestion without changing the number', async () => {
+    serviceMocks.fetchProjectCollectorInventory.mockResolvedValue(inventoryWithCollector())
+    serviceMocks.scanCollectorInventoryPhotoRegion.mockResolvedValue({
+      barcodeType: 'collector',
+      values: ['CORRECTED-001'],
+      normalizedValues: ['CORRECTED-001'],
+      method: 'barcode',
+      region: { x: 0.1, y: 0.2, width: 0.7, height: 0.3 },
+    })
+    const wrapper = await mountPage()
+    await wrapper.get('nav.bottom-nav button[aria-label="盘点记录"]').trigger('click')
+    await wrapper.get('[data-testid="open-inventory-photo"]').trigger('click')
+    const surface = wrapper.get('[data-testid="inventory-photo-selection-surface"]')
+    vi.spyOn(surface.element, 'getBoundingClientRect').mockReturnValue({
+      left: 10,
+      top: 20,
+      width: 200,
+      height: 100,
+      right: 210,
+      bottom: 120,
+      x: 10,
+      y: 20,
+      toJSON: () => ({}),
+    } as DOMRect)
+
+    await surface.trigger('pointerdown', { clientX: 30, clientY: 40 })
+    await surface.trigger('pointermove', { clientX: 170, clientY: 70 })
+    await surface.trigger('pointerup', { clientX: 170, clientY: 70 })
+    await wrapper.get('[data-testid="scan-inventory-photo-region"]').trigger('click')
+    await flushPromises()
+
+    expect(serviceMocks.scanCollectorInventoryPhotoRegion).toHaveBeenCalledWith(
+      'project-1',
+      'collector-1',
+      'OCR-WRONG',
+      'c2'.repeat(32),
+      { x: 0.1, y: 0.2, width: 0.7, height: 0.3 },
+    )
+    expect(wrapper.get<HTMLInputElement>('[data-testid="inventory-correction-number"]').element.value)
+      .toBe('CORRECTED-001')
+    expect(wrapper.get('[data-testid="inventory-recognition-suggestion"]').text()).toContain('仅作建议')
+    expect(serviceMocks.correctProjectCollectorNumber).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('confirms a manual number correction and refreshes the project inventory', async () => {
+    serviceMocks.fetchProjectCollectorInventory.mockResolvedValue(inventoryWithCollector())
+    serviceMocks.correctProjectCollectorNumber.mockResolvedValue({
+      collector_id: 'collector-1',
+      collector_no: 'MANUAL-001',
+      decision: 'pool_needs_photo',
+      requires_photo: false,
+      add_to_pool: true,
+      pool_status: 'available',
+      photo: inventoryWithCollector().items[0].photo,
+    })
+    const wrapper = await mountPage()
+    await wrapper.get('nav.bottom-nav button[aria-label="盘点记录"]').trigger('click')
+    await wrapper.get('[data-testid="open-inventory-photo"]').trigger('click')
+    await wrapper.get('[data-testid="inventory-correction-number"]').setValue('MANUAL-001')
+
+    await wrapper.get('[data-testid="confirm-inventory-number-correction"]').trigger('click')
+    await flushPromises()
+
+    expect(serviceMocks.correctProjectCollectorNumber).toHaveBeenCalledWith(
+      'project-1',
+      'collector-1',
+      {
+        expectedCollectorNo: 'OCR-WRONG',
+        expectedPhotoSha256: 'c2'.repeat(32),
+        collectorNo: 'MANUAL-001',
+        recognitionMethod: 'manual',
+        region: null,
+      },
+    )
+    expect(serviceMocks.fetchProjectCollectorInventory).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('[data-testid="inventory-photo-dialog"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each(['reserved', 'used'] as const)(
+    'keeps %s inventory viewable but disables region scan and number correction',
+    async (poolStatus) => {
+      serviceMocks.fetchProjectCollectorInventory.mockResolvedValue(inventoryWithCollector(poolStatus))
+      const wrapper = await mountPage()
+      await wrapper.get('nav.bottom-nav button[aria-label="盘点记录"]').trigger('click')
+      await wrapper.get('[data-testid="open-inventory-photo"]').trigger('click')
+
+      expect(wrapper.find('[data-testid="inventory-photo-large-image"]').exists()).toBe(true)
+      expect(wrapper.get('[data-testid="inventory-correction-number"]').attributes('disabled')).toBeDefined()
+      expect(wrapper.find('[data-testid="scan-inventory-photo-region"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="confirm-inventory-number-correction"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="inventory-correction-locked"]').text()).toContain('先回滚')
+      expect(serviceMocks.correctProjectCollectorNumber).not.toHaveBeenCalled()
+      wrapper.unmount()
+    },
+  )
 
   it('revokes the local preview on unmount without creating another registration', async () => {
     serviceMocks.scanProjectCollector.mockResolvedValue(

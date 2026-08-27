@@ -15,6 +15,9 @@ from app.core import security
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorDirectConflictError,
+    CollectorInventoryAssignmentLockedError,
+    CollectorInventoryNumberConflictError,
+    CollectorInventorySnapshotChangedError,
     CollectorPhotoConflictError,
     CollectorRunBlockedError,
     CollectorSnapshotChangedError,
@@ -77,6 +80,28 @@ class FakeCollectorTransferService:
             "items": [{"collector_id": "collector-1", "collector_no": "000123", "pool_status": "available"}],
             "total": 1,
             "stats": {"direct": 0, "available": 1, "reserved": 0, "used": 0, "awaiting_photo": 0},
+        }
+
+    def scan_inventory_photo_region(self, **payload) -> dict:
+        self.calls.append(("scan_inventory_photo_region", payload))
+        return {
+            "barcode_type": "collector",
+            "values": ["COLLECTOR-001"],
+            "normalized_values": ["COLLECTOR-001"],
+            "method": "barcode",
+            "region": payload["region"],
+        }
+
+    def correct_inventory_number(self, **payload) -> dict:
+        self.calls.append(("correct_inventory_number", payload))
+        return {
+            "collector_id": payload["collector_id"],
+            "collector_no": payload["collector_no"],
+            "decision": "direct_reuse",
+            "requires_photo": False,
+            "add_to_pool": False,
+            "pool_status": "direct",
+            "photo": {"id": "photo-1"},
         }
 
     def allocate(self, *, run_id: str) -> dict:
@@ -527,6 +552,151 @@ def test_project_inventory_list_accepts_only_known_status_filters(monkeypatch) -
             {"project_id": "11111111-1111-1111-1111-111111111111", "status": "available"},
         )
     ]
+
+
+def test_inventory_photo_region_scan_forwards_the_locked_snapshot(monkeypatch) -> None:
+    """Catches scanning a client-selected region without binding it to the visible record snapshot."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+    region = {"x": 0.1, "y": 0.2, "width": 0.7, "height": 0.3}
+
+    response = client.post(
+        "/collector-transfer/inventory/collector-1/photo/region-scan",
+        headers=auth_headers(),
+        json={
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "expected_collector_no": "OCR-WRONG",
+            "expected_photo_sha256": "c1" * 32,
+            "region": region,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["normalized_values"] == ["COLLECTOR-001"]
+    assert service.calls == [
+        (
+            "scan_inventory_photo_region",
+            {
+                "project_id": "11111111-1111-1111-1111-111111111111",
+                "collector_id": "collector-1",
+                "expected_collector_no": "OCR-WRONG",
+                "expected_photo_sha256": "c1" * 32,
+                "region": region,
+            },
+        )
+    ]
+
+
+def test_inventory_number_correction_forwards_manual_confirmation(monkeypatch) -> None:
+    """Catches a recognition suggestion mutating inventory without the explicit PATCH confirmation."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+    region = {"x": 0.12, "y": 0.22, "width": 0.66, "height": 0.24}
+
+    response = client.patch(
+        "/collector-transfer/inventory/collector-1",
+        headers=auth_headers(),
+        json={
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "expected_collector_no": "OCR-WRONG",
+            "expected_photo_sha256": "c2" * 32,
+            "collector_no": "DIRECT-CORRECTED",
+            "recognition_method": "barcode",
+            "region": region,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["collector_no"] == "DIRECT-CORRECTED"
+    assert service.calls == [
+        (
+            "correct_inventory_number",
+            {
+                "project_id": "11111111-1111-1111-1111-111111111111",
+                "collector_id": "collector-1",
+                "expected_collector_no": "OCR-WRONG",
+                "expected_photo_sha256": "c2" * 32,
+                "collector_no": "DIRECT-CORRECTED",
+                "recognition_method": "barcode",
+                "region": region,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (CollectorInventorySnapshotChangedError("changed"), "inventory_snapshot_changed"),
+        (CollectorInventoryAssignmentLockedError("rollback"), "inventory_assignment_locked"),
+        (CollectorInventoryNumberConflictError("exists"), "inventory_number_conflict"),
+    ],
+)
+def test_inventory_number_correction_maps_stable_conflicts(monkeypatch, error, code) -> None:
+    """Catches inventory concurrency conflicts falling through to an unstable generic 400 response."""
+    service = FakeCollectorTransferService()
+
+    def fail(**_payload):
+        raise error
+
+    monkeypatch.setattr(service, "correct_inventory_number", fail)
+    client = client_with_service(monkeypatch, service, raise_server_exceptions=False)
+    response = client.patch(
+        "/collector-transfer/inventory/collector-1",
+        headers=auth_headers(),
+        json={
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "expected_collector_no": "OCR-WRONG",
+            "expected_photo_sha256": "c2" * 32,
+            "collector_no": "DIRECT-CORRECTED",
+            "recognition_method": "manual",
+            "region": None,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == code
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        (
+            "post",
+            "/collector-transfer/inventory/collector-1/photo/region-scan",
+            {
+                "project_id": "11111111-1111-1111-1111-111111111111",
+                "expected_collector_no": "OCR-WRONG",
+                "expected_photo_sha256": "c1" * 32,
+                "region": {"x": 0.1, "y": 0.2, "width": 0.7, "height": 0.3},
+                "actor": "spoofed",
+            },
+        ),
+        (
+            "patch",
+            "/collector-transfer/inventory/collector-1",
+            {
+                "project_id": "11111111-1111-1111-1111-111111111111",
+                "expected_collector_no": "OCR-WRONG",
+                "expected_photo_sha256": "c2" * 32,
+                "collector_no": "DIRECT-CORRECTED",
+                "recognition_method": "manual",
+                "region": None,
+                "pool_status": "available",
+            },
+        ),
+    ],
+)
+def test_inventory_photo_tools_reject_extra_fields(monkeypatch, method, path, payload) -> None:
+    """Catches clients spoofing actor or server-owned inventory state in correction requests."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+
+    response = getattr(client, method)(path, headers=auth_headers(), json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert service.calls == []
 
 
 def test_pool_shortage_is_a_conflict_with_no_partial_success_payload(monkeypatch) -> None:

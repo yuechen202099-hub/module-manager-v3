@@ -57,6 +57,7 @@ from app.models import (
 )
 from app.services.barcode_verification_contract import resolve_persisted_barcode_verification
 from app.services.local_simulation import is_placeholder_formal_identity_value
+from app.services import photo_barcode_check
 from app.services.photo_storage import resolve_photo_for_response
 
 
@@ -86,6 +87,18 @@ class CollectorDirectConflictError(ValueError):
 
 class CollectorSnapshotChangedError(ValueError):
     """A hidden terminal snapshot cannot be refreshed while progress remains."""
+
+
+class CollectorInventorySnapshotChangedError(ValueError):
+    """The inventory record changed after the operator opened it."""
+
+
+class CollectorInventoryAssignmentLockedError(ValueError):
+    """A reserved or used inventory record must be rolled back before renumbering."""
+
+
+class CollectorInventoryNumberConflictError(ValueError):
+    """The corrected collector number already belongs to another physical device."""
 
 
 class TerminalReviewRequiredError(ValueError):
@@ -2364,6 +2377,180 @@ class PostgresCollectorTransferService:
             "requires_photo": decision.requires_photo,
             "add_to_pool": decision.add_to_pool,
             "pool_status": physical.pool_status,
+            "photo": _photo_response(photo),
+        }
+
+    def scan_inventory_photo_region(
+        self,
+        *,
+        project_id: str,
+        collector_id: str,
+        expected_collector_no: str,
+        expected_photo_sha256: str,
+        region: Mapping[str, float],
+    ) -> dict[str, object]:
+        project = self._project(project_id)
+        physical = self.session.scalar(
+            select(PhysicalCollector).where(
+                PhysicalCollector.id == _uuid(collector_id, "collector_id"),
+                PhysicalCollector.team_id == self.team_id,
+                PhysicalCollector.project_id == project.id,
+            )
+        )
+        if physical is None:
+            raise KeyError("collector not found")
+        if physical.collector_no != normalize_identifier(expected_collector_no):
+            raise CollectorInventorySnapshotChangedError(
+                "collector number changed; refresh and retry"
+            )
+
+        photo = self._active_collector_photo(physical.id)
+        if photo is None:
+            raise CollectorInventorySnapshotChangedError(
+                "collector photo changed; refresh and retry"
+            )
+        if photo.sha256 != normalize_identifier(expected_photo_sha256):
+            raise CollectorInventorySnapshotChangedError(
+                "collector photo changed; refresh and retry"
+            )
+
+        return photo_barcode_check.scan_photo_region(
+            {
+                "id": str(photo.id),
+                "image_url": normalize_identifier(photo.image_url),
+                "object_key": normalize_identifier(photo.object_key),
+                "storage_type": normalize_identifier(photo.storage_type),
+                "sha256": normalize_identifier(photo.sha256),
+                "content_type": normalize_identifier(photo.content_type),
+            },
+            "collector",
+            region,
+        )
+
+    def correct_inventory_number(
+        self,
+        *,
+        project_id: str,
+        collector_id: str,
+        expected_collector_no: str,
+        expected_photo_sha256: str,
+        collector_no: str,
+        recognition_method: str,
+        region: Mapping[str, float] | None,
+    ) -> dict[str, object]:
+        project = self._project(project_id)
+        physical = self.session.scalar(
+            select(PhysicalCollector)
+            .where(
+                PhysicalCollector.id == _uuid(collector_id, "collector_id"),
+                PhysicalCollector.team_id == self.team_id,
+                PhysicalCollector.project_id == project.id,
+            )
+            .with_for_update()
+        )
+        if physical is None:
+            raise KeyError("collector not found")
+
+        before_collector_no = physical.collector_no
+        before_pool_status = physical.pool_status
+        if before_collector_no != normalize_identifier(expected_collector_no):
+            raise CollectorInventorySnapshotChangedError(
+                "collector number changed; refresh and retry"
+            )
+        if before_pool_status in {"reserved", "used"}:
+            raise CollectorInventoryAssignmentLockedError(
+                "rollback collector assignment before renumbering"
+            )
+
+        photo = self._active_collector_photo(physical.id)
+        current_photo_sha256 = photo.sha256 if photo is not None else ""
+        if current_photo_sha256 != normalize_identifier(expected_photo_sha256):
+            raise CollectorInventorySnapshotChangedError(
+                "collector photo changed; refresh and retry"
+            )
+
+        corrected_no = normalize_identifier(collector_no)
+        if not corrected_no:
+            raise ValueError("collector_no is required")
+        normalized_method = normalize_identifier(recognition_method).lower()
+        if normalized_method not in {"manual", "barcode", "ocr"}:
+            raise ValueError("recognition_method is invalid")
+
+        duplicate = self.session.scalar(
+            select(PhysicalCollector)
+            .where(
+                PhysicalCollector.team_id == self.team_id,
+                PhysicalCollector.project_id == project.id,
+                PhysicalCollector.collector_no == corrected_no,
+                PhysicalCollector.id != physical.id,
+            )
+            .with_for_update()
+        )
+        if duplicate is not None:
+            raise CollectorInventoryNumberConflictError(
+                "collector number already exists"
+            )
+
+        is_direct = self._project_has_collector_number(project.id, corrected_no)
+        if is_direct:
+            after_pool_status = "direct"
+        elif photo is not None:
+            after_pool_status = "available"
+        else:
+            after_pool_status = "awaiting_photo"
+
+        physical.collector_no = corrected_no
+        physical.pool_status = after_pool_status
+        physical.last_scanned_at = datetime.now(UTC)
+        decision = decide_project_inventory_scan(
+            collector_no=corrected_no,
+            is_project_requirement=is_direct,
+            existing_pool_status=after_pool_status,
+            has_active_photo=photo is not None,
+        )
+        self.session.add(
+            CollectorScanEvent(
+                run_id=None,
+                team_id=self.team_id,
+                project_id=project.id,
+                physical_collector_id=physical.id,
+                requirement_id=None,
+                scanned_value=corrected_no,
+                decision=decision.kind.value,
+                requires_photo=decision.requires_photo,
+                add_to_pool=decision.add_to_pool,
+                actor_id=self._actor_user_id(),
+            )
+        )
+        self._audit(
+            action="collector_transfer.inventory_number_corrected",
+            entity_type="physical_collector",
+            entity_id=physical.id,
+            project_id=project.id,
+            payload={
+                "before_collector_no": before_collector_no,
+                "after_collector_no": corrected_no,
+                "before_pool_status": before_pool_status,
+                "after_pool_status": after_pool_status,
+                "recognition_method": normalized_method,
+                "region": dict(region) if region is not None else None,
+                "photo_id": str(photo.id) if photo is not None else None,
+                "photo_sha256": current_photo_sha256,
+            },
+        )
+        try:
+            self.session.commit()
+        except IntegrityError as exc:
+            raise CollectorInventoryNumberConflictError(
+                "collector number already exists"
+            ) from exc
+        return {
+            "collector_id": str(physical.id),
+            "collector_no": corrected_no,
+            "decision": decision.kind.value,
+            "requires_photo": decision.requires_photo,
+            "add_to_pool": decision.add_to_pool,
+            "pool_status": after_pool_status,
             "photo": _photo_response(photo),
         }
 

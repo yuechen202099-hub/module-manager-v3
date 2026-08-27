@@ -16,6 +16,9 @@ from app.models import CollectorPhoto, Project
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorDirectConflictError,
+    CollectorInventoryAssignmentLockedError,
+    CollectorInventoryNumberConflictError,
+    CollectorInventorySnapshotChangedError,
     CollectorPhotoConflictError,
     CollectorRunBlockedError,
     CollectorScanProvenanceError,
@@ -47,6 +50,35 @@ class InventoryScanRequest(BaseModel):
 
     project_id: str = Field(min_length=1, max_length=64)
     collector_no: str = Field(min_length=1, max_length=255)
+
+
+class NormalizedPhotoRegionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+
+
+class InventoryPhotoRegionScanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=64)
+    expected_collector_no: str = Field(min_length=1, max_length=255)
+    expected_photo_sha256: str = Field(min_length=64, max_length=64)
+    region: NormalizedPhotoRegionRequest
+
+
+class InventoryNumberCorrectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=64)
+    expected_collector_no: str = Field(min_length=1, max_length=255)
+    expected_photo_sha256: str = Field(default="", max_length=64)
+    collector_no: str = Field(min_length=1, max_length=255)
+    recognition_method: Literal["manual", "barcode", "ocr"]
+    region: NormalizedPhotoRegionRequest | None = None
 
 
 class WorkbenchItemStatusRequest(BaseModel):
@@ -216,6 +248,27 @@ def service_error_response(request: Request, exc: Exception):
             message="终端来源或快照进度已变化，请刷新后重试。",
             status_code=409,
         )
+    if isinstance(exc, CollectorInventorySnapshotChangedError):
+        return error_response(
+            request,
+            code="inventory_snapshot_changed",
+            message="采集器编号或照片已变化，请刷新后重试。",
+            status_code=409,
+        )
+    if isinstance(exc, CollectorInventoryAssignmentLockedError):
+        return error_response(
+            request,
+            code="inventory_assignment_locked",
+            message="该采集器已被占用，请先回滚分配后再修改编号。",
+            status_code=409,
+        )
+    if isinstance(exc, CollectorInventoryNumberConflictError):
+        return error_response(
+            request,
+            code="inventory_number_conflict",
+            message="目标采集器编号已存在，不能合并两台实物。",
+            status_code=409,
+        )
     if isinstance(exc, CollectorTerminalSourceBlockedError):
         return error_response(
             request,
@@ -383,6 +436,44 @@ def scan_inventory(payload: InventoryScanRequest, request: Request):
         lambda service: service.scan_inventory(
             project_id=payload.project_id,
             collector_no=payload.collector_no,
+        ),
+    )
+
+
+@router.post("/inventory/{collector_id}/photo/region-scan")
+def scan_inventory_photo_region(
+    collector_id: str,
+    payload: InventoryPhotoRegionScanRequest,
+    request: Request,
+):
+    return call_admin_service(
+        request,
+        lambda service: service.scan_inventory_photo_region(
+            project_id=payload.project_id,
+            collector_id=collector_id,
+            expected_collector_no=payload.expected_collector_no,
+            expected_photo_sha256=payload.expected_photo_sha256,
+            region=payload.region.model_dump(),
+        ),
+    )
+
+
+@router.patch("/inventory/{collector_id}")
+def correct_inventory_number(
+    collector_id: str,
+    payload: InventoryNumberCorrectionRequest,
+    request: Request,
+):
+    return call_admin_service(
+        request,
+        lambda service: service.correct_inventory_number(
+            project_id=payload.project_id,
+            collector_id=collector_id,
+            expected_collector_no=payload.expected_collector_no,
+            expected_photo_sha256=payload.expected_photo_sha256,
+            collector_no=payload.collector_no,
+            recognition_method=payload.recognition_method,
+            region=payload.region.model_dump() if payload.region is not None else None,
         ),
     )
 
