@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { BrowserMultiFormatReader } from '@zxing/browser'
+import type { IScannerControls } from '@zxing/browser'
 import {
   Camera,
   Close,
@@ -185,6 +187,9 @@ let scannerStream: MediaStream | null = null
 let scannerTimer = 0
 let quaggaActive = false
 let quaggaDetectedHandler: ((result: unknown) => void) | null = null
+let zxingControls: IScannerControls | null = null
+const zxingReader = new BrowserMultiFormatReader()
+let scannerSession = 0
 let scanCandidate = ''
 let scanCandidateHits = 0
 let scanLocked = false
@@ -994,13 +999,17 @@ async function ensureQuaggaLoaded() {
 }
 
 function resetScannerRuntime() {
+  scannerSession += 1
   clearTimeout(scannerTimer)
   scannerTimer = 0
+  zxingControls?.stop()
+  zxingControls = null
   const quagga = getQuagga()
-  if (quaggaActive && quagga) {
+  if (quagga) {
     if (quaggaDetectedHandler) quagga.offDetected?.(quaggaDetectedHandler)
     try {
-      quagga.stop()
+      const stopResult = quagga.stop?.()
+      stopResult?.catch?.(() => undefined)
     } catch {
       // Ignore scanner shutdown races on mobile browsers.
     }
@@ -1013,12 +1022,22 @@ function resetScannerRuntime() {
   scannerCamera.value?.querySelectorAll('canvas, video:not(.scanner-video)').forEach((node) => node.remove())
 }
 
+function beginScannerSession() {
+  scannerSession += 1
+  return scannerSession
+}
+
+function scannerSessionIsCurrent(session: number) {
+  return scannerOpen.value && scannerSession === session
+}
+
 function closeScanner() {
   resetScannerRuntime()
   scannerOpen.value = false
 }
 
 async function startScanner(target: ScannerTarget) {
+  let session = beginScannerSession()
   scannerTarget.value = target
   scannerOpen.value = true
   scanCandidate = ''
@@ -1033,20 +1052,36 @@ async function startScanner(target: ScannerTarget) {
         : '扫描表号条码后直接打开施工单'
 
   await nextTick()
+  if (!scannerSessionIsCurrent(session)) return
   if (!window.isSecureContext || typeof navigator.mediaDevices?.getUserMedia !== 'function') {
     prepareScannerFallback('当前浏览器未开放摄像头能力')
     return
   }
 
   const quagga = await ensureQuaggaLoaded().catch(() => null)
+  if (!scannerSessionIsCurrent(session)) return
   if (quagga?.init) {
     try {
-      await withTimeout(startQuaggaScanner(), SCANNER_START_TIMEOUT_MS, '相机启动超时')
+      await startQuaggaScanner()
       return
-    } catch {
+    } catch (error) {
+      if (!scannerSessionIsCurrent(session)) return
+      console.warn('Construction Quagga scanner failed; falling back to ZXing.', error)
       resetScannerRuntime()
-      scannerStatus.value = '实时扫码启动失败，正在切换相机预览。'
+      session = beginScannerSession()
+      scannerStatus.value = '实时扫码启动失败，正在切换安卓兼容识别。'
     }
+  }
+
+  try {
+    await startZxingScanner(session)
+    return
+  } catch (error) {
+    if (!scannerSessionIsCurrent(session)) return
+    console.warn('Construction ZXing scanner failed; falling back to BarcodeDetector.', error)
+    resetScannerRuntime()
+    session = beginScannerSession()
+    scannerStatus.value = '兼容扫码启动失败，正在切换浏览器原生识别。'
   }
 
   try {
@@ -1096,6 +1131,53 @@ async function startQuaggaScanner() {
   quagga.onDetected(quaggaDetectedHandler)
   quagga.start()
   scannerStatus.value = 'QuaggaJS 正在识别条形码。'
+}
+
+async function startZxingScanner(session: number) {
+  const preview = scannerVideo.value
+  if (!preview) throw new Error('扫描视频容器不可用')
+  preview.setAttribute('playsinline', 'true')
+  preview.setAttribute('webkit-playsinline', 'true')
+  preview.autoplay = true
+  preview.muted = true
+
+  let acceptControls = true
+  const pendingControls = zxingReader.decodeFromConstraints(
+    {
+      audio: false,
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+    },
+    preview,
+    (result, error) => {
+      if (!scannerSessionIsCurrent(session)) return
+      const code = result?.getText?.() || ''
+      if (code) {
+        handleDetectedCode(code)
+        return
+      }
+      if (error && error.name !== 'NotFoundException') {
+        scannerStatus.value = 'ZXing 正在重试识别，请保持条码清晰稳定。'
+      }
+    },
+  ).then((controls) => {
+    if (!acceptControls || !scannerSessionIsCurrent(session)) {
+      controls.stop()
+      throw new Error('扫码窗口已关闭')
+    }
+    return controls
+  })
+
+  try {
+    zxingControls = await withTimeout(pendingControls, SCANNER_START_TIMEOUT_MS, 'ZXing 相机启动超时')
+  } catch (error) {
+    acceptControls = false
+    throw error
+  }
+  scannerStatus.value = 'ZXing 正在识别条形码。'
 }
 
 async function requestCameraStream() {
