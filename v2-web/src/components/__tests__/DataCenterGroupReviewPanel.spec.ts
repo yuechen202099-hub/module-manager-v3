@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessageBox } from 'element-plus'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DataCenterDetail, GlobalMeterInstallWorkbenchRow, MaterialGroup } from '@/api/types'
@@ -37,6 +37,8 @@ function detailFixture(id: string, auditAction = `loaded-${id}`, reviewStatus = 
     photoCount: 1,
     classificationStatus: 'complete',
     classificationProgress: {},
+    classificationManualConfirmation: null,
+    classificationConfirmationFingerprint: `fingerprint-${id}`,
     barcodeStatus: 'passed',
     barcodeProgress: {},
     groupBarcodeMissingFields: [],
@@ -59,9 +61,11 @@ function detailFixture(id: string, auditAction = `loaded-${id}`, reviewStatus = 
 
 const apiMock = vi.hoisted(() => ({
   classifyDataCenterGroupPhoto: vi.fn(),
+  confirmDataCenterGroupClassification: vi.fn(),
   confirmDataCenterGroupBarcode: vi.fn(),
   fetchDataCenterDetail: vi.fn(),
   fetchGroupPhotoObjectUrl: vi.fn(),
+  getApiErrorStatus: vi.fn((error: unknown) => (error as { status?: number } | null)?.status),
   rescanDataCenterGroupPhotoBarcode: vi.fn(),
   resetAdminGroupToUnconstructed: vi.fn(),
   resetAdminGroupToUnreviewed: vi.fn(),
@@ -106,6 +110,7 @@ describe('DataCenterGroupReviewPanel', () => {
     apiMock.fetchDataCenterDetail.mockResolvedValue(detailFixture('default'))
     apiMock.fetchGroupPhotoObjectUrl.mockResolvedValue('blob:default')
     apiMock.classifyDataCenterGroupPhoto.mockResolvedValue({})
+    apiMock.confirmDataCenterGroupClassification.mockResolvedValue({})
     apiMock.confirmDataCenterGroupBarcode.mockResolvedValue({})
     apiMock.rescanDataCenterGroupPhotoBarcode.mockResolvedValue({})
     apiMock.resetAdminGroupToUnconstructed.mockResolvedValue({})
@@ -140,6 +145,57 @@ describe('DataCenterGroupReviewPanel', () => {
     expect(requests[0]?.path).toBe('/groups/data-center/groups/g%2Fencoded/review')
     expect(requests[0]?.init.method).toBe('PATCH')
     expect(body).toEqual({ status: 'approved', note: 'checked', exception_note: 'none' })
+    expect(body).not.toHaveProperty('actor')
+    expect(result).toMatchObject({ id: 'g/encoded', status: 'approved' })
+  })
+
+  it('maps the explicit manual classification confirmation from group detail', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          kind: 'group',
+          id: 'g-confirmed',
+          status: 'approved',
+          classification_manual_confirmation: {
+            actor: 'admin',
+            confirmed_at: '2026-08-27T12:00:00+08:00',
+          },
+          photos: [],
+          audit: [],
+        },
+      }),
+    }) as Response)
+    const realServices = await vi.importActual<typeof import('@/api/services')>('@/api/services')
+
+    const result = await realServices.fetchDataCenterDetail('group', 'g-confirmed')
+
+    expect(result.classificationManualConfirmation).toEqual({
+      actor: 'admin',
+      confirmed_at: '2026-08-27T12:00:00+08:00',
+    })
+  })
+
+  it('sends the manual classification confirmation contract without a client actor', async () => {
+    const requests: Array<{ path: string; init: RequestInit }> = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      requests.push({ path: String(input), init })
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { id: 'g/encoded', status: 'approved' } }),
+      } as Response
+    })
+    const realServices = await vi.importActual<typeof import('@/api/services')>('@/api/services')
+
+    const result = await realServices.confirmDataCenterGroupClassification('g/encoded', true, 'fingerprint-visible')
+    const body = JSON.parse(String(requests[0]?.init.body))
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.path).toBe('/groups/data-center/groups/g%2Fencoded/classification-manual-confirm')
+    expect(requests[0]?.init.method).toBe('POST')
+    expect(body).toEqual({ acknowledge_anomalies: true, expected_evidence_fingerprint: 'fingerprint-visible', source_page: 'review_rephoto_workbench' })
     expect(body).not.toHaveProperty('actor')
     expect(result).toMatchObject({ id: 'g/encoded', status: 'approved' })
   })
@@ -354,6 +410,105 @@ describe('DataCenterGroupReviewPanel', () => {
     expect(apiMock.reviewDataCenterGroup).not.toHaveBeenCalled()
     expect(apiMock.returnDataCenterGroupToException).not.toHaveBeenCalled()
     expect(wrapper.emitted('updated')?.at(-1)?.[0]).toMatchObject({ id: 'g-classification' })
+    wrapper.unmount()
+  })
+
+  it('allows an administrator to manually confirm classification and warns when anomalies remain', async () => {
+    const classificationDetail = {
+      ...detailFixture('g-manual-classification'),
+      classificationStatus: 'incomplete',
+      barcodeStatus: 'unreadable',
+      photos: [
+        { id: 'photo-unclassified', url: '', name: 'photo-unclassified', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
+        { id: 'photo-module', url: '', name: 'photo-module', status: 'valid', category: 'module_meter', categoryLabel: '模块与电能表' },
+      ],
+    } satisfies DataCenterDetail
+    apiMock.fetchDataCenterDetail.mockResolvedValue(classificationDetail)
+    apiMock.fetchGroupPhotoObjectUrl.mockImplementation((_groupId, photoId: string) => Promise.resolve(`blob:${photoId}`))
+    const confirmDialog = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(
+      'confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>,
+    )
+
+    const wrapper = mountPanel({ groupId: 'g-manual-classification', classificationOnly: true })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="confirm-classification-complete"]').trigger('click')
+    await flushPromises()
+
+    expect(confirmDialog).toHaveBeenCalledTimes(1)
+    expect(String(confirmDialog.mock.calls[0]?.[0])).toContain('仍有 1 张照片未分类')
+    expect(String(confirmDialog.mock.calls[0]?.[0])).toContain('条码状态未通过')
+    expect(apiMock.confirmDataCenterGroupClassification).toHaveBeenCalledWith(
+      'g-manual-classification',
+      true,
+      'fingerprint-g-manual-classification',
+    )
+    expect(wrapper.emitted('review-decided')).toEqual([['approved']])
+    expect(wrapper.emitted('updated')?.at(-1)?.[0]).toMatchObject({ id: 'g-manual-classification' })
+    wrapper.unmount()
+  })
+
+  it('reloads latest anomalies after a confirmation fingerprint conflict', async () => {
+    const first = detailFixture('g-conflict')
+    const latest = {
+      ...first,
+      classificationConfirmationFingerprint: 'fingerprint-latest',
+      photos: [
+        ...first.photos,
+        { id: 'photo-new', url: '', name: 'photo-new', status: 'valid', category: 'unclassified', categoryLabel: '未分类' },
+      ],
+    } satisfies DataCenterDetail
+    apiMock.fetchDataCenterDetail.mockResolvedValueOnce(first).mockResolvedValueOnce(latest)
+    apiMock.confirmDataCenterGroupClassification.mockRejectedValue(
+      Object.assign(new Error('分类证据或异常已变化，请重新加载最新异常后再次确认'), { status: 409 }),
+    )
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(
+      'confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>,
+    )
+    const wrapper = mountPanel({ groupId: 'g-conflict', classificationOnly: true })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="confirm-classification-complete"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.confirmDataCenterGroupClassification).toHaveBeenCalledWith(
+      'g-conflict', true, 'fingerprint-g-conflict',
+    )
+    expect(apiMock.fetchDataCenterDetail).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('照片分类 1/2')
+    expect(wrapper.emitted('review-decided')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('shows that an approved classification-only group has been manually accepted', async () => {
+    apiMock.fetchDataCenterDetail.mockResolvedValue(
+      {
+        ...detailFixture('g-confirmed', 'classification_manual_confirmed', 'approved'),
+        classificationManualConfirmation: {
+          actor: 'admin',
+          confirmed_at: '2026-08-26T00:00:00Z',
+        },
+      },
+    )
+
+    const wrapper = mountPanel({ groupId: 'g-confirmed', classificationOnly: true })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已人工确认分类完成')
+    expect(wrapper.get('[data-testid="confirm-classification-complete"]').text()).toContain('重新确认')
+    wrapper.unmount()
+  })
+
+  it('does not present an automatically approved group as manually confirmed', async () => {
+    apiMock.fetchDataCenterDetail.mockResolvedValue(
+      detailFixture('g-auto-approved', 'review_approved', 'approved'),
+    )
+
+    const wrapper = mountPanel({ groupId: 'g-auto-approved', classificationOnly: true })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('已人工确认分类完成')
+    expect(wrapper.get('[data-testid="confirm-classification-complete"]').text()).toContain('人工确认分类完成')
     wrapper.unmount()
   })
 

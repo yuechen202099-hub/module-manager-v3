@@ -187,6 +187,7 @@ class _GlobalTerminalGroupRow:
 @dataclass(frozen=True, slots=True)
 class _ProjectPhotoRow:
     id: UUID
+    legacy_id: str | None
     group_id: UUID
     collector: str | None
     asset_no: str | None
@@ -355,6 +356,7 @@ def _review_projection_from_rows(
             source_blockers.append("address_missing")
 
         raw_data = group.raw_data if isinstance(group.raw_data, Mapping) else {}
+        manual_confirmation = raw_data.get("classification_manual_confirmation")
         persisted_verification = resolve_persisted_barcode_verification(
             verification_by_group.get(group.id),
             raw_data,
@@ -388,12 +390,16 @@ def _review_projection_from_rows(
                         id=str(item.id),
                         category=normalize_identifier(item.category).lower(),
                         sha256=normalize_identifier(item.sha256),
+                        confirmation_id=normalize_identifier(item.legacy_id) or str(item.id),
                     )
                     for item in group_photos
                 ),
                 barcode_status=barcode_status,
                 identity_blockers=tuple(identity_blockers),
                 source_blockers=tuple(source_blockers),
+                classification_manual_confirmation=(
+                    dict(manual_confirmation) if isinstance(manual_confirmation, Mapping) else None
+                ),
             )
         )
 
@@ -424,6 +430,15 @@ def _review_projection_from_rows(
                 "review_ready": meter_projection.review_ready,
                 "blockers": list(meter_projection.blockers),
                 "review_status": _status_text(group.status),
+                "classification_manually_confirmed": meter_projection.classification_manually_confirmed,
+                "classification_confirmation_anomalies": list(
+                    meter_projection.classification_confirmation_anomalies
+                ),
+                "classification_manual_confirmation": (
+                    dict(meter_projection.classification_manual_confirmation)
+                    if meter_projection.classification_manual_confirmation is not None
+                    else None
+                ),
             }
         )
     return projection, tuple(review_rows)
@@ -593,6 +608,7 @@ class PostgresCollectorTransferService:
         photo_statement = (
             select(
                 Photo.id,
+                Photo.legacy_id,
                 Photo.group_id,
                 Photo.collector,
                 Photo.asset_no,
@@ -690,6 +706,7 @@ class PostgresCollectorTransferService:
             for row in self.session.execute(
                 select(
                     Photo.id,
+                    Photo.legacy_id,
                     Photo.group_id,
                     Photo.collector,
                     Photo.asset_no,
@@ -856,6 +873,7 @@ class PostgresCollectorTransferService:
         photo_statement = (
             select(
                 Photo.id,
+                Photo.legacy_id,
                 Photo.group_id,
                 Photo.collector,
                 Photo.asset_no,
@@ -1252,6 +1270,7 @@ class PostgresCollectorTransferService:
             for row in self.session.execute(
                 select(
                     Photo.id,
+                    Photo.legacy_id,
                     Photo.group_id,
                     Photo.collector,
                     Photo.asset_no,

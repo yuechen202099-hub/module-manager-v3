@@ -99,10 +99,20 @@ DATA_CENTER_IDENTITY_FIELDS = {
     "construction_collector",
     "construction_module_asset_no",
 }
+MANUAL_CLASSIFICATION_CATEGORIES = frozenset(
+    {"before_box", "collector_barcode", "module_meter", "after_box"}
+)
+MANUAL_CLASSIFICATION_BARCODE_READY = frozenset(
+    {"passed", "manual", "manual_confirmed", "manual_passed"}
+)
 
 
 class StateBackendNotReady(RuntimeError):
     """Raised when the selected state backend cannot safely serve the operation."""
+
+
+class ClassificationConfirmationConflict(ValueError):
+    """Raised when manual confirmation no longer matches the evidence shown to the user."""
 
 
 def _data_center_archive_status(group: Mapping[str, Any]) -> str:
@@ -168,6 +178,88 @@ def _data_center_audit_payload(
     }
     payload.update(extra)
     return payload
+
+
+def _manual_classification_snapshot(
+    group: Mapping[str, Any],
+    photos: list[Mapping[str, Any]],
+) -> tuple[list[dict[str, str]], list[str]]:
+    return data_center_service.manual_classification_snapshot(group, photos)
+
+
+def _revoke_json_manual_classification_confirmation(
+    group: dict[str, Any],
+    *,
+    actor: str,
+    reason: str,
+    source_page: str,
+    photo_id: str,
+) -> bool:
+    manual_confirmation = group.get("classification_manual_confirmation")
+    if not isinstance(manual_confirmation, Mapping):
+        return False
+    group.pop("classification_manual_confirmation", None)
+    group["status"] = "unreviewed"
+    group["reviewer"] = ""
+    group["review_note"] = ""
+    group["reviewed_at"] = None
+    group_id = str(group.get("id") or group.get("legacy_id") or "")
+    local_simulation.append_audit_event(
+        "classification_manual_confirmation_revoked",
+        actor,
+        _data_center_audit_payload(
+            source_page=source_page,
+            actor=actor,
+            reason=reason or "照片分类已变更",
+            before={"classification_manual_confirmation": dict(manual_confirmation)},
+            after={"classification_manual_confirmation": None},
+            group_id=group_id,
+            photo_id=photo_id,
+        ),
+    )
+    return True
+
+
+def _revoke_postgres_manual_classification_confirmation(
+    session: Session,
+    group: MaterialGroup,
+    *,
+    actor: str,
+    reason: str,
+    source_page: str,
+    photo_id: str,
+) -> bool:
+    group_raw = dict(group.raw_data or {})
+    manual_confirmation = group_raw.get("classification_manual_confirmation")
+    if not isinstance(manual_confirmation, Mapping):
+        return False
+    group_raw.pop("classification_manual_confirmation", None)
+    group_raw.update(
+        {"status": "unreviewed", "reviewer": "", "review_note": "", "reviewed_at": None}
+    )
+    group.raw_data = group_raw
+    group.status = GroupStatus.UNREVIEWED
+    group.reviewer = None
+    group.review_note = ""
+    group.reviewed_at = None
+    _stage_transactional_audit(
+        session,
+        team_id=group.team_id,
+        actor=actor,
+        action="classification_manual_confirmation_revoked",
+        entity_type="material_group",
+        entity_id=group.id,
+        payload=_data_center_audit_payload(
+            source_page=source_page,
+            actor=actor,
+            reason=reason or "照片分类已变更",
+            before={"classification_manual_confirmation": dict(manual_confirmation)},
+            after={"classification_manual_confirmation": None},
+            group_id=str(group.legacy_id or group.id),
+            photo_id=photo_id,
+        ),
+    )
+    return True
 
 
 def _json_enrich_latest_audit_payload(
@@ -1767,6 +1859,7 @@ def _group_payload(
         "installer",
         "construction_collector",
         "construction_module_asset_no",
+        "classification_manual_confirmation",
         "group_barcode_manual_confirmed",
         "group_barcode_manual_confirmed_fields",
         "group_barcode_manual_confirmed_by",
@@ -2718,6 +2811,18 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def manual_confirm_group_classification(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        acknowledge_anomalies: bool,
+        expected_evidence_fingerprint: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
     def rescan_data_center_group_photo_barcode(
         self,
         group_id: str,
@@ -3641,6 +3746,89 @@ class JsonStateRepository(StateRepository):
             local_simulation.refresh_summary()
         return _data_center_group_result(group, changed_fields=changed_fields)
 
+    def manual_confirm_group_classification(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        acknowledge_anomalies: bool,
+        expected_evidence_fingerprint: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            group = local_simulation.get_group(group_id)
+            if group is None:
+                raise KeyError(group_id)
+            snapshot, anomalies = _manual_classification_snapshot(
+                group,
+                [
+                    photo
+                    for photo in group.get("photos", [])
+                    if isinstance(photo, Mapping)
+                ],
+            )
+            current_fingerprint = data_center_service.manual_classification_fingerprint(snapshot, anomalies)
+            if expected_evidence_fingerprint != current_fingerprint:
+                raise ClassificationConfirmationConflict(
+                    "分类证据或异常已变化，请重新加载最新异常后再次确认"
+                )
+            if anomalies and not acknowledge_anomalies:
+                raise ValueError("存在分类或资料异常，请确认异常后继续")
+            before = {
+                "status": str(group.get("status") or ""),
+                "reviewer": str(group.get("reviewer") or ""),
+                "reviewed_at": str(group.get("reviewed_at") or ""),
+            }
+            now = local_simulation.now_iso()
+            confirmation = {
+                "actor": actor,
+                "confirmed_at": now,
+                "acknowledged_anomalies": bool(anomalies),
+                "anomalies": anomalies,
+                "photo_snapshot": snapshot,
+            }
+            group["classification_manual_confirmation"] = confirmation
+            group["status"] = "approved"
+            group["reviewer"] = actor
+            group["review_note"] = "人工确认分类完成"
+            group["reviewed_at"] = now
+            after = {
+                "status": "approved",
+                "reviewer": actor,
+                "reviewed_at": now,
+            }
+            local_simulation.append_audit_event(
+                "classification_manual_confirmed",
+                actor,
+                _data_center_audit_payload(
+                    source_page=source_page,
+                    actor=actor,
+                    reason="人工确认分类完成",
+                    before=before,
+                    after=after,
+                    group_id=group_id,
+                    anomalies=anomalies,
+                    acknowledged_anomalies=bool(anomalies),
+                    photo_snapshot=snapshot,
+                ),
+            )
+            local_simulation.refresh_summary()
+            result = deepcopy(group)
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction and transaction is not None and not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        return result
+
     def classify_data_center_group_photo(
         self,
         group_id: str,
@@ -3683,6 +3871,14 @@ class JsonStateRepository(StateRepository):
                 "archive_status": str(photo.get("archive_status") or ""),
                 "archive_filename": str(photo.get("archive_filename") or ""),
             }
+            if before["category"] != category:
+                _revoke_json_manual_classification_confirmation(
+                    group,
+                    actor=actor,
+                    reason=reason or "照片分类已变更",
+                    source_page=source_page,
+                    photo_id=photo_id,
+                )
             if photo.get("download_status") != "downloaded":
                 has_previewable_source = bool(
                     str(photo.get("image_url") or "").strip()
@@ -3780,67 +3976,94 @@ class JsonStateRepository(StateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
-        group = local_simulation.get_group(group_id)
-        if group is None:
-            raise KeyError(group_id)
-        photo = next(
-            (
-                item
-                for item in group.get("photos", [])
-                if str(item.get("id") or "") == photo_id and item.get("is_active", True) is not False
-            ),
-            None,
-        )
-        if photo is None:
-            raise KeyError(photo_id)
-        now = local_simulation.now_iso()
-        before = {
-            "barcode_rescan_requested_at": str(photo.get("barcode_rescan_requested_at") or ""),
-            "barcode_verification_status": str((group.get("barcode_verification") or {}).get("status") or ""),
-        }
-        local_simulation.invalidate_json_delivery_artifacts(
-            group,
-            actor=actor,
-            reason="group_barcode_rescan_requested",
-            verification_changed=True,
-        )
-        verification = dict(group.get("barcode_verification") or {})
-        photo["barcode_rescan_requested_by"] = actor
-        photo["barcode_rescan_requested_at"] = now
-        if category:
-            photo["category"] = category
-        local_simulation.get_state().setdefault("photo_events", []).append(
-            {
-                "group_id": group_id,
-                "photo_id": photo_id,
-                "category": str(photo.get("category") or "unclassified"),
-                "reviewer": actor,
-                "event": "group_barcode_rescan_requested",
-                "status": verification.get("status", "pending"),
-                "created_at": now,
+        if category and category not in local_simulation.PHOTO_CATEGORIES:
+            raise ValueError(f"Unsupported photo category: {category}")
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            group = local_simulation.get_group(group_id)
+            if group is None:
+                raise KeyError(group_id)
+            photo = next(
+                (
+                    item
+                    for item in group.get("photos", [])
+                    if str(item.get("id") or "") == photo_id and item.get("is_active", True) is not False
+                ),
+                None,
+            )
+            if photo is None:
+                raise KeyError(photo_id)
+            previous_category = str(photo.get("category") or "unclassified")
+            if category and previous_category != category:
+                _revoke_json_manual_classification_confirmation(
+                    group,
+                    actor=actor,
+                    reason=reason or "照片分类在重新扫码时已变更",
+                    source_page=source_page,
+                    photo_id=photo_id,
+                )
+            now = local_simulation.now_iso()
+            before = {
+                "barcode_rescan_requested_at": str(photo.get("barcode_rescan_requested_at") or ""),
+                "barcode_verification_status": str((group.get("barcode_verification") or {}).get("status") or ""),
             }
-        )
-        after = {
-            "barcode_rescan_requested_at": now,
-            "barcode_verification_status": str((group.get("barcode_verification") or {}).get("status") or ""),
-        }
-        local_simulation.append_audit_event(
-            "group_barcode_rescan_requested",
-            actor,
-            _data_center_audit_payload(
-                source_page=source_page,
+            local_simulation.invalidate_json_delivery_artifacts(
+                group,
                 actor=actor,
-                reason=reason or "group_barcode_rescan_requested",
-                before=before,
-                after=after,
-                group_id=group_id,
-                photo_id=photo_id,
-                status=after["barcode_verification_status"],
-                should_enqueue=bool((group.get("barcode_verification") or {}).get("should_enqueue")),
-            ),
-        )
-        local_simulation.refresh_summary()
-        return photo
+                reason="group_barcode_rescan_requested",
+                verification_changed=True,
+            )
+            verification = dict(group.get("barcode_verification") or {})
+            photo["barcode_rescan_requested_by"] = actor
+            photo["barcode_rescan_requested_at"] = now
+            if category:
+                photo["category"] = category
+                photo["category_label"] = local_simulation.PHOTO_CATEGORIES[category]
+            local_simulation.get_state().setdefault("photo_events", []).append(
+                {
+                    "group_id": group_id,
+                    "photo_id": photo_id,
+                    "category": str(photo.get("category") or "unclassified"),
+                    "reviewer": actor,
+                    "event": "group_barcode_rescan_requested",
+                    "status": verification.get("status", "pending"),
+                    "created_at": now,
+                }
+            )
+            after = {
+                "barcode_rescan_requested_at": now,
+                "barcode_verification_status": str((group.get("barcode_verification") or {}).get("status") or ""),
+            }
+            local_simulation.append_audit_event(
+                "group_barcode_rescan_requested",
+                actor,
+                _data_center_audit_payload(
+                    source_page=source_page,
+                    actor=actor,
+                    reason=reason or "group_barcode_rescan_requested",
+                    before=before,
+                    after=after,
+                    group_id=group_id,
+                    photo_id=photo_id,
+                    status=after["barcode_verification_status"],
+                    should_enqueue=bool((group.get("barcode_verification") or {}).get("should_enqueue")),
+                ),
+            )
+            local_simulation.refresh_summary()
+            result = deepcopy(photo)
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction and transaction is not None and not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        return result
 
     def scan_data_center_group_photo_region(
         self,
@@ -4431,6 +4654,20 @@ class JsonStateRepository(StateRepository):
             transaction = local_simulation.begin_authoritative_json_write(team_id)
             token = local_simulation.activate_authoritative_json_write(transaction)
         try:
+            group = local_simulation.get_group(group_id)
+            if group is None:
+                raise KeyError(group_id)
+            photo = next((item for item in group.get("photos", []) if item.get("id") == photo_id), None)
+            if photo is None:
+                raise KeyError(photo_id)
+            if str(photo.get("category") or "unclassified") != category:
+                _revoke_json_manual_classification_confirmation(
+                    group,
+                    actor=reviewer,
+                    reason="photo_category_changed",
+                    source_page="group_photo_category",
+                    photo_id=photo_id,
+                )
             result = local_simulation.classify_photo(group_id, photo_id, category, reviewer)
             if owns_transaction:
                 local_simulation.finish_authoritative_json_write(transaction, token)
@@ -4447,7 +4684,22 @@ class JsonStateRepository(StateRepository):
         reviewer: str,
         category: str = "",
     ) -> dict[str, Any]:
-        return local_simulation.rescan_photo_barcode(group_id, photo_id, reviewer, category)
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            result = local_simulation.rescan_photo_barcode(group_id, photo_id, reviewer, category)
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction and transaction is not None and not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        return result
 
     def apply_group_scan_result(
         self,
@@ -8221,6 +8473,113 @@ class PostgresStateRepository(StateRepository):
         except DeliveryPackageNotReady as exc:
             return exc.status
 
+    def manual_confirm_group_classification(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        acknowledge_anomalies: bool,
+        expected_evidence_fingerprint: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=True)
+            photos = list(
+                session.scalars(
+                    select(Photo)
+                    .where(
+                        Photo.team_id == group.team_id,
+                        Photo.group_id == group.id,
+                        Photo.is_active.is_(True),
+                    )
+                    .order_by(Photo.sort_order, Photo.id)
+                    .with_for_update()
+                ).all()
+            )
+            verification = session.scalar(
+                select(GroupBarcodeVerification).where(
+                    GroupBarcodeVerification.team_id == group.team_id,
+                    GroupBarcodeVerification.group_id == group.id,
+                )
+            )
+            group_snapshot = _group_payload(
+                session,
+                group,
+                include_photos=False,
+                verification=verification,
+            )
+            snapshot, anomalies = _manual_classification_snapshot(
+                {
+                    **group_snapshot,
+                    "address": str(group.installation_address or ""),
+                },
+                [_photo_payload(photo) for photo in photos],
+            )
+            current_fingerprint = data_center_service.manual_classification_fingerprint(snapshot, anomalies)
+            if expected_evidence_fingerprint != current_fingerprint:
+                raise ClassificationConfirmationConflict(
+                    "分类证据或异常已变化，请重新加载最新异常后再次确认"
+                )
+            if anomalies and not acknowledge_anomalies:
+                raise ValueError("存在分类或资料异常，请确认异常后继续")
+            before = {
+                "status": _legacy_group_status(group),
+                "reviewer": str(group.reviewer or ""),
+                "reviewed_at": group.reviewed_at.isoformat() if group.reviewed_at else "",
+            }
+            now = datetime.now(UTC)
+            confirmation = {
+                "actor": actor,
+                "confirmed_at": now.isoformat(),
+                "acknowledged_anomalies": bool(anomalies),
+                "anomalies": anomalies,
+                "photo_snapshot": snapshot,
+            }
+            raw_data = dict(group.raw_data or {})
+            raw_data.update(
+                {
+                    "classification_manual_confirmation": confirmation,
+                    "status": "approved",
+                    "reviewer": actor,
+                    "review_note": "人工确认分类完成",
+                    "reviewed_at": now.isoformat(),
+                }
+            )
+            group.raw_data = raw_data
+            group.status = GroupStatus.APPROVED
+            group.reviewer = actor
+            group.review_note = "人工确认分类完成"
+            group.reviewed_at = now
+            after = {
+                "status": "approved",
+                "reviewer": actor,
+                "reviewed_at": now.isoformat(),
+            }
+            _stage_transactional_audit(
+                session,
+                team_id=group.team_id,
+                actor=actor,
+                action="classification_manual_confirmed",
+                entity_type="material_group",
+                entity_id=group.id,
+                before_data=before,
+                after_data=after,
+                payload=_data_center_audit_payload(
+                    source_page=source_page,
+                    actor=actor,
+                    reason="人工确认分类完成",
+                    before=before,
+                    after=after,
+                    group_id=str(group.legacy_id or group.id),
+                    anomalies=anomalies,
+                    acknowledged_anomalies=bool(anomalies),
+                    photo_snapshot=snapshot,
+                ),
+            )
+            session.commit()
+            session.refresh(group)
+            return _group_payload(session, group, verification=verification)
+
     def classify_data_center_group_photo(
         self,
         group_id: str,
@@ -8255,6 +8614,15 @@ class PostgresStateRepository(StateRepository):
                 "archive_status": str(photo.archive_status or ""),
                 "archive_filename": str(photo.archive_filename or ""),
             }
+            if before["category"] != category:
+                _revoke_postgres_manual_classification_confirmation(
+                    session,
+                    group,
+                    actor=actor,
+                    reason=reason or "照片分类已变更",
+                    source_page=source_page,
+                    photo_id=str(photo.legacy_id or photo.id),
+                )
             category_label = local_simulation.PHOTO_CATEGORIES.get(
                 category,
                 local_simulation.PHOTO_CATEGORIES["unclassified"],
@@ -8472,6 +8840,8 @@ class PostgresStateRepository(StateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
+        if category and category not in local_simulation.PHOTO_CATEGORIES:
+            raise ValueError(f"Unsupported photo category: {category}")
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             photo = session.scalar(
@@ -8480,10 +8850,20 @@ class PostgresStateRepository(StateRepository):
                     Photo.group_id == group.id,
                     Photo.legacy_id == photo_id,
                     Photo.is_active.is_(True),
-                )
+                ).with_for_update()
             )
             if photo is None:
                 raise KeyError(photo_id)
+            previous_category = str(photo.category or "unclassified")
+            if category and previous_category != category:
+                _revoke_postgres_manual_classification_confirmation(
+                    session,
+                    group,
+                    actor=actor,
+                    reason=reason or "照片分类在重新扫码时已变更",
+                    source_page=source_page,
+                    photo_id=str(photo.legacy_id or photo.id),
+                )
             now = datetime.now(UTC)
             before = {
                 "barcode_rescan_requested_at": str((photo.raw_data or {}).get("barcode_rescan_requested_at") or ""),
@@ -8498,6 +8878,7 @@ class PostgresStateRepository(StateRepository):
             if category:
                 photo.category = category
                 raw_data["category"] = category
+                raw_data["category_label"] = local_simulation.PHOTO_CATEGORIES[category]
             photo.raw_data = raw_data
             verification = invalidate_verification_for_group(
                 session,
@@ -9939,6 +10320,15 @@ class PostgresStateRepository(StateRepository):
             if photo is None:
                 raise KeyError(photo_id)
             previous_category = str(photo.category or "unclassified")
+            if previous_category != category:
+                _revoke_postgres_manual_classification_confirmation(
+                    session,
+                    group,
+                    actor=reviewer,
+                    reason="photo_category_changed",
+                    source_page="group_photo_category",
+                    photo_id=str(photo.legacy_id or photo.id),
+                )
             previous_archive = (
                 str(photo.archive_status or ""),
                 str(photo.archive_filename or ""),
@@ -10039,6 +10429,8 @@ class PostgresStateRepository(StateRepository):
         reviewer: str,
         category: str = "",
     ) -> dict[str, Any]:
+        if category and category not in local_simulation.PHOTO_CATEGORIES:
+            raise ValueError(f"Unsupported photo category: {category}")
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
             self._ensure_task_claimed_by(session, group, reviewer)
@@ -10048,7 +10440,7 @@ class PostgresStateRepository(StateRepository):
                     Photo.group_id == group.id,
                     Photo.legacy_id == photo_id,
                     Photo.is_active.is_(True),
-                )
+                ).with_for_update()
             )
             if photo is None:
                 raise KeyError(photo_id)
@@ -12133,9 +12525,7 @@ class DualWriteStateRepository(JsonStateRepository):
         self._reject_uncoordinated_dual_write("review_group")
 
     def classify_photo(self, group_id: str, photo_id: str, category: str, reviewer: str) -> dict[str, Any]:
-        result = super().classify_photo(group_id, photo_id, category, reviewer)
-        self._mirror_write("classify_photo", group_id, photo_id, category, reviewer)
-        return result
+        self._reject_uncoordinated_dual_write("classify_photo")
 
     def rescan_photo_barcode(
         self,
@@ -12144,9 +12534,7 @@ class DualWriteStateRepository(JsonStateRepository):
         reviewer: str,
         category: str = "",
     ) -> dict[str, Any]:
-        result = super().rescan_photo_barcode(group_id, photo_id, reviewer, category)
-        self._mirror_write("rescan_photo_barcode", group_id, photo_id, reviewer, category)
-        return result
+        self._reject_uncoordinated_dual_write("rescan_photo_barcode")
 
     def apply_group_scan_result(
         self,
@@ -12243,24 +12631,18 @@ class DualWriteStateRepository(JsonStateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
-        result = super().classify_data_center_group_photo(
-            group_id,
-            photo_id,
-            category,
-            actor=actor,
-            reason=reason,
-            source_page=source_page,
-        )
-        self._mirror_write(
-            "classify_data_center_group_photo",
-            group_id,
-            photo_id,
-            category,
-            actor=actor,
-            reason=reason,
-            source_page=source_page,
-        )
-        return result
+        self._reject_uncoordinated_dual_write("classify_data_center_group_photo")
+
+    def manual_confirm_group_classification(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        acknowledge_anomalies: bool,
+        expected_evidence_fingerprint: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        self._reject_uncoordinated_dual_write("manual_confirm_group_classification")
 
     def rescan_data_center_group_photo_barcode(
         self,
@@ -12272,24 +12654,7 @@ class DualWriteStateRepository(JsonStateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
-        result = super().rescan_data_center_group_photo_barcode(
-            group_id,
-            photo_id,
-            actor=actor,
-            category=category,
-            reason=reason,
-            source_page=source_page,
-        )
-        self._mirror_write(
-            "rescan_data_center_group_photo_barcode",
-            group_id,
-            photo_id,
-            actor=actor,
-            category=category,
-            reason=reason,
-            source_page=source_page,
-        )
-        return result
+        self._reject_uncoordinated_dual_write("rescan_data_center_group_photo_barcode")
 
     def scan_data_center_group_photo_region(
         self,

@@ -347,6 +347,8 @@ export type DataCenterPage = {
 }
 
 export type DataCenterDetail = DataCenterRow & {
+  classificationManualConfirmation: Record<string, unknown> | null
+  classificationConfirmationFingerprint: string
   photos: ReviewPhoto[]
   audit: Array<Record<string, unknown>>
 }
@@ -942,6 +944,9 @@ export type ReviewWorkbenchMeter = {
   review_status: string
   review_ready: boolean
   blockers: string[]
+  classification_manually_confirmed: boolean
+  classification_confirmation_anomalies: string[]
+  classification_manual_confirmation: Record<string, unknown> | null
 }
 export type ReviewWorkbenchOpenResult = {
   terminal: { terminal_key: string; project_id: string; terminal_code: string; installation_address: string }

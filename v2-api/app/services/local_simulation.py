@@ -7295,6 +7295,8 @@ def rescan_photo_barcode(group_id: str, photo_id: str, reviewer: str, category: 
     photo = next((item for item in group["photos"] if item["id"] == photo_id), None)
     if photo is None:
         raise KeyError(photo_id)
+    if category and category not in PHOTO_CATEGORIES:
+        raise ValueError(f"Unsupported photo category: {category}")
     now = now_iso()
     invalidate_json_delivery_artifacts(
         group,

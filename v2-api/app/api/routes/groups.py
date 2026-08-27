@@ -10,7 +10,11 @@ from app.schemas.data_center import DataCenterQuery
 from app.schemas.review import ExceptionCreate, GroupReviewUpdate
 from app.services import local_simulation
 from app.services.photo_storage import resolve_group_collection_for_response
-from app.services.state_repository import StateBackendNotReady, get_state_repository
+from app.services.state_repository import (
+    ClassificationConfirmationConflict,
+    StateBackendNotReady,
+    get_state_repository,
+)
 from app.services.task_snapshot_cache import invalidate_task_snapshot_for_team
 
 router = APIRouter(prefix="/groups")
@@ -40,6 +44,12 @@ class DataCenterReviewDecisionRequest(BaseModel):
     status: Literal["approved", "incomplete", "exception"]
     note: str = ""
     exception_note: str = ""
+
+
+class DataCenterManualClassificationConfirmRequest(BaseModel):
+    acknowledge_anomalies: bool = False
+    expected_evidence_fingerprint: str = Field(min_length=64, max_length=64)
+    source_page: str = "review_rephoto_workbench"
 
 
 class DataCenterPhotoClassifyRequest(BaseModel):
@@ -291,6 +301,34 @@ def decide_data_center_group_review(
         raise HTTPException(status_code=404, detail="Group not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
+
+
+@router.post("/data-center/groups/{group_id}/classification-manual-confirm")
+def manual_confirm_data_center_group_classification(
+    group_id: str,
+    payload: DataCenterManualClassificationConfirmRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().manual_confirm_group_classification(
+            group_id,
+            actor=_admin_actor(admin_payload),
+            acknowledge_anomalies=payload.acknowledge_anomalies,
+            expected_evidence_fingerprint=payload.expected_evidence_fingerprint,
+            source_page=payload.source_page,
+        )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Group not found") from exc
+    except ClassificationConfirmationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:
         local_simulation.reset_current_team(token)
     return ok(request, resolve_group_collection_for_response(result))

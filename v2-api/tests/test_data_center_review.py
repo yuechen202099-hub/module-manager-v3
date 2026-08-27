@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import main as main_module
 from app.api.routes import groups as groups_routes
+from app.api.routes import local_test as local_test_routes
 from app.core import security
 from app.services import local_simulation
 from app.services import state_repository as repository
@@ -102,6 +103,12 @@ def _latest_group() -> dict:
     return local_simulation.get_state()["groups"][0]
 
 
+def _current_confirmation_fingerprint() -> str:
+    group = _latest_group()
+    snapshot, anomalies = repository._manual_classification_snapshot(group, group["photos"])
+    return repository.data_center_service.manual_classification_fingerprint(snapshot, anomalies)
+
+
 def _review_headers(*, username: str, role: str, team_id: str) -> dict[str, str]:
     token = security.create_access_token(
         {
@@ -140,6 +147,330 @@ def test_admin_can_approve_data_center_group_and_audit_actor(
     assert committed["review_events"][-1]["group_id"] == "g-1"
     assert committed["review_events"][-1]["reviewer"] == "admin"
     assert committed["review_events"][-1]["note"] == "资料核对完成"
+
+
+def test_manual_classification_confirmation_requires_anomaly_acknowledgement_and_audits_snapshot(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches silently accepting abnormal evidence or omitting the durable classification snapshot."""
+    group = _latest_group()
+    group["status"] = "pending"
+    group["photos"][0]["category"] = "unclassified"
+    group["barcode_verification"]["status"] = "unreadable"
+
+    with pytest.raises(ValueError, match="确认异常"):
+        json_review_repo.manual_confirm_group_classification(
+            "g-1",
+            actor="admin-a",
+            acknowledge_anomalies=False,
+            expected_evidence_fingerprint=_current_confirmation_fingerprint(),
+            source_page="review_rephoto_workbench",
+        )
+
+    result = json_review_repo.manual_confirm_group_classification(
+        "g-1",
+        actor="admin-a",
+        acknowledge_anomalies=True,
+        expected_evidence_fingerprint=_current_confirmation_fingerprint(),
+        source_page="review_rephoto_workbench",
+    )
+    confirmation = _latest_group()["classification_manual_confirmation"]
+    payload = _audit_payload("classification_manual_confirmed")
+
+    assert result["status"] == "approved"
+    assert confirmation["actor"] == "admin-a"
+    assert confirmation["acknowledged_anomalies"] is True
+    assert confirmation["anomalies"] == ["unclassified_photos", "barcode_verification_required"]
+    assert confirmation["photo_snapshot"][0] == {
+        "photo_id": "p1",
+        "category": "unclassified",
+        "sha256": "a" * 64,
+    }
+    assert payload["source_page"] == "review_rephoto_workbench"
+    assert payload["actor"] == "admin-a"
+    assert payload["anomalies"] == confirmation["anomalies"]
+    assert payload["photo_snapshot"] == confirmation["photo_snapshot"]
+
+
+def test_admin_can_manually_confirm_group_classification_through_api(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches a missing admin-only HTTP path or loss of the token-bound actor."""
+    state = local_simulation.get_state()
+    team_id = state["team_id"]
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+
+    response = client.post(
+        "/groups/data-center/groups/g-1/classification-manual-confirm",
+        headers=_review_headers(username="admin", role="admin", team_id=team_id),
+        json={
+            "acknowledge_anomalies": False,
+            "expected_evidence_fingerprint": _current_confirmation_fingerprint(),
+            "source_page": "review_rephoto_workbench",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "approved"
+    assert _latest_group()["classification_manual_confirmation"]["actor"] == "admin"
+
+
+def test_data_center_detail_exposes_explicit_manual_classification_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches forcing clients to infer a manual confirmation from the generic approved status."""
+    state = local_simulation.get_state()
+    team_id = state["team_id"]
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+    headers = _review_headers(username="admin", role="admin", team_id=team_id)
+
+    confirmed = client.post(
+        "/groups/data-center/groups/g-1/classification-manual-confirm",
+        headers=headers,
+        json={
+            "acknowledge_anomalies": False,
+            "expected_evidence_fingerprint": _current_confirmation_fingerprint(),
+            "source_page": "review_rephoto_workbench",
+        },
+    )
+    detail = client.get("/groups/data-center/group/g-1", headers=headers)
+
+    assert confirmed.status_code == 200
+    assert detail.status_code == 200
+    marker = detail.json()["data"]["classification_manual_confirmation"]
+    assert marker["actor"] == "admin"
+    assert marker["acknowledged_anomalies"] is False
+    assert marker["photo_snapshot"][0] == {
+        "photo_id": "p1",
+        "category": "before_box",
+        "sha256": "a" * 64,
+    }
+
+
+def test_reclassifying_photo_revokes_manual_classification_confirmation(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches stale manual confirmation surviving a later category change."""
+    json_review_repo.manual_confirm_group_classification(
+        "g-1",
+        actor="admin-a",
+        acknowledge_anomalies=False,
+        expected_evidence_fingerprint=_current_confirmation_fingerprint(),
+        source_page="review_rephoto_workbench",
+    )
+    group = _latest_group()
+    group["barcode_verification"]["status"] = "pending"
+
+    json_review_repo.classify_data_center_group_photo(
+        "g-1",
+        "p1",
+        "collector_barcode",
+        actor="admin-a",
+        reason="重新分类",
+        source_page="review_rephoto_workbench",
+    )
+
+    group = _latest_group()
+    assert group["status"] == "unreviewed"
+    assert group.get("classification_manual_confirmation") is None
+    revoked = _audit_payload("classification_manual_confirmation_revoked")
+    assert revoked["actor"] == "admin-a"
+    assert revoked["reason"] == "重新分类"
+
+
+def test_json_confirmation_rejects_concurrent_photo_evidence_change_without_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    state = local_simulation.get_state()
+    team_id = state["team_id"]
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+    headers = _review_headers(username="admin", role="admin", team_id=team_id)
+    detail = client.get("/groups/data-center/group/g-1", headers=headers)
+    fingerprint = detail.json()["data"]["classification_confirmation_fingerprint"]
+    before_confirm_audits = [
+        event for event in state["audit_events"]
+        if event.get("action") == "classification_manual_confirmed"
+    ]
+
+    state["groups"][0]["photos"][0]["category"] = "collector_barcode"
+    response = client.post(
+        "/groups/data-center/groups/g-1/classification-manual-confirm",
+        headers=headers,
+        json={
+            "acknowledge_anomalies": True,
+            "expected_evidence_fingerprint": fingerprint,
+            "source_page": "review_rephoto_workbench",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "重新加载" in response.json()["detail"]
+    assert _latest_group().get("classification_manual_confirmation") is None
+    assert [
+        event for event in state["audit_events"]
+        if event.get("action") == "classification_manual_confirmed"
+    ] == before_confirm_audits
+
+
+def test_legacy_classify_route_repository_path_revokes_only_when_category_changes(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    json_review_repo.manual_confirm_group_classification(
+        "g-1", actor="admin-a", acknowledge_anomalies=False,
+        expected_evidence_fingerprint=_current_confirmation_fingerprint(),
+    )
+    before_events = len(local_simulation.get_state()["audit_events"])
+
+    json_review_repo.classify_photo("g-1", "p1", "before_box", "admin-a")
+    assert _latest_group().get("classification_manual_confirmation") is not None
+    assert len(local_simulation.get_state()["audit_events"]) == before_events
+
+    json_review_repo.classify_photo("g-1", "p1", "collector_barcode", "admin-a")
+
+    assert _latest_group().get("classification_manual_confirmation") is None
+    assert _latest_group()["status"] == "unreviewed"
+    revoked = _audit_payload("classification_manual_confirmation_revoked")
+    assert revoked["photo_id"] == "p1"
+
+
+def test_legacy_photo_category_http_route_revokes_manual_confirmation_on_change(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    json_review_repo.manual_confirm_group_classification(
+        "g-1",
+        actor="admin-a",
+        acknowledge_anomalies=False,
+        expected_evidence_fingerprint=_current_confirmation_fingerprint(),
+    )
+    team_id = local_simulation.get_state()["team_id"]
+    monkeypatch.setattr(local_test_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+    headers = _review_headers(username="admin-a", role="admin", team_id=team_id)
+
+    unchanged = client.patch(
+        "/local-test/groups/g-1/photos/p1/category",
+        headers=headers,
+        json={"category": "before_box", "reviewer": "admin-a"},
+    )
+    assert unchanged.status_code == 200
+    assert _latest_group().get("classification_manual_confirmation") is not None
+
+    changed = client.patch(
+        "/local-test/groups/g-1/photos/p1/category",
+        headers=headers,
+        json={"category": "collector_barcode", "reviewer": "admin-a"},
+    )
+
+    assert changed.status_code == 200
+    assert changed.json()["data"]["category"] == "collector_barcode"
+    assert _latest_group().get("classification_manual_confirmation") is None
+    assert _latest_group()["status"] == "unreviewed"
+    assert _audit_payload("classification_manual_confirmation_revoked")["photo_id"] == "p1"
+
+
+def test_legacy_barcode_rescan_category_context_preserves_classification_and_confirmation(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    json_review_repo.manual_confirm_group_classification(
+        "g-1", actor="admin-a", acknowledge_anomalies=False,
+        expected_evidence_fingerprint=_current_confirmation_fingerprint(),
+    )
+    before_marker = deepcopy(_latest_group()["classification_manual_confirmation"])
+
+    result = json_review_repo.rescan_photo_barcode(
+        "g-1", "p1", "admin-a", "collector_barcode"
+    )
+
+    assert result["category"] == "before_box"
+    assert _latest_group()["photos"][0]["category"] == "before_box"
+    assert _latest_group()["classification_manual_confirmation"] == before_marker
+    assert _latest_group()["status"] == "approved"
+    revoked_events = [
+        event
+        for event in local_simulation.get_state()["audit_events"]
+        if event.get("action") == "classification_manual_confirmation_revoked"
+    ]
+    assert revoked_events == []
+
+
+def test_data_center_category_carrying_rescan_revokes_marker_only_for_real_evidence_change(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    json_review_repo.manual_confirm_group_classification(
+        "g-1", actor="admin-a", acknowledge_anomalies=False,
+        expected_evidence_fingerprint=_current_confirmation_fingerprint(),
+    )
+    json_review_repo.rescan_data_center_group_photo_barcode(
+        "g-1", "p1", actor="admin-a", category="before_box"
+    )
+    assert _latest_group().get("classification_manual_confirmation") is not None
+
+    json_review_repo.rescan_data_center_group_photo_barcode(
+        "g-1", "p1", actor="admin-a", category="collector_barcode"
+    )
+
+    assert _latest_group().get("classification_manual_confirmation") is None
+    assert _latest_group()["status"] == "unreviewed"
+    revoked_events = [
+        event
+        for event in local_simulation.get_state()["audit_events"]
+        if event.get("action") == "classification_manual_confirmation_revoked"
+    ]
+    assert len(revoked_events) == 1
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "manual_confirm_group_classification",
+        "classify_photo",
+        "classify_data_center_group_photo",
+        "rescan_data_center_group_photo_barcode",
+    ],
+)
+def test_dual_classification_evidence_writes_fail_before_json_or_postgres_mutates(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+    operation: str,
+) -> None:
+    if operation != "manual_confirm_group_classification":
+        json_review_repo.manual_confirm_group_classification(
+            "g-1", actor="admin-a", acknowledge_anomalies=False,
+            expected_evidence_fingerprint=_current_confirmation_fingerprint(),
+        )
+    before = deepcopy(local_simulation.get_state())
+    monkeypatch.setattr(
+        repository.DualWriteStateRepository,
+        "postgres_repository_factory",
+        staticmethod(lambda: pytest.fail("PostgreSQL writer must not be constructed")),
+    )
+    dual = repository.DualWriteStateRepository()
+
+    with pytest.raises(repository.StateBackendNotReady, match="before either backend mutated"):
+        if operation == "manual_confirm_group_classification":
+            dual.manual_confirm_group_classification(
+                "g-1", actor="admin-a", acknowledge_anomalies=False,
+                expected_evidence_fingerprint=_current_confirmation_fingerprint(),
+            )
+        elif operation == "classify_photo":
+            dual.classify_photo("g-1", "p1", "collector_barcode", "admin-a")
+        elif operation == "classify_data_center_group_photo":
+            dual.classify_data_center_group_photo(
+                "g-1", "p1", "collector_barcode", actor="admin-a"
+            )
+        else:
+            dual.rescan_data_center_group_photo_barcode(
+                "g-1", "p1", actor="admin-a", category="collector_barcode"
+            )
+
+    assert local_simulation.get_state() == before
 
 
 @pytest.mark.parametrize("status", ["approved", "incomplete"])

@@ -43,9 +43,9 @@ const open = (overrides: Partial<ReviewWorkbenchOpenResult> = {}): ReviewWorkben
   constructed_meter_count: 2, unconstructed_meter_count: 1, review_ready_count: 1, review_required_count: 1,
   review_blockers: [{ group_id: 'group-a', codes: ['资料不全'] }],
   meters: [
-    { group_id: 'group-a', meter_no: 'M-A', module_no: 'MOD-A', collector_no: 'C-01', construction_state: 'constructed', review_status: '待审阅', review_ready: false, blockers: ['资料不全'] },
-    { group_id: 'group-b', meter_no: 'M-B', module_no: 'MOD-B', collector_no: 'C-01', construction_state: 'constructed', review_status: '已通过', review_ready: true, blockers: [] },
-    { group_id: 'group-c', meter_no: 'M-C', module_no: 'MOD-C', collector_no: 'C-02', construction_state: 'unconstructed', review_status: '未施工', review_ready: false, blockers: [] },
+    { group_id: 'group-a', meter_no: 'M-A', module_no: 'MOD-A', collector_no: 'C-01', construction_state: 'constructed', review_status: '待审阅', review_ready: false, blockers: ['资料不全'], classification_manually_confirmed: false, classification_confirmation_anomalies: [], classification_manual_confirmation: null },
+    { group_id: 'group-b', meter_no: 'M-B', module_no: 'MOD-B', collector_no: 'C-01', construction_state: 'constructed', review_status: '已通过', review_ready: true, blockers: [], classification_manually_confirmed: true, classification_confirmation_anomalies: [], classification_manual_confirmation: {} },
+    { group_id: 'group-c', meter_no: 'M-C', module_no: 'MOD-C', collector_no: 'C-02', construction_state: 'unconstructed', review_status: '未施工', review_ready: false, blockers: [], classification_manually_confirmed: false, classification_confirmation_anomalies: [], classification_manual_confirmation: null },
   ], rephoto: null, ...overrides,
 })
 const page = (items: GlobalCollectorTerminalCandidate[]): GlobalCollectorTerminalPage => ({ items, page: 1, page_size: 50, total: items.length })
@@ -77,6 +77,24 @@ describe('review rephoto workbench', () => {
     expect(wrapper.findAll('.rephoto-mutation').every((button) => (button.element as HTMLButtonElement).disabled)).toBe(true)
     expect(wrapper.findAll('.rephoto-slot')).toHaveLength(2)
     expect(wrapper.findAll('.rephoto-slot img')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('distinguishes manual classification acceptance from remaining material anomalies', async () => {
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({
+      workflow_state: 'blocked',
+      review_ready_count: 1,
+      review_required_count: 1,
+      meters: [
+        { group_id: 'group-a', meter_no: 'M-A', module_no: 'MOD-A', collector_no: 'C-01', construction_state: 'constructed', review_status: 'approved', review_ready: false, blockers: ['after_box_photo_missing'], classification_manually_confirmed: true, classification_confirmation_anomalies: ['after_box_photo_missing'], classification_manual_confirmation: {} },
+        { group_id: 'group-b', meter_no: 'M-B', module_no: 'MOD-B', collector_no: 'C-01', construction_state: 'constructed', review_status: 'approved', review_ready: true, blockers: [], classification_manually_confirmed: true, classification_confirmation_anomalies: [], classification_manual_confirmation: {} },
+      ],
+    }))
+
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.get('[data-testid="meter-record-group-a"]').text()).toContain('分类已确认，资料异常')
+    expect(wrapper.get('.terminal-notice').text()).toContain('已确认分类的表计仍可能存在资料异常')
     wrapper.unmount()
   })
 

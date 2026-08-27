@@ -3200,7 +3200,8 @@ def test_dual_backend_mirrors_core_writes_after_json_success(monkeypatch: pytest
 
     repo = repository.get_state_repository()
 
-    assert repo.classify_photo("g-1", "p-1", "after_box", "reviewer-a")["category"] == "after_box"
+    with pytest.raises(repository.StateBackendNotReady, match="before either backend mutated"):
+        repo.classify_photo("g-1", "p-1", "after_box", "reviewer-a")
     assert repo.update_group_metadata("g-1", actor="reviewer-a", updates={"collector": "c"})["updates"] == {
         "collector": "c"
     }
@@ -3228,7 +3229,6 @@ def test_dual_backend_mirrors_core_writes_after_json_success(monkeypatch: pytest
         == 1
     )
     assert calls == [
-        ("classify_photo", ("g-1", "p-1", "after_box", "reviewer-a"), {}),
         (
             "update_group_metadata",
             ("g-1",),
@@ -5724,11 +5724,59 @@ def test_postgres_formal_identity_updates_reject_placeholders_before_transaction
             repo.update_group_metadata("g-1", actor="admin", updates={operation: value})
 
 
+def test_postgres_list_task_groups_has_no_unrelated_photo_category_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = SimpleNamespace(id="group-uuid", legacy_id="g-1", photo_count=0)
+
+    class ScalarResult:
+        def all(self):
+            return [group]
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def scalars(self, _statement):
+            return ScalarResult()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+        def _task_by_legacy_id(self, _session, task_id: int):
+            assert task_id == 7
+            return SimpleNamespace(legacy_id=task_id)
+
+    monkeypatch.setattr(
+        repository,
+        "_group_payloads",
+        lambda _session, _groups, *, include_photos: [
+            {"id": "g-1", "meter_no": "M-1"}
+        ],
+    )
+    monkeypatch.setattr(repository, "_review_queue_rank", lambda _group: 0)
+
+    result = TestPostgresRepository().list_task_groups(7)
+
+    assert result["total"] == 1
+    assert result["items"][0]["id"] == "g-1"
+
+
 def test_postgres_classify_photo_persists_archive_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.services import delivery_cache
 
     monkeypatch.setattr(repository, "invalidate_verification_for_group", lambda *args, **kwargs: {})
     events = []
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        repository,
+        "_stage_transactional_audit",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
     monkeypatch.setattr(
         delivery_cache,
         "invalidate_postgres_delivery_cache_for_group_change",
@@ -5762,8 +5810,17 @@ def test_postgres_classify_photo_persists_archive_fields(monkeypatch: pytest.Mon
         task_id=None,
         legacy_id="g-1",
         legacy_task_id=1,
-        raw_data={},
-        status=repository.GroupStatus.UNREVIEWED,
+        raw_data={
+            "classification_manual_confirmation": {
+                "actor": "reviewer-a",
+                "photo_snapshot": [{"photo_id": "p-1", "category": "unclassified", "sha256": "a" * 64}],
+            },
+            "status": "approved",
+        },
+        status=repository.GroupStatus.APPROVED,
+        reviewer="reviewer-a",
+        review_note="manual classification confirmed",
+        reviewed_at=datetime.now(UTC),
         photo_count=1,
     )
 
@@ -5811,7 +5868,217 @@ def test_postgres_classify_photo_persists_archive_fields(monkeypatch: pytest.Mon
     assert photo.archived_at is not None
     assert photo.raw_data["archive_status"] == "archived"
     assert photo.raw_data["category_label"] == repository.local_simulation.PHOTO_CATEGORIES["after_box"]
+    assert "classification_manual_confirmation" not in group.raw_data
+    assert group.status == repository.GroupStatus.UNREVIEWED
+    assert group.reviewer is None
+    assert [audit["action"] for audit in audits].count("classification_manual_confirmation_revoked") == 1
     assert events == ["invalidate", "commit", ("requeue", "g-1", "reviewer-a", "photo_category_changed")]
+
+
+@pytest.mark.parametrize("operation", ["legacy", "data_center"])
+@pytest.mark.parametrize(
+    ("next_category", "expect_revoked"),
+    [("", False), ("before_box", False), ("after_box", True)],
+)
+def test_postgres_legacy_rescan_preserves_classification_while_data_center_rescan_revokes_on_change(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    next_category: str,
+    expect_revoked: bool,
+) -> None:
+    from app.services import delivery_cache
+
+    marker = {
+        "actor": "reviewer-a",
+        "photo_snapshot": [
+            {"photo_id": "p-1", "category": "before_box", "sha256": "b" * 64}
+        ],
+    }
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-1",
+        team_id="alpha-team",
+        raw_data={
+            "classification_manual_confirmation": deepcopy(marker),
+            "status": "approved",
+        },
+        status=repository.GroupStatus.APPROVED,
+        reviewer="reviewer-a",
+        review_note="manual classification confirmed",
+        reviewed_at=datetime.now(UTC),
+    )
+    photo = SimpleNamespace(
+        id="photo-uuid",
+        legacy_id="p-1",
+        category="before_box",
+        sha256="b" * 64,
+        raw_data={
+            "category_label": "表箱整体改造前",
+            "construction_slot": "before_box",
+            "construction_slot_label": "表箱整体改造前",
+        },
+        image_url="https://example.test/p-1.jpg",
+        source_url="",
+        storage_type="external_url",
+        storage_bucket="",
+        storage_key="",
+        archive_filename="",
+        archive_status="pending",
+        original_filename="p-1.jpg",
+        sort_order=1,
+        barcode="",
+        collector="",
+        asset_no="",
+        creator="reviewer-a",
+        upload_status="uploaded",
+    )
+    audits: list[dict[str, object]] = []
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "alpha-team")
+    monkeypatch.setattr(
+        repository,
+        "invalidate_verification_for_group",
+        lambda *_args, **_kwargs: {"status": "pending", "should_enqueue": False},
+    )
+    monkeypatch.setattr(
+        delivery_cache,
+        "invalidate_postgres_delivery_cache_for_group_change",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        repository,
+        "_stage_transactional_audit",
+        lambda _session, **kwargs: audits.append(kwargs),
+    )
+    monkeypatch.setattr(
+        repository,
+        "_group_payload",
+        lambda _session, value, **_kwargs: {
+            "id": value.legacy_id,
+            "status": value.status.value,
+        },
+    )
+    monkeypatch.setattr(
+        repository,
+        "_data_center_group_result",
+        lambda value, **_kwargs: value,
+    )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def scalar(self, _statement):
+            return photo
+
+        def commit(self):
+            return None
+
+        def refresh(self, _value):
+            return None
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert group_id == "g-1"
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, _session, checked_group, actor: str, *, force: bool = False) -> None:
+            assert checked_group is group
+            assert actor == "reviewer-a"
+
+    if operation == "legacy":
+        result = TestPostgresRepository().rescan_photo_barcode(
+            "g-1",
+            "p-1",
+            "reviewer-a",
+            next_category,
+        )
+    else:
+        result = TestPostgresRepository().rescan_data_center_group_photo_barcode(
+            "g-1",
+            "p-1",
+            actor="reviewer-a",
+            category=next_category,
+            reason="rescan regression",
+            source_page="data_center",
+        )
+
+    revoked_audits = [
+        audit
+        for audit in audits
+        if audit["action"] == "classification_manual_confirmation_revoked"
+    ]
+    expected_category = next_category if operation == "data_center" and next_category else "before_box"
+    expected_label = {
+        "before_box": "表箱整体改造前",
+        "after_box": "表箱整体改造后",
+    }[expected_category]
+    expected_revoked = bool(next_category) and expect_revoked and operation == "data_center"
+    assert photo.category == expected_category
+    assert result["category"] == expected_category
+    assert result["category_label"] == expected_label
+    if operation == "legacy":
+        assert "category" not in photo.raw_data
+        assert photo.raw_data["category_label"] == "表箱整体改造前"
+    elif next_category:
+        assert photo.raw_data["category"] == expected_category
+        assert photo.raw_data["category_label"] == expected_label
+    if expected_revoked:
+        assert "classification_manual_confirmation" not in group.raw_data
+        assert group.status == repository.GroupStatus.UNREVIEWED
+        assert group.reviewer is None
+        assert len(revoked_audits) == 1
+    else:
+        assert group.raw_data["classification_manual_confirmation"] == marker
+        assert group.status == repository.GroupStatus.APPROVED
+        assert revoked_audits == []
+
+
+def test_postgres_data_center_rescan_rejects_unsupported_category_before_transaction() -> None:
+    marker = {
+        "actor": "reviewer-a",
+        "photo_snapshot": [
+            {"photo_id": "p-1", "category": "before_box", "sha256": "b" * 64}
+        ],
+    }
+    group = SimpleNamespace(
+        raw_data={"classification_manual_confirmation": deepcopy(marker)},
+        status=repository.GroupStatus.APPROVED,
+    )
+    photo = SimpleNamespace(
+        category="before_box",
+        raw_data={"category_label": "表箱整体改造前"},
+    )
+    audits: list[dict[str, object]] = []
+    session_opens: list[bool] = []
+    before_group = deepcopy(group.__dict__)
+    before_photo = deepcopy(photo.__dict__)
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            session_opens.append(True)
+            raise AssertionError("unsupported category must be rejected before opening a transaction")
+
+    with pytest.raises(ValueError, match="Unsupported photo category"):
+        TestPostgresRepository().rescan_data_center_group_photo_barcode(
+            "g-1",
+            "p-1",
+            actor="reviewer-a",
+            category="unsupported-category",
+            reason="rescan regression",
+            source_page="data_center",
+        )
+
+    assert session_opens == []
+    assert group.__dict__ == before_group
+    assert photo.__dict__ == before_photo
+    assert audits == []
 
 
 def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_without_claim(
@@ -5857,6 +6124,12 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
             "collector": "COLLECTOR001",
             "status": "pending",
             "archive_status": "pending",
+            "classification_manual_confirmation": {
+                "actor": "admin-a",
+                "photo_snapshot": [
+                    {"photo_id": "p-4", "category": "unclassified", "sha256": "d" * 64}
+                ],
+            },
         },
         updated_at=None,
     )
@@ -6011,17 +6284,153 @@ def test_postgres_data_center_classifies_final_photo_auto_archives_and_enqueues_
     assert result["archive_status"] == "archived"
     assert group.status == repository.GroupStatus.APPROVED
     assert group.raw_data["archive_status"] == "archived"
+    assert "classification_manual_confirmation" not in group.raw_data
     assert verification.auto_archive_status == "archived"
     assert all(photo.archive_status == "archived" for photo in photos)
     assert events == ["invalidate", ("stage-delivery", "admin-a", "data_center_auto_archive", 0), "commit"]
     assert result["delivery_package_job_status"] == "pending"
     audit = next(item for item in audits if item["action"] == "data_center_photo_classified")
+    revoked = next(
+        item
+        for item in audits
+        if item["action"] == "classification_manual_confirmation_revoked"
+    )
+    assert revoked["payload"]["photo_id"] == "p-4"
     assert audit["payload"]["source_page"] == "data_center"
     assert audit["payload"]["source"] == "data_center"
     assert audit["payload"]["actor"] == "admin-a"
     assert audit["payload"]["reason"] == "补齐最后一张分类"
     assert audit["before_data"]["category"] == "unclassified"
     assert audit["after_data"]["category"] == "after_box"
+
+
+def test_postgres_manual_classification_confirmation_is_transactional_and_audited(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches the production backend omitting the confirmation snapshot or audit event."""
+    group = SimpleNamespace(
+        id="group-uuid",
+        team_id="alpha-team",
+        legacy_id="g-1",
+        terminal="120000000001",
+        display_meter_no="110000288056",
+        module_asset_no="MOD001",
+        collector="COLLECTOR001",
+        installation_address="A road",
+        status=repository.GroupStatus.UNREVIEWED,
+        reviewer=None,
+        review_note="",
+        reviewed_at=None,
+        raw_data={"status": "pending"},
+    )
+    photos = [
+        SimpleNamespace(id=f"p-{index}-uuid", legacy_id=f"p-{index}", category=category, sha256=str(index) * 64, is_active=True)
+        for index, category in enumerate(
+            ("before_box", "collector_barcode", "module_meter", "after_box"),
+            start=1,
+        )
+    ]
+    verification = SimpleNamespace(status="passed")
+    audits: list[dict[str, object]] = []
+
+    class ScalarResult:
+        def all(self):
+            return photos
+
+    class Session:
+        committed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def scalars(self, _statement):
+            return ScalarResult()
+
+        def scalar(self, _statement):
+            return verification
+
+        def commit(self):
+            self.committed = True
+
+        def refresh(self, _value):
+            return None
+
+    session = Session()
+
+    class TestRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return session
+
+        def _group_by_legacy_id(self, _session, group_id: str, *, lock: bool = False):
+            assert group_id == "g-1"
+            assert lock is True
+            return group
+
+    def group_payload(_session, value, **_kwargs):
+        status = value.status.value if hasattr(value.status, "value") else str(value.status)
+        return {
+            "id": value.legacy_id,
+            "terminal": value.terminal,
+            "meter_no": value.display_meter_no,
+            "module_asset_no": value.module_asset_no,
+            "collector": value.collector,
+            "address": value.installation_address,
+            "status": status,
+            "reviewer": value.reviewer or "",
+            "review_note": value.review_note,
+            "barcode_verification": {"status": verification.status},
+        }
+
+    monkeypatch.setattr(repository, "_group_payload", group_payload)
+    monkeypatch.setattr(
+        repository,
+        "_photo_payload",
+        lambda photo: {
+            "id": photo.legacy_id,
+            "category": photo.category,
+            "sha256": photo.sha256,
+            "is_active": photo.is_active,
+        },
+    )
+    monkeypatch.setattr(repository, "_stage_transactional_audit", lambda _session, **kwargs: audits.append(kwargs))
+
+    snapshot, anomalies = repository._manual_classification_snapshot(
+        {**group_payload(session, group), "address": group.installation_address},
+        [repository._photo_payload(photo) for photo in photos],
+    )
+    before_group_raw = deepcopy(group.raw_data)
+    with pytest.raises(repository.ClassificationConfirmationConflict, match="重新加载"):
+        TestRepository().manual_confirm_group_classification(
+            "g-1",
+            actor="admin-a",
+            acknowledge_anomalies=False,
+            expected_evidence_fingerprint="0" * 64,
+            source_page="review_rephoto_workbench",
+        )
+    assert group.raw_data == before_group_raw
+    assert audits == []
+    assert session.committed is False
+
+    result = TestRepository().manual_confirm_group_classification(
+        "g-1",
+        actor="admin-a",
+        acknowledge_anomalies=False,
+        expected_evidence_fingerprint=repository.data_center_service.manual_classification_fingerprint(
+            snapshot, anomalies
+        ),
+        source_page="review_rephoto_workbench",
+    )
+
+    assert session.committed is True
+    assert result["status"] == "approved"
+    assert group.raw_data["classification_manual_confirmation"]["photo_snapshot"][0]["photo_id"] == "p-1"
+    audit = next(item for item in audits if item["action"] == "classification_manual_confirmed")
+    assert audit["payload"]["actor"] == "admin-a"
+    assert audit["payload"]["anomalies"] == []
+    assert len(audit["payload"]["photo_snapshot"]) == 4
 
 
 def test_postgres_data_center_classify_rolls_back_archive_when_commit_fails(

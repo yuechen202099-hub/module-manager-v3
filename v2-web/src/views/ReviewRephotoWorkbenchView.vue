@@ -81,7 +81,7 @@ const collectorRows = computed<CollectorDisplayRow[]>(() => {
 const terminalNotice = computed(() => {
   if (!opened.value) return ''
   if (sourceChanged.value) return '来源资料已变化，请刷新后继续。'
-  if (opened.value.review_required_count) return '已施工表计照片全部完成四类归档后，可进行翻拍。'
+  if (opened.value.review_required_count) return '待人工确认的表计需要先完成确认；已确认分类的表计仍可能存在资料异常。'
   if (opened.value.workflow_state === 'pool_shortage') return '采集器池数量不足，暂不能完成随机替换。'
   if (opened.value.workflow_state === 'no_construction') return '终端没有已施工表计，无需生成翻拍资料。'
   return '照片分类已完成，可以按表计查看翻拍资料。'
@@ -103,7 +103,10 @@ function workflowLabel(state: string) {
 function imageUrl(photo: { image_url?: string; preview_url?: string; thumbnail_url?: string; canonical_image_url?: string } | null) {
   return photo?.preview_url || photo?.image_url || photo?.thumbnail_url || photo?.canonical_image_url || ''
 }
-function classificationLabel(meter: ReviewWorkbenchMeter) { return meter.review_ready ? '分类完成' : '待完成分类' }
+function classificationLabel(meter: ReviewWorkbenchMeter) {
+  if (meter.review_ready) return '分类完成'
+  return meter.classification_manually_confirmed ? '分类已确认，资料异常' : '待人工确认'
+}
 function collectorStateLabel(state: CollectorDisplayRow['physical_state']) {
   return ({ pending: '待确认', present: '有实物', missing: '无实物', replaced: '已替换' } as Record<string, string>)[state] || state
 }

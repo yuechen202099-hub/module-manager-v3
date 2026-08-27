@@ -1040,6 +1040,10 @@ def test_postgres_data_center_detail_derives_statuses_after_loading_photos(
 ) -> None:
     group_id = uuid4()
     group = _model_group(group_id, legacy_id="detail-001", photo_count=4)
+    group.raw_data["classification_manual_confirmation"] = {
+        "actor": "admin-a",
+        "confirmed_at": "2026-08-27T12:00:00+08:00",
+    }
     photos = [
         _model_photo(group_id, "p1", "before_box", "archived"),
         _model_photo(group_id, "p2", "before_box", "archived"),
@@ -1084,6 +1088,10 @@ def test_postgres_data_center_detail_derives_statuses_after_loading_photos(
 
     assert detail is not None
     assert detail["classification_status"] == "incomplete"
+    assert detail["classification_manual_confirmation"] == {
+        "actor": "admin-a",
+        "confirmed_at": "2026-08-27T12:00:00+08:00",
+    }
     assert detail["archive_status"] == "pending"
     assert len(detail["photos"]) == 4
 

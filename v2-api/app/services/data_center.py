@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, date, datetime, time
 from typing import Any, Callable, Iterable, Mapping
 
@@ -8,6 +10,68 @@ from app.services.barcode_verification_contract import has_current_eligible_phot
 
 
 REQUIRED_CLASSIFICATION_SLOTS = {"before_box", "module_meter", "after_box", "collector_barcode"}
+MANUAL_CLASSIFICATION_BARCODE_READY = {"passed", "manual", "manual_confirmed", "manual_passed"}
+
+
+def manual_classification_snapshot(
+    group: Mapping[str, Any],
+    photos: list[Mapping[str, Any]],
+) -> tuple[list[dict[str, str]], list[str]]:
+    active = [photo for photo in photos if photo.get("is_active", True) is not False]
+    snapshot = [
+        {
+            "photo_id": str(photo.get("id") or photo.get("legacy_id") or ""),
+            "category": str(photo.get("category") or "unclassified"),
+            "sha256": str(photo.get("sha256") or ""),
+        }
+        for photo in active
+    ]
+    anomalies: list[str] = []
+    categories = [item["category"] for item in snapshot]
+    if any(category not in REQUIRED_CLASSIFICATION_SLOTS for category in categories):
+        anomalies.append("unclassified_photos")
+    for category in ("module_meter", "after_box"):
+        count = categories.count(category)
+        if count == 0:
+            anomalies.append(f"{category}_photo_missing")
+        elif count > 1:
+            anomalies.append(f"{category}_photo_conflict")
+    verification = group.get("barcode_verification")
+    barcode_status = ""
+    if isinstance(verification, Mapping):
+        barcode_status = str(verification.get("status") or "").strip().lower()
+    if not barcode_status:
+        barcode_status = str(group.get("barcode_status") or "").strip().lower()
+    if barcode_status not in MANUAL_CLASSIFICATION_BARCODE_READY:
+        anomalies.append("barcode_verification_required")
+    for field, code in (
+        ("terminal", "terminal_missing"),
+        ("meter_no", "meter_missing"),
+        ("module_asset_no", "module_missing"),
+        ("collector", "collector_missing"),
+        ("address", "address_missing"),
+    ):
+        if not str(group.get(field) or "").strip():
+            anomalies.append(code)
+    if str(group.get("exception_status") or "").strip().lower() in {"open", "exception", "rejected"}:
+        anomalies.append("exception_open")
+    return snapshot, anomalies
+
+
+def manual_classification_fingerprint(
+    snapshot: list[dict[str, str]],
+    anomalies: list[str],
+) -> str:
+    canonical = {
+        "photo_snapshot": sorted(
+            snapshot,
+            key=lambda item: (item["photo_id"], item["category"], item["sha256"]),
+        ),
+        "anomalies": sorted(anomalies),
+    }
+    return hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def coerce_datetime(value: Any) -> datetime | None:
@@ -155,6 +219,8 @@ def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
     if "status" not in classification:
         classification["status"] = str(group.get("classification_status") or "incomplete")
     barcode_status, missing_fields, barcode_progress = barcode_status_from_group(group)
+    manual_confirmation = group.get("classification_manual_confirmation")
+    confirmation_snapshot, confirmation_anomalies = manual_classification_snapshot(group, photos)
     return {
         "kind": "group",
         "id": str(group.get("id") or group.get("legacy_id") or "").strip(),
@@ -170,6 +236,13 @@ def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
         "photo_count": photo_count,
         "classification_status": classification["status"],
         "classification_progress": classification,
+        "classification_manual_confirmation": (
+            dict(manual_confirmation) if isinstance(manual_confirmation, Mapping) else None
+        ),
+        "classification_confirmation_fingerprint": manual_classification_fingerprint(
+            confirmation_snapshot,
+            confirmation_anomalies,
+        ),
         "barcode_status": barcode_status,
         "barcode_progress": barcode_progress,
         "group_barcode_missing_fields": missing_fields,
@@ -199,6 +272,7 @@ def unmatched_row(record: Mapping[str, Any]) -> dict[str, Any]:
         "photo_count": photo_count,
         "classification_status": "incomplete",
         "classification_progress": {"status": "incomplete", "classified_count": 0, "required_count": 4},
+        "classification_manual_confirmation": None,
         "barcode_status": "ineligible",
         "barcode_progress": {"status": "ineligible"},
         "group_barcode_missing_fields": [],

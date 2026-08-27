@@ -5,9 +5,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
   classifyDataCenterGroupPhoto,
+  confirmDataCenterGroupClassification,
   confirmDataCenterGroupBarcode,
   fetchDataCenterDetail,
   fetchGroupPhotoObjectUrl,
+  getApiErrorStatus,
   rescanDataCenterGroupPhotoBarcode,
   resetAdminGroupToUnconstructed,
   resetAdminGroupToUnreviewed,
@@ -96,6 +98,37 @@ const classificationChanges = computed(() => detail.value?.photos.flatMap((photo
     ? [{ photoId: photo.id, category }]
     : []
 }) || [])
+const hasManualClassificationConfirmation = computed(
+  () => Boolean(detail.value?.classificationManualConfirmation),
+)
+const manualClassificationWarnings = computed(() => {
+  if (!detail.value) return []
+  const warnings: string[] = []
+  const categories = detail.value.photos.map((photo) => photo.category || 'unclassified')
+  const unclassifiedCount = categories.filter((category) => !classificationCategoryValues.has(category)).length
+  if (unclassifiedCount) warnings.push(`仍有 ${unclassifiedCount} 张照片未分类`)
+  for (const [category, label] of [['module_meter', '电表和模块照片'], ['after_box', '改造完成照片']] as const) {
+    const count = categories.filter((value) => value === category).length
+    if (count === 0) warnings.push(`缺少${label}`)
+    else if (count > 1) warnings.push(`${label}存在重复分类`)
+  }
+  if (!['passed', 'manual', 'manual_confirmed', 'manual_passed'].includes(detail.value.barcodeStatus)) {
+    warnings.push('条码状态未通过')
+  }
+  for (const [value, label] of [
+    [detail.value.terminal, '终端号'],
+    [detail.value.meterNo, '表号'],
+    [detail.value.moduleAssetNo, '模块号'],
+    [detail.value.collector, '采集器号'],
+    [detail.value.address, '安装地址'],
+  ] as const) {
+    if (!value.trim()) warnings.push(`缺少${label}`)
+  }
+  if (['open', 'exception', 'rejected'].includes(detail.value.exceptionStatus.toLowerCase())) {
+    warnings.push('资料存在未关闭异常')
+  }
+  return warnings
+})
 const rephotoSlots = computed(() => {
   const definitions: Array<{ slot: 'module_meter' | 'after_box'; label: string }> = [
     { slot: 'module_meter', label: '电表和模块照片' },
@@ -298,6 +331,46 @@ async function saveClassifications() {
   }
 }
 
+async function confirmClassificationComplete() {
+  if (!detail.value || classificationChanges.value.length) return
+  const currentDetail = detail.value
+  const warnings = [...manualClassificationWarnings.value]
+  const owner = beginMutation(currentDetail.id)
+  try {
+    if (warnings.length) {
+      try {
+        await ElMessageBox.confirm(
+          `检测到以下异常：\n${warnings.map((warning) => `• ${warning}`).join('\n')}\n\n是否仍由人工确认分类完成？`,
+          '异常分类确认',
+          {
+            type: 'warning',
+            confirmButtonText: '确认分类完成',
+            cancelButtonText: '返回检查',
+          },
+        )
+      } catch {
+        return
+      }
+    }
+    if (!isCurrentMutation(owner)) return
+    await confirmDataCenterGroupClassification(
+      currentDetail.id,
+      warnings.length > 0,
+      currentDetail.classificationConfirmationFingerprint,
+    )
+    if (!isCurrentMutation(owner)) return
+    const next = await reloadAfterMutation(owner)
+    if (!next) return
+    emit('review-decided', 'approved')
+    ElMessage.success(warnings.length ? '已人工确认分类完成并记录异常' : '已人工确认分类完成')
+  } catch (error) {
+    if (getApiErrorStatus(error) === 409) await reloadAfterMutation(owner)
+    showMutationError(owner, error, '人工确认分类完成失败')
+  } finally {
+    finishMutation(owner)
+  }
+}
+
 async function rescanActivePhoto() {
   if (!detail.value || !activePhoto.value) return
   const groupId = detail.value.id
@@ -490,7 +563,10 @@ onBeforeUnmount(cleanupDetail)
 
     <section v-else-if="detail && props.classificationOnly" class="classification-only-panel">
       <header class="classification-heading">
-        <strong>照片分类 {{ classificationCompletedCount }}/{{ classificationTotalCount }}</strong>
+        <strong>
+          照片分类 {{ classificationCompletedCount }}/{{ classificationTotalCount }}
+          <em v-if="hasManualClassificationConfirmation">已人工确认分类完成</em>
+        </strong>
         <span>将未分类照片归入已有的四种资料类型</span>
       </header>
       <div class="classification-photo-grid">
@@ -520,13 +596,22 @@ onBeforeUnmount(cleanupDetail)
           </span>
         </article>
       </div>
-      <button
-        type="button"
-        class="save-classifications"
-        data-testid="save-photo-classifications"
-        :disabled="saving || !classificationChanges.length"
-        @click="saveClassifications"
-      >{{ saving ? '保存中…' : '保存分类' }}</button>
+      <div class="classification-actions">
+        <button
+          type="button"
+          class="save-classifications"
+          data-testid="save-photo-classifications"
+          :disabled="saving || !classificationChanges.length"
+          @click="saveClassifications"
+        >{{ saving ? '保存中…' : '保存分类' }}</button>
+        <button
+          type="button"
+          class="confirm-classification-complete"
+          data-testid="confirm-classification-complete"
+          :disabled="saving || classificationChanges.length > 0"
+          @click="confirmClassificationComplete"
+        >{{ saving ? '确认中…' : hasManualClassificationConfirmation ? '重新确认分类完成' : '人工确认分类完成' }}</button>
+      </div>
     </section>
 
     <div v-else-if="detail" class="review-layout">
@@ -645,6 +730,7 @@ onBeforeUnmount(cleanupDetail)
 .classification-only-panel { display: grid; gap: 14px; min-width: 0; }
 .classification-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .classification-heading strong { color: var(--v2-text-strong, #172033); font-size: 15px; }
+.classification-heading strong em { margin-left: 8px; color: var(--el-color-success-dark-2, #529b2e); font-size: 12px; font-style: normal; font-weight: 600; }
 .classification-heading span { color: var(--v2-text-muted, #7a8798); font-size: 13px; }
 .classification-photo-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
 .classification-photo-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; }
@@ -655,7 +741,9 @@ onBeforeUnmount(cleanupDetail)
 .classification-photo-card > span.classified { color: var(--el-color-success, #67c23a); }
 .classification-photo-card > span.unclassified { color: var(--el-color-warning, #e6a23c); }
 .save-classifications { justify-self: center; min-width: 92px; min-height: 36px; padding: 0 18px; border: 1px solid var(--v2-accent, #1677ff); border-radius: 6px; background: var(--v2-accent, #1677ff); color: #fff; cursor: pointer; }
-.save-classifications:disabled { cursor: not-allowed; opacity: .55; }
+.classification-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 10px; }
+.confirm-classification-complete { min-width: 154px; min-height: 36px; padding: 0 18px; border: 1px solid var(--el-color-success, #67c23a); border-radius: 6px; background: #fff; color: var(--el-color-success-dark-2, #529b2e); cursor: pointer; }
+.save-classifications:disabled, .confirm-classification-complete:disabled { cursor: not-allowed; opacity: .55; }
 .review-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr); gap: 14px; min-height: 640px; }
 .photo-pane, .review-pane { display: grid; align-content: start; gap: 10px; min-width: 0; }
 .source-stage { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 10px; }

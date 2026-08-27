@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -36,6 +36,7 @@ def review_meter(
     barcode_status: str = "passed",
     identity_blockers: tuple[str, ...] = (),
     source_blockers: tuple[str, ...] = (),
+    classification_manual_confirmation: dict[str, Any] | None | object = Ellipsis,
 ) -> ReviewMeterEvidence:
     resolved_photos = active_photos
     if resolved_photos is None:
@@ -43,6 +44,21 @@ def review_meter(
             photo(f"{group_id}-module-meter", "module_meter", "1"),
             photo(f"{group_id}-after-box", "after_box", "2"),
         )
+    if classification_manual_confirmation is Ellipsis:
+        classification_manual_confirmation = {
+            "actor": "admin",
+            "confirmed_at": "2026-08-27T12:00:00+08:00",
+            "acknowledged_anomalies": False,
+            "anomalies": [],
+            "photo_snapshot": [
+                {
+                    "photo_id": item.confirmation_id or item.id,
+                    "category": item.category,
+                    "sha256": item.sha256,
+                }
+                for item in resolved_photos
+            ],
+        }
     return ReviewMeterEvidence(
         group_id=group_id,
         status=status,
@@ -56,7 +72,50 @@ def review_meter(
         barcode_status=barcode_status,
         identity_blockers=identity_blockers,
         source_blockers=source_blockers,
+        classification_manual_confirmation=classification_manual_confirmation,
     )
+
+
+def test_automatic_approval_without_explicit_marker_stays_pending_manual_confirmation() -> None:
+    projection = project_terminal_review(
+        (review_meter("g-auto", status="approved", classification_manual_confirmation=None),)
+    )
+
+    meter = projection.constructed_meters[0]
+    assert meter.classification_manually_confirmed is False
+    assert meter.classification_manual_confirmation is None
+    assert meter.blockers == ("review_not_approved",)
+    assert projection.review_ready_count == 0
+    assert projection.review_required_count == 1
+    assert projection.rephoto_sources == ()
+
+
+def test_current_explicit_marker_is_first_class_confirmation_evidence() -> None:
+    projection = project_terminal_review((review_meter("g-current", status="unreviewed"),))
+
+    meter = projection.constructed_meters[0]
+    assert meter.classification_manually_confirmed is True
+    assert meter.classification_confirmation_anomalies == ()
+    assert meter.classification_manual_confirmation is not None
+    assert meter.review_ready is True
+
+
+def test_stale_manual_confirmation_snapshot_cannot_unlock_rephoto() -> None:
+    evidence = review_meter("g-stale")
+    stale = dict(evidence.classification_manual_confirmation or {})
+    stale["photo_snapshot"] = [
+        {**item, "sha256": "f" * 64}
+        for item in stale["photo_snapshot"]
+    ]
+
+    projection = project_terminal_review(
+        (review_meter("g-stale", classification_manual_confirmation=stale),)
+    )
+
+    meter = projection.constructed_meters[0]
+    assert meter.classification_manually_confirmed is False
+    assert "review_not_approved" in meter.blockers
+    assert projection.review_required_count == 1
 
 
 def test_mixed_terminal_partitions_unconstructed_and_locks_on_constructed_review() -> None:
@@ -64,7 +123,12 @@ def test_mixed_terminal_partitions_unconstructed_and_locks_on_constructed_review
     projection = project_terminal_review(
         (
             review_meter("g-1", status="approved", barcode_status="passed"),
-            review_meter("g-2", status="unreviewed", barcode_status="passed"),
+            review_meter(
+                "g-2",
+                status="unreviewed",
+                barcode_status="passed",
+                classification_manual_confirmation=None,
+            ),
             review_meter(
                 "g-3",
                 status="unreviewed",

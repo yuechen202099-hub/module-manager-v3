@@ -181,6 +181,47 @@ def service(session: Session) -> PostgresCollectorTransferService:
     return PostgresCollectorTransferService(session=session, team_id="team-1", actor="operator")
 
 
+def set_manual_classification_confirmation(
+    session: Session,
+    group: MaterialGroup,
+) -> None:
+    """Represent a manual confirmation of the group's current active-photo evidence."""
+    session.flush()
+    photos = list(
+        session.scalars(
+            select(Photo)
+            .where(
+                Photo.group_id == group.id,
+                Photo.is_active.is_(True),
+            )
+            .order_by(Photo.sort_order, Photo.id)
+        ).all()
+    )
+    raw_data = dict(group.raw_data or {})
+    raw_data["classification_manual_confirmation"] = {
+        "actor": "fixture-admin",
+        "confirmed_at": "2026-08-27T12:00:00+08:00",
+        "acknowledged_anomalies": False,
+        "anomalies": [],
+        "photo_snapshot": [
+            {
+                "photo_id": str(photo.legacy_id or photo.id),
+                "category": str(photo.category or "unclassified"),
+                "sha256": str(photo.sha256 or ""),
+            }
+            for photo in photos
+        ],
+    }
+    group.raw_data = raw_data
+
+
+def clear_manual_classification_confirmation(group: MaterialGroup) -> None:
+    """Represent a group whose current classification has not been manually confirmed."""
+    raw_data = dict(group.raw_data or {})
+    raw_data.pop("classification_manual_confirmation", None)
+    group.raw_data = raw_data
+
+
 def project_with_collector_requirement(
     session: Session,
     *,
@@ -208,8 +249,7 @@ def complete_project_collector_source(
     collector_no: str,
 ) -> tuple[Project, MaterialGroup]:
     project, group = project_with_collector_requirement(session, collector_no=collector_no)
-    session.add_all(
-        (
+    source_photos = (
             Photo(
                 team_id="team-1",
                 group_id=group.id,
@@ -232,7 +272,9 @@ def complete_project_collector_source(
                 is_active=True,
             ),
         )
-    )
+    session.add_all(source_photos)
+    session.flush()
+    set_manual_classification_confirmation(session, group)
     session.commit()
     return project, group
 
@@ -281,8 +323,7 @@ def add_global_terminal_source(
     )
     session.add_all((catalog, group))
     session.flush()
-    session.add_all(
-        (
+    source_photos = (
             Photo(
                 id=uuid4(),
                 team_id=project.team_id,
@@ -308,7 +349,7 @@ def add_global_terminal_source(
                 is_active=True,
             ),
         )
-    )
+    session.add_all(source_photos)
     session.add(
         GroupBarcodeVerification(
             id=uuid4(),
@@ -322,6 +363,7 @@ def add_global_terminal_source(
         )
     )
     session.flush()
+    set_manual_classification_confirmation(session, group)
     return group
 
 
@@ -3039,7 +3081,7 @@ def test_global_terminal_candidates_include_mixed_construction_review_counts(
         legacy_id="g-ready",
         status=GroupStatus.APPROVED,
     )
-    add_global_terminal_source(
+    review_group = add_global_terminal_source(
         db_session,
         project=project,
         terminal_code="MIXED-001",
@@ -3049,6 +3091,7 @@ def test_global_terminal_candidates_include_mixed_construction_review_counts(
         legacy_id="g-review",
         status=GroupStatus.UNREVIEWED,
     )
+    clear_manual_classification_confirmation(review_group)
     catalog = TotalCatalogRow(
         id=uuid4(),
         team_id="team-1",
@@ -3091,6 +3134,42 @@ def test_global_terminal_candidates_include_mixed_construction_review_counts(
     assert candidate["terminal_key"] != "MIXED-001"
 
 
+def test_automatic_approved_group_without_manual_marker_does_not_unlock_workbench(
+    db_session: Session,
+) -> None:
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="AUTO-APPROVED-NO-MARKER",
+        meter_no="AUTO-APPROVED-METER",
+        collector_no="AUTO-APPROVED-COLLECTOR",
+        authoritative_address="自动审批不解锁地址",
+        status=GroupStatus.APPROVED,
+    )
+    group.raw_data = {
+        key: value
+        for key, value in dict(group.raw_data or {}).items()
+        if key != "classification_manual_confirmation"
+    }
+    db_session.commit()
+
+    candidate = service(db_session).list_global_terminals(
+        query="AUTO-APPROVED-NO-MARKER",
+        include_blocked=True,
+    )["items"][0]
+    opened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert candidate["review_ready_count"] == 0
+    assert candidate["review_required_count"] == 1
+    assert opened["rephoto"] is None
+    assert opened["meters"][0]["classification_manually_confirmed"] is False
+    assert opened["meters"][0]["classification_manual_confirmation"] is None
+
+
 def test_multi_address_terminal_stays_selectable_for_pending_review(
     db_session: Session,
 ) -> None:
@@ -3106,7 +3185,7 @@ def test_multi_address_terminal_stays_selectable_for_pending_review(
         legacy_id="g-ready",
         status=GroupStatus.APPROVED,
     )
-    add_global_terminal_source(
+    review_group = add_global_terminal_source(
         db_session,
         project=project,
         terminal_code="MULTI-ADDRESS-001",
@@ -3117,6 +3196,7 @@ def test_multi_address_terminal_stays_selectable_for_pending_review(
         status=GroupStatus.UNREVIEWED,
         barcode_status="pending",
     )
+    clear_manual_classification_confirmation(review_group)
     db_session.commit()
 
     default_page = service(db_session).list_global_terminals(
@@ -3248,7 +3328,7 @@ def test_review_workbench_open_keeps_mixed_terminal_locked_without_hidden_run(
         legacy_id="g-ready",
         status=GroupStatus.APPROVED,
     )
-    add_global_terminal_source(
+    review_group = add_global_terminal_source(
         db_session,
         project=project,
         terminal_code="REVIEW-MIXED-001",
@@ -3258,6 +3338,7 @@ def test_review_workbench_open_keeps_mixed_terminal_locked_without_hidden_run(
         legacy_id="g-review",
         status=GroupStatus.UNREVIEWED,
     )
+    clear_manual_classification_confirmation(review_group)
     add_unconstructed_global_terminal_source(
         db_session,
         project=project,
@@ -3471,6 +3552,7 @@ def test_review_workbench_constructed_change_supersedes_untouched_snapshot(
         )
     )
     source_photo.sha256 = "e" * 64
+    set_manual_classification_confirmation(db_session, group)
     db_session.commit()
     changed_candidate = service(db_session).list_global_terminals(
         query="REVIEW-SUPERSEDE-001",
@@ -3527,6 +3609,7 @@ def test_review_workbench_constructed_change_preserves_progressed_snapshot(
         )
     )
     source_photo.sha256 = "d" * 64
+    set_manual_classification_confirmation(db_session, group)
     db_session.commit()
     changed_candidate = service(db_session).list_global_terminals(
         query="REVIEW-PROGRESS-001",
@@ -3705,6 +3788,7 @@ def test_every_collector_mutation_rechecks_terminal_review_gate_without_writes(
     elif operation == "complete_meter":
         item_id = rephoto["meter_install_items"][0]["workbench_item_id"]
 
+    clear_manual_classification_confirmation(group)
     group.status = GroupStatus.UNREVIEWED
     db_session.commit()
     before = mutation_fingerprint(db_session)
@@ -3783,6 +3867,7 @@ def test_every_collector_mutation_rejects_source_changed_active_photo_without_wr
     )
     assert source_photo is not None
     source_photo.sha256 = uuid4().hex * 2
+    set_manual_classification_confirmation(db_session, group)
     db_session.commit()
     before = mutation_fingerprint(db_session)
 
@@ -3838,6 +3923,7 @@ def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
         raw_data={},
     )
     final_group.legacy_task_id = review_task.legacy_id
+    clear_manual_classification_confirmation(final_group)
     db_session.add(review_task)
     db_session.commit()
     candidate = service(db_session).list_global_terminals(
@@ -3874,7 +3960,8 @@ def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
         "terminal-reviewer",
         note="final constructed meter approved",
     )
-    unlocked = service(db_session).open_review_workbench_terminal(
+    db_session.expire_all()
+    reviewed_but_unconfirmed = service(db_session).open_review_workbench_terminal(
         terminal_key_value=candidate["terminal_key"],
     )
 
@@ -3882,6 +3969,15 @@ def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
     approved_group = db_session.get(MaterialGroup, final_group.id)
     assert approved_group.reviewer == "terminal-reviewer"
     assert approved_group.reviewed_at is not None
+    assert reviewed_but_unconfirmed["review_required_count"] == 1
+    assert reviewed_but_unconfirmed["rephoto"] is None
+
+    set_manual_classification_confirmation(db_session, approved_group)
+    db_session.commit()
+    unlocked = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+    )
+
     assert unlocked["review_required_count"] == 0
     assert unlocked["workflow_state"] in {"needs_replacement", "pool_shortage", "ready"}
     assert unlocked["rephoto"] is not None
@@ -3923,6 +4019,7 @@ def test_repeated_rollback_rechecks_review_gate_without_writes(
     )
     assignment_id = replacement["assignments"][0]["assignment_id"]
     service(db_session).rollback_assignment(assignment_id=assignment_id)
+    clear_manual_classification_confirmation(group)
     group.status = GroupStatus.UNREVIEWED
     db_session.commit()
     before = mutation_fingerprint(db_session)
@@ -4800,6 +4897,7 @@ def test_legacy_allocate_rechecks_hidden_terminal_review_before_generic_rejectio
         source_revision=candidate["source_revision"],
         terminal_key_value=candidate["terminal_key"],
     )
+    clear_manual_classification_confirmation(group)
     group.status = GroupStatus.UNREVIEWED
     db_session.commit()
     before = mutation_fingerprint(db_session)
@@ -4993,6 +5091,7 @@ def test_refresh_global_terminal_requires_random_rollback_then_supersedes_snapsh
         )
     )
     source_photo.sha256 = "6" * 64
+    set_manual_classification_confirmation(db_session, source_group)
     db_session.commit()
     old_run = db_session.get(CollectorTransferRun, UUID(opened["run_id"]))
 
@@ -5053,6 +5152,7 @@ def test_replace_terminal_missing_rejects_a_stale_source_snapshot_without_writes
         )
     )
     source_photo.sha256 = "3" * 64
+    set_manual_classification_confirmation(db_session, source_group)
     db_session.commit()
 
     with pytest.raises(CollectorSnapshotChangedError, match="source"):

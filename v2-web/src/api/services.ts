@@ -105,6 +105,8 @@ type BackendDataCenterRow = {
   photo_count?: number
   classification_status?: string
   classification_progress?: Record<string, unknown>
+  classification_manual_confirmation?: Record<string, unknown> | null
+  classification_confirmation_fingerprint?: string
   barcode_status?: string
   barcode_progress?: Record<string, unknown>
   group_barcode_missing_fields?: string[]
@@ -1034,6 +1036,8 @@ function mapDataCenterRow(raw: BackendDataCenterRow): DataCenterRow {
 function mapDataCenterDetail(raw: BackendDataCenterRow): DataCenterDetail {
   return {
     ...mapDataCenterRow(raw),
+    classificationManualConfirmation: raw.classification_manual_confirmation || null,
+    classificationConfirmationFingerprint: raw.classification_confirmation_fingerprint || '',
     photos: (raw.photos || []).map(mapPhoto),
     audit: raw.audit || [],
   }
@@ -1677,6 +1681,25 @@ export async function reviewDataCenterGroup(
     {
       method: 'PATCH',
       body: JSON.stringify({ status, note, exception_note: exceptionNote }),
+    },
+  )
+  return mapGroup(data)
+}
+
+export async function confirmDataCenterGroupClassification(
+  groupId: string,
+  acknowledgeAnomalies: boolean,
+  expectedEvidenceFingerprint: string,
+): Promise<MaterialGroup> {
+  const data = await api<BackendGroup>(
+    `/groups/data-center/groups/${encodeURIComponent(groupId)}/classification-manual-confirm`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        acknowledge_anomalies: acknowledgeAnomalies,
+        expected_evidence_fingerprint: expectedEvidenceFingerprint,
+        source_page: 'review_rephoto_workbench',
+      }),
     },
   )
   return mapGroup(data)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -52,6 +52,7 @@ class ReviewPhotoEvidence:
     id: str
     category: str
     sha256: str
+    confirmation_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,7 @@ class ReviewMeterEvidence:
     barcode_status: str
     identity_blockers: tuple[str, ...] = ()
     source_blockers: tuple[str, ...] = ()
+    classification_manual_confirmation: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +79,9 @@ class ReviewMeterProjection:
     review_ready: bool
     blockers: tuple[str, ...]
     source: MeterSource | None
+    classification_manually_confirmed: bool = False
+    classification_confirmation_anomalies: tuple[str, ...] = ()
+    classification_manual_confirmation: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,15 +116,54 @@ def _selected_photo(
     return matching[0] if len(matching) == 1 else None
 
 
+def _valid_manual_confirmation(
+    evidence: ReviewMeterEvidence,
+) -> tuple[bool, tuple[str, ...], Mapping[str, object] | None]:
+    marker = evidence.classification_manual_confirmation
+    if not isinstance(marker, Mapping):
+        return False, (), None
+    snapshot = marker.get("photo_snapshot")
+    if not isinstance(snapshot, list):
+        return False, (), marker
+    expected_rows = sorted(
+        (
+            normalize_identifier(item.confirmation_id) or normalize_identifier(item.id),
+            normalize_identifier(item.category).lower(),
+            normalize_identifier(item.sha256).lower(),
+        )
+        for item in evidence.active_photos
+    )
+    marker_rows: list[tuple[str, str, str]] = []
+    for item in snapshot:
+        if not isinstance(item, Mapping):
+            return False, (), marker
+        marker_rows.append(
+            (
+                normalize_identifier(item.get("photo_id")),
+                normalize_identifier(item.get("category")).lower(),
+                normalize_identifier(item.get("sha256")).lower(),
+            )
+        )
+    if sorted(marker_rows) != expected_rows:
+        return False, (), marker
+    anomalies = marker.get("anomalies")
+    normalized_anomalies = tuple(
+        normalize_identifier(item)
+        for item in anomalies
+        if normalize_identifier(item)
+    ) if isinstance(anomalies, list) else ()
+    return True, normalized_anomalies, marker
+
+
 def _project_constructed_meter(evidence: ReviewMeterEvidence) -> ReviewMeterProjection:
-    status = normalize_identifier(evidence.status).lower()
+    manually_confirmed, confirmation_anomalies, confirmation = _valid_manual_confirmation(evidence)
     terminal_code = normalize_identifier(evidence.terminal_code)
     meter_no = normalize_identifier(evidence.meter_no)
     collector_no = normalize_identifier(evidence.collector_no)
     module_no = normalize_identifier(evidence.module_no)
     blockers: list[str] = []
 
-    if status != "approved":
+    if not manually_confirmed:
         blockers.append("review_not_approved")
     if not terminal_code:
         blockers.append("terminal_missing")
@@ -175,6 +219,9 @@ def _project_constructed_meter(evidence: ReviewMeterEvidence) -> ReviewMeterProj
         review_ready=not ordered_blockers,
         blockers=ordered_blockers,
         source=source,
+        classification_manually_confirmed=manually_confirmed,
+        classification_confirmation_anomalies=confirmation_anomalies,
+        classification_manual_confirmation=confirmation,
     )
 
 
@@ -201,6 +248,8 @@ def _source_revision_row(
         "after_box_photo_id": normalize_identifier(after_box.id) if after_box else None,
         "after_box_photo_sha256": normalize_identifier(after_box.sha256) if after_box else None,
         "barcode_status": normalize_identifier(evidence.barcode_status).lower(),
+        "classification_manually_confirmed": projection.classification_manually_confirmed,
+        "classification_confirmation_anomalies": projection.classification_confirmation_anomalies,
     }
 
 
