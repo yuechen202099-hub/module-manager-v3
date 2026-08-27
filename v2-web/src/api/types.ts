@@ -786,6 +786,7 @@ export type CollectorInventoryItem = {
   collector_id: string
   collector_no: string
   pool_status: CollectorPoolStatus
+  number_correction_locked: boolean
   photo: CollectorTransferPhoto | null
   last_scanned_at: string | null
   created_at: string | null

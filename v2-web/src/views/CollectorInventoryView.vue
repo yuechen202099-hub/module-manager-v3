@@ -90,6 +90,7 @@ let lastDecodedValue = ''
 let lastDecodedAt = 0
 let inventoryGeneration = 0
 let projectContextGeneration = 0
+let correctionScanSequence = 0
 let componentUnmounted = false
 
 const activeProject = computed(() => workspace.activeProject || null)
@@ -137,15 +138,17 @@ const cameraStatusMessage = computed(() => {
   if (cameraStatus.value === 'denied') return '摄像头不可用，请手工输入或使用扫码枪'
   return '手工输入与外接扫码枪始终可用'
 })
-const correctionLocked = computed(() => (
-  correctionItem.value?.pool_status === 'reserved' || correctionItem.value?.pool_status === 'used'
+const correctionLocked = computed(() => Boolean(
+  correctionItem.value?.number_correction_locked
+  || correctionItem.value?.pool_status === 'reserved'
+  || correctionItem.value?.pool_status === 'used',
 ))
 const correctionPhotoUrl = computed(() => {
   const photo = correctionItem.value?.photo
-  return photo?.canonical_image_url
+  return photo?.image_url
     || photo?.preview_url
-    || photo?.image_url
     || photo?.thumbnail_url
+    || photo?.canonical_image_url
     || ''
 })
 const correctionSelectionStyle = computed(() => {
@@ -712,6 +715,7 @@ function setMobileView(view: MobileView) {
 }
 
 function openInventoryCorrection(item: CollectorInventoryItem) {
+  correctionScanSequence += 1
   correctionItem.value = item
   correctionNo.value = item.collector_no
   correctionRegion.value = null
@@ -723,6 +727,7 @@ function openInventoryCorrection(item: CollectorInventoryItem) {
 }
 
 function closeInventoryCorrection() {
+  correctionScanSequence += 1
   correctionItem.value = null
   correctionNo.value = ''
   correctionRegion.value = null
@@ -762,6 +767,8 @@ function beginCorrectionRegion(event: PointerEvent) {
   if (correctionLocked.value || !correctionPhotoUrl.value) return
   const point = normalizedPointer(event)
   if (!point) return
+  const target = event.currentTarget as HTMLElement | null
+  target?.setPointerCapture?.(event.pointerId)
   selectionStart.value = point
   correctionRegion.value = { x: point.x, y: point.y, width: 0, height: 0 }
   correctionSuggestion.value = ''
@@ -773,6 +780,18 @@ function moveCorrectionRegion(event: PointerEvent) {
 
 function finishCorrectionRegion(event: PointerEvent) {
   updateCorrectionRegion(event)
+  selectionStart.value = null
+  const target = event.currentTarget as HTMLElement | null
+  target?.releasePointerCapture?.(event.pointerId)
+}
+
+function cancelCorrectionRegion(event: PointerEvent) {
+  selectionStart.value = null
+  const target = event.currentTarget as HTMLElement | null
+  target?.releasePointerCapture?.(event.pointerId)
+}
+
+function clearCorrectionPointer() {
   selectionStart.value = null
 }
 
@@ -789,6 +808,15 @@ async function scanCorrectionRegion() {
   const projectId = activeProjectId.value
   if (!item || !photo || !projectId || !region || correctionLocked.value) return
   if (region.width <= 0 || region.height <= 0) return
+  const requestSequence = ++correctionScanSequence
+  const expectedCollectorId = item.collector_id
+  const expectedPhotoSha256 = photo.sha256 || ''
+  const isCurrentRequest = () => (
+    requestSequence === correctionScanSequence
+    && activeProjectId.value === projectId
+    && correctionItem.value?.collector_id === expectedCollectorId
+    && (correctionItem.value?.photo?.sha256 || '') === expectedPhotoSha256
+  )
   correctionScanning.value = true
   try {
     const recognized = await scanCollectorInventoryPhotoRegion(
@@ -798,6 +826,7 @@ async function scanCorrectionRegion() {
       photo.sha256 || '',
       region,
     )
+    if (!isCurrentRequest()) return
     const suggestion = recognized.normalizedValues[0] || recognized.values[0] || ''
     if (!suggestion) {
       correctionSuggestion.value = '框选区域未识别到编号，请重新框选或手工输入。'
@@ -808,9 +837,10 @@ async function scanCorrectionRegion() {
     correctionRegion.value = { ...recognized.region }
     correctionSuggestion.value = `识别建议：${suggestion}。仅作建议，确认后才会修改。`
   } catch (error) {
+    if (!isCurrentRequest()) return
     ElMessage.error(error instanceof Error ? error.message : '框选区域识别失败')
   } finally {
-    correctionScanning.value = false
+    if (isCurrentRequest()) correctionScanning.value = false
   }
 }
 
@@ -1105,6 +1135,8 @@ function releaseLocalPhotoUrl() {
             @pointerdown.prevent="beginCorrectionRegion"
             @pointermove.prevent="moveCorrectionRegion"
             @pointerup.prevent="finishCorrectionRegion"
+            @pointercancel.prevent="cancelCorrectionRegion"
+            @lostpointercapture="clearCorrectionPointer"
           >
             <img
               :src="correctionPhotoUrl"
@@ -1127,7 +1159,7 @@ function releaseLocalPhotoUrl() {
           class="correction-locked"
           data-testid="inventory-correction-locked"
         >
-          该采集器已占用或已使用，请先回滚分配后再修改编号。
+          该采集器已绑定终端、已占用或已使用，请先回滚分配后再修改编号。
         </p>
 
         <div v-if="!correctionLocked && correctionPhotoUrl" class="correction-scan-action">

@@ -40,6 +40,7 @@ from app.models import (
 from app.services.collector_transfer import (
     CollectorAllocationConflictError,
     CollectorDirectConflictError,
+    CollectorInventoryNumberConflictError,
     CollectorPhotoConflictError,
     CollectorWorkbenchIncompleteError,
     PostgresCollectorTransferService,
@@ -166,6 +167,87 @@ def test_real_postgres_concurrent_same_project_number_commits_one_inventory_row(
                 CollectorPhoto.project_id == project_ids[0],
             )
         ) == 1
+
+
+def test_real_postgres_concurrent_number_swap_returns_conflicts_without_deadlock(
+    postgres_session_factory,
+) -> None:
+    """Catches two number corrections locking each other's target row and leaking a database 500."""
+    team_id, project_ids = seed_inventory_projects(
+        postgres_session_factory,
+        project_count=1,
+    )
+    project_id = project_ids[0]
+    project_uuid = UUID(project_id)
+    with postgres_session_factory.begin() as session:
+        collectors = [
+            PhysicalCollector(
+                team_id=team_id,
+                project_id=project_uuid,
+                collector_no=collector_no,
+                pool_status="available",
+            )
+            for collector_no in ("SWAP-A", "SWAP-B")
+        ]
+        session.add_all(collectors)
+        session.flush()
+        collector_ids = [str(collector.id) for collector in collectors]
+
+    duplicate_lookup_barrier = Barrier(2)
+    engine = postgres_session_factory.kw["bind"]
+
+    def synchronize_duplicate_lookup(
+        _conn,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = " ".join(statement.lower().split())
+        if (
+            "from physical_collectors" in normalized
+            and "physical_collectors.id !=" in normalized
+        ):
+            duplicate_lookup_barrier.wait(timeout=10)
+
+    event.listen(engine, "before_cursor_execute", synchronize_duplicate_lookup)
+
+    def correct_once(collector_id: str, source_no: str, target_no: str) -> tuple[str, str]:
+        with postgres_session_factory() as session:
+            try:
+                PostgresCollectorTransferService(
+                    session=session,
+                    team_id=team_id,
+                    actor="task7",
+                ).correct_inventory_number(
+                    project_id=project_id,
+                    collector_id=collector_id,
+                    expected_collector_no=source_no,
+                    expected_photo_sha256="",
+                    collector_no=target_no,
+                    recognition_method="manual",
+                    region=None,
+                )
+                return "ok", target_no
+            except CollectorInventoryNumberConflictError as exc:
+                session.rollback()
+                return "conflict", str(exc)
+            except Exception as exc:  # assertion below records leaked database/deadlock failures
+                session.rollback()
+                return "unexpected", f"{type(exc).__name__}: {exc}"
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(correct_once, collector_ids[0], "SWAP-A", "SWAP-B"),
+                executor.submit(correct_once, collector_ids[1], "SWAP-B", "SWAP-A"),
+            ]
+            outcomes = [future.result(timeout=20) for future in futures]
+    finally:
+        event.remove(engine, "before_cursor_execute", synchronize_duplicate_lookup)
+
+    assert [kind for kind, _detail in outcomes] == ["conflict", "conflict"], outcomes
 
 
 def test_real_postgres_concurrent_same_photo_sha_commits_one_collector_binding(

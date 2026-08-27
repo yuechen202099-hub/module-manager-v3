@@ -1054,6 +1054,163 @@ def test_inventory_number_correction_blocks_consumed_collectors(
     assert physical.collector_no == f"LOCKED-{pool_status}"
 
 
+def test_inventory_number_correction_blocks_active_direct_assignment(
+    db_session: Session,
+) -> None:
+    """Catches a reserved direct assignment staying editable because its pool status remains direct."""
+    run = transfer_run(db_session)
+    terminal = transfer_terminal(db_session, run)
+    direct_requirement = requirement(
+        db_session,
+        run,
+        terminal,
+        collector_no="DIRECT-ASSIGNED",
+        status="direct_ready",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=run.project_id,
+        collector_no="DIRECT-ASSIGNED",
+        pool_status="direct",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical, sha256="d1" * 32)
+    db_session.add(
+        CollectorAssignment(
+            id=uuid4(),
+            run_id=run.id,
+            team_id="team-1",
+            requirement_id=direct_requirement.id,
+            physical_collector_id=physical.id,
+            collector_photo_id=photo.id,
+            assignment_mode="direct",
+            status="reserved",
+            assigned_by_username="operator",
+        )
+    )
+    db_session.commit()
+
+    listed = service(db_session).list_inventory(project_id=str(run.project_id))
+    listed_item = next(
+        item for item in listed["items"] if item["collector_id"] == str(physical.id)
+    )
+    assert listed_item["number_correction_locked"] is True
+
+    with pytest.raises(ValueError, match="rollback") as raised:
+        service(db_session).correct_inventory_number(
+            project_id=str(run.project_id),
+            collector_id=str(physical.id),
+            expected_collector_no="DIRECT-ASSIGNED",
+            expected_photo_sha256=photo.sha256,
+            collector_no="DIRECT-CORRECTED",
+            recognition_method="manual",
+            region=None,
+        )
+
+    assert type(raised.value).__name__ == "CollectorInventoryAssignmentLockedError"
+    db_session.refresh(physical)
+    assert physical.collector_no == "DIRECT-ASSIGNED"
+
+
+def test_inventory_number_correction_blocks_active_assignmentless_direct_workbench(
+    db_session: Session,
+) -> None:
+    """Catches renumbering a direct-ready physical while its workbench still claims the old number."""
+    run = transfer_run(db_session)
+    run.stats = {"workflow_kind": "global_terminal_workbench", "superseded": False}
+    terminal = transfer_terminal(db_session, run)
+    direct_requirement = requirement(
+        db_session,
+        run,
+        terminal,
+        collector_no="DIRECT-WORKBENCH",
+        status="direct_ready",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=run.project_id,
+        collector_no="DIRECT-WORKBENCH",
+        pool_status="direct",
+    )
+    db_session.add_all(
+        [
+            physical,
+            CollectorWorkbenchItem(
+                id=uuid4(),
+                run_id=run.id,
+                terminal_id=terminal.id,
+                team_id="team-1",
+                item_kind="collector_removal",
+                source_key=str(direct_requirement.id),
+                requirement_id=direct_requirement.id,
+                assignment_id=None,
+                status="pending",
+                sort_order=0,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="rollback") as raised:
+        service(db_session).correct_inventory_number(
+            project_id=str(run.project_id),
+            collector_id=str(physical.id),
+            expected_collector_no="DIRECT-WORKBENCH",
+            expected_photo_sha256="",
+            collector_no="DIRECT-CORRECTED",
+            recognition_method="manual",
+            region=None,
+        )
+
+    assert type(raised.value).__name__ == "CollectorInventoryAssignmentLockedError"
+    db_session.refresh(physical)
+    assert physical.collector_no == "DIRECT-WORKBENCH"
+
+
+def test_inventory_number_correction_does_not_lock_the_duplicate_target_row(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches A-to-B and B-to-A corrections deadlocking on each other's target row."""
+    current_project_id = project_id(db_session)
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=current_project_id,
+        collector_no="SOURCE-NO",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    original_scalar = db_session.scalar
+
+    def reject_target_row_lock(statement, *args, **kwargs):
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        if (
+            "physical_collectors.id !=" in sql
+            and getattr(statement, "_for_update_arg", None) is not None
+        ):
+            raise RuntimeError("duplicate target row lock requested")
+        return original_scalar(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "scalar", reject_target_row_lock)
+
+    result = service(db_session).correct_inventory_number(
+        project_id=str(current_project_id),
+        collector_id=str(physical.id),
+        expected_collector_no="SOURCE-NO",
+        expected_photo_sha256="",
+        collector_no="TARGET-NO",
+        recognition_method="manual",
+        region=None,
+    )
+
+    assert result["collector_no"] == "TARGET-NO"
+
+
 def test_inventory_number_correction_rejects_stale_or_duplicate_targets(
     db_session: Session,
 ) -> None:

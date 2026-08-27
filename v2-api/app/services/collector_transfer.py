@@ -2457,7 +2457,10 @@ class PostgresCollectorTransferService:
             raise CollectorInventorySnapshotChangedError(
                 "collector number changed; refresh and retry"
             )
-        if before_pool_status in {"reserved", "used"}:
+        if physical.id in self._inventory_number_correction_locked_ids(
+            project_id=project.id,
+            physicals=(physical,),
+        ):
             raise CollectorInventoryAssignmentLockedError(
                 "rollback collector assignment before renumbering"
             )
@@ -2484,7 +2487,6 @@ class PostgresCollectorTransferService:
                 PhysicalCollector.collector_no == corrected_no,
                 PhysicalCollector.id != physical.id,
             )
-            .with_for_update()
         )
         if duplicate is not None:
             raise CollectorInventoryNumberConflictError(
@@ -2722,6 +2724,10 @@ class PostgresCollectorTransferService:
             ).all()
         }
         stats = {pool_status: grouped_counts.get(pool_status, 0) for pool_status in known_statuses}
+        number_correction_locked_ids = self._inventory_number_correction_locked_ids(
+            project_id=project.id,
+            physicals=rows,
+        )
         items = []
         for row in rows:
             photo = self._active_collector_photo(row.id)
@@ -2730,12 +2736,72 @@ class PostgresCollectorTransferService:
                     "collector_id": str(row.id),
                     "collector_no": row.collector_no,
                     "pool_status": row.pool_status,
+                    "number_correction_locked": row.id in number_correction_locked_ids,
                     "photo": _photo_response(photo),
                     "last_scanned_at": row.last_scanned_at.isoformat() if row.last_scanned_at else None,
                     "created_at": row.created_at.isoformat() if row.created_at else None,
                 }
             )
         return {"items": items, "total": len(rows), "stats": stats}
+
+    def _inventory_number_correction_locked_ids(
+        self,
+        *,
+        project_id: UUID,
+        physicals: Sequence[PhysicalCollector],
+    ) -> set[UUID]:
+        if not physicals:
+            return set()
+        physical_ids = [physical.id for physical in physicals]
+        locked_ids = {
+            physical.id
+            for physical in physicals
+            if physical.pool_status in {"reserved", "used"}
+        }
+        locked_ids.update(
+            self.session.scalars(
+                select(CollectorAssignment.physical_collector_id).where(
+                    CollectorAssignment.team_id == self.team_id,
+                    CollectorAssignment.physical_collector_id.in_(physical_ids),
+                    CollectorAssignment.status.in_(("reserved", "used")),
+                )
+            ).all()
+        )
+
+        collector_numbers = [physical.collector_no for physical in physicals]
+        superseded = CollectorTransferRun.stats["superseded"].as_boolean()
+        claimed_numbers = set(
+            self.session.scalars(
+                select(CollectorRequirement.original_collector_no)
+                .join(
+                    CollectorWorkbenchItem,
+                    CollectorWorkbenchItem.requirement_id == CollectorRequirement.id,
+                )
+                .join(
+                    CollectorTransferRun,
+                    CollectorTransferRun.id == CollectorWorkbenchItem.run_id,
+                )
+                .where(
+                    CollectorWorkbenchItem.team_id == self.team_id,
+                    CollectorWorkbenchItem.item_kind == "collector_removal",
+                    CollectorWorkbenchItem.assignment_id.is_(None),
+                    CollectorRequirement.team_id == self.team_id,
+                    CollectorRequirement.original_collector_no.in_(collector_numbers),
+                    CollectorRequirement.status.in_(("direct_ready", "used")),
+                    CollectorTransferRun.team_id == self.team_id,
+                    CollectorTransferRun.project_id == project_id,
+                    CollectorTransferRun.status != "cancelled",
+                    or_(superseded.is_(None), superseded.is_(False)),
+                )
+                .distinct()
+            ).all()
+        )
+        locked_ids.update(
+            physical.id
+            for physical in physicals
+            if physical.collector_no in claimed_numbers
+        )
+        return locked_ids
 
     def list_runs(self, *, project_id: str | None = None) -> list[dict[str, object]]:
         query = select(CollectorTransferRun).where(CollectorTransferRun.team_id == self.team_id)
