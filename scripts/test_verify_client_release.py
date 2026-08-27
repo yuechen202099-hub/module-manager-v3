@@ -364,11 +364,16 @@ def write_release_archive(
     content_overrides: dict[str, str | bytes] | None = None,
 ) -> None:
     omitted_names = set(omitted or set())
+    version_specific_required_files = (
+        set(verifier.required_files_for_version(manifest_version))
+        if manifest_version in {"3.2.8", "3.2.10", "3.2.11"}
+        else set()
+    )
     names = (
         set(verifier.REQUIRED_FILES)
         | {RUNTIME_VERSION_ARTIFACT, SOURCE_VERSION_ARTIFACT}
         | set(GLOBAL_WORKBENCH_SOURCE_FILES)
-        | set(verifier.required_files_for_version(manifest_version or "3.2.11"))
+        | version_specific_required_files
     ) - omitted_names
     versions = manifest_versions
     if versions is None:
