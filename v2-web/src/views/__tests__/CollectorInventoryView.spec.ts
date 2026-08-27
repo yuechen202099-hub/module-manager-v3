@@ -335,6 +335,39 @@ describe('CollectorInventoryView', () => {
     wrapper.unmount()
   })
 
+  it('keeps the live barcode camera inside a closable scanner dialog', async () => {
+    const quagga = {
+      init: vi.fn((_options: unknown, complete: (error?: unknown) => void) => complete()),
+      onDetected: vi.fn(),
+      offDetected: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    }
+    vi.stubGlobal('isSecureContext', true)
+    vi.stubGlobal('Quagga', quagga)
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      mediaDevices: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [] }) },
+    })
+    const wrapper = await mountPage()
+
+    expect(wrapper.find('[data-testid="inventory-scanner-dialog"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="start-camera"]').trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.get('[data-testid="inventory-scanner-dialog"]')
+    expect(dialog.attributes('role')).toBe('dialog')
+    expect(dialog.find('video.collector-camera-preview').exists()).toBe(true)
+    expect(wrapper.find('.camera-stage video').exists()).toBe(false)
+
+    await dialog.get('[data-testid="close-inventory-scanner"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="inventory-scanner-dialog"]').exists()).toBe(false)
+    expect(quagga.stop).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
   it('stops a partially started construction scanner before native fallback opens the camera', async () => {
     const detectedHandlers: Array<(result: unknown) => void> = []
     const quagga = {

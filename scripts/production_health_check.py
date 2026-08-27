@@ -24,6 +24,7 @@ CORE_PUBLIC_PATH_STATUSES = (
     ("/task-hall", 307),
     ("/claim-tasks", 200),
     ("/construction", 200),
+    ("/static/vendor/quagga.min.js", 200),
 )
 
 

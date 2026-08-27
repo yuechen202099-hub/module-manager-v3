@@ -297,28 +297,18 @@ def meter_sources_from_groups(groups: Iterable[object], photos: Iterable[object]
 def _with_terminal_address_diagnostics(
     projection: MeterSourceProjection,
 ) -> MeterSourceProjection:
-    addresses = sorted(
-        {
-            normalize_identifier(source.installation_address)
-            for source in projection.sources
-            if normalize_identifier(source.installation_address)
-        }
+    missing_address_groups = sorted(
+        source.group_id
+        for source in projection.sources
+        if not normalize_identifier(source.installation_address)
     )
     diagnostics = list(projection.diagnostics)
-    if not addresses:
+    for group_id in missing_address_groups:
         diagnostics.append(
             {
-                "group_id": "",
+                "group_id": group_id,
                 "code": "installation_address_missing",
                 "message": "安装地址为空",
-            }
-        )
-    elif len(addresses) > 1:
-        diagnostics.append(
-            {
-                "group_id": "",
-                "code": "installation_address_conflict",
-                "message": "安装地址冲突：" + "、".join(addresses),
             }
         )
     return MeterSourceProjection(
@@ -344,12 +334,6 @@ def _review_projection_from_rows(
     for item in photos:
         photos_by_group[str(item.group_id)].append(item)
 
-    addresses = {
-        normalize_identifier(source.installation_address)
-        for source in source_projection.sources
-        if normalize_identifier(source.installation_address)
-    }
-    has_address_conflict = len(addresses) != 1
     evidence_rows: list[ReviewMeterEvidence] = []
     for group in groups:
         internal_group_id = str(group.id)
@@ -367,8 +351,8 @@ def _review_projection_from_rows(
         source_blockers: list[str] = []
         if normalize_identifier(group.exception_note):
             source_blockers.append("exception_open")
-        if has_address_conflict:
-            source_blockers.append("address_conflict")
+        if not normalize_identifier(source.installation_address):
+            source_blockers.append("address_missing")
 
         raw_data = group.raw_data if isinstance(group.raw_data, Mapping) else {}
         persisted_verification = resolve_persisted_barcode_verification(
@@ -1121,11 +1105,25 @@ class PostgresCollectorTransferService:
             Project.name,
             normalized_terminal,
         )
-        address_count = func.count(
-            func.distinct(func.nullif(authoritative_address, ""))
+        has_any_active_photo = exists().where(
+            Photo.group_id == MaterialGroup.id,
+            Photo.team_id == self.team_id,
+            Photo.is_active.is_(True),
         )
-        incomplete_count = func.sum(
-            case((complete_source, 0), else_=1)
+        constructed_missing_address_count = func.sum(
+            case(
+                (
+                    and_(
+                        or_(
+                            func.coalesce(MaterialGroup.photo_count, 0) > 0,
+                            has_any_active_photo,
+                        ),
+                        authoritative_address == "",
+                    ),
+                    1,
+                ),
+                else_=0,
+            )
         )
         if search_text:
             pattern = f"%{search_text}%"
@@ -1147,7 +1145,7 @@ class PostgresCollectorTransferService:
             )
         if not include_blocked and normalized_state != "blocked":
             grouped_identity = grouped_identity.having(
-                address_count == 1,
+                constructed_missing_address_count == 0,
             )
         identity_subquery = grouped_identity.subquery()
 

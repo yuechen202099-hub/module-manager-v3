@@ -36,6 +36,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_8_release.py",
     "scripts/verify_v3_2_10_release.py",
     "scripts/test_verify_v3_2_10_release.py",
+    "scripts/verify_v3_2_11_release.py",
+    "scripts/test_verify_v3_2_11_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -98,6 +100,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.8.md",
     "ops/releases/V3.2.9.md",
     "ops/releases/V3.2.10.md",
+    "ops/releases/V3.2.11.md",
 )
 
 REQUIRED_FILES = [
@@ -949,6 +952,15 @@ def verified_v329_hotfix_baseline_is_documented(record: str, version: str) -> bo
     return True
 
 
+def verified_v3210_attested_baseline_is_documented(record: str, version: str) -> bool:
+    if version != "V3.2.10":
+        return False
+    expected_sha256 = "46c65deb2edf1500ac1315ab7e3e4bfdba4bcf70a5f3385c3c97b1ce9cc5e2f3"
+    if hashlib.sha256(record.encode("utf-8")).hexdigest() != expected_sha256:
+        fail("V3.2.10 attested baseline record must remain byte-identical to its production proof")
+    return True
+
+
 def release_record_matches_lifecycle_state(
     record: str,
     version: str,
@@ -957,6 +969,8 @@ def release_record_matches_lifecycle_state(
     candidate_phase: str = "source",
 ) -> None:
     if version == deployed_baseline:
+        if verified_v3210_attested_baseline_is_documented(record, version):
+            return
         if verified_v329_hotfix_baseline_is_documented(record, version):
             return
         if recovered_unattested_v327_baseline_is_documented(record, version):
@@ -1012,7 +1026,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def verify_current_release_phase(phase: str, version: str | None = None) -> None:
     candidate = version or release_candidate(read("AGENTS.md"))
-    if candidate == "V3.2.10":
+    if candidate == "V3.2.11":
+        path = Path(__file__).with_name("verify_v3_2_11_release.py")
+        module_name = "verify_v3_2_11_release"
+    elif candidate == "V3.2.10":
         path = Path(__file__).with_name("verify_v3_2_10_release.py")
         module_name = "verify_v3_2_10_release"
     else:

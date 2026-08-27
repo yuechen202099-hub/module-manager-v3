@@ -118,12 +118,20 @@ async function loadCandidates(query = lastSearchQuery.value, page = candidatePag
     candidates.value = response.items
     candidatePage.value = response.page
     candidateTotal.value = response.total
-    const matchingGroup = query ? response.items.filter((item) => item.selectable) : []
+    const matchingGroup = query && response.total === 1 && response.items.length === 1
+      ? response.items
+      : []
     const candidate = preferredGroupId
       ? (matchingGroup.length === 1 ? matchingGroup[0] : undefined)
-      : (matchingGroup.length === 1 ? matchingGroup[0] : response.items.find((item) => item.selectable))
+      : (query
+          ? (matchingGroup.length === 1 ? matchingGroup[0] : undefined)
+          : response.items.find((item) => item.selectable))
     if (candidate) await openCandidate(candidate, preferredGroupId)
-    else if (query) errorMessage.value = '未找到唯一可授权终端，请重新搜索。'
+    else if (query) {
+      errorMessage.value = response.total > 1
+        ? '匹配到多个终端，请输入完整终端号。'
+        : '未找到终端，请检查终端号。'
+    }
   } catch (error) {
     if (serial === searchSerial) showError(error)
   } finally {

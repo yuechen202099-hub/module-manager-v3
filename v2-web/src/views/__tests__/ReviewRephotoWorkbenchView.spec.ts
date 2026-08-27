@@ -100,6 +100,27 @@ describe('review rephoto workbench', () => {
     wrapper.unmount()
   })
 
+  it('opens one blocked terminal so its photos remain available for classification', async () => {
+    serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValue(page([
+      candidate({ workflow_state: 'blocked', selectable: false }),
+    ]))
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ workflow_state: 'blocked' }))
+
+    const wrapper = await mountWorkbench()
+    await wrapper.get('[aria-label="输入终端号"]').setValue('T-001')
+    await wrapper.get('[data-testid="search-terminal"]').trigger('click')
+    await flushPromises()
+
+    expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenCalledWith({
+      terminal_key: 'opaque-key',
+      source_revision: 'revision-1',
+    })
+    expect(wrapper.get('.terminal-summary').text()).toContain('T-001')
+    expect(wrapper.text()).not.toContain('未找到唯一可授权终端')
+    expect(wrapper.getComponent({ name: 'DataCenterGroupReviewPanel' }).props('classificationOnly')).toBe(true)
+    wrapper.unmount()
+  })
+
   it('does not let a late search response replace a newer opened terminal', async () => {
     const late = deferred<GlobalCollectorTerminalPage>()
     serviceMocks.fetchGlobalCollectorTerminals.mockReturnValueOnce(late.promise).mockResolvedValueOnce(page([candidate({ terminal_key: 'new-key', terminal_code: 'T-002' })]))
@@ -122,7 +143,7 @@ describe('review rephoto workbench', () => {
     lateOpen.resolve(open())
     await flushPromises()
 
-    expect(wrapper.text()).toContain('未找到唯一可授权终端，请重新搜索。')
+    expect(wrapper.text()).toContain('未找到终端，请检查终端号。')
     expect(wrapper.text()).not.toContain('终端 T-001')
     wrapper.unmount()
   })
@@ -135,6 +156,24 @@ describe('review rephoto workbench', () => {
 
     expect(serviceMocks.fetchGlobalCollectorTerminals).toHaveBeenLastCalledWith({ query: '', page: 2, pageSize: 50, includeBlocked: true })
     expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenLastCalledWith({ terminal_key: 'page-two', source_revision: 'revision-1' })
+    wrapper.unmount()
+  })
+
+  it('does not auto-open one visible row when the paginated search has multiple matches', async () => {
+    const wrapper = await mountWorkbench()
+    serviceMocks.openReviewWorkbenchTerminal.mockClear()
+    serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValueOnce({
+      ...page([candidate({ terminal_key: 'page-two', terminal_code: 'T-002' })]),
+      page: 2,
+      total: 51,
+    })
+
+    await wrapper.get('[aria-label="输入终端号"]').setValue('T')
+    await wrapper.get('[data-testid="search-terminal"]').trigger('click')
+    await flushPromises()
+
+    expect(serviceMocks.openReviewWorkbenchTerminal).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('匹配到多个终端，请输入完整终端号。')
     wrapper.unmount()
   })
 

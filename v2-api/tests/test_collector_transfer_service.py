@@ -3091,6 +3091,69 @@ def test_global_terminal_candidates_include_mixed_construction_review_counts(
     assert candidate["terminal_key"] != "MIXED-001"
 
 
+def test_multi_address_terminal_stays_selectable_for_pending_review(
+    db_session: Session,
+) -> None:
+    """Catches legitimate per-meter addresses blocking one terminal's review queue."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="MULTI-ADDRESS-001",
+        meter_no="M-READY",
+        collector_no="C-SHARED",
+        authoritative_address="一号楼 101 室",
+        legacy_id="g-ready",
+        status=GroupStatus.APPROVED,
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="MULTI-ADDRESS-001",
+        meter_no="M-REVIEW",
+        collector_no="C-SHARED",
+        authoritative_address="二号楼 202 室",
+        legacy_id="g-review",
+        status=GroupStatus.UNREVIEWED,
+        barcode_status="pending",
+    )
+    db_session.commit()
+
+    default_page = service(db_session).list_global_terminals(
+        query="MULTI-ADDRESS-001",
+    )
+
+    assert [item["terminal_code"] for item in default_page["items"]] == [
+        "MULTI-ADDRESS-001"
+    ]
+
+    candidate = service(db_session).list_global_terminals(
+        query="MULTI-ADDRESS-001",
+        include_blocked=True,
+    )["items"][0]
+
+    assert candidate["workflow_state"] == "needs_review"
+    assert candidate["selectable"] is True
+    assert candidate["review_ready_count"] == 1
+    assert candidate["review_required_count"] == 1
+    assert set(candidate["installation_address"].split("、")) == {
+        "一号楼 101 室",
+        "二号楼 202 室",
+    }
+
+    opened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert opened["workflow_state"] == "needs_review"
+    assert [row["group_id"] for row in opened["meters"]] == ["g-ready", "g-review"]
+    assert {code for row in opened["review_blockers"] for code in row["codes"]} == {
+        "review_not_approved",
+        "barcode_verification_required",
+    }
+
+
 def test_global_terminal_candidates_block_conflicts_and_bound_filters(
     db_session: Session,
 ) -> None:
@@ -3104,15 +3167,8 @@ def test_global_terminal_candidates_block_conflicts_and_bound_filters(
         terminal_code="000000",
         meter_no="CONFLICT-1",
         collector_no="CONFLICT-C1",
-        authoritative_address="冲突地址-甲",
-    )
-    add_global_terminal_source(
-        db_session,
-        project=project,
-        terminal_code="000000",
-        meter_no="CONFLICT-2",
-        collector_no="CONFLICT-C2",
-        authoritative_address="冲突地址-乙",
+        authoritative_address="",
+        snapshot_address="",
     )
     add_global_terminal_source(
         db_session,
@@ -3167,7 +3223,7 @@ def test_global_terminal_candidates_block_conflicts_and_bound_filters(
     assert blocked_page["items"][0]["workflow_state"] == "blocked"
     assert blocked_page["items"][0]["selectable"] is False
     assert {item["code"] for item in blocked_page["items"][0]["diagnostics"]} == {
-        "installation_address_conflict"
+        "installation_address_missing"
     }
 
     leading = service(db_session).list_global_terminals(query="000123")

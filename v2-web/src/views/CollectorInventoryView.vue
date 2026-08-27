@@ -51,6 +51,7 @@ const result = ref<CollectorInventoryDecision | null>(null)
 const inventory = ref<CollectorInventoryPage>(structuredClone(EMPTY_INVENTORY))
 const loading = ref(false)
 const inventoryLoading = ref(false)
+const scannerOpen = ref(false)
 const cameraActive = ref(false)
 const cameraStatus = ref<CameraStatus>('idle')
 const scanFeedback = ref('')
@@ -259,6 +260,7 @@ async function startCamera() {
     cameraStatus.value = 'unsupported'
     return
   }
+  scannerOpen.value = true
   const session = ++cameraSession
   cameraStatus.value = 'starting'
   try {
@@ -337,6 +339,11 @@ function stopCamera() {
   mediaStream = null
   if (video.value) video.value.srcObject = null
   video.value?.parentElement?.querySelectorAll('canvas, video:not(.collector-camera-preview)').forEach((node) => node.remove())
+  scannerOpen.value = false
+}
+
+function closeScanner() {
+  stopCamera()
 }
 
 function stopQuaggaInitOwner(owner: QuaggaInitOwner) {
@@ -701,8 +708,7 @@ function releaseLocalPhotoUrl() {
         <section v-else-if="mobileView === 'scan'" class="scan-view">
           <template v-if="!result">
             <div class="camera-stage">
-              <video v-show="cameraActive" ref="video" class="collector-camera-preview" autoplay muted playsinline />
-              <div v-if="!cameraActive" class="camera-empty">
+              <div class="camera-empty">
                 <span class="camera-glyph" aria-hidden="true">⌗</span>
                 <strong>扫描采集器条形码</strong>
                 <small>识别后立即判断是否需要拍照</small>
@@ -718,15 +724,6 @@ function releaseLocalPhotoUrl() {
                   {{ cameraStatusMessage }}
                 </span>
               </div>
-              <div v-if="cameraActive" class="scan-frame"><span /></div>
-              <p
-                v-if="cameraActive"
-                class="scan-hint"
-                data-testid="scan-feedback"
-                aria-live="polite"
-              >
-                {{ scanFeedback || '对准条形码，识别后自动判断' }}
-              </p>
             </div>
 
             <form class="manual-entry" @submit.prevent="submitScan()">
@@ -866,6 +863,39 @@ function releaseLocalPhotoUrl() {
       </nav>
     </section>
 
+    <div
+      v-if="scannerOpen"
+      class="scanner-backdrop"
+      data-testid="inventory-scanner-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-label="采集器条形码扫码"
+    >
+      <section class="scanner-panel">
+        <header class="scanner-head">
+          <div>
+            <strong>扫描采集器条形码</strong>
+            <span>{{ cameraStatusMessage }}</span>
+          </div>
+          <button
+            type="button"
+            data-testid="close-inventory-scanner"
+            aria-label="关闭扫码"
+            @click="closeScanner"
+          >
+            ×
+          </button>
+        </header>
+        <div class="scanner-camera">
+          <video ref="video" class="collector-camera-preview" autoplay muted playsinline />
+          <div class="scan-frame"><span /></div>
+          <p class="scan-hint" data-testid="scan-feedback" aria-live="polite">
+            {{ scanFeedback || '将采集器条形码横向放入框内' }}
+          </p>
+        </div>
+      </section>
+    </div>
+
     <input
       ref="photoInput"
       class="visually-hidden"
@@ -986,12 +1016,6 @@ function releaseLocalPhotoUrl() {
   color: white;
 }
 
-.camera-stage video {
-  width: 100%;
-  min-height: 310px;
-  object-fit: cover;
-}
-
 .camera-empty {
   display: grid;
   place-items: center;
@@ -1005,6 +1029,78 @@ function releaseLocalPhotoUrl() {
 .camera-status { color: #b9c9da; }
 .camera-glyph { font-size: 68px; line-height: 1; color: #71d29b; }
 .camera-status { min-height: 18px; font-size: 12px; }
+
+.scanner-backdrop {
+  position: fixed;
+  z-index: 2000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(5 17 31 / 78%);
+}
+
+.scanner-panel {
+  width: min(100%, 520px);
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 20px;
+  background: #102d4f;
+  color: white;
+  box-shadow: 0 24px 70px rgb(0 0 0 / 38%);
+}
+
+.scanner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+}
+
+.scanner-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.scanner-head span {
+  color: #bcd0e7;
+  font-size: 12px;
+}
+
+.scanner-head button {
+  display: grid;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 30%);
+  border-radius: 50%;
+  background: rgb(255 255 255 / 10%);
+  color: white;
+  font-size: 26px;
+  line-height: 1;
+}
+
+.scanner-camera {
+  position: relative;
+  min-height: min(62vh, 430px);
+  overflow: hidden;
+  background: #071525;
+}
+
+.scanner-camera .collector-camera-preview,
+.scanner-camera :deep(video),
+.scanner-camera :deep(canvas) {
+  width: 100%;
+  min-height: min(62vh, 430px);
+  object-fit: cover;
+}
+
+.scanner-camera :deep(canvas.drawingBuffer) {
+  position: absolute;
+  inset: 0;
+}
 
 .scan-frame {
   position: absolute;

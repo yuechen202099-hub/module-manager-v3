@@ -58,6 +58,9 @@ chown -R modulemgr:modulemgr "$APP/data" "$APP/uploads" "$APP/shared"
 chown root:modulemgr "$APP/.env"
 chmod 0640 "$APP/.env"
 mkdir -p "$REL"
+# Nginx serves /static directly as www-data and must be able to traverse the
+# immutable release root even when the server umask is 0027.
+chmod 0751 "$REL"
 unzip -q /tmp/module-manager-v2-server-$VERSION.zip -d "$REL"
 UPLOAD_LINK="$REL/v2-api/app/static/uploads"
 if [ -L "$UPLOAD_LINK" ]; then

@@ -39,6 +39,7 @@ _BLOCKER_ORDER = (
     "after_box_photo_conflict",
     "barcode_verification_required",
     "exception_open",
+    "address_missing",
     "address_conflict",
     "source_conflict",
 )

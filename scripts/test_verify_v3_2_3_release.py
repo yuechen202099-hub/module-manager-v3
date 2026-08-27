@@ -553,6 +553,7 @@ class ProductionHealthContractHandler(BaseHTTPRequestHandler):
         "/global-search",
         "/claim-tasks",
         "/construction",
+        "/static/vendor/quagga.min.js",
     }
     retired_410 = {
         "/exports",
