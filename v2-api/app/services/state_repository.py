@@ -107,6 +107,26 @@ MANUAL_CLASSIFICATION_BARCODE_READY = frozenset(
 )
 
 
+def _only_missing_collector_photo_exception_clause():
+    reasons = MaterialGroup.exception_reasons
+    return and_(
+        func.jsonb_typeof(reasons) == "array",
+        func.jsonb_array_length(reasons) == 1,
+        reasons.op("->>")(0) == data_center_service.DASHBOARD_IGNORED_EXCEPTION_REASON,
+    )
+
+
+def _dashboard_exception_clause():
+    return and_(
+        or_(
+            MaterialGroup.status == GroupStatus.REJECTED,
+            MaterialGroup.exception_status == "open",
+            MaterialGroup.has_archive_blocker.is_(True),
+        ),
+        ~_only_missing_collector_photo_exception_clause(),
+    )
+
+
 class StateBackendNotReady(RuntimeError):
     """Raised when the selected state backend cannot safely serve the operation."""
 
@@ -5190,12 +5210,7 @@ class PostgresStateRepository(StateRepository):
                     func.coalesce(
                         func.sum(
                             case(
-                                (
-                                    (MaterialGroup.status == GroupStatus.REJECTED)
-                                    | (MaterialGroup.exception_status == "open")
-                                    | (MaterialGroup.has_archive_blocker.is_(True)),
-                                    1,
-                                ),
+                                (_dashboard_exception_clause(), 1),
                                 else_=0,
                             )
                         ),
@@ -5539,9 +5554,12 @@ class PostgresStateRepository(StateRepository):
                 group_terminal_status.label("terminal_status"),
                 group_archive_status.label("archive_status"),
                 group_barcode_status.label("barcode_status"),
-                func.coalesce(
-                    func.nullif(func.trim(MaterialGroup.exception_status), ""),
-                    case((MaterialGroup.status == GroupStatus.REJECTED, literal("open")), else_=literal("")),
+                case(
+                    (_only_missing_collector_photo_exception_clause(), literal("")),
+                    else_=func.coalesce(
+                        func.nullif(func.trim(MaterialGroup.exception_status), ""),
+                        case((MaterialGroup.status == GroupStatus.REJECTED, literal("open")), else_=literal("")),
+                    ),
                 ).label("exception_status"),
                 active_photo_stats.c.activity_at.label("activity_at"),
                 MaterialGroup.updated_at.label("updated_at"),

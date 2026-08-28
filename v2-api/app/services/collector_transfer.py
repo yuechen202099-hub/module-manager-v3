@@ -510,7 +510,11 @@ def _photo_snapshot(photo: Photo | _ProjectPhotoRow | None) -> dict[str, object]
     }
 
 
-def _photo_response(photo: Photo | CollectorPhoto | Mapping[str, object] | None) -> dict[str, object] | None:
+def _photo_response(
+    photo: Photo | CollectorPhoto | Mapping[str, object] | None,
+    *,
+    resolve_urls: bool = True,
+) -> dict[str, object] | None:
     if photo is None:
         return None
     payload = {
@@ -523,6 +527,9 @@ def _photo_response(photo: Photo | CollectorPhoto | Mapping[str, object] | None)
         "sha256": normalize_identifier(_photo_value(photo, "sha256")),
         "content_type": normalize_identifier(_photo_value(photo, "content_type")),
     }
+    if not resolve_urls:
+        payload["image_url"] = ""
+        return payload
     return resolve_photo_for_response(payload)
 
 
@@ -2331,7 +2338,10 @@ class PostgresCollectorTransferService:
         )
         if hidden_terminal is None:
             raise KeyError(str(run.id))
-        rephoto = self.global_terminal_detail(terminal_id=str(hidden_terminal.id))
+        rephoto = self.global_terminal_detail(
+            terminal_id=str(hidden_terminal.id),
+            resolve_photos=False,
+        )
         stored_revision = normalize_identifier((run.stats or {}).get("source_revision"))
         source_changed = source_changed or stored_revision != current_revision
         rephoto["source_revision"] = stored_revision
@@ -4382,7 +4392,12 @@ class PostgresCollectorTransferService:
             ],
         }
 
-    def global_terminal_detail(self, *, terminal_id: str) -> dict[str, object]:
+    def global_terminal_detail(
+        self,
+        *,
+        terminal_id: str,
+        resolve_photos: bool = True,
+    ) -> dict[str, object]:
         terminal_uuid = _uuid(terminal_id, "terminal_id")
         terminal_ref = self.session.execute(
             select(
@@ -4593,14 +4608,16 @@ class PostgresCollectorTransferService:
                             "slot": "module_meter",
                             "label": "电表和模块",
                             "photo": _photo_response(
-                                meter.module_meter_photo_snapshot
+                                meter.module_meter_photo_snapshot,
+                                resolve_urls=resolve_photos,
                             ),
                         },
                         {
                             "slot": "after_box",
                             "label": "改造完成",
                             "photo": _photo_response(
-                                meter.after_box_photo_snapshot
+                                meter.after_box_photo_snapshot,
+                                resolve_urls=resolve_photos,
                             ),
                         },
                     ],
@@ -4642,7 +4659,8 @@ class PostgresCollectorTransferService:
                 collector_barcode = physical.collector_no
                 capture_strategy = "screen_photo"
                 response_photo = _photo_response(
-                    photo if photo is not None and photo.is_active else None
+                    photo if photo is not None and photo.is_active else None,
+                    resolve_urls=resolve_photos,
                 )
             elif is_direct:
                 physical_state = "present"
@@ -4650,7 +4668,8 @@ class PostgresCollectorTransferService:
                 collector_barcode = requirement.original_collector_no
                 capture_strategy = "live_physical"
                 response_photo = _photo_response(
-                    source_collector_photo_by_requirement.get(requirement.id)
+                    source_collector_photo_by_requirement.get(requirement.id),
+                    resolve_urls=resolve_photos,
                 )
             else:
                 physical_state = "missing"

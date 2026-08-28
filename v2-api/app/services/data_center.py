@@ -11,6 +11,15 @@ from app.services.barcode_verification_contract import has_current_eligible_phot
 
 REQUIRED_CLASSIFICATION_SLOTS = {"before_box", "module_meter", "after_box", "collector_barcode"}
 MANUAL_CLASSIFICATION_BARCODE_READY = {"passed", "manual", "manual_confirmed", "manual_passed"}
+DASHBOARD_IGNORED_EXCEPTION_REASON = "missing_collector_photo"
+
+
+def is_only_missing_collector_photo_exception(group: Mapping[str, Any]) -> bool:
+    raw_reasons = group.get("exception_reasons")
+    if not isinstance(raw_reasons, list):
+        return False
+    reasons = {str(item).strip() for item in raw_reasons if str(item).strip()}
+    return reasons == {DASHBOARD_IGNORED_EXCEPTION_REASON}
 
 
 def manual_classification_snapshot(
@@ -200,6 +209,8 @@ def archive_status_from_group(group: Mapping[str, Any], photos: list[Mapping[str
 
 
 def exception_status_from_group(group: Mapping[str, Any]) -> str:
+    if is_only_missing_collector_photo_exception(group):
+        return ""
     explicit = str(group.get("exception_status") or "").strip()
     if explicit:
         return explicit

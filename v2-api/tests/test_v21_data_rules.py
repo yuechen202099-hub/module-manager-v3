@@ -88,6 +88,27 @@ def test_photo_insufficient_threshold_is_four_valid_photos() -> None:
     assert summary["scanned_groups"] == 2
 
 
+def test_project_progress_ignores_only_missing_collector_photo_but_keeps_mixed_exceptions() -> None:
+    groups = [
+        {
+            "status": "exception",
+            "photo_count": 3,
+            "has_archive_blocker": True,
+            "exception_reasons": ["missing_collector_photo"],
+        },
+        {
+            "status": "exception",
+            "photo_count": 2,
+            "has_archive_blocker": True,
+            "exception_reasons": ["missing_collector_photo", "missing_module_asset_no"],
+        },
+    ]
+
+    summary = build_summary([], [], [], groups, [], [])
+
+    assert summary["exception_groups"] == 1
+
+
 def test_supplemental_photo_rule_returns_group_to_unreviewed_after_threshold() -> None:
     group = {"status": "incomplete", "photo_count": 3}
 

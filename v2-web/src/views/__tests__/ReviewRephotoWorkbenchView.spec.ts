@@ -5,7 +5,7 @@ import type { GlobalCollectorTerminalCandidate, GlobalCollectorTerminalDetail, G
 import ReviewRephotoWorkbenchView from '@/views/ReviewRephotoWorkbenchView.vue'
 
 const serviceMocks = vi.hoisted(() => ({
-  fetchGlobalCollectorTerminals: vi.fn(), openReviewWorkbenchTerminal: vi.fn(),
+  fetchGlobalCollectorTerminals: vi.fn(), fetchGlobalCollectorTerminal: vi.fn(), openReviewWorkbenchTerminal: vi.fn(),
   replaceGlobalTerminalMissing: vi.fn(), rollbackCollectorAssignment: vi.fn(),
   refreshGlobalCollectorTerminal: vi.fn(), setCollectorWorkbenchItemCompleted: vi.fn(),
   createReviewWorkbenchManualDemand: vi.fn(),
@@ -50,6 +50,30 @@ const open = (overrides: Partial<ReviewWorkbenchOpenResult> = {}): ReviewWorkben
   ], rephoto: null, ...overrides,
 })
 const page = (items: GlobalCollectorTerminalCandidate[]): GlobalCollectorTerminalPage => ({ items, page: 1, page_size: 50, total: items.length })
+function withoutPhotoUrls(detail: GlobalCollectorTerminalDetail): GlobalCollectorTerminalDetail {
+  const clone = JSON.parse(JSON.stringify(detail)) as GlobalCollectorTerminalDetail
+  for (const item of clone.meter_install_items) {
+    for (const slot of item.photos) {
+      if (slot.photo) slot.photo = { ...slot.photo, image_url: '', preview_url: '', thumbnail_url: '', canonical_image_url: '' }
+    }
+  }
+  for (const item of clone.collector_items) {
+    if (item.photo) item.photo = { ...item.photo, image_url: '', preview_url: '', thumbnail_url: '', canonical_image_url: '' }
+  }
+  return clone
+}
+function withPhotoUrl(detail: GlobalCollectorTerminalDetail, url: string): GlobalCollectorTerminalDetail {
+  const clone = JSON.parse(JSON.stringify(detail)) as GlobalCollectorTerminalDetail
+  for (const item of clone.meter_install_items) {
+    for (const slot of item.photos) {
+      if (slot.photo) slot.photo = { ...slot.photo, image_url: url, preview_url: url }
+    }
+  }
+  for (const item of clone.collector_items) {
+    if (item.photo) item.photo = { ...item.photo, image_url: url, preview_url: url }
+  }
+  return clone
+}
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason?: unknown) => void
@@ -63,11 +87,88 @@ describe('review rephoto workbench', () => {
     vi.clearAllMocks()
     serviceMocks.fetchGlobalCollectorTerminals.mockResolvedValue(page([candidate()]))
     serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open())
+    serviceMocks.fetchGlobalCollectorTerminal.mockImplementation(async () => {
+      const latestOpen = serviceMocks.openReviewWorkbenchTerminal.mock.results.at(-1)?.value
+      return (await latestOpen).rephoto
+    })
     serviceMocks.replaceGlobalTerminalMissing.mockResolvedValue({ required: 1, assigned: 1, assignments: [] })
     serviceMocks.rollbackCollectorAssignment.mockResolvedValue({})
     serviceMocks.refreshGlobalCollectorTerminal.mockResolvedValue({})
     serviceMocks.setCollectorWorkbenchItemCompleted.mockResolvedValue({})
     serviceMocks.createReviewWorkbenchManualDemand.mockResolvedValue(undefined)
+  })
+
+  it('renders terminal rows before asynchronously hydrating lazy images', async () => {
+    const imageDetail = rephoto('replaced')
+    const initialDetail = withoutPhotoUrls(imageDetail)
+    const images = deferred<GlobalCollectorTerminalDetail>()
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ rephoto: initialDetail }))
+    serviceMocks.fetchGlobalCollectorTerminal.mockReturnValue(images.promise)
+
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.text()).toContain('M-A')
+    expect(wrapper.text()).toContain('C-01')
+    expect(wrapper.findAll('.rephoto-slot img')).toHaveLength(0)
+    expect(wrapper.text()).toContain('图片加载中')
+
+    images.resolve(imageDetail)
+    await flushPromises()
+
+    const hydratedImages = wrapper.findAll<HTMLImageElement>('.photo-preview-trigger img')
+    expect(hydratedImages.length).toBeGreaterThan(0)
+    expect(hydratedImages.every((item) => item.attributes('loading') === 'lazy')).toBe(true)
+    expect(hydratedImages.every((item) => item.attributes('decoding') === 'async')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('does not let a late image response overwrite the newly opened terminal', async () => {
+    const lateTerminalA = deferred<GlobalCollectorTerminalDetail>()
+    const initialA = withoutPhotoUrls(rephoto('replaced'))
+    const initialB = withoutPhotoUrls(rephoto('present'))
+    initialB.terminal = { ...initialB.terminal, id: 'terminal-2', terminal_code: 'T-002' }
+    const hydratedB = withPhotoUrl(initialB, '/signed/terminal-b.jpg')
+    serviceMocks.fetchGlobalCollectorTerminals
+      .mockResolvedValueOnce(page([candidate()]))
+      .mockResolvedValueOnce(page([candidate({ terminal_key: 'terminal-key-2', terminal_code: 'T-002' })]))
+    serviceMocks.openReviewWorkbenchTerminal
+      .mockResolvedValueOnce(open({ rephoto: initialA }))
+      .mockResolvedValueOnce(open({
+        terminal: { terminal_key: 'terminal-key-2', project_id: 'project-1', terminal_code: 'T-002', installation_address: '新地址' },
+        rephoto: initialB,
+      }))
+    serviceMocks.fetchGlobalCollectorTerminal
+      .mockReturnValueOnce(lateTerminalA.promise)
+      .mockResolvedValueOnce(hydratedB)
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[aria-label="输入终端号"]').setValue('T-002')
+    await wrapper.get('[data-testid="search-terminal"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('T-002')
+    expect(wrapper.get<HTMLImageElement>('.rephoto-slot img').attributes('src')).toBe('/signed/terminal-b.jpg')
+
+    lateTerminalA.resolve(withPhotoUrl(initialA, '/signed/late-terminal-a.jpg'))
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('T-002')
+    expect(wrapper.get<HTMLImageElement>('.rephoto-slot img').attributes('src')).toBe('/signed/terminal-b.jpg')
+    wrapper.unmount()
+  })
+
+  it('keeps rows visible when asynchronous image loading fails', async () => {
+    const initialDetail = rephoto('present')
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ rephoto: initialDetail }))
+    serviceMocks.fetchGlobalCollectorTerminal.mockRejectedValue(new Error('图片服务暂不可用'))
+
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.text()).toContain('M-A')
+    expect(wrapper.text()).toContain('C-01')
+    expect(wrapper.text()).toContain('图片加载失败')
+    expect(wrapper.findAll('.meter-record')).toHaveLength(3)
+    wrapper.unmount()
   })
 
   it('posts a positive manual demand to the active terminal through the API boundary', async () => {

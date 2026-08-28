@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import {
   createReviewWorkbenchManualDemand,
+  fetchGlobalCollectorTerminal,
   fetchGlobalCollectorTerminals,
   openReviewWorkbenchTerminal,
   refreshGlobalCollectorTerminal,
@@ -24,6 +25,8 @@ const terminalInput = ref('')
 const opened = ref<ReviewWorkbenchOpenResult | null>(null)
 const selectedGroupId = ref('')
 const loading = ref(false)
+const photosLoading = ref(false)
+const photoLoadError = ref('')
 const mutationPending = ref(false)
 const errorMessage = ref('')
 const photoPreview = ref({ src: '', alt: '' })
@@ -31,6 +34,7 @@ const manualDemandQuantity = ref('')
 const maxManualDemandQuantity = 100
 let searchSerial = 0
 let openSerial = 0
+let photoLoadSerial = 0
 let searchTimer = 0
 let manualDemandSerial = 0
 const candidatePageSize = 50
@@ -115,7 +119,10 @@ onMounted(() => {
   lastSearchQuery.value = groupId
   void loadCandidates(groupId, 1, groupId)
 })
-onBeforeUnmount(() => { if (searchTimer) window.clearTimeout(searchTimer) })
+onBeforeUnmount(() => {
+  if (searchTimer) window.clearTimeout(searchTimer)
+  photoLoadSerial += 1
+})
 
 function collectorPriority(row: CollectorRequirementWorkbenchRow) {
   return row.physical_state === 'replaced' ? 3 : row.physical_state === 'missing' ? 2 : 1
@@ -175,6 +182,9 @@ function searchCandidates() {
   if (searchTimer) window.clearTimeout(searchTimer)
   searchTimer = 0
   openSerial += 1
+  photoLoadSerial += 1
+  photosLoading.value = false
+  photoLoadError.value = ''
   opened.value = null
   selectedGroupId.value = ''
   lastSearchQuery.value = terminalInput.value.trim()
@@ -189,6 +199,9 @@ function scheduleSearch() {
 function changeCandidatePage(page: number) {
   if (page < 1 || page === candidatePage.value || (page - 1) * candidatePageSize >= candidateTotal.value) return
   openSerial += 1
+  photoLoadSerial += 1
+  photosLoading.value = false
+  photoLoadError.value = ''
   opened.value = null
   selectedGroupId.value = ''
   ++searchSerial
@@ -213,10 +226,39 @@ async function openCandidate(candidate: GlobalCollectorTerminalCandidate, prefer
     opened.value = next
     terminalInput.value = next.terminal.terminal_code
     selectedGroupId.value = preferredMeter?.group_id || next.meters.find((meter) => meter.construction_state === 'constructed')?.group_id || ''
+    void hydrateRephotoPhotos(next, serial)
   } catch (error) {
     if (serial === openSerial) showError(error)
   } finally {
     if (serial === openSerial) loading.value = false
+  }
+}
+async function hydrateRephotoPhotos(next: ReviewWorkbenchOpenResult, openedSerial: number) {
+  const terminalId = next.rephoto?.terminal.id
+  if (!terminalId) {
+    photosLoading.value = false
+    photoLoadError.value = ''
+    return
+  }
+  const serial = ++photoLoadSerial
+  photosLoading.value = true
+  photoLoadError.value = ''
+  try {
+    const detail = await fetchGlobalCollectorTerminal(terminalId)
+    const current = opened.value
+    if (
+      serial !== photoLoadSerial
+      || openedSerial !== openSerial
+      || !current
+      || current.rephoto?.terminal.id !== terminalId
+    ) return
+    opened.value = { ...current, rephoto: { ...current.rephoto, ...detail } }
+  } catch {
+    if (serial === photoLoadSerial && openedSerial === openSerial && opened.value?.rephoto?.terminal.id === terminalId) {
+      photoLoadError.value = '图片加载失败，文字资料仍可继续审阅；可重新查询终端后重试。'
+    }
+  } finally {
+    if (serial === photoLoadSerial && openedSerial === openSerial) photosLoading.value = false
   }
 }
 async function reopenCurrent() {
@@ -286,6 +328,7 @@ function addManualDemand() {
         <strong class="workflow-status" :class="{ locked: !rephotoUnlocked }">{{ workflowLabel(opened.workflow_state) }}</strong>
       </section>
       <p class="terminal-notice" :class="{ unlocked: rephotoUnlocked }">{{ terminalNotice }}<button v-if="sourceChanged" type="button" class="rephoto-mutation refresh-button" data-testid="refresh-terminal" :disabled="!mutable || !sourceChanged" @click="refresh">刷新资料</button></p>
+      <p v-if="photosLoading || photoLoadError" class="photo-load-status" :class="{ failed: photoLoadError }">{{ photoLoadError || '图片加载中…' }}</p>
 
       <section class="meter-section">
         <h2>表计资料</h2>
@@ -314,8 +357,8 @@ function addManualDemand() {
                     :data-testid="`preview-meter-${slot.slot}`"
                     :aria-label="`查看${slot.label}大图`"
                     @click="openPhotoPreview(largeImageUrl(slot.photo), slot.label)"
-                  ><img :src="imageUrl(slot.photo)" :alt="slot.label" /></button>
-                  <span v-else>{{ selectedRephotoItem ? '暂无照片' : '资料异常，暂无可翻拍照片' }}</span>
+                  ><img :src="imageUrl(slot.photo)" :alt="slot.label" loading="lazy" decoding="async" /></button>
+                  <span v-else>{{ photosLoading && slot.photo ? '图片加载中…' : selectedRephotoItem ? '暂无照片' : '资料异常，暂无可翻拍照片' }}</span>
                 </figure>
               </div>
               <button v-if="selectedRephotoItem" type="button" class="rephoto-mutation complete-meter" :disabled="!mutable || meterCompletionBlockers(selectedRephotoItem).length > 0" @click="completeMeter(selectedRephotoItem)">完成本表翻拍</button>
@@ -349,8 +392,8 @@ function addManualDemand() {
               :data-testid="`preview-collector-${row.key}`"
               :aria-label="`查看采集器 ${row.original_collector_no} 大图`"
               @click="openPhotoPreview(largeImageUrl(row.photo), `采集器 ${row.original_collector_no}`)"
-            ><img :src="imageUrl(row.photo)" :alt="`采集器 ${row.original_collector_no}`" /></button>
-            <span v-else class="empty-cell">-</span>
+            ><img :src="imageUrl(row.photo)" :alt="`采集器 ${row.original_collector_no}`" loading="lazy" decoding="async" /></button>
+            <span v-else class="empty-cell">{{ photosLoading && row.photo ? '图片加载中…' : '-' }}</span>
             <div><span v-if="row.final_collector_no && row.final_collector_no !== row.original_collector_no" class="replacement-number">新编号 {{ row.final_collector_no }}</span><Code128Barcode v-if="row.collector_barcode" :value="row.collector_barcode" /></div>
             <div class="collector-actions">
               <button v-if="row.physical_state === 'pending' || row.physical_state === 'missing'" type="button" class="rephoto-mutation" data-testid="replace-all-missing" :disabled="!mutable || row.physical_state === 'pending' || opened.workflow_state === 'pool_shortage'" @click="replaceMissing">随机替换</button>
@@ -381,6 +424,8 @@ function addManualDemand() {
 .terminal-search button { color: #fff; background: var(--v2-accent, #1677ff); border-color: var(--v2-accent, #1677ff); }
 .candidate-pagination { display: flex; align-items: center; gap: 10px; }
 .warning { margin: 0; color: var(--el-color-danger, #d03050); }
+.photo-load-status { margin: -8px 0 0; color: var(--v2-text-muted, #7a8798); font-size: 12px; }
+.photo-load-status.failed { color: var(--el-color-warning, #e6a23c); }
 .terminal-summary { display: grid; grid-template-columns: 1.2fr repeat(3, .8fr) auto; align-items: stretch; overflow: hidden; border: 1px solid var(--v2-border, #dce3ec); border-radius: 8px 8px 0 0; background: #fff; }
 .terminal-summary > div { display: flex; align-items: center; justify-content: center; gap: 14px; min-height: 58px; padding: 0 18px; border-right: 1px solid #edf0f4; }
 .terminal-summary > div:first-child { justify-content: flex-start; }

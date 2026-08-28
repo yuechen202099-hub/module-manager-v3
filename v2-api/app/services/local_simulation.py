@@ -3738,7 +3738,7 @@ def build_summary(
     photo_rows_linked = sum(item["photo_count"] for item in groups)
     scanned_groups = sum(1 for item in groups if item.get("photo_count", 0) > 0)
     reviewed_groups = sum(1 for item in groups if is_reviewed_group(item))
-    exception_groups = sum(1 for item in groups if is_problem_group(item))
+    exception_groups = sum(1 for item in groups if is_dashboard_exception_group(item))
     photo_accuracy = photo_barcode_check.summarize_photo_accuracy(
         photo for group in groups for photo in group.get("photos", [])
     )
@@ -4830,6 +4830,10 @@ def is_problem_group(group: dict[str, Any]) -> bool:
         group.get("photo_count", 0) > 0
         and (group.get("status") == "incomplete" or bool(group.get("has_archive_blocker")))
     )
+
+
+def is_dashboard_exception_group(group: dict[str, Any]) -> bool:
+    return is_problem_group(group) and not data_center_service.is_only_missing_collector_photo_exception(group)
 
 
 def is_reviewed_group(group: dict[str, Any]) -> bool:

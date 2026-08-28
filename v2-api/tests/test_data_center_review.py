@@ -11,6 +11,7 @@ from app.api.routes import groups as groups_routes
 from app.api.routes import local_test as local_test_routes
 from app.core import security
 from app.services import local_simulation
+from app.services import data_center as data_center_service
 from app.services import state_repository as repository
 from app.services.group_barcode_verification import evaluate_group_eligibility
 from app.schemas.data_center import DataCenterQuery
@@ -797,3 +798,19 @@ def test_data_center_exception_none_filter_returns_no_exception_rows(
     assert page["total"] == 1
     assert [item["id"] for item in page["items"]] == ["g-1"]
     assert page["items"][0]["exception_status"] == ""
+
+
+def test_data_center_exception_drilldown_ignores_only_missing_collector_photo() -> None:
+    collector_only = {
+        "status": "exception",
+        "exception_status": "open",
+        "has_archive_blocker": True,
+        "exception_reasons": ["missing_collector_photo"],
+    }
+    mixed = {
+        **collector_only,
+        "exception_reasons": ["missing_collector_photo", "missing_module_asset_no"],
+    }
+
+    assert data_center_service.exception_status_from_group(collector_only) == ""
+    assert data_center_service.exception_status_from_group(mixed) == "open"

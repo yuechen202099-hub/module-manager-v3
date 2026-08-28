@@ -3865,6 +3865,59 @@ def test_review_workbench_open_ready_terminal_creates_and_reuses_one_snapshot(
     assert db_session.scalar(select(func.count(CollectorTransferRun.id))) == before + 1
 
 
+def test_review_workbench_open_defers_photo_urls_until_detail_request(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="ASYNC-PHOTO-001",
+        meter_no="ASYNC-PHOTO-METER",
+        collector_no="ASYNC-PHOTO-COLLECTOR",
+        authoritative_address="异步图片测试地址",
+    )
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="ASYNC-PHOTO-001",
+        include_blocked=True,
+    )["items"][0]
+    resolved_photo_ids: list[str] = []
+
+    def resolve_photo(payload: dict[str, object]) -> dict[str, object]:
+        resolved_photo_ids.append(str(payload.get("id") or ""))
+        return {**payload, "preview_url": f"/signed/{payload.get('id')}"}
+
+    monkeypatch.setattr(
+        "app.services.collector_transfer.resolve_photo_for_response",
+        resolve_photo,
+    )
+
+    opened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert resolved_photo_ids == []
+    initial_photos = [
+        slot["photo"]
+        for item in opened["rephoto"]["meter_install_items"]
+        for slot in item["photos"]
+    ]
+    assert all(photo["id"] for photo in initial_photos)
+    assert all(photo["image_url"] == "" for photo in initial_photos)
+
+    detail = service(db_session).global_terminal_detail(
+        terminal_id=opened["rephoto"]["terminal"]["id"],
+    )
+
+    assert resolved_photo_ids
+    assert all(
+        slot["photo"]["preview_url"].startswith("/signed/")
+        for item in detail["meter_install_items"]
+        for slot in item["photos"]
+    )
 def test_review_workbench_open_rejects_another_team_terminal_key(
     db_session: Session,
 ) -> None:

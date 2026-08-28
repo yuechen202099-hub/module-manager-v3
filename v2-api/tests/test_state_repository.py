@@ -8187,6 +8187,18 @@ def test_postgres_summary_uses_lightweight_barcode_accuracy_queries(monkeypatch:
     assert "count(photos.id)" in compiled.lower()
 
 
+def test_postgres_dashboard_exception_clause_excludes_only_missing_collector_photo() -> None:
+    compiled = str(
+        repository.select(repository._dashboard_exception_clause()).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "jsonb_array_length(material_groups.exception_reasons) = 1" in compiled
+    assert "(material_groups.exception_reasons ->> 0) = 'missing_collector_photo'" in compiled
+
+
 def test_group_barcode_accuracy_summary_uses_durable_rows_and_skips_legacy_recomputation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
