@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import String, and_, case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -130,6 +130,9 @@ class CollectorWorkbenchIncompleteError(ValueError):
 
 
 _MISSING_TERMINAL_PREFIX = "__missing_terminal__:"
+_MANUAL_DEMAND_INTERNAL_PREFIX = "manual-demand:"
+_MANUAL_DEMAND_DIAGNOSTIC_CODE = "manual_collector_demand"
+_MANUAL_DEMAND_LABEL = "人工需求"
 _IDENTIFIER_BOUNDARY_WHITESPACE = (
     "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
     "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
@@ -499,6 +502,17 @@ def _photo_response(photo: Photo | CollectorPhoto | Mapping[str, object] | None)
         "content_type": normalize_identifier(_photo_value(photo, "content_type")),
     }
     return resolve_photo_for_response(payload)
+
+
+def _collector_requirement_label(requirement: CollectorRequirement) -> str:
+    for diagnostic in requirement.diagnostics or []:
+        if (
+            isinstance(diagnostic, Mapping)
+            and normalize_identifier(diagnostic.get("code"))
+            == _MANUAL_DEMAND_DIAGNOSTIC_CODE
+        ):
+            return _MANUAL_DEMAND_LABEL
+    return requirement.original_collector_no
 
 
 def _snapshot_has_photo_evidence(snapshot: object) -> bool:
@@ -3603,7 +3617,7 @@ class PostgresCollectorTransferService:
                 {
                     "assignment_id": str(assignment.id),
                     "requirement_id": requirement_id,
-                    "original_collector_no": requirement.original_collector_no,
+                    "original_collector_no": _collector_requirement_label(requirement),
                     "physical_collector_id": collector_id,
                     "final_collector_no": physical.collector_no,
                     "mode": "random",
@@ -3632,7 +3646,11 @@ class PostgresCollectorTransferService:
             "stats": stats,
         }
 
-    def replace_terminal_missing(self, *, terminal_id: str) -> dict[str, object]:
+    def _locked_global_workbench_terminal(
+        self,
+        *,
+        terminal_id: str,
+    ) -> tuple[CollectorTransferRun, CollectorTransferTerminal]:
         terminal_uuid = _uuid(terminal_id, "terminal_id")
         terminal_ref = self.session.execute(
             select(
@@ -3683,30 +3701,14 @@ class PostgresCollectorTransferService:
             raise CollectorTerminalSourceBlockedError(
                 "终端存在资料阻断，不能执行随机替换"
             )
+        return run, terminal
 
-        requirements = list(
-            self.session.scalars(
-                select(CollectorRequirement)
-                .where(
-                    CollectorRequirement.run_id == run.id,
-                    CollectorRequirement.terminal_id == terminal.id,
-                    CollectorRequirement.team_id == self.team_id,
-                    CollectorRequirement.status == "unmatched",
-                )
-                .order_by(CollectorRequirement.id)
-                .with_for_update()
-            ).all()
-        )
-        required = len(requirements)
-        if not requirements:
-            return {
-                "run_id": str(run.id),
-                "terminal_id": str(terminal.id),
-                "required": 0,
-                "assigned": 0,
-                "assignments": [],
-            }
-
+    def _allocate_locked_requirements(
+        self,
+        *,
+        run: CollectorTransferRun,
+        requirements: Sequence[CollectorRequirement],
+    ) -> list[dict[str, str]]:
         physical_collectors = list(
             self.session.scalars(
                 select(PhysicalCollector)
@@ -3736,7 +3738,10 @@ class PostgresCollectorTransferService:
                         CollectorPhoto.physical_collector_id.in_(physical_by_id),
                         CollectorPhoto.is_active.is_(True),
                     )
-                    .order_by(CollectorPhoto.physical_collector_id, CollectorPhoto.id)
+                    .order_by(
+                        CollectorPhoto.physical_collector_id,
+                        CollectorPhoto.id,
+                    )
                     .with_for_update()
                 ).all()
             )
@@ -3764,15 +3769,17 @@ class PostgresCollectorTransferService:
             requirement = requirement_by_id[requirement_id]
             physical = physical_by_id[UUID(physical_id)]
             photo = valid_photos[physical.id]
-            assignment, _created = self._create_assignment(
+            assignment, created = self._create_assignment(
                 run=run,
                 requirement=requirement,
                 physical=physical,
                 photo=photo,
                 assignment_mode="random",
             )
-            requirement.status = "assigned"
-            physical.pool_status = "reserved"
+            if created or requirement.status == "unmatched":
+                requirement.status = "assigned"
+            if created or physical.pool_status == "available":
+                physical.pool_status = "reserved"
             self._ensure_removal_workbench_item(
                 run=run,
                 requirement=requirement,
@@ -3782,12 +3789,46 @@ class PostgresCollectorTransferService:
                 {
                     "assignment_id": str(assignment.id),
                     "requirement_id": requirement_id,
-                    "original_collector_no": requirement.original_collector_no,
+                    "original_collector_no": _collector_requirement_label(requirement),
                     "physical_collector_id": physical_id,
                     "final_collector_no": physical.collector_no,
                     "mode": "random",
                 }
             )
+        return result
+
+    def replace_terminal_missing(self, *, terminal_id: str) -> dict[str, object]:
+        run, terminal = self._locked_global_workbench_terminal(
+            terminal_id=terminal_id
+        )
+
+        requirements = list(
+            self.session.scalars(
+                select(CollectorRequirement)
+                .where(
+                    CollectorRequirement.run_id == run.id,
+                    CollectorRequirement.terminal_id == terminal.id,
+                    CollectorRequirement.team_id == self.team_id,
+                    CollectorRequirement.status == "unmatched",
+                )
+                .order_by(CollectorRequirement.id)
+                .with_for_update()
+            ).all()
+        )
+        required = len(requirements)
+        if not requirements:
+            return {
+                "run_id": str(run.id),
+                "terminal_id": str(terminal.id),
+                "required": 0,
+                "assigned": 0,
+                "assignments": [],
+            }
+
+        result = self._allocate_locked_requirements(
+            run=run,
+            requirements=requirements,
+        )
 
         run.status = "allocated"
         self._refresh_allocation_stats(run)
@@ -3810,6 +3851,111 @@ class PostgresCollectorTransferService:
             "run_id": str(run.id),
             "terminal_id": str(terminal.id),
             "required": required,
+            "assigned": len(result),
+            "assignments": result,
+        }
+
+    def create_manual_demand(
+        self,
+        *,
+        terminal_id: str,
+        quantity: int,
+    ) -> dict[str, object]:
+        if isinstance(quantity, bool) or quantity <= 0:
+            raise ValueError("quantity must be a positive integer")
+
+        run, terminal = self._locked_global_workbench_terminal(
+            terminal_id=terminal_id
+        )
+        current_max_sort = int(
+            self.session.scalar(
+                select(func.max(CollectorRequirement.sort_order)).where(
+                    CollectorRequirement.run_id == run.id,
+                    CollectorRequirement.terminal_id == terminal.id,
+                    CollectorRequirement.team_id == self.team_id,
+                )
+            )
+            or 0
+        )
+        requirement_ids: list[UUID] = []
+        new_requirements: list[CollectorRequirement] = []
+        for offset in range(quantity):
+            requirement_id = uuid4()
+            requirement_ids.append(requirement_id)
+            new_requirements.append(
+                CollectorRequirement(
+                    id=requirement_id,
+                    run_id=run.id,
+                    terminal_id=terminal.id,
+                    team_id=self.team_id,
+                    original_collector_no=(
+                        f"{_MANUAL_DEMAND_INTERNAL_PREFIX}{requirement_id.hex}"
+                    ),
+                    status="unmatched",
+                    sort_order=current_max_sort + offset + 1,
+                    diagnostics=[
+                        {
+                            "code": _MANUAL_DEMAND_DIAGNOSTIC_CODE,
+                            "label": _MANUAL_DEMAND_LABEL,
+                        }
+                    ],
+                )
+            )
+        self.session.add_all(new_requirements)
+
+        try:
+            self.session.flush()
+            locked_requirements = list(
+                self.session.scalars(
+                    select(CollectorRequirement)
+                    .where(
+                        CollectorRequirement.id.in_(requirement_ids),
+                        CollectorRequirement.run_id == run.id,
+                        CollectorRequirement.terminal_id == terminal.id,
+                        CollectorRequirement.team_id == self.team_id,
+                    )
+                    .order_by(
+                        CollectorRequirement.sort_order,
+                        CollectorRequirement.id,
+                    )
+                    .with_for_update()
+                ).all()
+            )
+            result = self._allocate_locked_requirements(
+                run=run,
+                requirements=locked_requirements,
+            )
+        except Exception:
+            self.session.rollback()
+            raise
+
+        terminal.collector_requirement_count += quantity
+        run_stats = dict(run.stats or {})
+        run_stats["collector_requirement_count"] = int(
+            run_stats.get("collector_requirement_count") or 0
+        ) + quantity
+        run.stats = run_stats
+        run.status = "allocated"
+        self._refresh_allocation_stats(run)
+        self._audit(
+            action="collector_workbench.manual_demand_added",
+            entity_type="collector_transfer_terminal",
+            entity_id=terminal.id,
+            project_id=run.project_id,
+            payload={
+                "run_id": str(run.id),
+                "terminal_id": str(terminal.id),
+                "quantity": quantity,
+                "assigned": len(result),
+                "assigned_by": self.actor,
+                "assignments": result,
+            },
+        )
+        self.session.commit()
+        return {
+            "run_id": str(run.id),
+            "terminal_id": str(terminal.id),
+            "required": quantity,
             "assigned": len(result),
             "assignments": result,
         }
@@ -4384,7 +4530,7 @@ class PostgresCollectorTransferService:
                     "requirement_id": str(requirement.id),
                     "workbench_item_id": str(item.id) if item is not None else None,
                     "status": item.status if item is not None else None,
-                    "original_collector_no": requirement.original_collector_no,
+                    "original_collector_no": _collector_requirement_label(requirement),
                     "physical_state": physical_state,
                     "final_collector_no": final_collector_no,
                     "collector_barcode": collector_barcode,

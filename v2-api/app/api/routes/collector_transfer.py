@@ -9,6 +9,10 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Upload
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from app.api.schemas.collector_transfer import (
+    ManualCollectorDemandRequest,
+    ManualCollectorDemandResponse,
+)
 from app.core.responses import error_response, ok
 from app.core.security import decode_access_token
 from app.database import SessionLocal
@@ -555,6 +559,24 @@ def open_review_workbench_terminal(
         lambda service: service.open_review_workbench_terminal(
             terminal_key_value=payload.terminal_key,
             source_revision=payload.source_revision,
+        ),
+    )
+
+
+@router.post(
+    "/review-workbench/terminals/{terminal_id}/manual-demand",
+    response_model=ManualCollectorDemandResponse,
+)
+def create_manual_collector_demand(
+    terminal_id: str,
+    payload: ManualCollectorDemandRequest,
+    request: Request,
+):
+    return call_admin_service(
+        request,
+        lambda service: service.create_manual_demand(
+            terminal_id=terminal_id,
+            quantity=payload.quantity,
         ),
     )
 

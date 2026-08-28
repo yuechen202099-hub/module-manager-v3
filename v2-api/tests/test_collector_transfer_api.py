@@ -168,6 +168,30 @@ class FakeCollectorTransferService:
             "assignments": [],
         }
 
+    def create_manual_demand(self, *, terminal_id: str, quantity: int) -> dict:
+        self.calls.append(
+            (
+                "create_manual_demand",
+                {"terminal_id": terminal_id, "quantity": quantity},
+            )
+        )
+        return {
+            "run_id": "run-1",
+            "terminal_id": terminal_id,
+            "required": quantity,
+            "assigned": quantity,
+            "assignments": [
+                {
+                    "assignment_id": "assignment-1",
+                    "requirement_id": "requirement-1",
+                    "original_collector_no": "人工需求",
+                    "physical_collector_id": "collector-1",
+                    "final_collector_no": "POOL-001",
+                    "mode": "random",
+                }
+            ],
+        }
+
     def refresh_global_terminal(self, *, terminal_id: str) -> dict:
         self.calls.append(("refresh_global_terminal", terminal_id))
         return {
@@ -1393,3 +1417,51 @@ def test_request_models_reject_team_actor_and_customer_platform_credentials(monk
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
     assert service.calls == []
+
+
+def test_manual_collector_demand_requires_positive_quantity_and_administrator(
+    monkeypatch,
+) -> None:
+    """Catches invalid quantities or non-administrators consuming collector-pool inventory."""
+    service = FakeCollectorTransferService()
+    client, headers, _identities = production_client_with_service(monkeypatch, service)
+    path = "/collector-transfer/review-workbench/terminals/terminal-1/manual-demand"
+
+    constructor = client.post(
+        path,
+        headers=headers["constructor"],
+        json={"quantity": 1},
+    )
+    zero = client.post(path, headers=headers["admin"], json={"quantity": 0})
+    negative = client.post(path, headers=headers["admin"], json={"quantity": -1})
+    boolean = client.post(path, headers=headers["admin"], json={"quantity": True})
+    spoofed = client.post(
+        path,
+        headers=headers["admin"],
+        json={"quantity": 1, "team_id": "spoofed-team", "actor": "spoofed-admin"},
+    )
+    administrator = client.post(
+        path,
+        headers=headers["admin"],
+        json={"quantity": 1},
+    )
+
+    assert constructor.status_code == 403
+    assert [
+        zero.status_code,
+        negative.status_code,
+        boolean.status_code,
+        spoofed.status_code,
+    ] == [422, 422, 422, 422]
+    assert all(
+        response.json()["error"]["code"] == "validation_error"
+        for response in (zero, negative, boolean, spoofed)
+    )
+    assert administrator.status_code == 200
+    assert administrator.json()["data"]["assignments"][0]["original_collector_no"] == "人工需求"
+    assert service.calls == [
+        (
+            "create_manual_demand",
+            {"terminal_id": "terminal-1", "quantity": 1},
+        )
+    ]

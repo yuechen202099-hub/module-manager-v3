@@ -4068,7 +4068,9 @@ def mutation_fingerprint(session: Session) -> dict[str, object]:
             for row in session.execute(
                 select(
                     CollectorRequirement.id,
+                    CollectorRequirement.original_collector_no,
                     CollectorRequirement.status,
+                    CollectorRequirement.diagnostics,
                 ).order_by(CollectorRequirement.id)
             ).tuples()
         ],
@@ -4108,6 +4110,7 @@ def mutation_fingerprint(session: Session) -> dict[str, object]:
                     CollectorTransferTerminal.id,
                     CollectorTransferTerminal.status,
                     CollectorTransferTerminal.completed_item_count,
+                    CollectorTransferTerminal.collector_requirement_count,
                 ).order_by(CollectorTransferTerminal.id)
             ).tuples()
         ],
@@ -5669,3 +5672,219 @@ def test_replace_terminal_missing_rejects_a_stale_source_snapshot_without_writes
             CollectorWorkbenchItem.item_kind == "collector_removal",
         )
     ) == 0
+
+
+def open_manual_demand_terminal(
+    session: Session,
+    *,
+    terminal_code: str,
+) -> tuple[Project, dict[str, object]]:
+    project = session.scalar(select(Project).where(Project.team_id == "team-1"))
+    add_global_terminal_source(
+        session,
+        project=project,
+        terminal_code=terminal_code,
+        meter_no=f"{terminal_code}-METER",
+        collector_no=f"{terminal_code}-SOURCE",
+        authoritative_address="人工需求测试地址",
+    )
+    session.commit()
+    candidate = service(session).list_global_terminals(query=terminal_code)["items"][0]
+    opened = service(session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code=terminal_code,
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+    return project, opened
+
+
+def test_manual_demand_matches_unique_current_project_collectors_and_audits(
+    db_session: Session,
+) -> None:
+    """Catches manual demand leaking opaque keys, crossing projects, or reusing one physical device."""
+    project, opened = open_manual_demand_terminal(
+        db_session,
+        terminal_code="DEMAND-ATOMIC-001",
+    )
+    pool = [
+        PhysicalCollector(
+            id=uuid4(),
+            team_id="team-1",
+            project_id=project.id,
+            collector_no=f"MANUAL-POOL-{index + 1}",
+            pool_status="available",
+        )
+        for index in range(2)
+    ]
+    db_session.add_all(pool)
+    db_session.commit()
+    for index, physical in enumerate(pool):
+        collector_photo(db_session, physical, sha256=f"{index + 5}" * 64)
+
+    result = service(db_session).create_manual_demand(
+        terminal_id=str(opened["workbench_terminal_id"]),
+        quantity=2,
+    )
+
+    manual_requirements = list(
+        db_session.scalars(
+            select(CollectorRequirement)
+            .where(CollectorRequirement.run_id == UUID(opened["run_id"]))
+            .order_by(CollectorRequirement.sort_order, CollectorRequirement.id)
+        )
+    )[-2:]
+    audit = db_session.scalar(
+        select(AuditLog)
+        .where(
+            AuditLog.team_id == "team-1",
+            AuditLog.action == "collector_workbench.manual_demand_added",
+        )
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+    )
+    detail = service(db_session).global_terminal_detail(
+        terminal_id=str(opened["workbench_terminal_id"])
+    )
+    manual_items = [
+        item
+        for item in detail["collector_items"]
+        if item["requirement_id"] in {str(row.id) for row in manual_requirements}
+    ]
+
+    assert result["required"] == result["assigned"] == 2
+    assert {row["original_collector_no"] for row in result["assignments"]} == {"人工需求"}
+    assert len({row["physical_collector_id"] for row in result["assignments"]}) == 2
+    assert {row["physical_collector_id"] for row in result["assignments"]} == {
+        str(row.id) for row in pool
+    }
+    assert len({row.original_collector_no for row in manual_requirements}) == 2
+    assert all(row.original_collector_no.startswith("manual-demand:") for row in manual_requirements)
+    assert all(
+        row.diagnostics == [{"code": "manual_collector_demand", "label": "人工需求"}]
+        for row in manual_requirements
+    )
+    assert {item["original_collector_no"] for item in manual_items} == {"人工需求"}
+    assert audit is not None
+    assert audit.project_id == project.id
+    assert audit.payload["quantity"] == 2
+    assert {row["original_collector_no"] for row in audit.payload["assignments"]} == {"人工需求"}
+    assert all("manual-demand:" not in str(row) for row in result["assignments"])
+    assert all("manual-demand:" not in str(row) for row in audit.payload["assignments"])
+
+
+def test_manual_demand_pool_shortage_ignores_foreign_project_and_writes_nothing(
+    db_session: Session,
+) -> None:
+    """Catches foreign-project inventory masking a shortage or partial manual-demand persistence."""
+    project, opened = open_manual_demand_terminal(
+        db_session,
+        terminal_code="DEMAND-SHORT-001",
+    )
+    current = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="MANUAL-SHORTAGE-CURRENT",
+        pool_status="available",
+    )
+    foreign_project = Project(
+        id=uuid4(),
+        team_id="team-1",
+        code="P-MANUAL-FOREIGN",
+        name="人工需求外部项目",
+        status=ProjectStatus.ACTIVE,
+        settings={},
+    )
+    foreign_pool = [
+        PhysicalCollector(
+            id=uuid4(),
+            team_id="team-1",
+            project_id=foreign_project.id,
+            collector_no=f"MANUAL-SHORTAGE-FOREIGN-{index + 1}",
+            pool_status="available",
+        )
+        for index in range(2)
+    ]
+    db_session.add_all([current, foreign_project, *foreign_pool])
+    db_session.commit()
+    collector_photo(db_session, current, sha256="a" * 64)
+    for index, physical in enumerate(foreign_pool):
+        collector_photo(db_session, physical, sha256=f"{index + 7}" * 64)
+    before = mutation_fingerprint(db_session)
+
+    with pytest.raises(PoolInsufficientError) as raised:
+        service(db_session).create_manual_demand(
+            terminal_id=str(opened["workbench_terminal_id"]),
+            quantity=2,
+        )
+
+    assert raised.value.required == 2
+    assert raised.value.available == 1
+    assert mutation_fingerprint(db_session) == before
+
+
+def test_manual_demand_rejects_non_positive_quantity_without_writes(
+    db_session: Session,
+) -> None:
+    """Catches a zero or negative manual-demand quantity creating internal requirements."""
+    _project, opened = open_manual_demand_terminal(
+        db_session,
+        terminal_code="DEMAND-VALID-001",
+    )
+    before = mutation_fingerprint(db_session)
+
+    for quantity in (0, -1):
+        with pytest.raises(ValueError, match="positive"):
+            service(db_session).create_manual_demand(
+                terminal_id=str(opened["workbench_terminal_id"]),
+                quantity=quantity,
+            )
+
+    assert mutation_fingerprint(db_session) == before
+
+
+def test_manual_demand_assignment_uses_existing_rollback_and_keeps_neutral_label(
+    db_session: Session,
+) -> None:
+    """Catches manual requirements becoming unrollable or exposing their internal key after rollback."""
+    project, opened = open_manual_demand_terminal(
+        db_session,
+        terminal_code="DEMAND-ROLLBACK-001",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="MANUAL-ROLLBACK-POOL",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="b" * 64)
+    created = service(db_session).create_manual_demand(
+        terminal_id=str(opened["workbench_terminal_id"]),
+        quantity=1,
+    )
+    assignment_id = created["assignments"][0]["assignment_id"]
+    requirement_id = created["assignments"][0]["requirement_id"]
+
+    rolled_back = service(db_session).rollback_assignment(
+        assignment_id=assignment_id
+    )
+    detail = service(db_session).global_terminal_detail(
+        terminal_id=str(opened["workbench_terminal_id"])
+    )
+    requirement_row = db_session.get(CollectorRequirement, UUID(requirement_id))
+    manual_item = next(
+        item
+        for item in detail["collector_items"]
+        if item["requirement_id"] == requirement_id
+    )
+
+    db_session.refresh(physical)
+    assert rolled_back["status"] == "rolled_back"
+    assert requirement_row.status == "unmatched"
+    assert physical.pool_status == "available"
+    assert manual_item["physical_state"] == "missing"
+    assert manual_item["original_collector_no"] == "人工需求"
+    assert "manual-demand:" not in str(manual_item)
