@@ -225,6 +225,46 @@ describe('review rephoto workbench', () => {
     wrapper.unmount()
   })
 
+  it('does not clear or reopen terminal B when a manual demand for terminal A resolves late', async () => {
+    const pendingDemand = deferred<void>()
+    const terminalB = candidate({ terminal_key: 'opaque-key-b', terminal_code: 'T-002', source_revision: 'revision-2' })
+    const rephotoB = rephoto('present')
+    rephotoB.terminal = { ...rephotoB.terminal, id: 'terminal-2', terminal_code: 'T-002' }
+    const openedB = open({
+      terminal: { terminal_key: 'opaque-key-b', project_id: 'project-1', terminal_code: 'T-002', installation_address: '新地址' },
+      source_revision: 'revision-2',
+      workflow_state: 'ready',
+      review_ready_count: 2,
+      review_required_count: 0,
+      review_blockers: [],
+      rephoto: rephotoB,
+    })
+    serviceMocks.fetchGlobalCollectorTerminals
+      .mockResolvedValueOnce(page([candidate()]))
+      .mockResolvedValueOnce(page([terminalB]))
+    serviceMocks.openReviewWorkbenchTerminal
+      .mockResolvedValueOnce(open({ workflow_state: 'ready', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('present') }))
+      .mockResolvedValue(openedB)
+    serviceMocks.createReviewWorkbenchManualDemand.mockReturnValue(pendingDemand.promise)
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="manual-demand-quantity"]').setValue('2')
+    await wrapper.get('[data-testid="submit-manual-demand"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[aria-label="输入终端号"]').setValue('T-002')
+    await wrapper.get('[data-testid="search-terminal"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="manual-demand-quantity"]').setValue('7')
+
+    pendingDemand.resolve(undefined)
+    await flushPromises()
+
+    expect(wrapper.get('.terminal-summary').text()).toContain('T-002')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="manual-demand-quantity"]').element.value).toBe('7')
+    expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
   it('sends only opaque terminal identity and revision to unified open', async () => {
     const wrapper = await mountWorkbench()
     expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenCalledWith({ terminal_key: 'opaque-key', source_revision: 'revision-1' })

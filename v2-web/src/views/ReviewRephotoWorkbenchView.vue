@@ -31,6 +31,7 @@ const manualDemandQuantity = ref('')
 let searchSerial = 0
 let openSerial = 0
 let searchTimer = 0
+let manualDemandSerial = 0
 const candidatePageSize = 50
 
 const rephoto = computed(() => opened.value?.rephoto || null)
@@ -223,7 +224,10 @@ async function runMutation(action: () => Promise<unknown>) {
   if (!mutable.value) return
   mutationPending.value = true
   errorMessage.value = ''
-  try { await action(); await reopenCurrent() } catch (error) { showError(error) } finally { mutationPending.value = false }
+  try {
+    const result = await action()
+    if (result !== false) await reopenCurrent()
+  } catch (error) { showError(error) } finally { mutationPending.value = false }
 }
 function replaceMissing() {
   const terminalId = rephoto.value?.terminal.id
@@ -251,8 +255,10 @@ function addManualDemand() {
   const terminalId = rephoto.value?.terminal.id
   const quantity = parsedManualDemandQuantity.value
   if (!terminalId || quantity === null) return
+  const requestSerial = ++manualDemandSerial
   void runMutation(async () => {
     await createReviewWorkbenchManualDemand(terminalId, quantity)
+    if (requestSerial !== manualDemandSerial || rephoto.value?.terminal.id !== terminalId) return false
     manualDemandQuantity.value = ''
   })
 }
