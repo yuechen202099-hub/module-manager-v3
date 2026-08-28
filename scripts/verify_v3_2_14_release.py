@@ -28,26 +28,24 @@ OPERATOR_PRODUCTION_MARKERS = (
     "当前生产提交：`bfb6958a6b0828c6b774432f79839a258bcecdd4`",
 )
 VERIFICATION_PHASES = frozenset(("source", "package", "attestation"))
-APPROVED_ALEMBIC_REVISIONS = frozenset(
-    {
-        "20260609_0001",
-        "20260618_0002",
-        "20260619_0003",
-        "20260622_0004",
-        "20260721_0005",
-        "20260722_0006",
-        "20260722_0007",
-        "20260722_0008",
-        "20260722_0009",
-        "20260723_0010",
-        "20260723_0011",
-        "20260723_0012",
-        "20260723_0013",
-        "20260724_0014",
-        "20260823_0015",
-        MIGRATION_REVISION,
-    }
-)
+APPROVED_ALEMBIC_CHAIN = {
+    "0001_initial_schema.py": ("20260609_0001", None),
+    "0002_local_state_postgres_bridge.py": ("20260618_0002", "20260609_0001"),
+    "0003_photo_import_dedup_fields.py": ("20260619_0003", "20260618_0002"),
+    "0004_allow_five_construction_tasks.py": ("20260622_0004", "20260619_0003"),
+    "0005_add_construction_priority.py": ("20260721_0005", "20260622_0004"),
+    "0006_group_barcode_verification.py": ("20260722_0006", "20260721_0005"),
+    "0007_group_barcode_verification_lease_token.py": ("20260722_0007", "20260722_0006"),
+    "0008_delivery_cache_jobs.py": ("20260722_0008", "20260722_0007"),
+    "0009_delivery_cache_fix3.py": ("20260722_0009", "20260722_0008"),
+    "0010_auto_archive_queue_state.py": ("20260723_0010", "20260722_0009"),
+    "0011_delivery_package_jobs.py": ("20260723_0011", "20260723_0010"),
+    "0012_delivery_package_group_ids_gin.py": ("20260723_0012", "20260723_0011"),
+    "0013_data_center_query_indexes.py": ("20260723_0013", "20260723_0012"),
+    "0014_export_center_jobs.py": ("20260724_0014", "20260723_0013"),
+    "0015_collector_transfer_workbench.py": ("20260823_0015", "20260724_0014"),
+    "0016_project_scoped_collector_inventory.py": (MIGRATION_REVISION, "20260823_0015"),
+}
 
 REQUIRED_FILES = (
     "AGENTS.md",
@@ -423,7 +421,15 @@ ATTESTATION_EXACT_FIELDS = {
     "Deployed production baseline": DEPLOYED_BASELINE,
     "Candidate version": DISPLAY_VERSION,
     "Database head": f"{MIGRATION_REVISION} (head)",
+    "Source verifier tests": "passed",
+    "Generic client-package verifier tests": "passed",
+    "SOP verifier tests": "passed",
+    "Source phase": "passed",
+    "SOP source phase": "passed",
+    "Git diff check": "passed",
     "Archive file": ARCHIVE_PATH,
+    "Build command": "passed",
+    "Archive verification result": "passed",
     "Backup verification": "passed",
     "Uvicorn readiness": "127.0.0.1:8000 ready",
     "Authorization acceptance": "passed",
@@ -487,14 +493,26 @@ def _field_values(record: str, field: str) -> list[str]:
 
 
 def _check_alembic_revisions(root: Path, failures: list[str]) -> None:
-    revisions: dict[str, str | None] = {}
-    for path in sorted((root / "v2-api/alembic/versions").glob("*.py")):
+    revision_files: dict[str, list[str]] = {}
+    migration_paths = sorted((root / "v2-api/alembic/versions").glob("*.py"))
+    actual_files = {path.name for path in migration_paths}
+    expected_files = set(APPROVED_ALEMBIC_CHAIN)
+    if actual_files != expected_files:
+        missing = sorted(expected_files - actual_files)
+        unexpected = sorted(actual_files - expected_files)
+        failures.append(
+            "v2-api/alembic/versions: no new Alembic migration is permitted; "
+            "approved Alembic file chain mismatch; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    for path in migration_paths:
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         except (OSError, UnicodeError, SyntaxError) as exc:
             failures.append(f"{path.relative_to(root).as_posix()}: cannot parse migration: {exc}")
             continue
-        values: dict[str, str | None] = {}
+        assignments: dict[str, list[str | None]] = {"revision": [], "down_revision": []}
         for node in tree.body:
             if not isinstance(node, ast.Assign) or len(node.targets) != 1:
                 continue
@@ -504,23 +522,37 @@ def _check_alembic_revisions(root: Path, failures: list[str]) -> None:
             if isinstance(node.value, ast.Constant) and (
                 isinstance(node.value.value, str) or node.value.value is None
             ):
-                values[target.id] = node.value.value
-        revision = values.get("revision")
-        if isinstance(revision, str):
-            revisions[revision] = values.get("down_revision")
-    unexpected = sorted(set(revisions) - APPROVED_ALEMBIC_REVISIONS)
-    if unexpected:
-        failures.append(
-            "v2-api/alembic/versions: no new Alembic migration is permitted for V3.2.14; "
-            f"unapproved revisions: {', '.join(unexpected)}"
-        )
-    down_revisions = {parent for parent in revisions.values() if isinstance(parent, str)}
-    heads = sorted(set(revisions) - down_revisions)
-    if heads != [MIGRATION_REVISION]:
-        failures.append(
-            "v2-api/alembic/versions: Alembic head must remain "
-            f"{MIGRATION_REVISION}; found {heads or ['none']}"
-        )
+                assignments[target.id].append(node.value.value)
+        if len(assignments["revision"]) != 1 or len(assignments["down_revision"]) != 1:
+            failures.append(
+                f"{path.relative_to(root).as_posix()}: migration must define exactly one valid "
+                "revision and down_revision metadata assignment"
+            )
+            continue
+        revision = assignments["revision"][0]
+        down_revision = assignments["down_revision"][0]
+        if not isinstance(revision, str) or not revision or (
+            down_revision is not None and not isinstance(down_revision, str)
+        ):
+            failures.append(
+                f"{path.relative_to(root).as_posix()}: migration must define valid revision "
+                "and down_revision metadata"
+            )
+            continue
+        revision_files.setdefault(revision, []).append(path.name)
+        expected_metadata = APPROVED_ALEMBIC_CHAIN.get(path.name)
+        if expected_metadata is None or (revision, down_revision) != expected_metadata:
+            failures.append(
+                f"{path.relative_to(root).as_posix()}: approved Alembic file chain requires "
+                f"{expected_metadata!r}; found {(revision, down_revision)!r}"
+            )
+
+    for revision, filenames in sorted(revision_files.items()):
+        if len(filenames) > 1:
+            failures.append(
+                f"v2-api/alembic/versions: duplicate Alembic revision {revision}: "
+                + ", ".join(sorted(filenames))
+            )
 
 
 def _check_source(
@@ -650,6 +682,7 @@ def _check_source(
             "scripts\\test_verify_v3_2_13_release.py",
             "ops\\releases\\V3.2.13.md",
             "ops\\releases\\V3.2.14.md",
+            "verify_v3_2_14_release.py --phase package --package $zipPath --expected-source-commit $sourceCommit",
         ),
         "scripts/verify-client-release.py": (
             '"scripts/verify_v3_2_14_release.py"',
@@ -693,13 +726,16 @@ def _forbidden_package_path(name: str) -> bool:
         "build",
         "data",
         "node_modules",
+        "secrets",
         "uploads",
     }
     parts = tuple(part.casefold() for part in PurePosixPath(name).parts)
     if any(part in forbidden_components or part == ".env" or part.startswith(".env.") for part in parts):
         return True
     leaf = parts[-1] if parts else ""
-    return leaf == "uv.lock" or leaf.endswith((".pem", ".key", ".p12", ".pfx", ".dump", ".sqlite", ".sqlite3"))
+    return leaf == "uv.lock" or leaf.endswith(
+        (".zip", ".pem", ".key", ".p12", ".pfx", ".dump", ".sqlite", ".sqlite3")
+    )
 
 
 def _load_generic_package_verifier(root: Path):
@@ -712,7 +748,19 @@ def _load_generic_package_verifier(root: Path):
     return module
 
 
-def _check_package(root: Path, package_path: Path | None, failures: list[str]) -> None:
+def _check_package(
+    root: Path,
+    package_path: Path | None,
+    expected_source_commit: str | None,
+    failures: list[str],
+) -> None:
+    if expected_source_commit is None:
+        failures.append("package phase requires --expected-source-commit for V3.2.14")
+        return
+    normalized_expected_commit = expected_source_commit.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{40}", normalized_expected_commit) is None:
+        failures.append("V3.2.14 expected source commit must be one lowercase 40-character Git commit")
+        return
     if package_path is None:
         failures.append("package phase requires --package for V3.2.14")
         return
@@ -762,12 +810,20 @@ def _check_package(root: Path, package_path: Path | None, failures: list[str]) -
         return
 
     try:
-        _load_generic_package_verifier(root).verify_package(package)
+        _load_generic_package_verifier(root).verify_package(
+            package,
+            expected_source_commit=normalized_expected_commit,
+        )
     except (AssertionError, KeyError, OSError, BadZipFile, UnicodeError, json.JSONDecodeError) as exc:
         failures.append(f"V3.2.14 package verification failed: {exc}")
 
 
-def _check_attestation(root: Path, failures: list[str]) -> None:
+def _check_attestation(
+    root: Path,
+    package_path: Path | None,
+    expected_source_commit: str | None,
+    failures: list[str],
+) -> None:
     record = _read(root, RELEASE_PATH, failures)
     for field, expected in ATTESTATION_EXACT_FIELDS.items():
         values = _field_values(record, field)
@@ -778,18 +834,53 @@ def _check_attestation(root: Path, failures: list[str]) -> None:
         if len(values) != 1 or values[0].strip().casefold() in {"", "pending", "not run"}:
             failures.append(f"{RELEASE_PATH}: attestation requires one non-pending {field} value")
     source_commits = _field_values(record, "Source commit")
-    if len(source_commits) == 1 and re.fullmatch(r"[0-9a-f]{40}", source_commits[0]) is None:
-        failures.append(f"{RELEASE_PATH}: Source commit must be one lowercase 40-character Git commit")
+    normalized_expected_commit = (expected_source_commit or "").strip().lower()
+    if (
+        len(source_commits) != 1
+        or re.fullmatch(r"[0-9a-f]{40}", source_commits[0]) is None
+        or source_commits[0] != normalized_expected_commit
+    ):
+        failures.append(
+            f"{RELEASE_PATH}: Source commit must equal the verified expected source commit exactly once"
+        )
     hashes = {field: _field_values(record, field) for field in ("SHA256", "Server SHA256")}
     if all(len(values) == 1 for values in hashes.values()):
         local_hash = hashes["SHA256"][0]
         server_hash = hashes["Server SHA256"][0]
+        actual_hash = (
+            hashlib.sha256(Path(package_path).read_bytes()).hexdigest()
+            if package_path is not None and Path(package_path).is_file()
+            else ""
+        )
+        if re.fullmatch(r"[0-9a-f]{64}", local_hash) is None or local_hash != actual_hash:
+            failures.append(f"{RELEASE_PATH}: package SHA256 must equal the verified package bytes")
+        if re.fullmatch(r"[0-9a-f]{64}", server_hash) is None or server_hash != actual_hash:
+            failures.append(f"{RELEASE_PATH}: Server SHA256 must equal the verified package SHA256")
+
+    path_patterns = {
+        "Backup directory": r"/opt/module-manager-v2/backups/v3\.2\.14-\d{8}T\d{6}Z",
+        "Release directory": r"/opt/module-manager-v2/releases/v3\.2\.14-\d{8}T\d{6}Z",
+        "Rollback directory": r"/opt/module-manager-v2/releases/v3\.2\.13-\d{8}T\d{6}Z",
+    }
+    for field, pattern in path_patterns.items():
+        values = _field_values(record, field)
+        if len(values) != 1 or re.fullmatch(pattern, values[0]) is None:
+            failures.append(f"{RELEASE_PATH}: {field} must be one canonical immutable release path")
+
+    for field in ("Local health", "Public health"):
+        values = _field_values(record, field)
         if (
-            re.fullmatch(r"[0-9a-f]{64}", local_hash) is None
-            or re.fullmatch(r"[0-9a-f]{64}", server_hash) is None
-            or local_hash != server_hash
+            len(values) != 1
+            or re.fullmatch(r"HTTP\s+200\s+version\s+3\.2\.14", values[0], re.IGNORECASE) is None
         ):
-            failures.append(f"{RELEASE_PATH}: Server SHA256 must equal one valid SHA256")
+            failures.append(f"{RELEASE_PATH}: {field} must prove HTTP 200 for version 3.2.14")
+
+    viewport_values = _field_values(record, "Browser viewport")
+    if (
+        len(viewport_values) != 1
+        or re.fullmatch(r"[1-9]\d*x[1-9]\d*\s+passed", viewport_values[0], re.IGNORECASE) is None
+    ):
+        failures.append(f"{RELEASE_PATH}: Browser viewport must be WIDTHxHEIGHT passed")
 
 
 def collect_failures(
@@ -797,6 +888,7 @@ def collect_failures(
     phase: str,
     *,
     package_path: Path | None = None,
+    expected_source_commit: str | None = None,
 ) -> list[str]:
     root = Path(root)
     if phase not in VERIFICATION_PHASES:
@@ -805,10 +897,11 @@ def collect_failures(
     if phase == "source":
         _check_source(root, failures)
     elif phase == "package":
-        _check_package(root, package_path, failures)
+        _check_package(root, package_path, expected_source_commit, failures)
     else:
         _check_source(root, failures, require_pending_lifecycle=False)
-        _check_attestation(root, failures)
+        _check_package(root, package_path, expected_source_commit, failures)
+        _check_attestation(root, package_path, expected_source_commit, failures)
     return failures
 
 
@@ -816,8 +909,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Verify the V3.2.14 source, package, or attestation contract.")
     parser.add_argument("--phase", required=True, choices=sorted(VERIFICATION_PHASES))
     parser.add_argument("--package", type=Path)
+    parser.add_argument("--expected-source-commit")
     args = parser.parse_args(argv)
-    failures = collect_failures(ROOT, args.phase, package_path=args.package)
+    failures = collect_failures(
+        ROOT,
+        args.phase,
+        package_path=args.package,
+        expected_source_commit=args.expected_source_commit,
+    )
     if failures:
         for failure in failures:
             print(f"- {failure}", file=sys.stderr)

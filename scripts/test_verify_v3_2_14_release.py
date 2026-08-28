@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 from pathlib import Path
 import shutil
@@ -33,10 +34,13 @@ def run_verifier(
     phase: str,
     *,
     package_path: Path | None = None,
+    expected_source_commit: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [sys.executable, str(root / "scripts" / "verify_v3_2_14_release.py"), "--phase", phase]
     if package_path is not None:
         command.extend(("--package", str(package_path)))
+    if expected_source_commit is not None:
+        command.extend(("--expected-source-commit", expected_source_commit))
     return subprocess.run(
         command,
         cwd=root,
@@ -55,10 +59,20 @@ def copy_contract_repo(tmp_path: Path) -> Path:
         target = repo / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+    migration_source = ROOT / "v2-api/alembic/versions"
+    migration_target = repo / "v2-api/alembic/versions"
+    migration_target.mkdir(parents=True, exist_ok=True)
+    for source in migration_source.glob("*.py"):
+        shutil.copy2(source, migration_target / source.name)
     return repo
 
 
-def write_attested_record(repo: Path) -> Path:
+def write_attested_record(
+    repo: Path,
+    *,
+    source_commit: str = VALID_SOURCE_COMMIT,
+    package_sha256: str = VALID_PACKAGE_SHA256,
+) -> Path:
     path = repo / "ops/releases/V3.2.14.md"
     text = path.read_text(encoding="utf-8")
     replacements = {
@@ -70,9 +84,19 @@ def write_attested_record(repo: Path) -> Path:
         "- Archive file: pending": (
             "- Archive file: `build/server-release/module-manager-v2-server-3.2.14.zip`"
         ),
-        "- SHA256: pending": f"- SHA256: `{VALID_PACKAGE_SHA256}`",
-        "- Server SHA256: pending": f"- Server SHA256: `{VALID_PACKAGE_SHA256}`",
-        "- Source commit: pending": f"- Source commit: `{VALID_SOURCE_COMMIT}`",
+        "- Source verifier tests: pending": "- Source verifier tests: passed",
+        "- Generic client-package verifier tests: pending": (
+            "- Generic client-package verifier tests: passed"
+        ),
+        "- SOP verifier tests: pending": "- SOP verifier tests: passed",
+        "- Source phase: pending": "- Source phase: passed",
+        "- SOP source phase: pending": "- SOP source phase: passed",
+        "- Git diff check: pending": "- Git diff check: passed",
+        "- SHA256: pending": f"- SHA256: `{package_sha256}`",
+        "- Server SHA256: pending": f"- Server SHA256: `{package_sha256}`",
+        "- Source commit: pending": f"- Source commit: `{source_commit}`",
+        "- Build command: pending": "- Build command: passed",
+        "- Archive verification result: pending": "- Archive verification result: passed",
         "- Backup verification: pending": "- Backup verification: passed",
         "- Uvicorn readiness: pending": "- Uvicorn readiness: `127.0.0.1:8000 ready`",
         "- Authorization acceptance: pending": "- Authorization acceptance: passed",
@@ -85,8 +109,8 @@ def write_attested_record(repo: Path) -> Path:
         "- Backup directory: pending": "- Backup directory: `/opt/module-manager-v2/backups/v3.2.14-20260828T010000Z`",
         "- Release directory: pending": "- Release directory: `/opt/module-manager-v2/releases/v3.2.14-20260828T010000Z`",
         "- Rollback directory: pending": "- Rollback directory: `/opt/module-manager-v2/releases/v3.2.13-20260827T160539Z`",
-        "- Local health: pending": "- Local health: `HTTP 200`",
-        "- Public health: pending": "- Public health: `HTTP 200`",
+        "- Local health: pending": "- Local health: `HTTP 200 version 3.2.14`",
+        "- Public health: pending": "- Public health: `HTTP 200 version 3.2.14`",
         "- Browser viewport: pending": "- Browser viewport: `390x844 passed`",
     }
     for pending, attested in replacements.items():
@@ -94,6 +118,95 @@ def write_attested_record(repo: Path) -> Path:
         text = text.replace(pending, attested, 1)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def load_generic_test_helpers():
+    path = ROOT / "scripts" / "test_verify_client_release.py"
+    spec = importlib.util.spec_from_file_location("v3214_generic_test_helpers", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def rewrite_archive_member(archive_path: Path, member_name: str, content: bytes) -> None:
+    rewritten = archive_path.with_name(archive_path.stem + "-rewritten.zip")
+    with ZipFile(archive_path) as source, ZipFile(rewritten, "w", ZIP_DEFLATED) as target:
+        found = False
+        for info in source.infolist():
+            payload = source.read(info.filename)
+            if info.filename == member_name:
+                payload = content
+                found = True
+            target.writestr(info, payload)
+        if not found:
+            target.writestr(member_name, content)
+    rewritten.replace(archive_path)
+
+
+def run_git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout.strip()
+
+
+@pytest.fixture(scope="module")
+def attestation_template(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path, str, str]:
+    template_root = tmp_path_factory.mktemp("v3214-attestation-template")
+    helpers = load_generic_test_helpers()
+    package_verifier = helpers.load_verifier()
+    package_path = template_root / "module-manager-v2-server-3.2.14.zip"
+    helpers.write_release_archive(
+        package_verifier,
+        package_path,
+        source_commit="0" * 40,
+        release_record=(ROOT / "ops/releases/V3.2.14.md").read_text(encoding="utf-8"),
+        content_overrides={
+            path.relative_to(ROOT).as_posix(): path.read_bytes()
+            for path in (ROOT / "v2-api/alembic/versions").glob("*.py")
+        },
+    )
+
+    repo = template_root / "repo"
+    repo.mkdir()
+    with ZipFile(package_path) as archive:
+        archive.extractall(repo)
+    (repo / "SOURCE_COMMIT").unlink()
+    run_git(repo, "init")
+    run_git(repo, "config", "user.email", "release-test@example.invalid")
+    run_git(repo, "config", "user.name", "Release Test")
+    run_git(repo, "config", "core.autocrlf", "false")
+    run_git(repo, "add", "-f", "--", ".")
+    run_git(repo, "commit", "-m", "test source")
+    source_commit = run_git(repo, "rev-parse", "HEAD")
+    rewrite_archive_member(package_path, "SOURCE_COMMIT", f"{source_commit}\n".encode("ascii"))
+    package_sha256 = hashlib.sha256(package_path.read_bytes()).hexdigest()
+    return repo, package_path, source_commit, package_sha256
+
+
+@pytest.fixture
+def valid_attestation_context(
+    tmp_path: Path,
+    attestation_template: tuple[Path, Path, str, str],
+) -> tuple[Path, Path, str]:
+    template_repo, template_package, source_commit, package_sha256 = attestation_template
+    repo = tmp_path / "repo"
+    shutil.copytree(template_repo, repo)
+    package_path = tmp_path / template_package.name
+    shutil.copy2(template_package, package_path)
+    write_attested_record(
+        repo,
+        source_commit=source_commit,
+        package_sha256=package_sha256,
+    )
+    return repo, package_path, source_commit
 
 
 def test_current_v3214_source_contract_executes_for_pending_candidate() -> None:
@@ -191,7 +304,12 @@ def test_v3213_archive_cannot_satisfy_v3214_package_gate(tmp_path: Path) -> None
         archive.writestr("SOURCE_COMMIT", "0" * 40 + "\n")
         archive.writestr("RELEASE_MANIFEST.md", "# Release\n\n- Version: 3.2.13\n")
 
-    result = run_verifier(ROOT, "package", package_path=package)
+    result = run_verifier(
+        ROOT,
+        "package",
+        package_path=package,
+        expected_source_commit="0" * 40,
+    )
 
     assert result.returncode == 1
     assert "Version 3.2.14" in result.stderr
@@ -204,11 +322,17 @@ def test_pending_v3214_candidate_does_not_pass_attestation() -> None:
     assert "attestation requires Status: attested" in result.stderr
 
 
-def test_complete_v3214_production_attestation_passes(tmp_path: Path) -> None:
-    repo = copy_contract_repo(tmp_path)
-    write_attested_record(repo)
+def test_complete_v3214_production_attestation_passes(
+    valid_attestation_context: tuple[Path, Path, str],
+) -> None:
+    repo, package_path, source_commit = valid_attestation_context
 
-    result = run_verifier(repo, "attestation")
+    result = run_verifier(
+        repo,
+        "attestation",
+        package_path=package_path,
+        expected_source_commit=source_commit,
+    )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "[OK] V3.2.14 attestation release contract" in result.stdout
@@ -223,55 +347,247 @@ def test_complete_v3214_production_attestation_passes(tmp_path: Path) -> None:
             "Archive file",
         ),
         (
-            f"- Source commit: `{VALID_SOURCE_COMMIT}`",
-            f"- Source commit: `{'1' * 39}`",
-            "Source commit",
-        ),
-        (
-            f"- SHA256: `{VALID_PACKAGE_SHA256}`",
-            f"- SHA256: `{'g' * 64}`",
-            "valid SHA256",
-        ),
-        (
             "- Backup verification: passed",
             "- Backup verification: pending",
             "Backup verification",
         ),
         (
             "- Browser viewport: `390x844 passed`",
-            "- Browser viewport: pending",
+            "- Browser viewport: `not-a-viewport`",
             "Browser viewport",
+        ),
+        (
+            "- Source verifier tests: passed",
+            "- Source verifier tests: pending",
+            "Source verifier tests",
+        ),
+        (
+            "- Build command: passed",
+            "- Build command: pending",
+            "Build command",
+        ),
+        (
+            "- Archive verification result: passed",
+            "- Archive verification result: failed",
+            "Archive verification result",
+        ),
+        (
+            "- Backup directory: `/opt/module-manager-v2/backups/v3.2.14-20260828T010000Z`",
+            "- Backup directory: `C:/arbitrary/non-pending`",
+            "Backup directory",
+        ),
+        (
+            "- Release directory: `/opt/module-manager-v2/releases/v3.2.14-20260828T010000Z`",
+            "- Release directory: `/tmp/arbitrary-release`",
+            "Release directory",
+        ),
+        (
+            "- Rollback directory: `/opt/module-manager-v2/releases/v3.2.13-20260827T160539Z`",
+            "- Rollback directory: `/opt/module-manager-v2/releases/v3.2.14-wrong`",
+            "Rollback directory",
+        ),
+        (
+            "- Local health: `HTTP 200 version 3.2.14`",
+            "- Local health: `failed`",
+            "Local health",
+        ),
+        (
+            "- Public health: `HTTP 200 version 3.2.14`",
+            "- Public health: `HTTP 500 version 3.2.14`",
+            "Public health",
         ),
     ),
 )
 def test_v3214_attestation_rejects_forged_or_missing_production_evidence(
-    tmp_path: Path,
+    valid_attestation_context: tuple[Path, Path, str],
     valid_line: str,
     forged_line: str,
     expected_error: str,
 ) -> None:
-    repo = copy_contract_repo(tmp_path)
-    path = write_attested_record(repo)
+    repo, package_path, source_commit = valid_attestation_context
+    path = repo / "ops/releases/V3.2.14.md"
     text = path.read_text(encoding="utf-8")
     assert valid_line in text
     path.write_text(text.replace(valid_line, forged_line, 1), encoding="utf-8")
 
-    result = run_verifier(repo, "attestation")
+    result = run_verifier(
+        repo,
+        "attestation",
+        package_path=package_path,
+        expected_source_commit=source_commit,
+    )
 
     assert result.returncode == 1
     assert expected_error in result.stderr
 
 
-def test_v3214_attestation_rejects_duplicate_sha256(tmp_path: Path) -> None:
-    repo = copy_contract_repo(tmp_path)
-    path = write_attested_record(repo)
+@pytest.mark.parametrize(
+    ("field", "replacement", "expected_error"),
+    (
+        ("Source commit", "1" * 39, "Source commit"),
+        ("SHA256", "f" * 64, "package SHA256"),
+        ("Server SHA256", "e" * 64, "Server SHA256"),
+    ),
+)
+def test_v3214_attestation_binds_commit_and_hashes_to_the_verified_package(
+    valid_attestation_context: tuple[Path, Path, str],
+    field: str,
+    replacement: str,
+    expected_error: str,
+) -> None:
+    repo, package_path, source_commit = valid_attestation_context
+    path = repo / "ops/releases/V3.2.14.md"
+    text = path.read_text(encoding="utf-8")
+    values = [line for line in text.splitlines() if line.startswith(f"- {field}:")]
+    assert len(values) == 1
+    path.write_text(
+        text.replace(values[0], f"- {field}: `{replacement}`", 1),
+        encoding="utf-8",
+    )
+
+    result = run_verifier(
+        repo,
+        "attestation",
+        package_path=package_path,
+        expected_source_commit=source_commit,
+    )
+
+    assert result.returncode == 1
+    assert expected_error in result.stderr
+
+
+def test_v3214_attestation_rejects_duplicate_sha256(
+    valid_attestation_context: tuple[Path, Path, str],
+) -> None:
+    repo, package_path, source_commit = valid_attestation_context
+    path = repo / "ops/releases/V3.2.14.md"
     with path.open("a", encoding="utf-8") as record:
         record.write(f"\n- SHA256: `{VALID_PACKAGE_SHA256}`\n")
 
-    result = run_verifier(repo, "attestation")
+    result = run_verifier(
+        repo,
+        "attestation",
+        package_path=package_path,
+        expected_source_commit=source_commit,
+    )
 
     assert result.returncode == 1
     assert "SHA256" in result.stderr
+
+
+def test_v3214_package_phase_requires_an_expected_source_commit(
+    attestation_template: tuple[Path, Path, str, str],
+) -> None:
+    repo, package_path, _, _ = attestation_template
+
+    result = run_verifier(repo, "package", package_path=package_path)
+
+    assert result.returncode == 1
+    assert "--expected-source-commit" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("member_name", "replacement", "expected_error"),
+    (
+        ("README.md", b"tampered tracked bytes\n", "bytes do not match SOURCE_COMMIT"),
+        ("debug/untracked.txt", b"untracked member\n", "not tracked by SOURCE_COMMIT"),
+    ),
+)
+def test_v3214_package_wrapper_rejects_source_unbound_members(
+    tmp_path: Path,
+    attestation_template: tuple[Path, Path, str, str],
+    member_name: str,
+    replacement: bytes,
+    expected_error: str,
+) -> None:
+    template_repo, template_package, source_commit, _ = attestation_template
+    repo = tmp_path / "repo"
+    shutil.copytree(template_repo, repo)
+    package_path = tmp_path / template_package.name
+    shutil.copy2(template_package, package_path)
+    rewrite_archive_member(package_path, member_name, replacement)
+
+    result = run_verifier(
+        repo,
+        "package",
+        package_path=package_path,
+        expected_source_commit=source_commit,
+    )
+
+    assert result.returncode == 1
+    assert expected_error in result.stderr
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    (
+        "nested/payload.zip",
+        "nested/secrets/token.txt",
+        "nested/backups/database.bin",
+        "nested/uv.lock",
+    ),
+)
+def test_v3214_package_wrapper_rejects_nested_release_artifacts(
+    tmp_path: Path,
+    attestation_template: tuple[Path, Path, str, str],
+    member_name: str,
+) -> None:
+    template_repo, template_package, source_commit, _ = attestation_template
+    repo = tmp_path / "repo"
+    shutil.copytree(template_repo, repo)
+    package_path = tmp_path / template_package.name
+    shutil.copy2(template_package, package_path)
+    rewrite_archive_member(package_path, member_name, b"must not ship\n")
+
+    result = run_verifier(
+        repo,
+        "package",
+        package_path=package_path,
+        expected_source_commit=source_commit,
+    )
+
+    assert result.returncode == 1
+    assert f"forbidden archive member: {member_name}" in result.stderr
+
+
+def test_v3214_source_rejects_duplicate_alembic_revision_ids(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    duplicate = repo / "v2-api/alembic/versions/0099_duplicate_revision.py"
+    duplicate.write_text(
+        'revision = "20260824_0016"\n'
+        'down_revision = "20260823_0015"\n',
+        encoding="utf-8",
+    )
+
+    result = run_verifier(repo, "source")
+
+    assert result.returncode == 1
+    assert "duplicate Alembic revision" in result.stderr
+
+
+def test_v3214_source_rejects_metadata_less_alembic_files(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    migration = repo / "v2-api/alembic/versions/0099_metadata_less.py"
+    migration.write_text("def upgrade():\n    pass\n", encoding="utf-8")
+
+    result = run_verifier(repo, "source")
+
+    assert result.returncode == 1
+    assert "valid revision and down_revision metadata" in result.stderr
+
+
+def test_v3214_source_rejects_an_approved_migration_under_the_wrong_filename(
+    tmp_path: Path,
+) -> None:
+    repo = copy_contract_repo(tmp_path)
+    original = repo / "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py"
+    renamed = original.with_name("0016_renamed.py")
+    original.rename(renamed)
+
+    result = run_verifier(repo, "source")
+
+    assert result.returncode == 1
+    assert "approved Alembic file chain" in result.stderr
 
 
 

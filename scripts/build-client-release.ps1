@@ -451,10 +451,12 @@ $forbiddenReleaseDirectoryNames = @(
     "test-results",
     "playwright-report",
     ".nyc_output",
-    "build"
+    "build",
+    "backups",
+    "secrets"
 )
 
-$forbiddenReleaseFileNames = @(".coverage", "coverage.xml", "junit.xml")
+$forbiddenReleaseFileNames = @(".coverage", "coverage.xml", "junit.xml", "uv.lock")
 $forbiddenReleaseFileSuffixes = @(
     ".pem",
     ".key",
@@ -521,13 +523,7 @@ function Test-ForbiddenReleasePath {
         $leafName -in $forbiddenReleaseFileNames -or
         $leafSuffix -in $forbiddenReleaseFileSuffixes -or
         $leafStem -in @("migration-report", "migration_report", "allowed-hosts", "allowed_hosts") -or
-        (
-            $leafSuffix -eq ".zip" -and
-            (
-                $leafName.StartsWith("oss-local-export-") -or
-                $leafName.StartsWith("oss_local_export_")
-            )
-        )
+        $leafSuffix -eq ".zip"
     )
 }
 
@@ -638,6 +634,12 @@ if (
 if ($LASTEXITCODE -ne 0) {
     Remove-Item -Force -LiteralPath $zipPath -ErrorAction SilentlyContinue
     throw "Release package verification failed."
+}
+
+& .\.venv\Scripts\python.exe .\scripts\verify_v3_2_14_release.py --phase package --package $zipPath --expected-source-commit $sourceCommit
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item -Force -LiteralPath $zipPath -ErrorAction SilentlyContinue
+    throw "V3.2.14 source-bound package verification failed."
 }
 
 Write-Host ""

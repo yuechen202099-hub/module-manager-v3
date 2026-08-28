@@ -704,6 +704,10 @@ def test_release_builder_embeds_the_current_source_commit() -> None:
     assert 'Join-Path $staging "SOURCE_COMMIT"' in build_script
     assert "source commit or worktree changed during packaging" in build_script
     assert "verify-client-release.py $zipPath --expected-source-commit $sourceCommit" in build_script
+    assert (
+        "verify_v3_2_14_release.py --phase package --package $zipPath "
+        "--expected-source-commit $sourceCommit"
+    ) in build_script
 
 
 def test_release_builder_checks_cleanliness_before_building_into_isolated_staging() -> None:
@@ -2789,6 +2793,8 @@ def test_archive_rejects_case_colliding_member(tmp_path: Path) -> None:
         "artifacts/.NYC_OUTPUT/coverage.json",
         "artifacts/.PyTeSt_CaChE/state",
         "artifacts/__PyCaChE__/module.pyc",
+        "nested/deeper/payload.ZIP",
+        "nested/UV.LOCK",
     ],
 )
 def test_archive_rejects_sensitive_and_test_artifacts_case_insensitively(
@@ -2814,6 +2820,8 @@ def test_archive_rejects_sensitive_and_test_artifacts_case_insensitively(
         "nested/.ENV.LOCAL/key.txt",
         "artifacts/nested/.VeNv/pyvenv.cfg",
         "artifacts/nested/BUILD/output.bin",
+        "artifacts/nested/Secrets/token.txt",
+        "artifacts/nested/Backups/database.bin",
     ],
 )
 def test_archive_rejects_forbidden_directory_components_at_any_depth(
@@ -2838,6 +2846,8 @@ def test_archive_rejects_forbidden_directory_components_at_any_depth(
         "nested/Migration-Report.JSON",
         r"nested\ALLOWED-HOSTS.TXT",
         "nested/deeper/Oss-Local-Export-20260819.ZIP",
+        "nested/deeper/arbitrary-package.ZIP",
+        "nested/UV.LOCK",
     ),
 )
 def test_python_classifier_rejects_operational_artifact_basenames_at_any_depth(
@@ -2901,7 +2911,11 @@ def test_release_builder_classifier_rejects_forbidden_components_on_windows(
             "    (Join-Path $staging 'artifacts\\BUILD\\output.bin'),",
             "    (Join-Path $staging 'nested\\Migration-Report.JSON'),",
             "    (Join-Path $staging 'nested\\ALLOWED-HOSTS.TXT'),",
-            "    (Join-Path $staging 'nested\\Oss-Local-Export-20260819.ZIP')",
+            "    (Join-Path $staging 'nested\\Oss-Local-Export-20260819.ZIP'),",
+            "    (Join-Path $staging 'nested\\arbitrary-package.ZIP'),",
+            "    (Join-Path $staging 'nested\\UV.LOCK'),",
+            "    (Join-Path $staging 'nested\\Secrets\\token.txt'),",
+            "    (Join-Path $staging 'nested\\Backups\\database.bin')",
             ")",
             "foreach ($path in $forbiddenCases) {",
             "    if (-not (Test-ForbiddenReleasePath -Path $path -IsDirectory $false)) {",

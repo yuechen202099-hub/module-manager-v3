@@ -239,9 +239,22 @@ def test_v3213_attested_baseline_is_byte_locked() -> None:
 def test_cli_parses_version_and_rejects_unknown_arguments() -> None:
     verifier = load_verifier()
 
-    args = verifier.parse_args(["--version", "V3.2.14", "--phase", "attestation"])
+    args = verifier.parse_args(
+        [
+            "--version",
+            "V3.2.14",
+            "--phase",
+            "attestation",
+            "--package",
+            "build/server-release/module-manager-v2-server-3.2.14.zip",
+            "--expected-source-commit",
+            "1" * 40,
+        ]
+    )
     assert args.version == "V3.2.14"
     assert args.phase == "attestation"
+    assert args.package == Path("build/server-release/module-manager-v2-server-3.2.14.zip")
+    assert args.expected_source_commit == "1" * 40
     with pytest.raises(SystemExit):
         verifier.parse_args(["--version", "V3.2.14", "--phase", "attestation", "--unknown"])
     with pytest.raises(SystemExit):

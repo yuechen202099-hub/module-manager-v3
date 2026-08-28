@@ -159,6 +159,22 @@ V3214_CONTRACT_INPUTS = frozenset(
         "ops/releases/V3.2.14.md",
         "scripts/verify_v3_2_14_release.py",
         "scripts/test_verify_v3_2_14_release.py",
+        "v2-api/alembic/versions/0001_initial_schema.py",
+        "v2-api/alembic/versions/0002_local_state_postgres_bridge.py",
+        "v2-api/alembic/versions/0003_photo_import_dedup_fields.py",
+        "v2-api/alembic/versions/0004_allow_five_construction_tasks.py",
+        "v2-api/alembic/versions/0005_add_construction_priority.py",
+        "v2-api/alembic/versions/0006_group_barcode_verification.py",
+        "v2-api/alembic/versions/0007_group_barcode_verification_lease_token.py",
+        "v2-api/alembic/versions/0008_delivery_cache_jobs.py",
+        "v2-api/alembic/versions/0009_delivery_cache_fix3.py",
+        "v2-api/alembic/versions/0010_auto_archive_queue_state.py",
+        "v2-api/alembic/versions/0011_delivery_package_jobs.py",
+        "v2-api/alembic/versions/0012_delivery_package_group_ids_gin.py",
+        "v2-api/alembic/versions/0013_data_center_query_indexes.py",
+        "v2-api/alembic/versions/0014_export_center_jobs.py",
+        "v2-api/alembic/versions/0015_collector_transfer_workbench.py",
+        "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
         "v2-api/app/api/schemas/collector_transfer.py",
     }
 )
@@ -527,6 +543,8 @@ FORBIDDEN_PARTS = {
     "playwright-report",
     ".nyc_output",
     "build",
+    "backups",
+    "secrets",
     "delivery-cache",
     "delivery_cache",
     "migration-reports",
@@ -554,6 +572,7 @@ FORBIDDEN_NAMES = {
     ".coverage",
     "coverage.xml",
     "junit.xml",
+    "uv.lock",
 }
 FORBIDDEN_OPERATIONAL_STEMS = {
     "allowed-hosts",
@@ -590,10 +609,7 @@ def is_forbidden_release_path(name: str) -> bool:
         leaf_name in FORBIDDEN_NAMES
         or leaf_path.suffix in FORBIDDEN_SUFFIXES
         or leaf_path.stem in FORBIDDEN_OPERATIONAL_STEMS
-        or (
-            leaf_path.suffix == ".zip"
-            and leaf_name.startswith(FORBIDDEN_OPERATIONAL_ARCHIVE_PREFIXES)
-        )
+        or leaf_path.suffix == ".zip"
     )
 
 

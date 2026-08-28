@@ -1071,10 +1071,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify release SOP files for one explicit candidate version.")
     parser.add_argument("--version", required=True, help="Expected candidate version, including the V prefix.")
     parser.add_argument("--phase", required=True, choices=("source", "attestation"))
+    parser.add_argument("--package", type=Path)
+    parser.add_argument("--expected-source-commit")
     return parser.parse_args(argv)
 
 
-def verify_current_release_phase(phase: str, version: str | None = None) -> None:
+def verify_current_release_phase(
+    phase: str,
+    version: str | None = None,
+    *,
+    package_path: Path | None = None,
+    expected_source_commit: str | None = None,
+) -> None:
     candidate = version or release_candidate(read("AGENTS.md"))
     if candidate == "V3.2.14":
         path = Path(__file__).with_name("verify_v3_2_14_release.py")
@@ -1099,7 +1107,13 @@ def verify_current_release_phase(phase: str, version: str | None = None) -> None
         fail(f"Unable to load {candidate} release verifier")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if module.main(["--phase", phase]) != 0:
+    verifier_args = ["--phase", phase]
+    if candidate == "V3.2.14":
+        if package_path is not None:
+            verifier_args.extend(("--package", str(package_path)))
+        if expected_source_commit is not None:
+            verifier_args.extend(("--expected-source-commit", expected_source_commit))
+    if module.main(verifier_args) != 0:
         fail(f"{candidate} {phase} release contract failed")
 
 
@@ -1132,7 +1146,12 @@ def main(argv: list[str] | None = None) -> int:
     missing = [path for path in REQUIRED_FILES if not (ROOT / path).exists()]
     if missing:
         fail("Missing SOP files: " + ", ".join(missing))
-    verify_current_release_phase(args.phase, args.version)
+    verify_current_release_phase(
+        args.phase,
+        args.version,
+        package_path=args.package,
+        expected_source_commit=args.expected_source_commit,
+    )
 
     readme = read("README.md")
     if "build/server-release/" not in readme:
