@@ -8,6 +8,7 @@ const serviceMocks = vi.hoisted(() => ({
   fetchGlobalCollectorTerminals: vi.fn(), openReviewWorkbenchTerminal: vi.fn(),
   replaceGlobalTerminalMissing: vi.fn(), rollbackCollectorAssignment: vi.fn(),
   refreshGlobalCollectorTerminal: vi.fn(), setCollectorWorkbenchItemCompleted: vi.fn(),
+  createReviewWorkbenchManualDemand: vi.fn(),
 }))
 const authMock = vi.hoisted(() => ({ user: { role: 'admin', roles: ['admin'] } }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => authMock }))
@@ -61,6 +62,33 @@ describe('review rephoto workbench', () => {
     serviceMocks.rollbackCollectorAssignment.mockResolvedValue({})
     serviceMocks.refreshGlobalCollectorTerminal.mockResolvedValue({})
     serviceMocks.setCollectorWorkbenchItemCompleted.mockResolvedValue({})
+    serviceMocks.createReviewWorkbenchManualDemand.mockResolvedValue(undefined)
+  })
+
+  it('posts a positive manual demand to the active terminal through the API boundary', async () => {
+    const requests: Array<{ path: string; init: RequestInit }> = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      requests.push({ path: String(input), init })
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { terminal_id: 'terminal/one', required: 2, assigned: 2, assignments: [] } }),
+      } as Response
+    })
+    const realServices = await vi.importActual<typeof import('@/api/services')>('@/api/services')
+    const submitManualDemand = (realServices as typeof realServices & {
+      createReviewWorkbenchManualDemand?: (terminalId: string, quantity: number) => Promise<unknown>
+    }).createReviewWorkbenchManualDemand
+
+    expect(typeof submitManualDemand).toBe('function')
+    if (!submitManualDemand) return
+    await submitManualDemand('terminal/one', 2)
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.path).toBe('/collector-transfer/review-workbench/terminals/terminal%2Fone/manual-demand')
+    expect(requests[0]?.init.method).toBe('POST')
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({ quantity: 2 })
+    vi.unstubAllGlobals()
   })
 
   it('keeps pending review visible without locking complete rephoto material', async () => {
@@ -125,6 +153,75 @@ describe('review rephoto workbench', () => {
     expect(wrapper.findAll('.rephoto-slot')).toHaveLength(2)
     expect(wrapper.get('.meter-record.is-expanded .meter-number').text()).toContain('M-B')
     expect(wrapper.findAll('.collector-card')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('omits persisted completed meter and collector items after reopening', async () => {
+    const initiallyVisible = rephoto('replaced')
+    initiallyVisible.collector_items[1] = {
+      ...initiallyVisible.collector_items[1],
+      original_collector_no: 'C-02',
+      final_collector_no: 'POOL-02',
+      collector_barcode: 'POOL-02',
+    }
+    const reopenedWithCompletedItems = rephoto('replaced')
+    reopenedWithCompletedItems.meter_install_items[0] = {
+      ...reopenedWithCompletedItems.meter_install_items[0],
+      status: 'completed',
+    }
+    reopenedWithCompletedItems.collector_items[1] = {
+      ...reopenedWithCompletedItems.collector_items[1],
+      status: 'completed',
+      original_collector_no: 'C-02',
+      final_collector_no: 'POOL-02',
+      collector_barcode: 'POOL-02',
+    }
+    serviceMocks.openReviewWorkbenchTerminal
+      .mockResolvedValueOnce(open({ rephoto: initiallyVisible }))
+      .mockResolvedValueOnce(open({ rephoto: reopenedWithCompletedItems }))
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="save-classification"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="meter-record-group-a"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="complete-collector-collector-b"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('C-02')
+    wrapper.unmount()
+  })
+
+  it('submits a positive manual demand, disables invalid quantities, and reopens the terminal', async () => {
+    serviceMocks.openReviewWorkbenchTerminal
+      .mockResolvedValueOnce(open({ workflow_state: 'ready', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('present') }))
+      .mockResolvedValueOnce(open({ workflow_state: 'in_progress', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('replaced') }))
+    const wrapper = await mountWorkbench()
+    const quantity = wrapper.get<HTMLInputElement>('[data-testid="manual-demand-quantity"]')
+    const submit = wrapper.get<HTMLButtonElement>('[data-testid="submit-manual-demand"]')
+
+    await quantity.setValue('0')
+    expect(submit.element.disabled).toBe(true)
+    await quantity.setValue('1.5')
+    expect(submit.element.disabled).toBe(true)
+    await quantity.setValue('2')
+    expect(submit.element.disabled).toBe(false)
+    await submit.trigger('click')
+    await flushPromises()
+
+    expect(serviceMocks.createReviewWorkbenchManualDemand).toHaveBeenCalledWith('terminal-1', 2)
+    expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('shows manual-demand shortage feedback from the existing error surface', async () => {
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ workflow_state: 'ready', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('present') }))
+    serviceMocks.createReviewWorkbenchManualDemand.mockRejectedValue(new Error('采集器池数量不足，当前可用 0 个。'))
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="manual-demand-quantity"]').setValue('1')
+    await wrapper.get('[data-testid="submit-manual-demand"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toContain('采集器池数量不足')
     wrapper.unmount()
   })
 

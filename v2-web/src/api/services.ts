@@ -3102,6 +3102,13 @@ export async function openReviewWorkbenchTerminal(candidate: Pick<GlobalCollecto
   })
 }
 
+export async function createReviewWorkbenchManualDemand(terminalId: string, quantity: number): Promise<void> {
+  await api(`/collector-transfer/review-workbench/terminals/${encodeURIComponent(terminalId)}/manual-demand`, {
+    method: 'POST',
+    body: JSON.stringify({ quantity }),
+  })
+}
+
 export async function fetchGlobalCollectorTerminal(terminalId: string): Promise<GlobalCollectorTerminalDetail> {
   return api<GlobalCollectorTerminalDetail>(`/collector-transfer/workbench/terminals/${encodeURIComponent(terminalId)}`)
 }

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import {
+  createReviewWorkbenchManualDemand,
   fetchGlobalCollectorTerminals,
   openReviewWorkbenchTerminal,
   refreshGlobalCollectorTerminal,
@@ -26,21 +27,37 @@ const loading = ref(false)
 const mutationPending = ref(false)
 const errorMessage = ref('')
 const photoPreview = ref({ src: '', alt: '' })
+const manualDemandQuantity = ref('')
 let searchSerial = 0
 let openSerial = 0
 let searchTimer = 0
 const candidatePageSize = 50
 
-const constructedMeters = computed(() => opened.value?.meters.filter((meter) => meter.construction_state === 'constructed') || [])
-const unconstructedMeters = computed(() => opened.value?.meters.filter((meter) => meter.construction_state === 'unconstructed') || [])
-const selectedMeter = computed<ReviewWorkbenchMeter | null>(() => opened.value?.meters.find((meter) => meter.group_id === selectedGroupId.value) || constructedMeters.value[0] || null)
 const rephoto = computed(() => opened.value?.rephoto || null)
+const activeMeters = computed(() => {
+  const completedMeterNumbers = new Set(
+    (rephoto.value?.meter_install_items || [])
+      .filter((item) => item.status === 'completed')
+      .map((item) => item.meter_no),
+  )
+  return (opened.value?.meters || []).filter((meter) => !completedMeterNumbers.has(meter.meter_no))
+})
+const constructedMeters = computed(() => activeMeters.value.filter((meter) => meter.construction_state === 'constructed'))
+const unconstructedMeters = computed(() => activeMeters.value.filter((meter) => meter.construction_state === 'unconstructed'))
+const selectedMeter = computed<ReviewWorkbenchMeter | null>(() => activeMeters.value.find((meter) => meter.group_id === selectedGroupId.value) || constructedMeters.value[0] || null)
 const sourceChanged = computed(() => Boolean(rephoto.value?.source_changed))
 const rephotoUnlocked = computed(() => canMutateRephoto({ rephoto: rephoto.value, source_changed: rephoto.value?.source_changed }))
 const mutable = computed(() => rephotoUnlocked.value && !mutationPending.value)
-const selectedRephotoItem = computed(() => rephoto.value?.meter_install_items.find((item) => item.meter_no === selectedMeter.value?.meter_no) || null)
+const selectedRephotoItem = computed(() => rephoto.value?.meter_install_items.find((item) => item.meter_no === selectedMeter.value?.meter_no && item.status !== 'completed') || null)
+const parsedManualDemandQuantity = computed(() => {
+  const value = String(manualDemandQuantity.value).trim()
+  if (!value || !/^\d+$/.test(value)) return null
+  const quantity = Number(value)
+  return Number.isSafeInteger(quantity) && quantity > 0 ? quantity : null
+})
+const canSubmitManualDemand = computed(() => mutable.value && parsedManualDemandQuantity.value !== null)
 const deduplicatedCollectors = computed(() => {
-  const rows = rephoto.value?.collector_items || []
+  const rows = (rephoto.value?.collector_items || []).filter((row) => row.status !== 'completed')
   const result = new Map<string, CollectorRequirementWorkbenchRow>()
   for (const row of rows) {
     const current = result.get(row.original_collector_no)
@@ -230,6 +247,15 @@ function completeMeter(item: NonNullable<ReviewWorkbenchOpenResult['rephoto']>['
   if (!item.workbench_item_id || meterCompletionBlockers(item).length) return
   void runMutation(() => setCollectorWorkbenchItemCompleted(item.workbench_item_id!, true))
 }
+function addManualDemand() {
+  const terminalId = rephoto.value?.terminal.id
+  const quantity = parsedManualDemandQuantity.value
+  if (!terminalId || quantity === null) return
+  void runMutation(async () => {
+    await createReviewWorkbenchManualDemand(terminalId, quantity)
+    manualDemandQuantity.value = ''
+  })
+}
 </script>
 
 <template>
@@ -296,6 +322,11 @@ function completeMeter(item: NonNullable<ReviewWorkbenchOpenResult['rephoto']>['
 
       <section class="collector-section">
         <h2>采集器</h2>
+        <div class="manual-demand-control">
+          <label for="manual-demand-quantity">人工需求</label>
+          <input id="manual-demand-quantity" v-model="manualDemandQuantity" type="number" min="1" step="1" inputmode="numeric" data-testid="manual-demand-quantity" aria-label="增加采集器数量" />
+          <button type="button" class="rephoto-mutation" data-testid="submit-manual-demand" :disabled="!canSubmitManualDemand" @click="addManualDemand">增加并随机匹配</button>
+        </div>
         <div class="collector-table">
           <header><span>采集器编号</span><span>实物状态</span><span>照片预览</span><span>条形码</span><span>翻拍资料</span></header>
           <article v-for="row in collectorRows" :key="row.key" class="collector-card">
@@ -352,6 +383,9 @@ function completeMeter(item: NonNullable<ReviewWorkbenchOpenResult['rephoto']>['
 .refresh-button { margin-left: auto; min-height: 28px; }
 .meter-section, .collector-section { display: grid; gap: 8px; }
 .meter-section h2, .collector-section h2 { font-size: 16px; }
+.manual-demand-control { display: flex; align-items: center; gap: 8px; color: var(--v2-text-muted, #7a8798); font-size: 13px; }
+.manual-demand-control input { width: 72px; min-height: 32px; padding: 0 8px; border: 1px solid var(--v2-border, #dce3ec); border-radius: 6px; color: inherit; font: inherit; }
+.manual-demand-control .rephoto-mutation { min-height: 32px; padding: 0 10px; }
 .meter-record { overflow: hidden; border: 1px solid var(--v2-border, #dce3ec); border-radius: 7px; background: #fff; }
 .meter-record.is-expanded { border-color: #cdd8e5; box-shadow: 0 4px 14px rgba(44, 63, 86, .04); }
 .meter-record-header { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 22px; align-items: center; width: 100%; min-height: 50px; padding: 0 18px; border: 0; background: #fff; color: inherit; text-align: left; cursor: pointer; font: inherit; }
