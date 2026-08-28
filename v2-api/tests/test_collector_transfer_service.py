@@ -4856,6 +4856,111 @@ def test_global_terminal_detail_projects_present_missing_and_replaced_collectors
     }
 
 
+def test_global_terminal_detail_reuses_authorized_source_photo_for_present_collector(
+    db_session: Session,
+) -> None:
+    """Catches a photo-free confirmed collector hiding its matching constructed source photo."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    first_group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="PRESENT-SOURCE-001",
+        meter_no="PRESENT-SOURCE-METER-1",
+        collector_no="PRESENT-SOURCE-COLLECTOR",
+        authoritative_address="实物采集器来源地址",
+    )
+    second_group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="PRESENT-SOURCE-001",
+        meter_no="PRESENT-SOURCE-METER-2",
+        collector_no="PRESENT-SOURCE-COLLECTOR",
+        authoritative_address="实物采集器来源地址",
+    )
+    first_source_photo = Photo(
+        id=uuid4(),
+        team_id="team-1",
+        group_id=first_group.id,
+        sha256="d" * 64,
+        object_key=f"global/{first_group.id}/collector-primary.jpg",
+        image_url=f"/global/{first_group.id}/collector-primary.jpg",
+        category="collector_barcode",
+        sort_order=2,
+        is_active=True,
+    )
+    db_session.add_all(
+        (
+            Photo(
+                id=uuid4(),
+                team_id="team-1",
+                group_id=first_group.id,
+                sha256="a" * 64,
+                object_key=f"global/{first_group.id}/collector-inactive.jpg",
+                image_url=f"/global/{first_group.id}/collector-inactive.jpg",
+                category="collector_barcode",
+                sort_order=0,
+                is_active=False,
+            ),
+            first_source_photo,
+            Photo(
+                id=uuid4(),
+                team_id="team-1",
+                group_id=first_group.id,
+                sha256="e" * 64,
+                object_key=f"global/{first_group.id}/collector-secondary.jpg",
+                image_url=f"/global/{first_group.id}/collector-secondary.jpg",
+                category="collector_barcode",
+                sort_order=3,
+                is_active=True,
+            ),
+            Photo(
+                id=uuid4(),
+                team_id="team-1",
+                group_id=second_group.id,
+                sha256="f" * 64,
+                object_key=f"global/{second_group.id}/collector-other-group.jpg",
+                image_url=f"/global/{second_group.id}/collector-other-group.jpg",
+                category="collector_barcode",
+                sort_order=0,
+                is_active=True,
+            ),
+        )
+    )
+    db_session.commit()
+
+    scanned = service(db_session).scan_inventory(
+        project_id=str(project.id),
+        collector_no="PRESENT-SOURCE-COLLECTOR",
+    )
+    candidate = service(db_session).list_global_terminals(
+        query="PRESENT-SOURCE-001"
+    )["items"][0]
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="PRESENT-SOURCE-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+
+    first = service(db_session).global_terminal_detail(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+    second = service(db_session).global_terminal_detail(
+        terminal_id=opened["workbench_terminal_id"]
+    )
+
+    present = first["collector_items"][0]
+    physical = db_session.get(PhysicalCollector, UUID(scanned["collector_id"]))
+    assert present["physical_state"] == "present"
+    assert present["photo"]["id"] == str(first_source_photo.id)
+    assert present["photo"]["sha256"] == "d" * 64
+    assert second["collector_items"] == first["collector_items"]
+    assert present["assignment_id"] is None
+    assert physical.pool_status == "direct"
+    assert db_session.scalar(select(func.count(CollectorPhoto.id))) == 0
+    assert first["pool_summary"] == {"required": 0, "available": 0, "shortage": 0}
+
+
 def test_global_terminal_detail_reconciles_late_direct_inventory_once(
     db_session: Session,
 ) -> None:

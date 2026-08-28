@@ -4512,6 +4512,44 @@ class PostgresCollectorTransferService:
         )
         physical_by_id = {row.id: row for row in physicals}
         collector_photo_by_id = {row.id: row for row in collector_photos}
+        source_collector_photo_by_requirement: dict[UUID, Photo] = {}
+        if requirement_ids:
+            source_collector_photo_rows = self.session.execute(
+                select(CollectorRequirementMeter.requirement_id, Photo)
+                .join(
+                    CollectorMeterItem,
+                    CollectorRequirementMeter.meter_item_id
+                    == CollectorMeterItem.id,
+                )
+                .join(
+                    MaterialGroup,
+                    CollectorMeterItem.source_group_id == MaterialGroup.id,
+                )
+                .join(Photo, Photo.group_id == MaterialGroup.id)
+                .where(
+                    CollectorRequirementMeter.requirement_id.in_(requirement_ids),
+                    CollectorMeterItem.run_id == run.id,
+                    CollectorMeterItem.terminal_id == terminal.id,
+                    CollectorMeterItem.team_id == self.team_id,
+                    MaterialGroup.team_id == self.team_id,
+                    MaterialGroup.project_id == run.project_id,
+                    Photo.team_id == self.team_id,
+                    Photo.is_active.is_(True),
+                    Photo.category == "collector_barcode",
+                )
+                .order_by(
+                    CollectorRequirementMeter.requirement_id,
+                    CollectorMeterItem.sort_order,
+                    CollectorMeterItem.id,
+                    Photo.sort_order,
+                    Photo.id,
+                )
+            ).all()
+            for requirement_id, source_photo in source_collector_photo_rows:
+                source_collector_photo_by_requirement.setdefault(
+                    requirement_id,
+                    source_photo,
+                )
 
         meter_install_items: list[dict[str, object]] = []
         for meter in meter_rows:
@@ -4586,7 +4624,9 @@ class PostgresCollectorTransferService:
                 final_collector_no = requirement.original_collector_no
                 collector_barcode = requirement.original_collector_no
                 capture_strategy = "live_physical"
-                response_photo = None
+                response_photo = _photo_response(
+                    source_collector_photo_by_requirement.get(requirement.id)
+                )
             else:
                 physical_state = "missing"
                 final_collector_no = None
