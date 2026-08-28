@@ -5888,3 +5888,284 @@ def test_manual_demand_assignment_uses_existing_rollback_and_keeps_neutral_label
     assert manual_item["physical_state"] == "missing"
     assert manual_item["original_collector_no"] == "人工需求"
     assert "manual-demand:" not in str(manual_item)
+
+
+def test_manual_demand_internal_key_is_independent_from_returned_requirement_id(
+    db_session: Session,
+) -> None:
+    """Catches clients reconstructing the database-only key from a returned requirement id."""
+    project, opened = open_manual_demand_terminal(
+        db_session,
+        terminal_code="DEMAND-OPAQUE-001",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="OPAQUE-SAFE-POOL",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="c" * 64)
+
+    created = service(db_session).create_manual_demand(
+        terminal_id=str(opened["workbench_terminal_id"]),
+        quantity=1,
+    )
+    requirement_id = UUID(created["assignments"][0]["requirement_id"])
+    requirement_row = db_session.get(CollectorRequirement, requirement_id)
+
+    assert requirement_row.original_collector_no != f"manual-demand:{requirement_id.hex}"
+
+
+def test_manual_namespace_is_rejected_by_every_collector_number_input(
+    db_session: Session,
+) -> None:
+    """Catches any public collector-number path admitting or looking up an internal key."""
+    project, opened = open_manual_demand_terminal(
+        db_session,
+        terminal_code="DEMAND-INPUTS-001",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="INPUT-SAFE-POOL",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    photo = collector_photo(db_session, physical, sha256="d" * 64)
+    reserved = "MaNuAl-DeMaNd:forged-input"
+    region = {"x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5}
+    before = mutation_fingerprint(db_session)
+
+    with pytest.raises(ValueError, match="reserved"):
+        service(db_session).scan_inventory(
+            project_id=str(project.id),
+            collector_no=reserved,
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        service(db_session).register_inventory(
+            project_id=str(project.id),
+            collector_no=reserved,
+            original_filename="forged.jpg",
+            stored={
+                "sha256": "e" * 64,
+                "storage_key": "collector-transfer/forged.jpg",
+                "storage_type": "local_upload",
+                "content_type": "image/jpeg",
+            },
+            byte_size=10,
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        service(db_session).scan_inventory_photo_region(
+            project_id=str(project.id),
+            collector_id=str(physical.id),
+            expected_collector_no=reserved,
+            expected_photo_sha256=photo.sha256,
+            region=region,
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        service(db_session).correct_inventory_number(
+            project_id=str(project.id),
+            collector_id=str(physical.id),
+            expected_collector_no=reserved,
+            expected_photo_sha256=photo.sha256,
+            collector_no="INPUT-SAFE-NEW",
+            recognition_method="manual",
+            region=None,
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        service(db_session).correct_inventory_number(
+            project_id=str(project.id),
+            collector_id=str(physical.id),
+            expected_collector_no=physical.collector_no,
+            expected_photo_sha256=photo.sha256,
+            collector_no=reserved,
+            recognition_method="manual",
+            region=None,
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        service(db_session).scan_collector(
+            run_id=str(opened["run_id"]),
+            collector_no=reserved,
+        )
+
+    assert mutation_fingerprint(db_session) == before
+
+
+def test_manual_internal_inventory_never_reconciles_or_surfaces_in_mappings(
+    db_session: Session,
+) -> None:
+    """Catches legacy synthetic inventory appearing as a direct or random final collector number."""
+    project, opened = open_manual_demand_terminal(
+        db_session,
+        terminal_code="DEMAND-ROUNDTRIP-001",
+    )
+    safe = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="ROUNDTRIP-SAFE-POOL",
+        pool_status="available",
+    )
+    db_session.add(safe)
+    db_session.commit()
+    collector_photo(db_session, safe, sha256="f" * 64)
+    created = service(db_session).create_manual_demand(
+        terminal_id=str(opened["workbench_terminal_id"]),
+        quantity=1,
+    )
+    assignment_id = created["assignments"][0]["assignment_id"]
+    requirement_id = created["assignments"][0]["requirement_id"]
+    service(db_session).rollback_assignment(assignment_id=assignment_id)
+    requirement_row = db_session.get(CollectorRequirement, UUID(requirement_id))
+    internal_key = requirement_row.original_collector_no
+    safe.pool_status = "used"
+    rogue = PhysicalCollector(
+        id=UUID("00000000-0000-0000-0000-0000000000a1"),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no=internal_key,
+        pool_status="direct",
+    )
+    db_session.add(rogue)
+    db_session.commit()
+    collector_photo(db_session, rogue, sha256="1" * 64)
+
+    inventory = service(db_session).list_inventory(project_id=str(project.id))
+    assert internal_key not in str(inventory)
+
+    detail = service(db_session).global_terminal_detail(
+        terminal_id=str(opened["workbench_terminal_id"])
+    )
+    manual_item = next(
+        item
+        for item in detail["collector_items"]
+        if item["requirement_id"] == requirement_id
+    )
+    direct_audit_count = db_session.scalar(
+        select(func.count(AuditLog.id)).where(
+            AuditLog.action == "collector_workbench.direct_bound",
+            AuditLog.payload["requirement_id"].as_string() == requirement_id,
+        )
+    )
+
+    assert manual_item["physical_state"] == "missing"
+    assert manual_item["final_collector_no"] is None
+    assert direct_audit_count == 0
+
+    rogue.pool_status = "available"
+    db_session.commit()
+    with pytest.raises(PoolInsufficientError):
+        service(db_session).create_manual_demand(
+            terminal_id=str(opened["workbench_terminal_id"]),
+            quantity=1,
+        )
+
+    replacement_physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="ROUNDTRIP-FRESH-POOL",
+        pool_status="available",
+    )
+    db_session.add(replacement_physical)
+    db_session.commit()
+    collector_photo(db_session, replacement_physical, sha256="2" * 64)
+    replacement = service(db_session).create_manual_demand(
+        terminal_id=str(opened["workbench_terminal_id"]),
+        quantity=1,
+    )
+    replacement_requirement_id = replacement["assignments"][0]["requirement_id"]
+    audit = next(
+        row
+        for row in db_session.scalars(
+            select(AuditLog).where(
+                AuditLog.action == "collector_workbench.manual_demand_added"
+            )
+        ).all()
+        if row.payload["assignments"][0]["requirement_id"]
+        == replacement_requirement_id
+    )
+
+    assert replacement["assignments"][0]["final_collector_no"] == (
+        replacement_physical.collector_no
+    )
+    assert "manual-demand:" not in str(replacement["assignments"])
+    assert {
+        assignment["final_collector_no"]
+        for assignment in audit.payload["assignments"]
+    } == {replacement_physical.collector_no}
+    assert "manual-demand:" not in str(audit.payload["assignments"])
+
+
+def test_manual_demand_reopens_completed_terminal_with_pending_work(
+    db_session: Session,
+) -> None:
+    """Catches a completed terminal remaining completed after a new pending manual item is added."""
+    project, opened = open_manual_demand_terminal(
+        db_session,
+        terminal_code="DEMAND-REOPEN-001",
+    )
+    meter_item = db_session.scalar(
+        select(CollectorWorkbenchItem).where(
+            CollectorWorkbenchItem.run_id == UUID(opened["run_id"]),
+            CollectorWorkbenchItem.item_kind == "meter_install",
+        )
+    )
+    service(db_session).set_workbench_item_status(
+        item_id=str(meter_item.id),
+        completed=True,
+    )
+    previous_total_count = service(db_session).global_terminal_detail(
+        terminal_id=str(opened["workbench_terminal_id"])
+    )["total_count"]
+    terminal = db_session.get(
+        CollectorTransferTerminal,
+        UUID(opened["workbench_terminal_id"]),
+    )
+    assert terminal.status == "completed"
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="REOPEN-SAFE-POOL",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="2" * 64)
+
+    created = service(db_session).create_manual_demand(
+        terminal_id=str(opened["workbench_terminal_id"]),
+        quantity=1,
+    )
+    detail = service(db_session).global_terminal_detail(
+        terminal_id=str(opened["workbench_terminal_id"])
+    )
+    manual_item = next(
+        item
+        for item in detail["collector_items"]
+        if item["requirement_id"] == created["assignments"][0]["requirement_id"]
+    )
+
+    db_session.refresh(terminal)
+    assert terminal.status == "in_progress"
+    assert terminal.completed_item_count == 1
+    assert detail["terminal"]["status"] == "in_progress"
+    assert detail["completed_count"] == 1
+    assert detail["total_count"] == previous_total_count + 1
+    assert manual_item["status"] == "pending"
+    assert db_session.scalar(
+        select(func.count(AuditLog.id)).where(
+            AuditLog.action == "collector_transfer.workbench_item_completed"
+        )
+    ) == 1
+    assert db_session.scalar(
+        select(func.count(AuditLog.id)).where(
+            AuditLog.action == "collector_workbench.manual_demand_added"
+        )
+    ) == 1

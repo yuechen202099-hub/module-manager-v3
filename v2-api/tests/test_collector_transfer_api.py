@@ -960,6 +960,44 @@ def test_project_inventory_photo_rejects_blank_barcode_before_storage(monkeypatc
     assert service.calls == []
 
 
+def test_project_inventory_photo_rejects_manual_namespace_before_storage(monkeypatch) -> None:
+    """Catches a database-only manual key being uploaded and admitted as physical inventory."""
+    service = FakeCollectorTransferService()
+    client = client_with_service(monkeypatch, service)
+    storage_calls: list[dict[str, object]] = []
+
+    def save_inventory_image(**payload):
+        storage_calls.append(payload)
+        return {
+            "url": "/static/uploads/collector-inventory/forged.jpg",
+            "sha256": "9" * 64,
+            "storage_type": "local_upload",
+            "storage_key": "collector-inventory/forged.jpg",
+            "content_type": "image/jpeg",
+        }
+
+    monkeypatch.setattr(
+        routes,
+        "save_image_bytes",
+        save_inventory_image,
+    )
+
+    response = client.post(
+        "/collector-transfer/inventory",
+        headers=auth_headers(),
+        data={
+            "project_id": "11111111-1111-1111-1111-111111111111",
+            "collector_no": "MaNuAl-DeMaNd:forged-key",
+        },
+        files={"file": ("forged.jpg", b"valid-looking-image", "image/jpeg")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert storage_calls == []
+    assert service.calls == []
+
+
 def test_mobile_photo_sha_conflict_returns_409_and_removes_new_orphan(monkeypatch) -> None:
     """Catches a concurrent cross-collector SHA conflict leaking storage or returning 400/500."""
     service = FakeCollectorTransferService()

@@ -35,6 +35,7 @@ from app.services.collector_transfer import (
     TerminalReviewRequiredError,
     TerminalSourceChangedError,
     normalize_identifier,
+    validate_collector_number,
 )
 from app.services.photo_storage import delete_saved_image, save_image_bytes
 
@@ -656,6 +657,10 @@ async def register_inventory(
         return service_error_response(request, ValueError("project_id is required"))
     if not normalized_collector_no:
         return service_error_response(request, ValueError("collector_no is required"))
+    try:
+        normalized_collector_no = validate_collector_number(normalized_collector_no)
+    except ValueError as exc:
+        return service_error_response(request, exc)
     content = await file.read()
     filename = normalize_identifier(file.filename) or f"{normalized_collector_no}.jpg"
     try:

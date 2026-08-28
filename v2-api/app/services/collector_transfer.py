@@ -140,6 +140,27 @@ _IDENTIFIER_BOUNDARY_WHITESPACE = (
 )
 
 
+def _is_reserved_collector_number(value: object) -> bool:
+    return normalize_identifier(value).casefold().startswith(
+        _MANUAL_DEMAND_INTERNAL_PREFIX
+    )
+
+
+def validate_collector_number(value: object, field_name: str = "collector_no") -> str:
+    normalized = normalize_identifier(value)
+    if not normalized:
+        raise ValueError(f"{field_name} is required")
+    if _is_reserved_collector_number(normalized):
+        raise ValueError(f"{field_name} uses a reserved namespace")
+    return normalized
+
+
+def _public_collector_number_clause():
+    return ~func.lower(PhysicalCollector.collector_no).like(
+        f"{_MANUAL_DEMAND_INTERNAL_PREFIX}%"
+    )
+
+
 class _IdentifierBoundaryStrip(FunctionElement):
     type = String()
     inherit_cache = True
@@ -504,15 +525,23 @@ def _photo_response(photo: Photo | CollectorPhoto | Mapping[str, object] | None)
     return resolve_photo_for_response(payload)
 
 
-def _collector_requirement_label(requirement: CollectorRequirement) -> str:
+def _is_manual_requirement(requirement: CollectorRequirement) -> bool:
     for diagnostic in requirement.diagnostics or []:
         if (
             isinstance(diagnostic, Mapping)
             and normalize_identifier(diagnostic.get("code"))
             == _MANUAL_DEMAND_DIAGNOSTIC_CODE
         ):
-            return _MANUAL_DEMAND_LABEL
-    return requirement.original_collector_no
+            return True
+    return False
+
+
+def _collector_requirement_label(requirement: CollectorRequirement) -> str:
+    return (
+        _MANUAL_DEMAND_LABEL
+        if _is_manual_requirement(requirement)
+        else requirement.original_collector_no
+    )
 
 
 def _snapshot_has_photo_evidence(snapshot: object) -> bool:
@@ -1375,6 +1404,7 @@ class PostgresCollectorTransferService:
                 ).where(
                     PhysicalCollector.team_id == self.team_id,
                     PhysicalCollector.pool_status == "direct",
+                    _public_collector_number_clause(),
                     or_(
                         *(
                             and_(
@@ -1408,6 +1438,7 @@ class PostgresCollectorTransferService:
                     PhysicalCollector.team_id == self.team_id,
                     PhysicalCollector.project_id.in_(project_ids),
                     PhysicalCollector.pool_status == "available",
+                    _public_collector_number_clause(),
                 )
                 .group_by(PhysicalCollector.project_id)
             ).tuples()
@@ -1687,6 +1718,7 @@ class PostgresCollectorTransferService:
                     PhysicalCollector.team_id == self.team_id,
                     PhysicalCollector.project_id == run.project_id,
                     PhysicalCollector.pool_status == "available",
+                    _public_collector_number_clause(),
                 )
             )
             or 0
@@ -1705,6 +1737,47 @@ class PostgresCollectorTransferService:
             "random_match_count": random_match_count,
             "pool_available_count": available_pool_count,
         }
+
+    def _refresh_terminal_item_progress(
+        self,
+        terminal: CollectorTransferTerminal,
+        *,
+        preserve_blocked: bool,
+    ) -> tuple[int, int]:
+        self.session.flush()
+        total = int(
+            self.session.scalar(
+                select(func.count(CollectorWorkbenchItem.id)).where(
+                    CollectorWorkbenchItem.run_id == terminal.run_id,
+                    CollectorWorkbenchItem.terminal_id == terminal.id,
+                    CollectorWorkbenchItem.team_id == self.team_id,
+                )
+            )
+            or 0
+        )
+        completed_count = int(
+            self.session.scalar(
+                select(func.count(CollectorWorkbenchItem.id)).where(
+                    CollectorWorkbenchItem.run_id == terminal.run_id,
+                    CollectorWorkbenchItem.terminal_id == terminal.id,
+                    CollectorWorkbenchItem.team_id == self.team_id,
+                    CollectorWorkbenchItem.status == "completed",
+                )
+            )
+            or 0
+        )
+        terminal.completed_item_count = completed_count
+        if not preserve_blocked or terminal.status != "blocked":
+            terminal.status = (
+                "ready"
+                if completed_count == 0
+                else (
+                    "completed"
+                    if total and completed_count >= total
+                    else "in_progress"
+                )
+            )
+        return completed_count, total
 
     def _create_run_from_projection(
         self,
@@ -2298,9 +2371,7 @@ class PostgresCollectorTransferService:
 
     def scan_inventory(self, *, project_id: str, collector_no: str) -> dict[str, object]:
         project = self._project(project_id)
-        normalized_no = normalize_identifier(collector_no)
-        if not normalized_no:
-            raise ValueError("collector_no is required")
+        normalized_no = validate_collector_number(collector_no)
 
         physical = self.session.scalar(
             select(PhysicalCollector)
@@ -2398,6 +2469,10 @@ class PostgresCollectorTransferService:
         region: Mapping[str, float],
     ) -> dict[str, object]:
         project = self._project(project_id)
+        normalized_expected_no = validate_collector_number(
+            expected_collector_no,
+            "expected_collector_no",
+        )
         physical = self.session.scalar(
             select(PhysicalCollector).where(
                 PhysicalCollector.id == _uuid(collector_id, "collector_id"),
@@ -2407,7 +2482,7 @@ class PostgresCollectorTransferService:
         )
         if physical is None:
             raise KeyError("collector not found")
-        if physical.collector_no != normalize_identifier(expected_collector_no):
+        if physical.collector_no != normalized_expected_no:
             raise CollectorInventorySnapshotChangedError(
                 "collector number changed; refresh and retry"
             )
@@ -2447,6 +2522,11 @@ class PostgresCollectorTransferService:
         region: Mapping[str, float] | None,
     ) -> dict[str, object]:
         project = self._project(project_id)
+        normalized_expected_no = validate_collector_number(
+            expected_collector_no,
+            "expected_collector_no",
+        )
+        corrected_no = validate_collector_number(collector_no)
         physical = self.session.scalar(
             select(PhysicalCollector)
             .where(
@@ -2461,7 +2541,7 @@ class PostgresCollectorTransferService:
 
         before_collector_no = physical.collector_no
         before_pool_status = physical.pool_status
-        if before_collector_no != normalize_identifier(expected_collector_no):
+        if before_collector_no != normalized_expected_no:
             raise CollectorInventorySnapshotChangedError(
                 "collector number changed; refresh and retry"
             )
@@ -2480,9 +2560,6 @@ class PostgresCollectorTransferService:
                 "collector photo changed; refresh and retry"
             )
 
-        corrected_no = normalize_identifier(collector_no)
-        if not corrected_no:
-            raise ValueError("collector_no is required")
         normalized_method = normalize_identifier(recognition_method).lower()
         if normalized_method not in {"manual", "barcode", "ocr"}:
             raise ValueError("recognition_method is invalid")
@@ -2574,9 +2651,7 @@ class PostgresCollectorTransferService:
         byte_size: int,
     ) -> dict[str, object]:
         project = self._project(project_id)
-        normalized_no = normalize_identifier(collector_no)
-        if not normalized_no:
-            raise ValueError("collector_no is required")
+        normalized_no = validate_collector_number(collector_no)
         sha256 = normalize_identifier(stored.get("sha256"))
         if not sha256:
             raise ValueError("sha256 is required")
@@ -2711,6 +2786,7 @@ class PostgresCollectorTransferService:
         filters = (
             PhysicalCollector.team_id == self.team_id,
             PhysicalCollector.project_id == project.id,
+            _public_collector_number_clause(),
         )
         query = select(PhysicalCollector).where(*filters)
         if normalized_status:
@@ -3084,7 +3160,8 @@ class PostgresCollectorTransferService:
             {
                 normalize_identifier(requirement.original_collector_no)
                 for requirement in requirements
-                if normalize_identifier(requirement.original_collector_no)
+                if not _is_manual_requirement(requirement)
+                and normalize_identifier(requirement.original_collector_no)
             }
         )
         if not collector_numbers:
@@ -3097,6 +3174,7 @@ class PostgresCollectorTransferService:
                     PhysicalCollector.project_id == locked_run.project_id,
                     PhysicalCollector.collector_no.in_(collector_numbers),
                     PhysicalCollector.pool_status.in_(("direct", "used")),
+                    _public_collector_number_clause(),
                 )
                 .order_by(PhysicalCollector.id)
                 .with_for_update()
@@ -3190,7 +3268,8 @@ class PostgresCollectorTransferService:
         collector_numbers = {
             requirement.original_collector_no
             for requirement in requirements
-            if requirement.original_collector_no
+            if not _is_manual_requirement(requirement)
+            and requirement.original_collector_no
         }
         if not collector_numbers:
             return 0
@@ -3203,6 +3282,7 @@ class PostgresCollectorTransferService:
                     PhysicalCollector.project_id == run.project_id,
                     PhysicalCollector.collector_no.in_(collector_numbers),
                     PhysicalCollector.pool_status == "direct",
+                    _public_collector_number_clause(),
                 )
                 .order_by(PhysicalCollector.collector_no, PhysicalCollector.id)
                 .with_for_update()
@@ -3228,9 +3308,7 @@ class PostgresCollectorTransferService:
 
     def scan_collector(self, *, run_id: str, collector_no: str) -> dict[str, object]:
         run = self._run(run_id, lock=True)
-        normalized_no = normalize_identifier(collector_no)
-        if not normalized_no:
-            raise ValueError("collector_no is required")
+        normalized_no = validate_collector_number(collector_no)
         physical = self._locked_physical_collector_for_scan(run=run, collector_no=normalized_no)
         physical.last_scanned_at = datetime.now(UTC)
 
@@ -3561,6 +3639,7 @@ class PostgresCollectorTransferService:
                     PhysicalCollector.team_id == self.team_id,
                     PhysicalCollector.project_id == run.project_id,
                     PhysicalCollector.pool_status == "available",
+                    _public_collector_number_clause(),
                 )
                 .order_by(PhysicalCollector.id)
                 .with_for_update()
@@ -3716,6 +3795,7 @@ class PostgresCollectorTransferService:
                     PhysicalCollector.team_id == self.team_id,
                     PhysicalCollector.project_id == run.project_id,
                     PhysicalCollector.pool_status == "available",
+                    _public_collector_number_clause(),
                     ~exists().where(
                         CollectorAssignment.physical_collector_id
                         == PhysicalCollector.id,
@@ -3889,7 +3969,7 @@ class PostgresCollectorTransferService:
                     terminal_id=terminal.id,
                     team_id=self.team_id,
                     original_collector_no=(
-                        f"{_MANUAL_DEMAND_INTERNAL_PREFIX}{requirement_id.hex}"
+                        f"{_MANUAL_DEMAND_INTERNAL_PREFIX}{uuid4().hex}"
                     ),
                     status="unmatched",
                     sort_order=current_max_sort + offset + 1,
@@ -3937,6 +4017,10 @@ class PostgresCollectorTransferService:
         run.stats = run_stats
         run.status = "allocated"
         self._refresh_allocation_stats(run)
+        self._refresh_terminal_item_progress(
+            terminal,
+            preserve_blocked=True,
+        )
         self._audit(
             action="collector_workbench.manual_demand_added",
             entity_type="collector_transfer_terminal",
@@ -4221,26 +4305,9 @@ class PostgresCollectorTransferService:
             self.session.delete(item)
         self.session.flush()
 
-        total = int(
-            self.session.scalar(
-                select(func.count(CollectorWorkbenchItem.id)).where(
-                    CollectorWorkbenchItem.terminal_id == terminal.id
-                )
-            )
-            or 0
-        )
-        completed_count = int(
-            self.session.scalar(
-                select(func.count(CollectorWorkbenchItem.id)).where(
-                    CollectorWorkbenchItem.terminal_id == terminal.id,
-                    CollectorWorkbenchItem.status == "completed",
-                )
-            )
-            or 0
-        )
-        terminal.completed_item_count = completed_count
-        terminal.status = "ready" if completed_count == 0 else (
-            "completed" if total and completed_count >= total else "in_progress"
+        self._refresh_terminal_item_progress(
+            terminal,
+            preserve_blocked=False,
         )
 
         stats = self._refresh_allocation_stats(run)
@@ -4424,6 +4491,7 @@ class PostgresCollectorTransferService:
                     select(PhysicalCollector).where(
                         PhysicalCollector.team_id == self.team_id,
                         PhysicalCollector.id.in_(physical_ids),
+                        _public_collector_number_clause(),
                     )
                 ).all()
             )
@@ -4559,6 +4627,7 @@ class PostgresCollectorTransferService:
                     PhysicalCollector.team_id == self.team_id,
                     PhysicalCollector.project_id == run.project_id,
                     PhysicalCollector.pool_status == "available",
+                    _public_collector_number_clause(),
                 )
             )
             or 0
@@ -4989,31 +5058,11 @@ class PostgresCollectorTransferService:
             requirement.status = "used" if completed else "direct_ready"
             physical.pool_status = "used" if completed else "direct"
         self.session.flush()
-        total = int(
-            self.session.scalar(
-                select(func.count(CollectorWorkbenchItem.id)).where(
-                    CollectorWorkbenchItem.terminal_id == item.terminal_id
-                )
-            )
-            or 0
-        )
-        completed_count = int(
-            self.session.scalar(
-                select(func.count(CollectorWorkbenchItem.id)).where(
-                    CollectorWorkbenchItem.terminal_id == item.terminal_id,
-                    CollectorWorkbenchItem.status == "completed",
-                )
-            )
-            or 0
-        )
         if terminal is not None:
-            terminal.completed_item_count = completed_count
-            if terminal.status != "blocked":
-                terminal.status = (
-                    "ready"
-                    if completed_count == 0
-                    else ("completed" if total and completed_count >= total else "in_progress")
-                )
+            self._refresh_terminal_item_progress(
+                terminal,
+                preserve_blocked=True,
+            )
         self._audit(
             action="collector_transfer.workbench_item_completed" if completed else "collector_transfer.workbench_item_reopened",
             entity_type="collector_workbench_item",
