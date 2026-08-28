@@ -6169,3 +6169,52 @@ def test_manual_demand_reopens_completed_terminal_with_pending_work(
             AuditLog.action == "collector_workbench.manual_demand_added"
         )
     ) == 1
+
+
+def test_terminal_workbench_redacts_legacy_manual_namespace_assignment(
+    db_session: Session,
+) -> None:
+    """Catches the run-scoped workbench exposing a database-only manual key as a barcode."""
+    project, opened = open_manual_demand_terminal(
+        db_session,
+        terminal_code="DEMAND-LEGACY-WORKBENCH-001",
+    )
+    physical = PhysicalCollector(
+        id=uuid4(),
+        team_id="team-1",
+        project_id=project.id,
+        collector_no="LEGACY-WORKBENCH-SAFE",
+        pool_status="available",
+    )
+    db_session.add(physical)
+    db_session.commit()
+    collector_photo(db_session, physical, sha256="4" * 64)
+    created = service(db_session).create_manual_demand(
+        terminal_id=str(opened["workbench_terminal_id"]),
+        quantity=1,
+    )
+    requirement_id = created["assignments"][0]["requirement_id"]
+    requirement = db_session.get(CollectorRequirement, UUID(requirement_id))
+    physical.collector_no = requirement.original_collector_no
+    db_session.commit()
+
+    workbench = service(db_session).terminal_workbench(
+        run_id=str(opened["run_id"]),
+        terminal_id=str(opened["workbench_terminal_id"]),
+    )
+    removal_item = next(
+        item for item in workbench["items"] if item["kind"] == "collector_removal"
+    )
+    detail = service(db_session).global_terminal_detail(
+        terminal_id=str(opened["workbench_terminal_id"])
+    )
+    manual_item = next(
+        item
+        for item in detail["collector_items"]
+        if item["requirement_id"] == requirement_id
+    )
+
+    assert removal_item["collector_no"] == ""
+    assert removal_item["collector_barcode"] == ""
+    assert "manual-demand:" not in str(workbench)
+    assert manual_item["original_collector_no"] == "人工需求"

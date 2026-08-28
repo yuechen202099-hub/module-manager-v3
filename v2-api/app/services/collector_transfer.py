@@ -4713,7 +4713,14 @@ class PostgresCollectorTransferService:
         collector_ids = [item.physical_collector_id for item in assignments]
         collector_photo_ids = [item.collector_photo_id for item in assignments]
         physicals = (
-            self.session.scalars(select(PhysicalCollector).where(PhysicalCollector.id.in_(collector_ids))).all()
+            self.session.scalars(
+                select(PhysicalCollector).where(
+                    PhysicalCollector.id.in_(collector_ids),
+                    PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.project_id == run.project_id,
+                    _public_collector_number_clause(),
+                )
+            ).all()
             if collector_ids
             else []
         )
