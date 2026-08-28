@@ -24,6 +24,7 @@ import type {
   RegionScanResult,
 } from '@/api/types'
 import Code128Barcode from '@/components/Code128Barcode.vue'
+import PhotoLightbox from '@/components/PhotoLightbox.vue'
 import ReviewImageInspector from '@/components/ReviewImageInspector.vue'
 
 const props = withDefaults(defineProps<{
@@ -44,12 +45,15 @@ const imageLoading = ref(false)
 const detail = ref<DataCenterDetail | null>(null)
 const selectedPhotoId = ref('')
 const errorMessage = ref('')
+const photoPreview = ref({ src: '', alt: '' })
 const inspector = ref<InstanceType<typeof ReviewImageInspector> | null>(null)
 const photoObjectUrls = reactive(new Map<string, string>())
 const pendingCategories = reactive<Record<string, string>>({})
 const activeStage = ref<'source' | 'rephoto'>(props.rephotoItem ? props.defaultStage : 'source')
 let detailAbortController: AbortController | null = null
 let photoAbortController: AbortController | null = null
+let largePhotoAbortController: AbortController | null = null
+let largePhotoObjectUrl = ''
 let detailSerial = 0
 let photoSerial = 0
 let groupSerial = 0
@@ -153,6 +157,41 @@ function revokeAllPhotoUrls() {
   photoObjectUrls.clear()
 }
 
+function closePhotoPreview() {
+  largePhotoAbortController?.abort()
+  largePhotoAbortController = null
+  if (largePhotoObjectUrl) URL.revokeObjectURL(largePhotoObjectUrl)
+  largePhotoObjectUrl = ''
+  photoPreview.value = { src: '', alt: '' }
+}
+
+async function openProtectedPhoto(photo: DataCenterDetail['photos'][number]) {
+  if (!detail.value) return
+  closePhotoPreview()
+  const groupId = detail.value.id
+  const fallbackUrl = photoObjectUrls.get(photo.id) || ''
+  const alt = photo.categoryLabel || photo.name || '待分类照片'
+  photoPreview.value = { src: fallbackUrl, alt }
+  const controller = new AbortController()
+  largePhotoAbortController = controller
+  try {
+    const originalUrl = await fetchGroupPhotoObjectUrl(groupId, photo.id, 'original', '', controller.signal)
+    if (controller.signal.aborted || detail.value?.id !== groupId) {
+      if (originalUrl !== fallbackUrl) URL.revokeObjectURL(originalUrl)
+      return
+    }
+    if (originalUrl !== fallbackUrl) largePhotoObjectUrl = originalUrl
+    photoPreview.value = { src: originalUrl, alt }
+  } catch (error) {
+    if (!isAbortError(error) && !fallbackUrl) errorMessage.value = '大图加载失败，请重试'
+  }
+}
+
+function openRephotoPreview(src: string, alt: string) {
+  closePhotoPreview()
+  if (src) photoPreview.value = { src, alt }
+}
+
 function cleanupDetail() {
   groupSerial += 1
   mutationSerial += 1
@@ -163,6 +202,7 @@ function cleanupDetail() {
   detailAbortController = null
   photoAbortController?.abort()
   photoAbortController = null
+  closePhotoPreview()
   revokeAllPhotoUrls()
   detail.value = null
   selectedPhotoId.value = ''
@@ -572,11 +612,13 @@ onBeforeUnmount(cleanupDetail)
       <div class="classification-photo-grid">
         <article v-for="photo in detail.photos" :key="photo.id" class="classification-photo-card">
           <div class="classification-photo-frame">
-            <img
+            <button
               v-if="photoObjectUrls.get(photo.id)"
-              :src="photoObjectUrls.get(photo.id)"
-              :alt="photo.categoryLabel || photo.name || '待分类照片'"
-            />
+              type="button"
+              :data-testid="`preview-classification-${photo.id}`"
+              :aria-label="`查看${photo.categoryLabel || photo.name || '待分类照片'}大图`"
+              @click="openProtectedPhoto(photo)"
+            ><img :src="photoObjectUrls.get(photo.id)" :alt="photo.categoryLabel || photo.name || '待分类照片'" /></button>
             <span v-else>图片加载中</span>
           </div>
           <select
@@ -657,7 +699,14 @@ onBeforeUnmount(cleanupDetail)
           <div class="rephoto-slots">
             <figure v-for="slot in rephotoSlots" :key="slot.slot" :data-rephoto-slot="slot.slot">
               <figcaption>{{ slot.label }}</figcaption>
-              <img v-if="rephotoImageUrl(slot.photo)" :src="rephotoImageUrl(slot.photo)" :alt="slot.label" />
+              <button
+                v-if="rephotoImageUrl(slot.photo)"
+                type="button"
+                class="rephoto-preview-trigger"
+                :data-testid="`preview-rephoto-${slot.slot}`"
+                :aria-label="`查看${slot.label}大图`"
+                @click="openRephotoPreview(rephotoImageUrl(slot.photo), slot.label)"
+              ><img :src="rephotoImageUrl(slot.photo)" :alt="slot.label" /></button>
               <span v-else>暂无照片</span>
             </figure>
           </div>
@@ -722,6 +771,7 @@ onBeforeUnmount(cleanupDetail)
         </el-table>
       </section>
     </div>
+    <PhotoLightbox :src="photoPreview.src" :alt="photoPreview.alt" @close="closePhotoPreview" />
   </section>
 </template>
 
@@ -735,7 +785,8 @@ onBeforeUnmount(cleanupDetail)
 .classification-photo-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
 .classification-photo-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; }
 .classification-photo-frame { grid-column: 1 / -1; display: grid; place-items: center; aspect-ratio: 4 / 2.35; overflow: hidden; border: 1px solid var(--v2-border, #dce3ec); border-radius: 6px; background: var(--v2-surface-soft, #f6f8fb); color: var(--v2-text-muted, #7a8798); }
-.classification-photo-frame img { width: 100%; height: 100%; object-fit: cover; }
+.classification-photo-frame button, .rephoto-preview-trigger { display: block; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; }
+.classification-photo-frame img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .classification-photo-card select { width: 100%; min-width: 0; height: 34px; padding: 0 30px 0 10px; border: 1px solid var(--v2-border, #dce3ec); border-radius: 6px; background: #fff; color: var(--v2-text, #2f3a4a); font: inherit; }
 .classification-photo-card > span { white-space: nowrap; font-size: 12px; }
 .classification-photo-card > span.classified { color: var(--el-color-success, #67c23a); }
@@ -760,7 +811,7 @@ onBeforeUnmount(cleanupDetail)
 .rephoto-identifiers > div { display: flex; justify-content: space-between; gap: 8px; padding: 10px; border: 1px solid var(--v2-border); border-radius: 8px; }
 .rephoto-slots { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .rephoto-slots figure { display: grid; gap: 8px; min-height: 260px; margin: 0; padding: 10px; border: 1px solid var(--v2-border); border-radius: 8px; }
-.rephoto-slots img { width: 100%; height: 240px; object-fit: contain; }
+.rephoto-slots img { display: block; width: 100%; height: 240px; object-fit: contain; }
 .group-summary { display: flex; flex-wrap: wrap; gap: 10px; color: var(--v2-text-muted); }
 .group-summary strong { color: var(--v2-text-strong); }
 .field-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 10px; }

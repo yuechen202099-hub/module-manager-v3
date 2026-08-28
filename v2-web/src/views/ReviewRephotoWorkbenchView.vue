@@ -11,6 +11,7 @@ import {
 } from '@/api/services'
 import type { CollectorRequirementWorkbenchRow, GlobalCollectorTerminalCandidate, ReviewWorkbenchMeter, ReviewWorkbenchOpenResult } from '@/api/types'
 import Code128Barcode from '@/components/Code128Barcode.vue'
+import PhotoLightbox from '@/components/PhotoLightbox.vue'
 import DataCenterGroupReviewPanel from '@/components/data-center/DataCenterGroupReviewPanel.vue'
 import { canMutateRephoto, completionBlockers, meterCompletionBlockers, normalizeMeterPhotoSlots } from '@/features/collectorTransfer/state'
 
@@ -24,6 +25,7 @@ const selectedGroupId = ref('')
 const loading = ref(false)
 const mutationPending = ref(false)
 const errorMessage = ref('')
+const photoPreview = ref({ src: '', alt: '' })
 let searchSerial = 0
 let openSerial = 0
 let searchTimer = 0
@@ -34,8 +36,8 @@ const unconstructedMeters = computed(() => opened.value?.meters.filter((meter) =
 const selectedMeter = computed<ReviewWorkbenchMeter | null>(() => opened.value?.meters.find((meter) => meter.group_id === selectedGroupId.value) || constructedMeters.value[0] || null)
 const rephoto = computed(() => opened.value?.rephoto || null)
 const sourceChanged = computed(() => Boolean(rephoto.value?.source_changed))
-const reviewUnlocked = computed(() => Boolean(opened.value && opened.value.review_required_count === 0 && canMutateRephoto({ rephoto: rephoto.value, source_changed: rephoto.value?.source_changed })))
-const mutable = computed(() => reviewUnlocked.value && !mutationPending.value)
+const rephotoUnlocked = computed(() => canMutateRephoto({ rephoto: rephoto.value, source_changed: rephoto.value?.source_changed }))
+const mutable = computed(() => rephotoUnlocked.value && !mutationPending.value)
 const selectedRephotoItem = computed(() => rephoto.value?.meter_install_items.find((item) => item.meter_no === selectedMeter.value?.meter_no) || null)
 const deduplicatedCollectors = computed(() => {
   const rows = rephoto.value?.collector_items || []
@@ -81,7 +83,7 @@ const collectorRows = computed<CollectorDisplayRow[]>(() => {
 const terminalNotice = computed(() => {
   if (!opened.value) return ''
   if (sourceChanged.value) return '来源资料已变化，请刷新后继续。'
-  if (opened.value.review_required_count) return '待人工确认的表计需要先完成确认；已确认分类的表计仍可能存在资料异常。'
+  if (opened.value.review_required_count) return '部分表计仍待审阅，分类不影响翻拍；已确认分类的表计仍可能存在资料异常。'
   if (opened.value.workflow_state === 'pool_shortage') return '采集器池数量不足，暂不能完成随机替换。'
   if (opened.value.workflow_state === 'no_construction') return '终端没有已施工表计，无需生成翻拍资料。'
   return '照片分类已完成，可以按表计查看翻拍资料。'
@@ -103,6 +105,13 @@ function workflowLabel(state: string) {
 function imageUrl(photo: { image_url?: string; preview_url?: string; thumbnail_url?: string; canonical_image_url?: string } | null) {
   return photo?.preview_url || photo?.image_url || photo?.thumbnail_url || photo?.canonical_image_url || ''
 }
+function largeImageUrl(photo: { image_url?: string; preview_url?: string; thumbnail_url?: string; canonical_image_url?: string } | null) {
+  return photo?.image_url || photo?.canonical_image_url || photo?.preview_url || photo?.thumbnail_url || ''
+}
+function openPhotoPreview(src: string, alt: string) {
+  if (src) photoPreview.value = { src, alt }
+}
+function closePhotoPreview() { photoPreview.value = { src: '', alt: '' } }
 function classificationLabel(meter: ReviewWorkbenchMeter) {
   if (meter.review_ready) return '分类完成'
   return meter.classification_manually_confirmed ? '分类已确认，资料异常' : '待人工确认'
@@ -238,9 +247,9 @@ function completeMeter(item: NonNullable<ReviewWorkbenchOpenResult['rephoto']>['
         <div><span>已施工</span><strong>{{ opened.constructed_meter_count }}</strong></div>
         <div><span>未施工</span><strong>{{ opened.unconstructed_meter_count }}</strong></div>
         <div><span>分类完成</span><strong>{{ opened.review_ready_count }}/{{ opened.constructed_meter_count }}</strong></div>
-        <strong class="workflow-status" :class="{ locked: !reviewUnlocked }">{{ workflowLabel(opened.workflow_state) }}</strong>
+        <strong class="workflow-status" :class="{ locked: !rephotoUnlocked }">{{ workflowLabel(opened.workflow_state) }}</strong>
       </section>
-      <p class="terminal-notice" :class="{ unlocked: reviewUnlocked }">{{ terminalNotice }}<button v-if="sourceChanged" type="button" class="rephoto-mutation refresh-button" data-testid="refresh-terminal" :disabled="!mutable || !sourceChanged" @click="refresh">刷新资料</button></p>
+      <p class="terminal-notice" :class="{ unlocked: rephotoUnlocked }">{{ terminalNotice }}<button v-if="sourceChanged" type="button" class="rephoto-mutation refresh-button" data-testid="refresh-terminal" :disabled="!mutable || !sourceChanged" @click="refresh">刷新资料</button></p>
 
       <section class="meter-section">
         <h2>表计资料</h2>
@@ -254,7 +263,7 @@ function completeMeter(item: NonNullable<ReviewWorkbenchOpenResult['rephoto']>['
           <div v-if="meter.group_id === selectedMeter?.group_id" class="meter-record-body">
             <DataCenterGroupReviewPanel :group-id="meter.group_id" :classification-only="true" @updated="reopenCurrent" />
             <section class="rephoto-material" :class="{ locked: !selectedRephotoItem }">
-              <header><strong>翻拍资料</strong><span v-if="!selectedRephotoItem">待完成分类</span></header>
+              <header><strong>翻拍资料</strong><span v-if="!selectedRephotoItem">资料异常，暂不可翻拍</span></header>
               <div v-if="selectedRephotoItem" class="identifier-barcodes">
                 <Code128Barcode :value="selectedRephotoItem.meter_barcode" label="表号条码" />
                 <Code128Barcode :value="selectedRephotoItem.module_barcode" label="模块号条码" />
@@ -262,8 +271,15 @@ function completeMeter(item: NonNullable<ReviewWorkbenchOpenResult['rephoto']>['
               <div class="rephoto-slots">
                 <figure v-for="slot in selectedRephotoItem ? normalizeMeterPhotoSlots(selectedRephotoItem.photos) : [{ slot: 'module_meter', label: '电表和模块', photo: null }, { slot: 'after_box', label: '改造完成', photo: null }]" :key="slot.slot" class="rephoto-slot">
                   <figcaption>{{ slot.label }}</figcaption>
-                  <img v-if="imageUrl(slot.photo)" :src="imageUrl(slot.photo)" :alt="slot.label" />
-                  <span v-else>{{ selectedRephotoItem ? '暂无照片' : '完成分类后显示' }}</span>
+                  <button
+                    v-if="imageUrl(slot.photo)"
+                    type="button"
+                    class="photo-preview-trigger"
+                    :data-testid="`preview-meter-${slot.slot}`"
+                    :aria-label="`查看${slot.label}大图`"
+                    @click="openPhotoPreview(largeImageUrl(slot.photo), slot.label)"
+                  ><img :src="imageUrl(slot.photo)" :alt="slot.label" /></button>
+                  <span v-else>{{ selectedRephotoItem ? '暂无照片' : '资料异常，暂无可翻拍照片' }}</span>
                 </figure>
               </div>
               <button v-if="selectedRephotoItem" type="button" class="rephoto-mutation complete-meter" :disabled="!mutable || meterCompletionBlockers(selectedRephotoItem).length > 0" @click="completeMeter(selectedRephotoItem)">完成本表翻拍</button>
@@ -285,20 +301,28 @@ function completeMeter(item: NonNullable<ReviewWorkbenchOpenResult['rephoto']>['
           <article v-for="row in collectorRows" :key="row.key" class="collector-card">
             <strong>{{ row.original_collector_no }}</strong>
             <span class="collector-state" :class="row.physical_state">{{ collectorStateLabel(row.physical_state) }}</span>
-            <img v-if="imageUrl(row.photo)" :src="imageUrl(row.photo)" :alt="`采集器 ${row.original_collector_no}`" />
+            <button
+              v-if="imageUrl(row.photo)"
+              type="button"
+              class="photo-preview-trigger collector-photo-trigger"
+              :data-testid="`preview-collector-${row.key}`"
+              :aria-label="`查看采集器 ${row.original_collector_no} 大图`"
+              @click="openPhotoPreview(largeImageUrl(row.photo), `采集器 ${row.original_collector_no}`)"
+            ><img :src="imageUrl(row.photo)" :alt="`采集器 ${row.original_collector_no}`" /></button>
             <span v-else class="empty-cell">-</span>
             <div><span v-if="row.final_collector_no && row.final_collector_no !== row.original_collector_no" class="replacement-number">新编号 {{ row.final_collector_no }}</span><Code128Barcode v-if="row.collector_barcode" :value="row.collector_barcode" /></div>
             <div class="collector-actions">
               <button v-if="row.physical_state === 'pending' || row.physical_state === 'missing'" type="button" class="rephoto-mutation" data-testid="replace-all-missing" :disabled="!mutable || row.physical_state === 'pending' || opened.workflow_state === 'pool_shortage'" @click="replaceMissing">随机替换</button>
               <button v-if="row.source?.workbench_item_id" type="button" class="rephoto-mutation" :data-testid="`complete-collector-${row.source.requirement_id}`" :disabled="!mutable || opened.workflow_state === 'pool_shortage' || completionBlockers(row.source).length > 0" @click="completeCollector(row.source)">完成</button>
               <button v-if="row.source?.assignment_id" type="button" class="rephoto-mutation" data-testid="rollback-assignment" :disabled="!mutable" @click="rollback(row.source)">回滚</button>
-              <span v-if="row.physical_state === 'pending'" class="locked-copy">等待照片分类完成</span>
+              <span v-if="row.physical_state === 'pending'" class="locked-copy">翻拍资料尚未生成</span>
               <span v-else-if="row.physical_state === 'present' && !row.source?.workbench_item_id">可直接翻拍</span>
             </div>
           </article>
         </div>
       </section>
     </template>
+    <PhotoLightbox :src="photoPreview.src" :alt="photoPreview.alt" @close="closePhotoPreview" />
   </main>
 </template>
 
@@ -347,7 +371,9 @@ function completeMeter(item: NonNullable<ReviewWorkbenchOpenResult['rephoto']>['
 .identifier-barcodes, .rephoto-slots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .rephoto-slot { display: grid; gap: 8px; min-height: 120px; margin: 0; padding: 12px; border: 1px solid var(--v2-border, #dce3ec); border-radius: 6px; background: #fff; }
 .rephoto-slot figcaption { color: var(--v2-text-muted, #7a8798); font-size: 13px; }
-.rephoto-slot img { width: 100%; height: 180px; object-fit: contain; }
+.photo-preview-trigger { display: block; width: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; }
+.rephoto-slot img { display: block; width: 100%; height: 180px; object-fit: contain; }
+.collector-photo-trigger img { display: block; width: 100%; height: 78px; object-fit: contain; }
 .rephoto-slot span { display: grid; place-items: center; min-height: 78px; color: var(--v2-text-muted, #7a8798); background: var(--v2-surface-soft, #f7f9fc); }
 .rephoto-material.locked .rephoto-slot { background: var(--v2-surface-soft, #f7f9fc); opacity: .72; }
 .complete-meter { justify-self: end; }

@@ -63,7 +63,8 @@ describe('review rephoto workbench', () => {
     serviceMocks.setCollectorWorkbenchItemCompleted.mockResolvedValue({})
   })
 
-  it('locks every rephoto mutation until each constructed meter is review-ready', async () => {
+  it('keeps pending review visible without locking complete rephoto material', async () => {
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ rephoto: rephoto('replaced') }))
     const wrapper = await mountWorkbench()
     expect(wrapper.text()).toContain('T-001')
     expect(wrapper.text()).toContain('未施工，不参与本次翻拍')
@@ -74,9 +75,25 @@ describe('review rephoto workbench', () => {
     expect(wrapper.text()).not.toContain('资料不全')
     expect(wrapper.text()).not.toContain('退回异常')
     expect(wrapper.getComponent({ name: 'DataCenterGroupReviewPanel' }).props('classificationOnly')).toBe(true)
-    expect(wrapper.findAll('.rephoto-mutation').every((button) => (button.element as HTMLButtonElement).disabled)).toBe(true)
+    expect(wrapper.get('.terminal-notice').text()).toContain('分类不影响翻拍')
+    expect(wrapper.get<HTMLButtonElement>('.complete-meter').element.disabled).toBe(false)
     expect(wrapper.findAll('.rephoto-slot')).toHaveLength(2)
-    expect(wrapper.findAll('.rephoto-slot img')).toHaveLength(0)
+    expect(wrapper.findAll('.rephoto-slot img')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('opens every rephoto image in a large read-only preview', async () => {
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ rephoto: rephoto('replaced') }))
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="preview-meter-module_meter"]').trigger('click')
+    expect(wrapper.get('[data-testid="photo-lightbox"]').attributes('aria-modal')).toBe('true')
+    expect(wrapper.get<HTMLImageElement>('[data-testid="photo-lightbox-image"]').attributes('src')).toBe('/api/photos/1')
+    await wrapper.get('[data-testid="close-photo-lightbox"]').trigger('click')
+    expect(wrapper.find('[data-testid="photo-lightbox"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="preview-collector-collector-b"]').trigger('click')
+    expect(wrapper.get('[data-testid="photo-lightbox-image"]').attributes('alt')).toContain('采集器 C-01')
     wrapper.unmount()
   })
 

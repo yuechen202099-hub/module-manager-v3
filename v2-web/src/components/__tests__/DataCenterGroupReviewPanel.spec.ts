@@ -395,6 +395,20 @@ describe('DataCenterGroupReviewPanel', () => {
     expect(wrapper.text()).not.toContain('资料不全')
     expect(wrapper.text()).not.toContain('异常 / 回退')
 
+    await wrapper.get('[data-testid="preview-classification-photo-before"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="photo-lightbox"]').attributes('aria-modal')).toBe('true')
+    expect(wrapper.get<HTMLImageElement>('[data-testid="photo-lightbox-image"]').attributes('src')).toBe('blob:photo-before')
+    expect(apiMock.fetchGroupPhotoObjectUrl).toHaveBeenCalledWith(
+      'g-classification',
+      'photo-before',
+      'original',
+      '',
+      expect.any(AbortSignal),
+    )
+    await wrapper.get('[data-testid="close-photo-lightbox"]').trigger('click')
+    expect(wrapper.find('[data-testid="photo-lightbox"]').exists()).toBe(false)
+
     await wrapper.get('[data-testid="photo-category-photo-before"]').setValue('before_box')
     expect(wrapper.text()).toContain('照片分类 4/4')
     await wrapper.get('[data-testid="save-photo-classifications"]').trigger('click')

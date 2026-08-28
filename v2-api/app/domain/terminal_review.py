@@ -236,20 +236,15 @@ def _source_revision_row(
     assert source is not None
     return {
         "group_id": source.group_id,
-        "status": normalize_identifier(evidence.status).lower(),
         "terminal_code": source.terminal_code,
         "installation_address": source.installation_address,
         "meter_no": source.meter_no,
         "collector_no": source.collector_no,
         "module_no": source.module_no,
-        "blockers": projection.blockers,
         "module_meter_photo_id": normalize_identifier(module_meter.id) if module_meter else None,
         "module_meter_photo_sha256": normalize_identifier(module_meter.sha256) if module_meter else None,
         "after_box_photo_id": normalize_identifier(after_box.id) if after_box else None,
         "after_box_photo_sha256": normalize_identifier(after_box.sha256) if after_box else None,
-        "barcode_status": normalize_identifier(evidence.barcode_status).lower(),
-        "classification_manually_confirmed": projection.classification_manually_confirmed,
-        "classification_confirmation_anomalies": projection.classification_confirmation_anomalies,
     }
 
 
@@ -279,10 +274,11 @@ def project_terminal_review(
     constructed_pairs.sort(key=lambda pair: pair[1].group_id)
     unconstructed.sort(key=lambda item: item.group_id)
     constructed = tuple(pair[1] for pair in constructed_pairs)
-    ready_sources = tuple(
+    rephoto_sources = tuple(
         item.source
         for item in constructed
-        if item.review_ready and item.source is not None
+        if item.source is not None
+        and all(code in _SOFT_REVIEW_BLOCKERS for code in item.blockers)
     )
     all_valid_sources = tuple(
         item.source
@@ -307,7 +303,7 @@ def project_terminal_review(
     return TerminalReviewProjection(
         constructed_meters=constructed,
         unconstructed_meters=tuple(unconstructed),
-        rephoto_sources=ready_sources,
+        rephoto_sources=rephoto_sources,
         collector_requirements=collector_requirements,
         review_ready_count=review_ready_count,
         review_required_count=len(constructed) - review_ready_count,

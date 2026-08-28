@@ -76,7 +76,7 @@ def review_meter(
     )
 
 
-def test_automatic_approval_without_explicit_marker_stays_pending_manual_confirmation() -> None:
+def test_pending_manual_confirmation_remains_visible_but_keeps_rephoto_source() -> None:
     projection = project_terminal_review(
         (review_meter("g-auto", status="approved", classification_manual_confirmation=None),)
     )
@@ -87,7 +87,7 @@ def test_automatic_approval_without_explicit_marker_stays_pending_manual_confirm
     assert meter.blockers == ("review_not_approved",)
     assert projection.review_ready_count == 0
     assert projection.review_required_count == 1
-    assert projection.rephoto_sources == ()
+    assert [item.group_id for item in projection.rephoto_sources] == ["g-auto"]
 
 
 def test_current_explicit_marker_is_first_class_confirmation_evidence() -> None:
@@ -118,8 +118,8 @@ def test_stale_manual_confirmation_snapshot_cannot_unlock_rephoto() -> None:
     assert projection.review_required_count == 1
 
 
-def test_mixed_terminal_partitions_unconstructed_and_locks_on_constructed_review() -> None:
-    """Catches zero-photo rows blocking or entering the terminal re-photo snapshot."""
+def test_mixed_terminal_partitions_unconstructed_without_hiding_pending_review_sources() -> None:
+    """Catches pending classification hiding already constructed re-photo material."""
     projection = project_terminal_review(
         (
             review_meter("g-1", status="approved", barcode_status="passed"),
@@ -142,7 +142,7 @@ def test_mixed_terminal_partitions_unconstructed_and_locks_on_constructed_review
     assert [item.group_id for item in projection.unconstructed_meters] == ["g-3"]
     assert projection.review_ready_count == 1
     assert projection.review_required_count == 1
-    assert [item.group_id for item in projection.rephoto_sources] == ["g-1"]
+    assert [item.group_id for item in projection.rephoto_sources] == ["g-1", "g-2"]
     assert projection.source_revision != project_terminal_review(
         (review_meter("g-1", status="approved", barcode_status="passed"),)
     ).source_revision
@@ -282,6 +282,32 @@ def test_source_revision_ignores_every_unconstructed_field() -> None:
     )
 
     assert first.source_revision == changed.source_revision
+
+
+def test_source_revision_ignores_review_confirmation_and_barcode_status() -> None:
+    """Catches review-only progress invalidating an otherwise identical re-photo snapshot."""
+    pending = project_terminal_review(
+        (
+            review_meter(
+                "g-review-state",
+                barcode_status="pending",
+                classification_manual_confirmation=None,
+            ),
+        )
+    )
+    confirmed = project_terminal_review(
+        (
+            review_meter(
+                "g-review-state",
+                status="approved",
+                barcode_status="passed",
+            ),
+        )
+    )
+
+    assert pending.review_required_count == 1
+    assert confirmed.review_required_count == 0
+    assert pending.source_revision == confirmed.source_revision
 
 
 def test_shared_collector_is_one_requirement_with_all_constructed_meter_groups() -> None:

@@ -49,7 +49,6 @@ from app.services.collector_transfer import (
     CollectorWorkbenchIncompleteError,
     PostgresCollectorTransferService,
     TerminalNotFoundError,
-    TerminalReviewRequiredError,
     TerminalSourceChangedError,
     _photo_snapshot,
     meter_sources_from_groups,
@@ -3555,7 +3554,7 @@ def test_global_terminal_candidates_include_mixed_construction_review_counts(
     assert candidate["terminal_key"] != "MIXED-001"
 
 
-def test_automatic_approved_group_without_manual_marker_does_not_unlock_workbench(
+def test_automatic_approved_group_without_manual_marker_keeps_review_pending_and_opens_rephoto(
     db_session: Session,
 ) -> None:
     project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
@@ -3586,7 +3585,9 @@ def test_automatic_approved_group_without_manual_marker_does_not_unlock_workbenc
 
     assert candidate["review_ready_count"] == 0
     assert candidate["review_required_count"] == 1
-    assert opened["rephoto"] is None
+    assert opened["workflow_state"] == "needs_review"
+    assert opened["rephoto"] is not None
+    assert len(opened["rephoto"]["meter_install_items"]) == 1
     assert opened["meters"][0]["classification_manually_confirmed"] is False
     assert opened["meters"][0]["classification_manual_confirmation"] is None
 
@@ -3734,10 +3735,10 @@ def test_global_terminal_candidates_block_conflicts_and_bound_filters(
     )["items"][0]["terminal_key"]
 
 
-def test_review_workbench_open_keeps_mixed_terminal_locked_without_hidden_run(
+def test_review_workbench_open_keeps_review_pending_and_creates_constructed_rephoto_run(
     db_session: Session,
 ) -> None:
-    """Catches creating hidden re-photo state before every constructed meter is reviewed."""
+    """Catches pending classification hiding already constructed re-photo material."""
     project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
     add_global_terminal_source(
         db_session,
@@ -3781,7 +3782,8 @@ def test_review_workbench_open_keeps_mixed_terminal_locked_without_hidden_run(
     )
 
     assert result["workflow_state"] == "needs_review"
-    assert result["rephoto"] is None
+    assert result["rephoto"] is not None
+    assert len(result["rephoto"]["meter_install_items"]) == 2
     assert result["constructed_meter_count"] == 2
     assert result["unconstructed_meter_count"] == 1
     assert [row["group_id"] for row in result["meters"]] == [
@@ -3789,7 +3791,7 @@ def test_review_workbench_open_keeps_mixed_terminal_locked_without_hidden_run(
         "g-review",
         "g-unbuilt",
     ]
-    assert db_session.scalar(select(func.count(CollectorTransferRun.id))) == before
+    assert db_session.scalar(select(func.count(CollectorTransferRun.id))) == before + 1
 
 
 def test_review_workbench_open_all_unconstructed_is_zero_write(
@@ -4163,11 +4165,11 @@ def test_review_gate_compiles_postgres_valid_outer_join_lock_shape(
     "operation",
     ["replace_missing", "rollback", "refresh", "complete_meter", "complete_collector"],
 )
-def test_every_collector_mutation_rechecks_terminal_review_gate_without_writes(
+def test_every_collector_mutation_allows_pending_review_when_source_is_unchanged(
     db_session: Session,
     operation: str,
 ) -> None:
-    """Catches any collector mutation trusting a once-ready hidden snapshot."""
+    """Catches review-only state changes re-locking valid re-photo operations."""
     project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
     group = add_global_terminal_source(
         db_session,
@@ -4214,20 +4216,19 @@ def test_every_collector_mutation_rechecks_terminal_review_gate_without_writes(
     db_session.commit()
     before = mutation_fingerprint(db_session)
 
-    with pytest.raises(TerminalReviewRequiredError):
-        if operation == "replace_missing":
-            service(db_session).replace_terminal_missing(terminal_id=terminal_id)
-        elif operation == "rollback":
-            service(db_session).rollback_assignment(assignment_id=assignment_id)
-        elif operation == "refresh":
-            service(db_session).refresh_global_terminal(terminal_id=terminal_id)
-        else:
-            service(db_session).set_workbench_item_status(
-                item_id=item_id,
-                completed=True,
-            )
+    if operation == "replace_missing":
+        service(db_session).replace_terminal_missing(terminal_id=terminal_id)
+    elif operation == "rollback":
+        service(db_session).rollback_assignment(assignment_id=assignment_id)
+    elif operation == "refresh":
+        service(db_session).refresh_global_terminal(terminal_id=terminal_id)
+    else:
+        service(db_session).set_workbench_item_status(
+            item_id=item_id,
+            completed=True,
+        )
 
-    assert mutation_fingerprint(db_session) == before
+    assert mutation_fingerprint(db_session) != before
 
 
 @pytest.mark.parametrize(
@@ -4308,11 +4309,11 @@ def test_every_collector_mutation_rejects_source_changed_active_photo_without_wr
     assert mutation_fingerprint(db_session) == before
 
 
-def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
+def test_final_approval_updates_review_state_without_gating_rephoto(
     db_session: Session,
     monkeypatch,
 ) -> None:
-    """Catches reopening a terminal before its final constructed meter is approved."""
+    """Catches classification status suppressing otherwise complete re-photo material."""
     project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
     terminal_code = "FINAL-APPROVAL-001"
     add_global_terminal_source(
@@ -4358,7 +4359,8 @@ def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
 
     assert locked["workflow_state"] == "needs_review"
     assert locked["review_required_count"] == 1
-    assert locked["rephoto"] is None
+    assert locked["rephoto"] is not None
+    assert len(locked["rephoto"]["meter_install_items"]) == 2
 
     repository = PostgresStateRepository()
     monkeypatch.setattr(
@@ -4391,7 +4393,8 @@ def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
     assert approved_group.reviewer == "terminal-reviewer"
     assert approved_group.reviewed_at is not None
     assert reviewed_but_unconfirmed["review_required_count"] == 1
-    assert reviewed_but_unconfirmed["rephoto"] is None
+    assert reviewed_but_unconfirmed["rephoto"] is not None
+    assert reviewed_but_unconfirmed["rephoto"]["run_id"] == locked["rephoto"]["run_id"]
 
     set_manual_classification_confirmation(db_session, approved_group)
     db_session.commit()
@@ -4405,10 +4408,10 @@ def test_final_approval_unlocks_rephoto_only_after_current_evidence_is_ready(
     assert len(unlocked["rephoto"]["meter_install_items"]) == 2
 
 
-def test_repeated_rollback_rechecks_review_gate_without_writes(
+def test_repeated_rollback_remains_idempotent_while_review_is_pending(
     db_session: Session,
 ) -> None:
-    """Catches an idempotent rollback bypassing terminal review after its source is invalidated."""
+    """Catches review-only state turning an idempotent rollback into an error."""
     project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
     group = add_global_terminal_source(
         db_session,
@@ -4445,9 +4448,9 @@ def test_repeated_rollback_rechecks_review_gate_without_writes(
     db_session.commit()
     before = mutation_fingerprint(db_session)
 
-    with pytest.raises(TerminalReviewRequiredError):
-        service(db_session).rollback_assignment(assignment_id=assignment_id)
+    result = service(db_session).rollback_assignment(assignment_id=assignment_id)
 
+    assert result["status"] == "rolled_back"
     assert mutation_fingerprint(db_session) == before
 
 
@@ -5295,10 +5298,10 @@ def test_legacy_allocate_rejects_a_global_terminal_hidden_run(
     assert physical.pool_status == "available"
 
 
-def test_legacy_allocate_rechecks_hidden_terminal_review_before_generic_rejection(
+def test_legacy_allocate_keeps_terminal_scoped_rejection_while_review_is_pending(
     db_session: Session,
 ) -> None:
-    """Catches the old global-run shortcut masking a newly required review."""
+    """Catches pending review changing the global workbench's terminal-scoped safety gate."""
     project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
     group = add_global_terminal_source(
         db_session,
@@ -5323,7 +5326,7 @@ def test_legacy_allocate_rechecks_hidden_terminal_review_before_generic_rejectio
     db_session.commit()
     before = mutation_fingerprint(db_session)
 
-    with pytest.raises(TerminalReviewRequiredError):
+    with pytest.raises(ValueError, match="terminal-scoped"):
         service(db_session).allocate(run_id=opened["run_id"])
 
     assert mutation_fingerprint(db_session) == before

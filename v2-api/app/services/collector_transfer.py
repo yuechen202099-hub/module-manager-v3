@@ -932,7 +932,7 @@ class PostgresCollectorTransferService:
             review_rows=review_rows,
         )
 
-    def _require_terminal_review_ready(
+    def _require_terminal_rephoto_ready(
         self,
         *,
         run: CollectorTransferRun,
@@ -952,14 +952,6 @@ class PostgresCollectorTransferService:
         if projection.hard_blocked:
             raise CollectorTerminalSourceBlockedError(
                 "terminal source is blocked by current review evidence"
-            )
-        if projection.review_required_count:
-            raise TerminalReviewRequiredError(
-                tuple(
-                    item
-                    for item in projection.constructed_meters
-                    if not item.review_ready
-                )
             )
         stored_revision = normalize_identifier(
             (run.stats or {}).get("source_revision")
@@ -2149,7 +2141,7 @@ class PostgresCollectorTransferService:
             pool_available_count=0,
             snapshot_state=None,
         )
-        if locked_state in {"no_construction", "needs_review", "blocked"}:
+        if locked_state in {"no_construction", "blocked"}:
             return self._review_workbench_result(
                 project=project,
                 bundle=bundle,
@@ -3512,7 +3504,7 @@ class PostgresCollectorTransferService:
             )
             if terminal is None:
                 raise KeyError(run_id)
-            self._require_terminal_review_ready(run=run, terminal=terminal)
+            self._require_terminal_rephoto_ready(run=run, terminal=terminal)
             raise CollectorRunBlockedError(
                 "global terminal workbench requires terminal-scoped replacement"
             )
@@ -3684,7 +3676,7 @@ class PostgresCollectorTransferService:
         )
         if terminal is None:
             raise KeyError(terminal_id)
-        self._require_terminal_review_ready(run=run, terminal=terminal)
+        self._require_terminal_rephoto_ready(run=run, terminal=terminal)
         if terminal.status == "blocked":
             raise CollectorTerminalSourceBlockedError(
                 "终端存在资料阻断，不能执行随机替换"
@@ -3894,7 +3886,7 @@ class PostgresCollectorTransferService:
             raise CollectorSnapshotChangedError(
                 "snapshot has progress; undo completions and roll back assignments first"
             )
-        self._require_terminal_review_ready(run=run, terminal=terminal)
+        self._require_terminal_rephoto_ready(run=run, terminal=terminal)
 
         return self.open_global_terminal(
             project_id=str(run.project_id),
@@ -3979,7 +3971,7 @@ class PostgresCollectorTransferService:
         if terminal is None:
             raise ValueError("assignment resources are missing")
         if is_global_terminal_workbench:
-            self._require_terminal_review_ready(run=run, terminal=terminal)
+            self._require_terminal_rephoto_ready(run=run, terminal=terminal)
         if assignment_ref.status == "rolled_back":
             return {
                 "assignment_id": str(assignment_uuid),
@@ -4654,7 +4646,7 @@ class PostgresCollectorTransferService:
         if terminal is None:
             raise CollectorWorkbenchIncompleteError(("终端快照不存在",))
         if is_global_terminal_workbench:
-            self._require_terminal_review_ready(run=run, terminal=terminal)
+            self._require_terminal_rephoto_ready(run=run, terminal=terminal)
 
         requirement_id = item_ref.requirement_id or (
             assignment_ref.requirement_id if assignment_ref is not None else None
