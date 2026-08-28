@@ -60,6 +60,7 @@ $releaseInputs = @(
     "docs\sop\09-export-retirement-and-oss-local-export.md",
     "docs\superpowers\specs\2026-08-26-unified-terminal-review-rephoto-workbench-design.md",
     "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md",
+    "docs\superpowers\plans\2026-08-28-v3-2-15-dashboard-rephoto-async.md",
     "v2-api\alembic\versions\0013_data_center_query_indexes.py",
     "v2-api\alembic\versions\0014_export_center_jobs.py",
     "v2-api\alembic\versions\0015_collector_transfer_workbench.py",
@@ -344,6 +345,7 @@ Copy-ReleaseItem "docs\sop" "docs\sop"
 Copy-ReleaseItem "docs\superpowers\specs\2026-08-23-collector-transfer-workbench-design.md" "docs\superpowers\specs\2026-08-23-collector-transfer-workbench-design.md"
 Copy-ReleaseItem "docs\superpowers\specs\2026-08-26-unified-terminal-review-rephoto-workbench-design.md" "docs\superpowers\specs\2026-08-26-unified-terminal-review-rephoto-workbench-design.md"
 Copy-ReleaseItem "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md" "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md"
+Copy-ReleaseItem "docs\superpowers\plans\2026-08-28-v3-2-15-dashboard-rephoto-async.md" "docs\superpowers\plans\2026-08-28-v3-2-15-dashboard-rephoto-async.md"
 Copy-ReleaseItem "ops" "ops"
 
 Copy-ReleaseItem "infra" "infra"
