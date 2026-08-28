@@ -82,6 +82,17 @@ def test_v3215_release_contract_is_registered_for_source_and_attestation() -> No
     verifier.verify_current_release_phase("source", "V3.2.15")
 
 
+def test_v3215_sop_attestation_forwards_verified_package_and_source_commit() -> None:
+    verifier = load_verifier()
+
+    verifier.verify_current_release_phase(
+        "attestation",
+        "V3.2.15",
+        package_path=ROOT / "build/server-release/module-manager-v2-server-3.2.15.zip",
+        expected_source_commit="143e155186ef8f3dadce61944007da8c271aa090",
+    )
+
+
 def test_v3214_attested_record_is_accepted_as_v3215_baseline() -> None:
     verifier = load_verifier()
     record = (ROOT / "ops/releases/V3.2.14.md").read_text(encoding="utf-8")

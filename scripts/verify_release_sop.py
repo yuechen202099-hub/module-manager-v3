@@ -1125,7 +1125,7 @@ def verify_current_release_phase(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     verifier_args = ["--phase", phase]
-    if candidate == "V3.2.14":
+    if candidate in {"V3.2.14", "V3.2.15"}:
         if package_path is not None:
             verifier_args.extend(("--package", str(package_path)))
         if expected_source_commit is not None:
