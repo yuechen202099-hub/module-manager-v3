@@ -4561,6 +4561,72 @@ def test_open_global_terminal_creates_one_terminal_snapshot_and_reuses_revision(
     assert reopened["snapshot_reused"] is True
 
 
+def test_open_global_terminal_keeps_only_safe_constructed_sources(
+    db_session: Session,
+) -> None:
+    """Catches legacy diagnostics blocking valid constructed evidence from opening."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    safe_group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="OPEN-SAFE-ONLY-001",
+        meter_no="M-SAFE",
+        collector_no="C-SAFE",
+        authoritative_address="安全施工地址",
+    )
+    add_unconstructed_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="OPEN-SAFE-ONLY-001",
+        meter_no="M-UNCONSTRUCTED",
+        authoritative_address="安全施工地址",
+    )
+    add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="OPEN-SAFE-ONLY-001",
+        meter_no="M-MISSING-COLLECTOR",
+        collector_no="",
+        authoritative_address="安全施工地址",
+    )
+    missing_photo_group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="OPEN-SAFE-ONLY-001",
+        meter_no="M-MISSING-PHOTO",
+        collector_no="C-MISSING-PHOTO",
+        authoritative_address="安全施工地址",
+    )
+    missing_photo = db_session.scalar(
+        select(Photo).where(
+            Photo.group_id == missing_photo_group.id,
+            Photo.category == "after_box",
+        )
+    )
+    missing_photo.is_active = False
+    db_session.commit()
+    candidate = service(db_session).list_global_terminals(
+        query="OPEN-SAFE-ONLY-001",
+        include_blocked=True,
+    )["items"][0]
+
+    opened = service(db_session).open_global_terminal(
+        project_id=str(project.id),
+        terminal_code="OPEN-SAFE-ONLY-001",
+        source_revision=candidate["source_revision"],
+        terminal_key_value=candidate["terminal_key"],
+    )
+
+    meter_items = list(
+        db_session.scalars(
+            select(CollectorMeterItem).where(
+                CollectorMeterItem.run_id == UUID(opened["run_id"])
+            )
+        )
+    )
+    assert [item.source_group_id for item in meter_items] == [safe_group.id]
+
+
 def test_open_global_terminal_supersedes_untouched_snapshot_after_source_change(
     db_session: Session,
 ) -> None:

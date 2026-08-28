@@ -148,6 +148,36 @@ def test_mixed_terminal_partitions_unconstructed_without_hiding_pending_review_s
     ).source_revision
 
 
+def test_safe_constructed_sources_survive_unconstructed_and_incomplete_rows() -> None:
+    """Catches one incomplete row blocking a terminal's independent constructed evidence."""
+    projection = project_terminal_review(
+        (
+            review_meter("g-safe"),
+            review_meter(
+                "g-unconstructed",
+                persisted_photo_count=0,
+                active_photos=(),
+            ),
+            review_meter("g-missing-collector", collector_no=""),
+            review_meter(
+                "g-missing-photo",
+                active_photos=(
+                    photo("g-missing-photo-module", "module_meter", "3"),
+                ),
+            ),
+        )
+    )
+
+    assert [item.group_id for item in projection.rephoto_sources] == ["g-safe"]
+    blockers_by_group = {
+        item.group_id: item.blockers
+        for item in projection.constructed_meters
+    }
+    assert "collector_missing" in blockers_by_group["g-missing-collector"]
+    assert "after_box_photo_missing" in blockers_by_group["g-missing-photo"]
+    assert projection.hard_blocked is False
+
+
 def test_persisted_construction_without_active_photos_requires_both_slots() -> None:
     """Catches treating a positive historical photo count as current re-photo evidence."""
     projection = project_terminal_review(

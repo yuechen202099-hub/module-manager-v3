@@ -295,11 +295,7 @@ def project_terminal_review(
         for evidence, projection in constructed_pairs
     )
     review_ready_count = sum(item.review_ready for item in constructed)
-    hard_blocked = any(
-        code not in _SOFT_REVIEW_BLOCKERS
-        for item in constructed
-        for code in item.blockers
-    )
+    hard_blocked = bool(constructed) and not rephoto_sources
     return TerminalReviewProjection(
         constructed_meters=constructed,
         unconstructed_meters=tuple(unconstructed),

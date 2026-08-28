@@ -1968,16 +1968,18 @@ class PostgresCollectorTransferService:
             project_id=project.id,
             terminal_code=normalized_code,
         )
-        projection, photos = self._global_terminal_projection(
+        bundle = self._terminal_review_bundle(
             project_id=project.id,
             terminal_code=normalized_code,
         )
-        if projection.diagnostics:
+        if not bundle.projection.rephoto_sources:
             raise CollectorTerminalSourceBlockedError("terminal source is blocked")
-        current_revision = self._terminal_review_bundle(
-            project_id=project.id,
-            terminal_code=normalized_code,
-        ).projection.source_revision
+        projection = MeterSourceProjection(
+            sources=bundle.projection.rephoto_sources,
+            diagnostics=(),
+        )
+        photos = bundle.photos
+        current_revision = bundle.projection.source_revision
         requested_revision = normalize_identifier(source_revision)
         active_run = self._active_global_terminal_run(
             project_id=project.id,
