@@ -2,10 +2,10 @@
 
 本清单用于甲方第一版演示结束后的现场确认。签收范围是“模块更换项目管理器 V2.0 本地交付演示版”，不等同于公网生产部署版。
 
-## V3.2.12 候选生产包路径
+## V3.2.13 候选生产包路径
 
 ```text
-build/server-release/module-manager-v2-server-3.2.12.zip
+build/server-release/module-manager-v2-server-3.2.13.zip
 ```
 
 ## 演示入口

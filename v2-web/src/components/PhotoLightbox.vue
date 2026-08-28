@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
-defineProps<{
+const props = defineProps<{
   src: string
   alt: string
 }>()
@@ -10,25 +10,88 @@ const emit = defineEmits<{
   (event: 'close'): void
 }>()
 
-function closeOnEscape(event: KeyboardEvent) {
-  if (event.key === 'Escape') emit('close')
+const dialog = ref<HTMLElement | null>(null)
+const closeButton = ref<HTMLButtonElement | null>(null)
+let previousFocus: HTMLElement | null = null
+let listening = false
+
+function focusableElements() {
+  if (!dialog.value) return []
+  return Array.from(
+    dialog.value.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => element.getAttribute('aria-hidden') !== 'true')
 }
 
-onMounted(() => window.addEventListener('keydown', closeOnEscape))
-onBeforeUnmount(() => window.removeEventListener('keydown', closeOnEscape))
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    emit('close')
+    return
+  }
+  if (event.key !== 'Tab') return
+
+  const focusable = focusableElements()
+  if (focusable.length === 0) {
+    event.preventDefault()
+    dialog.value?.focus()
+    return
+  }
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  const active = document.activeElement
+  if (event.shiftKey && (active === first || !dialog.value?.contains(active))) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && (active === last || !dialog.value?.contains(active))) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+function activate() {
+  if (listening) return
+  previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  window.addEventListener('keydown', handleKeydown)
+  listening = true
+  void nextTick(() => {
+    if (props.src) closeButton.value?.focus()
+  })
+}
+
+function deactivate() {
+  if (listening) {
+    window.removeEventListener('keydown', handleKeydown)
+    listening = false
+  }
+  if (previousFocus?.isConnected) previousFocus.focus()
+  previousFocus = null
+}
+
+watch(
+  () => props.src,
+  (src, previousSrc) => {
+    if (src && !previousSrc) activate()
+    else if (!src && previousSrc) deactivate()
+  },
+  { immediate: true },
+)
+onBeforeUnmount(deactivate)
 </script>
 
 <template>
   <div
     v-if="src"
+    ref="dialog"
     class="photo-lightbox"
     data-testid="photo-lightbox"
     role="dialog"
     aria-modal="true"
+    tabindex="-1"
     :aria-label="`${alt}大图`"
     @click.self="emit('close')"
   >
-    <button type="button" data-testid="close-photo-lightbox" aria-label="关闭大图" @click="emit('close')">关闭</button>
+    <button ref="closeButton" type="button" data-testid="close-photo-lightbox" aria-label="关闭大图" @click="emit('close')">关闭</button>
     <figure>
       <img data-testid="photo-lightbox-image" :src="src" :alt="alt" />
       <figcaption>{{ alt }}</figcaption>

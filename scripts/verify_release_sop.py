@@ -40,6 +40,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_11_release.py",
     "scripts/verify_v3_2_12_release.py",
     "scripts/test_verify_v3_2_12_release.py",
+    "scripts/verify_v3_2_13_release.py",
+    "scripts/test_verify_v3_2_13_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -75,6 +77,7 @@ RELEASE_INPUTS = (
     "v2-web/src/components/data-center/DataCenterFilters.vue",
     "v2-web/src/components/data-center/DataCenterReviewDialog.vue",
     "v2-web/src/components/data-center/DataCenterGroupReviewPanel.vue",
+    "v2-web/src/components/PhotoLightbox.vue",
     "v2-web/src/composables/useDataCenterQuery.ts",
     "v2-web/src/utils/dataCenterDrilldown.ts",
     "v2-web/src/components/InstallerKpiDialog.vue",
@@ -104,6 +107,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.10.md",
     "ops/releases/V3.2.11.md",
     "ops/releases/V3.2.12.md",
+    "ops/releases/V3.2.13.md",
 )
 
 REQUIRED_FILES = [
@@ -973,6 +977,15 @@ def verified_v3211_attested_baseline_is_documented(record: str, version: str) ->
     return True
 
 
+def verified_v3212_attested_baseline_is_documented(record: str, version: str) -> bool:
+    if version != "V3.2.12":
+        return False
+    expected_sha256 = "7354aa5be62423111f4e4136cc56d88da76dd426965b7c1c10705eca83d598aa"
+    if hashlib.sha256(record.encode("utf-8")).hexdigest() != expected_sha256:
+        fail("V3.2.12 attested baseline record must remain byte-identical to its production proof")
+    return True
+
+
 def release_record_matches_lifecycle_state(
     record: str,
     version: str,
@@ -981,6 +994,8 @@ def release_record_matches_lifecycle_state(
     candidate_phase: str = "source",
 ) -> None:
     if version == deployed_baseline:
+        if verified_v3212_attested_baseline_is_documented(record, version):
+            return
         if verified_v3211_attested_baseline_is_documented(record, version):
             return
         if verified_v3210_attested_baseline_is_documented(record, version):
@@ -1040,7 +1055,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def verify_current_release_phase(phase: str, version: str | None = None) -> None:
     candidate = version or release_candidate(read("AGENTS.md"))
-    if candidate == "V3.2.12":
+    if candidate == "V3.2.13":
+        path = Path(__file__).with_name("verify_v3_2_13_release.py")
+        module_name = "verify_v3_2_13_release"
+    elif candidate == "V3.2.12":
         path = Path(__file__).with_name("verify_v3_2_12_release.py")
         module_name = "verify_v3_2_12_release"
     elif candidate == "V3.2.11":

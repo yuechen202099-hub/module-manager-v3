@@ -2,11 +2,11 @@
 
 This directory is the standard operating procedure entrypoint for the production maintenance line.
 
-Current production baseline: `V3.2.11`.
+Current production baseline: `V3.2.12`.
 
-Current release candidate: `V3.2.12`.
+Current release candidate: `V3.2.13`.
 
-Current candidate branch: `production/V3/3.2.12`.
+Current candidate branch: `production/V3/3.2.13`.
 
 Use these SOPs for every production-impacting change:
 

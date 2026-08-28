@@ -3,7 +3,7 @@
     <header class="legacy-layout-header">
       <div>
         <strong>模块更换项目管理器</strong>
-        <span>V3.2.12</span>
+        <span>V3.2.13</span>
       </div>
       <el-tag type="info" effect="plain">兼容布局</el-tag>
     </header>

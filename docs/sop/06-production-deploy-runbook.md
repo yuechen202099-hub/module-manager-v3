@@ -90,13 +90,13 @@ systemctl stop module-manager-v2-photo-barcode-maintenance.service 2>/dev/null |
 systemctl stop module-manager-v2-photo-barcode-maintenance.timer 2>/dev/null || true
 systemctl stop module-manager-v2-photo-barcode-maintenance-enqueue.service 2>/dev/null || true
 
-# The current candidate requires the complete 20260721_0005 -> 20260724_0014 upgrade chain.
+# The current candidate requires the complete 20260721_0005 -> 20260824_0016 upgrade chain.
 set -a
 . "$APP/.env"
 set +a
 cd "$REL/v2-api"
 $APP/venv/bin/python -m alembic upgrade head
-$APP/venv/bin/python -m alembic current | grep -q "20260724_0014"
+$APP/venv/bin/python -m alembic current | grep -q "20260824_0016"
 
 install -m 0644 "$REL/infra/module-manager-v2-photo-barcode-maintenance.service" \
   /etc/systemd/system/module-manager-v2-photo-barcode-maintenance.service
@@ -118,7 +118,7 @@ systemctl is-active nginx
 systemctl show module-manager-v2.service -p User -p Group -p WorkingDirectory -p ExecStart
 ```
 
-The `0006` through `0014` migrations are forward-only in this release. A code rollback must keep the database at `20260724_0014`; do not run `alembic downgrade` in production. The API, worker, and enqueue service must all report `modulemgr` as their configured user before the worker is resumed.
+The `0006` through `0016` migrations are forward-only in this release. A code rollback must keep the database at `20260824_0016`; do not run `alembic downgrade` in production. The API, worker, and enqueue service must all report `modulemgr` as their configured user before the worker is resumed.
 
 ## Post-Deploy Health Check
 
