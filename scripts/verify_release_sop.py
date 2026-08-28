@@ -42,6 +42,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_12_release.py",
     "scripts/verify_v3_2_13_release.py",
     "scripts/test_verify_v3_2_13_release.py",
+    "scripts/verify_v3_2_14_release.py",
+    "scripts/test_verify_v3_2_14_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -108,6 +110,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.11.md",
     "ops/releases/V3.2.12.md",
     "ops/releases/V3.2.13.md",
+    "ops/releases/V3.2.14.md",
 )
 
 REQUIRED_FILES = [
@@ -811,9 +814,16 @@ def candidate_release_record_is_pending(record: str, version: str, deployed_base
     for field, value in required_fields.items():
         values = lifecycle_values[field]
         if field == "Local Verification":
-            allowed = {normalize_text("not run"), normalize_text("passed")}
+            allowed = {
+                normalize_text("not run"),
+                normalize_text("pending"),
+                normalize_text("passed"),
+            }
             if len(values) != 1 or normalize_text(values[0]).strip() not in allowed:
-                fail(f"{version} release record must define Local Verification: not run or passed exactly once")
+                fail(
+                    f"{version} release record must define Local Verification: "
+                    "not run, pending, or passed exactly once"
+                )
             continue
         if len(values) != 1 or normalize_text(values[0]).strip() != normalize_text(value):
             fail(f"{version} release record must define {field}: {value} exactly once")
@@ -986,6 +996,15 @@ def verified_v3212_attested_baseline_is_documented(record: str, version: str) ->
     return True
 
 
+def verified_v3213_attested_baseline_is_documented(record: str, version: str) -> bool:
+    if version != "V3.2.13":
+        return False
+    expected_sha256 = "2db0b2c7a895d57dfef268ff3f12063c6104a06cbe9031eabcb86b70ea98bfb8"
+    if hashlib.sha256(record.encode("utf-8")).hexdigest() != expected_sha256:
+        fail("V3.2.13 attested baseline record must remain byte-identical to its production proof")
+    return True
+
+
 def release_record_matches_lifecycle_state(
     record: str,
     version: str,
@@ -994,6 +1013,8 @@ def release_record_matches_lifecycle_state(
     candidate_phase: str = "source",
 ) -> None:
     if version == deployed_baseline:
+        if verified_v3213_attested_baseline_is_documented(record, version):
+            return
         if verified_v3212_attested_baseline_is_documented(record, version):
             return
         if verified_v3211_attested_baseline_is_documented(record, version):
@@ -1055,7 +1076,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def verify_current_release_phase(phase: str, version: str | None = None) -> None:
     candidate = version or release_candidate(read("AGENTS.md"))
-    if candidate == "V3.2.13":
+    if candidate == "V3.2.14":
+        path = Path(__file__).with_name("verify_v3_2_14_release.py")
+        module_name = "verify_v3_2_14_release"
+    elif candidate == "V3.2.13":
         path = Path(__file__).with_name("verify_v3_2_13_release.py")
         module_name = "verify_v3_2_13_release"
     elif candidate == "V3.2.12":

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.2.13",
+    [string]$Version = "3.2.14",
     [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
@@ -9,13 +9,13 @@ $ErrorActionPreference = "Stop"
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw "Release Version must be a semantic version such as 3.0.84."
 }
-$requiredVersion = "3.2.13"
-$protectedHistoricalVersion = "3.2.12"
+$requiredVersion = "3.2.14"
+$protectedHistoricalVersion = "3.2.13"
 if ($Version -eq $protectedHistoricalVersion) {
-    throw "Refusing to build protected historical release $Version. Expected exactly 3.2.13."
+    throw "Refusing to build protected historical release $Version. Expected exactly 3.2.14."
 }
 if ($Version -ne $requiredVersion) {
-    throw "Refusing to build release version $Version. Expected exactly 3.2.13."
+    throw "Refusing to build release version $Version. Expected exactly 3.2.14."
 }
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -49,12 +49,15 @@ $releaseInputs = @(
     "scripts\test_verify_v3_2_12_release.py",
     "scripts\verify_v3_2_13_release.py",
     "scripts\test_verify_v3_2_13_release.py",
+    "scripts\verify_v3_2_14_release.py",
+    "scripts\test_verify_v3_2_14_release.py",
     "scripts\patch_export_retirement_nginx.py",
     "scripts\test_patch_export_retirement_nginx.py",
     "scripts\oss_local_export.py",
     "scripts\test_oss_local_export.py",
     "docs\sop\09-export-retirement-and-oss-local-export.md",
     "docs\superpowers\specs\2026-08-26-unified-terminal-review-rephoto-workbench-design.md",
+    "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md",
     "v2-api\alembic\versions\0013_data_center_query_indexes.py",
     "v2-api\alembic\versions\0014_export_center_jobs.py",
     "v2-api\alembic\versions\0015_collector_transfer_workbench.py",
@@ -118,6 +121,7 @@ $releaseInputs = @(
     "ops\releases\V3.2.11.md",
     "ops\releases\V3.2.12.md",
     "ops\releases\V3.2.13.md"
+    "ops\releases\V3.2.14.md"
 )
 foreach ($releaseInput in $releaseInputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $root $releaseInput) -PathType Leaf)) {
@@ -130,8 +134,8 @@ if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the full Git source commit for this release."
 }
 $sourceBranch = (& git branch --show-current).Trim()
-if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.13") {
-    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.13."
+if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.14") {
+    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.14."
 }
 $worktreeChanges = @(
     git status --porcelain --untracked-files=all |
@@ -213,7 +217,7 @@ if ($performanceReportPath) {
     }
 }
 
-Write-Host "Running V3.2.13 focused release gates..."
+Write-Host "Running V3.2.14 focused release gates..."
 $releaseVerifiers = @(
     "scripts\verify_v3_2_0_role_routes.py",
     "scripts\verify_v3_2_0_data_center_ui.py",
@@ -221,34 +225,34 @@ $releaseVerifiers = @(
     "scripts\verify_v3_2_0_export_center_ui.py",
     "scripts\verify_v3_2_0_single_export_entry.py",
     "scripts\verify_v3_2_1_installer_kpi_restore.py",
-    "scripts\verify_v3_2_13_release.py"
+    "scripts\verify_v3_2_14_release.py"
 )
 foreach ($releaseVerifier in $releaseVerifiers) {
-    if ($releaseVerifier -eq "scripts\verify_v3_2_13_release.py") {
+    if ($releaseVerifier -eq "scripts\verify_v3_2_14_release.py") {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier) --phase source
     } else {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
     }
     if ($LASTEXITCODE -ne 0) {
-        throw "V3.2.13 release gate failed: $releaseVerifier"
+        throw "V3.2.14 release gate failed: $releaseVerifier"
     }
 }
 
-Write-Host "Running V3.2.13 contract tests..."
-& .\.venv\Scripts\python.exe -m pytest .\scripts\test_verify_v3_2_13_release.py -q
+Write-Host "Running V3.2.14 contract tests..."
+& .\.venv\Scripts\python.exe -m pytest .\scripts\test_verify_v3_2_14_release.py -q
 if ($LASTEXITCODE -ne 0) {
-    throw "V3.2.13 contract tests failed."
+    throw "V3.2.14 contract tests failed."
 }
 
 & .\.venv\Scripts\python.exe -m pytest .\v2-api\tests\test_collector_transfer_scale.py -q
 if ($LASTEXITCODE -ne 0) {
-    throw "V3.2.13 collector scale regression gate failed."
+    throw "V3.2.14 collector scale regression gate failed."
 }
 Push-Location .\v2-web
 try {
     npm run test:collector-transfer -- CollectorInventoryView.spec.ts
     if ($LASTEXITCODE -ne 0) {
-        throw "V3.2.13 collector camera regression gate failed."
+        throw "V3.2.14 collector camera regression gate failed."
     }
 }
 finally {
@@ -336,6 +340,7 @@ Copy-ReleaseItem "docs\database\postgresql-schema.md" "docs\database\postgresql-
 Copy-ReleaseItem "docs\sop" "docs\sop"
 Copy-ReleaseItem "docs\superpowers\specs\2026-08-23-collector-transfer-workbench-design.md" "docs\superpowers\specs\2026-08-23-collector-transfer-workbench-design.md"
 Copy-ReleaseItem "docs\superpowers\specs\2026-08-26-unified-terminal-review-rephoto-workbench-design.md" "docs\superpowers\specs\2026-08-26-unified-terminal-review-rephoto-workbench-design.md"
+Copy-ReleaseItem "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md" "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md"
 Copy-ReleaseItem "ops" "ops"
 
 Copy-ReleaseItem "infra" "infra"
@@ -393,6 +398,8 @@ Copy-ReleaseItem "scripts\verify_v3_2_12_release.py" "scripts\verify_v3_2_12_rel
 Copy-ReleaseItem "scripts\test_verify_v3_2_12_release.py" "scripts\test_verify_v3_2_12_release.py"
 Copy-ReleaseItem "scripts\verify_v3_2_13_release.py" "scripts\verify_v3_2_13_release.py"
 Copy-ReleaseItem "scripts\test_verify_v3_2_13_release.py" "scripts\test_verify_v3_2_13_release.py"
+Copy-ReleaseItem "scripts\verify_v3_2_14_release.py" "scripts\verify_v3_2_14_release.py"
+Copy-ReleaseItem "scripts\test_verify_v3_2_14_release.py" "scripts\test_verify_v3_2_14_release.py"
 Copy-ReleaseItem "scripts\patch_export_retirement_nginx.py" "scripts\patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\test_patch_export_retirement_nginx.py" "scripts\test_patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\oss_local_export.py" "scripts\oss_local_export.py"
