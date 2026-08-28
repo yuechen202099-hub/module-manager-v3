@@ -114,8 +114,10 @@ def write_attested_record(
         "- Browser viewport: pending": "- Browser viewport: `390x844 passed`",
     }
     for pending, attested in replacements.items():
-        assert pending in text
-        text = text.replace(pending, attested, 1)
+        if pending in text:
+            text = text.replace(pending, attested, 1)
+        else:
+            assert attested in text
     path.write_text(text, encoding="utf-8")
     return path
 
