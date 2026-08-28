@@ -30,8 +30,8 @@ const candidate = (overrides: Partial<GlobalCollectorTerminalCandidate> = {}): G
 const rephoto = (state: 'present' | 'missing' | 'replaced' = 'missing'): GlobalCollectorTerminalDetail => ({
   run_id: 'run-1', project_id: 'project-1', terminal: { id: 'terminal-1', terminal_code: 'T-001', installation_address: '安装地址', status: 'ready', diagnostics: [] },
   meter_install_items: [
-    { meter_item_id: 'meter-a', workbench_item_id: 'meter-workbench-a', status: 'pending', meter_no: 'M-A', meter_barcode: 'M-A', module_no: 'MOD-A', module_barcode: 'MOD-A', photos: [{ slot: 'module_meter', label: '电表和模块', photo }, { slot: 'after_box', label: '改造完成', photo }], diagnostics: [] },
-    { meter_item_id: 'meter-b', workbench_item_id: 'meter-workbench-b', status: 'pending', meter_no: 'M-B', meter_barcode: 'M-B', module_no: 'MOD-B', module_barcode: 'MOD-B', photos: [{ slot: 'module_meter', label: '电表和模块', photo }, { slot: 'after_box', label: '改造完成', photo }], diagnostics: [] },
+    { meter_item_id: 'meter-a', source_group_id: 'group-a', workbench_item_id: 'meter-workbench-a', status: 'pending', meter_no: 'M-A', meter_barcode: 'M-A', module_no: 'MOD-A', module_barcode: 'MOD-A', photos: [{ slot: 'module_meter', label: '电表和模块', photo }, { slot: 'after_box', label: '改造完成', photo }], diagnostics: [] },
+    { meter_item_id: 'meter-b', source_group_id: 'group-b', workbench_item_id: 'meter-workbench-b', status: 'pending', meter_no: 'M-B', meter_barcode: 'M-B', module_no: 'MOD-B', module_barcode: 'MOD-B', photos: [{ slot: 'module_meter', label: '电表和模块', photo }, { slot: 'after_box', label: '改造完成', photo }], diagnostics: [] },
   ],
   collector_items: [
     { requirement_id: 'collector-a', workbench_item_id: 'collector-workbench-a', status: 'pending', original_collector_no: 'C-01', physical_state: 'present', final_collector_no: 'C-01', collector_barcode: 'C-01', capture_strategy: 'live_physical', assignment_id: null, photo: null, diagnostics: [] },
@@ -195,6 +195,79 @@ describe('review rephoto workbench', () => {
     wrapper.unmount()
   })
 
+  it('keeps every incomplete manual-demand collector visible by requirement identity', async () => {
+    const withTwoManualDemands = rephoto('replaced')
+    withTwoManualDemands.collector_items = [
+      {
+        ...withTwoManualDemands.collector_items[0],
+        requirement_id: 'manual-requirement-a',
+        workbench_item_id: 'manual-workbench-a',
+        original_collector_no: '人工需求',
+        final_collector_no: 'POOL-A',
+        collector_barcode: 'POOL-A',
+        physical_state: 'replaced',
+        capture_strategy: 'screen_photo',
+        assignment_id: 'manual-assignment-a',
+        photo,
+        diagnostics: [{ group_id: '', code: 'manual_collector_demand', message: '人工需求' }],
+      },
+      {
+        ...withTwoManualDemands.collector_items[1],
+        requirement_id: 'manual-requirement-b',
+        workbench_item_id: 'manual-workbench-b',
+        original_collector_no: '人工需求',
+        final_collector_no: 'POOL-B',
+        collector_barcode: 'POOL-B',
+        physical_state: 'replaced',
+        capture_strategy: 'screen_photo',
+        assignment_id: 'manual-assignment-b',
+        photo,
+        diagnostics: [{ group_id: '', code: 'manual_collector_demand', message: '人工需求' }],
+      },
+    ]
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(open({ rephoto: withTwoManualDemands }))
+
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.findAll('.collector-card')).toHaveLength(2)
+    expect(wrapper.find('[data-testid="complete-collector-manual-requirement-a"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="complete-collector-manual-requirement-b"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('POOL-A')
+    expect(wrapper.text()).toContain('POOL-B')
+    wrapper.unmount()
+  })
+
+  it('hides only the completed group when sibling meters share a display number', async () => {
+    const duplicateMeterNumbers = rephoto('present')
+    duplicateMeterNumbers.meter_install_items[0] = {
+      ...duplicateMeterNumbers.meter_install_items[0],
+      meter_no: 'M-DUPLICATE',
+      meter_barcode: 'M-DUPLICATE',
+      status: 'completed',
+    }
+    duplicateMeterNumbers.meter_install_items[1] = {
+      ...duplicateMeterNumbers.meter_install_items[1],
+      meter_no: 'M-DUPLICATE',
+      meter_barcode: 'M-DUPLICATE',
+    }
+    const duplicateMeters = open({
+      rephoto: duplicateMeterNumbers,
+      meters: open().meters.map((meter, index) => (
+        index < 2 ? { ...meter, meter_no: 'M-DUPLICATE' } : meter
+      )),
+    })
+    serviceMocks.openReviewWorkbenchTerminal.mockResolvedValue(duplicateMeters)
+
+    const wrapper = await mountWorkbench()
+
+    expect(wrapper.find('[data-testid="meter-record-group-a"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="meter-record-group-b"]').exists()).toBe(true)
+    await wrapper.get('.complete-meter').trigger('click')
+    await flushPromises()
+    expect(serviceMocks.setCollectorWorkbenchItemCompleted).toHaveBeenCalledWith('meter-workbench-b', true)
+    wrapper.unmount()
+  })
+
   it('submits a positive manual demand, disables invalid quantities, and reopens the terminal', async () => {
     serviceMocks.openReviewWorkbenchTerminal
       .mockResolvedValueOnce(open({ workflow_state: 'ready', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('present') }))
@@ -207,8 +280,13 @@ describe('review rephoto workbench', () => {
     expect(submit.element.disabled).toBe(true)
     await quantity.setValue('1.5')
     expect(submit.element.disabled).toBe(true)
+    await quantity.setValue('101')
+    expect(submit.element.disabled).toBe(true)
+    await quantity.setValue('100')
+    expect(submit.element.disabled).toBe(false)
     await quantity.setValue('2')
     expect(submit.element.disabled).toBe(false)
+    expect(quantity.attributes('max')).toBe('100')
     await submit.trigger('click')
     await flushPromises()
 

@@ -28,6 +28,7 @@ const mutationPending = ref(false)
 const errorMessage = ref('')
 const photoPreview = ref({ src: '', alt: '' })
 const manualDemandQuantity = ref('')
+const maxManualDemandQuantity = 100
 let searchSerial = 0
 let openSerial = 0
 let searchTimer = 0
@@ -36,12 +37,12 @@ const candidatePageSize = 50
 
 const rephoto = computed(() => opened.value?.rephoto || null)
 const activeMeters = computed(() => {
-  const completedMeterNumbers = new Set(
+  const completedGroupIds = new Set(
     (rephoto.value?.meter_install_items || [])
       .filter((item) => item.status === 'completed')
-      .map((item) => item.meter_no),
+      .map((item) => item.source_group_id),
   )
-  return (opened.value?.meters || []).filter((meter) => !completedMeterNumbers.has(meter.meter_no))
+  return (opened.value?.meters || []).filter((meter) => !completedGroupIds.has(meter.group_id))
 })
 const constructedMeters = computed(() => activeMeters.value.filter((meter) => meter.construction_state === 'constructed'))
 const unconstructedMeters = computed(() => activeMeters.value.filter((meter) => meter.construction_state === 'unconstructed'))
@@ -49,20 +50,22 @@ const selectedMeter = computed<ReviewWorkbenchMeter | null>(() => activeMeters.v
 const sourceChanged = computed(() => Boolean(rephoto.value?.source_changed))
 const rephotoUnlocked = computed(() => canMutateRephoto({ rephoto: rephoto.value, source_changed: rephoto.value?.source_changed }))
 const mutable = computed(() => rephotoUnlocked.value && !mutationPending.value)
-const selectedRephotoItem = computed(() => rephoto.value?.meter_install_items.find((item) => item.meter_no === selectedMeter.value?.meter_no && item.status !== 'completed') || null)
+const selectedRephotoItem = computed(() => rephoto.value?.meter_install_items.find((item) => item.source_group_id === selectedMeter.value?.group_id && item.status !== 'completed') || null)
 const parsedManualDemandQuantity = computed(() => {
   const value = String(manualDemandQuantity.value).trim()
   if (!value || !/^\d+$/.test(value)) return null
   const quantity = Number(value)
-  return Number.isSafeInteger(quantity) && quantity > 0 ? quantity : null
+  return Number.isSafeInteger(quantity) && quantity > 0 && quantity <= maxManualDemandQuantity ? quantity : null
 })
 const canSubmitManualDemand = computed(() => mutable.value && parsedManualDemandQuantity.value !== null)
 const deduplicatedCollectors = computed(() => {
   const rows = (rephoto.value?.collector_items || []).filter((row) => row.status !== 'completed')
   const result = new Map<string, CollectorRequirementWorkbenchRow>()
   for (const row of rows) {
-    const current = result.get(row.original_collector_no)
-    if (!current || collectorPriority(row) > collectorPriority(current)) result.set(row.original_collector_no, row)
+    const isManualDemand = row.diagnostics.some((item) => item.code === 'manual_collector_demand')
+    const identity = isManualDemand ? `requirement:${row.requirement_id}` : `collector:${row.original_collector_no}`
+    const current = result.get(identity)
+    if (!current || collectorPriority(row) > collectorPriority(current)) result.set(identity, row)
   }
   return [...result.values()]
 })
@@ -331,7 +334,7 @@ function addManualDemand() {
         <h2>采集器</h2>
         <div class="manual-demand-control">
           <label for="manual-demand-quantity">人工需求</label>
-          <input id="manual-demand-quantity" v-model="manualDemandQuantity" type="number" min="1" step="1" inputmode="numeric" data-testid="manual-demand-quantity" aria-label="增加采集器数量" />
+          <input id="manual-demand-quantity" v-model="manualDemandQuantity" type="number" min="1" :max="maxManualDemandQuantity" step="1" inputmode="numeric" data-testid="manual-demand-quantity" aria-label="增加采集器数量" />
           <button type="button" class="rephoto-mutation" data-testid="submit-manual-demand" :disabled="!canSubmitManualDemand" @click="addManualDemand">增加并随机匹配</button>
         </div>
         <div class="collector-table">

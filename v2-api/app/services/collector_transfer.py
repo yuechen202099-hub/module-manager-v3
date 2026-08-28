@@ -133,6 +133,7 @@ _MISSING_TERMINAL_PREFIX = "__missing_terminal__:"
 _MANUAL_DEMAND_INTERNAL_PREFIX = "manual-demand:"
 _MANUAL_DEMAND_DIAGNOSTIC_CODE = "manual_collector_demand"
 _MANUAL_DEMAND_LABEL = "人工需求"
+_MAX_MANUAL_DEMAND_QUANTITY = 100
 _IDENTIFIER_BOUNDARY_WHITESPACE = (
     "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680"
     "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
@@ -3943,6 +3944,10 @@ class PostgresCollectorTransferService:
     ) -> dict[str, object]:
         if isinstance(quantity, bool) or quantity <= 0:
             raise ValueError("quantity must be a positive integer")
+        if quantity > _MAX_MANUAL_DEMAND_QUANTITY:
+            raise ValueError(
+                f"quantity must not exceed {_MAX_MANUAL_DEMAND_QUANTITY}"
+            )
 
         run, terminal = self._locked_global_workbench_terminal(
             terminal_id=terminal_id
@@ -4427,6 +4432,22 @@ class PostgresCollectorTransferService:
                 .order_by(CollectorMeterItem.sort_order, CollectorMeterItem.id)
             ).all()
         )
+        source_group_ids = [meter.source_group_id for meter in meter_rows]
+        source_group_rows = (
+            self.session.execute(
+                select(MaterialGroup.id, MaterialGroup.legacy_id).where(
+                    MaterialGroup.id.in_(source_group_ids),
+                    MaterialGroup.team_id == self.team_id,
+                    MaterialGroup.project_id == run.project_id,
+                )
+            ).all()
+            if source_group_ids
+            else []
+        )
+        public_group_id_by_id = {
+            group_id: normalize_identifier(legacy_id) or str(group_id)
+            for group_id, legacy_id in source_group_rows
+        }
         requirement_rows = list(
             self.session.scalars(
                 select(CollectorRequirement)
@@ -4557,6 +4578,10 @@ class PostgresCollectorTransferService:
             meter_install_items.append(
                 {
                     "meter_item_id": str(meter.id),
+                    "source_group_id": public_group_id_by_id.get(
+                        meter.source_group_id,
+                        str(meter.source_group_id),
+                    ),
                     "workbench_item_id": str(item.id) if item is not None else None,
                     "status": item.status if item is not None else None,
                     "meter_no": meter.meter_no,

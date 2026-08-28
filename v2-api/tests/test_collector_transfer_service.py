@@ -3784,6 +3784,10 @@ def test_review_workbench_open_keeps_review_pending_and_creates_constructed_reph
     assert result["workflow_state"] == "needs_review"
     assert result["rephoto"] is not None
     assert len(result["rephoto"]["meter_install_items"]) == 2
+    assert [
+        row["source_group_id"]
+        for row in result["rephoto"]["meter_install_items"]
+    ] == ["g-ready", "g-review"]
     assert result["constructed_meter_count"] == 2
     assert result["unconstructed_meter_count"] == 1
     assert [row["group_id"] for row in result["meters"]] == [
@@ -5942,6 +5946,22 @@ def test_manual_demand_rejects_non_positive_quantity_without_writes(
         with pytest.raises(ValueError, match="positive"):
             service(db_session).create_manual_demand(
                 terminal_id=str(opened["workbench_terminal_id"]),
+                quantity=quantity,
+            )
+
+    assert mutation_fingerprint(db_session) == before
+
+
+def test_manual_demand_rejects_oversized_quantity_before_terminal_locking(
+    db_session: Session,
+) -> None:
+    """Catches an oversized quantity entering the locked allocation loop."""
+    before = mutation_fingerprint(db_session)
+
+    for quantity in (101, int("9" * 101)):
+        with pytest.raises(ValueError, match="must not exceed 100"):
+            service(db_session).create_manual_demand(
+                terminal_id="not-a-terminal-uuid",
                 quantity=quantity,
             )
 

@@ -182,6 +182,7 @@ LABELED_TEST_MARKERS = (
 TASK_FEATURE_MARKERS = {
     "v2-api/app/api/schemas/collector_transfer.py": (
         "class ManualCollectorDemandRequest(BaseModel):",
+        "quantity: int = Field(gt=0, le=100, strict=True)",
         'original_collector_no: Literal["人工需求"]',
     ),
     "v2-api/app/api/routes/collector_transfer.py": (
@@ -191,16 +192,21 @@ TASK_FEATURE_MARKERS = {
     "v2-api/app/services/collector_transfer.py": (
         '_MANUAL_DEMAND_INTERNAL_PREFIX = "manual-demand:"',
         '_MANUAL_DEMAND_LABEL = "人工需求"',
+        "_MAX_MANUAL_DEMAND_QUANTITY = 100",
         "def create_manual_demand(",
         'action="collector_workbench.manual_demand_added"',
         "source_collector_photo_by_requirement.setdefault(",
+        '"source_group_id": public_group_id_by_id.get(',
     ),
     "v2-web/src/api/services.ts": (
         "export async function createReviewWorkbenchManualDemand(",
         "/manual-demand`, {",
     ),
     "v2-web/src/views/ReviewRephotoWorkbenchView.vue": (
-        "const completedMeterNumbers = new Set(",
+        "const completedGroupIds = new Set(",
+        "item.source_group_id === selectedMeter.value?.group_id",
+        "quantity <= maxManualDemandQuantity",
+        "`requirement:${row.requirement_id}`",
         ".filter((row) => row.status !== 'completed')",
         'data-testid="submit-manual-demand"',
         "增加并随机匹配",
@@ -362,9 +368,24 @@ TASK_TEST_MARKERS = (
         "Task 2 manual demand API regression",
     ),
     (
+        "v2-api/tests/test_collector_transfer_api.py",
+        "def test_manual_collector_demand_enforces_the_operational_quantity_limit(",
+        "Task 2 manual demand API quantity-limit regression",
+    ),
+    (
+        "v2-api/tests/test_collector_transfer_service.py",
+        "def test_manual_demand_rejects_oversized_quantity_before_terminal_locking(",
+        "Task 2 manual demand service quantity-limit regression",
+    ),
+    (
         "v2-api/tests/test_collector_transfer_service.py",
         "def test_global_terminal_detail_reuses_authorized_source_photo_for_present_collector(",
         "Task 3 present collector source-photo regression",
+    ),
+    (
+        "v2-api/tests/test_collector_transfer_service.py",
+        'row["source_group_id"]',
+        "Task 4 stable meter group identity regression",
     ),
     (
         "v2-web/src/views/__tests__/ReviewRephotoWorkbenchView.spec.ts",
@@ -375,6 +396,16 @@ TASK_TEST_MARKERS = (
         "v2-web/src/views/__tests__/ReviewRephotoWorkbenchView.spec.ts",
         "omits persisted completed meter and collector items after reopening",
         "Task 4 completed row visibility regression",
+    ),
+    (
+        "v2-web/src/views/__tests__/ReviewRephotoWorkbenchView.spec.ts",
+        "keeps every incomplete manual-demand collector visible by requirement identity",
+        "Task 4 manual demand identity regression",
+    ),
+    (
+        "v2-web/src/views/__tests__/ReviewRephotoWorkbenchView.spec.ts",
+        "hides only the completed group when sibling meters share a display number",
+        "Task 4 stable meter group UI regression",
     ),
     (
         "v2-web/src/views/__tests__/ReviewRephotoWorkbenchView.spec.ts",

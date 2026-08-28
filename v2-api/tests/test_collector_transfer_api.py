@@ -1503,3 +1503,33 @@ def test_manual_collector_demand_requires_positive_quantity_and_administrator(
             {"terminal_id": "terminal-1", "quantity": 1},
         )
     ]
+
+
+def test_manual_collector_demand_enforces_the_operational_quantity_limit(
+    monkeypatch,
+) -> None:
+    """Catches oversized manual demand payloads reaching the allocation service."""
+    service = FakeCollectorTransferService()
+    client, headers, _identities = production_client_with_service(monkeypatch, service)
+    path = "/collector-transfer/review-workbench/terminals/terminal-1/manual-demand"
+
+    maximum = client.post(path, headers=headers["admin"], json={"quantity": 100})
+    over_limit = client.post(path, headers=headers["admin"], json={"quantity": 101})
+    enormous = client.post(
+        path,
+        headers=headers["admin"],
+        json={"quantity": int("9" * 101)},
+    )
+
+    assert maximum.status_code == 200
+    assert [over_limit.status_code, enormous.status_code] == [422, 422]
+    assert all(
+        response.json()["error"]["code"] == "validation_error"
+        for response in (over_limit, enormous)
+    )
+    assert service.calls == [
+        (
+            "create_manual_demand",
+            {"terminal_id": "terminal-1", "quantity": 100},
+        )
+    ]

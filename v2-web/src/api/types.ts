@@ -988,6 +988,7 @@ export type CollectorRequirementWorkbenchRow = {
 
 export type GlobalMeterInstallWorkbenchRow = {
   meter_item_id: string
+  source_group_id: string
   workbench_item_id: string | null
   status: 'pending' | 'completed' | null
   meter_no: string

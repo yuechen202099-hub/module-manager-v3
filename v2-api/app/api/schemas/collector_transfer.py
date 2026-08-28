@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class ManualCollectorDemandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    quantity: int = Field(gt=0, strict=True)
+    quantity: int = Field(gt=0, le=100, strict=True)
 
 
 class ManualCollectorDemandAssignmentResponse(BaseModel):
