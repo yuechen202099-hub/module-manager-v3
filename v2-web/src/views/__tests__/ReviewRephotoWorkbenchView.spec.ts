@@ -50,7 +50,12 @@ const open = (overrides: Partial<ReviewWorkbenchOpenResult> = {}): ReviewWorkben
   ], rephoto: null, ...overrides,
 })
 const page = (items: GlobalCollectorTerminalCandidate[]): GlobalCollectorTerminalPage => ({ items, page: 1, page_size: 50, total: items.length })
-function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done }); return { promise, resolve } }
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
+}
 async function mountWorkbench() { const wrapper = mount(ReviewRephotoWorkbenchView, { attachTo: document.body }); await flushPromises(); return wrapper }
 
 describe('review rephoto workbench', () => {
@@ -262,6 +267,46 @@ describe('review rephoto workbench', () => {
     expect(wrapper.get('.terminal-summary').text()).toContain('T-002')
     expect(wrapper.get<HTMLInputElement>('[data-testid="manual-demand-quantity"]').element.value).toBe('7')
     expect(serviceMocks.openReviewWorkbenchTerminal).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('does not render a manual-demand error from terminal A after terminal B is current', async () => {
+    const pendingDemand = deferred<void>()
+    const terminalB = candidate({ terminal_key: 'opaque-key-b', terminal_code: 'T-002', source_revision: 'revision-2' })
+    const rephotoB = rephoto('present')
+    rephotoB.terminal = { ...rephotoB.terminal, id: 'terminal-2', terminal_code: 'T-002' }
+    const openedB = open({
+      terminal: { terminal_key: 'opaque-key-b', project_id: 'project-1', terminal_code: 'T-002', installation_address: '新地址' },
+      source_revision: 'revision-2',
+      workflow_state: 'ready',
+      review_ready_count: 2,
+      review_required_count: 0,
+      review_blockers: [],
+      rephoto: rephotoB,
+    })
+    serviceMocks.fetchGlobalCollectorTerminals
+      .mockResolvedValueOnce(page([candidate()]))
+      .mockResolvedValueOnce(page([terminalB]))
+    serviceMocks.openReviewWorkbenchTerminal
+      .mockResolvedValueOnce(open({ workflow_state: 'ready', review_ready_count: 2, review_required_count: 0, review_blockers: [], rephoto: rephoto('present') }))
+      .mockResolvedValue(openedB)
+    serviceMocks.createReviewWorkbenchManualDemand.mockReturnValue(pendingDemand.promise)
+    const wrapper = await mountWorkbench()
+
+    await wrapper.get('[data-testid="manual-demand-quantity"]').setValue('2')
+    await wrapper.get('[data-testid="submit-manual-demand"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[aria-label="输入终端号"]').setValue('T-002')
+    await wrapper.get('[data-testid="search-terminal"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="manual-demand-quantity"]').setValue('7')
+
+    pendingDemand.reject(new Error('终端 A 的采集器池数量不足。'))
+    await flushPromises()
+
+    expect(wrapper.get('.terminal-summary').text()).toContain('T-002')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="manual-demand-quantity"]').element.value).toBe('7')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     wrapper.unmount()
   })
 

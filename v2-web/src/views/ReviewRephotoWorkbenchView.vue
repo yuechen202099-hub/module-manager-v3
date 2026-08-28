@@ -220,14 +220,14 @@ async function reopenCurrent() {
   const candidate = candidates.value.find((item) => item.terminal_key === opened.value?.terminal.terminal_key)
   if (candidate) await openCandidate({ ...candidate, source_revision: opened.value?.source_revision || candidate.source_revision }, selectedGroupId.value)
 }
-async function runMutation(action: () => Promise<unknown>) {
+async function runMutation(action: () => Promise<unknown>, shouldShowError: () => boolean = () => true) {
   if (!mutable.value) return
   mutationPending.value = true
   errorMessage.value = ''
   try {
     const result = await action()
     if (result !== false) await reopenCurrent()
-  } catch (error) { showError(error) } finally { mutationPending.value = false }
+  } catch (error) { if (shouldShowError()) showError(error) } finally { mutationPending.value = false }
 }
 function replaceMissing() {
   const terminalId = rephoto.value?.terminal.id
@@ -256,11 +256,12 @@ function addManualDemand() {
   const quantity = parsedManualDemandQuantity.value
   if (!terminalId || quantity === null) return
   const requestSerial = ++manualDemandSerial
+  const isCurrentManualDemand = () => requestSerial === manualDemandSerial && rephoto.value?.terminal.id === terminalId
   void runMutation(async () => {
     await createReviewWorkbenchManualDemand(terminalId, quantity)
-    if (requestSerial !== manualDemandSerial || rephoto.value?.terminal.id !== terminalId) return false
+    if (!isCurrentManualDemand()) return false
     manualDemandQuantity.value = ''
-  })
+  }, isCurrentManualDemand)
 }
 </script>
 
