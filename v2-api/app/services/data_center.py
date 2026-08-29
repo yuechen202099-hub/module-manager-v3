@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, date, datetime, time
+from io import BytesIO
 from typing import Any, Callable, Iterable, Mapping
 
 from app.schemas.data_center import DataCenterQuery
@@ -12,6 +13,39 @@ from app.services.barcode_verification_contract import has_current_eligible_phot
 REQUIRED_CLASSIFICATION_SLOTS = {"before_box", "module_meter", "after_box", "collector_barcode"}
 MANUAL_CLASSIFICATION_BARCODE_READY = {"passed", "manual", "manual_confirmed", "manual_passed"}
 DASHBOARD_IGNORED_EXCEPTION_REASON = "missing_collector_photo"
+ANOMALY_RESOLUTIONS_KEY = "data_center_anomaly_resolutions"
+
+ANOMALY_MESSAGES = {
+    "unclassified_photos": "存在未分类照片",
+    "module_meter_photo_missing": "缺少电表和模块照片",
+    "module_meter_photo_conflict": "电表和模块照片重复",
+    "after_box_photo_missing": "缺少改造完成照片",
+    "after_box_photo_conflict": "改造完成照片重复",
+    "barcode_verification_required": "条码识别未通过",
+    "terminal_missing": "缺少终端号",
+    "meter_missing": "缺少表号",
+    "module_missing": "缺少模块号",
+    "collector_missing": "缺少采集器号",
+    "address_missing": "缺少安装地址",
+    "exception_open": "资料存在未关闭异常",
+    "meter_barcode_mismatch": "表号与照片识别结果不一致",
+    "module_barcode_mismatch": "模块号与台账不一致",
+    "collector_barcode_mismatch": "采集器号与照片识别结果不一致",
+    "required_photos_missing": "缺少必要施工照片",
+}
+
+EXCEPTION_REASON_ANOMALIES = {
+    "missing_module_asset_no": ("module_missing", ANOMALY_MESSAGES["module_missing"]),
+    "缺少模块资产编号": ("module_missing", ANOMALY_MESSAGES["module_missing"]),
+    "missing_collector_info": ("collector_missing", ANOMALY_MESSAGES["collector_missing"]),
+    "缺少采集器信息": ("collector_missing", ANOMALY_MESSAGES["collector_missing"]),
+    "insufficient_group_photos": ("required_photos_missing", ANOMALY_MESSAGES["required_photos_missing"]),
+    "资料组照片不足 4 张": ("required_photos_missing", ANOMALY_MESSAGES["required_photos_missing"]),
+    "barcode_error": ("exception_barcode_error", "资料被标记为条码异常"),
+    "module_error": ("exception_module_error", "资料被标记为模块异常"),
+    "collector_error": ("exception_collector_error", "资料被标记为采集器异常"),
+    "photo_error": ("exception_photo_error", "资料被标记为照片异常"),
+}
 
 
 def is_only_missing_collector_photo_exception(group: Mapping[str, Any]) -> bool:
@@ -81,6 +115,160 @@ def manual_classification_fingerprint(
     return hashlib.sha256(
         json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _anomaly_resolution_map(group: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    direct = group.get(ANOMALY_RESOLUTIONS_KEY)
+    raw = group.get("raw_data")
+    nested = raw.get(ANOMALY_RESOLUTIONS_KEY) if isinstance(raw, Mapping) else None
+    source = direct if isinstance(direct, Mapping) else nested
+    if not isinstance(source, Mapping):
+        return {}
+    return {str(code): value for code, value in source.items() if isinstance(value, Mapping)}
+
+
+def group_anomaly_evidence_fingerprint(group: Mapping[str, Any]) -> str:
+    photos = active_photos(group)
+    snapshot, manual_codes = manual_classification_snapshot(group, photos)
+    verification = group.get("barcode_verification")
+    verification_payload = dict(verification) if isinstance(verification, Mapping) else {}
+    canonical = {
+        "fields": {
+            key: str(group.get(key) or "").strip()
+            for key in ("terminal", "meter_no", "module_asset_no", "collector", "address")
+        },
+        "photo_snapshot": sorted(
+            snapshot,
+            key=lambda item: (item["photo_id"], item["category"], item["sha256"]),
+        ),
+        "manual_codes": sorted(manual_codes),
+        "barcode": {
+            "status": str(verification_payload.get("status") or group.get("barcode_status") or ""),
+            "evidence_fingerprint": str(verification_payload.get("evidence_fingerprint") or ""),
+            "evidence_version": int(verification_payload.get("evidence_version") or 0),
+            "meter_matched": verification_payload.get("meter_matched"),
+            "module_matched": verification_payload.get("module_matched"),
+            "collector_matched": verification_payload.get("collector_matched"),
+            "missing_fields": sorted(
+                str(item)
+                for item in (
+                    group.get("group_barcode_missing_fields")
+                    or (verification_payload.get("result") or {}).get("missing_fields")
+                    or []
+                )
+                if str(item)
+            ),
+        },
+        "exception": {
+            "status": str(group.get("exception_status") or ""),
+            "note": str(group.get("exception_note") or ""),
+            "reasons": sorted(str(item) for item in group.get("exception_reasons") or [] if str(item)),
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def group_anomalies(group: Mapping[str, Any]) -> list[dict[str, str]]:
+    photos = active_photos(group)
+    _snapshot, manual_codes = manual_classification_snapshot(group, photos)
+    if is_only_missing_collector_photo_exception(group):
+        manual_codes = [code for code in manual_codes if code != "exception_open"]
+
+    messages: dict[str, str] = {}
+    unclassified_count = sum(
+        1
+        for photo in photos
+        if str(photo.get("category") or "unclassified") not in REQUIRED_CLASSIFICATION_SLOTS
+    )
+    for code in manual_codes:
+        message = ANOMALY_MESSAGES.get(code)
+        if code == "unclassified_photos" and unclassified_count:
+            message = f"存在 {unclassified_count} 张未分类照片"
+        if message:
+            messages.setdefault(code, message)
+
+    _barcode_status, missing_fields, _progress = barcode_status_from_group(group)
+    for field, code in (
+        ("meter", "meter_barcode_mismatch"),
+        ("module", "module_barcode_mismatch"),
+        ("collector", "collector_barcode_mismatch"),
+    ):
+        if field in missing_fields:
+            messages.setdefault(code, ANOMALY_MESSAGES[code])
+
+    for raw_reason in group.get("exception_reasons") or []:
+        reason = str(raw_reason or "").strip()
+        if not reason or reason == DASHBOARD_IGNORED_EXCEPTION_REASON:
+            continue
+        known = EXCEPTION_REASON_ANOMALIES.get(reason)
+        if known:
+            messages.setdefault(*known)
+            continue
+        if reason in ANOMALY_MESSAGES:
+            messages.setdefault(reason, ANOMALY_MESSAGES[reason])
+            continue
+        code = f"exception_reason_{hashlib.sha256(reason.encode('utf-8')).hexdigest()[:12]}"
+        readable = reason if any("\u4e00" <= char <= "\u9fff" for char in reason) else f"资料异常（系统记录：{reason}）"
+        messages.setdefault(code, readable)
+
+    fingerprint = group_anomaly_evidence_fingerprint(group)
+    resolutions = _anomaly_resolution_map(group)
+    anomalies: list[dict[str, str]] = []
+    for code, message in messages.items():
+        resolution = resolutions.get(code) or {}
+        resolved = str(resolution.get("evidence_fingerprint") or "") == fingerprint
+        anomalies.append(
+            {
+                "code": code,
+                "message": message,
+                "status": "resolved" if resolved else "open",
+                "evidence_fingerprint": fingerprint,
+                "resolved_by": str(resolution.get("resolved_by") or "") if resolved else "",
+                "resolved_at": str(resolution.get("resolved_at") or "") if resolved else "",
+            }
+        )
+    return anomalies
+
+
+def build_meter_module_workbook(rows: Iterable[Mapping[str, Any]]) -> bytes:
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:  # pragma: no cover - guarded by runtime dependency checks
+        raise RuntimeError("openpyxl is required to export Excel files") from exc
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "表号模块号对应表"
+    sheet.append(["序号", "终端号", "安装地址", "表号", "模块号", "施工状态"])
+    construction_labels = {
+        "completed": "已施工",
+        "constructed": "已施工",
+        "in_progress": "施工中",
+        "unconstructed": "未施工",
+    }
+    for index, row in enumerate(rows, start=1):
+        value = lambda key: str(row.get(key) or "").strip() or "未填写"
+        status = construction_labels.get(str(row.get("construction_status") or "").strip(), "未填写")
+        sheet.append(
+            [
+                index,
+                value("terminal"),
+                value("address"),
+                value("meter_no"),
+                value("module_asset_no"),
+                status,
+            ]
+        )
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    for column, width in {"A": 10, "B": 22, "C": 42, "D": 24, "E": 24, "F": 14}.items():
+        sheet.column_dimensions[column].width = width
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
 
 
 def coerce_datetime(value: Any) -> datetime | None:
@@ -254,6 +442,7 @@ def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
             confirmation_snapshot,
             confirmation_anomalies,
         ),
+        "anomalies": group_anomalies(group),
         "barcode_status": barcode_status,
         "barcode_progress": barcode_progress,
         "group_barcode_missing_fields": missing_fields,
@@ -284,6 +473,7 @@ def unmatched_row(record: Mapping[str, Any]) -> dict[str, Any]:
         "classification_status": "incomplete",
         "classification_progress": {"status": "incomplete", "classified_count": 0, "required_count": 4},
         "classification_manual_confirmation": None,
+        "anomalies": [],
         "barcode_status": "ineligible",
         "barcode_progress": {"status": "ineligible"},
         "group_barcode_missing_fields": [],

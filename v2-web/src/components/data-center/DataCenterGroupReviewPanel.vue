@@ -13,6 +13,7 @@ import {
   rescanDataCenterGroupPhotoBarcode,
   resetAdminGroupToUnconstructed,
   resetAdminGroupToUnreviewed,
+  resolveDataCenterGroupAnomaly,
   returnDataCenterGroupToException,
   reviewDataCenterGroup,
   scanDataCenterGroupPhotoRegion,
@@ -107,6 +108,11 @@ const hasManualClassificationConfirmation = computed(
 )
 const manualClassificationWarnings = computed(() => {
   if (!detail.value) return []
+  if (detail.value.anomalies.length) {
+    return detail.value.anomalies
+      .filter((anomaly) => anomaly.status === 'open')
+      .map((anomaly) => anomaly.message)
+  }
   const warnings: string[] = []
   const categories = detail.value.photos.map((photo) => photo.category || 'unclassified')
   const unclassifiedCount = categories.filter((category) => !classificationCategoryValues.has(category)).length
@@ -411,6 +417,38 @@ async function confirmClassificationComplete() {
   }
 }
 
+async function resolveAnomaly(anomaly: DataCenterDetail['anomalies'][number]) {
+  if (!detail.value || anomaly.status !== 'open') return
+  const groupId = detail.value.id
+  const owner = beginMutation(groupId)
+  try {
+    try {
+      await ElMessageBox.confirm(
+        `请人工确认异常“${anomaly.message}”已经修复。确认后将保留处理人员和时间；资料再次变化时，该异常会重新打开。`,
+        '确认异常已修复',
+        {
+          type: 'warning',
+          confirmButtonText: '确认已修复',
+          cancelButtonText: '取消',
+        },
+      )
+    } catch {
+      return
+    }
+    if (!isCurrentMutation(owner)) return
+    await resolveDataCenterGroupAnomaly(groupId, anomaly.code, anomaly.evidenceFingerprint)
+    if (!isCurrentMutation(owner)) return
+    const next = await reloadAfterMutation(owner)
+    if (!next) return
+    ElMessage.success('异常已人工确认修复并留痕')
+  } catch (error) {
+    if (getApiErrorStatus(error) === 409) await reloadAfterMutation(owner)
+    showMutationError(owner, error, '确认异常修复失败')
+  } finally {
+    finishMutation(owner)
+  }
+}
+
 async function rescanActivePhoto() {
   if (!detail.value || !activePhoto.value) return
   const groupId = detail.value.id
@@ -609,6 +647,32 @@ onBeforeUnmount(cleanupDetail)
         </strong>
         <span>将未分类照片归入已有的四种资料类型</span>
       </header>
+      <section v-if="detail.anomalies.length" class="anomaly-snapshot" aria-label="异常快照">
+        <header><strong>异常原因</strong><span>人工确认后保留绿色处理记录</span></header>
+        <article
+          v-for="anomaly in detail.anomalies"
+          :key="anomaly.code"
+          :class="{ resolved: anomaly.status === 'resolved' }"
+          :data-testid="`anomaly-${anomaly.code}`"
+        >
+          <div>
+            <strong>{{ anomaly.message }}</strong>
+            <span v-if="anomaly.status === 'resolved'">
+              已确认修复 · {{ anomaly.resolvedBy || '未知人员' }} · {{ anomaly.resolvedAt || '未记录时间' }}
+            </span>
+            <span v-else>当前异常</span>
+          </div>
+          <el-button
+            v-if="anomaly.status === 'open'"
+            size="small"
+            type="success"
+            plain
+            :loading="saving"
+            :data-testid="`resolve-anomaly-${anomaly.code}`"
+            @click="resolveAnomaly(anomaly)"
+          >确认已修复</el-button>
+        </article>
+      </section>
       <div class="classification-photo-grid">
         <article v-for="photo in detail.photos" :key="photo.id" class="classification-photo-card">
           <div class="classification-photo-frame">
@@ -749,6 +813,32 @@ onBeforeUnmount(cleanupDetail)
 
         <div class="exception-box">
           <div><el-icon><Warning /></el-icon><strong>异常 / 回退</strong></div>
+          <section v-if="detail.anomalies.length" class="anomaly-snapshot" aria-label="异常快照">
+            <header><strong>异常原因</strong><span>人工确认后保留绿色处理记录</span></header>
+            <article
+              v-for="anomaly in detail.anomalies"
+              :key="anomaly.code"
+              :class="{ resolved: anomaly.status === 'resolved' }"
+              :data-testid="`anomaly-${anomaly.code}`"
+            >
+              <div>
+                <strong>{{ anomaly.message }}</strong>
+                <span v-if="anomaly.status === 'resolved'">
+                  已确认修复 · {{ anomaly.resolvedBy || '未知人员' }} · {{ anomaly.resolvedAt || '未记录时间' }}
+                </span>
+                <span v-else>当前异常</span>
+              </div>
+              <el-button
+                v-if="anomaly.status === 'open'"
+                size="small"
+                type="success"
+                plain
+                :loading="saving"
+                :data-testid="`resolve-anomaly-${anomaly.code}`"
+                @click="resolveAnomaly(anomaly)"
+              >确认已修复</el-button>
+            </article>
+          </section>
           <el-select v-model="form.exceptionCategory">
             <el-option label="条码异常" value="barcode_error" />
             <el-option label="模块异常" value="module_error" />
@@ -783,6 +873,15 @@ onBeforeUnmount(cleanupDetail)
 .classification-heading strong em { margin-left: 8px; color: var(--el-color-success-dark-2, #529b2e); font-size: 12px; font-style: normal; font-weight: 600; }
 .classification-heading span { color: var(--v2-text-muted, #7a8798); font-size: 13px; }
 .classification-photo-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+.anomaly-snapshot { display: grid; gap: 8px; padding: 10px; border: 1px solid #f3c6c6; border-radius: 8px; background: #fffafa; }
+.anomaly-snapshot > header { display: flex; justify-content: space-between; gap: 10px; color: var(--v2-text-muted, #7a8798); font-size: 12px; }
+.anomaly-snapshot > header strong { color: #b42318; font-size: 14px; }
+.anomaly-snapshot > article { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid #ffd7d2; border-radius: 6px; background: #fff; }
+.anomaly-snapshot > article > div { display: grid; gap: 3px; min-width: 0; }
+.anomaly-snapshot > article > div > strong { color: #b42318; }
+.anomaly-snapshot > article > div > span { color: var(--v2-text-muted, #7a8798); font-size: 12px; }
+.anomaly-snapshot > article.resolved { border-color: #b7e4c7; background: #f0fdf4; }
+.anomaly-snapshot > article.resolved > div > strong, .anomaly-snapshot > article.resolved > div > span { color: #217a3c; }
 .classification-photo-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; }
 .classification-photo-frame { grid-column: 1 / -1; display: grid; place-items: center; aspect-ratio: 4 / 2.35; overflow: hidden; border: 1px solid var(--v2-border, #dce3ec); border-radius: 6px; background: var(--v2-surface-soft, #f6f8fb); color: var(--v2-text-muted, #7a8798); }
 .classification-photo-frame button, .rephoto-preview-trigger { display: block; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; }

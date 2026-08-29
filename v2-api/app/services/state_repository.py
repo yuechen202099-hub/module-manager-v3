@@ -135,6 +135,10 @@ class ClassificationConfirmationConflict(ValueError):
     """Raised when manual confirmation no longer matches the evidence shown to the user."""
 
 
+class AnomalyResolutionConflict(ValueError):
+    """Raised when an anomaly resolution no longer matches the evidence shown to the user."""
+
+
 def _data_center_archive_status(group: Mapping[str, Any]) -> str:
     return str(data_center_service.group_row(group).get("archive_status") or "unarchived")
 
@@ -1903,6 +1907,7 @@ def _group_payload(
         "delivery_package_invalidation_epoch",
         "delivery_package_invalidated_at",
         "delivery_package_invalidated_by",
+        data_center_service.ANOMALY_RESOLUTIONS_KEY,
     ):
         if key in raw and key not in payload:
             payload[key] = raw[key]
@@ -2581,6 +2586,18 @@ class StateRepository(ABC):
 
     @abstractmethod
     def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def resolve_data_center_group_anomaly(
+        self,
+        group_id: str,
+        anomaly_code: str,
+        *,
+        actor: str,
+        expected_evidence_fingerprint: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -3382,6 +3399,73 @@ class JsonStateRepository(StateRepository):
 
     def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
         return local_simulation.get_data_center_detail(kind=kind, item_id=item_id)
+
+    def resolve_data_center_group_anomaly(
+        self,
+        group_id: str,
+        anomaly_code: str,
+        *,
+        actor: str,
+        expected_evidence_fingerprint: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        transaction = local_simulation.active_authoritative_json_write(team_id)
+        owns_transaction = transaction is None
+        token = None
+        if owns_transaction:
+            transaction = local_simulation.begin_authoritative_json_write(team_id)
+            token = local_simulation.activate_authoritative_json_write(transaction)
+        try:
+            group = local_simulation.get_group(group_id)
+            if group is None:
+                raise KeyError(group_id)
+            anomaly = next(
+                (item for item in data_center_service.group_anomalies(group) if item["code"] == anomaly_code),
+                None,
+            )
+            if anomaly is None:
+                raise KeyError(anomaly_code)
+            if anomaly["evidence_fingerprint"] != expected_evidence_fingerprint:
+                raise AnomalyResolutionConflict("异常资料已变化，请重新加载后再次确认")
+            if anomaly["status"] != "resolved":
+                resolved_at = local_simulation.now_iso()
+                resolution = {
+                    "evidence_fingerprint": anomaly["evidence_fingerprint"],
+                    "message": anomaly["message"],
+                    "resolved_by": actor,
+                    "resolved_at": resolved_at,
+                    "source_page": source_page,
+                }
+                resolutions = dict(group.get(data_center_service.ANOMALY_RESOLUTIONS_KEY) or {})
+                resolutions[anomaly_code] = resolution
+                group[data_center_service.ANOMALY_RESOLUTIONS_KEY] = resolutions
+                raw = dict(group.get("raw_data") or {})
+                raw[data_center_service.ANOMALY_RESOLUTIONS_KEY] = resolutions
+                group["raw_data"] = raw
+                local_simulation.append_audit_event(
+                    "data_center_anomaly_resolved",
+                    actor,
+                    {
+                        "group_id": group_id,
+                        "anomaly_code": anomaly_code,
+                        "anomaly_message": anomaly["message"],
+                        "evidence_fingerprint": anomaly["evidence_fingerprint"],
+                        "resolved_at": resolved_at,
+                        "source_page": source_page,
+                        "source": source_page,
+                    },
+                )
+            if owns_transaction:
+                local_simulation.finish_authoritative_json_write(transaction, token)
+        except BaseException:
+            if owns_transaction and transaction is not None and not transaction.closed:
+                local_simulation.abort_authoritative_json_write(transaction, token)
+            raise
+        detail = local_simulation.get_data_center_detail(kind="group", item_id=group_id)
+        if detail is None:
+            raise KeyError(group_id)
+        return detail
 
     def list_photo_barcode_review_groups(
         self,
@@ -5870,6 +5954,81 @@ class PostgresStateRepository(StateRepository):
                 ]
                 return detail
         return None
+
+    def resolve_data_center_group_anomaly(
+        self,
+        group_id: str,
+        anomaly_code: str,
+        *,
+        actor: str,
+        expected_evidence_fingerprint: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        team_id = local_simulation.current_team_id()
+        with self._session() as session:
+            group = self._group_by_legacy_id(session, group_id, lock=True)
+            photo_rows = list(
+                session.scalars(
+                    select(Photo)
+                    .where(
+                        Photo.team_id == team_id,
+                        Photo.group_id == group.id,
+                        Photo.is_active.is_(True),
+                        Photo.upload_status != PhotoUploadStatus.INVALID,
+                    )
+                    .order_by(Photo.sort_order, Photo.created_at, Photo.legacy_id)
+                ).all()
+            )
+            photos = [_photo_payload(photo) for photo in photo_rows]
+            payload = _group_payload(session, group, include_photos=False)
+            payload["photos"] = photos
+            payload["photo_count"] = len(photos)
+            anomaly = next(
+                (item for item in data_center_service.group_anomalies(payload) if item["code"] == anomaly_code),
+                None,
+            )
+            if anomaly is None:
+                raise KeyError(anomaly_code)
+            if anomaly["evidence_fingerprint"] != expected_evidence_fingerprint:
+                raise AnomalyResolutionConflict("异常资料已变化，请重新加载后再次确认")
+            if anomaly["status"] != "resolved":
+                resolved_at = datetime.now(UTC)
+                before = dict(group.raw_data or {}).get(data_center_service.ANOMALY_RESOLUTIONS_KEY) or {}
+                resolutions = dict(before) if isinstance(before, Mapping) else {}
+                resolutions[anomaly_code] = {
+                    "evidence_fingerprint": anomaly["evidence_fingerprint"],
+                    "message": anomaly["message"],
+                    "resolved_by": actor,
+                    "resolved_at": resolved_at.isoformat(),
+                    "source_page": source_page,
+                }
+                raw = dict(group.raw_data or {})
+                raw[data_center_service.ANOMALY_RESOLUTIONS_KEY] = resolutions
+                group.raw_data = raw
+                _stage_transactional_audit(
+                    session,
+                    team_id=group.team_id,
+                    actor=actor,
+                    action="data_center_anomaly_resolved",
+                    entity_type="material_group",
+                    entity_id=group.id,
+                    before_data={"anomaly_resolutions": before},
+                    after_data={"anomaly_resolutions": resolutions},
+                    payload={
+                        "group_id": group_id,
+                        "anomaly_code": anomaly_code,
+                        "anomaly_message": anomaly["message"],
+                        "evidence_fingerprint": anomaly["evidence_fingerprint"],
+                        "resolved_at": resolved_at.isoformat(),
+                        "source_page": source_page,
+                        "source": source_page,
+                    },
+                )
+                session.commit()
+        detail = self.get_data_center_detail(kind="group", item_id=group_id)
+        if detail is None:
+            raise KeyError(group_id)
+        return detail
 
     def _ensure_task_claimed_by(self, session: Session, group: MaterialGroup, actor: str, *, force: bool = False) -> None:
         if force:
@@ -12734,6 +12893,32 @@ class DualWriteStateRepository(JsonStateRepository):
             expected_version=expected_version,
             source_page=source_page,
         )
+
+    def resolve_data_center_group_anomaly(
+        self,
+        group_id: str,
+        anomaly_code: str,
+        *,
+        actor: str,
+        expected_evidence_fingerprint: str,
+        source_page: str = "review_rephoto_workbench",
+    ) -> dict[str, Any]:
+        result = super().resolve_data_center_group_anomaly(
+            group_id,
+            anomaly_code,
+            actor=actor,
+            expected_evidence_fingerprint=expected_evidence_fingerprint,
+            source_page=source_page,
+        )
+        self._mirror_write(
+            "resolve_data_center_group_anomaly",
+            group_id,
+            anomaly_code,
+            actor=actor,
+            expected_evidence_fingerprint=expected_evidence_fingerprint,
+            source_page=source_page,
+        )
+        return result
 
     def reset_group_to_unconstructed(
         self,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Refresh, Upload } from '@element-plus/icons-vue'
+import { Download, Refresh, Upload } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -7,6 +7,7 @@ import { useRouter } from 'vue-router'
 import {
   boardEventHeaders,
   boardEventsUrl,
+  downloadProjectMeterModuleWorkbook,
   fetchInstallerWorkload,
   fetchProjectSummary,
   fetchTasks,
@@ -87,6 +88,7 @@ const BOARD_REFRESH_INTERVAL_MS = 15 * 60 * 1000
 const loading = ref(false)
 const importingTotal = ref(false)
 const importingScan = ref(false)
+const exportingMeterModule = ref(false)
 const summary = ref<ProjectSummary>({ ...emptySummary })
 const taskStatus = ref<TaskStatusSummary>({ ...emptyTaskStatus })
 const terminalTasks = ref<ReviewTask[]>([])
@@ -492,6 +494,19 @@ async function refreshBoard() {
   await loadBoard({ forceSummaryRefresh: true })
 }
 
+async function exportMeterModuleWorkbook() {
+  if (exportingMeterModule.value) return
+  exportingMeterModule.value = true
+  try {
+    await downloadProjectMeterModuleWorkbook()
+    ElMessage.success('表号模块号对应表已导出')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '表号模块号对应表导出失败')
+  } finally {
+    exportingMeterModule.value = false
+  }
+}
+
 async function uploadTotal(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -643,6 +658,13 @@ onUnmounted(() => {
           <span>导入扫码表格</span>
           <input class="sr-only" type="file" accept=".xlsx,.xls,.csv" @change="uploadScan" />
         </label>
+        <el-button
+          v-if="isAdmin"
+          data-testid="export-meter-module"
+          :icon="Download"
+          :loading="exportingMeterModule"
+          @click="exportMeterModuleWorkbook"
+        >导出表号模块号</el-button>
         <el-button :icon="Refresh" :loading="loading" @click="refreshBoard">刷新</el-button>
       </div>
     </div>

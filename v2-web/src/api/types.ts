@@ -346,9 +346,19 @@ export type DataCenterPage = {
   items: DataCenterRow[]
 }
 
+export type DataCenterAnomaly = {
+  code: string
+  message: string
+  status: 'open' | 'resolved'
+  evidenceFingerprint: string
+  resolvedBy: string
+  resolvedAt: string
+}
+
 export type DataCenterDetail = DataCenterRow & {
   classificationManualConfirmation: Record<string, unknown> | null
   classificationConfirmationFingerprint: string
+  anomalies: DataCenterAnomaly[]
   photos: ReviewPhoto[]
   audit: Array<Record<string, unknown>>
 }

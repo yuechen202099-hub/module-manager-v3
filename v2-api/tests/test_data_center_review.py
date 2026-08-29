@@ -122,6 +122,127 @@ def _review_headers(*, username: str, role: str, team_id: str) -> dict[str, str]
     return {"Authorization": f"bearer {token}"}
 
 
+def test_data_center_anomalies_are_chinese_specific_and_ignore_missing_collector_photo() -> None:
+    group = deepcopy(_review_state("anomaly-team")["groups"][0])
+    group.update(
+        {
+            "module_asset_no": "",
+            "construction_module_asset_no": "",
+            "exception_status": "open",
+            "exception_note": "",
+            "exception_reasons": [
+                "missing_collector_photo",
+                "missing_module_asset_no",
+                "缺少模块资产编号",
+                "资料组照片不足 4 张",
+            ],
+            "barcode_verification": {
+                "status": "mismatch",
+                "evidence_version": 8,
+                "meter_matched": False,
+                "module_matched": False,
+                "collector_matched": True,
+                "result": {
+                    "passed_count": 1,
+                    "matched_fields": ["collector"],
+                    "missing_fields": ["meter", "module"],
+                },
+            },
+        }
+    )
+
+    anomalies = data_center_service.group_anomalies(group)
+    messages = {item["message"] for item in anomalies}
+
+    assert "缺少模块号" in messages
+    assert "表号与照片识别结果不一致" in messages
+    assert "模块号与台账不一致" in messages
+    assert "条码识别未通过" in messages
+    assert "缺采集器照片" not in messages
+    assert "缺少采集器照片" not in messages
+    assert "缺少模块资产编号" not in messages
+    assert "资料组照片不足 4 张" not in messages
+    assert "缺少必要施工照片" in messages
+    assert all(item["status"] == "open" for item in anomalies)
+    assert len({item["code"] for item in anomalies}) == len(anomalies)
+    assert all(len(item["evidence_fingerprint"]) == 64 for item in anomalies)
+
+
+def test_json_data_center_anomaly_resolution_keeps_history_and_reopens_after_evidence_change(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    group = _latest_group()
+    group["module_asset_no"] = ""
+    group["construction_module_asset_no"] = ""
+    detail = json_review_repo.get_data_center_detail(kind="group", item_id="g-1")
+    assert detail is not None
+    anomaly = next(item for item in detail["anomalies"] if item["code"] == "module_missing")
+
+    resolved = json_review_repo.resolve_data_center_group_anomaly(
+        "g-1",
+        "module_missing",
+        actor="admin-a",
+        expected_evidence_fingerprint=anomaly["evidence_fingerprint"],
+        source_page="review_rephoto_workbench",
+    )
+    resolved_anomaly = next(item for item in resolved["anomalies"] if item["code"] == "module_missing")
+
+    assert resolved_anomaly["status"] == "resolved"
+    assert resolved_anomaly["resolved_by"] == "admin-a"
+    assert resolved_anomaly["resolved_at"]
+    payload = _audit_payload("data_center_anomaly_resolved")
+    assert payload["group_id"] == "g-1"
+    assert payload["anomaly_code"] == "module_missing"
+    assert payload["anomaly_message"] == "缺少模块号"
+    assert payload["source_page"] == "review_rephoto_workbench"
+
+    group = _latest_group()
+    group["address"] = "资料变化后的地址"
+    reopened = json_review_repo.get_data_center_detail(kind="group", item_id="g-1")
+    assert reopened is not None
+    reopened_anomaly = next(item for item in reopened["anomalies"] if item["code"] == "module_missing")
+    assert reopened_anomaly["status"] == "open"
+    assert reopened_anomaly["resolved_by"] == ""
+    assert reopened_anomaly["resolved_at"] == ""
+
+
+def test_data_center_anomaly_resolution_route_uses_server_actor_and_rejects_stale_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    group = _latest_group()
+    group["module_asset_no"] = ""
+    group["construction_module_asset_no"] = ""
+    detail = json_review_repo.get_data_center_detail(kind="group", item_id="g-1")
+    assert detail is not None
+    anomaly = next(item for item in detail["anomalies"] if item["code"] == "module_missing")
+    team_id = local_simulation.get_state()["team_id"]
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+    headers = _review_headers(username="admin-route", role="admin", team_id=team_id)
+
+    stale = client.post(
+        "/groups/data-center/groups/g-1/anomalies/module_missing/resolve",
+        headers=headers,
+        json={"expected_evidence_fingerprint": "0" * 64, "source_page": "review_rephoto_workbench"},
+    )
+    assert stale.status_code == 409
+
+    response = client.post(
+        "/groups/data-center/groups/g-1/anomalies/module_missing/resolve",
+        headers=headers,
+        json={
+            "expected_evidence_fingerprint": anomaly["evidence_fingerprint"],
+            "source_page": "review_rephoto_workbench",
+        },
+    )
+
+    assert response.status_code == 200
+    resolved = next(item for item in response.json()["data"]["anomalies"] if item["code"] == "module_missing")
+    assert resolved["status"] == "resolved"
+    assert resolved["resolved_by"] == "admin-route"
+
+
 def test_admin_can_approve_data_center_group_and_audit_actor(
     monkeypatch: pytest.MonkeyPatch,
     json_review_repo: repository.JsonStateRepository,

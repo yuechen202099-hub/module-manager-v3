@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
+from io import BytesIO
 from uuid import uuid4
 
 import pytest
@@ -70,6 +71,62 @@ def test_data_center_route_requires_admin(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(group_routes, "state_repository", lambda: RecordingRepository())
 
     assert client.get("/groups/data-center").status_code == 401
+
+
+def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: pytest.MonkeyPatch) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+
+    class ExportRepository(RecordingRepository):
+        def list_data_center_rows(self, query):
+            self.queries.append(query)
+            return {
+                "total": 2,
+                "page": query.page,
+                "page_size": query.page_size,
+                "items": [
+                    {
+                        "kind": "group",
+                        "id": "g-1",
+                        "terminal": "350000000001",
+                        "address": "一号路 1 号",
+                        "meter_no": "METER-001",
+                        "module_asset_no": "MODULE-001",
+                        "construction_status": "completed",
+                    },
+                    {
+                        "kind": "group",
+                        "id": "g-2",
+                        "terminal": "350000000002",
+                        "address": "二号路 2 号",
+                        "meter_no": "METER-002",
+                        "module_asset_no": "",
+                        "construction_status": "unconstructed",
+                    },
+                ],
+            }
+
+    repo = ExportRepository()
+    monkeypatch.setattr(group_routes, "state_repository", lambda: repo)
+
+    response = client.get("/groups/data-center/export-meter-module", headers=admin_headers())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+    assert len(repo.queries) == 1
+    assert repo.queries[0].data_type == "group"
+    assert repo.queries[0].page_size == 100
+    assert repo.queries[0].sort == "terminal_asc"
+
+    workbook = openpyxl.load_workbook(BytesIO(response.content), read_only=True)
+    sheet = workbook.active
+    assert list(sheet.values) == [
+        ("序号", "终端号", "安装地址", "表号", "模块号", "施工状态"),
+        (1, "350000000001", "一号路 1 号", "METER-001", "MODULE-001", "已施工"),
+        (2, "350000000002", "二号路 2 号", "METER-002", "未填写", "未施工"),
+    ]
 
 
 def test_data_center_route_accepts_precise_dashboard_filters(monkeypatch: pytest.MonkeyPatch) -> None:

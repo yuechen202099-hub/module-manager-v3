@@ -1,16 +1,21 @@
-from datetime import date
+from datetime import date, datetime
+from io import BytesIO
 from typing import Any, Literal
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from app.core.responses import ok
 from app.api.routes.auth import require_admin, require_production_reviewer_or_admin
 from app.schemas.data_center import DataCenterQuery
 from app.schemas.review import ExceptionCreate, GroupReviewUpdate
+from app.services import data_center as data_center_service
 from app.services import local_simulation
 from app.services.photo_storage import resolve_group_collection_for_response
 from app.services.state_repository import (
+    AnomalyResolutionConflict,
     ClassificationConfirmationConflict,
     StateBackendNotReady,
     get_state_repository,
@@ -48,6 +53,11 @@ class DataCenterReviewDecisionRequest(BaseModel):
 
 class DataCenterManualClassificationConfirmRequest(BaseModel):
     acknowledge_anomalies: bool = False
+    expected_evidence_fingerprint: str = Field(min_length=64, max_length=64)
+    source_page: str = "review_rephoto_workbench"
+
+
+class DataCenterAnomalyResolveRequest(BaseModel):
     expected_evidence_fingerprint: str = Field(min_length=64, max_length=64)
     source_page: str = "review_rephoto_workbench"
 
@@ -237,6 +247,40 @@ def list_data_center(
     return ok(request, result)
 
 
+@router.get("/data-center/export-meter-module")
+def export_data_center_meter_module(
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        repo = state_repository()
+        rows: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            result = repo.list_data_center_rows(
+                DataCenterQuery(data_type="group", page=page, page_size=100, sort="terminal_asc")
+            )
+            items = [dict(item) for item in result.get("items") or []]
+            rows.extend(items)
+            total = int(result.get("total") or 0)
+            if not items or len(rows) >= total:
+                break
+            page += 1
+        content = data_center_service.build_meter_module_workbook(rows)
+    finally:
+        local_simulation.reset_current_team(token)
+    filename = f"表号模块号对应表-{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=meter-module-map.xlsx; filename*=UTF-8''{quote(filename)}"
+            )
+        },
+    )
+
+
 @router.get("/data-center/{kind}/{item_id}")
 def data_center_detail(
     kind: Literal["group", "unmatched"],
@@ -252,6 +296,32 @@ def data_center_detail(
     if result is None:
         raise HTTPException(status_code=404, detail="Data center item not found")
     return ok(request, result)
+
+
+@router.post("/data-center/groups/{group_id}/anomalies/{anomaly_code}/resolve")
+def resolve_data_center_group_anomaly(
+    group_id: str,
+    anomaly_code: str,
+    payload: DataCenterAnomalyResolveRequest,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().resolve_data_center_group_anomaly(
+            group_id,
+            anomaly_code,
+            actor=_admin_actor(admin_payload),
+            expected_evidence_fingerprint=payload.expected_evidence_fingerprint,
+            source_page=payload.source_page,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Group or anomaly not found") from exc
+    except AnomalyResolutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
 
 
 @router.patch("/data-center/groups/{group_id}")

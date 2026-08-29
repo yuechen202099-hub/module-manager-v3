@@ -39,6 +39,7 @@ function detailFixture(id: string, auditAction = `loaded-${id}`, reviewStatus = 
     classificationProgress: {},
     classificationManualConfirmation: null,
     classificationConfirmationFingerprint: `fingerprint-${id}`,
+    anomalies: [],
     barcodeStatus: 'passed',
     barcodeProgress: {},
     groupBarcodeMissingFields: [],
@@ -69,6 +70,7 @@ const apiMock = vi.hoisted(() => ({
   rescanDataCenterGroupPhotoBarcode: vi.fn(),
   resetAdminGroupToUnconstructed: vi.fn(),
   resetAdminGroupToUnreviewed: vi.fn(),
+  resolveDataCenterGroupAnomaly: vi.fn(),
   returnDataCenterGroupToException: vi.fn(),
   reviewDataCenterGroup: vi.fn(),
   scanDataCenterGroupPhotoRegion: vi.fn(),
@@ -115,6 +117,7 @@ describe('DataCenterGroupReviewPanel', () => {
     apiMock.rescanDataCenterGroupPhotoBarcode.mockResolvedValue({})
     apiMock.resetAdminGroupToUnconstructed.mockResolvedValue({})
     apiMock.resetAdminGroupToUnreviewed.mockResolvedValue({})
+    apiMock.resolveDataCenterGroupAnomaly.mockResolvedValue({})
     apiMock.returnDataCenterGroupToException.mockResolvedValue({})
     apiMock.reviewDataCenterGroup.mockResolvedValue({} as MaterialGroup)
     apiMock.scanDataCenterGroupPhotoRegion.mockResolvedValue({})
@@ -198,6 +201,56 @@ describe('DataCenterGroupReviewPanel', () => {
     expect(body).toEqual({ acknowledge_anomalies: true, expected_evidence_fingerprint: 'fingerprint-visible', source_page: 'review_rephoto_workbench' })
     expect(body).not.toHaveProperty('actor')
     expect(result).toMatchObject({ id: 'g/encoded', status: 'approved' })
+  })
+
+  it('maps anomaly history and sends the single-anomaly resolution contract', async () => {
+    const requests: Array<{ path: string; init: RequestInit }> = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      requests.push({ path: String(input), init })
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            kind: 'group',
+            id: 'g/encoded',
+            anomalies: [{
+              code: 'module_missing',
+              message: '缺少模块号',
+              status: 'resolved',
+              evidence_fingerprint: 'a'.repeat(64),
+              resolved_by: 'admin-a',
+              resolved_at: '2026-08-29T10:00:00+08:00',
+            }],
+            photos: [],
+            audit: [],
+          },
+        }),
+      } as Response
+    })
+    const realServices = await vi.importActual<typeof import('@/api/services')>('@/api/services')
+
+    const result = await realServices.resolveDataCenterGroupAnomaly(
+      'g/encoded',
+      'module/missing',
+      'a'.repeat(64),
+    )
+    const body = JSON.parse(String(requests[0]?.init.body))
+
+    expect(requests[0]?.path).toBe('/groups/data-center/groups/g%2Fencoded/anomalies/module%2Fmissing/resolve')
+    expect(requests[0]?.init.method).toBe('POST')
+    expect(body).toEqual({
+      expected_evidence_fingerprint: 'a'.repeat(64),
+      source_page: 'review_rephoto_workbench',
+    })
+    expect(result.anomalies).toEqual([{
+      code: 'module_missing',
+      message: '缺少模块号',
+      status: 'resolved',
+      evidenceFingerprint: 'a'.repeat(64),
+      resolvedBy: 'admin-a',
+      resolvedAt: '2026-08-29T10:00:00+08:00',
+    }])
   })
 
   it('aborts stale detail and ignores a late response after groupId changes', async () => {
@@ -459,6 +512,55 @@ describe('DataCenterGroupReviewPanel', () => {
     )
     expect(wrapper.emitted('review-decided')).toEqual([['approved']])
     expect(wrapper.emitted('updated')?.at(-1)?.[0]).toMatchObject({ id: 'g-manual-classification' })
+    wrapper.unmount()
+  })
+
+  it('shows Chinese anomalies and keeps a resolved item as green history', async () => {
+    const fingerprint = 'b'.repeat(64)
+    const openDetail = {
+      ...detailFixture('g-anomaly'),
+      anomalies: [{
+        code: 'module_missing',
+        message: '缺少模块号',
+        status: 'open',
+        evidenceFingerprint: fingerprint,
+        resolvedBy: '',
+        resolvedAt: '',
+      }],
+    } satisfies DataCenterDetail
+    const resolvedDetail = {
+      ...openDetail,
+      anomalies: [{
+        ...openDetail.anomalies[0],
+        status: 'resolved',
+        resolvedBy: 'admin-a',
+        resolvedAt: '2026-08-29T10:00:00+08:00',
+      }],
+    } satisfies DataCenterDetail
+    let resolved = false
+    apiMock.fetchDataCenterDetail.mockImplementation(() => Promise.resolve(resolved ? resolvedDetail : openDetail))
+    apiMock.resolveDataCenterGroupAnomaly.mockImplementation(() => {
+      resolved = true
+      return Promise.resolve(resolvedDetail)
+    })
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(
+      'confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>,
+    )
+
+    const wrapper = mountPanel({ groupId: 'g-anomaly', classificationOnly: true })
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="anomaly-module_missing"]').text()).toContain('缺少模块号')
+    expect(wrapper.get('[data-testid="resolve-anomaly-module_missing"]').text()).toBe('确认已修复')
+
+    await wrapper.get('[data-testid="resolve-anomaly-module_missing"]').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.resolveDataCenterGroupAnomaly).toHaveBeenCalledWith('g-anomaly', 'module_missing', fingerprint)
+    expect(wrapper.get('[data-testid="anomaly-module_missing"]').classes()).toContain('resolved')
+    expect(wrapper.get('[data-testid="anomaly-module_missing"]').text()).toContain('已确认修复')
+    expect(wrapper.get('[data-testid="anomaly-module_missing"]').text()).toContain('admin-a')
+    expect(wrapper.find('[data-testid="resolve-anomaly-module_missing"]').exists()).toBe(false)
     wrapper.unmount()
   })
 

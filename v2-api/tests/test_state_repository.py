@@ -154,6 +154,39 @@ def test_data_center_contract_is_available_on_all_repository_backends() -> None:
         assert hints["query"] is DataCenterQuery
 
 
+def test_postgres_group_payload_exposes_persisted_anomaly_resolution_history() -> None:
+    resolutions = {
+        "module_missing": {
+            "evidence_fingerprint": "a" * 64,
+            "resolved_by": "admin-a",
+            "resolved_at": "2026-08-29T10:00:00+08:00",
+        }
+    }
+    group = SimpleNamespace(
+        id=uuid4(),
+        legacy_id="g-anomaly",
+        legacy_task_id=1,
+        display_meter_no="METER-001",
+        meter_match_key="METER-001",
+        terminal="350000000001",
+        installation_address="一号路 1 号",
+        status=repository.GroupStatus.UNREVIEWED,
+        photo_count=0,
+        reviewer=None,
+        reviewed_at=None,
+        review_note="",
+        exception_note="",
+        exception_reasons=[],
+        has_archive_blocker=False,
+        task_id=None,
+        raw_data={repository.data_center_service.ANOMALY_RESOLUTIONS_KEY: resolutions},
+    )
+
+    payload = repository._group_payload(object(), group, include_photos=False, verification=None)
+
+    assert payload[repository.data_center_service.ANOMALY_RESOLUTIONS_KEY] == resolutions
+
+
 def test_json_repository_sets_construction_priority_through_simulation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

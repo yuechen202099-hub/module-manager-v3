@@ -108,6 +108,14 @@ type BackendDataCenterRow = {
   classification_progress?: Record<string, unknown>
   classification_manual_confirmation?: Record<string, unknown> | null
   classification_confirmation_fingerprint?: string
+  anomalies?: Array<{
+    code?: string
+    message?: string
+    status?: string
+    evidence_fingerprint?: string
+    resolved_by?: string
+    resolved_at?: string
+  }>
   barcode_status?: string
   barcode_progress?: Record<string, unknown>
   group_barcode_missing_fields?: string[]
@@ -1039,6 +1047,14 @@ function mapDataCenterDetail(raw: BackendDataCenterRow): DataCenterDetail {
     ...mapDataCenterRow(raw),
     classificationManualConfirmation: raw.classification_manual_confirmation || null,
     classificationConfirmationFingerprint: raw.classification_confirmation_fingerprint || '',
+    anomalies: (raw.anomalies || []).map((item) => ({
+      code: item.code || '',
+      message: item.message || '',
+      status: item.status === 'resolved' ? 'resolved' : 'open',
+      evidenceFingerprint: item.evidence_fingerprint || '',
+      resolvedBy: item.resolved_by || '',
+      resolvedAt: item.resolved_at || '',
+    })),
     photos: (raw.photos || []).map(mapPhoto),
     audit: raw.audit || [],
   }
@@ -1669,6 +1685,34 @@ export async function fetchDataCenterDetail(
     { signal },
   )
   return mapDataCenterDetail(data)
+}
+
+export async function resolveDataCenterGroupAnomaly(
+  groupId: string,
+  anomalyCode: string,
+  expectedEvidenceFingerprint: string,
+): Promise<DataCenterDetail> {
+  const data = await api<BackendDataCenterRow>(
+    `/groups/data-center/groups/${encodeURIComponent(groupId)}/anomalies/${encodeURIComponent(anomalyCode)}/resolve`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        expected_evidence_fingerprint: expectedEvidenceFingerprint,
+        source_page: 'review_rephoto_workbench',
+      }),
+    },
+  )
+  return mapDataCenterDetail(data)
+}
+
+export async function downloadProjectMeterModuleWorkbook(): Promise<void> {
+  const response = await fetchWithAuth('/groups/data-center/export-meter-module', { headers: authHeaders() })
+  if (!response.ok) throw createApiRequestError(response)
+  const blob = await response.blob()
+  triggerBrowserDownload(
+    blob,
+    filenameFromDisposition(response.headers.get('Content-Disposition') || '', '表号模块号对应表.xlsx'),
+  )
 }
 
 export async function reviewDataCenterGroup(

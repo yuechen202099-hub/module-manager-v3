@@ -84,5 +84,6 @@ class DataCenterPage(BaseModel):
 class DataCenterDetail(DataCenterRow):
     classification_manual_confirmation: dict[str, Any] | None = None
     classification_confirmation_fingerprint: str = ""
+    anomalies: list[dict[str, Any]] = Field(default_factory=list)
     photos: list[dict[str, Any]] = Field(default_factory=list)
     audit: list[dict[str, Any]] = Field(default_factory=list)
