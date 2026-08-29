@@ -587,6 +587,20 @@ V3217_FEATURE_MARKERS = {
     ),
 }
 
+V3217_SCALE_EXPORT_MARKERS = {
+    "v2-api/app/api/routes/groups.py": (
+        "rows = state_repository().list_meter_module_export_rows()",
+    ),
+    "v2-api/app/services/state_repository.py": (
+        "def list_meter_module_export_rows(self) -> list[dict[str, Any]]:",
+        ".order_by(*self._data_center_order(source, \"terminal_asc\"))",
+    ),
+    "v2-api/tests/test_data_center.py": (
+        "def test_postgres_meter_module_export_uses_one_unbounded_projection_query(",
+        "full export must not repeat the paginated data-center query",
+    ),
+}
+
 V3217_TEST_MARKERS = (
     (
         "v2-api/tests/test_data_center.py",
@@ -900,6 +914,8 @@ def _check_source(
         _require_markers(root, path, (marker,), label, failures)
     for path, markers in V3217_FEATURE_MARKERS.items():
         _require_markers(root, path, markers, "V3.2.17 anomaly/export feature contract", failures)
+    for path, markers in V3217_SCALE_EXPORT_MARKERS.items():
+        _require_markers(root, path, markers, "single-query meter-module export", failures)
     for path, marker, label in V3217_TEST_MARKERS:
         _require_markers(root, path, (marker,), label, failures)
 

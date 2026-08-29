@@ -2585,6 +2585,10 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_meter_module_export_rows(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
@@ -3396,6 +3400,13 @@ class JsonStateRepository(StateRepository):
 
     def list_data_center_rows(self, query: DataCenterQuery) -> dict[str, Any]:
         return local_simulation.list_data_center_rows(query)
+
+    def list_meter_module_export_rows(self) -> list[dict[str, Any]]:
+        state = local_simulation.get_state()
+        rows = [data_center_service.group_row(group) for group in state.get("groups", [])]
+        rows.sort(key=lambda row: (str(row.get("terminal") or ""), str(row.get("id") or "")))
+        fields = ("terminal", "address", "meter_no", "module_asset_no", "construction_status")
+        return [{field: row.get(field) for field in fields} for row in rows]
 
     def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
         return local_simulation.get_data_center_detail(kind=kind, item_id=item_id)
@@ -5877,6 +5888,25 @@ class PostgresStateRepository(StateRepository):
             "page_size": query.page_size,
             "items": [self._data_center_row_from_mapping(dict(getattr(row, "_mapping", row))) for row in rows],
         }
+
+    def list_meter_module_export_rows(self) -> list[dict[str, Any]]:
+        team_id = local_simulation.current_team_id()
+        query = DataCenterQuery(data_type="group", page=1, page_size=100, sort="terminal_asc")
+        with self._session() as session:
+            source, filters = self._data_center_filtered_source(team_id, query)
+            statement = (
+                select(
+                    source.c.terminal,
+                    source.c.address,
+                    source.c.meter_no,
+                    source.c.module_asset_no,
+                    source.c.construction_status,
+                )
+                .where(*filters)
+                .order_by(*self._data_center_order(source, "terminal_asc"))
+            )
+            rows = session.execute(statement).mappings().all()
+        return [dict(row) for row in rows]
 
     def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
         team_id = local_simulation.current_team_id()

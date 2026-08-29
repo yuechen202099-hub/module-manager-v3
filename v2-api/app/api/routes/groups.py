@@ -253,19 +253,7 @@ def export_data_center_meter_module(
 ):
     token = _with_admin_team(admin_payload)
     try:
-        repo = state_repository()
-        rows: list[dict[str, Any]] = []
-        page = 1
-        while True:
-            result = repo.list_data_center_rows(
-                DataCenterQuery(data_type="group", page=page, page_size=100, sort="terminal_asc")
-            )
-            items = [dict(item) for item in result.get("items") or []]
-            rows.extend(items)
-            total = int(result.get("total") or 0)
-            if not items or len(rows) >= total:
-                break
-            page += 1
+        rows = state_repository().list_meter_module_export_rows()
         content = data_center_service.build_meter_module_workbook(rows)
     finally:
         local_simulation.reset_current_team(token)

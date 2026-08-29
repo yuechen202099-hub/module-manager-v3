@@ -333,6 +333,20 @@ def test_v3217_contract_rejects_review_lock_regression(tmp_path: Path) -> None:
     assert "classification-independent rephoto" in result.stderr
 
 
+def test_v3217_contract_rejects_paginated_meter_module_export_regression(tmp_path: Path) -> None:
+    repo = copy_contract_repo(tmp_path)
+    path = repo / "v2-api/app/api/routes/groups.py"
+    marker = "rows = state_repository().list_meter_module_export_rows()"
+    text = path.read_text(encoding="utf-8")
+    assert marker in text
+    path.write_text(text.replace(marker, "rows = []", 1), encoding="utf-8")
+
+    result = run_verifier(repo, "source")
+
+    assert result.returncode == 1
+    assert "single-query meter-module export" in result.stderr
+
+
 def test_v3217_contract_rejects_missing_original_photo_preview(tmp_path: Path) -> None:
     repo = copy_contract_repo(tmp_path)
     path = repo / "v2-web/src/components/data-center/DataCenterGroupReviewPanel.vue"

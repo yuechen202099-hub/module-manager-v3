@@ -77,33 +77,31 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
     openpyxl = pytest.importorskip("openpyxl")
 
     class ExportRepository(RecordingRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.export_reads = 0
+
         def list_data_center_rows(self, query):
-            self.queries.append(query)
-            return {
-                "total": 2,
-                "page": query.page,
-                "page_size": query.page_size,
-                "items": [
-                    {
-                        "kind": "group",
-                        "id": "g-1",
-                        "terminal": "350000000001",
-                        "address": "一号路 1 号",
-                        "meter_no": "METER-001",
-                        "module_asset_no": "MODULE-001",
-                        "construction_status": "completed",
-                    },
-                    {
-                        "kind": "group",
-                        "id": "g-2",
-                        "terminal": "350000000002",
-                        "address": "二号路 2 号",
-                        "meter_no": "METER-002",
-                        "module_asset_no": "",
-                        "construction_status": "unconstructed",
-                    },
-                ],
-            }
+            raise AssertionError("full export must not repeat the paginated data-center query")
+
+        def list_meter_module_export_rows(self):
+            self.export_reads += 1
+            return [
+                {
+                    "terminal": "350000000001",
+                    "address": "一号路 1 号",
+                    "meter_no": "METER-001",
+                    "module_asset_no": "MODULE-001",
+                    "construction_status": "completed",
+                },
+                {
+                    "terminal": "350000000002",
+                    "address": "二号路 2 号",
+                    "meter_no": "METER-002",
+                    "module_asset_no": "",
+                    "construction_status": "unconstructed",
+                },
+            ]
 
     repo = ExportRepository()
     monkeypatch.setattr(group_routes, "state_repository", lambda: repo)
@@ -115,10 +113,7 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert "filename*=UTF-8''" in response.headers["content-disposition"]
-    assert len(repo.queries) == 1
-    assert repo.queries[0].data_type == "group"
-    assert repo.queries[0].page_size == 100
-    assert repo.queries[0].sort == "terminal_asc"
+    assert repo.export_reads == 1
 
     workbook = openpyxl.load_workbook(BytesIO(response.content), read_only=True)
     sheet = workbook.active
@@ -126,6 +121,50 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
         ("序号", "终端号", "安装地址", "表号", "模块号", "施工状态"),
         (1, "350000000001", "一号路 1 号", "METER-001", "MODULE-001", "已施工"),
         (2, "350000000002", "二号路 2 号", "METER-002", "未填写", "未施工"),
+    ]
+
+
+def test_json_meter_module_export_rows_are_complete_and_terminal_sorted(monkeypatch: pytest.MonkeyPatch) -> None:
+    team_id = f"meter-module-export-{uuid4()}"
+    state = local_simulation.blank_state(team_id)
+    state["groups"] = [
+        {
+            "id": "group-2",
+            "terminal": "350000000002",
+            "address": "二号路 2 号",
+            "meter_no": "METER-002",
+            "module_asset_no": "MODULE-002",
+            "construction_status": "unconstructed",
+        },
+        {
+            "id": "group-1",
+            "terminal": "350000000001",
+            "address": "一号路 1 号",
+            "meter_no": "METER-001",
+            "module_asset_no": "MODULE-001",
+            "construction_status": "completed",
+        },
+    ]
+    monkeypatch.setitem(local_simulation._team_states, team_id, state)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: team_id)
+
+    rows = repository.JsonStateRepository().list_meter_module_export_rows()
+
+    assert rows == [
+        {
+            "terminal": "350000000001",
+            "address": "一号路 1 号",
+            "meter_no": "METER-001",
+            "module_asset_no": "MODULE-001",
+            "construction_status": "completed",
+        },
+        {
+            "terminal": "350000000002",
+            "address": "二号路 2 号",
+            "meter_no": "METER-002",
+            "module_asset_no": "MODULE-002",
+            "construction_status": "unconstructed",
+        },
     ]
 
 
@@ -651,6 +690,46 @@ def test_postgres_data_center_uses_count_and_bounded_stable_row_query(monkeypatc
     assert "updated_at desc" in compiled[1]
     assert "nulls last" in compiled[1]
     assert "legacy_id desc" in compiled[1] or "material_groups.id desc" in compiled[1]
+
+
+def test_postgres_meter_module_export_uses_one_unbounded_projection_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MappingResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class RecordingSession:
+        def __init__(self):
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return MappingResult()
+
+    session = RecordingSession()
+    repo = repository.PostgresStateRepository()
+    monkeypatch.setattr(repo, "_session", lambda: session)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "demo-team")
+
+    rows = repo.list_meter_module_export_rows()
+
+    assert rows == []
+    assert len(session.statements) == 1
+    compiled = str(session.statements[0].compile(compile_kwargs={"literal_binds": True})).lower()
+    assert " limit " not in compiled
+    assert " offset " not in compiled
+    assert "order by" in compiled
+    assert "terminal asc" in compiled
 
 
 def test_postgres_data_center_unmatched_list_only_returns_open_records(

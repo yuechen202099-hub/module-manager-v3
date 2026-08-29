@@ -106,3 +106,10 @@ Require one listener on `127.0.0.1:8000`, local/public version 3.2.17, required 
 - [ ] **Step 5: Retention and attestation**
 
 Dry-run retention to five release directories, remove only the selected oldest release, update the release record with exact evidence, run attestation verification, commit, push `production/V3/3.2.17`, and tag `V3.2.17`.
+
+### Guarded rollback remediation: production-scale XLSX export
+
+- [x] Reproduce the production timeout with `22358` project rows and prove the paginated route repeats about `224` full data-center queries.
+- [x] Add failing route, JSON and PostgreSQL regression tests that require one dedicated export read.
+- [x] Replace the pagination loop with one terminal-sorted, unbounded projection query containing only workbook fields.
+- [ ] Re-run the full release gates, rebuild the source-bound package, and require the production XLSX response to finish within 30 seconds before retaining the cutover.
