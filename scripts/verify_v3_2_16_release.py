@@ -67,6 +67,7 @@ REQUIRED_FILES = (
     "scripts/test_verify_v3_2_14_release.py",
     "scripts/verify_v3_2_16_release.py",
     "scripts/test_verify_v3_2_16_release.py",
+    "scripts/production_backup.sh",
     "v2-api/alembic/versions/0016_project_scoped_collector_inventory.py",
     "v2-api/app/api/routes/collector_transfer.py",
     "v2-api/app/api/schemas/collector_transfer.py",
@@ -510,6 +511,16 @@ V3215_TEST_MARKERS = (
 )
 
 V3216_TEST_MARKERS = (
+    (
+        "scripts/test_verify_v3_2_16_release.py",
+        "def test_production_backup_checksum_manifest_is_relocatable(",
+        "relocatable production-backup checksum regression",
+    ),
+    (
+        "scripts/test_verify_v3_2_16_release.py",
+        "def test_production_backup_checksum_manifest_covers_env(",
+        "production-backup env checksum regression",
+    ),
     (
         "v2-api/tests/test_data_center.py",
         "def test_postgres_data_center_unmatched_list_only_returns_open_records(",

@@ -59,7 +59,22 @@ else
   printf 'pg_dump or DATABASE_URL unavailable\n' > "$BACKUP_DIR/database_backup_skipped.txt"
 fi
 
-sha256sum "$BACKUP_DIR"/* | sort -k2 > "$BACKUP_DIR/SHA256SUMS"
+(
+  cd "$BACKUP_DIR"
+  checksum_files=(
+    .env
+    current_release.tar.gz
+    current_release.txt
+    data.tar.gz
+    uploads.tar.gz
+  )
+  for optional_file in database.dump database-schema.sql database_backup_skipped.txt; do
+    if [ -f "$optional_file" ]; then
+      checksum_files+=("$optional_file")
+    fi
+  done
+  sha256sum -- "${checksum_files[@]}" | sort -k2 > SHA256SUMS
+)
 chmod -R go-rwx "$BACKUP_DIR"
 
 echo "BACKUP_DIR=$BACKUP_DIR"

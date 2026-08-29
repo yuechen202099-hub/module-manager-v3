@@ -197,6 +197,7 @@ V3216_CONTRACT_INPUTS = frozenset(
         "ops/releases/V3.2.16.md",
         "scripts/verify_v3_2_16_release.py",
         "scripts/test_verify_v3_2_16_release.py",
+        "scripts/production_backup.sh",
         "v2-api/tests/test_data_center.py",
         "v2-api/tests/test_local_simulation.py",
         "v2-web/src/views/__tests__/AppLayout.spec.ts",

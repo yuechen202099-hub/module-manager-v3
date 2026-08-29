@@ -18,6 +18,93 @@ V3215_PRODUCTION_RECORD_SHA256 = (
 )
 VALID_SOURCE_COMMIT = "1" * 40
 VALID_PACKAGE_SHA256 = "a" * 64
+PRODUCTION_BACKUP_SCRIPT = ROOT / "scripts" / "production_backup.sh"
+
+
+def git_bash() -> Path:
+    candidates = (
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    executable = shutil.which("bash")
+    assert executable is not None, "bash is required for production backup contract tests"
+    return Path(executable)
+
+
+def bash_path(path: Path) -> str:
+    resolved = path.resolve()
+    if resolved.drive:
+        tail = resolved.as_posix()[3:]
+        return f"/{resolved.drive[0].lower()}/{tail}"
+    return resolved.as_posix()
+
+
+def native_path(path: str) -> Path:
+    if len(path) >= 4 and path[0] == "/" and path[2] == "/":
+        return Path(f"{path[1]}:/{path[3:]}")
+    return Path(path)
+
+
+def run_minimal_production_backup(tmp_path: Path) -> Path:
+    app_root = tmp_path / "app"
+    (app_root / "current").mkdir(parents=True)
+    (app_root / "current" / "release.txt").write_text("release\n", encoding="utf-8")
+    (app_root / "data").mkdir()
+    (app_root / "data" / "state.json").write_text("{}\n", encoding="utf-8")
+    (app_root / "uploads").mkdir()
+    (app_root / "uploads" / "keep.txt").write_text("upload\n", encoding="utf-8")
+    (app_root / ".env").write_text("DATABASE_URL=\n", encoding="utf-8")
+    result = subprocess.run(
+        [git_bash(), bash_path(PRODUCTION_BACKUP_SCRIPT), bash_path(app_root), "contract"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    backup_lines = [
+        line.removeprefix("BACKUP_DIR=")
+        for line in result.stdout.splitlines()
+        if line.startswith("BACKUP_DIR=")
+    ]
+    assert len(backup_lines) == 1
+    return native_path(backup_lines[0])
+
+
+def test_production_backup_checksum_manifest_is_relocatable(tmp_path: Path) -> None:
+    backup_dir = run_minimal_production_backup(tmp_path)
+    relocated = backup_dir.with_name("relocated-backup")
+    backup_dir.rename(relocated)
+
+    result = subprocess.run(
+        [
+            git_bash(),
+            "-c",
+            'cd "$1" && sha256sum -c SHA256SUMS',
+            "backup-check",
+            bash_path(relocated),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_production_backup_checksum_manifest_covers_env(tmp_path: Path) -> None:
+    backup_dir = run_minimal_production_backup(tmp_path)
+    manifest_entries = {
+        line.split(maxsplit=1)[1].lstrip("*")
+        for line in (backup_dir / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    }
+
+    assert ".env" in manifest_entries
 
 
 def load_verifier():
