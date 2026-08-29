@@ -66,7 +66,7 @@ Commit only the V3.2.17 release/version/static-source files and this plan on `pr
 - Consumes: clean V3.2.17 production branch.
 - Produces: a ZIP whose `SOURCE_COMMIT`, manifest, CRC, required/forbidden members and SHA256 are verified.
 
-- [ ] **Step 1: Run full backend/frontend validation**
+- [x] **Step 1: Run full backend/frontend validation**
 
 Run backend pytest, frontend component/state/view tests, Vue migration/data-center gates, type-check/build and `git diff --check`.
 
