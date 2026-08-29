@@ -29,6 +29,7 @@ V3213_RELEASE_RECORD = "ops/releases/V3.2.13.md"
 V3214_RELEASE_RECORD = "ops/releases/V3.2.14.md"
 V3215_RELEASE_RECORD = "ops/releases/V3.2.15.md"
 V3216_RELEASE_RECORD = "ops/releases/V3.2.16.md"
+V3217_RELEASE_RECORD = "ops/releases/V3.2.17.md"
 RUNTIME_VERSION_ARTIFACT = "v2-api/app/static/vue/version.json"
 SOURCE_VERSION_ARTIFACT = "v2-web/src/version.json"
 VALID_SHA256 = "a" * 64
@@ -62,6 +63,7 @@ V328_ARCHIVE_SOURCE_FILES = frozenset(
         "docs/superpowers/plans/2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md",
         "docs/superpowers/plans/2026-08-28-v3-2-15-dashboard-rephoto-async.md",
         "docs/superpowers/plans/2026-08-29-v3-2-16-review-claim-hotfix.md",
+        "docs/superpowers/plans/2026-08-29-v3-2-17-anomaly-export-release.md",
         "scripts/build-client-release.ps1",
         "scripts/production_health_check.py",
         "scripts/verify-client-release.py",
@@ -80,6 +82,8 @@ V328_ARCHIVE_SOURCE_FILES = frozenset(
         "scripts/test_verify_v3_2_15_release.py",
         "scripts/verify_v3_2_16_release.py",
         "scripts/test_verify_v3_2_16_release.py",
+        "scripts/verify_v3_2_17_release.py",
+        "scripts/test_verify_v3_2_17_release.py",
         "v2-api/app/api/schemas/collector_transfer.py",
         "v2-api/app/schemas/data_center.py",
         "v2-api/app/services/data_center.py",
@@ -127,6 +131,8 @@ V328_ARCHIVE_SOURCE_FILES = frozenset(
         "v2-web/src/views/__tests__/ConstructionScannerAndroid.spec.ts",
         "v2-web/src/views/__tests__/AppLayout.spec.ts",
         "v2-web/src/views/__tests__/LoginView.spec.ts",
+        "v2-web/src/views/ProjectBoardView.vue",
+        "v2-web/src/components/__tests__/ProjectBoardView.spec.ts",
     }
 ) | GLOBAL_WORKBENCH_SOURCE_FILES
 SAFETY_NOTES = (
@@ -187,14 +193,14 @@ V3211_PENDING_RELEASE_RECORD = """# V3.2.11 Production Release Record
 
 VALID_AGENTS = """# Package fixture
 
-- Deployed production baseline: `V3.2.15`.
-- Release candidate: `V3.2.16`.
-- Release-candidate maintenance branch: `production/V3/3.2.16`.
-- 当前已部署生产版本：`V3.2.15`。
-- 当前发布候选版本：`V3.2.16`。
-- 当前候选维护分支：`production/V3/3.2.16`。
+- Deployed production baseline: `V3.2.16`.
+- Release candidate: `V3.2.17`.
+- Release-candidate maintenance branch: `production/V3/3.2.17`.
+- 当前已部署生产版本：`V3.2.16`。
+- 当前发布候选版本：`V3.2.17`。
+- 当前候选维护分支：`production/V3/3.2.17`。
 """
-PENDING_RELEASE_RECORD = (ROOT / V3216_RELEASE_RECORD).read_text(encoding="utf-8")
+PENDING_RELEASE_RECORD = (ROOT / V3217_RELEASE_RECORD).read_text(encoding="utf-8")
 
 V322_PENDING_RELEASE_RECORD = """# V3.2.2 Production Release Record
 
@@ -243,21 +249,22 @@ def load_verifier():
     return module
 
 
-def test_v3216_package_contract_inherits_v3215_and_registers_current_gates() -> None:
+def test_v3217_package_contract_inherits_v3216_and_registers_current_gates() -> None:
     verifier = load_verifier()
     expected = {
-        "ops/releases/V3.2.16.md",
-        "scripts/verify_v3_2_16_release.py",
-        "scripts/test_verify_v3_2_16_release.py",
+        "ops/releases/V3.2.17.md",
+        "scripts/verify_v3_2_17_release.py",
+        "scripts/test_verify_v3_2_17_release.py",
         "v2-api/app/api/schemas/collector_transfer.py",
         "v2-web/src/api/services.ts",
     }
 
-    assert verifier.V3215_CONTRACT_INPUTS < verifier.V3216_CONTRACT_INPUTS
-    assert expected <= verifier.V3216_CONTRACT_INPUTS
+    assert verifier.V3216_CONTRACT_INPUTS < verifier.V3217_CONTRACT_INPUTS
+    assert expected <= verifier.V3217_CONTRACT_INPUTS
     assert verifier.required_files_for_version("3.2.14") < frozenset(verifier.REQUIRED_FILES)
     assert verifier.required_files_for_version("3.2.15") < frozenset(verifier.REQUIRED_FILES)
-    assert verifier.required_files_for_version("3.2.16") == frozenset(verifier.REQUIRED_FILES)
+    assert verifier.required_files_for_version("3.2.16") < frozenset(verifier.REQUIRED_FILES)
+    assert verifier.required_files_for_version("3.2.17") == frozenset(verifier.REQUIRED_FILES)
 
 
 def load_v320_release_verifier():
@@ -404,9 +411,9 @@ def write_release_archive(
     verifier,
     archive_path: Path,
     *,
-    manifest_version: str | None = "3.2.16",
+    manifest_version: str | None = "3.2.17",
     manifest_versions: list[str] | None = None,
-    static_version: str = "3.2.16",
+    static_version: str = "3.2.17",
     title_version: str | None = None,
     runtime_version: str | None = None,
     source_version: str | None = None,
@@ -425,7 +432,7 @@ def write_release_archive(
     content_overrides: dict[str, str | bytes] | None = None,
 ) -> None:
     omitted_names = set(omitted or set())
-    supported_version = manifest_version in {"3.2.8", "3.2.10", "3.2.11", "3.2.12", "3.2.13", "3.2.14", "3.2.15", "3.2.16"}
+    supported_version = manifest_version in {"3.2.8", "3.2.10", "3.2.11", "3.2.12", "3.2.13", "3.2.14", "3.2.15", "3.2.16", "3.2.17"}
     version_specific_required_files = (
         set(verifier.required_files_for_version(manifest_version))
         if supported_version
@@ -478,7 +485,8 @@ def write_release_archive(
         V3213_RELEASE_RECORD: (ROOT / V3213_RELEASE_RECORD).read_text(encoding="utf-8"),
         V3214_RELEASE_RECORD: (ROOT / V3214_RELEASE_RECORD).read_text(encoding="utf-8"),
         V3215_RELEASE_RECORD: (ROOT / V3215_RELEASE_RECORD).read_text(encoding="utf-8"),
-        V3216_RELEASE_RECORD: release_record,
+        V3216_RELEASE_RECORD: (ROOT / V3216_RELEASE_RECORD).read_text(encoding="utf-8"),
+        V3217_RELEASE_RECORD: release_record,
         SOURCE_VERSION_ARTIFACT: json.dumps(
             {"version": resolved_source_version}, separators=(",", ":")
         ),
@@ -631,7 +639,7 @@ def test_archive_missing_v3079_historical_release_record_fails_verification(tmp_
 def test_release_builder_default_version_is_candidate_semantic_version() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    assert '[string]$Version = "3.2.16"' in build_script
+    assert '[string]$Version = "3.2.17"' in build_script
 
 
 @pytest.mark.parametrize("version", ("3.2.7", "3.2.9"))
@@ -673,7 +681,7 @@ def test_release_builder_rejects_non_candidate_version_before_output_mutation(
 
     output = completed.stdout + completed.stderr
     assert completed.returncode != 0
-    assert "Expected exactly 3.2.16" in output
+    assert "Expected exactly 3.2.17" in output
     assert staging_sentinel.read_text(encoding="utf-8") == "preserve staging"
     assert archive.read_bytes() == b"preserve archive"
 
@@ -687,7 +695,7 @@ def test_release_builder_embeds_the_current_source_commit() -> None:
     assert "source commit or worktree changed during packaging" in build_script
     assert "verify-client-release.py $zipPath --expected-source-commit $sourceCommit" in build_script
     assert (
-        "verify_v3_2_16_release.py --phase package --package $zipPath "
+        "verify_v3_2_17_release.py --phase package --package $zipPath "
         "--expected-source-commit $sourceCommit"
     ) in build_script
 
@@ -712,7 +720,7 @@ def test_release_builder_checks_cleanliness_before_building_into_isolated_stagin
 def test_release_builder_guards_candidate_version_before_output_mutation() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
 
-    candidate_guard = build_script.index("Expected exactly 3.2.16")
+    candidate_guard = build_script.index("Expected exactly 3.2.17")
     release_root = build_script.index('$releaseRoot = Join-Path $root "build\\server-release"')
     remove_archive = build_script.index("Remove-Item -Force -LiteralPath $zipPath")
     first_validation = build_script.index('Write-Host "Verifying administrator release notes..."')
@@ -882,7 +890,7 @@ def test_release_builder_packages_the_committed_manifest_with_source_phase_comma
     assert '$manifestPath = Join-Path $staging "RELEASE_MANIFEST.md"' not in build_script
     assert (
         ".\\.venv\\Scripts\\python.exe .\\scripts\\verify_release_sop.py "
-        "--version V3.2.16 --phase source"
+        "--version V3.2.17 --phase source"
     ) in committed_manifest
 
 
@@ -1187,7 +1195,7 @@ def test_valid_pending_candidate_archive_contains_reviewed_kpi_bytes(tmp_path: P
     verifier.verify_package(archive_path)
 
 
-def test_v3216_build_sequence_executes_current_and_compatible_release_gates_only() -> None:
+def test_v3217_build_sequence_executes_current_and_compatible_release_gates_only() -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     match = re.search(r"\$releaseVerifiers\s*=\s*@\((?P<items>[\s\S]*?)\n\)", build_script)
 
@@ -1200,7 +1208,7 @@ def test_v3216_build_sequence_executes_current_and_compatible_release_gates_only
         "scripts\\verify_v3_2_0_export_center_ui.py",
         "scripts\\verify_v3_2_0_single_export_entry.py",
         "scripts\\verify_v3_2_1_installer_kpi_restore.py",
-        "scripts\\verify_v3_2_16_release.py",
+        "scripts\\verify_v3_2_17_release.py",
     )
     for verifier_path in expected:
         assert verifier_path in release_verifiers
@@ -1222,9 +1230,9 @@ def test_v3216_build_sequence_executes_current_and_compatible_release_gates_only
     )
 
 
-def test_v3216_builder_executes_contract_tests_and_stops_on_failure(tmp_path: Path) -> None:
+def test_v3217_builder_executes_contract_tests_and_stops_on_failure(tmp_path: Path) -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
-    gate_start_marker = 'Write-Host "Running V3.2.16 contract tests..."'
+    gate_start_marker = 'Write-Host "Running V3.2.17 contract tests..."'
     next_gate_marker = (
         "& .\\.venv\\Scripts\\python.exe -m pytest "
         ".\\v2-api\\tests\\test_collector_transfer_scale.py -q"
@@ -1243,7 +1251,7 @@ def test_v3216_builder_executes_contract_tests_and_stops_on_failure(tmp_path: Pa
         "exit /b 23\n",
         encoding="utf-8",
     )
-    harness = tmp_path / "run-v3216-contract-gate.ps1"
+    harness = tmp_path / "run-v3217-contract-gate.ps1"
     continued = tmp_path / "continued.txt"
     harness.write_text(
         '\n'.join(
@@ -1278,11 +1286,11 @@ def test_v3216_builder_executes_contract_tests_and_stops_on_failure(tmp_path: Pa
 
     output = result.stdout + result.stderr
     assert result.returncode != 0
-    assert "V3.2.16 contract tests failed" in output
+    assert "V3.2.17 contract tests failed" in output
     assert not continued.exists()
     invocation = invocation_log.read_text(encoding="utf-8")
     assert "-m pytest" in invocation
-    assert ".\\scripts\\test_verify_v3_2_16_release.py -q" in invocation
+    assert ".\\scripts\\test_verify_v3_2_17_release.py -q" in invocation
 
 
 def test_v3215_archive_rejects_an_unapproved_alembic_revision(tmp_path: Path) -> None:
@@ -1829,7 +1837,7 @@ def test_all_copied_operational_documents_reject_stale_candidate_markers() -> No
     assert document_paths
     for document_path in document_paths:
         content = (ROOT / document_path).read_text(encoding="utf-8")
-        verifier.verify_release_markdown_text(document_path, content, "3.2.16")
+        verifier.verify_release_markdown_text(document_path, content, "3.2.17")
 
 
 @pytest.mark.parametrize(
@@ -1842,7 +1850,7 @@ def test_current_operational_documents_validate_against_the_package_version(docu
     verifier.verify_release_markdown_text(
         document_path,
         (ROOT / document_path).read_text(encoding="utf-8"),
-        "3.2.16",
+        "3.2.17",
     )
 
 
@@ -2127,7 +2135,7 @@ def test_archive_source_and_runtime_version_artifacts_must_match(tmp_path: Path)
     archive_path = tmp_path / "source-runtime-version-mismatch.zip"
     write_release_archive(verifier, archive_path, source_version="3.0.80")
 
-    with pytest.raises(AssertionError, match="V3.2.16 archive source contract|source and built runtime versions"):
+    with pytest.raises(AssertionError, match="V3.2.17 archive source contract|source and built runtime versions"):
         verifier.verify_package(archive_path)
 
 
@@ -2137,11 +2145,11 @@ def test_archive_rejects_stale_entry_bundle_despite_current_sidecars(tmp_path: P
     write_release_archive(
         verifier,
         archive_path,
-        runtime_version="3.2.16",
-        source_version="3.2.16",
+        runtime_version="3.2.17",
+        source_version="3.2.17",
         entry_version="3.2.4",
-        unrelated_static_version="3.2.16",
-        unrelated_chunk_entry_version="3.2.16",
+        unrelated_static_version="3.2.17",
+        unrelated_chunk_entry_version="3.2.17",
     )
 
     with pytest.raises(AssertionError, match="entry bundle version"):
@@ -2219,7 +2227,7 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
     verifier = load_verifier()
     archive_path = tmp_path / "contradictory-agents.zip"
     agents = VALID_AGENTS.replace(
-        "- Deployed production baseline: `V3.2.15`.",
+        "- Deployed production baseline: `V3.2.16`.",
         "- Deployed production baseline: `V3.2.3`.",
     )
     write_release_archive(verifier, archive_path, agents=agents)
@@ -2234,7 +2242,7 @@ def test_archive_rejects_contradictory_agents_deployed_markers(tmp_path: Path) -
         (
             "star-package",
             "Package",
-            "* Package: module-manager-v2-server-3.2.16.zip",
+            "* Package: module-manager-v2-server-3.2.17.zip",
         ),
         ("plus-local-verification", "Local Verification", "+ Local Verification: passed"),
         (
@@ -2271,7 +2279,7 @@ def test_archive_rejects_deployed_record_without_live_evidence(tmp_path: Path) -
     verifier = load_verifier()
     archive_path = tmp_path / "unsupported-deployed-record.zip"
     record = deployed_release_record(
-        "3.2.16",
+        "3.2.17",
         "Status: reviewed, packaged, deployed, and verified in production",
     ).replace(f"| SHA256 | {VALID_SHA256} |", "| SHA256 | |")
     write_release_archive(
@@ -2336,14 +2344,14 @@ def test_archive_rejects_pending_candidate_with_unversioned_claim_and_complete_e
         verifier.verify_package(archive_path)
 
 
-def test_archive_rejects_mutated_v3215_deployed_baseline_record(tmp_path: Path) -> None:
+def test_archive_rejects_mutated_v3216_deployed_baseline_record(tmp_path: Path) -> None:
     verifier = load_verifier()
     archive_path = tmp_path / "bare-deployed-baseline.zip"
     write_release_archive(
         verifier,
         archive_path,
         content_overrides={
-            V3215_RELEASE_RECORD: deployed_release_record("3.2.15", "Status: deployed")
+            V3216_RELEASE_RECORD: deployed_release_record("3.2.16", "Status: deployed")
         },
     )
 
@@ -2366,7 +2374,7 @@ def test_archive_rejects_deployed_candidate_record(tmp_path: Path) -> None:
         verifier,
         archive_path,
         release_record=deployed_release_record(
-            "3.2.16",
+            "3.2.17",
             "Status: reviewed, packaged, deployed, and verified in production",
         ),
     )

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "3.2.16",
+    [string]$Version = "3.2.17",
     [string]$PerformanceReport = "",
     [switch]$SkipSmoke
 )
@@ -9,13 +9,13 @@ $ErrorActionPreference = "Stop"
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
     throw "Release Version must be a semantic version such as 3.0.84."
 }
-$requiredVersion = "3.2.16"
-$protectedHistoricalVersion = "3.2.15"
+$requiredVersion = "3.2.17"
+$protectedHistoricalVersion = "3.2.16"
 if ($Version -eq $protectedHistoricalVersion) {
-    throw "Refusing to build protected historical release $Version. Expected exactly 3.2.16."
+    throw "Refusing to build protected historical release $Version. Expected exactly 3.2.17."
 }
 if ($Version -ne $requiredVersion) {
-    throw "Refusing to build release version $Version. Expected exactly 3.2.16."
+    throw "Refusing to build release version $Version. Expected exactly 3.2.17."
 }
 
 $root = Split-Path -Parent $PSScriptRoot
@@ -55,6 +55,8 @@ $releaseInputs = @(
     "scripts\test_verify_v3_2_15_release.py",
     "scripts\verify_v3_2_16_release.py",
     "scripts\test_verify_v3_2_16_release.py",
+    "scripts\verify_v3_2_17_release.py",
+    "scripts\test_verify_v3_2_17_release.py",
     "scripts\patch_export_retirement_nginx.py",
     "scripts\test_patch_export_retirement_nginx.py",
     "scripts\oss_local_export.py",
@@ -64,6 +66,7 @@ $releaseInputs = @(
     "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md",
     "docs\superpowers\plans\2026-08-28-v3-2-15-dashboard-rephoto-async.md",
     "docs\superpowers\plans\2026-08-29-v3-2-16-review-claim-hotfix.md",
+    "docs\superpowers\plans\2026-08-29-v3-2-17-anomaly-export-release.md",
     "v2-api\alembic\versions\0013_data_center_query_indexes.py",
     "v2-api\alembic\versions\0014_export_center_jobs.py",
     "v2-api\alembic\versions\0015_collector_transfer_workbench.py",
@@ -110,8 +113,10 @@ $releaseInputs = @(
     "v2-web\src\views\ConstructionView.vue",
     "v2-web\src\views\__tests__\ConstructionScannerAndroid.spec.ts",
     "v2-web\src\views\ReviewRephotoWorkbenchView.vue",
+    "v2-web\src\views\ProjectBoardView.vue",
     "v2-web\src\views\__tests__\CollectorInventoryRouting.spec.ts",
     "v2-web\src\views\__tests__\ReviewRephotoWorkbenchView.spec.ts",
+    "v2-web\src\components\__tests__\ProjectBoardView.spec.ts",
     "v2-web\src\views\__tests__\AppLayout.spec.ts",
     "v2-web\src\views\__tests__\LoginView.spec.ts",
     "v2-web\tests\collector-transfer-state.test.ts",
@@ -133,7 +138,8 @@ $releaseInputs = @(
     "ops\releases\V3.2.13.md"
     "ops\releases\V3.2.14.md",
     "ops\releases\V3.2.15.md",
-    "ops\releases\V3.2.16.md"
+    "ops\releases\V3.2.16.md",
+    "ops\releases\V3.2.17.md"
 )
 foreach ($releaseInput in $releaseInputs) {
     if (-not (Test-Path -LiteralPath (Join-Path $root $releaseInput) -PathType Leaf)) {
@@ -146,8 +152,8 @@ if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the full Git source commit for this release."
 }
 $sourceBranch = (& git branch --show-current).Trim()
-if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.16") {
-    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.16."
+if ($LASTEXITCODE -ne 0 -or $sourceBranch -ne "production/V3/3.2.17") {
+    throw "Refusing to package branch '$sourceBranch'. Expected production/V3/3.2.17."
 }
 $worktreeChanges = @(
     git status --porcelain --untracked-files=all |
@@ -229,7 +235,7 @@ if ($performanceReportPath) {
     }
 }
 
-Write-Host "Running V3.2.16 focused release gates..."
+Write-Host "Running V3.2.17 focused release gates..."
 $releaseVerifiers = @(
     "scripts\verify_v3_2_0_role_routes.py",
     "scripts\verify_v3_2_0_data_center_ui.py",
@@ -237,34 +243,34 @@ $releaseVerifiers = @(
     "scripts\verify_v3_2_0_export_center_ui.py",
     "scripts\verify_v3_2_0_single_export_entry.py",
     "scripts\verify_v3_2_1_installer_kpi_restore.py",
-    "scripts\verify_v3_2_16_release.py"
+    "scripts\verify_v3_2_17_release.py"
 )
 foreach ($releaseVerifier in $releaseVerifiers) {
-    if ($releaseVerifier -eq "scripts\verify_v3_2_16_release.py") {
+    if ($releaseVerifier -eq "scripts\verify_v3_2_17_release.py") {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier) --phase source
     } else {
         & .\.venv\Scripts\python.exe (Join-Path $root $releaseVerifier)
     }
     if ($LASTEXITCODE -ne 0) {
-        throw "V3.2.16 release gate failed: $releaseVerifier"
+        throw "V3.2.17 release gate failed: $releaseVerifier"
     }
 }
 
-Write-Host "Running V3.2.16 contract tests..."
-& .\.venv\Scripts\python.exe -m pytest .\scripts\test_verify_v3_2_16_release.py -q
+Write-Host "Running V3.2.17 contract tests..."
+& .\.venv\Scripts\python.exe -m pytest .\scripts\test_verify_v3_2_17_release.py -q
 if ($LASTEXITCODE -ne 0) {
-    throw "V3.2.16 contract tests failed."
+    throw "V3.2.17 contract tests failed."
 }
 
 & .\.venv\Scripts\python.exe -m pytest .\v2-api\tests\test_collector_transfer_scale.py -q
 if ($LASTEXITCODE -ne 0) {
-    throw "V3.2.16 collector scale regression gate failed."
+    throw "V3.2.17 collector scale regression gate failed."
 }
 Push-Location .\v2-web
 try {
     npm run test:collector-transfer -- CollectorInventoryView.spec.ts
     if ($LASTEXITCODE -ne 0) {
-        throw "V3.2.16 collector camera regression gate failed."
+        throw "V3.2.17 collector camera regression gate failed."
     }
 }
 finally {
@@ -355,6 +361,7 @@ Copy-ReleaseItem "docs\superpowers\specs\2026-08-26-unified-terminal-review-reph
 Copy-ReleaseItem "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md" "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archive-manual-demand.md"
 Copy-ReleaseItem "docs\superpowers\plans\2026-08-28-v3-2-15-dashboard-rephoto-async.md" "docs\superpowers\plans\2026-08-28-v3-2-15-dashboard-rephoto-async.md"
 Copy-ReleaseItem "docs\superpowers\plans\2026-08-29-v3-2-16-review-claim-hotfix.md" "docs\superpowers\plans\2026-08-29-v3-2-16-review-claim-hotfix.md"
+Copy-ReleaseItem "docs\superpowers\plans\2026-08-29-v3-2-17-anomaly-export-release.md" "docs\superpowers\plans\2026-08-29-v3-2-17-anomaly-export-release.md"
 Copy-ReleaseItem "ops" "ops"
 
 Copy-ReleaseItem "infra" "infra"
@@ -418,6 +425,8 @@ Copy-ReleaseItem "scripts\verify_v3_2_15_release.py" "scripts\verify_v3_2_15_rel
 Copy-ReleaseItem "scripts\test_verify_v3_2_15_release.py" "scripts\test_verify_v3_2_15_release.py"
 Copy-ReleaseItem "scripts\verify_v3_2_16_release.py" "scripts\verify_v3_2_16_release.py"
 Copy-ReleaseItem "scripts\test_verify_v3_2_16_release.py" "scripts\test_verify_v3_2_16_release.py"
+Copy-ReleaseItem "scripts\verify_v3_2_17_release.py" "scripts\verify_v3_2_17_release.py"
+Copy-ReleaseItem "scripts\test_verify_v3_2_17_release.py" "scripts\test_verify_v3_2_17_release.py"
 Copy-ReleaseItem "scripts\patch_export_retirement_nginx.py" "scripts\patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\test_patch_export_retirement_nginx.py" "scripts\test_patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\oss_local_export.py" "scripts\oss_local_export.py"
@@ -654,10 +663,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "Release package verification failed."
 }
 
-& .\.venv\Scripts\python.exe .\scripts\verify_v3_2_16_release.py --phase package --package $zipPath --expected-source-commit $sourceCommit
+& .\.venv\Scripts\python.exe .\scripts\verify_v3_2_17_release.py --phase package --package $zipPath --expected-source-commit $sourceCommit
 if ($LASTEXITCODE -ne 0) {
     Remove-Item -Force -LiteralPath $zipPath -ErrorAction SilentlyContinue
-    throw "V3.2.16 source-bound package verification failed."
+    throw "V3.2.17 source-bound package verification failed."
 }
 
 Write-Host ""
