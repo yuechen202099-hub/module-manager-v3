@@ -1,7 +1,7 @@
 [project]
 name = "module-manager-v2-api"
-version = "3.2.15"
-description = "FastAPI backend for Module Replacement Project Manager V3.2.15"
+version = "3.2.16"
+description = "FastAPI backend for Module Replacement Project Manager V3.2.16"
 requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.13.0",

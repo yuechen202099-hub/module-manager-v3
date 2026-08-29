@@ -5,14 +5,14 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.2.15`
-- 当前生产应用基线：`V3.2.14`
-- 当前发布候选版本：`V3.2.15`
-- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.14-20260828T113306Z`
-- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.13-20260828T020636Z`
-- 当前生产提交：`7f8218371f3afdfc9b448535883deba25a35a8eb`
+- 生产维护分支：`production/V3/3.2.16`
+- 当前生产应用基线：`V3.2.15`
+- 当前发布候选版本：`V3.2.16`
+- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.15-20260828T144635Z`
+- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.14-20260828T113306Z`
+- 当前生产提交：`7cf23bfca2748da45b4d425cef42a6ba1928d500`
 - 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.2.0`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
-- 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\production-v3.0.24`
+- 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\review-rephoto-workbench`
 - worktree 路径里的 `production-v3.0.24` 是创建时名称，不代表当前线上版本。
 
 ## 不可突破的生产边界
@@ -74,7 +74,7 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest v2-api/tests
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.15 --phase source
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.16 --phase source
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py --help
 cd v2-web; npm run build
 ```
