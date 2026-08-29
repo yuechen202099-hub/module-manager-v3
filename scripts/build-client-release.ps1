@@ -366,6 +366,7 @@ Copy-ReleaseItem "docs\superpowers\plans\2026-08-28-v3-2-14-review-rephoto-archi
 Copy-ReleaseItem "docs\superpowers\plans\2026-08-28-v3-2-15-dashboard-rephoto-async.md" "docs\superpowers\plans\2026-08-28-v3-2-15-dashboard-rephoto-async.md"
 Copy-ReleaseItem "docs\superpowers\plans\2026-08-29-v3-2-16-review-claim-hotfix.md" "docs\superpowers\plans\2026-08-29-v3-2-16-review-claim-hotfix.md"
 Copy-ReleaseItem "docs\superpowers\plans\2026-08-29-v3-2-17-anomaly-export-release.md" "docs\superpowers\plans\2026-08-29-v3-2-17-anomaly-export-release.md"
+Copy-ReleaseItem "docs\superpowers\plans\2026-08-29-v3-2-18-approved-exception-hotfix.md" "docs\superpowers\plans\2026-08-29-v3-2-18-approved-exception-hotfix.md"
 Copy-ReleaseItem "ops" "ops"
 
 Copy-ReleaseItem "infra" "infra"
@@ -431,6 +432,8 @@ Copy-ReleaseItem "scripts\verify_v3_2_16_release.py" "scripts\verify_v3_2_16_rel
 Copy-ReleaseItem "scripts\test_verify_v3_2_16_release.py" "scripts\test_verify_v3_2_16_release.py"
 Copy-ReleaseItem "scripts\verify_v3_2_17_release.py" "scripts\verify_v3_2_17_release.py"
 Copy-ReleaseItem "scripts\test_verify_v3_2_17_release.py" "scripts\test_verify_v3_2_17_release.py"
+Copy-ReleaseItem "scripts\verify_v3_2_18_release.py" "scripts\verify_v3_2_18_release.py"
+Copy-ReleaseItem "scripts\test_verify_v3_2_18_release.py" "scripts\test_verify_v3_2_18_release.py"
 Copy-ReleaseItem "scripts\patch_export_retirement_nginx.py" "scripts\patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\test_patch_export_retirement_nginx.py" "scripts\test_patch_export_retirement_nginx.py"
 Copy-ReleaseItem "scripts\oss_local_export.py" "scripts\oss_local_export.py"

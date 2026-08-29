@@ -1254,6 +1254,19 @@ def test_v3218_build_sequence_executes_current_and_compatible_release_gates_only
     )
 
 
+def test_v3218_builder_copies_current_release_contract_inputs_into_package() -> None:
+    build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
+
+    expected_copy_commands = (
+        'Copy-ReleaseItem "docs\\superpowers\\plans\\2026-08-29-v3-2-18-approved-exception-hotfix.md" "docs\\superpowers\\plans\\2026-08-29-v3-2-18-approved-exception-hotfix.md"',
+        'Copy-ReleaseItem "scripts\\verify_v3_2_18_release.py" "scripts\\verify_v3_2_18_release.py"',
+        'Copy-ReleaseItem "scripts\\test_verify_v3_2_18_release.py" "scripts\\test_verify_v3_2_18_release.py"',
+    )
+
+    for copy_command in expected_copy_commands:
+        assert copy_command in build_script
+
+
 def test_v3218_builder_executes_contract_tests_and_stops_on_failure(tmp_path: Path) -> None:
     build_script = (ROOT / "scripts" / "build-client-release.ps1").read_text(encoding="utf-8")
     gate_start_marker = 'Write-Host "Running V3.2.18 contract tests..."'
