@@ -27,7 +27,7 @@ from app.core.config import settings
 from app.core.rate_limit import SlidingWindowRateLimiter
 from app.core import security
 from app.services.ezcodes_scheduler import sync_manager
-from app.services import account_store, local_simulation, photo_barcode_check, photo_storage, state_repository, unmatched_review
+from app.services import account_store, data_center as data_center_service, local_simulation, photo_barcode_check, photo_storage, state_repository, unmatched_review
 from app.services.export_retirement import RETIREMENT_MESSAGE
 from app.services.photo_storage import resolve_photo_for_response
 
@@ -70,6 +70,32 @@ def assert_success_shape(payload: dict) -> None:
     assert "data" in payload
     assert payload["error"] is None
     assert isinstance(payload["request_id"], str)
+
+
+def acknowledge_all_group_anomalies(group_id: str, actor: str) -> None:
+    group = local_simulation.get_group(group_id)
+    assert group is not None
+    anomalies = data_center_service.group_anomalies(group)
+    if not anomalies:
+        return
+    fingerprint = anomalies[0]["evidence_fingerprint"]
+    resolutions = dict(group.get(data_center_service.ANOMALY_RESOLUTIONS_KEY) or {})
+    resolutions.update(
+        {
+            anomaly["code"]: {
+                "evidence_fingerprint": fingerprint,
+                "message": anomaly["message"],
+                "resolved_by": actor,
+                "resolved_at": "2026-08-29T18:47:02+08:00",
+                "source_page": "test_setup",
+            }
+            for anomaly in anomalies
+        }
+    )
+    group[data_center_service.ANOMALY_RESOLUTIONS_KEY] = resolutions
+    raw = dict(group.get("raw_data") or {})
+    raw[data_center_service.ANOMALY_RESOLUTIONS_KEY] = resolutions
+    group["raw_data"] = raw
 
 
 def assert_active_nav(html: str, href: str) -> None:
@@ -3453,7 +3479,7 @@ def test_system_status_version_requires_admin_and_reports_runtime_state() -> Non
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.2.17"
+    assert data["version"] == "3.2.18"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -4385,6 +4411,7 @@ def test_review_api_preserves_retired_delivery_cache_queue_after_json_persistenc
     )
     assert claimed.status_code == 200
     group = client.get(f"/local-test/tasks/{task['id']}/groups?limit=1").json()["data"]["items"][0]
+    acknowledge_all_group_anomalies(group["id"], "api-cache-reviewer")
     events: list[str] = []
 
     monkeypatch.setattr(local_test, "state_repository", lambda: state_repository.JsonStateRepository())
@@ -4452,6 +4479,7 @@ def test_local_test_task_and_review_flow() -> None:
     assert "photos" not in summary_group
     assert "photo_count" in summary_group
     assert "reviewer" in summary_group
+    acknowledge_all_group_anomalies(group["id"], "api-test")
 
     review_response = client.patch(
         f"/local-test/groups/{group['id']}/review",

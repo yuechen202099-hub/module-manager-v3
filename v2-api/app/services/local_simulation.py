@@ -4826,6 +4826,8 @@ def count_groups(groups: list[dict[str, Any]], statuses: set[str]) -> int:
 
 
 def is_problem_group(group: dict[str, Any]) -> bool:
+    if group.get("status") == "approved":
+        return False
     return group.get("status") == "exception" or (
         group.get("photo_count", 0) > 0
         and (group.get("status") == "incomplete" or bool(group.get("has_archive_blocker")))
@@ -6737,11 +6739,29 @@ def review_group(
         raise KeyError(group_id)
     if status == "exception" and not (note or exception_note):
         raise ValueError("Exception review requires a note")
+    approved_anomalies: list[dict[str, str]] = []
+    if status == "approved":
+        approved_anomalies = data_center_service.group_anomalies(group)
+        unresolved = [anomaly for anomaly in approved_anomalies if anomaly["status"] == "open"]
+        if unresolved:
+            raise ValueError(f"仍有 {len(unresolved)} 项异常未确认修复，请先逐项确认")
     previous = group["status"]
     group["status"] = status
     group["reviewer"] = reviewer
     group["review_note"] = note
-    group["exception_note"] = exception_note if status == "exception" else ""
+    if status == "exception":
+        group["exception_note"] = exception_note
+    elif status != "approved":
+        group["exception_note"] = ""
+    else:
+        group.setdefault("exception_note", "")
+    if status == "approved":
+        group["exception_status"] = ""
+        group["has_archive_blocker"] = False
+        group[data_center_service.ANOMALY_RESOLUTIONS_KEY] = data_center_service.rebind_anomaly_resolutions(
+            group,
+            (anomaly["code"] for anomaly in approved_anomalies),
+        )
     group["reviewed_at"] = now_iso() if status in DONE_STATUSES else None
     state = get_state()
     state["review_events"].append(

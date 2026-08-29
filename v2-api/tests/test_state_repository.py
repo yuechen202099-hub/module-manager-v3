@@ -1016,6 +1016,21 @@ def test_dual_manual_confirmation_fails_before_either_backend_or_archive_queue_m
 
 def _prepare_json_review_cache_state(monkeypatch: pytest.MonkeyPatch, team_id: str) -> dict:
     state = _json_barcode_state(team_id)
+    group = state["groups"][0]
+    group["address"] = "测试地址"
+    group["barcode_verification"].update(
+        {
+            "status": "passed",
+            "meter_matched": True,
+            "module_matched": True,
+            "collector_matched": True,
+            "result": {
+                "passed_count": 3,
+                "matched_fields": ["meter", "module", "collector"],
+                "missing_fields": [],
+            },
+        }
+    )
     state["delivery_cache_jobs"] = []
     monkeypatch.setitem(repository.local_simulation._team_states, team_id, state)
     monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: team_id)
@@ -1132,6 +1147,185 @@ def test_postgres_nonapproved_review_invalidates_delivery_cache_before_commit(
 
     assert result["status"] == "rejected"
     assert events == ["invalidate", "commit"]
+
+
+def _postgres_exception_review_fixture(*, resolved: bool):
+    photos = [
+        {
+            "id": f"photo-{category}",
+            "legacy_id": f"photo-{category}",
+            "category": category,
+            "sha256": category,
+            "is_active": True,
+        }
+        for category in ("before_box", "collector_barcode", "module_meter", "after_box")
+    ]
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="approved-exception-team",
+        legacy_id="approved-exception-group",
+        status=repository.GroupStatus.REJECTED,
+        reviewer="reviewer-a",
+        review_note="",
+        exception_status="open",
+        exception_note="人工异常",
+        exception_reasons=["manual_quality"],
+        has_archive_blocker=True,
+        reviewed_at=None,
+        raw_data={"status": "exception"},
+    )
+
+    def payload():
+        return {
+            "id": group.legacy_id,
+            "status": repository._status_value(group.status),
+            "terminal": "350000441152",
+            "meter_no": "3130001201100256152333",
+            "module_asset_no": "MODULE-001",
+            "collector": "COLLECTOR-001",
+            "address": "测试地址",
+            "photo_count": len(photos),
+            "photos": photos,
+            "barcode_verification": {"status": "passed"},
+            "exception_status": str(group.exception_status or ""),
+            "exception_note": group.exception_note,
+            "exception_reasons": list(group.exception_reasons),
+            "has_archive_blocker": group.has_archive_blocker,
+            repository.data_center_service.ANOMALY_RESOLUTIONS_KEY: dict(
+                group.raw_data.get(repository.data_center_service.ANOMALY_RESOLUTIONS_KEY) or {}
+            ),
+        }
+
+    anomalies = repository.data_center_service.group_anomalies(payload())
+    if resolved:
+        fingerprint = anomalies[0]["evidence_fingerprint"]
+        group.raw_data[repository.data_center_service.ANOMALY_RESOLUTIONS_KEY] = {
+            anomaly["code"]: {
+                "evidence_fingerprint": fingerprint,
+                "message": anomaly["message"],
+                "resolved_by": "module_admin",
+                "resolved_at": "2026-08-29T18:47:02+08:00",
+                "source_page": "review_rephoto_workbench",
+            }
+            for anomaly in anomalies
+        }
+    return group, payload
+
+
+def test_postgres_approved_review_closes_resolved_exception_state_and_keeps_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group, payload = _postgres_exception_review_fixture(resolved=True)
+
+    class Session:
+        def commit(self):
+            return None
+
+        def refresh(self, _value):
+            return None
+
+    session = Session()
+
+    class ReviewRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(session)
+
+        def _group_by_legacy_id(self, checked_session, group_id: str, *, lock: bool = False):
+            assert checked_session is session
+            assert group_id == group.legacy_id
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, _group: payload())
+
+    ReviewRepository().review_group(group.legacy_id, "approved", "module_admin", "资料核对完成")
+
+    assert group.status == repository.GroupStatus.APPROVED
+    assert group.exception_status in {None, ""}
+    assert group.has_archive_blocker is False
+    assert group.exception_reasons == ["manual_quality"]
+    assert group.exception_note == "人工异常"
+    assert group.raw_data["exception_status"] == ""
+    assert group.raw_data["has_archive_blocker"] is False
+    history = group.raw_data[repository.data_center_service.ANOMALY_RESOLUTIONS_KEY]
+    assert history
+    assert all(item["resolved_by"] == "module_admin" for item in history.values())
+    assert all(item["status"] == "resolved" for item in repository.data_center_service.group_anomalies(payload()))
+
+
+def test_postgres_approved_review_rejects_unconfirmed_current_anomaly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group, payload = _postgres_exception_review_fixture(resolved=False)
+
+    class Session:
+        def commit(self):
+            pytest.fail("unconfirmed approval must not commit")
+
+        def refresh(self, _value):
+            return None
+
+    session = Session()
+
+    class ReviewRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(session)
+
+        def _group_by_legacy_id(self, *_args, **_kwargs):
+            return group
+
+        def _ensure_task_claimed_by(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, _group: payload())
+
+    with pytest.raises(ValueError, match="未确认"):
+        ReviewRepository().review_group(group.legacy_id, "approved", "module_admin")
+
+    assert group.status == repository.GroupStatus.REJECTED
+    assert group.exception_status == "open"
+    assert group.has_archive_blocker is True
+
+
+def test_postgres_incomplete_review_rejects_unconfirmed_anomaly_without_exception_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group, payload = _postgres_exception_review_fixture(resolved=False)
+    group.status = repository.GroupStatus.INCOMPLETE
+    group.exception_status = ""
+    group.has_archive_blocker = False
+    group.raw_data = {"status": "incomplete"}
+
+    class Session:
+        def commit(self):
+            pytest.fail("unconfirmed approval must not commit")
+
+        def refresh(self, _value):
+            return None
+
+    session = Session()
+
+    class ReviewRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(session)
+
+        def _group_by_legacy_id(self, *_args, **_kwargs):
+            return group
+
+        def _ensure_task_claimed_by(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, _group: payload())
+
+    with pytest.raises(ValueError, match="未确认"):
+        ReviewRepository().review_group(group.legacy_id, "approved", "module_admin")
+
+    assert group.status == repository.GroupStatus.INCOMPLETE
+    assert group.exception_status == ""
+    assert group.has_archive_blocker is False
 
 
 def test_postgres_review_does_not_consult_removed_reviewer_claim(
@@ -8323,6 +8517,7 @@ def test_postgres_dashboard_exception_clause_excludes_only_missing_collector_pho
 
     assert "jsonb_array_length(material_groups.exception_reasons) = 1" in compiled
     assert "(material_groups.exception_reasons ->> 0) = 'missing_collector_photo'" in compiled
+    assert "material_groups.status != 'approved'" in compiled
 
 
 def test_group_barcode_accuracy_summary_uses_durable_rows_and_skips_legacy_recomputation(

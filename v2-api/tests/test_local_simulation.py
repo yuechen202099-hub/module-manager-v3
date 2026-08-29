@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.services import data_center as data_center_service
 from app.services import local_simulation, state_repository
 from app.services import photo_barcode_check
 from app.services import unmatched_review
@@ -477,6 +478,30 @@ def archive_all_group_photos(group: dict, reviewer: str = "alice") -> None:
     categories = ["before_box", "collector_barcode", "module_meter", "after_box"]
     for index, photo in enumerate(list(group["photos"])):
         classify_photo(group["id"], photo["id"], categories[index % len(categories)], reviewer=reviewer)
+
+
+def acknowledge_all_group_anomalies(group: dict, actor: str = "test-admin") -> None:
+    anomalies = data_center_service.group_anomalies(group)
+    if not anomalies:
+        return
+    fingerprint = anomalies[0]["evidence_fingerprint"]
+    resolutions = dict(group.get(data_center_service.ANOMALY_RESOLUTIONS_KEY) or {})
+    resolutions.update(
+        {
+            anomaly["code"]: {
+                "evidence_fingerprint": fingerprint,
+                "message": anomaly["message"],
+                "resolved_by": actor,
+                "resolved_at": "2026-08-29T18:47:02+08:00",
+                "source_page": "test_setup",
+            }
+            for anomaly in anomalies
+        }
+    )
+    group[data_center_service.ANOMALY_RESOLUTIONS_KEY] = resolutions
+    raw = dict(group.get("raw_data") or {})
+    raw[data_center_service.ANOMALY_RESOLUTIONS_KEY] = resolutions
+    group["raw_data"] = raw
 
 
 def build_catalog_workbook_bytes(rows: list[tuple[str, str, str]]) -> bytes:
@@ -1032,6 +1057,7 @@ def test_review_group_updates_status_and_summary(synthetic_state: dict) -> None:
     first_id = state["groups"][0]["id"]
 
     claim_task(1, reviewer="alice")
+    acknowledge_all_group_anomalies(state["groups"][0], actor="alice")
     reviewed = review_group(first_id, status="approved", reviewer="alice", note="sample passed")
     tasks = list_tasks()
 
@@ -1056,6 +1082,7 @@ def test_review_group_rejects_unknown_status(synthetic_state: dict) -> None:
 def test_review_group_does_not_require_removed_reviewer_claim(synthetic_state: dict) -> None:
     first_id = synthetic_state["groups"][0]["id"]
     claim_task(1, reviewer="alice")
+    acknowledge_all_group_anomalies(synthetic_state["groups"][0], actor="bob")
 
     result = review_group(first_id, status="approved", reviewer="bob")
 
@@ -4609,6 +4636,7 @@ def test_replacement_rematch_adds_delivery_export_remark(synthetic_state: dict) 
     target = synthetic_state["groups"][0]
     claim_task(target["task_id"], "alice")
     archive_all_group_photos(target)
+    acknowledge_all_group_anomalies(target, actor="alice")
     review_group(target["id"], status="approved", reviewer="alice", note="ready")
     apply_synced_scan_records(
         [
@@ -5395,6 +5423,7 @@ def test_local_test_routes_cover_review_flow(synthetic_state: dict) -> None:
     claim_response = client.post("/local-test/tasks/1/claim", json={"reviewer": "alice"})
     groups_response = client.get("/local-test/tasks/1/groups?limit=1")
     group_id = groups_response.json()["data"]["items"][0]["id"]
+    acknowledge_all_group_anomalies(get_group(group_id), actor="alice")
     review_response = client.patch(
         f"/local-test/groups/{group_id}/review",
         json={"status": "approved", "reviewer": "alice", "note": "ok"},

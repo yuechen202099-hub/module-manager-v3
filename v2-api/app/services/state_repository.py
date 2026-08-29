@@ -118,6 +118,7 @@ def _only_missing_collector_photo_exception_clause():
 
 def _dashboard_exception_clause():
     return and_(
+        MaterialGroup.status != GroupStatus.APPROVED,
         or_(
             MaterialGroup.status == GroupStatus.REJECTED,
             MaterialGroup.exception_status == "open",
@@ -2007,6 +2008,8 @@ def _apply_construction_status(group: dict[str, Any]) -> dict[str, Any]:
 
 
 def _is_problem_group(group: dict[str, Any]) -> bool:
+    if group.get("status") == "approved":
+        return False
     photo_count = int(group.get("photo_count") or 0)
     return group.get("status") == "exception" or (
         photo_count > 0 and (group.get("status") == "incomplete" or bool(group.get("has_archive_blocker")))
@@ -5650,6 +5653,7 @@ class PostgresStateRepository(StateRepository):
                 group_archive_status.label("archive_status"),
                 group_barcode_status.label("barcode_status"),
                 case(
+                    (MaterialGroup.status == GroupStatus.APPROVED, literal("")),
                     (_only_missing_collector_photo_exception_clause(), literal("")),
                     else_=func.coalesce(
                         func.nullif(func.trim(MaterialGroup.exception_status), ""),
@@ -6609,9 +6613,12 @@ class PostgresStateRepository(StateRepository):
                         func.sum(
                             case(
                                 (
-                                    (MaterialGroup.status == GroupStatus.REJECTED)
-                                    | (MaterialGroup.exception_status == "open")
-                                    | (MaterialGroup.has_archive_blocker.is_(True)),
+                                    (MaterialGroup.status != GroupStatus.APPROVED)
+                                    & (
+                                        (MaterialGroup.status == GroupStatus.REJECTED)
+                                        | (MaterialGroup.exception_status == "open")
+                                        | (MaterialGroup.has_archive_blocker.is_(True))
+                                    ),
                                     1,
                                 ),
                                 else_=0,
@@ -8335,6 +8342,7 @@ class PostgresStateRepository(StateRepository):
         statement = select(MaterialGroup).where(
             MaterialGroup.team_id == team_id,
             MaterialGroup.photo_count > 0,
+            MaterialGroup.status != GroupStatus.APPROVED,
             or_(
                 MaterialGroup.status.in_([GroupStatus.INCOMPLETE, GroupStatus.REJECTED]),
                 MaterialGroup.has_archive_blocker.is_(True),
@@ -10481,13 +10489,47 @@ class PostgresStateRepository(StateRepository):
             raise ValueError(f"Unsupported review status: {status}")
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
+            approved_payload: dict[str, Any] | None = None
+            approved_anomalies: list[dict[str, str]] = []
+            if status == "approved":
+                approved_payload = _group_payload(session, group)
+                approved_anomalies = data_center_service.group_anomalies(approved_payload)
+                unresolved = [anomaly for anomaly in approved_anomalies if anomaly["status"] == "open"]
+                if unresolved:
+                    raise ValueError(f"仍有 {len(unresolved)} 项异常未确认修复，请先逐项确认")
             group.status = mapped_status
             group.reviewer = reviewer
             group.review_note = note
-            group.exception_note = exception_note
+            if status != "approved":
+                group.exception_note = exception_note
             group.reviewed_at = datetime.now(UTC) if status in {"approved", "exception", "rejected"} else None
             raw_data = dict(group.raw_data or {})
-            raw_data.update({"status": status, "reviewer": reviewer, "review_note": note, "exception_note": exception_note})
+            raw_data.update(
+                {
+                    "status": status,
+                    "reviewer": reviewer,
+                    "review_note": note,
+                    "exception_note": group.exception_note or "",
+                }
+            )
+            if status == "approved":
+                group.exception_status = None
+                group.has_archive_blocker = False
+                raw_data.update({"exception_status": "", "has_archive_blocker": False})
+                post_approval_payload = dict(approved_payload or {})
+                post_approval_payload.update(
+                    {
+                        "status": "approved",
+                        "exception_status": "",
+                        "has_archive_blocker": False,
+                    }
+                )
+                raw_data[data_center_service.ANOMALY_RESOLUTIONS_KEY] = (
+                    data_center_service.rebind_anomaly_resolutions(
+                        post_approval_payload,
+                        (anomaly["code"] for anomaly in approved_anomalies),
+                    )
+                )
             group.raw_data = raw_data
             if status != "approved":
                 from app.services.delivery_cache import (

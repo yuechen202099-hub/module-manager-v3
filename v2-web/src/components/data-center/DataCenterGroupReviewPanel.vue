@@ -139,6 +139,8 @@ const manualClassificationWarnings = computed(() => {
   }
   return warnings
 })
+const openAnomalies = computed(() => detail.value?.anomalies.filter((anomaly) => anomaly.status === 'open') || [])
+const resolvedAnomalies = computed(() => detail.value?.anomalies.filter((anomaly) => anomaly.status === 'resolved') || [])
 const rephotoSlots = computed(() => {
   const definitions: Array<{ slot: 'module_meter' | 'after_box'; label: string }> = [
     { slot: 'module_meter', label: '电表和模块照片' },
@@ -813,23 +815,18 @@ onBeforeUnmount(cleanupDetail)
 
         <div class="exception-box">
           <div><el-icon><Warning /></el-icon><strong>异常 / 回退</strong></div>
-          <section v-if="detail.anomalies.length" class="anomaly-snapshot" aria-label="异常快照">
-            <header><strong>异常原因</strong><span>人工确认后保留绿色处理记录</span></header>
+          <section v-if="openAnomalies.length" class="anomaly-snapshot" aria-label="当前异常">
+            <header><strong>当前异常</strong><span>确认修复后将移入历史处理记录</span></header>
             <article
-              v-for="anomaly in detail.anomalies"
+              v-for="anomaly in openAnomalies"
               :key="anomaly.code"
-              :class="{ resolved: anomaly.status === 'resolved' }"
               :data-testid="`anomaly-${anomaly.code}`"
             >
               <div>
                 <strong>{{ anomaly.message }}</strong>
-                <span v-if="anomaly.status === 'resolved'">
-                  已确认修复 · {{ anomaly.resolvedBy || '未知人员' }} · {{ anomaly.resolvedAt || '未记录时间' }}
-                </span>
-                <span v-else>当前异常</span>
+                <span>当前异常</span>
               </div>
               <el-button
-                v-if="anomaly.status === 'open'"
                 size="small"
                 type="success"
                 plain
@@ -853,6 +850,28 @@ onBeforeUnmount(cleanupDetail)
             <el-button type="danger" plain :loading="saving" @click="resetGroup('unconstructed')">回退未施工</el-button>
           </div>
         </div>
+
+        <section
+          v-if="resolvedAnomalies.length"
+          class="anomaly-snapshot anomaly-history"
+          aria-label="历史处理记录"
+          data-testid="anomaly-history"
+        >
+          <header><strong>历史处理记录</strong><span>保留人工确认人员和时间</span></header>
+          <article
+            v-for="anomaly in resolvedAnomalies"
+            :key="anomaly.code"
+            class="resolved"
+            :data-testid="`history-anomaly-${anomaly.code}`"
+          >
+            <div>
+              <strong>{{ anomaly.message }}</strong>
+              <span>
+                已确认修复 · {{ anomaly.resolvedBy || '未知人员' }} · {{ anomaly.resolvedAt || '未记录时间' }}
+              </span>
+            </div>
+          </article>
+        </section>
 
         <el-table :data="detail.audit" size="small" height="180" class="audit-table">
           <el-table-column prop="action" label="审计" min-width="160" show-overflow-tooltip />
@@ -882,6 +901,8 @@ onBeforeUnmount(cleanupDetail)
 .anomaly-snapshot > article > div > span { color: var(--v2-text-muted, #7a8798); font-size: 12px; }
 .anomaly-snapshot > article.resolved { border-color: #b7e4c7; background: #f0fdf4; }
 .anomaly-snapshot > article.resolved > div > strong, .anomaly-snapshot > article.resolved > div > span { color: #217a3c; }
+.anomaly-history { border-color: #b7e4c7; background: #f0fdf4; }
+.anomaly-history > header strong { color: #217a3c; }
 .classification-photo-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; }
 .classification-photo-frame { grid-column: 1 / -1; display: grid; place-items: center; aspect-ratio: 4 / 2.35; overflow: hidden; border: 1px solid var(--v2-border, #dce3ec); border-radius: 6px; background: var(--v2-surface-soft, #f6f8fb); color: var(--v2-text-muted, #7a8798); }
 .classification-photo-frame button, .rephoto-preview-trigger { display: block; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; }

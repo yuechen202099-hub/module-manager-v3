@@ -170,6 +170,22 @@ def group_anomaly_evidence_fingerprint(group: Mapping[str, Any]) -> str:
     ).hexdigest()
 
 
+def rebind_anomaly_resolutions(
+    group: Mapping[str, Any],
+    anomaly_codes: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    fingerprint = group_anomaly_evidence_fingerprint(group)
+    resolutions = {
+        str(code): dict(resolution)
+        for code, resolution in _anomaly_resolution_map(group).items()
+    }
+    for code in anomaly_codes:
+        normalized = str(code or "").strip()
+        if normalized in resolutions:
+            resolutions[normalized]["evidence_fingerprint"] = fingerprint
+    return resolutions
+
+
 def group_anomalies(group: Mapping[str, Any]) -> list[dict[str, str]]:
     photos = active_photos(group)
     _snapshot, manual_codes = manual_classification_snapshot(group, photos)
@@ -397,6 +413,8 @@ def archive_status_from_group(group: Mapping[str, Any], photos: list[Mapping[str
 
 
 def exception_status_from_group(group: Mapping[str, Any]) -> str:
+    if str(group.get("status") or "").strip() == "approved":
+        return ""
     if is_only_missing_collector_photo_exception(group):
         return ""
     explicit = str(group.get("exception_status") or "").strip()

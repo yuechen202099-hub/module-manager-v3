@@ -564,6 +564,46 @@ describe('DataCenterGroupReviewPanel', () => {
     wrapper.unmount()
   })
 
+  it('separates current anomalies from resolved history in the review panel', async () => {
+    const detail = {
+      ...detailFixture('g-anomaly-history', 'approved-history', 'approved'),
+      exceptionStatus: '',
+      anomalies: [
+        {
+          code: 'module_missing',
+          message: '缺少模块号',
+          status: 'open',
+          evidenceFingerprint: 'a'.repeat(64),
+          resolvedBy: '',
+          resolvedAt: '',
+        },
+        {
+          code: 'collector_missing',
+          message: '缺少采集器号',
+          status: 'resolved',
+          evidenceFingerprint: 'a'.repeat(64),
+          resolvedBy: 'module_admin',
+          resolvedAt: '2026-08-29T18:47:02+08:00',
+        },
+      ],
+    } satisfies DataCenterDetail
+    apiMock.fetchDataCenterDetail.mockResolvedValue(detail)
+    apiMock.fetchGroupPhotoObjectUrl.mockImplementation((_groupId, photoId: string) => Promise.resolve(`blob:${photoId}`))
+
+    const wrapper = mountPanel({ groupId: detail.id })
+    await flushPromises()
+
+    const currentSection = wrapper.get('.exception-box')
+    expect(currentSection.find('[data-testid="anomaly-module_missing"]').exists()).toBe(true)
+    expect(currentSection.find('[data-testid="anomaly-collector_missing"]').exists()).toBe(false)
+    const historySection = wrapper.get('[data-testid="anomaly-history"]')
+    expect(historySection.text()).toContain('历史处理记录')
+    expect(historySection.text()).toContain('缺少采集器号')
+    expect(historySection.text()).toContain('module_admin')
+    expect(historySection.text()).not.toContain('缺少模块号')
+    wrapper.unmount()
+  })
+
   it('reloads latest anomalies after a confirmation fingerprint conflict', async () => {
     const first = detailFixture('g-conflict')
     const latest = {

@@ -217,6 +217,16 @@ V3217_CONTRACT_INPUTS = frozenset(
     }
 )
 
+V3218_CONTRACT_INPUTS = frozenset(
+    set(V3217_CONTRACT_INPUTS)
+    | {
+        "docs/superpowers/plans/2026-08-29-v3-2-18-approved-exception-hotfix.md",
+        "ops/releases/V3.2.18.md",
+        "scripts/verify_v3_2_18_release.py",
+        "scripts/test_verify_v3_2_18_release.py",
+    }
+)
+
 REQUIRED_FILES = {
     "SOURCE_COMMIT",
     "README.md",
@@ -441,7 +451,7 @@ REQUIRED_FILES = {
     "v2-web/src/utils/dataCenterDrilldown.ts",
     "v2-web/src/components/InstallerKpiDialog.vue",
     "v2-web/src/utils/installerKpi.ts",
-} | V328_CONTRACT_INPUTS | V3210_CONTRACT_INPUTS | V3211_CONTRACT_INPUTS | V3212_CONTRACT_INPUTS | V3213_CONTRACT_INPUTS | V3214_CONTRACT_INPUTS | V3215_CONTRACT_INPUTS | V3216_CONTRACT_INPUTS | V3217_CONTRACT_INPUTS
+} | V328_CONTRACT_INPUTS | V3210_CONTRACT_INPUTS | V3211_CONTRACT_INPUTS | V3212_CONTRACT_INPUTS | V3213_CONTRACT_INPUTS | V3214_CONTRACT_INPUTS | V3215_CONTRACT_INPUTS | V3216_CONTRACT_INPUTS | V3217_CONTRACT_INPUTS | V3218_CONTRACT_INPUTS
 
 V3210_ONLY_REQUIRED_FILES = frozenset(
     {
@@ -476,6 +486,7 @@ V328_REQUIRED_FILES = frozenset(
         - (V3215_CONTRACT_INPUTS - V3214_CONTRACT_INPUTS)
         - (V3216_CONTRACT_INPUTS - V3215_CONTRACT_INPUTS)
         - (V3217_CONTRACT_INPUTS - V3216_CONTRACT_INPUTS)
+        - (V3218_CONTRACT_INPUTS - V3217_CONTRACT_INPUTS)
     )
     | V328_WORKBENCH_REQUIRED_FILES
 )
@@ -494,6 +505,7 @@ def required_files_for_version(version: str) -> frozenset[str]:
             - (V3215_CONTRACT_INPUTS - V3214_CONTRACT_INPUTS)
             - (V3216_CONTRACT_INPUTS - V3215_CONTRACT_INPUTS)
             - (V3217_CONTRACT_INPUTS - V3216_CONTRACT_INPUTS)
+            - (V3218_CONTRACT_INPUTS - V3217_CONTRACT_INPUTS)
         )
     if version == "3.2.11":
         return frozenset(
@@ -505,6 +517,7 @@ def required_files_for_version(version: str) -> frozenset[str]:
                 - (V3215_CONTRACT_INPUTS - V3214_CONTRACT_INPUTS)
                 - (V3216_CONTRACT_INPUTS - V3215_CONTRACT_INPUTS)
                 - (V3217_CONTRACT_INPUTS - V3216_CONTRACT_INPUTS)
+                - (V3218_CONTRACT_INPUTS - V3217_CONTRACT_INPUTS)
             )
             | V3211_ANDROID_SCANNER_INPUTS
         )
@@ -516,6 +529,7 @@ def required_files_for_version(version: str) -> frozenset[str]:
             - (V3215_CONTRACT_INPUTS - V3214_CONTRACT_INPUTS)
             - (V3216_CONTRACT_INPUTS - V3215_CONTRACT_INPUTS)
             - (V3217_CONTRACT_INPUTS - V3216_CONTRACT_INPUTS)
+            - (V3218_CONTRACT_INPUTS - V3217_CONTRACT_INPUTS)
         )
     if version == "3.2.13":
         return frozenset(
@@ -524,6 +538,7 @@ def required_files_for_version(version: str) -> frozenset[str]:
             - (V3215_CONTRACT_INPUTS - V3214_CONTRACT_INPUTS)
             - (V3216_CONTRACT_INPUTS - V3215_CONTRACT_INPUTS)
             - (V3217_CONTRACT_INPUTS - V3216_CONTRACT_INPUTS)
+            - (V3218_CONTRACT_INPUTS - V3217_CONTRACT_INPUTS)
         )
     if version == "3.2.14":
         return frozenset(
@@ -531,16 +546,24 @@ def required_files_for_version(version: str) -> frozenset[str]:
             - (V3215_CONTRACT_INPUTS - V3214_CONTRACT_INPUTS)
             - (V3216_CONTRACT_INPUTS - V3215_CONTRACT_INPUTS)
             - (V3217_CONTRACT_INPUTS - V3216_CONTRACT_INPUTS)
+            - (V3218_CONTRACT_INPUTS - V3217_CONTRACT_INPUTS)
         )
     if version == "3.2.15":
         return frozenset(
             REQUIRED_FILES
             - (V3216_CONTRACT_INPUTS - V3215_CONTRACT_INPUTS)
             - (V3217_CONTRACT_INPUTS - V3216_CONTRACT_INPUTS)
+            - (V3218_CONTRACT_INPUTS - V3217_CONTRACT_INPUTS)
         )
     if version == "3.2.16":
-        return frozenset(REQUIRED_FILES - (V3217_CONTRACT_INPUTS - V3216_CONTRACT_INPUTS))
+        return frozenset(
+            REQUIRED_FILES
+            - (V3217_CONTRACT_INPUTS - V3216_CONTRACT_INPUTS)
+            - (V3218_CONTRACT_INPUTS - V3217_CONTRACT_INPUTS)
+        )
     if version == "3.2.17":
+        return frozenset(REQUIRED_FILES - (V3218_CONTRACT_INPUTS - V3217_CONTRACT_INPUTS))
+    if version == "3.2.18":
         return frozenset(REQUIRED_FILES)
     fail(f"Release manifest Version must match a supported archived source contract: {version}")
 
@@ -589,6 +612,7 @@ VERSION_LOCKED_HISTORICAL_DOCUMENTS = {
     "docs/CLIENT_ACCEPTANCE_REPORT.md": "3.2.2",
     "docs/CLIENT_FINAL_AUDIT.md": "3.2.0",
     "docs/superpowers/plans/2026-08-29-v3-2-16-review-claim-hotfix.md": "3.2.16",
+    "docs/superpowers/plans/2026-08-29-v3-2-17-anomaly-export-release.md": "3.2.17",
 }
 VERSION_LOCKED_HISTORICAL_DOCUMENT_IDENTITIES = {
     "docs/CLIENT_FINAL_AUDIT.md": (
@@ -908,6 +932,32 @@ def verify_v3217_archive_source_contract(archive: zipfile.ZipFile):
         failures = module.collect_failures(extracted_root, "source")
         if failures:
             fail("V3.2.17 archive source contract failed: " + " | ".join(failures))
+        return module
+
+
+def verify_v3218_archive_source_contract(archive: zipfile.ZipFile):
+    with tempfile.TemporaryDirectory(prefix="module-manager-v3218-contract-") as temporary_root:
+        extracted_root = Path(temporary_root)
+        migration_members = {
+            name
+            for name in archive.namelist()
+            if PurePosixPath(name).parent.as_posix() == "v2-api/alembic/versions"
+            and PurePosixPath(name).suffix == ".py"
+        }
+        for relative_path in V3218_CONTRACT_INPUTS | migration_members:
+            target = extracted_root / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(archive.read(relative_path))
+
+        verifier_path = extracted_root / "scripts" / "verify_v3_2_18_release.py"
+        spec = importlib.util.spec_from_file_location("archive_v3218_release_contract", verifier_path)
+        if spec is None or spec.loader is None:
+            fail("Unable to load archived V3.2.18 release verifier")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        failures = module.collect_failures(extracted_root, "source")
+        if failures:
+            fail("V3.2.18 archive source contract failed: " + " | ".join(failures))
         return module
 
 
@@ -1243,10 +1293,10 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         ):
             fail("Release manifest must define exactly one semantic Version")
         package_version = manifest_versions[0]
-        if package_version not in {"3.2.8", "3.2.10", "3.2.11", "3.2.12", "3.2.13", "3.2.14", "3.2.15", "3.2.16", "3.2.17"}:
+        if package_version not in {"3.2.8", "3.2.10", "3.2.11", "3.2.12", "3.2.13", "3.2.14", "3.2.15", "3.2.16", "3.2.17", "3.2.18"}:
             fail(
                 "Release manifest Version must match a supported archived source contract: "
-                "3.2.8, 3.2.10, 3.2.11, 3.2.12, 3.2.13, 3.2.14, 3.2.15, 3.2.16, or 3.2.17"
+                "3.2.8, 3.2.10, 3.2.11, 3.2.12, 3.2.13, 3.2.14, 3.2.15, 3.2.16, 3.2.17, or 3.2.18"
             )
         required_files = required_files_for_version(package_version)
         missing = sorted(required_files - names)
@@ -1360,7 +1410,9 @@ def verify_package(zip_path: Path, *, expected_source_commit: str | None = None)
         candidate_version,
     )
     with zipfile.ZipFile(zip_path) as archive:
-        if package_version == "3.2.17":
+        if package_version == "3.2.18":
+            archived_release = verify_v3218_archive_source_contract(archive)
+        elif package_version == "3.2.17":
             archived_release = verify_v3217_archive_source_contract(archive)
         elif package_version == "3.2.16":
             archived_release = verify_v3216_archive_source_contract(archive)

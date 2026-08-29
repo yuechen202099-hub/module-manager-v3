@@ -5,12 +5,12 @@
 ## 当前生产身份
 
 - GitHub 仓库：`https://github.com/yuechen202099-hub/module-manager-v3`
-- 生产维护分支：`production/V3/3.2.17`
-- 当前生产应用基线：`V3.2.16`
-- 当前发布候选版本：`V3.2.17`
-- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.16-20260829T020456Z`
-- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.15-20260828T144635Z`
-- 当前生产提交：`6e286b33d6063d9c89da6b28013909bce81488d1`
+- 生产维护分支：`production/V3/3.2.18`
+- 当前生产应用基线：`V3.2.17`
+- 当前发布候选版本：`V3.2.18`
+- 当前生产 release：`/opt/module-manager-v2/releases/v3.2.17-20260829T095416Z`
+- 当前回滚 release：`/opt/module-manager-v2/releases/v3.2.16-20260829T020456Z`
+- 当前生产提交：`16855540ba4679c43638f5c86f37370f8be2344c`
 - 生产分支命名规则：`production/V3/<version>`，例如 `production/V3/3.2.0`。旧 `production/v3.0.35` 仅保留历史兼容，不作为新开发基线。
 - 当前本地生产 worktree：`C:\Users\Administrator\.config\superpowers\worktrees\module-manager-v3\review-rephoto-workbench`
 - worktree 路径里的 `production-v3.0.24` 是创建时名称，不代表当前线上版本。
@@ -74,7 +74,7 @@
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest v2-api/tests
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.17 --phase source
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.18 --phase source
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py --help
 cd v2-web; npm run build
 ```

@@ -168,6 +168,100 @@ def test_data_center_anomalies_are_chinese_specific_and_ignore_missing_collector
     assert all(len(item["evidence_fingerprint"]) == 64 for item in anomalies)
 
 
+def test_approved_group_exits_current_exception_while_resolved_history_is_preserved() -> None:
+    group = deepcopy(_review_state("approved-exception-team")["groups"][0])
+    group.update(
+        {
+            "status": "approved",
+            "module_asset_no": "",
+            "construction_module_asset_no": "",
+            "exception_status": "open",
+            "exception_note": "缺少模块资产编号",
+            "exception_reasons": ["missing_module_asset_no"],
+            "has_archive_blocker": True,
+        }
+    )
+    fingerprint = data_center_service.group_anomaly_evidence_fingerprint(group)
+    initial_anomalies = data_center_service.group_anomalies(group)
+    group[data_center_service.ANOMALY_RESOLUTIONS_KEY] = {
+        anomaly["code"]: {
+            "evidence_fingerprint": fingerprint,
+            "message": anomaly["message"],
+            "resolved_by": "module_admin",
+            "resolved_at": "2026-08-29T18:47:02+08:00",
+            "source_page": "review_rephoto_workbench",
+        }
+        for anomaly in initial_anomalies
+    }
+
+    row = data_center_service.group_row(group)
+
+    assert row["exception_status"] == ""
+    assert row["anomalies"]
+    assert all(anomaly["status"] == "resolved" for anomaly in row["anomalies"])
+    assert all(anomaly["resolved_by"] == "module_admin" for anomaly in row["anomalies"])
+
+
+def test_json_approved_review_rejects_unconfirmed_current_anomaly(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    group = _latest_group()
+    group.update(
+        {
+            "status": "incomplete",
+            "exception_status": "",
+            "exception_note": "人工异常",
+            "exception_reasons": ["manual_quality"],
+            "has_archive_blocker": False,
+        }
+    )
+    before = deepcopy(group)
+
+    with pytest.raises(ValueError, match="未确认"):
+        json_review_repo.review_group("g-1", "approved", "module_admin")
+
+    assert _latest_group() == before
+
+
+def test_json_approved_review_closes_resolved_exception_state_and_keeps_history(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    group = _latest_group()
+    group.update(
+        {
+            "status": "exception",
+            "exception_status": "open",
+            "exception_note": "人工异常",
+            "exception_reasons": ["manual_quality"],
+            "has_archive_blocker": True,
+        }
+    )
+    anomalies = data_center_service.group_anomalies(group)
+    fingerprint = anomalies[0]["evidence_fingerprint"]
+    group[data_center_service.ANOMALY_RESOLUTIONS_KEY] = {
+        anomaly["code"]: {
+            "evidence_fingerprint": fingerprint,
+            "message": anomaly["message"],
+            "resolved_by": "module_admin",
+            "resolved_at": "2026-08-29T18:47:02+08:00",
+            "source_page": "review_rephoto_workbench",
+        }
+        for anomaly in anomalies
+    }
+
+    reviewed = json_review_repo.review_group("g-1", "approved", "module_admin", "资料核对完成")
+
+    assert reviewed["status"] == "approved"
+    assert reviewed["exception_status"] == ""
+    assert reviewed["has_archive_blocker"] is False
+    assert reviewed["exception_note"] == "人工异常"
+    assert reviewed["exception_reasons"] == ["manual_quality"]
+    history = reviewed[data_center_service.ANOMALY_RESOLUTIONS_KEY]
+    assert history
+    assert all(item["resolved_by"] == "module_admin" for item in history.values())
+    assert all(item["status"] == "resolved" for item in data_center_service.group_anomalies(reviewed))
+
+
 def test_json_data_center_anomaly_resolution_keeps_history_and_reopens_after_evidence_change(
     json_review_repo: repository.JsonStateRepository,
 ) -> None:
