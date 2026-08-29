@@ -1053,12 +1053,14 @@ def test_review_group_rejects_unknown_status(synthetic_state: dict) -> None:
         review_group(first_id, status="done", reviewer="alice")
 
 
-def test_review_group_blocks_non_claiming_reviewer(synthetic_state: dict) -> None:
+def test_review_group_does_not_require_removed_reviewer_claim(synthetic_state: dict) -> None:
     first_id = synthetic_state["groups"][0]["id"]
     claim_task(1, reviewer="alice")
 
-    with pytest.raises(ValueError):
-        review_group(first_id, status="approved", reviewer="bob")
+    result = review_group(first_id, status="approved", reviewer="bob")
+
+    assert result["status"] == "approved"
+    assert result["reviewer"] == "bob"
 
 
 def test_exception_note_marks_group_and_progress(synthetic_state: dict) -> None:

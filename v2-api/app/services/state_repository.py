@@ -5614,7 +5614,10 @@ class PostgresStateRepository(StateRepository):
             cast(UnmatchedRecord.updated_at, String).label("activity_at"),
             UnmatchedRecord.updated_at.label("updated_at"),
             UnmatchedRecord.payload.label("raw_data"),
-        ).where(UnmatchedRecord.team_id == team_id)
+        ).where(
+            UnmatchedRecord.team_id == team_id,
+            UnmatchedRecord.status == "open",
+        )
 
         if query.data_type == "group":
             return group_select.subquery("data_center_rows")
@@ -10289,7 +10292,6 @@ class PostgresStateRepository(StateRepository):
             raise ValueError(f"Unsupported review status: {status}")
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
-            self._ensure_task_claimed_by(session, group, reviewer)
             group.status = mapped_status
             group.reviewer = reviewer
             group.review_note = note

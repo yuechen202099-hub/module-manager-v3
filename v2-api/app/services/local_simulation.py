@@ -6735,7 +6735,6 @@ def review_group(
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
-    ensure_task_claimed_by(group, reviewer)
     if status == "exception" and not (note or exception_note):
         raise ValueError("Exception review requires a note")
     previous = group["status"]

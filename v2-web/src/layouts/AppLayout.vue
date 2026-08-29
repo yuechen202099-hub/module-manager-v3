@@ -40,7 +40,7 @@ const navigation = computed(() => {
 const roleLabel = computed(() => {
   if (auth.user?.role === 'admin') return '管理员'
   if (auth.user?.role === 'constructor') return '施工员'
-  return '审阅员'
+  return '用户'
 })
 const isEmbedded = computed(() => route.query.embedded === '1')
 const isConstructionRoute = computed(() => route.path === '/construction')

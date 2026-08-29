@@ -596,6 +596,49 @@ def test_postgres_data_center_uses_count_and_bounded_stable_row_query(monkeypatc
     assert "legacy_id desc" in compiled[1] or "material_groups.id desc" in compiled[1]
 
 
+def test_postgres_data_center_unmatched_list_only_returns_open_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches completed unmatched rows remaining visible even though their review cannot open."""
+    from app.schemas.data_center import DataCenterQuery
+
+    class ScalarResult:
+        def all(self):
+            return []
+
+    class RecordingSession:
+        def __init__(self):
+            self.statements = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def scalar(self, statement):
+            self.statements.append(statement)
+            return 0
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            return ScalarResult()
+
+    session = RecordingSession()
+    repo = repository.PostgresStateRepository()
+    monkeypatch.setattr(repo, "_session", lambda: session)
+    monkeypatch.setattr(local_simulation, "current_team_id", lambda: "demo-team")
+
+    repo.list_data_center_rows(DataCenterQuery(data_type="unmatched", page=1, page_size=20))
+
+    compiled = [
+        str(statement.compile(compile_kwargs={"literal_binds": True})).lower()
+        for statement in session.statements
+    ]
+    assert len(compiled) == 2
+    assert all("unmatched_records.status = 'open'" in statement for statement in compiled)
+
+
 def test_json_data_center_updated_sort_keeps_empty_times_last() -> None:
     from app.schemas.data_center import DataCenterQuery
 

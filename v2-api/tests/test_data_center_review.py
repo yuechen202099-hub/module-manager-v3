@@ -150,6 +150,29 @@ def test_admin_can_approve_data_center_group_and_audit_actor(
     assert committed["review_events"][-1]["note"] == "资料核对完成"
 
 
+def test_admin_data_center_review_ignores_removed_reviewer_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches the removed reviewer-claim workflow blocking an admin review decision."""
+    state = local_simulation.get_state()
+    team_id = state["team_id"]
+    state["tasks"][0]["claimed_by"] = "former-reviewer"
+    state["groups"][0]["status"] = "exception"
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+
+    response = client.patch(
+        "/groups/data-center/groups/g-1/review",
+        headers=_review_headers(username="admin", role="admin", team_id=team_id),
+        json={"status": "incomplete", "note": "管理员复核", "exception_note": "资料异常"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "incomplete"
+    assert _latest_group()["reviewer"] == "admin"
+
+
 def test_manual_classification_confirmation_requires_anomaly_acknowledgement_and_audits_snapshot(
     json_review_repo: repository.JsonStateRepository,
 ) -> None:

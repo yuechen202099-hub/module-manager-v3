@@ -1101,6 +1101,72 @@ def test_postgres_nonapproved_review_invalidates_delivery_cache_before_commit(
     assert events == ["invalidate", "commit"]
 
 
+def test_postgres_review_does_not_consult_removed_reviewer_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models import GroupStatus
+    from app.services import delivery_cache
+
+    group = SimpleNamespace(
+        id=uuid4(),
+        team_id="team-a",
+        legacy_id="group-a",
+        status=GroupStatus.REJECTED,
+        reviewer="former-reviewer",
+        review_note="",
+        exception_note="legacy exception",
+        reviewed_at=None,
+        raw_data={"status": "exception"},
+    )
+
+    class Session:
+        def commit(self):
+            return None
+
+        def refresh(self, _value):
+            return None
+
+    session = Session()
+
+    class ReviewRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(session)
+
+        def _group_by_legacy_id(self, checked_session, group_id: str, *, lock: bool = False):
+            assert checked_session is session
+            assert group_id == "group-a"
+            assert lock is True
+            return group
+
+        def _ensure_task_claimed_by(self, *_args, **_kwargs):
+            pytest.fail("review must not consult the removed reviewer claim")
+
+    monkeypatch.setattr(
+        delivery_cache,
+        "invalidate_postgres_delivery_cache_for_group_change",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        repository,
+        "_group_payload",
+        lambda _session, checked_group: {
+            "id": checked_group.legacy_id,
+            "status": "incomplete",
+        },
+    )
+
+    result = ReviewRepository().review_group(
+        "group-a",
+        "incomplete",
+        "admin-a",
+        "管理员复核",
+        "资料异常",
+    )
+
+    assert result["status"] == "incomplete"
+    assert group.reviewer == "admin-a"
+
+
 def test_dual_scan_cas_fails_before_either_backend_or_archive_queue_mutates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

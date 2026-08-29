@@ -81,7 +81,7 @@ onMounted(() => {
         <dl class="login-proof">
           <div>
             <dt>角色</dt>
-            <dd>管理员 / 审阅员 / 施工员</dd>
+            <dd>管理员 / 施工员</dd>
           </div>
           <div>
             <dt>数据</dt>
@@ -89,7 +89,7 @@ onMounted(() => {
           </div>
           <div>
             <dt>流程</dt>
-            <dd>领取、采集、审阅、导出</dd>
+            <dd>采集、审阅、翻拍、导出</dd>
           </div>
         </dl>
       </div>
@@ -97,7 +97,7 @@ onMounted(() => {
       <div class="login-panel">
         <div class="login-title">
           <h1>登录工作台</h1>
-          <span>使用管理员、审阅员或施工员账号进入对应页面。</span>
+          <span>使用管理员或施工员账号进入对应页面。</span>
         </div>
 
         <ElForm label-position="top" @submit.prevent="submit">
