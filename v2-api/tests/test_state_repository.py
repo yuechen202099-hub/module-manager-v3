@@ -5523,6 +5523,33 @@ def test_dual_backend_finalize_unmatched_match_fails_before_json_or_postgres_wri
     assert calls == []
 
 
+def test_dual_data_center_anomaly_resolution_rejects_before_json_or_postgres_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    class MirrorRepository:
+        def resolve_data_center_group_anomaly(self, *args, **kwargs):
+            calls.append(("postgres", args, kwargs))
+
+    monkeypatch.setattr(repository.DualWriteStateRepository, "postgres_repository_factory", MirrorRepository)
+    monkeypatch.setattr(
+        repository.JsonStateRepository,
+        "resolve_data_center_group_anomaly",
+        lambda *args, **kwargs: calls.append(("json", args, kwargs)),
+    )
+
+    with pytest.raises(repository.StateBackendNotReady, match="before either backend mutated"):
+        repository.DualWriteStateRepository().resolve_data_center_group_anomaly(
+            "group-1",
+            "module_missing",
+            actor="admin-a",
+            expected_evidence_fingerprint="f" * 64,
+        )
+
+    assert calls == []
+
+
 def test_dual_backend_candidate_view_fails_before_json_or_postgres_audit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -12903,22 +12903,7 @@ class DualWriteStateRepository(JsonStateRepository):
         expected_evidence_fingerprint: str,
         source_page: str = "review_rephoto_workbench",
     ) -> dict[str, Any]:
-        result = super().resolve_data_center_group_anomaly(
-            group_id,
-            anomaly_code,
-            actor=actor,
-            expected_evidence_fingerprint=expected_evidence_fingerprint,
-            source_page=source_page,
-        )
-        self._mirror_write(
-            "resolve_data_center_group_anomaly",
-            group_id,
-            anomaly_code,
-            actor=actor,
-            expected_evidence_fingerprint=expected_evidence_fingerprint,
-            source_page=source_page,
-        )
-        return result
+        self._reject_uncoordinated_dual_write("resolve_data_center_group_anomaly")
 
     def reset_group_to_unconstructed(
         self,
