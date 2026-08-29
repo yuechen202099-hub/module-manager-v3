@@ -249,6 +249,24 @@ def load_verifier():
     return module
 
 
+def load_retired_export_center_verifier():
+    spec = importlib.util.spec_from_file_location(
+        "verify_v3_2_0_export_center_ui",
+        ROOT / "scripts" / "verify_v3_2_0_export_center_ui.py",
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Unable to load verify_v3_2_0_export_center_ui.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_retired_export_center_gate_allows_only_current_business_downloads() -> None:
+    verifier = load_retired_export_center_verifier()
+
+    verifier.verify_template_download_chain(verifier.source_files())
+
+
 def test_v3217_package_contract_inherits_v3216_and_registers_current_gates() -> None:
     verifier = load_verifier()
     expected = {

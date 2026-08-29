@@ -146,6 +146,21 @@ def verify_template_download_chain(source_paths: list[Path]) -> None:
     ):
         ensure(marker in service_body, f"construction-priority template service missing `{marker}`")
 
+    meter_module_body = function_body(
+        services,
+        "export async function downloadProjectMeterModuleWorkbook(): Promise<void>",
+        "project meter-module workbook service",
+    )
+    for marker in (
+        "await fetchWithAuth('/groups/data-center/export-meter-module'",
+        "authHeaders()",
+        "response.ok",
+        "await response.blob()",
+        "triggerBrowserDownload(",
+        "filenameFromDisposition(",
+    ):
+        ensure(marker in meter_module_body, f"project meter-module workbook service missing `{marker}`")
+
     filename_body = function_body(
         services,
         "function filenameFromDisposition(disposition: string, fallbackName: string)",
@@ -196,8 +211,8 @@ def verify_template_download_chain(source_paths: list[Path]) -> None:
     ensure('@click="downloadTemplate"' in dialog, "priority import template button must invoke downloadTemplate")
 
     ensure(
-        services.count("triggerBrowserDownload(") == 2,
-        "browser-download helper must be used only by the retained import-template service",
+        services.count("triggerBrowserDownload(") == 3,
+        "browser-download helper must be used only by the retained import-template and meter-module services",
     )
     ensure(
         services.count("downloadConstructionPriorityTemplate") == 1,
