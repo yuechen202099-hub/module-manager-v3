@@ -1290,6 +1290,120 @@ def test_postgres_approved_review_rejects_unconfirmed_current_anomaly(
     assert group.has_archive_blocker is True
 
 
+def test_postgres_approved_review_bulk_resolves_current_anomalies_and_stages_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches PostgreSQL approval committing without atomic anomaly resolutions and audit."""
+    group, payload = _postgres_exception_review_fixture(resolved=False)
+    anomalies = repository.data_center_service.group_anomalies(payload())
+    expected = {item["code"]: item["evidence_fingerprint"] for item in anomalies}
+    audits: list[dict[str, object]] = []
+
+    class Session:
+        committed = False
+
+        def commit(self):
+            self.committed = True
+
+        def refresh(self, _value):
+            return None
+
+    session = Session()
+
+    class ReviewRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(session)
+
+        def _group_by_legacy_id(self, checked_session, group_id: str, *, lock: bool = False):
+            assert checked_session is session
+            assert group_id == group.legacy_id
+            assert lock is True
+            return group
+
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, _group: payload())
+    monkeypatch.setattr(repository, "_stage_transactional_audit", lambda _session, **kwargs: audits.append(kwargs))
+
+    reviewed = ReviewRepository().review_group(
+        group.legacy_id,
+        "approved",
+        "module_admin",
+        "全部异常已人工核实",
+        resolve_all_anomalies=True,
+        expected_open_anomalies=expected,
+        source_page="review_rephoto_workbench",
+    )
+
+    assert session.committed is True
+    assert reviewed["status"] == "approved"
+    resolutions = group.raw_data[repository.data_center_service.ANOMALY_RESOLUTIONS_KEY]
+    assert set(resolutions) == set(expected)
+    assert all(item["resolved_by"] == "module_admin" for item in resolutions.values())
+    assert all(item["source_page"] == "review_rephoto_workbench" for item in resolutions.values())
+    assert {
+        code: item["confirmed_evidence_fingerprint"]
+        for code, item in resolutions.items()
+    } == expected
+    per_anomaly_audits = [
+        audit for audit in audits if audit["action"] == "data_center_anomaly_resolved"
+    ]
+    assert len(per_anomaly_audits) == len(expected)
+    assert {
+        audit["payload"]["anomaly_code"]: audit["payload"]["confirmed_evidence_fingerprint"]
+        for audit in per_anomaly_audits
+    } == expected
+    bulk_audits = [
+        audit
+        for audit in audits
+        if audit["action"] == "data_center_anomalies_bulk_resolved_on_approval"
+    ]
+    assert len(bulk_audits) == 1
+    assert bulk_audits[0]["payload"]["anomaly_count"] == len(expected)
+    assert bulk_audits[0]["payload"]["anomaly_codes"] == sorted(expected)
+
+
+def test_postgres_approved_review_bulk_rejects_changed_snapshot_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches PostgreSQL accepting a bulk decision for evidence the admin did not confirm."""
+    group, payload = _postgres_exception_review_fixture(resolved=False)
+    anomalies = repository.data_center_service.group_anomalies(payload())
+    expected = {item["code"]: item["evidence_fingerprint"] for item in anomalies}
+    expected[next(iter(expected))] = "0" * 64
+    audits: list[dict[str, object]] = []
+
+    class Session:
+        def commit(self):
+            pytest.fail("changed anomaly evidence must not commit")
+
+        def refresh(self, _value):
+            return None
+
+    session = Session()
+
+    class ReviewRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return nullcontext(session)
+
+        def _group_by_legacy_id(self, *_args, **_kwargs):
+            return group
+
+    monkeypatch.setattr(repository, "_group_payload", lambda _session, _group: payload())
+    monkeypatch.setattr(repository, "_stage_transactional_audit", lambda _session, **kwargs: audits.append(kwargs))
+
+    with pytest.raises(repository.AnomalyResolutionConflict, match="变化"):
+        ReviewRepository().review_group(
+            group.legacy_id,
+            "approved",
+            "module_admin",
+            resolve_all_anomalies=True,
+            expected_open_anomalies=expected,
+        )
+
+    assert group.status == repository.GroupStatus.REJECTED
+    assert group.raw_data == {"status": "exception"}
+    assert audits == []
+
+
 def test_postgres_incomplete_review_rejects_unconfirmed_anomaly_without_exception_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

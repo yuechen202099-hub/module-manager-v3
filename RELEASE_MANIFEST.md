@@ -2,14 +2,14 @@
 
 ## Package
 
-- Package: `build/server-release/module-manager-v2-server-3.2.20.zip`
-- Name: `module-manager-v2-server-3.2.20.zip`
-- Version: 3.2.20
-- Generated at: `2026-08-30T08:55:09Z`
-- Size: `2339193` bytes
-- SHA256: `d09163455fb3db0469119455eb3b1279d2ff0847eaebbe1c350852d6e289e487`
-- Source commit: `7ee6419cb3d9035a7484f4b2224323784d450c57`
-- Production release: `/opt/module-manager-v2/releases/v3.2.20-20260830T090700Z`
+- Package: `build/server-release/module-manager-v2-server-3.2.21.zip`
+- Name: `module-manager-v2-server-3.2.21.zip`
+- Version: 3.2.21
+- Generated at: pending
+- Size: pending
+- SHA256: pending
+- Source commit: pending
+- Production release: pending
 
 ## Included
 
@@ -17,7 +17,7 @@
 - Vue production bundle under v2-api/app/static/vue
 - v2-web source required by docker-compose.yml
 - Alembic migration files
-- V3.2.0 historical boundaries, immutable V3.2.3 through V3.2.19 records, V3.2.9 Quagga-first scanner regressions, V3.2.13 classification-independent rephoto gates, V3.2.14 archive/manual-demand/source-photo gates, V3.2.15 exception-count/deferred-image gates, V3.2.16 reviewer-claim removal gates, V3.2.17 anomaly-confirmation/meter-module-export gates, V3.2.18 approved-exception closure gates, V3.2.19 terminal meter-number deduplication gates, and V3.2.20 effective collector/module display gates
+- V3.2.0 historical boundaries, immutable V3.2.3 through V3.2.20 records, V3.2.9 Quagga-first scanner regressions, V3.2.13 classification-independent rephoto gates, V3.2.14 archive/manual-demand/source-photo gates, V3.2.15 exception-count/deferred-image gates, V3.2.16 reviewer-claim removal gates, V3.2.17 anomaly-confirmation/meter-module-export gates, V3.2.18 approved-exception closure gates, V3.2.19 terminal meter-number deduplication gates, V3.2.20 effective collector/module display gates, and V3.2.21 audited bulk anomaly approval gates
 - Nginx retirement patcher, server migration and manifest signer, Windows-local downloader, verifier tests, operator SOP, and release record
 - JSON/PostgreSQL and photo migration scripts under v2-api/scripts
 - Requirements and Dockerfile
@@ -51,13 +51,13 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.20 --phase source
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.21 --phase source
 
 ## Pending Package Gates
 
 - Release smoke check must pass unless -SkipSmoke is used
 - Demo admin and constructor login are available only for local walkthrough when enabled
-- Historical release contracts plus the active V3.2.20 effective-device-display, package, and lifecycle contracts must pass
+- Historical release contracts plus the active V3.2.21 bulk-anomaly-approval, package, and lifecycle contracts must pass
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
 - Production mode disables demo accounts by default

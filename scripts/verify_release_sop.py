@@ -56,6 +56,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_19_release.py",
     "scripts/verify_v3_2_20_release.py",
     "scripts/test_verify_v3_2_20_release.py",
+    "scripts/verify_v3_2_21_release.py",
+    "scripts/test_verify_v3_2_21_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -135,6 +137,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.18.md",
     "ops/releases/V3.2.19.md",
     "ops/releases/V3.2.20.md",
+    "ops/releases/V3.2.21.md",
 )
 
 REQUIRED_FILES = [
@@ -1083,6 +1086,15 @@ def verified_v3219_attested_baseline_is_documented(record: str, version: str) ->
     return True
 
 
+def verified_v3220_attested_baseline_is_documented(record: str, version: str) -> bool:
+    if version != "V3.2.20":
+        return False
+    expected_sha256 = "9e9c5d2edd0a0463bdd8744a7d69b937539b1e74916f7ce522b86d31016bef96"
+    if hashlib.sha256(record.encode("utf-8")).hexdigest() != expected_sha256:
+        fail("V3.2.20 attested baseline record must remain byte-identical to its production proof")
+    return True
+
+
 def release_record_matches_lifecycle_state(
     record: str,
     version: str,
@@ -1091,6 +1103,8 @@ def release_record_matches_lifecycle_state(
     candidate_phase: str = "source",
 ) -> None:
     if version == deployed_baseline:
+        if verified_v3220_attested_baseline_is_documented(record, version):
+            return
         if verified_v3219_attested_baseline_is_documented(record, version):
             return
         if verified_v3218_attested_baseline_is_documented(record, version):
@@ -1174,7 +1188,10 @@ def verify_current_release_phase(
     expected_source_commit: str | None = None,
 ) -> None:
     candidate = version or release_candidate(read("AGENTS.md"))
-    if candidate == "V3.2.20":
+    if candidate == "V3.2.21":
+        path = Path(__file__).with_name("verify_v3_2_21_release.py")
+        module_name = "verify_v3_2_21_release"
+    elif candidate == "V3.2.20":
         path = Path(__file__).with_name("verify_v3_2_20_release.py")
         module_name = "verify_v3_2_20_release"
     elif candidate == "V3.2.19":
@@ -1216,7 +1233,7 @@ def verify_current_release_phase(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     verifier_args = ["--phase", phase]
-    if candidate in {"V3.2.14", "V3.2.15", "V3.2.16", "V3.2.17", "V3.2.18", "V3.2.19", "V3.2.20"}:
+    if candidate in {"V3.2.14", "V3.2.15", "V3.2.16", "V3.2.17", "V3.2.18", "V3.2.19", "V3.2.20", "V3.2.21"}:
         if package_path is not None:
             verifier_args.extend(("--package", str(package_path)))
         if expected_source_commit is not None:

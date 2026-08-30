@@ -136,8 +136,7 @@ class ClassificationConfirmationConflict(ValueError):
     """Raised when manual confirmation no longer matches the evidence shown to the user."""
 
 
-class AnomalyResolutionConflict(ValueError):
-    """Raised when an anomaly resolution no longer matches the evidence shown to the user."""
+AnomalyResolutionConflict = data_center_service.AnomalyResolutionConflict
 
 
 def _data_center_archive_status(group: Mapping[str, Any]) -> str:
@@ -3094,6 +3093,10 @@ class StateRepository(ABC):
         reviewer: str,
         note: str = "",
         exception_note: str = "",
+        *,
+        resolve_all_anomalies: bool = False,
+        expected_open_anomalies: Mapping[str, str] | None = None,
+        source_page: str = "review_rephoto_workbench",
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -4745,6 +4748,10 @@ class JsonStateRepository(StateRepository):
         reviewer: str,
         note: str = "",
         exception_note: str = "",
+        *,
+        resolve_all_anomalies: bool = False,
+        expected_open_anomalies: Mapping[str, str] | None = None,
+        source_page: str = "review_rephoto_workbench",
     ) -> dict[str, Any]:
         team_id = local_simulation.current_team_id()
         transaction = local_simulation.active_authoritative_json_write(team_id)
@@ -4754,7 +4761,16 @@ class JsonStateRepository(StateRepository):
             transaction = local_simulation.begin_authoritative_json_write(team_id)
             token = local_simulation.activate_authoritative_json_write(transaction)
         try:
-            result = local_simulation.review_group(group_id, status, reviewer, note, exception_note)
+            result = local_simulation.review_group(
+                group_id,
+                status,
+                reviewer,
+                note,
+                exception_note,
+                resolve_all_anomalies=resolve_all_anomalies,
+                expected_open_anomalies=expected_open_anomalies,
+                source_page=source_page,
+            )
             if owns_transaction:
                 local_simulation.finish_authoritative_json_write(transaction, token)
         except BaseException:
@@ -10475,6 +10491,10 @@ class PostgresStateRepository(StateRepository):
         reviewer: str,
         note: str = "",
         exception_note: str = "",
+        *,
+        resolve_all_anomalies: bool = False,
+        expected_open_anomalies: Mapping[str, str] | None = None,
+        source_page: str = "review_rephoto_workbench",
     ) -> dict[str, Any]:
         status_map = {
             "pending": GroupStatus.UNREVIEWED,
@@ -10487,22 +10507,62 @@ class PostgresStateRepository(StateRepository):
         mapped_status = status_map.get(status)
         if mapped_status is None:
             raise ValueError(f"Unsupported review status: {status}")
+        if resolve_all_anomalies and status != "approved":
+            raise ValueError("批量确认异常只能用于正式通过")
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
+            previous_status = _legacy_group_status(group)
             approved_payload: dict[str, Any] | None = None
             approved_anomalies: list[dict[str, str]] = []
+            bulk_resolved_anomalies: list[dict[str, str]] = []
+            bulk_resolved_at: datetime | None = None
             if status == "approved":
                 approved_payload = _group_payload(session, group)
                 approved_anomalies = data_center_service.group_anomalies(approved_payload)
                 unresolved = [anomaly for anomaly in approved_anomalies if anomaly["status"] == "open"]
-                if unresolved:
+                if resolve_all_anomalies:
+                    current_snapshot = {
+                        anomaly["code"]: anomaly["evidence_fingerprint"]
+                        for anomaly in unresolved
+                    }
+                    expected_snapshot = {
+                        str(code).strip(): str(fingerprint).strip()
+                        for code, fingerprint in (expected_open_anomalies or {}).items()
+                        if str(code).strip()
+                    }
+                    if current_snapshot != expected_snapshot:
+                        raise AnomalyResolutionConflict("异常资料已变化，请重新加载后再次确认")
+                    if unresolved:
+                        bulk_resolved_at = datetime.now(UTC)
+                        stored = approved_payload.get(data_center_service.ANOMALY_RESOLUTIONS_KEY) or {}
+                        resolutions = (
+                            {
+                                str(code): dict(resolution)
+                                for code, resolution in stored.items()
+                                if isinstance(resolution, Mapping)
+                            }
+                            if isinstance(stored, Mapping)
+                            else {}
+                        )
+                        for anomaly in unresolved:
+                            resolutions[anomaly["code"]] = {
+                                "evidence_fingerprint": anomaly["evidence_fingerprint"],
+                                "confirmed_evidence_fingerprint": anomaly["evidence_fingerprint"],
+                                "message": anomaly["message"],
+                                "resolved_by": reviewer,
+                                "resolved_at": bulk_resolved_at.isoformat(),
+                                "source_page": source_page,
+                            }
+                        approved_payload[data_center_service.ANOMALY_RESOLUTIONS_KEY] = resolutions
+                        bulk_resolved_anomalies = unresolved
+                elif unresolved:
                     raise ValueError(f"仍有 {len(unresolved)} 项异常未确认修复，请先逐项确认")
             group.status = mapped_status
             group.reviewer = reviewer
             group.review_note = note
             if status != "approved":
                 group.exception_note = exception_note
-            group.reviewed_at = datetime.now(UTC) if status in {"approved", "exception", "rejected"} else None
+            group.reviewed_at = (bulk_resolved_at or datetime.now(UTC)) if status in {"approved", "exception", "rejected"} else None
             raw_data = dict(group.raw_data or {})
             raw_data.update(
                 {
@@ -10531,6 +10591,61 @@ class PostgresStateRepository(StateRepository):
                     )
                 )
             group.raw_data = raw_data
+            if bulk_resolved_anomalies:
+                anomaly_codes = sorted(anomaly["code"] for anomaly in bulk_resolved_anomalies)
+                for anomaly in bulk_resolved_anomalies:
+                    _stage_transactional_audit(
+                        session,
+                        team_id=local_simulation.current_team_id(),
+                        actor=reviewer,
+                        action="data_center_anomaly_resolved",
+                        entity_type="material_group",
+                        entity_id=group.id,
+                        before_data={
+                            "status": previous_status,
+                            "anomaly_code": anomaly["code"],
+                            "anomaly_status": "open",
+                        },
+                        after_data={
+                            "status": "approved",
+                            "anomaly_code": anomaly["code"],
+                            "anomaly_status": "resolved",
+                        },
+                        payload={
+                            "group_id": group_id,
+                            "terminal": str((approved_payload or {}).get("terminal") or ""),
+                            "anomaly_code": anomaly["code"],
+                            "anomaly_message": anomaly["message"],
+                            "evidence_fingerprint": anomaly["evidence_fingerprint"],
+                            "confirmed_evidence_fingerprint": anomaly["evidence_fingerprint"],
+                            "resolved_at": bulk_resolved_at.isoformat(),
+                            "source_page": source_page,
+                            "source": source_page,
+                            "review_action": "approved",
+                        },
+                    )
+                _stage_transactional_audit(
+                    session,
+                    team_id=local_simulation.current_team_id(),
+                    actor=reviewer,
+                    action="data_center_anomalies_bulk_resolved_on_approval",
+                    entity_type="material_group",
+                    entity_id=group.id,
+                    before_data={"status": previous_status, "open_anomalies": anomaly_codes},
+                    after_data={"status": "approved", "resolved_anomalies": anomaly_codes},
+                    payload={
+                        "group_id": group_id,
+                        "terminal": str((approved_payload or {}).get("terminal") or ""),
+                        "anomaly_count": len(anomaly_codes),
+                        "anomaly_codes": anomaly_codes,
+                        "expected_open_anomalies": {
+                            anomaly["code"]: anomaly["evidence_fingerprint"]
+                            for anomaly in bulk_resolved_anomalies
+                        },
+                        "source_page": source_page,
+                        "review_action": "approved",
+                    },
+                )
             if status != "approved":
                 from app.services.delivery_cache import (
                     invalidate_postgres_delivery_cache_for_group_change,
@@ -12772,6 +12887,10 @@ class DualWriteStateRepository(JsonStateRepository):
         reviewer: str,
         note: str = "",
         exception_note: str = "",
+        *,
+        resolve_all_anomalies: bool = False,
+        expected_open_anomalies: Mapping[str, str] | None = None,
+        source_page: str = "review_rephoto_workbench",
     ) -> dict[str, Any]:
         self._reject_uncoordinated_dual_write("review_group")
 

@@ -6731,6 +6731,10 @@ def review_group(
     reviewer: str,
     note: str = "",
     exception_note: str = "",
+    *,
+    resolve_all_anomalies: bool = False,
+    expected_open_anomalies: Mapping[str, str] | None = None,
+    source_page: str = "review_rephoto_workbench",
 ) -> dict[str, Any]:
     if status not in REVIEWABLE_STATUSES:
         raise ValueError(f"Unsupported group status: {status}")
@@ -6739,11 +6743,50 @@ def review_group(
         raise KeyError(group_id)
     if status == "exception" and not (note or exception_note):
         raise ValueError("Exception review requires a note")
+    if resolve_all_anomalies and status != "approved":
+        raise ValueError("批量确认异常只能用于正式通过")
     approved_anomalies: list[dict[str, str]] = []
+    bulk_resolved_anomalies: list[dict[str, str]] = []
+    bulk_resolved_at = ""
     if status == "approved":
         approved_anomalies = data_center_service.group_anomalies(group)
         unresolved = [anomaly for anomaly in approved_anomalies if anomaly["status"] == "open"]
-        if unresolved:
+        if resolve_all_anomalies:
+            current_snapshot = {
+                anomaly["code"]: anomaly["evidence_fingerprint"]
+                for anomaly in unresolved
+            }
+            expected_snapshot = {
+                str(code).strip(): str(fingerprint).strip()
+                for code, fingerprint in (expected_open_anomalies or {}).items()
+                if str(code).strip()
+            }
+            if current_snapshot != expected_snapshot:
+                raise data_center_service.AnomalyResolutionConflict("异常资料已变化，请重新加载后再次确认")
+            if unresolved:
+                bulk_resolved_at = now_iso()
+                stored = group.get(data_center_service.ANOMALY_RESOLUTIONS_KEY) or {}
+                resolutions = (
+                    {
+                        str(code): dict(resolution)
+                        for code, resolution in stored.items()
+                        if isinstance(resolution, Mapping)
+                    }
+                    if isinstance(stored, Mapping)
+                    else {}
+                )
+                for anomaly in unresolved:
+                    resolutions[anomaly["code"]] = {
+                        "evidence_fingerprint": anomaly["evidence_fingerprint"],
+                        "confirmed_evidence_fingerprint": anomaly["evidence_fingerprint"],
+                        "message": anomaly["message"],
+                        "resolved_by": reviewer,
+                        "resolved_at": bulk_resolved_at,
+                        "source_page": source_page,
+                    }
+                group[data_center_service.ANOMALY_RESOLUTIONS_KEY] = resolutions
+                bulk_resolved_anomalies = unresolved
+        elif unresolved:
             raise ValueError(f"仍有 {len(unresolved)} 项异常未确认修复，请先逐项确认")
     previous = group["status"]
     group["status"] = status
@@ -6762,8 +6805,44 @@ def review_group(
             group,
             (anomaly["code"] for anomaly in approved_anomalies),
         )
-    group["reviewed_at"] = now_iso() if status in DONE_STATUSES else None
+    group["reviewed_at"] = (bulk_resolved_at or now_iso()) if status in DONE_STATUSES else None
     state = get_state()
+    if bulk_resolved_anomalies:
+        anomaly_codes = sorted(anomaly["code"] for anomaly in bulk_resolved_anomalies)
+        for anomaly in bulk_resolved_anomalies:
+            append_audit_event(
+                "data_center_anomaly_resolved",
+                reviewer,
+                {
+                    "group_id": group_id,
+                    "terminal": str(group.get("terminal") or ""),
+                    "anomaly_code": anomaly["code"],
+                    "anomaly_message": anomaly["message"],
+                    "evidence_fingerprint": anomaly["evidence_fingerprint"],
+                    "confirmed_evidence_fingerprint": anomaly["evidence_fingerprint"],
+                    "resolved_at": bulk_resolved_at,
+                    "source_page": source_page,
+                    "source": source_page,
+                    "review_action": "approved",
+                },
+            )
+        append_audit_event(
+            "data_center_anomalies_bulk_resolved_on_approval",
+            reviewer,
+            {
+                "group_id": group_id,
+                "terminal": str(group.get("terminal") or ""),
+                "anomaly_count": len(anomaly_codes),
+                "anomaly_codes": anomaly_codes,
+                "expected_open_anomalies": {
+                    anomaly["code"]: anomaly["evidence_fingerprint"]
+                    for anomaly in bulk_resolved_anomalies
+                },
+                "source_page": source_page,
+                "review_action": "approved",
+                "resolved_at": bulk_resolved_at,
+            },
+        )
     state["review_events"].append(
         {
             "group_id": group_id,

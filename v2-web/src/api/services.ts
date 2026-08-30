@@ -1722,12 +1722,22 @@ export async function reviewDataCenterGroup(
   status: 'approved' | 'incomplete' | 'exception',
   note = '',
   exceptionNote = '',
+  resolveAllAnomalies = false,
+  expectedOpenAnomalies: Record<string, string> = {},
 ): Promise<MaterialGroup> {
+  const body: Record<string, unknown> = { status, note, exception_note: exceptionNote }
+  if (resolveAllAnomalies) {
+    Object.assign(body, {
+      resolve_all_anomalies: true,
+      expected_open_anomalies: expectedOpenAnomalies,
+      source_page: 'review_rephoto_workbench',
+    })
+  }
   const data = await api<BackendGroup>(
     `/groups/data-center/groups/${encodeURIComponent(groupId)}/review`,
     {
       method: 'PATCH',
-      body: JSON.stringify({ status, note, exception_note: exceptionNote }),
+      body: JSON.stringify(body),
     },
   )
   return mapGroup(data)

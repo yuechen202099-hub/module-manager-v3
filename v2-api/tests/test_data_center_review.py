@@ -223,6 +223,91 @@ def test_json_approved_review_rejects_unconfirmed_current_anomaly(
     assert _latest_group() == before
 
 
+def test_json_approved_review_bulk_resolves_current_anomalies_and_audits(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches bulk approval changing status without durable per-anomaly and aggregate audit history."""
+    group = _latest_group()
+    group.update(
+        {
+            "status": "incomplete",
+            "module_asset_no": "",
+            "construction_module_asset_no": "",
+            "exception_status": "open",
+            "exception_reasons": ["manual_quality"],
+            "has_archive_blocker": True,
+        }
+    )
+    anomalies = data_center_service.group_anomalies(group)
+    expected = {item["code"]: item["evidence_fingerprint"] for item in anomalies}
+
+    reviewed = json_review_repo.review_group(
+        "g-1",
+        "approved",
+        "module_admin",
+        "全部异常已人工核实",
+        resolve_all_anomalies=True,
+        expected_open_anomalies=expected,
+        source_page="review_rephoto_workbench",
+    )
+
+    assert reviewed["status"] == "approved"
+    assert all(item["status"] == "resolved" for item in data_center_service.group_anomalies(reviewed))
+    resolutions = reviewed[data_center_service.ANOMALY_RESOLUTIONS_KEY]
+    assert set(resolutions) == set(expected)
+    assert all(item["resolved_by"] == "module_admin" for item in resolutions.values())
+    assert all(item["resolved_at"] for item in resolutions.values())
+    assert all(item["source_page"] == "review_rephoto_workbench" for item in resolutions.values())
+    assert {
+        code: item["confirmed_evidence_fingerprint"]
+        for code, item in resolutions.items()
+    } == expected
+    per_anomaly_audits = [
+        event
+        for event in local_simulation.get_state()["audit_events"]
+        if event["action"] == "data_center_anomaly_resolved"
+    ]
+    assert len(per_anomaly_audits) == len(expected)
+    assert {
+        event["payload"]["anomaly_code"]: event["payload"]["confirmed_evidence_fingerprint"]
+        for event in per_anomaly_audits
+    } == expected
+    assert all(
+        event["payload"]["source_page"] == "review_rephoto_workbench"
+        for event in per_anomaly_audits
+    )
+    payload = _audit_payload("data_center_anomalies_bulk_resolved_on_approval")
+    assert payload["group_id"] == "g-1"
+    assert payload["terminal"] == "120000000001"
+    assert payload["anomaly_count"] == len(expected)
+    assert payload["anomaly_codes"] == sorted(expected)
+    assert payload["source_page"] == "review_rephoto_workbench"
+
+
+def test_json_approved_review_bulk_rejects_changed_anomaly_snapshot_without_writes(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches approving anomalies that differ from those shown in the confirmation dialog."""
+    group = _latest_group()
+    group["module_asset_no"] = ""
+    group["construction_module_asset_no"] = ""
+    anomalies = data_center_service.group_anomalies(group)
+    expected = {item["code"]: item["evidence_fingerprint"] for item in anomalies}
+    expected[next(iter(expected))] = "0" * 64
+    before = deepcopy(local_simulation.get_state())
+
+    with pytest.raises(repository.AnomalyResolutionConflict, match="变化"):
+        json_review_repo.review_group(
+            "g-1",
+            "approved",
+            "module_admin",
+            resolve_all_anomalies=True,
+            expected_open_anomalies=expected,
+        )
+
+    assert local_simulation.get_state() == before
+
+
 def test_json_approved_review_closes_resolved_exception_state_and_keeps_history(
     json_review_repo: repository.JsonStateRepository,
 ) -> None:
@@ -363,6 +448,57 @@ def test_admin_can_approve_data_center_group_and_audit_actor(
     assert committed["review_events"][-1]["group_id"] == "g-1"
     assert committed["review_events"][-1]["reviewer"] == "admin"
     assert committed["review_events"][-1]["note"] == "资料核对完成"
+
+
+def test_admin_can_bulk_resolve_current_anomalies_and_approve_with_server_actor(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches trusting a client actor or dropping the anomaly evidence snapshot at the review route."""
+    state = local_simulation.get_state()
+    team_id = state["team_id"]
+    group = state["groups"][0]
+    group["module_asset_no"] = ""
+    group["construction_module_asset_no"] = ""
+    detail = json_review_repo.get_data_center_detail(kind="group", item_id="g-1")
+    expected = {
+        item["code"]: item["evidence_fingerprint"]
+        for item in detail["anomalies"]
+        if item["status"] == "open"
+    }
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+    headers = _review_headers(username="admin-route", role="admin", team_id=team_id)
+
+    stale = client.patch(
+        "/groups/data-center/groups/g-1/review",
+        headers=headers,
+        json={
+            "status": "approved",
+            "resolve_all_anomalies": True,
+            "expected_open_anomalies": {**expected, next(iter(expected)): "0" * 64},
+            "source_page": "review_rephoto_workbench",
+        },
+    )
+    assert stale.status_code == 409
+
+    response = client.patch(
+        "/groups/data-center/groups/g-1/review",
+        headers=headers,
+        json={
+            "status": "approved",
+            "resolve_all_anomalies": True,
+            "expected_open_anomalies": expected,
+            "source_page": "review_rephoto_workbench",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "approved"
+    reloaded = json_review_repo.get_data_center_detail(kind="group", item_id="g-1")
+    assert reloaded is not None
+    assert all(item["status"] == "resolved" for item in reloaded["anomalies"])
+    assert all(item["resolved_by"] == "admin-route" for item in reloaded["anomalies"])
 
 
 def test_admin_data_center_review_ignores_removed_reviewer_claim(

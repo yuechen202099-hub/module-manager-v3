@@ -24,7 +24,7 @@ def load_verifier():
     return module
 
 
-def test_v3219_sop_inputs_bind_current_and_historical_release_gates() -> None:
+def test_v3220_sop_inputs_bind_current_and_historical_release_gates() -> None:
     verifier = load_verifier()
     global_workbench_sources = {
         "v2-web/src/api/services.ts",
@@ -66,6 +66,8 @@ def test_v3219_sop_inputs_bind_current_and_historical_release_gates() -> None:
         "scripts/test_verify_v3_2_19_release.py",
         "scripts/verify_v3_2_20_release.py",
         "scripts/test_verify_v3_2_20_release.py",
+        "scripts/verify_v3_2_21_release.py",
+        "scripts/test_verify_v3_2_21_release.py",
         "v2-api/tests/test_collector_transfer_scale.py",
         "v2-api/tests/test_data_center_review.py",
         "v2-api/tests/test_terminal_review_domain.py",
@@ -83,21 +85,22 @@ def test_v3219_sop_inputs_bind_current_and_historical_release_gates() -> None:
         "ops/releases/V3.2.18.md",
         "ops/releases/V3.2.19.md",
         "ops/releases/V3.2.20.md",
+        "ops/releases/V3.2.21.md",
     } | global_workbench_sources <= set(verifier.RELEASE_INPUTS)
     assert "v2-web/src/views/CollectorBatchManagementView.vue" not in verifier.RELEASE_INPUTS
 
 
-def test_v3220_release_contract_is_registered_for_source_and_attestation() -> None:
+def test_v3221_release_contract_is_registered_for_source_and_attestation() -> None:
     verifier = load_verifier()
 
-    assert "scripts/verify_v3_2_20_release.py" in verifier.RELEASE_INPUTS
-    assert "scripts/test_verify_v3_2_20_release.py" in verifier.RELEASE_INPUTS
-    assert "ops/releases/V3.2.20.md" in verifier.RELEASE_INPUTS
+    assert "scripts/verify_v3_2_21_release.py" in verifier.RELEASE_INPUTS
+    assert "scripts/test_verify_v3_2_21_release.py" in verifier.RELEASE_INPUTS
+    assert "ops/releases/V3.2.21.md" in verifier.RELEASE_INPUTS
 
-    verifier.verify_current_release_phase("source", "V3.2.20")
+    verifier.verify_current_release_phase("source", "V3.2.21")
 
 
-def test_v3220_sop_attestation_forwards_verified_package_and_source_commit(monkeypatch) -> None:
+def test_v3221_sop_attestation_forwards_verified_package_and_source_commit(monkeypatch) -> None:
     verifier = load_verifier()
     captured: list[list[str]] = []
 
@@ -120,8 +123,8 @@ def test_v3220_sop_attestation_forwards_verified_package_and_source_commit(monke
 
     verifier.verify_current_release_phase(
         "attestation",
-        "V3.2.20",
-        package_path=ROOT / "build/server-release/module-manager-v2-server-3.2.20.zip",
+        "V3.2.21",
+        package_path=ROOT / "build/server-release/module-manager-v2-server-3.2.21.zip",
         expected_source_commit="02fbe4b5d55b68708683303361389234be3807af",
     )
 
@@ -129,7 +132,7 @@ def test_v3220_sop_attestation_forwards_verified_package_and_source_commit(monke
         "--phase",
         "attestation",
         "--package",
-        str(ROOT / "build/server-release/module-manager-v2-server-3.2.20.zip"),
+        str(ROOT / "build/server-release/module-manager-v2-server-3.2.21.zip"),
         "--expected-source-commit",
         "02fbe4b5d55b68708683303361389234be3807af",
     ]]
@@ -198,6 +201,24 @@ def test_v3219_attested_record_is_accepted_as_v3220_baseline_and_is_byte_locked(
         verifier.verified_v3219_attested_baseline_is_documented(
             record + "\nmutated\n",
             "V3.2.19",
+        )
+
+
+def test_v3220_attested_record_is_accepted_as_v3221_baseline_and_is_byte_locked() -> None:
+    verifier = load_verifier()
+    record = (ROOT / "ops/releases/V3.2.20.md").read_text(encoding="utf-8")
+
+    assert verifier.verified_v3220_attested_baseline_is_documented(record, "V3.2.20")
+    verifier.release_record_matches_lifecycle_state(
+        record,
+        "V3.2.20",
+        "V3.2.20",
+        "V3.2.21",
+    )
+    with pytest.raises(AssertionError, match="byte-identical"):
+        verifier.verified_v3220_attested_baseline_is_documented(
+            record + "\nmutated\n",
+            "V3.2.20",
         )
 
 
@@ -330,8 +351,8 @@ def test_parses_current_deployed_baseline_and_release_candidate_markers() -> Non
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert verifier.deployed_production_baseline(agents) == "V3.2.19"
-    assert verifier.release_candidate(agents) == "V3.2.20"
+    assert verifier.deployed_production_baseline(agents) == "V3.2.20"
+    assert verifier.release_candidate(agents) == "V3.2.21"
 
 
 def test_v3212_attested_baseline_is_byte_locked() -> None:
@@ -364,30 +385,30 @@ def test_cli_parses_version_and_rejects_unknown_arguments() -> None:
     args = verifier.parse_args(
         [
             "--version",
-            "V3.2.20",
+            "V3.2.21",
             "--phase",
             "attestation",
             "--package",
-            "build/server-release/module-manager-v2-server-3.2.20.zip",
+            "build/server-release/module-manager-v2-server-3.2.21.zip",
             "--expected-source-commit",
             "1" * 40,
         ]
     )
-    assert args.version == "V3.2.20"
+    assert args.version == "V3.2.21"
     assert args.phase == "attestation"
-    assert args.package == Path("build/server-release/module-manager-v2-server-3.2.20.zip")
+    assert args.package == Path("build/server-release/module-manager-v2-server-3.2.21.zip")
     assert args.expected_source_commit == "1" * 40
     with pytest.raises(SystemExit):
-        verifier.parse_args(["--version", "V3.2.20", "--phase", "attestation", "--unknown"])
+        verifier.parse_args(["--version", "V3.2.21", "--phase", "attestation", "--unknown"])
     with pytest.raises(SystemExit):
-        verifier.parse_args(["--version", "V3.2.20"])
+        verifier.parse_args(["--version", "V3.2.21"])
 
 
 def test_cli_version_must_match_the_release_candidate() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
-    assert verifier.validate_requested_candidate_version("V3.2.20", agents) == "V3.2.20"
+    assert verifier.validate_requested_candidate_version("V3.2.21", agents) == "V3.2.21"
     with pytest.raises(AssertionError, match="release candidate"):
         verifier.validate_requested_candidate_version("V3.1.1", agents)
 
@@ -395,14 +416,14 @@ def test_cli_version_must_match_the_release_candidate() -> None:
 def test_cli_verifies_the_current_source_contract() -> None:
     verifier = load_verifier()
 
-    assert verifier.main(["--version", "V3.2.20", "--phase", "source"]) == 0
+    assert verifier.main(["--version", "V3.2.21", "--phase", "source"]) == 0
 
 
 def test_cli_rejects_current_pending_candidate_as_attestation() -> None:
     verifier = load_verifier()
 
     with pytest.raises(AssertionError, match="attestation"):
-        verifier.main(["--version", "V3.2.20", "--phase", "attestation"])
+        verifier.main(["--version", "V3.2.21", "--phase", "attestation"])
 
 
 def test_v323_nested_release_inputs_accept_parent_directory_copy_semantics() -> None:
@@ -432,7 +453,7 @@ def test_v323_nested_release_inputs_accept_parent_directory_copy_semantics() -> 
 def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
-        "production/V3/3.2.20", "production/V3/3.0.81"
+        "production/V3/3.2.21", "production/V3/3.0.81"
     )
 
     with pytest.raises(AssertionError, match="maintenance branch"):
@@ -442,7 +463,7 @@ def test_rejects_wrong_release_candidate_maintenance_branch() -> None:
 def test_rejects_inconsistent_release_candidate_maintenance_branch_markers() -> None:
     verifier = load_verifier()
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8").replace(
-        "- Release-candidate maintenance branch: `production/V3/3.2.20`.",
+        "- Release-candidate maintenance branch: `production/V3/3.2.21`.",
         "- Release-candidate maintenance branch: `production/V3/3.0.81`.",
         1,
     )
@@ -641,9 +662,9 @@ def test_v3083_release_record_contains_required_chinese_feature_titles() -> None
 def test_v323_manifest_records_the_release_candidate_package() -> None:
     manifest = (ROOT / "RELEASE_MANIFEST.md").read_text(encoding="utf-8")
 
-    assert "- Package: `build/server-release/module-manager-v2-server-3.2.20.zip`" in manifest
-    assert "- Name: `module-manager-v2-server-3.2.20.zip`" in manifest
-    assert "- Version: 3.2.20" in manifest
+    assert "- Package: `build/server-release/module-manager-v2-server-3.2.21.zip`" in manifest
+    assert "- Name: `module-manager-v2-server-3.2.21.zip`" in manifest
+    assert "- Version: 3.2.21" in manifest
 
 
 def test_v320_deployed_release_record_contains_required_release_evidence_contract() -> None:
@@ -774,12 +795,12 @@ def test_v3082_release_record_passes_the_deployed_baseline_gate() -> None:
     ("english_marker", "replacement", "parser_name"),
     [
         (
-            "- Deployed production baseline: `V3.2.19`.",
+            "- Deployed production baseline: `V3.2.20`.",
             "- Deployed production baseline: `V3.0.82`.",
             "deployed_production_baseline",
         ),
         (
-            "- Release candidate: `V3.2.20`.",
+            "- Release candidate: `V3.2.21`.",
             "- Release candidate: `V3.0.83`.",
             "release_candidate",
         ),
@@ -1458,7 +1479,7 @@ def test_round5_vue_app_version_uses_one_machine_source_and_entry_marker() -> No
     vite_config = (ROOT / "v2-web" / "vite.config.ts").read_text(encoding="utf-8")
 
     assert source_path.is_file()
-    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.2.20"}
+    assert json.loads(source_path.read_text(encoding="utf-8")) == {"version": "3.2.21"}
     assert not legacy_source_path.exists()
     assert "from '../version.json'" in release_notes
     assert "APP_VERSION = versionArtifact.version" in release_notes

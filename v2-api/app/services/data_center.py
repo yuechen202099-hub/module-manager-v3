@@ -15,6 +15,11 @@ MANUAL_CLASSIFICATION_BARCODE_READY = {"passed", "manual", "manual_confirmed", "
 DASHBOARD_IGNORED_EXCEPTION_REASON = "missing_collector_photo"
 ANOMALY_RESOLUTIONS_KEY = "data_center_anomaly_resolutions"
 
+
+class AnomalyResolutionConflict(ValueError):
+    """Raised when an anomaly decision no longer matches the evidence shown to the user."""
+
+
 ANOMALY_MESSAGES = {
     "unclassified_photos": "存在未分类照片",
     "module_meter_photo_missing": "缺少电表和模块照片",

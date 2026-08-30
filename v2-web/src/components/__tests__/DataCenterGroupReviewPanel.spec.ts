@@ -152,6 +152,41 @@ describe('DataCenterGroupReviewPanel', () => {
     expect(result).toMatchObject({ id: 'g/encoded', status: 'approved' })
   })
 
+  it('sends the bulk anomaly evidence snapshot only for explicit bulk approval', async () => {
+    const requests: Array<{ path: string; init: RequestInit }> = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      requests.push({ path: String(input), init })
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { id: 'g-bulk', status: 'approved' } }),
+      } as Response
+    })
+    const realServices = await vi.importActual<typeof import('@/api/services')>('@/api/services')
+
+    await realServices.reviewDataCenterGroup(
+      'g-bulk',
+      'approved',
+      'checked',
+      '',
+      true,
+      { module_missing: 'a'.repeat(64), collector_missing: 'b'.repeat(64) },
+    )
+    const body = JSON.parse(String(requests[0]?.init.body))
+
+    expect(body).toEqual({
+      status: 'approved',
+      note: 'checked',
+      exception_note: '',
+      resolve_all_anomalies: true,
+      expected_open_anomalies: {
+        module_missing: 'a'.repeat(64),
+        collector_missing: 'b'.repeat(64),
+      },
+      source_page: 'review_rephoto_workbench',
+    })
+  })
+
   it('maps the explicit manual classification confirmation from group detail', async () => {
     vi.stubGlobal('fetch', async () => ({
       ok: true,
@@ -489,6 +524,93 @@ describe('DataCenterGroupReviewPanel', () => {
     expect(wrapper.text()).toContain(`审阅状态：${status}`)
     expect(wrapper.emitted('review-decided')).toEqual([[status]])
     expect(wrapper.emitted('updated')?.at(-1)?.[0]).toMatchObject({ id: 'g-review' })
+    wrapper.unmount()
+  })
+
+  it('confirms all current anomalies once before formal approval', async () => {
+    const openDetail = {
+      ...detailFixture('g-bulk-approval'),
+      anomalies: [
+        { code: 'module_missing', message: '缺少模块号', status: 'open', evidenceFingerprint: 'a'.repeat(64), resolvedBy: '', resolvedAt: '' },
+        { code: 'collector_missing', message: '缺少采集器号', status: 'open', evidenceFingerprint: 'b'.repeat(64), resolvedBy: '', resolvedAt: '' },
+      ],
+    } satisfies DataCenterDetail
+    apiMock.fetchDataCenterDetail.mockResolvedValue(openDetail)
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(
+      'confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>,
+    )
+    const wrapper = mountPanel({ groupId: openDetail.id })
+    await flushPromises()
+
+    await buttonByText(wrapper, '正式通过').trigger('click')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(String(confirm.mock.calls[0]?.[0])).toContain('2 项异常')
+    expect(confirm.mock.calls[0]?.[2]).toMatchObject({
+      confirmButtonText: '确认全部已修复并正式通过',
+      cancelButtonText: '返回逐项处理',
+    })
+    expect(apiMock.reviewDataCenterGroup).toHaveBeenCalledWith(
+      openDetail.id,
+      'approved',
+      '',
+      '',
+      true,
+      { module_missing: 'a'.repeat(64), collector_missing: 'b'.repeat(64) },
+    )
+    wrapper.unmount()
+  })
+
+  it('keeps the group unchanged when bulk anomaly approval is cancelled', async () => {
+    const openDetail = {
+      ...detailFixture('g-bulk-cancel'),
+      anomalies: [
+        { code: 'module_missing', message: '缺少模块号', status: 'open', evidenceFingerprint: 'a'.repeat(64), resolvedBy: '', resolvedAt: '' },
+      ],
+    } satisfies DataCenterDetail
+    apiMock.fetchDataCenterDetail.mockResolvedValue(openDetail)
+    vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+    const wrapper = mountPanel({ groupId: openDetail.id })
+    await flushPromises()
+
+    await buttonByText(wrapper, '正式通过').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.reviewDataCenterGroup).not.toHaveBeenCalled()
+    expect(wrapper.emitted('review-decided')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('reloads current anomalies when the bulk approval snapshot conflicts', async () => {
+    const first = {
+      ...detailFixture('g-bulk-conflict'),
+      anomalies: [
+        { code: 'module_missing', message: '缺少模块号', status: 'open', evidenceFingerprint: 'a'.repeat(64), resolvedBy: '', resolvedAt: '' },
+      ],
+    } satisfies DataCenterDetail
+    const latest = {
+      ...first,
+      anomalies: [
+        { code: 'module_missing', message: '模块号资料已变化', status: 'open', evidenceFingerprint: 'b'.repeat(64), resolvedBy: '', resolvedAt: '' },
+      ],
+    } satisfies DataCenterDetail
+    apiMock.fetchDataCenterDetail.mockResolvedValueOnce(first).mockResolvedValueOnce(latest)
+    apiMock.reviewDataCenterGroup.mockRejectedValue(
+      Object.assign(new Error('异常资料已变化，请重新加载后再次确认'), { status: 409 }),
+    )
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(
+      'confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>,
+    )
+    const wrapper = mountPanel({ groupId: first.id })
+    await flushPromises()
+
+    await buttonByText(wrapper, '正式通过').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.fetchDataCenterDetail).toHaveBeenCalledTimes(2)
+    expect(wrapper.text()).toContain('模块号资料已变化')
+    expect(wrapper.emitted('review-decided')).toBeUndefined()
     wrapper.unmount()
   })
 

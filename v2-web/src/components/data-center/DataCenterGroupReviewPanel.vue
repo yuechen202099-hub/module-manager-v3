@@ -599,11 +599,36 @@ async function decideReview(status: 'approved' | 'incomplete') {
   const requestedGroupId = detail.value.id
   const owner = beginMutation(requestedGroupId)
   try {
+    let resolveAllAnomalies = false
+    let expectedOpenAnomalies: Record<string, string> = {}
+    if (status === 'approved' && openAnomalies.value.length > 0) {
+      const anomaliesToConfirm = [...openAnomalies.value]
+      try {
+        await ElMessageBox.confirm(
+          `当前有 ${anomaliesToConfirm.length} 项异常。请确认这些异常均已人工核实并修复；确认后将一次性留痕并正式通过。`,
+          '确认全部异常已修复',
+          {
+            type: 'warning',
+            confirmButtonText: '确认全部已修复并正式通过',
+            cancelButtonText: '返回逐项处理',
+          },
+        )
+      } catch {
+        return
+      }
+      if (!isCurrentMutation(owner)) return
+      resolveAllAnomalies = true
+      expectedOpenAnomalies = Object.fromEntries(
+        anomaliesToConfirm.map((anomaly) => [anomaly.code, anomaly.evidenceFingerprint]),
+      )
+    }
     await reviewDataCenterGroup(
       requestedGroupId,
       status,
       form.reason.trim(),
       status === 'incomplete' ? form.exceptionNote.trim() : '',
+      resolveAllAnomalies,
+      expectedOpenAnomalies,
     )
     if (!isCurrentMutation(owner)) return
     const next = await reloadAfterMutation(owner)
@@ -611,6 +636,7 @@ async function decideReview(status: 'approved' | 'incomplete') {
     emit('review-decided', status)
     ElMessage.success(status === 'approved' ? '已正式通过' : '已标记资料不全')
   } catch (error) {
+    if (getApiErrorStatus(error) === 409) await reloadAfterMutation(owner)
     showMutationError(owner, error, '审阅决定失败')
   } finally {
     finishMutation(owner)

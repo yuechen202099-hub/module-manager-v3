@@ -49,6 +49,9 @@ class DataCenterReviewDecisionRequest(BaseModel):
     status: Literal["approved", "incomplete", "exception"]
     note: str = ""
     exception_note: str = ""
+    resolve_all_anomalies: bool = False
+    expected_open_anomalies: dict[str, str] = Field(default_factory=dict)
+    source_page: str = "review_rephoto_workbench"
 
 
 class DataCenterManualClassificationConfirmRequest(BaseModel):
@@ -353,10 +356,15 @@ def decide_data_center_group_review(
             reviewer=_admin_actor(admin_payload),
             note=payload.note,
             exception_note=payload.exception_note,
+            resolve_all_anomalies=payload.resolve_all_anomalies,
+            expected_open_anomalies=payload.expected_open_anomalies,
+            source_page=payload.source_page,
         )
         invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Group not found") from exc
+    except AnomalyResolutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
