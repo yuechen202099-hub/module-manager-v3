@@ -248,22 +248,154 @@ def _source_revision_row(
     }
 
 
+def _has_construction_evidence(evidence: ReviewMeterEvidence) -> bool:
+    return bool(evidence.active_photos or evidence.persisted_photo_count > 0)
+
+
+def _meter_evidence_key(evidence: ReviewMeterEvidence) -> tuple[str, str]:
+    meter_no = normalize_identifier(evidence.meter_no)
+    if meter_no:
+        return "meter", meter_no
+    return "group", normalize_identifier(evidence.group_id)
+
+
+def _preferred_identity_value(
+    rows: tuple[ReviewMeterEvidence, ...],
+    primary: ReviewMeterEvidence,
+    field: str,
+) -> tuple[str, bool]:
+    constructed_rows = tuple(item for item in rows if _has_construction_evidence(item))
+    authoritative_rows = tuple(
+        item
+        for item in constructed_rows
+        if normalize_identifier(getattr(item, field))
+    )
+    candidate_rows = authoritative_rows or rows
+    ordered = (primary,) + tuple(
+        item
+        for item in candidate_rows
+        if item is not primary
+    )
+    values = tuple(
+        dict.fromkeys(
+            normalize_identifier(getattr(item, field))
+            for item in ordered
+            if normalize_identifier(getattr(item, field))
+        )
+    )
+    return (values[0] if values else ""), len(values) > 1
+
+
+def _merge_constructed_meter_evidence(
+    rows: tuple[ReviewMeterEvidence, ...],
+) -> ReviewMeterEvidence:
+    constructed_rows = tuple(item for item in rows if _has_construction_evidence(item))
+    primary = sorted(
+        constructed_rows,
+        key=lambda item: (
+            -len(item.active_photos),
+            -max(0, item.persisted_photo_count),
+            normalize_identifier(item.group_id),
+        ),
+    )[0]
+    terminal_code, terminal_conflict = _preferred_identity_value(
+        rows, primary, "terminal_code"
+    )
+    collector_no, collector_conflict = _preferred_identity_value(
+        rows, primary, "collector_no"
+    )
+    module_no, module_conflict = _preferred_identity_value(rows, primary, "module_no")
+
+    photos_by_id: dict[str, ReviewPhotoEvidence] = {}
+    for item in constructed_rows:
+        for photo in item.active_photos:
+            photos_by_id.setdefault(normalize_identifier(photo.id), photo)
+    active_photos = tuple(
+        sorted(
+            photos_by_id.values(),
+            key=lambda item: (
+                normalize_identifier(item.category).lower(),
+                normalize_identifier(item.id),
+            ),
+        )
+    )
+
+    merged_identity_values = {
+        "terminal_missing": terminal_code,
+        "meter_missing": normalize_identifier(primary.meter_no),
+        "collector_missing": collector_no,
+        "module_missing": module_no,
+    }
+    primary_identity_values = {
+        "terminal_missing": normalize_identifier(primary.terminal_code),
+        "meter_missing": normalize_identifier(primary.meter_no),
+        "collector_missing": normalize_identifier(primary.collector_no),
+        "module_missing": normalize_identifier(primary.module_no),
+    }
+    identity_blockers = {
+        code
+        for item in constructed_rows
+        for code in item.identity_blockers
+        if not (
+            code in merged_identity_values
+            and not primary_identity_values[code]
+            and merged_identity_values[code]
+        )
+    }
+    source_blockers = {
+        code
+        for item in constructed_rows
+        for code in item.source_blockers
+    }
+    if terminal_conflict or collector_conflict or module_conflict:
+        source_blockers.add("source_conflict")
+
+    return ReviewMeterEvidence(
+        group_id=normalize_identifier(primary.group_id),
+        status=primary.status,
+        terminal_code=terminal_code,
+        installation_address=normalize_identifier(primary.installation_address),
+        meter_no=normalize_identifier(primary.meter_no),
+        collector_no=collector_no,
+        module_no=module_no,
+        persisted_photo_count=max(
+            len(active_photos),
+            *(max(0, item.persisted_photo_count) for item in constructed_rows),
+        ),
+        active_photos=active_photos,
+        barcode_status=primary.barcode_status,
+        identity_blockers=tuple(sorted(identity_blockers)),
+        source_blockers=tuple(sorted(source_blockers)),
+        classification_manual_confirmation=primary.classification_manual_confirmation,
+    )
+
+
 def project_terminal_review(
     meters: Iterable[ReviewMeterEvidence],
 ) -> TerminalReviewProjection:
     constructed_pairs: list[tuple[ReviewMeterEvidence, ReviewMeterProjection]] = []
     unconstructed: list[ReviewMeterProjection] = []
 
+    meters_by_identity: dict[tuple[str, str], list[ReviewMeterEvidence]] = {}
     for evidence in meters:
         group_id = normalize_identifier(evidence.group_id)
         if not group_id:
             raise ValueError("group_id is required")
-        if evidence.active_photos or evidence.persisted_photo_count > 0:
+        meters_by_identity.setdefault(_meter_evidence_key(evidence), []).append(evidence)
+
+    for identity in sorted(meters_by_identity):
+        evidence_rows = tuple(meters_by_identity[identity])
+        if any(_has_construction_evidence(item) for item in evidence_rows):
+            evidence = _merge_constructed_meter_evidence(evidence_rows)
             constructed_pairs.append((evidence, _project_constructed_meter(evidence)))
         else:
+            evidence = min(
+                evidence_rows,
+                key=lambda item: normalize_identifier(item.group_id),
+            )
             unconstructed.append(
                 ReviewMeterProjection(
-                    group_id=group_id,
+                    group_id=normalize_identifier(evidence.group_id),
                     construction_state="unconstructed",
                     review_ready=False,
                     blockers=(),

@@ -37,11 +37,18 @@ def meter(
     )
 
 
-def test_terminal_snapshot_deduplicates_collectors_but_keeps_every_meter() -> None:
-    """Catches generating one removal row per meter instead of per distinct collector."""
+def test_terminal_snapshot_deduplicates_collectors_and_duplicate_meter_rows() -> None:
+    """Catches construction-stage duplicates creating a second meter or collector demand."""
     snapshots = build_terminal_snapshots(
         [
             meter(group_id="g-1", terminal="T-001", meter_no="M-001", collector_no="C-100", module_no="A-001"),
+            meter(
+                group_id="g-1-before",
+                terminal="T-001",
+                meter_no="M-001",
+                collector_no="C-100",
+                module_no="A-001",
+            ),
             meter(group_id="g-2", terminal="T-001", meter_no="M-002", collector_no="C-100", module_no="A-002"),
             meter(group_id="g-3", terminal="T-001", meter_no="M-003", collector_no="C-200", module_no="A-003"),
         ]

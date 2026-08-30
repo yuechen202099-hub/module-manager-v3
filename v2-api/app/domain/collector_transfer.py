@@ -152,12 +152,23 @@ def build_terminal_snapshots(records: Iterable[MeterSource]) -> tuple[TerminalSn
 
     snapshots: list[TerminalSnapshot] = []
     for terminal_code in sorted(terminals):
-        meters = tuple(
-            sorted(
-                terminals[terminal_code],
-                key=lambda item: (normalize_identifier(item.meter_no), normalize_identifier(item.group_id)),
-            )
+        ordered_meters = sorted(
+            terminals[terminal_code],
+            key=lambda item: (
+                normalize_identifier(item.meter_no),
+                normalize_identifier(item.group_id),
+            ),
         )
+        meters_by_identity: dict[tuple[str, str], MeterSource] = {}
+        for item in ordered_meters:
+            meter_no = normalize_identifier(item.meter_no)
+            identity = (
+                ("meter", meter_no)
+                if meter_no
+                else ("group", normalize_identifier(item.group_id))
+            )
+            meters_by_identity.setdefault(identity, item)
+        meters = tuple(meters_by_identity.values())
         requirement_groups: dict[str, list[str]] = defaultdict(list)
         for item in meters:
             collector_no = normalize_identifier(item.collector_no)

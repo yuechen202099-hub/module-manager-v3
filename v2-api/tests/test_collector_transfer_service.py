@@ -375,14 +375,16 @@ def add_unconstructed_global_terminal_source(
     meter_no: str,
     authoritative_address: str,
     legacy_id: str | None = None,
+    meter_match_key: str | None = None,
 ) -> MaterialGroup:
+    resolved_match_key = meter_match_key or meter_no
     catalog = TotalCatalogRow(
         id=uuid4(),
         team_id=project.team_id,
         project_id=project.id,
         terminal=terminal_code,
         original_meter_no=meter_no,
-        meter_match_key=meter_no,
+        meter_match_key=resolved_match_key,
         installation_address=authoritative_address,
         raw_data={},
     )
@@ -393,7 +395,7 @@ def add_unconstructed_global_terminal_source(
         total_catalog_row_id=catalog.id,
         legacy_id=legacy_id or meter_no,
         terminal=terminal_code,
-        meter_match_key=meter_no,
+        meter_match_key=resolved_match_key,
         display_meter_no=meter_no,
         installation_address=f"旧-{authoritative_address}",
         status=GroupStatus.UNREVIEWED,
@@ -3552,6 +3554,64 @@ def test_global_terminal_candidates_include_mixed_construction_review_counts(
     assert candidate["selectable"] is True
     assert candidate["terminal_code"] == "MIXED-001"
     assert candidate["terminal_key"] != "MIXED-001"
+
+
+def test_review_workbench_deduplicates_same_meter_and_merges_device_numbers(
+    db_session: Session,
+) -> None:
+    """Catches before/after rows duplicating a meter or dropping its collector number."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    constructed = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="MERGED-METER-001",
+        meter_no="M-SAME",
+        collector_no="COLLECTOR-001",
+        authoritative_address="合并表计地址",
+        legacy_id="g-after",
+    )
+    for item in db_session.scalars(select(Photo).where(Photo.group_id == constructed.id)).all():
+        item.collector = None
+    constructed.raw_data = {
+        **dict(constructed.raw_data or {}),
+        "collector": "",
+    }
+    unconstructed = add_unconstructed_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="MERGED-METER-001",
+        meter_no="M-SAME",
+        authoritative_address="合并表计地址",
+        legacy_id="g-before",
+        meter_match_key="M-SAME-before",
+    )
+    unconstructed.raw_data = {
+        "collector": "COLLECTOR-001",
+        "module_asset_no": "",
+    }
+    unconstructed.exception_note = "未施工历史行异常不应阻塞"
+    db_session.commit()
+
+    candidate = service(db_session).list_global_terminals(
+        query="MERGED-METER-001",
+        include_blocked=True,
+    )["items"][0]
+    result = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert candidate["constructed_meter_count"] == 1
+    assert candidate["unconstructed_meter_count"] == 0
+    assert candidate["collector_count"] == 1
+    assert result["workflow_state"] == "pool_shortage"
+    assert len(result["meters"]) == 1
+    assert result["meters"][0]["group_id"] == "g-after"
+    assert result["meters"][0]["meter_no"] == "M-SAME"
+    assert result["meters"][0]["collector_no"] == "COLLECTOR-001"
+    assert result["meters"][0]["module_no"] == "MODULE-M-SAME"
+    assert len(result["rephoto"]["meter_install_items"]) == 1
+    assert len(result["rephoto"]["collector_items"]) == 1
 
 
 def test_automatic_approved_group_without_manual_marker_keeps_review_pending_and_opens_rephoto(

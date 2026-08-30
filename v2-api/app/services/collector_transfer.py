@@ -442,22 +442,28 @@ def _review_projection_from_rows(
         )
 
     projection = project_terminal_review(evidence_rows)
-    meter_by_group = {
-        item.group_id: item
-        for item in (*projection.constructed_meters, *projection.unconstructed_meters)
-    }
+    group_by_id = {str(group.id): group for group in groups}
     review_rows: list[dict[str, object]] = []
-    for group in sorted(
-        groups,
-        key=lambda item: (
-            normalize_identifier(item.display_meter_no),
-            normalize_identifier(item.legacy_id),
-            str(item.id),
+    ordered_meter_projections = (
+        *sorted(
+            projection.constructed_meters,
+            key=lambda item: (
+                normalize_identifier(item.source.meter_no if item.source else ""),
+                item.group_id,
+            ),
         ),
-    ):
-        internal_group_id = str(group.id)
-        meter_projection = meter_by_group[internal_group_id]
-        source = source_by_group[internal_group_id]
+        *sorted(
+            projection.unconstructed_meters,
+            key=lambda item: (
+                normalize_identifier(source_by_group[item.group_id].meter_no),
+                item.group_id,
+            ),
+        ),
+    )
+    for meter_projection in ordered_meter_projections:
+        internal_group_id = meter_projection.group_id
+        group = group_by_id[internal_group_id]
+        source = meter_projection.source or source_by_group[internal_group_id]
         review_rows.append(
             {
                 "group_id": normalize_identifier(group.legacy_id) or internal_group_id,

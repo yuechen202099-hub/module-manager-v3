@@ -360,6 +360,74 @@ def test_shared_collector_is_one_requirement_with_all_constructed_meter_groups()
     assert projection.collector_requirements[0].meter_group_ids == ("g-1", "g-2")
 
 
+def test_same_meter_merges_constructed_and_unconstructed_identity_without_blocking_rephoto() -> None:
+    """Catches one meter appearing twice or losing its collector when before/after rows are split."""
+    projection = project_terminal_review(
+        (
+            review_meter(
+                "g-after",
+                meter_no="M-SAME",
+                collector_no="",
+                module_no="MODULE-001",
+            ),
+            review_meter(
+                "g-before",
+                meter_no="M-SAME",
+                collector_no="COLLECTOR-001",
+                module_no="",
+                persisted_photo_count=0,
+                active_photos=(),
+                source_blockers=("exception_open",),
+                classification_manual_confirmation=None,
+            ),
+        )
+    )
+
+    assert len(projection.constructed_meters) == 1
+    assert projection.unconstructed_meters == ()
+    meter_projection = projection.constructed_meters[0]
+    assert meter_projection.group_id == "g-after"
+    assert meter_projection.blockers == ()
+    assert meter_projection.source is not None
+    assert meter_projection.source.meter_no == "M-SAME"
+    assert meter_projection.source.collector_no == "COLLECTOR-001"
+    assert meter_projection.source.module_no == "MODULE-001"
+    assert [item.group_id for item in projection.rephoto_sources] == ["g-after"]
+    assert len(projection.collector_requirements) == 1
+    assert projection.collector_requirements[0].original_collector_no == "COLLECTOR-001"
+    assert projection.collector_requirements[0].meter_group_ids == ("g-after",)
+
+
+def test_unconstructed_same_meter_cannot_override_constructed_device_numbers() -> None:
+    """Catches an old unconstructed identity turning valid constructed material into a conflict."""
+    projection = project_terminal_review(
+        (
+            review_meter(
+                "g-after",
+                meter_no="M-SAME",
+                collector_no="COLLECTOR-CURRENT",
+                module_no="MODULE-CURRENT",
+            ),
+            review_meter(
+                "g-before",
+                meter_no="M-SAME",
+                collector_no="COLLECTOR-OLD",
+                module_no="MODULE-OLD",
+                persisted_photo_count=0,
+                active_photos=(),
+                source_blockers=("exception_open",),
+                classification_manual_confirmation=None,
+            ),
+        )
+    )
+
+    meter_projection = projection.constructed_meters[0]
+    assert meter_projection.blockers == ()
+    assert meter_projection.source is not None
+    assert meter_projection.source.collector_no == "COLLECTOR-CURRENT"
+    assert meter_projection.source.module_no == "MODULE-CURRENT"
+
+
 @pytest.mark.parametrize(
     ("constructed", "required", "hard_blocked", "missing", "available", "snapshot", "expected"),
     [
