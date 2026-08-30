@@ -592,6 +592,30 @@ def test_admin_can_manually_confirm_group_classification_through_api(
     assert _latest_group()["classification_manual_confirmation"]["actor"] == "admin"
 
 
+def test_admin_can_delete_data_center_photo_without_a_review_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    """Catches routing the workbench through the legacy reviewer-claim deletion contract."""
+    state = local_simulation.get_state()
+    team_id = state["team_id"]
+    state["tasks"][0]["claimed_by"] = "another-user"
+    monkeypatch.setattr(groups_routes, "state_repository", lambda: json_review_repo)
+    client = TestClient(main_module.create_app())
+
+    response = client.delete(
+        "/groups/data-center/groups/g-1/photos/p2",
+        headers=_review_headers(username="admin-delete", role="admin", team_id=team_id),
+    )
+
+    assert response.status_code == 200
+    assert [photo["id"] for photo in response.json()["data"]["group"]["photos"]] == ["p1", "p3", "p4"]
+    assert [photo["id"] for photo in _latest_group()["photos"]] == ["p1", "p3", "p4"]
+    event = local_simulation.get_state()["photo_events"][-1]
+    assert event["photo_id"] == "p2"
+    assert event["reviewer"] == "admin-delete"
+
+
 def test_data_center_detail_exposes_explicit_manual_classification_confirmation(
     monkeypatch: pytest.MonkeyPatch,
     json_review_repo: repository.JsonStateRepository,
@@ -995,6 +1019,32 @@ def test_data_center_edit_invalidates_barcode_archive_and_preserves_retired_deli
         assert payload["reason"]
         assert "before" in payload
         assert "after" in payload
+
+
+def test_json_data_center_edit_persists_all_identity_fields_on_active_photos(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    json_review_repo.update_data_center_group(
+        group_id="g-1",
+        patch={
+            "meter_no": "110000288099",
+            "module_asset_no": "MOD099",
+            "collector": "COLLECTOR099",
+        },
+        actor="admin-a",
+        reason="核对三项号码",
+        source_page="data_center",
+    )
+
+    group = _latest_group()
+    assert group["meter_no"] == "110000288099"
+    assert group["meter_match_key"] == "0000288099"
+    assert group["module_asset_no"] == "MOD099"
+    assert group["collector"] == "COLLECTOR099"
+    for photo in group["photos"]:
+        assert photo["barcode"] == "110000288099"
+        assert photo["asset_no"] == "MOD099"
+        assert photo["collector"] == "COLLECTOR099"
 
 
 def test_json_data_center_classifies_final_photo_then_auto_archives_without_delivery_enqueue(

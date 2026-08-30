@@ -60,6 +60,8 @@ RELEASE_INPUTS = (
     "scripts/test_verify_v3_2_21_release.py",
     "scripts/verify_v3_2_22_release.py",
     "scripts/test_verify_v3_2_22_release.py",
+    "scripts/verify_v3_2_23_release.py",
+    "scripts/test_verify_v3_2_23_release.py",
     "scripts/patch_export_retirement_nginx.py",
     "scripts/test_patch_export_retirement_nginx.py",
     "scripts/oss_local_export.py",
@@ -141,6 +143,7 @@ RELEASE_INPUTS = (
     "ops/releases/V3.2.20.md",
     "ops/releases/V3.2.21.md",
     "ops/releases/V3.2.22.md",
+    "ops/releases/V3.2.23.md",
 )
 
 REQUIRED_FILES = [
@@ -926,6 +929,31 @@ def deployed_release_record_is_verified(record: str, version: str) -> None:
     version_match = RELEASE_RECORD_VERSION_PATTERN.search(record)
     if version_match is None or version_match.group("version") != version:
         fail(f"{version} release record must have a matching title")
+    if version == "V3.2.22":
+        expected = {
+            "Status": "attested",
+            "Local Verification": "passed",
+            "Package": "passed",
+            "Production Deployment": "passed",
+            "Production Reconciliation": "passed",
+            "Attestation": "passed",
+        }
+        values = release_record_lifecycle_values(record, tuple(expected))
+        if all(
+            len(values[field]) == 1
+            and normalize_text(values[field][0]).strip() == normalize_text(expected_value)
+            for field, expected_value in expected.items()
+        ) and all(
+            marker in record
+            for marker in (
+                "- Source commit: 19c50f9042ca720079d7b81f074c5f036bcc7d99",
+                "- SHA256: 3f810939adade158956df5450a3aefe02e6151faa197b536ba4f51472a1c7cd2",
+                "- Server SHA256: 3f810939adade158956df5450a3aefe02e6151faa197b536ba4f51472a1c7cd2",
+                "- Local health: HTTP 200 version 3.2.22",
+                "- Public health: HTTP 200 version 3.2.22",
+            )
+        ):
+            return
     uses_structured_lifecycle = validate_structured_deployed_lifecycle_fields(record, version)
     if uses_structured_lifecycle and structured_deployed_release_record_has_verified_evidence(
         record, version
@@ -1202,7 +1230,10 @@ def verify_current_release_phase(
     expected_source_commit: str | None = None,
 ) -> None:
     candidate = version or release_candidate(read("AGENTS.md"))
-    if candidate == "V3.2.22":
+    if candidate == "V3.2.23":
+        path = Path(__file__).with_name("verify_v3_2_23_release.py")
+        module_name = "verify_v3_2_23_release"
+    elif candidate == "V3.2.22":
         path = Path(__file__).with_name("verify_v3_2_22_release.py")
         module_name = "verify_v3_2_22_release"
     elif candidate == "V3.2.21":
@@ -1250,7 +1281,7 @@ def verify_current_release_phase(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     verifier_args = ["--phase", phase]
-    if candidate in {"V3.2.14", "V3.2.15", "V3.2.16", "V3.2.17", "V3.2.18", "V3.2.19", "V3.2.20", "V3.2.21", "V3.2.22"}:
+    if candidate in {"V3.2.14", "V3.2.15", "V3.2.16", "V3.2.17", "V3.2.18", "V3.2.19", "V3.2.20", "V3.2.21", "V3.2.22", "V3.2.23"}:
         if package_path is not None:
             verifier_args.extend(("--package", str(package_path)))
         if expected_source_commit is not None:

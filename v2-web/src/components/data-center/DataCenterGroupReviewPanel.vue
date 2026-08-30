@@ -1,16 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { CircleCheck, FolderChecked, Refresh, Warning } from '@element-plus/icons-vue'
+import { Delete, UploadFilled, Warning } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 import {
   classifyDataCenterGroupPhoto,
   confirmDataCenterGroupClassification,
-  confirmDataCenterGroupBarcode,
+  deleteDataCenterGroupPhoto,
   fetchDataCenterDetail,
   fetchGroupPhotoObjectUrl,
   getApiErrorStatus,
-  rescanDataCenterGroupPhotoBarcode,
   resetAdminGroupToUnconstructed,
   resetAdminGroupToUnreviewed,
   resolveDataCenterGroupAnomaly,
@@ -18,6 +17,7 @@ import {
   reviewDataCenterGroup,
   scanDataCenterGroupPhotoRegion,
   updateDataCenterGroup,
+  uploadGroupImages,
 } from '@/api/services'
 import type {
   DataCenterDetail,
@@ -48,6 +48,7 @@ const selectedPhotoId = ref('')
 const errorMessage = ref('')
 const photoPreview = ref({ src: '', alt: '' })
 const inspector = ref<InstanceType<typeof ReviewImageInspector> | null>(null)
+const replacementInput = ref<HTMLInputElement | null>(null)
 const photoObjectUrls = reactive(new Map<string, string>())
 const pendingCategories = reactive<Record<string, string>>({})
 const activeStage = ref<'source' | 'rephoto'>(props.rephotoItem ? props.defaultStage : 'source')
@@ -85,7 +86,6 @@ const categoryOptions = [
   { value: 'collector_barcode', label: '采集器条码' },
   { value: 'module_meter', label: '模块表号' },
   { value: 'after_box', label: '施工后' },
-  { value: 'other', label: '其他' },
 ]
 const classificationCategoryOptions = [
   { value: 'before_box', label: '表箱整体改造前' },
@@ -314,26 +314,6 @@ async function reloadAfterMutation(owner: MutationOwner) {
   return next
 }
 
-async function saveFields() {
-  if (!detail.value) return
-  const currentDetail = detail.value
-  const owner = beginMutation(currentDetail.id)
-  try {
-    const patch: Record<string, string> = {}
-    if (form.meterNo.trim() !== currentDetail.meterNo) patch.meter_no = form.meterNo.trim()
-    if (form.collector.trim() !== currentDetail.collector) patch.collector = form.collector.trim()
-    if (form.moduleAssetNo.trim() !== currentDetail.moduleAssetNo) patch.module_asset_no = form.moduleAssetNo.trim()
-    const result = await updateDataCenterGroup(currentDetail.id, patch, form.reason.trim() || '数据中台字段修正')
-    if (!isCurrentMutation(owner)) return
-    ElMessage.success(result.changedFields.length ? '已保存字段修正' : '没有字段变化')
-    await reloadAfterMutation(owner)
-  } catch (error) {
-    showMutationError(owner, error, '保存失败')
-  } finally {
-    finishMutation(owner)
-  }
-}
-
 async function classifyActivePhoto(category: string) {
   if (!detail.value || !activePhoto.value) return
   const groupId = detail.value.id
@@ -451,28 +431,6 @@ async function resolveAnomaly(anomaly: DataCenterDetail['anomalies'][number]) {
   }
 }
 
-async function rescanActivePhoto() {
-  if (!detail.value || !activePhoto.value) return
-  const groupId = detail.value.id
-  const photo = activePhoto.value
-  const owner = beginMutation(groupId)
-  try {
-    await rescanDataCenterGroupPhotoBarcode(
-      groupId,
-      photo.id,
-      photo.category || '',
-      form.reason.trim() || '数据中台重新扫码',
-    )
-    if (!isCurrentMutation(owner)) return
-    ElMessage.success('重新扫码完成')
-    await reloadAfterMutation(owner)
-  } catch (error) {
-    showMutationError(owner, error, '重新扫码失败')
-  } finally {
-    finishMutation(owner)
-  }
-}
-
 function targetField(type: RegionScanResult['barcodeType']) {
   return type === 'collector' ? 'collector' : type === 'module' ? 'moduleAssetNo' : 'meterNo'
 }
@@ -510,39 +468,120 @@ async function handleRegionScan(request: { barcodeType: RegionScanResult['barcod
   }
 }
 
-async function manualConfirm() {
+async function saveReview() {
   if (!detail.value) return
   const currentDetail = detail.value
-  const reason = form.reason.trim()
-  if (!reason) {
-    ElMessage.warning('请填写人工确认原因')
-    return
-  }
+  const reason = form.reason.trim() || '审阅保存'
   const owner = beginMutation(currentDetail.id)
   try {
-    try {
-      await ElMessageBox.confirm('确认以当前字段和照片证据人工通过扫码？', '人工确认', {
-        type: 'warning',
-        confirmButtonText: '人工确认',
-        cancelButtonText: '取消',
-      })
-    } catch {
-      return
-    }
-    if (!isCurrentMutation(owner)) return
-    const result = await confirmDataCenterGroupBarcode(currentDetail.id, {
-      meterNo: form.meterNo.trim(),
-      moduleAssetNo: form.moduleAssetNo.trim(),
+    await updateDataCenterGroup(currentDetail.id, {
+      meter_no: form.meterNo.trim(),
+      module_asset_no: form.moduleAssetNo.trim(),
       collector: form.collector.trim(),
-      reason,
-      photoIds: currentDetail.photos.map((photo) => photo.id),
-    })
+    }, reason)
     if (!isCurrentMutation(owner)) return
-    ElMessage.success(result.deliveryPackageJobStatus ? '已人工确认并排队' : '已人工确认')
+    ElMessage.success('已保存')
     await reloadAfterMutation(owner)
   } catch (error) {
-    showMutationError(owner, error, '人工确认失败')
+    showMutationError(owner, error, '保存失败')
   } finally {
+    finishMutation(owner)
+  }
+}
+
+async function deleteSelectedPhoto() {
+  if (!detail.value || !activePhoto.value) return
+  const groupId = detail.value.id
+  const photoId = activePhoto.value.id
+  try {
+    await ElMessageBox.confirm('确认删除当前选中的照片？删除后将重新计算资料状态。', '删除照片', {
+      type: 'warning',
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  if (detail.value?.id !== groupId || activePhoto.value?.id !== photoId) return
+  const owner = beginMutation(groupId)
+  try {
+    await deleteDataCenterGroupPhoto(groupId, photoId)
+    if (!isCurrentMutation(owner)) return
+    ElMessage.success('照片已删除')
+    await reloadAfterMutation(owner)
+  } catch (error) {
+    showMutationError(owner, error, '删除照片失败')
+  } finally {
+    finishMutation(owner)
+  }
+}
+
+function openReplacementPicker() {
+  replacementInput.value?.click()
+}
+
+async function replaceSelectedPhoto(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || !detail.value || !activePhoto.value) return
+  const currentDetail = detail.value
+  const selected = activePhoto.value
+  const previousIds = new Set(currentDetail.photos.map((photo) => photo.id))
+  const owner = beginMutation(currentDetail.id)
+  let replacementPhotoId = ''
+  let originalDeleted = false
+  try {
+    const uploaded = await uploadGroupImages(currentDetail.id, {
+      collector: currentDetail.collector,
+      moduleAssetNo: currentDetail.moduleAssetNo,
+      creator: '审阅上传替换',
+      files: [file],
+    })
+    const uploadedUrls = new Set(uploaded.uploadedUrls)
+    const uploadedPhotos = uploaded.group?.photos || []
+    const selectedCategory = selected.category || ''
+    const replacement = uploadedPhotos.find((photo) => (
+      !previousIds.has(photo.id)
+      && (!uploadedUrls.size || uploadedUrls.has(photo.url) || uploadedUrls.has(photo.imageUrl || ''))
+    )) || uploadedPhotos.find((photo) => !previousIds.has(photo.id))
+    if (!replacement) throw new Error('上传完成但未找到替换照片，请刷新后检查')
+    replacementPhotoId = replacement.id
+    if (!isCurrentMutation(owner)) {
+      await deleteDataCenterGroupPhoto(currentDetail.id, replacementPhotoId)
+      return
+    }
+    if (classificationCategoryValues.has(selectedCategory)) {
+      await classifyDataCenterGroupPhoto(
+        currentDetail.id,
+        replacement.id,
+        selectedCategory,
+        '审阅照片替换继承原类型',
+      )
+    }
+    if (!isCurrentMutation(owner)) {
+      await deleteDataCenterGroupPhoto(currentDetail.id, replacementPhotoId)
+      return
+    }
+    await deleteDataCenterGroupPhoto(currentDetail.id, selected.id)
+    originalDeleted = true
+    if (!isCurrentMutation(owner)) return
+    ElMessage.success('照片已替换')
+    await reloadAfterMutation(owner)
+  } catch (error) {
+    let reportedError = error
+    if (replacementPhotoId && !originalDeleted) {
+      try {
+        await deleteDataCenterGroupPhoto(currentDetail.id, replacementPhotoId)
+      } catch (cleanupError) {
+        const primaryMessage = error instanceof Error ? error.message : '替换照片失败'
+        const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : '自动清理失败'
+        reportedError = new Error(`${primaryMessage}；${cleanupMessage}，请刷新后手工删除新增照片`)
+      }
+    }
+    await reloadAfterMutation(owner)
+    showMutationError(owner, reportedError, '替换照片失败')
+  } finally {
+    input.value = ''
     finishMutation(owner)
   }
 }
@@ -779,6 +818,22 @@ onBeforeUnmount(cleanupDetail)
               {{ photo.categoryLabel || photo.category || photo.id }}
             </button>
           </div>
+          <div class="photo-mutation-strip">
+            <input
+              ref="replacementInput"
+              data-testid="replace-photo-input"
+              class="photo-file-input"
+              type="file"
+              accept="image/*"
+              @change="replaceSelectedPhoto"
+            />
+            <el-button :icon="UploadFilled" :loading="saving" :disabled="!activePhoto || saving" @click="openReplacementPicker">
+              上传替换
+            </el-button>
+            <el-button type="danger" plain :icon="Delete" :loading="saving" :disabled="!activePhoto || saving" @click="deleteSelectedPhoto">
+              删除照片
+            </el-button>
+          </div>
         </div>
 
         <section v-else-if="props.rephotoItem" data-stage="rephoto" class="rephoto-stage">
@@ -812,19 +867,17 @@ onBeforeUnmount(cleanupDetail)
           <span>审阅状态：{{ detail.reviewStatus }}</span>
         </header>
         <el-form label-position="top" class="field-grid">
-          <el-form-item label="表号"><el-input v-model="form.meterNo" /></el-form-item>
-          <el-form-item label="模块"><el-input v-model="form.moduleAssetNo" /></el-form-item>
-          <el-form-item label="采集器"><el-input v-model="form.collector" /></el-form-item>
-          <el-form-item label="原因" class="wide-field"><el-input v-model="form.reason" /></el-form-item>
+          <el-form-item label="表号"><el-input v-model="form.meterNo" data-testid="meter-no-input" /></el-form-item>
+          <el-form-item label="模块"><el-input v-model="form.moduleAssetNo" data-testid="module-no-input" /></el-form-item>
+          <el-form-item label="采集器"><el-input v-model="form.collector" data-testid="collector-no-input" /></el-form-item>
+          <el-form-item label="原因" class="wide-field"><el-input v-model="form.reason" data-testid="save-reason-input" /></el-form-item>
         </el-form>
 
         <div class="action-strip">
-          <el-button :icon="Refresh" :loading="saving" :disabled="!activePhoto" @click="rescanActivePhoto">重新扫码</el-button>
-          <el-button type="primary" :icon="CircleCheck" :loading="saving" @click="manualConfirm">人工确认</el-button>
-          <el-button :icon="FolderChecked" :loading="saving" @click="saveFields">字段修正</el-button>
+          <el-button type="primary" :loading="saving" @click="saveReview">保存</el-button>
         </div>
 
-        <div class="category-grid">
+        <div class="category-grid" data-testid="photo-category-actions">
           <el-button
             v-for="item in categoryOptions"
             :key="item.value"
@@ -952,6 +1005,8 @@ onBeforeUnmount(cleanupDetail)
 .photo-tabs button, .stage-switch button { min-width: 0; padding: 8px; border: 1px solid var(--v2-border); border-radius: 8px; background: #fff; color: var(--v2-text); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .photo-tabs button.active, .stage-switch button.active { border-color: var(--v2-accent); color: var(--v2-accent); }
 .stage-switch, .action-strip, .decision-strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.photo-mutation-strip { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.photo-file-input { display: none; }
 .rephoto-stage, .rephoto-identifiers, .rephoto-slots { display: grid; gap: 12px; }
 .rephoto-identifiers { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .rephoto-identifiers > div { display: flex; justify-content: space-between; gap: 8px; padding: 10px; border: 1px solid var(--v2-border); border-radius: 8px; }
@@ -962,7 +1017,7 @@ onBeforeUnmount(cleanupDetail)
 .group-summary strong { color: var(--v2-text-strong); }
 .field-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 10px; }
 .wide-field { grid-column: 1 / -1; }
-.category-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.category-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .exception-box { display: grid; gap: 10px; padding: 12px; border: 1px solid #f3c6c6; border-radius: 8px; background: #fff7f7; }
 .exception-box > div:first-child { display: flex; align-items: center; gap: 8px; }
 .audit-table { width: 100%; }

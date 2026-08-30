@@ -1838,6 +1838,17 @@ export async function classifyDataCenterGroupPhoto(
   }
 }
 
+export async function deleteDataCenterGroupPhoto(
+  groupId: string,
+  photoId: string,
+): Promise<{ group?: MaterialGroup }> {
+  const data = await api<{ group?: BackendGroup }>(
+    `/groups/data-center/groups/${encodeURIComponent(groupId)}/photos/${encodeURIComponent(photoId)}`,
+    { method: 'DELETE' },
+  )
+  return { group: data.group ? mapGroup(data.group) : undefined }
+}
+
 export async function rescanDataCenterGroupPhotoBarcode(
   groupId: string,
   photoId: string,

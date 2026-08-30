@@ -428,6 +428,31 @@ def classify_data_center_group_photo(
     return ok(request, resolve_group_collection_for_response(result))
 
 
+@router.delete("/data-center/groups/{group_id}/photos/{photo_id}")
+def delete_data_center_group_photo(
+    group_id: str,
+    photo_id: str,
+    request: Request,
+    admin_payload: dict = Depends(require_admin),
+):
+    token = _with_admin_team(admin_payload)
+    try:
+        result = state_repository().delete_photo(
+            group_id,
+            photo_id,
+            _admin_actor(admin_payload),
+            require_claim=False,
+        )
+        invalidate_task_snapshot_for_team(_admin_team_id(admin_payload))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Photo or group not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        local_simulation.reset_current_team(token)
+    return ok(request, resolve_group_collection_for_response(result))
+
+
 @router.post("/data-center/groups/{group_id}/photos/{photo_id}/barcode-rescan")
 def rescan_data_center_group_photo_barcode(
     group_id: str,

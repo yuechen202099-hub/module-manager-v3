@@ -12,6 +12,17 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.23',
+    date: '2026-08-31',
+    type: '小更新',
+    title: '数据中台表号与照片处理统一保存',
+    items: [
+      '单一保存动作会同时持久化表号、模块号和采集器号。',
+      '管理员可直接删除资料照片，并支持上传替换或删除当前照片。',
+      '施工照片类型固定为施工前、采集器条码、模块表号和施工后四类。',
+    ],
+  },
+  {
     version: 'V3.2.22',
     date: '2026-08-30',
     type: '小更新',

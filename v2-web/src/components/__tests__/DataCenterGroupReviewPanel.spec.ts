@@ -64,6 +64,7 @@ const apiMock = vi.hoisted(() => ({
   classifyDataCenterGroupPhoto: vi.fn(),
   confirmDataCenterGroupClassification: vi.fn(),
   confirmDataCenterGroupBarcode: vi.fn(),
+  deleteDataCenterGroupPhoto: vi.fn(),
   fetchDataCenterDetail: vi.fn(),
   fetchGroupPhotoObjectUrl: vi.fn(),
   getApiErrorStatus: vi.fn((error: unknown) => (error as { status?: number } | null)?.status),
@@ -75,6 +76,7 @@ const apiMock = vi.hoisted(() => ({
   reviewDataCenterGroup: vi.fn(),
   scanDataCenterGroupPhotoRegion: vi.fn(),
   updateDataCenterGroup: vi.fn(),
+  uploadGroupImages: vi.fn(),
 }))
 
 vi.mock('@/api/services', () => apiMock)
@@ -114,6 +116,7 @@ describe('DataCenterGroupReviewPanel', () => {
     apiMock.classifyDataCenterGroupPhoto.mockResolvedValue({})
     apiMock.confirmDataCenterGroupClassification.mockResolvedValue({})
     apiMock.confirmDataCenterGroupBarcode.mockResolvedValue({})
+    apiMock.deleteDataCenterGroupPhoto.mockResolvedValue({})
     apiMock.rescanDataCenterGroupPhotoBarcode.mockResolvedValue({})
     apiMock.resetAdminGroupToUnconstructed.mockResolvedValue({})
     apiMock.resetAdminGroupToUnreviewed.mockResolvedValue({})
@@ -122,11 +125,251 @@ describe('DataCenterGroupReviewPanel', () => {
     apiMock.reviewDataCenterGroup.mockResolvedValue({} as MaterialGroup)
     apiMock.scanDataCenterGroupPhotoRegion.mockResolvedValue({})
     apiMock.updateDataCenterGroup.mockResolvedValue({ changedFields: [] })
+    apiMock.uploadGroupImages.mockResolvedValue({ group: undefined, uploadedUrls: [] })
   })
 
   afterEach(() => {
     document.body.innerHTML = ''
     vi.unstubAllGlobals()
+  })
+
+  it('saves edited meter, module, and collector fields without requiring four confirmation photos', async () => {
+    const detail = detailFixture('g-save')
+    apiMock.fetchDataCenterDetail.mockResolvedValue(detail)
+    const wrapper = mountPanel({ groupId: detail.id })
+    await flushPromises()
+
+    await wrapper.get('[data-testid="meter-no-input"]').setValue('meter-corrected')
+    await wrapper.get('[data-testid="module-no-input"]').setValue('module-corrected')
+    await wrapper.get('[data-testid="collector-no-input"]').setValue('collector-corrected')
+    await wrapper.get('[data-testid="save-reason-input"]').setValue('现场号码核对')
+    await buttonByText(wrapper, '保存').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.updateDataCenterGroup).toHaveBeenCalledWith(detail.id, {
+      meter_no: 'meter-corrected',
+      module_asset_no: 'module-corrected',
+      collector: 'collector-corrected',
+    }, '现场号码核对')
+    expect(apiMock.confirmDataCenterGroupBarcode).not.toHaveBeenCalled()
+    expect(apiMock.rescanDataCenterGroupPhotoBarcode).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('重新扫码')
+    expect(wrapper.text()).not.toContain('人工确认')
+    expect(wrapper.text()).not.toContain('字段修正')
+    wrapper.unmount()
+  })
+
+  it('offers only the four supported construction photo categories', async () => {
+    const wrapper = mountPanel({ groupId: 'g-categories' })
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="photo-category-actions"]').findAll('button').map((button) => button.text().trim())).toEqual([
+      '施工前',
+      '采集器条码',
+      '模块表号',
+      '施工后',
+    ])
+    expect(wrapper.text()).not.toContain('其他')
+    wrapper.unmount()
+  })
+
+  it('deletes only the currently selected photo after explicit confirmation', async () => {
+    const detail = detailFixture('g-delete')
+    detail.photos.push({
+      ...detail.photos[0],
+      id: 'photo-delete-target',
+      name: 'delete-target',
+      category: 'after_box',
+      categoryLabel: '施工后',
+    })
+    detail.photoCount = 2
+    apiMock.fetchDataCenterDetail.mockResolvedValue(detail)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(
+      'confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>,
+    )
+    const wrapper = mountPanel({ groupId: detail.id })
+    await flushPromises()
+
+    await buttonByText(wrapper, '施工后').trigger('click')
+    await buttonByText(wrapper, '删除照片').trigger('click')
+    await flushPromises()
+
+    expect(apiMock.deleteDataCenterGroupPhoto).toHaveBeenCalledWith(detail.id, 'photo-delete-target')
+    expect(apiMock.fetchDataCenterDetail).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('uploads a replacement before deleting the selected photo and preserves its category', async () => {
+    const detail = detailFixture('g-replace')
+    apiMock.fetchDataCenterDetail.mockResolvedValue(detail)
+    apiMock.uploadGroupImages.mockResolvedValue({
+      group: {
+        id: detail.id,
+        collector: detail.collector,
+        moduleAssetNo: detail.moduleAssetNo,
+        photos: [
+          detail.photos[0],
+          {
+            ...detail.photos[0],
+            id: 'photo-replacement',
+            url: 'blob:replacement',
+            imageUrl: 'blob:replacement',
+            category: 'unclassified',
+          },
+        ],
+      } as MaterialGroup,
+      uploadedUrls: ['blob:replacement'],
+    })
+    const wrapper = mountPanel({ groupId: detail.id })
+    await flushPromises()
+    const file = new File(['replacement-image'], 'replacement.jpg', { type: 'image/jpeg' })
+
+    const input = wrapper.get('[data-testid="replace-photo-input"]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+    await input.trigger('change')
+    await flushPromises()
+
+    expect(apiMock.uploadGroupImages).toHaveBeenCalledWith(detail.id, {
+      collector: detail.collector,
+      moduleAssetNo: detail.moduleAssetNo,
+      creator: '审阅上传替换',
+      files: [file],
+    })
+    expect(apiMock.classifyDataCenterGroupPhoto).toHaveBeenCalledWith(
+      detail.id,
+      'photo-replacement',
+      'module_meter',
+      '审阅照片替换继承原类型',
+    )
+    expect(apiMock.deleteDataCenterGroupPhoto).toHaveBeenCalledWith(detail.id, 'photo-g-replace')
+    expect(apiMock.uploadGroupImages.mock.invocationCallOrder[0]).toBeLessThan(
+      apiMock.deleteDataCenterGroupPhoto.mock.invocationCallOrder[0],
+    )
+    wrapper.unmount()
+  })
+
+  it('removes the uploaded replacement when category inheritance fails', async () => {
+    const detail = detailFixture('g-replace-category-failure')
+    apiMock.fetchDataCenterDetail.mockResolvedValue(detail)
+    apiMock.uploadGroupImages.mockResolvedValue({
+      group: {
+        id: detail.id,
+        collector: detail.collector,
+        moduleAssetNo: detail.moduleAssetNo,
+        photos: [
+          detail.photos[0],
+          {
+            ...detail.photos[0],
+            id: 'photo-replacement-failed-category',
+            url: 'blob:replacement-failed-category',
+            imageUrl: 'blob:replacement-failed-category',
+            category: 'unclassified',
+          },
+        ],
+      } as MaterialGroup,
+      uploadedUrls: ['blob:replacement-failed-category'],
+    })
+    apiMock.classifyDataCenterGroupPhoto.mockRejectedValueOnce(new Error('classification failed'))
+    const wrapper = mountPanel({ groupId: detail.id })
+    await flushPromises()
+    const file = new File(['replacement-image'], 'replacement.jpg', { type: 'image/jpeg' })
+
+    const input = wrapper.get('[data-testid="replace-photo-input"]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+    await input.trigger('change')
+    await flushPromises()
+
+    expect(apiMock.deleteDataCenterGroupPhoto).toHaveBeenCalledTimes(1)
+    expect(apiMock.deleteDataCenterGroupPhoto).toHaveBeenCalledWith(
+      detail.id,
+      'photo-replacement-failed-category',
+    )
+    expect(apiMock.deleteDataCenterGroupPhoto).not.toHaveBeenCalledWith(detail.id, detail.photos[0]?.id)
+    wrapper.unmount()
+  })
+
+  it('removes the uploaded replacement when deleting the old photo fails', async () => {
+    const detail = detailFixture('g-replace-delete-failure')
+    apiMock.fetchDataCenterDetail.mockResolvedValue(detail)
+    apiMock.uploadGroupImages.mockResolvedValue({
+      group: {
+        id: detail.id,
+        collector: detail.collector,
+        moduleAssetNo: detail.moduleAssetNo,
+        photos: [
+          detail.photos[0],
+          {
+            ...detail.photos[0],
+            id: 'photo-replacement-failed-delete',
+            url: 'blob:replacement-failed-delete',
+            imageUrl: 'blob:replacement-failed-delete',
+            category: 'unclassified',
+          },
+        ],
+      } as MaterialGroup,
+      uploadedUrls: ['blob:replacement-failed-delete'],
+    })
+    apiMock.deleteDataCenterGroupPhoto
+      .mockRejectedValueOnce(new Error('old photo delete failed'))
+      .mockResolvedValueOnce({})
+    const wrapper = mountPanel({ groupId: detail.id })
+    await flushPromises()
+    const file = new File(['replacement-image'], 'replacement.jpg', { type: 'image/jpeg' })
+
+    const input = wrapper.get('[data-testid="replace-photo-input"]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+    await input.trigger('change')
+    await flushPromises()
+
+    expect(apiMock.deleteDataCenterGroupPhoto.mock.calls).toEqual([
+      [detail.id, detail.photos[0]?.id],
+      [detail.id, 'photo-replacement-failed-delete'],
+    ])
+    wrapper.unmount()
+  })
+
+  it('removes the uploaded replacement when the active group changes after classification', async () => {
+    const detail = detailFixture('g-replace-group-change')
+    const classificationRequest = deferred<Record<string, never>>()
+    apiMock.fetchDataCenterDetail.mockImplementation((_kind, groupId: string) => Promise.resolve(detailFixture(groupId)))
+    apiMock.uploadGroupImages.mockResolvedValue({
+      group: {
+        id: detail.id,
+        collector: detail.collector,
+        moduleAssetNo: detail.moduleAssetNo,
+        photos: [
+          detail.photos[0],
+          {
+            ...detail.photos[0],
+            id: 'photo-replacement-stale-group',
+            url: 'blob:replacement-stale-group',
+            imageUrl: 'blob:replacement-stale-group',
+            category: 'unclassified',
+          },
+        ],
+      } as MaterialGroup,
+      uploadedUrls: ['blob:replacement-stale-group'],
+    })
+    apiMock.classifyDataCenterGroupPhoto.mockImplementationOnce(() => classificationRequest.promise)
+    const wrapper = mountPanel({ groupId: detail.id })
+    await flushPromises()
+    const file = new File(['replacement-image'], 'replacement.jpg', { type: 'image/jpeg' })
+
+    const input = wrapper.get('[data-testid="replace-photo-input"]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [file] })
+    await input.trigger('change')
+    await flushPromises()
+    await wrapper.setProps({ groupId: 'g-next' })
+    await flushPromises()
+    classificationRequest.resolve({})
+    await flushPromises()
+
+    expect(apiMock.deleteDataCenterGroupPhoto).toHaveBeenCalledTimes(1)
+    expect(apiMock.deleteDataCenterGroupPhoto).toHaveBeenCalledWith(
+      detail.id,
+      'photo-replacement-stale-group',
+    )
+    wrapper.unmount()
   })
 
   it('sends the formal review contract without a client actor', async () => {
@@ -150,6 +393,25 @@ describe('DataCenterGroupReviewPanel', () => {
     expect(body).toEqual({ status: 'approved', note: 'checked', exception_note: 'none' })
     expect(body).not.toHaveProperty('actor')
     expect(result).toMatchObject({ id: 'g/encoded', status: 'approved' })
+  })
+
+  it('deletes a selected photo through the admin data-center route', async () => {
+    const requests: Array<{ path: string; init: RequestInit }> = []
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      requests.push({ path: String(input), init })
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { group: { id: 'g/encoded', photos: [] } } }),
+      } as Response
+    })
+    const realServices = await vi.importActual<typeof import('@/api/services')>('@/api/services')
+
+    await realServices.deleteDataCenterGroupPhoto('g/encoded', 'p/encoded')
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.path).toBe('/groups/data-center/groups/g%2Fencoded/photos/p%2Fencoded')
+    expect(requests[0]?.init.method).toBe('DELETE')
   })
 
   it('sends the bulk anomaly evidence snapshot only for explicit bulk approval', async () => {
@@ -414,7 +676,7 @@ describe('DataCenterGroupReviewPanel', () => {
     resolvePhoto(photoRequests.get('g-1')?.[0], 'blob:g-1-late')
     await flushPromises()
 
-    await buttonByText(wrapper, '字段修正').trigger('click')
+    await buttonByText(wrapper, '保存').trigger('click')
     await flushPromises()
     resolvePhoto(photoRequests.get('g-2')?.[1], 'blob:g-2-replacement')
     await flushPromises()
@@ -470,7 +732,7 @@ describe('DataCenterGroupReviewPanel', () => {
 
     const wrapper = mountPanel({ groupId: 'g-1' })
     await flushPromises()
-    await buttonByText(wrapper, '字段修正').trigger('click')
+    await buttonByText(wrapper, '保存').trigger('click')
     await flushPromises()
     await wrapper.setProps({ groupId: 'g-2' })
     await flushPromises()

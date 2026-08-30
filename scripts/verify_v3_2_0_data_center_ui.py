@@ -50,8 +50,10 @@ def main() -> None:
         "data center pagination must expose only the supported page sizes",
     )
     assert_contains(global_search, "DataCenterReviewDialog", "global search must use the unified review dialog")
-    assert_contains(group_review_panel, "重新扫码", "review panel must expose rescan")
-    assert_contains(group_review_panel, "人工确认", "review panel must expose manual confirmation")
+    assert_contains(group_review_panel, "async function saveReview()", "review panel must expose the unified save action")
+    assert_contains(group_review_panel, ">保存</el-button>", "review panel must render one explicit save action")
+    assert "重新扫码" not in group_review_panel, "review panel must not expose the retired full-photo rescan action"
+    assert "async function manualConfirm()" not in group_review_panel, "review panel must not expose the retired separate manual-confirm action"
     assert_contains(group_review_panel, "框选扫码", "review panel must expose region scan")
     assert "完成审阅" not in group_review_panel, "ordinary complete-review action is forbidden in unified panel"
     assert_contains(query_composable, "router.replace", "query composable must synchronize filters into the URL")

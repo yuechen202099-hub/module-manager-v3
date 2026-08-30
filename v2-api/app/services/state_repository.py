@@ -3145,7 +3145,14 @@ class StateRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
+    def delete_photo(
+        self,
+        group_id: str,
+        photo_id: str,
+        reviewer: str,
+        *,
+        require_claim: bool = True,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
@@ -4948,8 +4955,20 @@ class JsonStateRepository(StateRepository):
             local_simulation.finish_authoritative_json_write(transaction, token)
         return result
 
-    def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
-        return local_simulation.delete_group_photo(group_id, photo_id, reviewer)
+    def delete_photo(
+        self,
+        group_id: str,
+        photo_id: str,
+        reviewer: str,
+        *,
+        require_claim: bool = True,
+    ) -> dict[str, Any]:
+        return local_simulation.delete_group_photo(
+            group_id,
+            photo_id,
+            reviewer,
+            require_claim=require_claim,
+        )
 
     def delete_unmatched_record(
         self,
@@ -8462,6 +8481,8 @@ class PostgresStateRepository(StateRepository):
         audit_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         updates = local_simulation.validate_formal_identity_updates(updates)
+        if "meter_no" in updates and "meter_match_key" not in updates:
+            updates["meter_match_key"] = build_total_catalog_match_key(str(updates["meter_no"]))
         requeue_delivery_cache_reason = ""
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
@@ -8509,6 +8530,7 @@ class PostgresStateRepository(StateRepository):
                 raw_data["construction_module_asset_no"] = str(updates.get("construction_module_asset_no") or "").strip()
 
             photo_updates = {
+                "meter_no": "barcode",
                 "collector": "collector",
                 "module_asset_no": "asset_no",
                 "creator": "creator",
@@ -8531,6 +8553,8 @@ class PostgresStateRepository(StateRepository):
                     setattr(photo, attribute, value)
                     photo_raw = dict(photo.raw_data or {})
                     photo_raw[incoming] = value
+                    if incoming == "meter_no":
+                        photo_raw["barcode"] = value
                     photo.raw_data = photo_raw
 
             group.raw_data = raw_data
@@ -11278,10 +11302,18 @@ class PostgresStateRepository(StateRepository):
             )
         return result
 
-    def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
+    def delete_photo(
+        self,
+        group_id: str,
+        photo_id: str,
+        reviewer: str,
+        *,
+        require_claim: bool = True,
+    ) -> dict[str, Any]:
         with self._session() as session:
             group = self._group_by_legacy_id(session, group_id, lock=True)
-            self._ensure_task_claimed_by(session, group, reviewer)
+            if require_claim:
+                self._ensure_task_claimed_by(session, group, reviewer)
             photo = session.scalar(
                 select(Photo).where(
                     Photo.team_id == local_simulation.current_team_id(),
@@ -12992,9 +13024,27 @@ class DualWriteStateRepository(JsonStateRepository):
     ) -> dict[str, Any]:
         self._reject_uncoordinated_dual_write("confirm_group_barcode_manually")
 
-    def delete_photo(self, group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
-        result = super().delete_photo(group_id, photo_id, reviewer)
-        self._mirror_write("delete_photo", group_id, photo_id, reviewer)
+    def delete_photo(
+        self,
+        group_id: str,
+        photo_id: str,
+        reviewer: str,
+        *,
+        require_claim: bool = True,
+    ) -> dict[str, Any]:
+        result = super().delete_photo(
+            group_id,
+            photo_id,
+            reviewer,
+            require_claim=require_claim,
+        )
+        self._mirror_write(
+            "delete_photo",
+            group_id,
+            photo_id,
+            reviewer,
+            require_claim=require_claim,
+        )
         return result
 
     def update_group_metadata(

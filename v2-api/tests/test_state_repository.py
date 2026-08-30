@@ -7274,6 +7274,9 @@ def test_postgres_identity_invalidation_requeues_only_after_commit(
         def __exit__(self, *_args):
             return False
 
+        def scalars(self, _statement):
+            return SimpleNamespace(all=lambda: [])
+
         def commit(self):
             events.append("commit")
             if fail_commit:
@@ -7488,10 +7491,15 @@ def test_postgres_data_center_group_update_audits_source_reason_and_state_snapsh
             team_id=group.team_id,
             group_id=group.id,
             is_active=True,
+            barcode="M-001",
             collector="C-001",
             asset_no="MOD-001",
             creator="installer-a",
-            raw_data={"module_asset_no": "MOD-001"},
+            raw_data={
+                "barcode": "M-001",
+                "collector": "C-001",
+                "module_asset_no": "MOD-001",
+            },
             archive_status="archived",
             archived_at=datetime(2026, 7, 23, 12, 0, tzinfo=UTC),
             archive_filename=f"{index}.jpg",
@@ -7589,9 +7597,13 @@ def test_postgres_data_center_group_update_audits_source_reason_and_state_snapsh
 
     TestRepository().update_data_center_group(
         group.legacy_id,
-        patch={"module_asset_no": "MOD-002"},
+        patch={
+            "meter_no": "M-002",
+            "module_asset_no": "MOD-002",
+            "collector": "C-002",
+        },
         actor="admin-a",
-        reason="更正模块号",
+        reason="核对三项号码",
         source_page="data_center",
     )
 
@@ -7600,16 +7612,40 @@ def test_postgres_data_center_group_update_audits_source_reason_and_state_snapsh
     assert update_payload["source"] == "data_center"
     assert update_payload["source_page"] == "data_center"
     assert update_payload["actor"] == "admin-a"
-    assert update_payload["reason"] == "更正模块号"
-    assert update_payload["before"] == {"module_asset_no": "MOD-001"}
-    assert update_payload["after"] == {"module_asset_no": "MOD-002"}
+    assert update_payload["reason"] == "核对三项号码"
+    assert update_payload["before"] == {
+        "collector": "C-001",
+        "meter_match_key": "M-001",
+        "meter_no": "M-001",
+        "module_asset_no": "MOD-001",
+    }
+    assert update_payload["after"] == {
+        "collector": "C-002",
+        "meter_match_key": "M-002",
+        "meter_no": "M-002",
+        "module_asset_no": "MOD-002",
+    }
+    assert group.display_meter_no == "M-002"
+    assert group.meter_match_key == "M-002"
+    assert group.raw_data["meter_no"] == "M-002"
+    assert group.raw_data["meter_match_key"] == "M-002"
+    assert group.raw_data["collector"] == "C-002"
+    assert group.raw_data["module_asset_no"] == "MOD-002"
+    for photo in photos:
+        assert photo.barcode == "M-002"
+        assert photo.collector == "C-002"
+        assert photo.asset_no == "MOD-002"
+        assert photo.raw_data["meter_no"] == "M-002"
+        assert photo.raw_data["barcode"] == "M-002"
+        assert photo.raw_data["collector"] == "C-002"
+        assert photo.raw_data["module_asset_no"] == "MOD-002"
 
     invalidation_audit = next(item for item in staged_audits if item["action"] == "data_center_archive_invalidated")
     invalidation_payload = invalidation_audit["payload"]
     assert invalidation_payload["source"] == "data_center"
     assert invalidation_payload["source_page"] == "data_center"
     assert invalidation_payload["actor"] == "admin-a"
-    assert invalidation_payload["reason"] == "更正模块号"
+    assert invalidation_payload["reason"] == "核对三项号码"
     assert invalidation_payload["before"] == {
         "archive_status": "archived",
         "barcode_status": "passed",
@@ -8912,7 +8948,12 @@ def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pyt
     monkeypatch.setattr(
         repository.local_simulation,
         "delete_group_photo",
-        lambda group_id, photo_id, reviewer: {"group_id": group_id, "photo_id": photo_id, "reviewer": reviewer},
+        lambda group_id, photo_id, reviewer, require_claim=True: {
+            "group_id": group_id,
+            "photo_id": photo_id,
+            "reviewer": reviewer,
+            "require_claim": require_claim,
+        },
     )
     monkeypatch.setattr(
         repository.local_simulation,
@@ -8942,6 +8983,7 @@ def test_json_state_repository_delegates_review_risk_operations(monkeypatch: pyt
         "group_id": "g-1",
         "photo_id": "p-1",
         "reviewer": "reviewer-a",
+        "require_claim": True,
     }
     assert repo.reset_group_to_unconstructed("g-1", actor="reviewer-a", reason="wrong site", force=True) == {
         "group_id": "g-1",

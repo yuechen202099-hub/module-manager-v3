@@ -3229,6 +3229,8 @@ def update_group_metadata(
     audit_action: str = "update_group_metadata",
 ) -> dict[str, Any]:
     updates = validate_formal_identity_updates(updates)
+    if "meter_no" in updates and "meter_match_key" not in updates:
+        updates["meter_match_key"] = build_total_catalog_match_key(str(updates["meter_no"]))
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
@@ -3253,6 +3255,7 @@ def update_group_metadata(
         if field in updates:
             group[field] = str(updates.get(field) or "").strip()
     photo_field_map = {
+        "meter_no": "barcode",
         "collector": "collector",
         "module_asset_no": "asset_no",
         "creator": "creator",
@@ -7677,11 +7680,18 @@ def _manual_confirmation_audit_snapshot(group: Mapping[str, Any], verification: 
     }
 
 
-def delete_group_photo(group_id: str, photo_id: str, reviewer: str) -> dict[str, Any]:
+def delete_group_photo(
+    group_id: str,
+    photo_id: str,
+    reviewer: str,
+    *,
+    require_claim: bool = True,
+) -> dict[str, Any]:
     group = get_group(group_id)
     if group is None:
         raise KeyError(group_id)
-    ensure_task_claimed_by(group, reviewer)
+    if require_claim:
+        ensure_task_claimed_by(group, reviewer)
     photos = group.get("photos", [])
     photo = next((item for item in photos if item["id"] == photo_id), None)
     if photo is None:
