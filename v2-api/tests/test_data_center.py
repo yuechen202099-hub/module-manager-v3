@@ -791,6 +791,45 @@ def test_json_data_center_updated_sort_keeps_empty_times_last() -> None:
     assert [row["id"] for row in asc] == ["group-002", "group-003", "group-001"]
 
 
+def test_data_center_group_row_prefers_construction_identifiers_and_falls_back_to_source() -> None:
+    constructed = _group(10)
+    source_only = _group(11)
+    source_only["construction_collector"] = "   "
+    source_only["construction_module_asset_no"] = "   "
+
+    constructed_row = data_center_service.group_row(constructed)
+    source_only_row = data_center_service.group_row(source_only)
+
+    assert constructed_row["collector"] == "CC-010"
+    assert constructed_row["module_asset_no"] == "CM-010"
+    assert source_only_row["collector"] == "C-011"
+    assert source_only_row["module_asset_no"] == "M-011"
+
+
+def test_data_center_anomalies_accept_construction_identifiers_when_source_is_empty() -> None:
+    group = _group(12)
+    group["collector"] = ""
+    group["module_asset_no"] = ""
+
+    anomaly_codes = {item["code"] for item in data_center_service.group_anomalies(group)}
+
+    assert "collector_missing" not in anomaly_codes
+    assert "module_missing" not in anomaly_codes
+
+
+def test_data_center_anomaly_fingerprint_tracks_effective_construction_identifiers() -> None:
+    group = _group(13)
+    group["collector"] = ""
+    group["module_asset_no"] = ""
+    before = data_center_service.group_anomaly_evidence_fingerprint(group)
+
+    group["construction_collector"] = "CC-013-updated"
+    group["construction_module_asset_no"] = "CM-013-updated"
+    after = data_center_service.group_anomaly_evidence_fingerprint(group)
+
+    assert after != before
+
+
 def test_json_data_center_bounded_selection_keeps_only_requested_window() -> None:
     from app.schemas.data_center import DataCenterQuery
 

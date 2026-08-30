@@ -180,6 +180,77 @@ describe('DataCenterGroupReviewPanel', () => {
     })
   })
 
+  it('uses construction identifiers as the effective values in data-center rows', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          total: 2,
+          page: 1,
+          page_size: 20,
+          items: [
+            {
+              kind: 'group',
+              id: 'g-construction',
+              collector: 'source-collector',
+              module_asset_no: 'source-module',
+              construction_collector: 'construction-collector',
+              construction_module_asset_no: 'construction-module',
+            },
+            {
+              kind: 'group',
+              id: 'g-source-fallback',
+              collector: 'fallback-collector',
+              module_asset_no: 'fallback-module',
+              construction_collector: '   ',
+              construction_module_asset_no: '   ',
+            },
+          ],
+        },
+      }),
+    }) as Response)
+    const realServices = await vi.importActual<typeof import('@/api/services')>('@/api/services')
+
+    const result = await realServices.fetchDataCenterRows({ page: 1, pageSize: 20 })
+
+    expect(result.items[0]).toMatchObject({
+      collector: 'construction-collector',
+      moduleAssetNo: 'construction-module',
+      constructionCollector: 'construction-collector',
+      constructionModuleAssetNo: 'construction-module',
+    })
+    expect(result.items[1]).toMatchObject({
+      collector: 'fallback-collector',
+      moduleAssetNo: 'fallback-module',
+    })
+  })
+
+  it('uses construction identifiers in the group detail consumed by the review form', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          kind: 'group',
+          id: 'g-review-construction',
+          collector: '',
+          module_asset_no: '',
+          construction_collector: 'review-collector',
+          construction_module_asset_no: 'review-module',
+          photos: [],
+          audit: [],
+        },
+      }),
+    }) as Response)
+    const realServices = await vi.importActual<typeof import('@/api/services')>('@/api/services')
+
+    const result = await realServices.fetchDataCenterDetail('group', 'g-review-construction')
+
+    expect(result.collector).toBe('review-collector')
+    expect(result.moduleAssetNo).toBe('review-module')
+  })
+
   it('sends the manual classification confirmation contract without a client actor', async () => {
     const requests: Array<{ path: string; init: RequestInit }> = []
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {

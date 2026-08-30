@@ -196,8 +196,6 @@ function handlePageSize(size: number) {
         <el-table-column prop="photoCount" label="照片" width="76" />
         <el-table-column prop="collector" label="采集器" min-width="140" show-overflow-tooltip />
         <el-table-column prop="moduleAssetNo" label="模块" min-width="140" show-overflow-tooltip />
-        <el-table-column prop="constructionCollector" label="施工采集器" min-width="150" show-overflow-tooltip />
-        <el-table-column prop="constructionModuleAssetNo" label="施工模块" min-width="150" show-overflow-tooltip />
         <el-table-column prop="address" label="地址" min-width="280" show-overflow-tooltip />
         <el-table-column label="操作" width="118" fixed="right">
           <template #default="{ row }">

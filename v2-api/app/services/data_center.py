@@ -56,6 +56,20 @@ def is_only_missing_collector_photo_exception(group: Mapping[str, Any]) -> bool:
     return reasons == {DASHBOARD_IGNORED_EXCEPTION_REASON}
 
 
+def effective_collector(group: Mapping[str, Any]) -> str:
+    construction_value = str(group.get("construction_collector") or "").strip()
+    if construction_value:
+        return construction_value
+    return str(group.get("collector") or "").strip()
+
+
+def effective_module_asset_no(group: Mapping[str, Any]) -> str:
+    construction_value = str(group.get("construction_module_asset_no") or "").strip()
+    if construction_value:
+        return construction_value
+    return str(group.get("module_asset_no") or group.get("asset_no") or "").strip()
+
+
 def manual_classification_snapshot(
     group: Mapping[str, Any],
     photos: list[Mapping[str, Any]],
@@ -87,14 +101,14 @@ def manual_classification_snapshot(
         barcode_status = str(group.get("barcode_status") or "").strip().lower()
     if barcode_status not in MANUAL_CLASSIFICATION_BARCODE_READY:
         anomalies.append("barcode_verification_required")
-    for field, code in (
-        ("terminal", "terminal_missing"),
-        ("meter_no", "meter_missing"),
-        ("module_asset_no", "module_missing"),
-        ("collector", "collector_missing"),
-        ("address", "address_missing"),
+    for value, code in (
+        (group.get("terminal"), "terminal_missing"),
+        (group.get("meter_no"), "meter_missing"),
+        (effective_module_asset_no(group), "module_missing"),
+        (effective_collector(group), "collector_missing"),
+        (group.get("address"), "address_missing"),
     ):
-        if not str(group.get(field) or "").strip():
+        if not str(value or "").strip():
             anomalies.append(code)
     if str(group.get("exception_status") or "").strip().lower() in {"open", "exception", "rejected"}:
         anomalies.append("exception_open")
@@ -134,8 +148,11 @@ def group_anomaly_evidence_fingerprint(group: Mapping[str, Any]) -> str:
     verification_payload = dict(verification) if isinstance(verification, Mapping) else {}
     canonical = {
         "fields": {
-            key: str(group.get(key) or "").strip()
-            for key in ("terminal", "meter_no", "module_asset_no", "collector", "address")
+            "terminal": str(group.get("terminal") or "").strip(),
+            "meter_no": str(group.get("meter_no") or "").strip(),
+            "module_asset_no": effective_module_asset_no(group),
+            "collector": effective_collector(group),
+            "address": str(group.get("address") or "").strip(),
         },
         "photo_snapshot": sorted(
             snapshot,
@@ -445,8 +462,8 @@ def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
         "meter_no": str(group.get("meter_no") or group.get("display_meter_no") or "").strip(),
         "meter_match_key": str(group.get("meter_match_key") or "").strip(),
         "address": str(group.get("address") or group.get("installation_address") or "").strip(),
-        "collector": str(group.get("collector") or "").strip(),
-        "module_asset_no": str(group.get("module_asset_no") or group.get("asset_no") or "").strip(),
+        "collector": effective_collector(group),
+        "module_asset_no": effective_module_asset_no(group),
         "construction_collector": str(group.get("construction_collector") or "").strip(),
         "construction_module_asset_no": str(group.get("construction_module_asset_no") or "").strip(),
         "installer": str(group.get("installer") or group.get("constructor") or group.get("creator") or "").strip(),

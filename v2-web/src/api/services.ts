@@ -1016,6 +1016,8 @@ function mapGroup(raw: BackendGroup): MaterialGroup {
 }
 
 function mapDataCenterRow(raw: BackendDataCenterRow): DataCenterRow {
+  const constructionCollector = (raw.construction_collector || '').trim()
+  const constructionModuleAssetNo = (raw.construction_module_asset_no || '').trim()
   return {
     kind: raw.kind === 'unmatched' ? 'unmatched' : 'group',
     id: String(raw.id || ''),
@@ -1023,10 +1025,10 @@ function mapDataCenterRow(raw: BackendDataCenterRow): DataCenterRow {
     meterNo: raw.meter_no || '',
     meterMatchKey: raw.meter_match_key || '',
     address: raw.address || '',
-    collector: raw.collector || '',
-    moduleAssetNo: raw.module_asset_no || '',
-    constructionCollector: raw.construction_collector || '',
-    constructionModuleAssetNo: raw.construction_module_asset_no || '',
+    collector: constructionCollector || (raw.collector || '').trim(),
+    moduleAssetNo: constructionModuleAssetNo || (raw.module_asset_no || '').trim(),
+    constructionCollector,
+    constructionModuleAssetNo,
     installer: raw.installer || '',
     photoCount: Number(raw.photo_count || raw.photos?.length || 0),
     classificationStatus: raw.classification_status || 'incomplete',
