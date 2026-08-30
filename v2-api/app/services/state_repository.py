@@ -3409,10 +3409,7 @@ class JsonStateRepository(StateRepository):
 
     def list_meter_module_export_rows(self) -> list[dict[str, Any]]:
         state = local_simulation.get_state()
-        rows = [data_center_service.group_row(group) for group in state.get("groups", [])]
-        rows.sort(key=lambda row: (str(row.get("terminal") or ""), str(row.get("id") or "")))
-        fields = ("terminal", "address", "meter_no", "module_asset_no", "construction_status")
-        return [{field: row.get(field) for field in fields} for row in rows]
+        return data_center_service.meter_module_export_rows_from_groups(state.get("groups", []))
 
     def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
         return local_simulation.get_data_center_detail(kind=kind, item_id=item_id)
@@ -5914,19 +5911,80 @@ class PostgresStateRepository(StateRepository):
         query = DataCenterQuery(data_type="group", page=1, page_size=100, sort="terminal_asc")
         with self._session() as session:
             source, filters = self._data_center_filtered_source(team_id, query)
-            statement = (
+            group_source = select(source).where(*filters).cte("meter_module_groups")
+            original_module = func.nullif(func.trim(func.coalesce(group_source.c.module_asset_no, "")), "")
+            construction_module = func.nullif(
+                func.trim(func.coalesce(group_source.c.construction_module_asset_no, "")),
+                "",
+            )
+            photo_module = func.coalesce(
+                func.nullif(func.trim(Photo.asset_no), ""),
+                func.nullif(func.trim(Photo.raw_data.op("->>")("module_asset_no")), ""),
+                func.nullif(func.trim(Photo.raw_data.op("->>")("asset_no")), ""),
+            )
+            original_candidates = (
                 select(
-                    source.c.terminal,
-                    source.c.address,
-                    source.c.meter_no,
-                    source.c.module_asset_no,
-                    source.c.construction_status,
+                    group_source.c.terminal,
+                    group_source.c.address,
+                    group_source.c.meter_no,
+                    original_module.label("module_asset_no"),
+                    literal("original").label("module_source"),
+                    group_source.c.construction_status,
                 )
-                .where(*filters)
-                .order_by(*self._data_center_order(source, "terminal_asc"))
+                .select_from(group_source)
+                .where(original_module.is_not(None))
+            )
+            construction_candidates = (
+                select(
+                    group_source.c.terminal,
+                    group_source.c.address,
+                    group_source.c.meter_no,
+                    construction_module.label("module_asset_no"),
+                    literal("construction").label("module_source"),
+                    group_source.c.construction_status,
+                )
+                .select_from(group_source)
+                .where(construction_module.is_not(None))
+            )
+            photo_candidates = (
+                select(
+                    group_source.c.terminal,
+                    group_source.c.address,
+                    group_source.c.meter_no,
+                    photo_module.label("module_asset_no"),
+                    literal("photo").label("module_source"),
+                    group_source.c.construction_status,
+                )
+                .select_from(group_source)
+                .join(
+                    MaterialGroup,
+                    and_(
+                        MaterialGroup.team_id == team_id,
+                        MaterialGroup.legacy_id == group_source.c.legacy_id,
+                    ),
+                )
+                .join(
+                    Photo,
+                    and_(
+                        Photo.team_id == team_id,
+                        Photo.group_id == MaterialGroup.id,
+                    ),
+                )
+                .where(photo_module.is_not(None))
+            )
+            candidates = union_all(
+                original_candidates,
+                construction_candidates,
+                photo_candidates,
+            ).subquery("meter_module_candidates")
+            statement = select(candidates).order_by(
+                candidates.c.terminal.asc(),
+                candidates.c.meter_no.asc(),
+                candidates.c.module_asset_no.asc(),
+                candidates.c.module_source.asc(),
             )
             rows = session.execute(statement).mappings().all()
-        return [dict(row) for row in rows]
+        return data_center_service.aggregate_meter_module_export_rows(rows)
 
     def get_data_center_detail(self, *, kind: str, item_id: str) -> dict[str, Any] | None:
         team_id = local_simulation.current_team_id()

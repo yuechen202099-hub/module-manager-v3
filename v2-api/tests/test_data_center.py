@@ -92,14 +92,26 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
                     "address": "一号路 1 号",
                     "meter_no": "METER-001",
                     "module_asset_no": "MODULE-001",
+                    "module_source": "原始资料、照片记录",
+                    "occurrence_count": 4,
+                    "is_duplicate": "否",
+                    "duplicate_type": "无",
+                    "module_meter_count": 1,
+                    "meter_candidate_count": 1,
                     "construction_status": "completed",
                 },
                 {
                     "terminal": "350000000002",
                     "address": "二号路 2 号",
                     "meter_no": "METER-002",
-                    "module_asset_no": "",
-                    "construction_status": "unconstructed",
+                    "module_asset_no": "MODULE-002",
+                    "module_source": "施工回传",
+                    "occurrence_count": 1,
+                    "is_duplicate": "是",
+                    "duplicate_type": "同表多模块",
+                    "module_meter_count": 1,
+                    "meter_candidate_count": 2,
+                    "construction_status": "in_progress",
                 },
             ]
 
@@ -118,9 +130,48 @@ def test_data_center_meter_module_export_is_current_project_xlsx(monkeypatch: py
     workbook = openpyxl.load_workbook(BytesIO(response.content), read_only=True)
     sheet = workbook.active
     assert list(sheet.values) == [
-        ("序号", "终端号", "安装地址", "表号", "模块号", "施工状态"),
-        (1, "350000000001", "一号路 1 号", "METER-001", "MODULE-001", "已施工"),
-        (2, "350000000002", "二号路 2 号", "METER-002", "未填写", "未施工"),
+        (
+            "序号",
+            "终端号",
+            "安装地址",
+            "表号",
+            "候选模块号",
+            "模块号来源",
+            "出现次数",
+            "是否重复",
+            "重复类型",
+            "模块关联表号数",
+            "表号候选模块数",
+            "施工状态",
+        ),
+        (
+            1,
+            "350000000001",
+            "一号路 1 号",
+            "METER-001",
+            "MODULE-001",
+            "原始资料、照片记录",
+            4,
+            "否",
+            "无",
+            1,
+            1,
+            "已施工",
+        ),
+        (
+            2,
+            "350000000002",
+            "二号路 2 号",
+            "METER-002",
+            "MODULE-002",
+            "施工回传",
+            1,
+            "是",
+            "同表多模块",
+            1,
+            2,
+            "施工中",
+        ),
     ]
 
 
@@ -133,7 +184,8 @@ def test_json_meter_module_export_rows_are_complete_and_terminal_sorted(monkeypa
             "terminal": "350000000002",
             "address": "二号路 2 号",
             "meter_no": "METER-002",
-            "module_asset_no": "MODULE-002",
+            "module_asset_no": "MODULE-SHARED",
+            "deleted_photos": [{"asset_no": "MODULE-SHARED", "is_active": False}],
             "construction_status": "unconstructed",
         },
         {
@@ -141,8 +193,23 @@ def test_json_meter_module_export_rows_are_complete_and_terminal_sorted(monkeypa
             "terminal": "350000000001",
             "address": "一号路 1 号",
             "meter_no": "METER-001",
-            "module_asset_no": "MODULE-001",
+            "module_asset_no": "MODULE-SHARED",
+            "construction_module_asset_no": "MODULE-NEW",
+            "photos": [
+                {"asset_no": "MODULE-NEW"},
+                {"module_asset_no": "MODULE-NEW"},
+            ],
             "construction_status": "completed",
+        },
+        {
+            "id": "group-3",
+            "terminal": "350000000003",
+            "address": "三号路 3 号",
+            "meter_no": "METER-003",
+            "module_asset_no": "",
+            "construction_module_asset_no": "",
+            "photos": [{"asset_no": ""}],
+            "construction_status": "unconstructed",
         },
     ]
     monkeypatch.setitem(local_simulation._team_states, team_id, state)
@@ -155,14 +222,39 @@ def test_json_meter_module_export_rows_are_complete_and_terminal_sorted(monkeypa
             "terminal": "350000000001",
             "address": "一号路 1 号",
             "meter_no": "METER-001",
-            "module_asset_no": "MODULE-001",
+            "module_asset_no": "MODULE-NEW",
+            "module_source": "施工回传、照片记录",
+            "occurrence_count": 3,
+            "is_duplicate": "是",
+            "duplicate_type": "同表多模块",
+            "module_meter_count": 1,
+            "meter_candidate_count": 2,
+            "construction_status": "completed",
+        },
+        {
+            "terminal": "350000000001",
+            "address": "一号路 1 号",
+            "meter_no": "METER-001",
+            "module_asset_no": "MODULE-SHARED",
+            "module_source": "原始资料",
+            "occurrence_count": 1,
+            "is_duplicate": "是",
+            "duplicate_type": "同表多模块、同模块多表",
+            "module_meter_count": 2,
+            "meter_candidate_count": 2,
             "construction_status": "completed",
         },
         {
             "terminal": "350000000002",
             "address": "二号路 2 号",
             "meter_no": "METER-002",
-            "module_asset_no": "MODULE-002",
+            "module_asset_no": "MODULE-SHARED",
+            "module_source": "原始资料、照片记录",
+            "occurrence_count": 2,
+            "is_duplicate": "是",
+            "duplicate_type": "同模块多表",
+            "module_meter_count": 2,
+            "meter_candidate_count": 1,
             "construction_status": "unconstructed",
         },
     ]
@@ -700,7 +792,56 @@ def test_postgres_meter_module_export_uses_one_unbounded_projection_query(
             return self
 
         def all(self):
-            return []
+            return [
+                {
+                    "terminal": "350000000001",
+                    "address": "一号路 1 号",
+                    "meter_no": "METER-001",
+                    "module_asset_no": "MODULE-SHARED",
+                    "module_source": "original",
+                    "construction_status": "completed",
+                },
+                {
+                    "terminal": "350000000001",
+                    "address": "一号路 1 号",
+                    "meter_no": "METER-001",
+                    "module_asset_no": "MODULE-NEW",
+                    "module_source": "construction",
+                    "construction_status": "completed",
+                },
+                {
+                    "terminal": "350000000001",
+                    "address": "一号路 1 号",
+                    "meter_no": "METER-001",
+                    "module_asset_no": "MODULE-NEW",
+                    "module_source": "photo",
+                    "construction_status": "completed",
+                },
+                {
+                    "terminal": "350000000001",
+                    "address": "一号路 1 号",
+                    "meter_no": "METER-001",
+                    "module_asset_no": "MODULE-NEW",
+                    "module_source": "photo",
+                    "construction_status": "completed",
+                },
+                {
+                    "terminal": "350000000002",
+                    "address": "二号路 2 号",
+                    "meter_no": "METER-002",
+                    "module_asset_no": "MODULE-SHARED",
+                    "module_source": "original",
+                    "construction_status": "unconstructed",
+                },
+                {
+                    "terminal": "350000000002",
+                    "address": "二号路 2 号",
+                    "meter_no": "METER-002",
+                    "module_asset_no": "MODULE-SHARED",
+                    "module_source": "photo",
+                    "construction_status": "unconstructed",
+                },
+            ]
 
     class RecordingSession:
         def __init__(self):
@@ -723,13 +864,54 @@ def test_postgres_meter_module_export_uses_one_unbounded_projection_query(
 
     rows = repo.list_meter_module_export_rows()
 
-    assert rows == []
+    assert rows == [
+        {
+            "terminal": "350000000001",
+            "address": "一号路 1 号",
+            "meter_no": "METER-001",
+            "module_asset_no": "MODULE-NEW",
+            "module_source": "施工回传、照片记录",
+            "occurrence_count": 3,
+            "is_duplicate": "是",
+            "duplicate_type": "同表多模块",
+            "module_meter_count": 1,
+            "meter_candidate_count": 2,
+            "construction_status": "completed",
+        },
+        {
+            "terminal": "350000000001",
+            "address": "一号路 1 号",
+            "meter_no": "METER-001",
+            "module_asset_no": "MODULE-SHARED",
+            "module_source": "原始资料",
+            "occurrence_count": 1,
+            "is_duplicate": "是",
+            "duplicate_type": "同表多模块、同模块多表",
+            "module_meter_count": 2,
+            "meter_candidate_count": 2,
+            "construction_status": "completed",
+        },
+        {
+            "terminal": "350000000002",
+            "address": "二号路 2 号",
+            "meter_no": "METER-002",
+            "module_asset_no": "MODULE-SHARED",
+            "module_source": "原始资料、照片记录",
+            "occurrence_count": 2,
+            "is_duplicate": "是",
+            "duplicate_type": "同模块多表",
+            "module_meter_count": 2,
+            "meter_candidate_count": 1,
+            "construction_status": "unconstructed",
+        },
+    ]
     assert len(session.statements) == 1
     compiled = str(session.statements[0].compile(compile_kwargs={"literal_binds": True})).lower()
     assert " limit " not in compiled
     assert " offset " not in compiled
     assert "order by" in compiled
     assert "terminal asc" in compiled
+    assert "union all" in compiled
 
 
 def test_postgres_data_center_unmatched_list_only_returns_open_records(

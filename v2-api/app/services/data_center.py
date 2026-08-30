@@ -279,7 +279,22 @@ def build_meter_module_workbook(rows: Iterable[Mapping[str, Any]]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "表号模块号对应表"
-    sheet.append(["序号", "终端号", "安装地址", "表号", "模块号", "施工状态"])
+    sheet.append(
+        [
+            "序号",
+            "终端号",
+            "安装地址",
+            "表号",
+            "候选模块号",
+            "模块号来源",
+            "出现次数",
+            "是否重复",
+            "重复类型",
+            "模块关联表号数",
+            "表号候选模块数",
+            "施工状态",
+        ]
+    )
     construction_labels = {
         "completed": "已施工",
         "constructed": "已施工",
@@ -296,17 +311,151 @@ def build_meter_module_workbook(rows: Iterable[Mapping[str, Any]]) -> bytes:
                 value("address"),
                 value("meter_no"),
                 value("module_asset_no"),
+                value("module_source"),
+                int(row.get("occurrence_count") or 0),
+                value("is_duplicate"),
+                value("duplicate_type"),
+                int(row.get("module_meter_count") or 0),
+                int(row.get("meter_candidate_count") or 0),
                 status,
             ]
         )
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
-    for column, width in {"A": 10, "B": 22, "C": 42, "D": 24, "E": 24, "F": 14}.items():
+    for column, width in {
+        "A": 10,
+        "B": 22,
+        "C": 42,
+        "D": 24,
+        "E": 24,
+        "F": 28,
+        "G": 12,
+        "H": 12,
+        "I": 28,
+        "J": 18,
+        "K": 18,
+        "L": 14,
+    }.items():
         sheet.column_dimensions[column].width = width
     output = BytesIO()
     workbook.save(output)
     workbook.close()
     return output.getvalue()
+
+
+def aggregate_meter_module_export_rows(
+    evidence_rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    source_labels = {
+        "original": "原始资料",
+        "construction": "施工回传",
+        "photo": "照片记录",
+    }
+    source_order = tuple(source_labels)
+    relations: dict[tuple[str, str, str], dict[str, Any]] = {}
+    meter_modules: dict[tuple[str, str], set[str]] = {}
+    module_meters: dict[str, set[tuple[str, str]]] = {}
+
+    for evidence in evidence_rows:
+        terminal = str(evidence.get("terminal") or "").strip()
+        meter_no = str(evidence.get("meter_no") or "").strip()
+        module_asset_no = str(evidence.get("module_asset_no") or "").strip()
+        if not module_asset_no:
+            continue
+
+        meter_key = (terminal, meter_no)
+        relation_key = (terminal, meter_no, module_asset_no)
+        relation = relations.setdefault(
+            relation_key,
+            {
+                "terminal": terminal,
+                "address": str(evidence.get("address") or "").strip(),
+                "meter_no": meter_no,
+                "module_asset_no": module_asset_no,
+                "construction_status": str(evidence.get("construction_status") or "").strip(),
+                "_sources": set(),
+                "occurrence_count": 0,
+            },
+        )
+        if not relation["address"]:
+            relation["address"] = str(evidence.get("address") or "").strip()
+        if not relation["construction_status"]:
+            relation["construction_status"] = str(evidence.get("construction_status") or "").strip()
+        relation["occurrence_count"] += 1
+        source = str(evidence.get("module_source") or "").strip()
+        if source:
+            relation["_sources"].add(source)
+        meter_modules.setdefault(meter_key, set()).add(module_asset_no)
+        module_meters.setdefault(module_asset_no, set()).add(meter_key)
+
+    output: list[dict[str, Any]] = []
+    for relation_key in sorted(relations):
+        relation = relations[relation_key]
+        meter_key = (relation["terminal"], relation["meter_no"])
+        meter_candidate_count = len(meter_modules[meter_key])
+        module_meter_count = len(module_meters[relation["module_asset_no"]])
+        duplicate_reasons = []
+        if meter_candidate_count > 1:
+            duplicate_reasons.append("同表多模块")
+        if module_meter_count > 1:
+            duplicate_reasons.append("同模块多表")
+
+        sources = relation.pop("_sources")
+        ordered_sources = [source_labels[source] for source in source_order if source in sources]
+        ordered_sources.extend(sorted(source for source in sources if source not in source_labels))
+        relation.update(
+            {
+                "module_source": "、".join(ordered_sources) or "未填写",
+                "is_duplicate": "是" if duplicate_reasons else "否",
+                "duplicate_type": "、".join(duplicate_reasons) or "无",
+                "module_meter_count": module_meter_count,
+                "meter_candidate_count": meter_candidate_count,
+            }
+        )
+        output.append(relation)
+    return output
+
+
+def meter_module_export_rows_from_groups(
+    groups: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    evidence_rows: list[dict[str, Any]] = []
+    for group in groups:
+        mapped = group_row(group)
+        base = {
+            "terminal": mapped["terminal"],
+            "address": mapped["address"],
+            "meter_no": mapped["meter_no"],
+            "construction_status": mapped["construction_status"],
+        }
+        evidence_rows.extend(
+            {
+                **base,
+                "module_asset_no": module_asset_no,
+                "module_source": module_source,
+            }
+            for module_asset_no, module_source in (
+                (group.get("module_asset_no") or group.get("asset_no"), "original"),
+                (group.get("construction_module_asset_no"), "construction"),
+            )
+        )
+        for photo in list(group.get("photos") or []) + list(group.get("deleted_photos") or []):
+            if not isinstance(photo, Mapping):
+                continue
+            raw = photo.get("raw_data") if isinstance(photo.get("raw_data"), Mapping) else {}
+            evidence_rows.append(
+                {
+                    **base,
+                    "module_asset_no": (
+                        photo.get("module_asset_no")
+                        or photo.get("asset_no")
+                        or raw.get("module_asset_no")
+                        or raw.get("asset_no")
+                    ),
+                    "module_source": "photo",
+                }
+            )
+    return aggregate_meter_module_export_rows(evidence_rows)
 
 
 def coerce_datetime(value: Any) -> datetime | None:
