@@ -2,14 +2,14 @@
 
 ## Package
 
-- Package: `build/server-release/module-manager-v2-server-3.2.19.zip`
-- Name: `module-manager-v2-server-3.2.19.zip`
-- Version: 3.2.19
-- Generated at: `2026-08-30T03:49:01Z`
-- Size: `2327097` bytes
-- SHA256: `517bcde62f0d7d172b0c2cd453c5ec4b2ea2cea9e9c6e2d231b4aaf4636e181c`
-- Source commit: `482690df8a1941a1ae4f9ebef92579174fecac2b`
-- Production release: `/opt/module-manager-v2/releases/v3.2.19-20260830T035812Z`
+- Package: `build/server-release/module-manager-v2-server-3.2.20.zip`
+- Name: `module-manager-v2-server-3.2.20.zip`
+- Version: 3.2.20
+- Generated at: pending
+- Size: pending
+- SHA256: pending
+- Source commit: pending
+- Production release: pending
 
 ## Included
 
@@ -17,7 +17,7 @@
 - Vue production bundle under v2-api/app/static/vue
 - v2-web source required by docker-compose.yml
 - Alembic migration files
-- V3.2.0 historical boundaries, immutable V3.2.3 through V3.2.18 records, V3.2.9 Quagga-first scanner regressions, V3.2.13 classification-independent rephoto gates, V3.2.14 archive/manual-demand/source-photo gates, V3.2.15 exception-count/deferred-image gates, V3.2.16 reviewer-claim removal gates, V3.2.17 anomaly-confirmation/meter-module-export gates, V3.2.18 approved-exception closure gates, and V3.2.19 terminal meter-number deduplication gates
+- V3.2.0 historical boundaries, immutable V3.2.3 through V3.2.19 records, V3.2.9 Quagga-first scanner regressions, V3.2.13 classification-independent rephoto gates, V3.2.14 archive/manual-demand/source-photo gates, V3.2.15 exception-count/deferred-image gates, V3.2.16 reviewer-claim removal gates, V3.2.17 anomaly-confirmation/meter-module-export gates, V3.2.18 approved-exception closure gates, V3.2.19 terminal meter-number deduplication gates, and V3.2.20 effective collector/module display gates
 - Nginx retirement patcher, server migration and manifest signer, Windows-local downloader, verifier tests, operator SOP, and release record
 - JSON/PostgreSQL and photo migration scripts under v2-api/scripts
 - Requirements and Dockerfile
@@ -51,13 +51,13 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify-client-release.py
 
-.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.19 --phase source
+.\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.20 --phase source
 
 ## Pending Package Gates
 
 - Release smoke check must pass unless -SkipSmoke is used
 - Demo admin and constructor login are available only for local walkthrough when enabled
-- Historical release contracts plus the active V3.2.19 meter-deduplication, package, and lifecycle contracts must pass
+- Historical release contracts plus the active V3.2.20 effective-device-display, package, and lifecycle contracts must pass
 - Vue strict-native production pages are required
 - PostgreSQL cutover audit must be reviewed before production deployment
 - Production mode disables demo accounts by default
