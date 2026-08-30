@@ -5,11 +5,11 @@
 - Package: `build/server-release/module-manager-v2-server-3.2.21.zip`
 - Name: `module-manager-v2-server-3.2.21.zip`
 - Version: 3.2.21
-- Generated at: pending
-- Size: pending
-- SHA256: pending
-- Source commit: pending
-- Production release: pending
+- Generated at: 2026-08-30 20:38:00 +08:00
+- Size: 2367192 bytes
+- SHA256: c421b326817e4bc0ecd957b8748d49e7decbf2d2a5be3266ef12ceca55566837
+- Source commit: 983c911d2e5184fcc64c471c0bb98799eea62c23
+- Production release: `/opt/module-manager-v2/releases/v3.2.21-20260830T124356Z`
 
 ## Included
 
@@ -53,7 +53,7 @@
 
 .\.venv\Scripts\python.exe .\scripts\verify_release_sop.py --version V3.2.21 --phase source
 
-## Pending Package Gates
+## Verified Package Gates
 
 - Release smoke check must pass unless -SkipSmoke is used
 - Demo admin and constructor login are available only for local walkthrough when enabled
