@@ -5,11 +5,11 @@
 - Package: `build/server-release/module-manager-v2-server-3.2.20.zip`
 - Name: `module-manager-v2-server-3.2.20.zip`
 - Version: 3.2.20
-- Generated at: pending
-- Size: pending
-- SHA256: pending
-- Source commit: pending
-- Production release: pending
+- Generated at: `2026-08-30T08:55:09Z`
+- Size: `2339193` bytes
+- SHA256: `d09163455fb3db0469119455eb3b1279d2ff0847eaebbe1c350852d6e289e487`
+- Source commit: `7ee6419cb3d9035a7484f4b2224323784d450c57`
+- Production release: `/opt/module-manager-v2/releases/v3.2.20-20260830T090700Z`
 
 ## Included
 
