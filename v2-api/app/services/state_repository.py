@@ -629,48 +629,34 @@ def _apply_photo_quality_exception_status(
     previous_reasons = {str(item).strip() for item in (group.exception_reasons or []) if str(item).strip()}
     had_missing_collector = local_simulation.MISSING_COLLECTOR_PHOTO_REASON in previous_reasons
     slots = _group_active_photo_slots(session, group, exclude_photo_id=exclude_photo_id)
-    missing_collector = (
-        group.photo_count > 0
-        and local_simulation.CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots)
-        and "collector_barcode" not in slots
-    )
     reasons = [item for item in previous_reasons if item != local_simulation.MISSING_COLLECTOR_PHOTO_REASON]
-    if missing_collector:
-        reasons.append(local_simulation.MISSING_COLLECTOR_PHOTO_REASON)
     group.exception_reasons = list(dict.fromkeys(reasons))
     group.has_archive_blocker = bool(group.exception_reasons)
     raw = dict(group.raw_data or {})
-    if missing_collector:
-        group.status = GroupStatus.REJECTED
-        group.exception_status = "open"
-        group.exception_note = local_simulation.MISSING_COLLECTOR_PHOTO_LABEL
-        group.reviewer = None
-        group.review_note = ""
-        group.reviewed_at = None
-        raw.update(
-            {
-                "status": "exception",
-                "exception_note": group.exception_note,
-                "exception_reasons": group.exception_reasons,
-                "reviewer": "",
-                "review_note": "",
-                "reviewed_at": None,
-            }
-        )
-    elif had_missing_collector and str(group.exception_note or "").strip() == local_simulation.MISSING_COLLECTOR_PHOTO_LABEL:
+    if had_missing_collector and str(group.exception_note or "").strip() == local_simulation.MISSING_COLLECTOR_PHOTO_LABEL:
         group.exception_note = ""
+        recovered_missing_collector_only = False
         if not group.exception_reasons and _legacy_group_status(group) == "exception":
             group.status = GroupStatus.UNREVIEWED if group.photo_count > 0 else GroupStatus.UNREVIEWED
             group.exception_status = ""
+            recovered_missing_collector_only = True
         raw.update(
             {
-                "status": _legacy_group_status(group),
+                "status": "pending" if recovered_missing_collector_only else _legacy_group_status(group),
                 "exception_note": group.exception_note or "",
                 "exception_reasons": group.exception_reasons,
             }
         )
     else:
         raw["exception_reasons"] = group.exception_reasons
+    if (
+        not group.exception_reasons
+        and group.status == GroupStatus.INCOMPLETE
+        and local_simulation.CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots)
+    ):
+        group.status = GroupStatus.UNREVIEWED
+        group.exception_status = ""
+        raw["status"] = "pending"
     group.raw_data = raw
 
 
@@ -1027,14 +1013,9 @@ def _validate_group_archive_with_module_map(
     if not photos:
         return reasons
     slots = local_simulation.group_photo_slots(group)
-    missing_collector_only = (
-        local_simulation.CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots)
-        and "collector_barcode" not in slots
-    )
-    if len(photos) < 4 and not missing_collector_only:
+    has_required_construction_slots = local_simulation.CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots)
+    if len(photos) < 4 and not has_required_construction_slots:
         reasons.append(INSUFFICIENT_GROUP_PHOTO_REASON)
-    if missing_collector_only:
-        reasons.append(local_simulation.MISSING_COLLECTOR_PHOTO_REASON)
     if photos and not any(str(photo.get("collector") or "").strip() for photo in photos):
         reasons.append(MISSING_COLLECTOR_INFO_REASON)
     module_asset_values = local_simulation.group_module_asset_values(group)
@@ -2022,6 +2003,8 @@ def _apply_construction_status(group: dict[str, Any]) -> dict[str, Any]:
 def _is_problem_group(group: dict[str, Any]) -> bool:
     if group.get("status") == "approved":
         return False
+    if data_center_service.is_only_missing_collector_photo_exception(group):
+        return False
     photo_count = int(group.get("photo_count") or 0)
     return group.get("status") == "exception" or (
         photo_count > 0 and (group.get("status") == "incomplete" or bool(group.get("has_archive_blocker")))
@@ -2081,7 +2064,7 @@ def _calculate_completeness_rate(groups: list[dict[str, Any]], *, scan_only: boo
 def _review_queue_rank(group: dict[str, Any]) -> int:
     if _is_reviewed_group(group):
         return 3
-    if group.get("status") == "exception" or group.get("has_archive_blocker"):
+    if _is_problem_group(group):
         return 1
     if int(group.get("photo_count") or 0) == 0 and group.get("status") != "unmatched":
         return 2
@@ -2102,7 +2085,10 @@ def _review_queue_status_expression():
     return case(
         (legacy_status == "approved", literal("archived")),
         (
-            or_(legacy_status == "exception", MaterialGroup.has_archive_blocker.is_(True)),
+            and_(
+                or_(legacy_status == "exception", MaterialGroup.has_archive_blocker.is_(True)),
+                ~_only_missing_collector_photo_exception_clause(),
+            ),
             literal("exception"),
         ),
         (
@@ -6678,6 +6664,8 @@ class PostgresStateRepository(StateRepository):
                 _status_value(group.status) == GroupStatus.REJECTED.value
                 or group.exception_status == "open"
                 or group.has_archive_blocker
+            ) and not data_center_service.is_only_missing_collector_photo_exception(
+                {"exception_reasons": list(group.exception_reasons or [])}
             ):
                 row["exception_count"] += 1
                 row["exception_groups"].append(_installer_exception_group_payload(group, len(matched_photos)))
@@ -8455,6 +8443,7 @@ class PostgresStateRepository(StateRepository):
                 MaterialGroup.has_archive_blocker.is_(True),
                 MaterialGroup.exception_status == "open",
             ),
+            ~_only_missing_collector_photo_exception_clause(),
         )
         if reviewer:
             claimed_task_ids = select(Task.legacy_id).where(Task.team_id == team_id, Task.review_claimed_by == reviewer)

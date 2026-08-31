@@ -3479,7 +3479,7 @@ def test_system_status_version_requires_admin_and_reports_runtime_state() -> Non
     assert denied.status_code == 403
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["version"] == "3.2.24"
+    assert data["version"] == "3.2.25"
     assert {"disk", "state_file", "uploads", "storage", "backups", "teams", "warnings"}.issubset(data)
     assert "used_percent" in data["disk"]
     assert "warn_bytes" in data["uploads"]
@@ -5237,9 +5237,9 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     payload = uploaded.json()["data"]
     assert payload["added"] == 3
     assert payload["skipped_duplicates"] == 0
-    assert payload["group"]["status"] == "exception"
-    assert payload["group"]["exception_note"] == "缺采集器照片"
-    assert "missing_collector_photo" in payload["group"]["exception_reasons"]
+    assert payload["group"]["status"] == "pending"
+    assert payload["group"]["exception_note"] == ""
+    assert "missing_collector_photo" not in payload["group"]["exception_reasons"]
     assert payload["group"]["photos"][0]["upload_source"] == "construction-mobile"
     assert payload["group"]["photos"][0]["construction_slot"] == "before_box"
     assert payload["group"]["photos"][0]["category"] == "before_box"
@@ -5342,11 +5342,11 @@ def test_construction_task_open_claim_and_upload_batch() -> None:
     assert deleted_collector.status_code == 200
 
     deleted_group = deleted_collector.json()["data"]["group"]
-    assert deleted_group["status"] == "exception"
-    assert deleted_group["exception_note"] == "缺采集器照片"
-    assert "missing_collector_photo" in deleted_group["exception_reasons"]
+    assert deleted_group["status"] == "pending"
+    assert deleted_group["exception_note"] == ""
+    assert "missing_collector_photo" not in deleted_group["exception_reasons"]
     exception_groups = client.get("/local-test/exception-groups", headers=admin_headers).json()["data"]["items"]
-    assert group["id"] in {item["id"] for item in exception_groups}
+    assert group["id"] not in {item["id"] for item in exception_groups}
 
     released = client.post(
         f"/local-test/construction/tasks/{task['id']}/release",

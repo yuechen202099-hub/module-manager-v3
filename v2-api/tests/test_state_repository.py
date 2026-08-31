@@ -8027,6 +8027,69 @@ def test_postgres_installer_workload_uses_material_group_installation_address() 
     assert segment_addresses[0]["address"] == group.installation_address
 
 
+@pytest.mark.parametrize(
+    ("reasons", "expected_exception_count", "expected_unreviewed_count"),
+    [
+        (["missing_collector_photo"], 0, 1),
+        (["missing_collector_photo", "missing_module_asset_no"], 1, 0),
+    ],
+)
+def test_postgres_installer_workload_ignores_only_missing_collector_photo_exception(
+    reasons: list[str],
+    expected_exception_count: int,
+    expected_unreviewed_count: int,
+) -> None:
+    photo = SimpleNamespace(
+        id="photo-uuid",
+        raw_data={"client_completed_at": "2026-08-31T09:30:00", "upload_source": "construction-mobile"},
+        source="construction",
+        created_at=datetime(2026, 8, 31, 9, 30),
+        taken_at=None,
+        sort_order=1,
+        legacy_id="p-1",
+    )
+    group = SimpleNamespace(
+        id="group-uuid",
+        legacy_id="g-1",
+        legacy_task_id=1,
+        display_meter_no="110020000001",
+        terminal="350000000001",
+        installation_address="上海市测试区测试路1号101室",
+        status=repository.GroupStatus.REJECTED,
+        raw_data={"status": "exception"},
+        last_photo_imported_at=None,
+        exception_status="open",
+        has_archive_blocker=True,
+        exception_reasons=reasons,
+        exception_note="缺采集器照片",
+        review_note="",
+        photo_count=1,
+    )
+
+    class FakeResult:
+        def all(self):
+            return [(photo, group)]
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, _statement):
+            return FakeResult()
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+    item = TestPostgresRepository().installer_daily_workload("installer-a")["items"][0]
+
+    assert item["exception_count"] == expected_exception_count
+    assert item["unreviewed_count"] == expected_unreviewed_count
+
+
 def test_postgres_group_search_includes_raw_display_fields() -> None:
     captured: list[object] = []
 
@@ -8238,7 +8301,7 @@ def test_installer_distribution_reuses_shared_name_cache(monkeypatch: pytest.Mon
     assert calls == ["xa"]
 
 
-def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -> None:
+def test_postgres_quality_status_does_not_require_collector_photo() -> None:
     def photo(category: str):
         return SimpleNamespace(
             raw_data={"construction_slot": category, "upload_source": "construction-mobile"},
@@ -8250,7 +8313,7 @@ def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -
         id="group-uuid",
         team_id="default-team",
         photo_count=3,
-        status=repository.GroupStatus.UNREVIEWED,
+        status=repository.GroupStatus.INCOMPLETE,
         exception_status="",
         exception_note="",
         exception_reasons=[],
@@ -8258,7 +8321,7 @@ def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -
         reviewer="reviewer",
         review_note="",
         reviewed_at=datetime(2026, 6, 8, 9, 30),
-        raw_data={},
+        raw_data={"status": "incomplete"},
     )
 
     class FakeScalars:
@@ -8274,17 +8337,58 @@ def test_postgres_quality_exception_marks_and_clears_missing_collector_photo() -
 
     repository._apply_photo_quality_exception_status(FakeSession(), group)
 
-    assert group.status == repository.GroupStatus.REJECTED
-    assert group.exception_note == repository.local_simulation.MISSING_COLLECTOR_PHOTO_LABEL
-    assert repository.local_simulation.MISSING_COLLECTOR_PHOTO_REASON in group.exception_reasons
+    assert group.status == repository.GroupStatus.UNREVIEWED
+    assert group.exception_status == ""
+    assert group.exception_note == ""
+    assert group.exception_reasons == []
+    assert group.has_archive_blocker is False
+    assert group.raw_data["status"] == "pending"
 
-    photos.append(photo("collector_barcode"))
-    group.photo_count = 4
+
+def test_postgres_quality_status_clears_stale_missing_collector_photo_exception() -> None:
+    def photo(category: str):
+        return SimpleNamespace(
+            raw_data={"construction_slot": category, "upload_source": "construction-mobile"},
+            category=category,
+        )
+
+    photos = [photo("before_box"), photo("module_meter"), photo("after_box")]
+    group = SimpleNamespace(
+        id="group-uuid",
+        team_id="default-team",
+        photo_count=3,
+        status=repository.GroupStatus.REJECTED,
+        exception_status="open",
+        exception_note=repository.local_simulation.MISSING_COLLECTOR_PHOTO_LABEL,
+        exception_reasons=[repository.local_simulation.MISSING_COLLECTOR_PHOTO_REASON],
+        has_archive_blocker=True,
+        reviewer=None,
+        review_note="",
+        reviewed_at=None,
+        raw_data={
+            "status": "exception",
+            "exception_note": repository.local_simulation.MISSING_COLLECTOR_PHOTO_LABEL,
+            "exception_reasons": [repository.local_simulation.MISSING_COLLECTOR_PHOTO_REASON],
+        },
+    )
+
+    class FakeScalars:
+        def all(self):
+            return photos
+
+    class FakeSession:
+        def scalars(self, _statement):
+            return FakeScalars()
+
     repository._apply_photo_quality_exception_status(FakeSession(), group)
 
     assert group.status == repository.GroupStatus.UNREVIEWED
+    assert group.exception_status == ""
     assert group.exception_note == ""
-    assert repository.local_simulation.MISSING_COLLECTOR_PHOTO_REASON not in group.exception_reasons
+    assert group.exception_reasons == []
+    assert group.has_archive_blocker is False
+    assert group.raw_data["status"] == "pending"
+    assert group.raw_data["exception_reasons"] == []
 
 
 def test_postgres_exception_listing_revalidates_stale_missing_module_note() -> None:
@@ -8676,6 +8780,75 @@ def test_postgres_dashboard_exception_clause_excludes_only_missing_collector_pho
     assert "jsonb_array_length(material_groups.exception_reasons) = 1" in compiled
     assert "(material_groups.exception_reasons ->> 0) = 'missing_collector_photo'" in compiled
     assert "material_groups.status != 'approved'" in compiled
+
+
+def test_postgres_problem_group_ignores_only_missing_collector_photo_exception() -> None:
+    collector_only = {
+        "status": "exception",
+        "photo_count": 3,
+        "has_archive_blocker": True,
+        "exception_reasons": ["missing_collector_photo"],
+    }
+    mixed = {
+        **collector_only,
+        "exception_reasons": ["missing_collector_photo", "missing_module_asset_no"],
+    }
+
+    assert repository._is_problem_group(collector_only) is False
+    assert repository._is_problem_group(mixed) is True
+
+
+def test_postgres_review_queue_status_ignores_only_missing_collector_photo_exception() -> None:
+    compiled = str(
+        repository.select(repository._review_queue_status_expression()).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "jsonb_array_length(material_groups.exception_reasons) = 1" in compiled
+    assert "(material_groups.exception_reasons ->> 0) = 'missing_collector_photo'" in compiled
+
+
+def test_postgres_exception_listing_ignores_only_missing_collector_photo_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[object] = []
+
+    class FakeScalars:
+        def all(self):
+            return []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def scalars(self, statement):
+            captured.append(statement)
+            return FakeScalars()
+
+        def scalar(self, _statement):
+            return 0
+
+    class TestPostgresRepository(repository.PostgresStateRepository):
+        def _session(self):
+            return FakeSession()
+
+    monkeypatch.setattr(repository.local_simulation, "current_team_id", lambda: "default-team")
+
+    TestPostgresRepository().list_exception_groups()
+    compiled = str(
+        captured[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "jsonb_array_length(material_groups.exception_reasons) = 1" in compiled
+    assert "(material_groups.exception_reasons ->> 0) = 'missing_collector_photo'" in compiled
 
 
 def test_group_barcode_accuracy_summary_uses_durable_rows_and_skips_legacy_recomputation(

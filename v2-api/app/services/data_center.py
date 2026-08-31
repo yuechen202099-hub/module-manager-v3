@@ -596,6 +596,13 @@ def exception_status_from_group(group: Mapping[str, Any]) -> str:
     return ""
 
 
+def status_from_group(group: Mapping[str, Any]) -> str:
+    status = str(group.get("status") or "pending").strip() or "pending"
+    if is_only_missing_collector_photo_exception(group) and status in {"exception", "rejected"}:
+        return "pending"
+    return status
+
+
 def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
     photos = active_photos(group)
     photo_count = int(group.get("photo_count") or 0)
@@ -638,7 +645,7 @@ def group_row(group: Mapping[str, Any]) -> dict[str, Any]:
         "construction_status": construction_status_from_group(group, photo_count),
         "archive_status": archive_status_from_group(group, photos),
         "exception_status": exception_status_from_group(group),
-        "status": str(group.get("status") or "pending").strip() or "pending",
+        "status": status_from_group(group),
         "updated_at": group.get("updated_at") or group.get("last_photo_imported_at") or "",
     }
 

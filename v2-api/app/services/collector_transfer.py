@@ -56,6 +56,7 @@ from app.models import (
     User,
 )
 from app.services.barcode_verification_contract import resolve_persisted_barcode_verification
+from app.services.data_center import is_only_missing_collector_photo_exception
 from app.services.local_simulation import is_placeholder_formal_identity_value
 from app.services import photo_barcode_check
 from app.services.photo_storage import resolve_photo_for_response
@@ -205,6 +206,7 @@ class _ProjectGroupRow:
     installation_address: str
     photo_count: int
     exception_note: str | None
+    exception_reasons: list[object] | None
     raw_data: Mapping[str, object]
 
 
@@ -219,6 +221,7 @@ class _GlobalTerminalGroupRow:
     installation_address: str
     photo_count: int
     exception_note: str | None
+    exception_reasons: list[object] | None
     raw_data: Mapping[str, object]
 
 
@@ -388,7 +391,9 @@ def _review_projection_from_rows(
                 identity_blockers.append(code)
 
         source_blockers: list[str] = []
-        if normalize_identifier(group.exception_note):
+        if normalize_identifier(group.exception_note) and not is_only_missing_collector_photo_exception(
+            {"exception_reasons": group.exception_reasons}
+        ):
             source_blockers.append("exception_open")
         if not normalize_identifier(source.installation_address):
             source_blockers.append("address_missing")
@@ -662,6 +667,7 @@ class PostgresCollectorTransferService:
                 MaterialGroup.installation_address,
                 MaterialGroup.photo_count,
                 MaterialGroup.exception_note,
+                MaterialGroup.exception_reasons,
                 MaterialGroup.raw_data,
             )
             .where(
@@ -749,6 +755,7 @@ class PostgresCollectorTransferService:
                     authoritative_address,
                     MaterialGroup.photo_count,
                     MaterialGroup.exception_note,
+                    MaterialGroup.exception_reasons,
                     MaterialGroup.raw_data,
                 )
                 .outerjoin(
@@ -918,6 +925,7 @@ class PostgresCollectorTransferService:
                 authoritative_address,
                 MaterialGroup.photo_count,
                 MaterialGroup.exception_note,
+                MaterialGroup.exception_reasons,
                 MaterialGroup.raw_data,
             )
             .outerjoin(
@@ -1302,6 +1310,7 @@ class PostgresCollectorTransferService:
                     authoritative_address,
                     MaterialGroup.photo_count,
                     MaterialGroup.exception_note,
+                    MaterialGroup.exception_reasons,
                     MaterialGroup.raw_data,
                 )
                 .outerjoin(

@@ -3556,6 +3556,46 @@ def test_global_terminal_candidates_include_mixed_construction_review_counts(
     assert candidate["terminal_key"] != "MIXED-001"
 
 
+def test_review_workbench_ignores_stale_missing_collector_photo_exception(
+    db_session: Session,
+) -> None:
+    """Catches a retired collector-photo-only exception blocking review and re-photo."""
+    project = db_session.scalar(select(Project).where(Project.team_id == "team-1"))
+    group = add_global_terminal_source(
+        db_session,
+        project=project,
+        terminal_code="STALE-COLLECTOR-PHOTO-001",
+        meter_no="M-STALE-COLLECTOR-PHOTO",
+        collector_no="C-STALE-COLLECTOR-PHOTO",
+        authoritative_address="历史缺采集器照片地址",
+        status=GroupStatus.REJECTED,
+    )
+    group.exception_status = "open"
+    group.exception_note = "缺采集器照片"
+    group.exception_reasons = ["missing_collector_photo"]
+    group.has_archive_blocker = True
+    group.raw_data = {
+        **dict(group.raw_data or {}),
+        "status": "exception",
+        "exception_note": "缺采集器照片",
+        "exception_reasons": ["missing_collector_photo"],
+    }
+    db_session.commit()
+
+    candidate = service(db_session).list_global_terminals(
+        query="STALE-COLLECTOR-PHOTO-001",
+        include_blocked=True,
+    )["items"][0]
+    opened = service(db_session).open_review_workbench_terminal(
+        terminal_key_value=candidate["terminal_key"],
+        source_revision=candidate["source_revision"],
+    )
+
+    assert candidate["review_ready_count"] == 1
+    assert candidate["review_required_count"] == 0
+    assert "exception_open" not in opened["meters"][0]["blockers"]
+
+
 def test_review_workbench_deduplicates_same_meter_and_merges_device_numbers(
     db_session: Session,
 ) -> None:

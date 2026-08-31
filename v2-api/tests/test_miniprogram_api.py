@@ -203,7 +203,7 @@ def test_miniprogram_group_filters_and_upload_keep_production_shape(monkeypatch:
 
     exception_groups = client.get(f"/miniprogram/tasks/{task['id']}/groups?filter=exception", headers=headers)
     assert exception_groups.status_code == 200
-    assert group["id"] in {item["id"] for item in exception_groups.json()["data"]["items"]}
+    assert group["id"] not in {item["id"] for item in exception_groups.json()["data"]["items"]}
 
 
 def test_miniprogram_single_file_uploads_commit_as_one_batch(monkeypatch: pytest.MonkeyPatch) -> None:

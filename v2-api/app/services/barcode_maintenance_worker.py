@@ -24,7 +24,7 @@ from app.models import (
     MaterialGroup,
     Photo,
 )
-from app.services import local_simulation, photo_barcode_check
+from app.services import data_center, local_simulation, photo_barcode_check
 from app.services.export_retirement import ExportCenterRetiredError, RETIREMENT_MESSAGE
 from app.services.delivery_cache import (
     MAX_DELIVERY_CACHE_ATTEMPTS,
@@ -876,9 +876,13 @@ def _archive_block_reason(group: dict[str, Any], verification: dict[str, Any]) -
     required = {"before_box", "collector_barcode", "module_meter", "after_box"}
     if len(active_photos) != 4 or len(set(categories)) != 4 or set(categories) != required:
         return "incomplete_categories", ""
-    if str(group.get("status") or "") not in {"", "pending", "unreviewed", "in_review", "incomplete"}:
+    only_ignored_exception = data_center.is_only_missing_collector_photo_exception(group)
+    if (
+        str(group.get("status") or "") not in {"", "pending", "unreviewed", "in_review", "incomplete"}
+        and not only_ignored_exception
+    ):
         return "final_review_status", ""
-    if group.get("has_archive_blocker") or group.get("exception_reasons"):
+    if (group.get("has_archive_blocker") or group.get("exception_reasons")) and not only_ignored_exception:
         return "archive_blocked", ""
     eligibility = evaluate_group_eligibility(group)
     if eligibility.status != "pending" or eligibility.evidence_fingerprint != verification.get("evidence_fingerprint"):

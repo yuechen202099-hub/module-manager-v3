@@ -1130,6 +1130,22 @@ def test_problem_group_is_not_counted_again_as_missing_photo(synthetic_state: di
     assert synthetic_state["summary"]["scanned_groups"] == 2
 
 
+def test_problem_group_ignores_only_missing_collector_photo_exception() -> None:
+    collector_only = {
+        "status": "exception",
+        "photo_count": 3,
+        "has_archive_blocker": True,
+        "exception_reasons": ["missing_collector_photo"],
+    }
+    mixed = {
+        **collector_only,
+        "exception_reasons": ["missing_collector_photo", "缺少采集器信息"],
+    }
+
+    assert local_simulation.is_problem_group(collector_only) is False
+    assert local_simulation.is_problem_group(mixed) is True
+
+
 def test_task_groups_can_be_filtered_by_status(synthetic_state: dict) -> None:
     result = list_task_groups(2, status="incomplete")
 

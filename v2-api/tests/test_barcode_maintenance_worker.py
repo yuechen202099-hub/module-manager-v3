@@ -1127,6 +1127,26 @@ def test_auto_archive_rejects_nonpassing_verification_states(
     assert group["status"] == "unreviewed"
 
 
+def test_auto_archive_ignores_stale_missing_collector_photo_only_exception() -> None:
+    from app.services import barcode_maintenance_worker as worker
+
+    group = eligible_group("stale-missing-collector-photo", verification_status="passed")
+    group.update(
+        status="exception",
+        exception_note="缺采集器照片",
+        exception_reasons=["missing_collector_photo"],
+        has_archive_blocker=True,
+    )
+
+    assert worker._archive_block_reason(group, group["barcode_verification"]) == ("", "machine_barcode")
+
+    group["exception_reasons"] = ["missing_collector_photo", "missing_module_asset_no"]
+    assert worker._archive_block_reason(group, group["barcode_verification"])[0] in {
+        "final_review_status",
+        "archive_blocked",
+    }
+
+
 def test_auto_archive_rejects_ocr_only_and_incomplete_categories(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

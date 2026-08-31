@@ -1267,3 +1267,5 @@ def test_data_center_exception_drilldown_ignores_only_missing_collector_photo() 
 
     assert data_center_service.exception_status_from_group(collector_only) == ""
     assert data_center_service.exception_status_from_group(mixed) == "open"
+    assert data_center_service.group_row(collector_only)["status"] == "pending"
+    assert data_center_service.group_row(mixed)["status"] == "exception"

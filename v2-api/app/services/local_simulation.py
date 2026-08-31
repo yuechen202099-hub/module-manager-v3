@@ -4831,6 +4831,8 @@ def count_groups(groups: list[dict[str, Any]], statuses: set[str]) -> int:
 def is_problem_group(group: dict[str, Any]) -> bool:
     if group.get("status") == "approved":
         return False
+    if data_center_service.is_only_missing_collector_photo_exception(group):
+        return False
     return group.get("status") == "exception" or (
         group.get("photo_count", 0) > 0
         and (group.get("status") == "incomplete" or bool(group.get("has_archive_blocker")))
@@ -4955,14 +4957,12 @@ def apply_photo_quality_exception_status(group: dict[str, Any], *, allow_recover
     had_missing_collector = MISSING_COLLECTOR_PHOTO_REASON in previous_reasons
     reasons = validate_group_archive(group)
     set_group_exception_flags(group, reasons)
-    has_missing_collector = MISSING_COLLECTOR_PHOTO_REASON in set(reasons)
-    if has_missing_collector:
-        group["status"] = "exception"
-        group["exception_note"] = MISSING_COLLECTOR_PHOTO_LABEL
-        group["reviewer"] = None
-        group["review_note"] = ""
-        group["reviewed_at"] = None
-        return
+    if (
+        not reasons
+        and group.get("status") == "incomplete"
+        and CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(group_photo_slots(group))
+    ):
+        group["status"] = "pending"
     if allow_recover and had_missing_collector and str(group.get("exception_note") or "").strip() == MISSING_COLLECTOR_PHOTO_LABEL:
         group["exception_note"] = ""
         if not reasons and group.get("status") == "exception":
@@ -5011,11 +5011,9 @@ def validate_group_archive(group: dict[str, Any]) -> list[str]:
     if not photos:
         return reasons
     slots = group_photo_slots(group)
-    missing_collector_only = CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots) and "collector_barcode" not in slots
-    if len(photos) < 4 and not missing_collector_only:
+    has_required_construction_slots = CONSTRUCTION_UPLOAD_REQUIRED_SLOTS.issubset(slots)
+    if len(photos) < 4 and not has_required_construction_slots:
         reasons.append("资料组照片不足 4 张")
-    if missing_collector_only:
-        reasons.append(MISSING_COLLECTOR_PHOTO_REASON)
     if photos and not any(str(photo.get("collector") or "").strip() for photo in photos):
         reasons.append("缺少采集器信息")
     module_asset_values = group_module_asset_values(group)
@@ -5624,7 +5622,7 @@ def collect_exception_groups(reviewer: str = "") -> list[dict[str, Any]]:
         for item in state["groups"]
         if item.get("photo_count", 0) > 0
         and item.get("status") != "unmatched"
-        and (item["status"] in {"incomplete", "exception"} or item.get("has_archive_blocker"))
+        and is_problem_group(item)
     ]
     if reviewer:
         groups = [
