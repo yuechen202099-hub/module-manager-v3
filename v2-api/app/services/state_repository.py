@@ -99,6 +99,19 @@ DATA_CENTER_IDENTITY_FIELDS = {
     "construction_collector",
     "construction_module_asset_no",
 }
+
+
+def _synchronize_data_center_identity_patch(patch: Mapping[str, Any]) -> dict[str, Any]:
+    updates = dict(patch)
+    for source_field, construction_field in (
+        ("collector", "construction_collector"),
+        ("module_asset_no", "construction_module_asset_no"),
+    ):
+        if source_field in updates:
+            updates[construction_field] = updates[source_field]
+    return updates
+
+
 MANUAL_CLASSIFICATION_CATEGORIES = frozenset(
     {"before_box", "collector_barcode", "module_meter", "after_box"}
 )
@@ -3819,6 +3832,7 @@ class JsonStateRepository(StateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
+        patch = _synchronize_data_center_identity_patch(patch)
         before_group = deepcopy(local_simulation.get_group(group_id) or {})
         result = self.update_group_metadata(
             group_id,
@@ -8675,6 +8689,7 @@ class PostgresStateRepository(StateRepository):
         reason: str = "",
         source_page: str = "data_center",
     ) -> dict[str, Any]:
+        patch = _synchronize_data_center_identity_patch(patch)
         before_data_center_state = _data_center_state_audit_snapshot(self.get_group(group_id) or {})
         result = self.update_group_metadata(
             group_id,

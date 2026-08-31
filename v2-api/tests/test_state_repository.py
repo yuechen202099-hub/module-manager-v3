@@ -7481,6 +7481,8 @@ def test_postgres_data_center_group_update_audits_source_reason_and_state_snapsh
             "archive_status": "archived",
             "delivery_cache_status": "ready",
             "barcode_verification": {"status": "passed"},
+            "construction_collector": "C-001",
+            "construction_module_asset_no": "MOD-001",
         },
         updated_at=None,
     )
@@ -7564,8 +7566,8 @@ def test_postgres_data_center_group_update_audits_source_reason_and_state_snapsh
             "collector": photos[0].collector,
             "module_asset_no": photos[0].asset_no,
             "creator": photos[0].creator,
-            "construction_collector": "C-001",
-            "construction_module_asset_no": "MOD-001",
+            "construction_collector": value.raw_data.get("construction_collector", ""),
+            "construction_module_asset_no": value.raw_data.get("construction_module_asset_no", ""),
             "photos": [
                 {
                     "id": photo.legacy_id,
@@ -7615,12 +7617,16 @@ def test_postgres_data_center_group_update_audits_source_reason_and_state_snapsh
     assert update_payload["reason"] == "核对三项号码"
     assert update_payload["before"] == {
         "collector": "C-001",
+        "construction_collector": "C-001",
+        "construction_module_asset_no": "MOD-001",
         "meter_match_key": "M-001",
         "meter_no": "M-001",
         "module_asset_no": "MOD-001",
     }
     assert update_payload["after"] == {
         "collector": "C-002",
+        "construction_collector": "C-002",
+        "construction_module_asset_no": "MOD-002",
         "meter_match_key": "M-002",
         "meter_no": "M-002",
         "module_asset_no": "MOD-002",
@@ -7631,6 +7637,8 @@ def test_postgres_data_center_group_update_audits_source_reason_and_state_snapsh
     assert group.raw_data["meter_match_key"] == "M-002"
     assert group.raw_data["collector"] == "C-002"
     assert group.raw_data["module_asset_no"] == "MOD-002"
+    assert group.raw_data["construction_collector"] == "C-002"
+    assert group.raw_data["construction_module_asset_no"] == "MOD-002"
     for photo in photos:
         assert photo.barcode == "M-002"
         assert photo.collector == "C-002"

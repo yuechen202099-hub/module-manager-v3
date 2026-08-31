@@ -12,6 +12,17 @@ export type ReleaseNote = {
 
 export const releaseNotes: ReleaseNote[] = [
   {
+    version: 'V3.2.24',
+    date: '2026-08-31',
+    type: 'BUG 修复',
+    title: '修复审阅模块号保存后回退',
+    items: [
+      '审阅保存模块号和采集器号时同步覆盖施工字段、普通字段及活动照片字段。',
+      '修复普通模块号已更新但施工模块号仍为旧值时，刷新后重新显示旧号码的问题。',
+      '保存留痕继续记录变更前后字段，原有权限、照片和归档边界保持不变。',
+    ],
+  },
+  {
     version: 'V3.2.23',
     date: '2026-08-31',
     type: '小更新',

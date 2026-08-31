@@ -1024,6 +1024,10 @@ def test_data_center_edit_invalidates_barcode_archive_and_preserves_retired_deli
 def test_json_data_center_edit_persists_all_identity_fields_on_active_photos(
     json_review_repo: repository.JsonStateRepository,
 ) -> None:
+    group = _latest_group()
+    group["construction_module_asset_no"] = "MOD001"
+    group["construction_collector"] = "COLLECTOR001"
+
     json_review_repo.update_data_center_group(
         group_id="g-1",
         patch={
@@ -1041,10 +1045,35 @@ def test_json_data_center_edit_persists_all_identity_fields_on_active_photos(
     assert group["meter_match_key"] == "0000288099"
     assert group["module_asset_no"] == "MOD099"
     assert group["collector"] == "COLLECTOR099"
+    assert group["construction_module_asset_no"] == "MOD099"
+    assert group["construction_collector"] == "COLLECTOR099"
     for photo in group["photos"]:
         assert photo["barcode"] == "110000288099"
         assert photo["asset_no"] == "MOD099"
         assert photo["collector"] == "COLLECTOR099"
+
+
+def test_json_data_center_edit_replaces_stale_construction_module_when_source_already_matches(
+    json_review_repo: repository.JsonStateRepository,
+) -> None:
+    group = _latest_group()
+    group["module_asset_no"] = "MOD099"
+    group["construction_module_asset_no"] = "MOD001"
+    for photo in group["photos"]:
+        photo["asset_no"] = "MOD099"
+
+    json_review_repo.update_data_center_group(
+        group_id="g-1",
+        patch={"module_asset_no": "MOD099"},
+        actor="admin-a",
+        reason="覆盖旧施工模块号",
+        source_page="data_center",
+    )
+
+    detail = json_review_repo.get_data_center_detail(kind="group", item_id="g-1")
+    assert detail is not None
+    assert detail["module_asset_no"] == "MOD099"
+    assert _latest_group()["construction_module_asset_no"] == "MOD099"
 
 
 def test_json_data_center_classifies_final_photo_then_auto_archives_without_delivery_enqueue(
