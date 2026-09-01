@@ -8,7 +8,10 @@ import pytest
 from app.domain.material_export import MaterialExportMeter
 from app.services.material_export import (
     MaterialExportAllocationResult,
+    MaterialExportBusy,
     MaterialExportCompletedCannotRelease,
+    MaterialExportFileMismatch,
+    MaterialExportLeaseMismatch,
     MaterialExportPoolShortage,
     MaterialExportProjectMismatch,
     ProjectExportEvidence,
@@ -162,3 +165,9 @@ def test_allocation_result_distinguishes_replacement_and_extra() -> None:
     assert replacement.is_extra is False
     assert extra.is_extra is True
     assert MaterialExportCompletedCannotRelease.code == "completed_cannot_release"
+
+
+def test_resumable_export_errors_have_stable_contract_codes() -> None:
+    assert MaterialExportBusy.code == "export_busy"
+    assert MaterialExportLeaseMismatch.code == "lease_mismatch"
+    assert MaterialExportFileMismatch.code == "file_mismatch"

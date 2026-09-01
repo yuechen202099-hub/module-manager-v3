@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import secrets
+from pathlib import PurePath
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -20,6 +21,7 @@ from app.domain.material_export import (
     preflight_fingerprint,
     project_module_issues,
     required_meter_issues,
+    safe_windows_component,
 )
 from app.domain.terminal_review import (
     ReviewMeterEvidence,
@@ -34,7 +36,9 @@ from app.models import (
     CollectorRequirement,
     CollectorTransferTerminal,
     MaterialExportCollectorAllocation,
+    MaterialExportFile,
     MaterialExportJob,
+    MaterialExportLease,
     MaterialExportTerminal,
     MaterialGroup,
     Photo,
@@ -76,6 +80,18 @@ class MaterialExportPoolShortage(MaterialExportError):
 
 class MaterialExportCompletedCannotRelease(MaterialExportError):
     code = "completed_cannot_release"
+
+
+class MaterialExportBusy(MaterialExportError):
+    code = "export_busy"
+
+
+class MaterialExportLeaseMismatch(MaterialExportError):
+    code = "lease_mismatch"
+
+
+class MaterialExportFileMismatch(MaterialExportError):
+    code = "file_mismatch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,10 +167,56 @@ class MaterialExportJobResult:
     terminals: tuple[MaterialExportTerminalResult, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class MaterialExportFileDetail:
+    id: str
+    relative_path: str
+    source_kind: str
+    content_type: str
+    byte_size: int | None
+    sha256: str | None
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialExportTerminalDetail:
+    id: str
+    task_id: str
+    terminal_code: str
+    status: str
+    meter_rows: tuple[Mapping[str, object], ...]
+    supplement_rows: tuple[Mapping[str, object], ...]
+    files: tuple[MaterialExportFileDetail, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialExportJobDetail:
+    job_id: str
+    status: str
+    manifest_sha256: str
+    terminals: tuple[MaterialExportTerminalDetail, ...]
+
+
 def _setting_count(setting: object | None) -> int:
     if setting is None:
         return 0
     return max(0, int(getattr(setting, "requested_collector_count", 0) or 0))
+
+
+_CONTENT_TYPE_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+}
+
+
+def _safe_photo_extension(filename: object, content_type: object) -> str:
+    suffix = PurePath(str(filename or "")).suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}:
+        return ".jpg" if suffix == ".jpeg" else suffix
+    return _CONTENT_TYPE_EXTENSIONS.get(str(content_type or "").lower(), ".jpg")
 
 
 def _terminal_issue(
@@ -954,6 +1016,241 @@ class PostgresMaterialExportService:
                     continue
         return None
 
+    def _create_source_file(
+        self,
+        *,
+        job: MaterialExportJob,
+        terminal: MaterialExportTerminal,
+        source_kind: str,
+        source_id: UUID,
+        storage: Mapping[str, object],
+        relative_path: str,
+        manifest_position: int,
+    ) -> MaterialExportFile:
+        byte_size = int(storage.get("byte_size") or 0)
+        sha256 = normalize_identifier(storage.get("sha256"))
+        if not sha256:
+            raise MaterialExportSnapshotChanged("照片缺少 SHA256，请重新整理资料后预检")
+        row = MaterialExportFile(
+            job_id=job.id,
+            terminal_export_id=terminal.id,
+            team_id=self.team_id,
+            project_id=terminal.project_id,
+            source_kind=source_kind,
+            source_photo_id=source_id if source_kind == "photo" else None,
+            source_collector_photo_id=(
+                source_id if source_kind == "collector_photo" else None
+            ),
+            storage_type=normalize_identifier(storage.get("storage_type")),
+            storage_bucket=normalize_identifier(storage.get("storage_bucket")),
+            storage_key=normalize_identifier(storage.get("storage_key")),
+            relative_path=relative_path,
+            content_type=normalize_identifier(storage.get("content_type"))
+            or "application/octet-stream",
+            original_extension=_safe_photo_extension(
+                storage.get("original_filename"), storage.get("content_type")
+            ),
+            byte_size=byte_size,
+            sha256=sha256,
+            status="pending",
+            retry_count=0,
+            manifest_position=manifest_position,
+        )
+        self.session.add(row)
+        return row
+
+    def _create_workbook_file(
+        self,
+        *,
+        job: MaterialExportJob,
+        terminal: MaterialExportTerminal,
+        relative_path: str,
+        manifest_position: int,
+    ) -> MaterialExportFile:
+        row = MaterialExportFile(
+            job_id=job.id,
+            terminal_export_id=terminal.id,
+            team_id=self.team_id,
+            project_id=terminal.project_id,
+            source_kind="client_workbook",
+            relative_path=relative_path,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            original_extension=".xlsx",
+            byte_size=None,
+            sha256=None,
+            status="pending",
+            retry_count=0,
+            manifest_position=manifest_position,
+        )
+        self.session.add(row)
+        return row
+
+    def _build_terminal_manifest(
+        self,
+        *,
+        job: MaterialExportJob,
+        terminal: MaterialExportTerminal,
+        evidence: ProjectExportEvidence,
+        allocations: Mapping[
+            str, tuple[MaterialExportCollectorAllocation, PhysicalCollector, bool]
+        ],
+        collector_photos: Mapping[UUID, CollectorPhoto],
+    ) -> None:
+        terminal_folder = safe_windows_component(terminal.terminal_code)
+        meters = sorted(
+            (
+                item
+                for item in evidence.meters
+                if item.constructed and item.task_id == str(terminal.task_id)
+            ),
+            key=lambda item: (normalize_identifier(item.module_no), item.group_id),
+        )
+        files: list[MaterialExportFile] = []
+        meter_rows: list[Mapping[str, object]] = []
+        supplement_rows: list[Mapping[str, object]] = []
+        used_module_folders: set[str] = set()
+        collision = False
+        position = 0
+        for meter in meters:
+            module_folder = safe_windows_component(meter.module_no)
+            if module_folder.casefold() in used_module_folders:
+                module_folder = safe_windows_component(
+                    f"{meter.module_no}__{meter.meter_no}"
+                )
+                collision = True
+            used_module_folders.add(module_folder.casefold())
+            allocation = allocations.get(
+                f"collector:{normalize_identifier(meter.collector_no)}"
+            )
+            final_collector_no = allocation[1].collector_no if allocation else ""
+            meter_rows.append(
+                {
+                    "meter_no": meter.meter_no,
+                    "address": meter.installation_address,
+                    "module_no": meter.module_no,
+                    "final_collector_no": final_collector_no,
+                }
+            )
+            for photo_id, basename in (
+                (meter.module_meter_photo_id, "模块与电能表"),
+                (meter.after_box_photo_id, "改造后"),
+            ):
+                if not photo_id:
+                    continue
+                storage = evidence.photo_storage_rows.get(photo_id)
+                if storage is None:
+                    raise MaterialExportSnapshotChanged("照片存储快照缺失，请重新预检")
+                extension = _safe_photo_extension(
+                    storage.get("original_filename"), storage.get("content_type")
+                )
+                position += 1
+                files.append(
+                    self._create_source_file(
+                        job=job,
+                        terminal=terminal,
+                        source_kind="photo",
+                        source_id=UUID(photo_id),
+                        storage=storage,
+                        relative_path=(
+                            f"{terminal_folder}/{module_folder}/{basename}{extension}"
+                        ),
+                        manifest_position=position,
+                    )
+                )
+
+        for requirement_key, (allocation, physical, is_extra) in sorted(
+            allocations.items()
+        ):
+            collector_photo = collector_photos.get(physical.id)
+            storage: Mapping[str, object] | None = None
+            source_kind = "collector_photo"
+            source_id: UUID | None = None
+            if allocation.collector_photo_id and collector_photo is not None:
+                source_id = collector_photo.id
+                storage = {
+                    "storage_type": collector_photo.storage_type,
+                    "storage_bucket": "",
+                    "storage_key": collector_photo.object_key,
+                    "sha256": collector_photo.sha256,
+                    "byte_size": collector_photo.byte_size,
+                    "content_type": collector_photo.content_type,
+                    "original_filename": collector_photo.original_filename,
+                }
+            elif allocation.group_photo_id:
+                source_id = allocation.group_photo_id
+                source_kind = "photo"
+                storage = evidence.photo_storage_rows.get(str(allocation.group_photo_id))
+            photo_filename = ""
+            if source_id is not None and storage is not None:
+                extension = _safe_photo_extension(
+                    storage.get("original_filename"), storage.get("content_type")
+                )
+                photo_filename = f"{safe_windows_component(physical.collector_no)}{extension}"
+                position += 1
+                files.append(
+                    self._create_source_file(
+                        job=job,
+                        terminal=terminal,
+                        source_kind=source_kind,
+                        source_id=source_id,
+                        storage=storage,
+                        relative_path=f"{terminal_folder}/采集器/{photo_filename}",
+                        manifest_position=position,
+                    )
+                )
+            if is_extra:
+                supplement_rows.append(
+                    {
+                        "collector_no": physical.collector_no,
+                        "photo_filename": photo_filename,
+                    }
+                )
+
+        position += 1
+        files.append(
+            self._create_workbook_file(
+                job=job,
+                terminal=terminal,
+                relative_path=f"{terminal_folder}/终端资料.xlsx",
+                manifest_position=position,
+            )
+        )
+        if supplement_rows:
+            position += 1
+            files.append(
+                self._create_workbook_file(
+                    job=job,
+                    terminal=terminal,
+                    relative_path=f"{terminal_folder}/补充采集器.xlsx",
+                    manifest_position=position,
+                )
+            )
+        self.session.flush()
+        terminal.manifest_json = {
+            **dict(terminal.manifest_json or {}),
+            "meter_rows": meter_rows,
+            "supplement_rows": supplement_rows,
+            "files": [
+                {
+                    "id": str(row.id),
+                    "relative_path": row.relative_path,
+                    "source_kind": row.source_kind,
+                    "content_type": row.content_type,
+                    "byte_size": row.byte_size,
+                    "sha256": row.sha256,
+                }
+                for row in files
+            ],
+        }
+        if collision:
+            terminal.status = "needs_recheck"
+            terminal.diagnostics = [
+                {
+                    "code": "module_directory_collision",
+                    "message": "模块目录安全化后发生重名，请重新预检",
+                }
+            ]
+
     def reserve_job(
         self,
         *,
@@ -1136,6 +1433,10 @@ class PostgresMaterialExportService:
             self.session.flush()
             allocation_results: list[MaterialExportAllocationResult] = []
             allocation_ids: list[str] = []
+            manifest_allocations: dict[
+                str,
+                tuple[MaterialExportCollectorAllocation, PhysicalCollector, bool],
+            ] = {}
             for (
                 requirement_key,
                 original_no,
@@ -1199,9 +1500,21 @@ class PostgresMaterialExportService:
                         is_extra=is_extra,
                     )
                 )
+                manifest_allocations[requirement_key] = (
+                    allocation,
+                    physical,
+                    is_extra,
+                )
                 allocation_ids.append(str(allocation.id))
                 total_allocations += 1
             terminal_export.manifest_json = {"allocation_ids": allocation_ids}
+            self._build_terminal_manifest(
+                job=job,
+                terminal=terminal_export,
+                evidence=evidence,
+                allocations=manifest_allocations,
+                collector_photos=photo_map,
+            )
             results.append(
                 MaterialExportTerminalResult(
                     id=str(terminal_export.id),
@@ -1214,6 +1527,14 @@ class PostgresMaterialExportService:
             "terminal_count": len(results),
             "allocation_count": total_allocations,
         }
+        job.manifest_sha256 = preflight_fingerprint(
+            terminal.manifest_json
+            for terminal in self.session.scalars(
+                select(MaterialExportTerminal)
+                .where(MaterialExportTerminal.job_id == job.id)
+                .order_by(MaterialExportTerminal.id)
+            ).all()
+        )
         self.session.add(
             AuditLog(
                 team_id=self.team_id,
@@ -1236,6 +1557,205 @@ class PostgresMaterialExportService:
             terminals=tuple(results),
         )
 
+    def job_detail(self, *, job_id: str) -> MaterialExportJobDetail:
+        job = self.session.scalar(
+            select(MaterialExportJob).where(
+                MaterialExportJob.id == UUID(job_id),
+                MaterialExportJob.team_id == self.team_id,
+            )
+        )
+        if job is None:
+            raise ValueError("导出任务不存在")
+        terminals = self.session.scalars(
+            select(MaterialExportTerminal)
+            .where(MaterialExportTerminal.job_id == job.id)
+            .order_by(MaterialExportTerminal.id)
+        ).all()
+        files_by_terminal: dict[UUID, list[MaterialExportFile]] = defaultdict(list)
+        for row in self.session.scalars(
+            select(MaterialExportFile)
+            .where(MaterialExportFile.job_id == job.id)
+            .order_by(MaterialExportFile.terminal_export_id, MaterialExportFile.manifest_position)
+        ).all():
+            files_by_terminal[row.terminal_export_id].append(row)
+        terminal_details = tuple(
+            MaterialExportTerminalDetail(
+                id=str(terminal.id),
+                task_id=str(terminal.task_id),
+                terminal_code=terminal.terminal_code,
+                status=terminal.status,
+                meter_rows=tuple(terminal.manifest_json.get("meter_rows") or ()),
+                supplement_rows=tuple(
+                    terminal.manifest_json.get("supplement_rows") or ()
+                ),
+                files=tuple(
+                    MaterialExportFileDetail(
+                        id=str(row.id),
+                        relative_path=row.relative_path,
+                        source_kind=row.source_kind,
+                        content_type=row.content_type,
+                        byte_size=row.byte_size,
+                        sha256=row.sha256,
+                        status=row.status,
+                    )
+                    for row in files_by_terminal.get(terminal.id, ())
+                ),
+            )
+            for terminal in terminals
+        )
+        return MaterialExportJobDetail(
+            job_id=str(job.id),
+            status=job.status,
+            manifest_sha256=job.manifest_sha256,
+            terminals=terminal_details,
+        )
+
+    def acquire_lease(
+        self, *, job_id: str, owner_token: str, ttl_seconds: int = 90
+    ) -> MaterialExportLease:
+        token = normalize_identifier(owner_token)
+        if not token:
+            raise ValueError("浏览器租约标识不能为空")
+        job = self.session.scalar(
+            select(MaterialExportJob)
+            .where(
+                MaterialExportJob.id == UUID(job_id),
+                MaterialExportJob.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if job is None:
+            raise ValueError("导出任务不存在")
+        now = datetime.now(UTC)
+        lease = self.session.scalar(
+            select(MaterialExportLease)
+            .where(MaterialExportLease.scope == "global-download")
+            .with_for_update()
+        )
+        if lease is not None and lease.expires_at > now:
+            if lease.job_id != job.id or lease.owner_token != token:
+                raise MaterialExportBusy("已有管理员正在下载，请稍后继续")
+        if lease is None:
+            from datetime import timedelta
+
+            lease = MaterialExportLease(
+                scope="global-download",
+                job_id=job.id,
+                owner_token=token,
+                owner_id=self.actor_id,
+                owner_username=self.actor,
+                heartbeat_at=now,
+                expires_at=now + timedelta(seconds=max(10, ttl_seconds)),
+            )
+            self.session.add(lease)
+        else:
+            from datetime import timedelta
+
+            lease.job_id = job.id
+            lease.owner_token = token
+            lease.owner_id = self.actor_id
+            lease.owner_username = self.actor
+            lease.heartbeat_at = now
+            lease.expires_at = now + timedelta(seconds=max(10, ttl_seconds))
+        job.status = "downloading"
+        self.session.flush()
+        return lease
+
+    def heartbeat(
+        self, *, job_id: str, owner_token: str, ttl_seconds: int = 90
+    ) -> MaterialExportLease:
+        from datetime import timedelta
+
+        lease = self.session.scalar(
+            select(MaterialExportLease)
+            .where(MaterialExportLease.scope == "global-download")
+            .with_for_update()
+        )
+        if (
+            lease is None
+            or lease.job_id != UUID(job_id)
+            or lease.owner_token != normalize_identifier(owner_token)
+        ):
+            raise MaterialExportLeaseMismatch("下载租约已失效，请重新继续")
+        now = datetime.now(UTC)
+        lease.heartbeat_at = now
+        lease.expires_at = now + timedelta(seconds=max(10, ttl_seconds))
+        self.session.flush()
+        return lease
+
+    def pause(self, *, job_id: str, owner_token: str) -> None:
+        lease = self.session.scalar(
+            select(MaterialExportLease)
+            .where(MaterialExportLease.scope == "global-download")
+            .with_for_update()
+        )
+        if (
+            lease is None
+            or lease.job_id != UUID(job_id)
+            or lease.owner_token != normalize_identifier(owner_token)
+        ):
+            raise MaterialExportLeaseMismatch("下载租约已失效，请重新继续")
+        job = self.session.scalar(
+            select(MaterialExportJob)
+            .where(
+                MaterialExportJob.id == lease.job_id,
+                MaterialExportJob.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if job is None:
+            raise ValueError("导出任务不存在")
+        job.status = "paused"
+        for terminal in self.session.scalars(
+            select(MaterialExportTerminal)
+            .where(
+                MaterialExportTerminal.job_id == job.id,
+                MaterialExportTerminal.status == "downloading",
+            )
+            .with_for_update()
+        ).all():
+            terminal.status = "paused"
+        self.session.delete(lease)
+        self.session.flush()
+
+    def ack_file(
+        self,
+        *,
+        job_id: str,
+        file_id: str,
+        byte_size: int,
+        sha256: str,
+    ) -> MaterialExportFile:
+        if byte_size < 0 or not normalize_identifier(sha256):
+            raise MaterialExportFileMismatch("文件大小或 SHA256 无效")
+        row = self.session.scalar(
+            select(MaterialExportFile)
+            .join(MaterialExportJob, MaterialExportJob.id == MaterialExportFile.job_id)
+            .where(
+                MaterialExportFile.id == UUID(file_id),
+                MaterialExportFile.job_id == UUID(job_id),
+                MaterialExportFile.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            raise ValueError("导出文件不存在")
+        normalized_sha = normalize_identifier(sha256).lower()
+        if row.status == "completed":
+            if row.byte_size == byte_size and row.sha256 == normalized_sha:
+                return row
+            raise MaterialExportFileMismatch("文件已确认，但大小或 SHA256 不一致")
+        if row.byte_size is not None and row.byte_size != byte_size:
+            raise MaterialExportFileMismatch("文件大小与清单不一致")
+        if row.sha256 is not None and row.sha256.lower() != normalized_sha:
+            raise MaterialExportFileMismatch("文件 SHA256 与清单不一致")
+        row.byte_size = byte_size
+        row.sha256 = normalized_sha
+        row.status = "completed"
+        row.completed_at = datetime.now(UTC)
+        self.session.flush()
+        return row
+
     def mark_terminal_completed(self, *, job_id: str, terminal_id: str) -> None:
         terminal = self.session.scalar(
             select(MaterialExportTerminal)
@@ -1249,6 +1769,17 @@ class PostgresMaterialExportService:
         )
         if terminal is None:
             raise ValueError("导出终端不存在")
+        pending_files = int(
+            self.session.scalar(
+                select(func.count(MaterialExportFile.id)).where(
+                    MaterialExportFile.terminal_export_id == terminal.id,
+                    MaterialExportFile.status != "completed",
+                )
+            )
+            or 0
+        )
+        if pending_files:
+            raise MaterialExportFileMismatch("仍有文件未完成校验，不能完成终端导出")
         allocation_ids = [
             UUID(value) for value in terminal.manifest_json.get("allocation_ids", [])
         ]
