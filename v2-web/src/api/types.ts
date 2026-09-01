@@ -134,6 +134,98 @@ export type ReviewTask = {
   installerDistribution?: Array<{ installer: string; groupCount: number; share: number }>
 }
 
+export type MaterialExportTerminalSummary = {
+  taskId: string
+  projectId: string
+  terminalCode: string
+  requestedCollectorCount: number
+  sourceCollectorCount: number
+  finalCollectorCount: number
+  activeAllocationCount: number
+  lastJobStatus: string
+}
+
+export type MaterialExportIssue = {
+  code: string
+  terminalCode: string
+  groupIds: string[]
+  meterNos: string[]
+  moduleNos: string[]
+  message: string
+}
+
+export type MaterialExportTerminalPreflight = {
+  taskId: string
+  terminalCode: string
+  constructedMeterCount: number
+  sourceCollectorCount: number
+  requestedCollectorCount: number
+  finalCollectorCount: number
+  sourceRevision: string
+  canExport: boolean
+  issues: MaterialExportIssue[]
+  poolShortage: number
+}
+
+export type MaterialExportPreflight = {
+  projectId: string
+  fingerprint: string
+  terminals: Record<string, MaterialExportTerminalPreflight>
+  sourceGroupIds: string[]
+  totalPoolShortage: number
+}
+
+export type MaterialExportFile = {
+  id: string
+  relativePath: string
+  sourceKind: 'photo' | 'collector_photo' | 'client_workbook'
+  contentType: string
+  byteSize: number | null
+  sha256: string | null
+  status: string
+}
+
+export type MaterialExportMeterRow = {
+  meterNo: string
+  address: string
+  moduleNo: string
+  finalCollectorNo: string
+}
+
+export type MaterialExportSupplementRow = {
+  collectorNo: string
+  photoFilename: string
+}
+
+export type MaterialExportTerminalManifest = {
+  id: string
+  taskId: string
+  terminalCode: string
+  status: string
+  meterRows: MaterialExportMeterRow[]
+  supplementRows: MaterialExportSupplementRow[]
+  files: MaterialExportFile[]
+}
+
+export type MaterialExportJobDetail = {
+  id: string
+  status: string
+  manifestSha256: string
+  terminals: MaterialExportTerminalManifest[]
+}
+
+export type MaterialExportLease = {
+  scope: string
+  jobId: string
+  ownerToken: string
+  expiresAt: string
+}
+
+export type MaterialExportWrittenFile = {
+  byteSize: number
+  sha256: string
+}
+
 export type TaskSnapshot = {
   teamId: string
   items: ReviewTask[]

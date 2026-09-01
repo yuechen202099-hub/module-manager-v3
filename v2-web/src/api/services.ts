@@ -36,6 +36,16 @@ import type {
   ImportJob,
   InstallerWorkload,
   MaterialGroup,
+  MaterialExportFile,
+  MaterialExportIssue,
+  MaterialExportJobDetail,
+  MaterialExportLease,
+  MaterialExportMeterRow,
+  MaterialExportPreflight,
+  MaterialExportSupplementRow,
+  MaterialExportTerminalManifest,
+  MaterialExportTerminalPreflight,
+  MaterialExportTerminalSummary,
   PhotoBarcodeReviewGroup,
   Project,
   ProjectSummary,
@@ -167,6 +177,7 @@ type BackendAuthConfig = {
 
 type BackendTask = {
   id: number | string
+  project_id?: string
   terminal?: string
   address?: string
   address_search_text?: string
@@ -858,7 +869,7 @@ function mapTask(raw: BackendTask): ReviewTask {
   const unreviewedCount = Number(raw.unreviewed_count || Math.max(renovationCount - reviewedCount, 0))
   return {
     id: String(raw.id),
-    projectId: 'local-test',
+    projectId: raw.project_id || '',
     name: raw.name || `终端 ${raw.terminal || raw.id}`,
     stage: raw.terminal || '',
     status: (raw.status || 'pending') as TaskStatus,
@@ -3190,4 +3201,181 @@ export async function refreshGlobalCollectorTerminal(terminalId: string): Promis
 
 export async function rollbackCollectorAssignment(assignmentId: string): Promise<void> {
   await api(`/collector-transfer/assignments/${encodeURIComponent(assignmentId)}/rollback`, { method: 'POST' })
+}
+
+type BackendMaterialExportIssue = {
+  code: string
+  terminal_code: string
+  group_ids: string[]
+  meter_nos: string[]
+  module_nos: string[]
+  message: string
+}
+
+function mapMaterialExportIssue(raw: BackendMaterialExportIssue): MaterialExportIssue {
+  return {
+    code: raw.code,
+    terminalCode: raw.terminal_code,
+    groupIds: raw.group_ids || [],
+    meterNos: raw.meter_nos || [],
+    moduleNos: raw.module_nos || [],
+    message: raw.message,
+  }
+}
+
+function mapMaterialExportPreflightRow(raw: any): MaterialExportTerminalPreflight {
+  return {
+    taskId: String(raw.task_id),
+    terminalCode: String(raw.terminal_code || ''),
+    constructedMeterCount: Number(raw.constructed_meter_count || 0),
+    sourceCollectorCount: Number(raw.source_collector_count || 0),
+    requestedCollectorCount: Number(raw.requested_collector_count || 0),
+    finalCollectorCount: Number(raw.final_collector_count || 0),
+    sourceRevision: String(raw.source_revision || ''),
+    canExport: Boolean(raw.can_export),
+    issues: (raw.issues || []).map(mapMaterialExportIssue),
+    poolShortage: Number(raw.pool_shortage || 0),
+  }
+}
+
+function mapMaterialExportFile(raw: any): MaterialExportFile {
+  return {
+    id: String(raw.id),
+    relativePath: String(raw.relative_path || ''),
+    sourceKind: raw.source_kind,
+    contentType: String(raw.content_type || 'application/octet-stream'),
+    byteSize: raw.byte_size == null ? null : Number(raw.byte_size),
+    sha256: raw.sha256 == null ? null : String(raw.sha256),
+    status: String(raw.status || ''),
+  }
+}
+
+function mapMaterialExportTerminal(raw: any): MaterialExportTerminalManifest {
+  const meterRows: MaterialExportMeterRow[] = (raw.meter_rows || []).map((row: any) => ({
+    meterNo: String(row.meter_no || ''),
+    address: String(row.address || ''),
+    moduleNo: String(row.module_no || ''),
+    finalCollectorNo: String(row.final_collector_no || ''),
+  }))
+  const supplementRows: MaterialExportSupplementRow[] = (raw.supplement_rows || []).map((row: any) => ({
+    collectorNo: String(row.collector_no || ''),
+    photoFilename: String(row.photo_filename || ''),
+  }))
+  return {
+    id: String(raw.id),
+    taskId: String(raw.task_id),
+    terminalCode: String(raw.terminal_code || ''),
+    status: String(raw.status || ''),
+    meterRows,
+    supplementRows,
+    files: (raw.files || []).map(mapMaterialExportFile),
+  }
+}
+
+export async function fetchMaterialExportSummaries(taskIds: string[]): Promise<MaterialExportTerminalSummary[]> {
+  const rows = await api<any[]>('/material-exports/terminal-summaries', {
+    method: 'POST',
+    body: JSON.stringify({ task_ids: taskIds }),
+  })
+  return rows.map((raw) => ({
+    taskId: String(raw.task_id),
+    projectId: String(raw.project_id || ''),
+    terminalCode: String(raw.terminal_code || ''),
+    requestedCollectorCount: Number(raw.requested_collector_count || 0),
+    sourceCollectorCount: Number(raw.source_collector_count || 0),
+    finalCollectorCount: Number(raw.final_collector_count || 0),
+    activeAllocationCount: Number(raw.active_allocation_count || 0),
+    lastJobStatus: String(raw.last_job_status || ''),
+  }))
+}
+
+export async function updateMaterialExportSetting(taskId: string, count: number): Promise<MaterialExportTerminalSummary> {
+  const raw = await api<any>(`/material-exports/terminal-settings/${encodeURIComponent(taskId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ requested_collector_count: count }),
+  })
+  return (await fetchMaterialExportSummaries([String(raw.task_id)]))[0]
+}
+
+export async function preflightMaterialExport(taskIds: string[]): Promise<MaterialExportPreflight> {
+  const raw = await api<any>('/material-exports/preflight', {
+    method: 'POST',
+    body: JSON.stringify({ task_ids: taskIds }),
+  })
+  const terminals: Record<string, MaterialExportTerminalPreflight> = {}
+  for (const [taskId, row] of Object.entries(raw.terminals || {})) terminals[taskId] = mapMaterialExportPreflightRow(row)
+  return {
+    projectId: String(raw.project_id || ''),
+    fingerprint: String(raw.fingerprint || ''),
+    terminals,
+    sourceGroupIds: (raw.source_group_ids || []).map(String),
+    totalPoolShortage: Number(raw.total_pool_shortage || 0),
+  }
+}
+
+export async function fetchMaterialExportJob(jobId: string): Promise<MaterialExportJobDetail> {
+  const raw = await api<any>(`/material-exports/jobs/${encodeURIComponent(jobId)}`)
+  return {
+    id: String(raw.job_id),
+    status: String(raw.status || ''),
+    manifestSha256: String(raw.manifest_sha256 || ''),
+    terminals: (raw.terminals || []).map(mapMaterialExportTerminal),
+  }
+}
+
+export async function reserveMaterialExport(taskIds: string[], fingerprint: string): Promise<MaterialExportJobDetail> {
+  const raw = await api<any>('/material-exports/jobs', {
+    method: 'POST',
+    body: JSON.stringify({ task_ids: taskIds, preflight_fingerprint: fingerprint }),
+  })
+  return fetchMaterialExportJob(String(raw.job_id))
+}
+
+export async function resumeMaterialExport(jobId: string, ownerToken = crypto.randomUUID()): Promise<MaterialExportLease> {
+  const raw = await api<any>(`/material-exports/jobs/${encodeURIComponent(jobId)}/lease`, {
+    method: 'POST',
+    body: JSON.stringify({ owner_token: ownerToken }),
+  })
+  return { scope: raw.scope, jobId: String(raw.job_id), ownerToken, expiresAt: String(raw.expires_at || '') }
+}
+
+export async function heartbeatMaterialExport(jobId: string, ownerToken: string): Promise<void> {
+  await api(`/material-exports/jobs/${encodeURIComponent(jobId)}/heartbeat`, {
+    method: 'POST',
+    body: JSON.stringify({ owner_token: ownerToken }),
+  })
+}
+
+export async function pauseMaterialExport(jobId: string, ownerToken: string): Promise<void> {
+  await api(`/material-exports/jobs/${encodeURIComponent(jobId)}/pause`, {
+    method: 'POST',
+    body: JSON.stringify({ owner_token: ownerToken }),
+  })
+}
+
+export async function fetchMaterialExportFile(jobId: string, fileId: string, leaseToken: string, signal?: AbortSignal): Promise<Response> {
+  const response = await fetchWithAuth(`/material-exports/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(fileId)}`, {
+    signal,
+    headers: { ...authHeaders(), 'X-Material-Export-Lease': leaseToken },
+  })
+  if (!response.ok) throw new Error(`导出文件下载失败（${response.status}）`)
+  return response
+}
+
+export async function acknowledgeMaterialExportFile(jobId: string, fileId: string, result: { byteSize: number; sha256: string }): Promise<void> {
+  await api(`/material-exports/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(fileId)}/ack`, {
+    method: 'POST',
+    body: JSON.stringify({ byte_size: result.byteSize, sha256: result.sha256 }),
+  })
+}
+
+export async function completeMaterialExportTerminal(jobId: string, terminalId: string): Promise<void> {
+  await api(`/material-exports/jobs/${encodeURIComponent(jobId)}/terminals/${encodeURIComponent(terminalId)}/complete`, { method: 'POST' })
+}
+
+export async function cancelReleaseMaterialExport(jobId: string, terminalIds: string[], reason: string): Promise<void> {
+  await api(`/material-exports/jobs/${encodeURIComponent(jobId)}/release`, {
+    method: 'POST',
+    body: JSON.stringify({ terminal_ids: terminalIds, reason }),
+  })
 }
