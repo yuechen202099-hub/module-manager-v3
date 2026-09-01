@@ -44,6 +44,28 @@ class _TrackingRetiredDeliveryDependency:
         raise RuntimeError("retired delivery producer touched a dependency")
 
 
+def test_task_payload_project_identity_is_not_hard_coded() -> None:
+    project_id = uuid4()
+    task = SimpleNamespace(
+        id=uuid4(),
+        legacy_id=7,
+        project_id=project_id,
+        terminal="T-007",
+        title="终端 7",
+        status="published",
+        review_claimed_by=None,
+        claimed_at=None,
+        released_at=None,
+        construction_enabled=True,
+        construction_claimed_by=None,
+        construction_claimed_at=None,
+        construction_priority=False,
+        construction_priority_updated_by=None,
+        construction_priority_updated_at=None,
+    )
+    assert repository._task_payload(task)["project_id"] == str(project_id)
+
+
 def test_postgres_delivery_enqueue_compatibility_hook_is_noop_before_dependencies() -> None:
     dependency = _TrackingRetiredDeliveryDependency()
     assert (

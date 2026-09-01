@@ -1165,6 +1165,7 @@ def _task_payload(task: Task, stats: dict[str, Any] | None = None) -> dict[str, 
     )
     return {
         "id": task.legacy_id if task.legacy_id is not None else str(task.id),
+        "project_id": str(task.project_id),
         "terminal": task.terminal or "",
         "address": str(resolved_stats.get("address") or ""),
         "address_search_text": str(resolved_stats.get("address_search_text") or ""),
