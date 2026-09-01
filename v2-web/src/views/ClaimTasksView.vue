@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { Refresh, Search, Upload } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import { assignConstructionTask, fetchTaskSnapshot, fetchUserAccounts, setConstructionTaskPriority } from '@/api/services'
 import ConstructionPriorityImportDialog from '@/components/ConstructionPriorityImportDialog.vue'
+import MaterialExportCardControls from '@/components/material-export/MaterialExportCardControls.vue'
+import MaterialExportToolbar from '@/components/material-export/MaterialExportToolbar.vue'
 import type { ReviewTask, UserAccount } from '@/api/types'
+import { useMaterialExport } from '@/features/materialExport/useMaterialExport'
 import { useAuthStore } from '@/stores/auth'
 import { createMutationGuardedRequestGate, isAbortError } from '@/utils/latestRequestGate.mjs'
 
@@ -36,7 +39,8 @@ const taskLoadGate = createMutationGuardedRequestGate((nextLoading) => {
   loading.value = nextLoading
 })
 
-const isAdmin = computed(() => auth.user?.role === 'admin' || auth.user?.roles?.includes('admin'))
+const isAdmin = computed(() => Boolean(auth.user?.role === 'admin' || auth.user?.roles?.includes('admin')))
+const materialExport = useMaterialExport(tasks, isAdmin)
 const userByUsername = computed(() => {
   const map = new Map<string, UserAccount>()
   for (const user of accountUsers.value) {
@@ -67,12 +71,15 @@ const visibleTasks = computed(() => {
   return items.sort((left, right) => {
     const priorityDiff = Number(right.constructionPriority) - Number(left.constructionPriority)
     if (priorityDiff) return priorityDiff
-    const completionDiff = Number(isTaskConstructionComplete(left)) - Number(isTaskConstructionComplete(right))
+    const completionDiff = constructionProgressPercent(right) - constructionProgressPercent(left)
     if (completionDiff) return completionDiff
-    const availableDiff = Number(right.constructionAvailable) - Number(left.constructionAvailable)
-    if (availableDiff) return availableDiff
     return String(left.terminal || left.id).localeCompare(String(right.terminal || right.id), 'zh-Hans-CN')
   })
+})
+const exportableVisibleTasks = computed(() => visibleTasks.value.filter((task) => taskUploadedGroups(task) > 0))
+const allVisibleExportSelected = computed(() => {
+  const rows = exportableVisibleTasks.value
+  return Boolean(rows.length) && rows.every((task) => materialExport.isSelected(task.id))
 })
 const summary = computed(() => ({
   total: tasks.value.length,
@@ -201,6 +208,11 @@ async function loadTasks(force = false) {
     const snapshot = await fetchTaskSnapshot({ force, signal: request.signal })
     if (!request.isCurrent(taskMutationVersion)) return
     tasks.value = snapshot.items
+    if (isAdmin.value) {
+      void materialExport.loadSummaries(snapshot.items).catch((error) => {
+        materialExport.error.value = error instanceof Error ? error.message : '导出摘要加载失败'
+      })
+    }
   } catch (error) {
     if (isAbortError(error)) return
     if (!request.isCurrent(taskMutationVersion)) return
@@ -212,6 +224,59 @@ async function loadTasks(force = false) {
 
 function refreshTasks() {
   void loadTasks(true)
+}
+
+function selectVisibleForExport(selected: boolean) {
+  materialExport.selectCurrent(visibleTasks.value, selected)
+}
+
+async function updateExportCollectorCount(task: ReviewTask, count: number) {
+  try {
+    await materialExport.updateCount(task.id, count)
+    ElMessage.success(`终端 ${task.terminal || task.id} 的应还采集器数量已保存`)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '应还采集器数量保存失败')
+  }
+}
+
+async function startMaterialExport(taskIds?: string[]) {
+  try {
+    const result = await materialExport.start(taskIds)
+    if (result === 'completed') ElMessage.success('终端资料导出完成')
+    else ElMessage.info('已在当前文件完成后暂停，可继续导出')
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') return
+    ElMessage.error(error instanceof Error ? error.message : '终端资料导出失败')
+  }
+}
+
+function pauseMaterialExportRun() {
+  materialExport.pause()
+  ElMessage.info('将在当前文件完成后暂停')
+}
+
+async function resumeMaterialExportRun() {
+  try {
+    const result = await materialExport.resume()
+    if (result === 'completed') ElMessage.success('终端资料导出完成')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '继续导出失败')
+  }
+}
+
+async function confirmReleaseMaterialExport() {
+  try {
+    await ElMessageBox.confirm(
+      '仅释放尚未完成终端的采集器预留；已完成终端不会被释放。是否继续？',
+      '取消本次导出',
+      { confirmButtonText: '确认释放', cancelButtonText: '返回', type: 'warning' },
+    )
+    await materialExport.release('管理员在任务派发页取消导出')
+    ElMessage.success('未完成终端的采集器占用已释放')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error instanceof Error ? error.message : '释放失败')
+  }
 }
 
 function handleConstructionPriorityImported() {
@@ -308,6 +373,7 @@ onUnmounted(() => {
     </div>
 
     <ElAlert v-if="errorMessage" class="claim-alert" type="error" :closable="false" :title="errorMessage" />
+    <ElAlert v-if="isAdmin && materialExport.error.value" class="claim-alert" type="warning" :closable="false" :title="materialExport.error.value" />
 
     <div class="claim-summary">
       <article class="metric">
@@ -334,14 +400,30 @@ onUnmounted(() => {
           <h3>终端任务</h3>
           <p class="muted">共 {{ visibleTasks.length }} 个</p>
         </div>
-        <ElInput
-          v-model="searchQuery"
-          class="claim-task-search"
-          clearable
-          :prefix-icon="Search"
-          placeholder="搜索终端号或地址"
-          aria-label="搜索终端号或地址"
-        />
+        <div class="claim-task-heading-actions">
+          <MaterialExportToolbar
+            v-if="isAdmin"
+            :selected-count="materialExport.selectedCount.value"
+            :all-selected="allVisibleExportSelected"
+            :running="materialExport.running.value"
+            :paused="materialExport.paused.value"
+            :has-job="Boolean(materialExport.currentJob.value)"
+            :progress-text="materialExport.progressText.value"
+            @select-all="selectVisibleForExport"
+            @export="startMaterialExport()"
+            @pause="pauseMaterialExportRun"
+            @resume="resumeMaterialExportRun"
+            @release="confirmReleaseMaterialExport"
+          />
+          <ElInput
+            v-model="searchQuery"
+            class="claim-task-search"
+            clearable
+            :prefix-icon="Search"
+            placeholder="搜索终端号或地址"
+            aria-label="搜索终端号或地址"
+          />
+        </div>
       </div>
 
       <ElRadioGroup v-model="taskFilter" class="claim-task-filters" size="small">
@@ -426,6 +508,18 @@ onUnmounted(() => {
             >
               {{ task.constructionPriority ? '取消优先施工' : '设为优先施工' }}
             </ElButton>
+            <MaterialExportCardControls
+              v-if="isAdmin"
+              :task-id="task.id"
+              :terminal-code="task.terminal || task.id"
+              :summary="materialExport.summaries.value[task.id]"
+              :selected="materialExport.isSelected(task.id)"
+              :disabled="taskUploadedGroups(task) <= 0"
+              :busy="materialExport.running.value"
+              @selected="materialExport.setSelected(task.id, $event)"
+              @count="updateExportCollectorCount(task, $event)"
+              @export="startMaterialExport([task.id])"
+            />
           </div>
         </article>
       </div>
@@ -468,3 +562,14 @@ onUnmounted(() => {
     />
   </section>
 </template>
+
+<style scoped>
+.claim-task-heading-actions {
+  display: flex;
+  flex: 1 1 640px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+</style>
