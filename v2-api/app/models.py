@@ -1126,7 +1126,7 @@ class MaterialExportCollectorAllocation(Base, TimestampMixin):
     __tablename__ = "material_export_collector_allocations"
     __table_args__ = (
         CheckConstraint(
-            "allocation_mode IN ('same_number', 'random_pool', 'extra_pool')",
+            "allocation_mode IN ('same_number', 'pool_replacement', 'extra_pool')",
             name="ck_material_export_allocations_mode",
         ),
         CheckConstraint(

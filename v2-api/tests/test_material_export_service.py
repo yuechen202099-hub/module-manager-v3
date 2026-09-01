@@ -7,6 +7,9 @@ import pytest
 
 from app.domain.material_export import MaterialExportMeter
 from app.services.material_export import (
+    MaterialExportAllocationResult,
+    MaterialExportCompletedCannotRelease,
+    MaterialExportPoolShortage,
     MaterialExportProjectMismatch,
     ProjectExportEvidence,
     build_preflight,
@@ -126,3 +129,36 @@ def test_preflight_rejects_cross_project_task_selection() -> None:
             evidence=ProjectExportEvidence(meters=(), group_payloads={}, photo_storage_rows={}),
             settings={},
         )
+
+
+def test_pool_shortage_keeps_batch_and_terminal_diagnostics() -> None:
+    error = MaterialExportPoolShortage(
+        "采集器池库存不足，本批次未开始分配",
+        total_shortage=2,
+        terminal_shortages={"task-a": 1, "task-b": 1},
+    )
+    assert error.code == "pool_shortage"
+    assert error.total_shortage == 2
+    assert error.terminal_shortages == {"task-a": 1, "task-b": 1}
+
+
+def test_allocation_result_distinguishes_replacement_and_extra() -> None:
+    replacement = MaterialExportAllocationResult(
+        allocation_id="a-1",
+        physical_collector_id="p-1",
+        original_collector_no="C-OLD",
+        final_collector_no="C-NEW",
+        allocation_mode="pool_replacement",
+        is_extra=False,
+    )
+    extra = MaterialExportAllocationResult(
+        allocation_id="a-2",
+        physical_collector_id="p-2",
+        original_collector_no=None,
+        final_collector_no="C-EXTRA",
+        allocation_mode="extra_pool",
+        is_extra=True,
+    )
+    assert replacement.is_extra is False
+    assert extra.is_extra is True
+    assert MaterialExportCompletedCannotRelease.code == "completed_cannot_release"

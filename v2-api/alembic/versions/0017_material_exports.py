@@ -181,7 +181,7 @@ def upgrade() -> None:
         sa.Column("released_at", sa.DateTime(timezone=True), nullable=True),
         *timestamps(),
         sa.CheckConstraint(
-            "allocation_mode IN ('same_number', 'random_pool', 'extra_pool')",
+            "allocation_mode IN ('same_number', 'pool_replacement', 'extra_pool')",
             name="ck_material_export_allocations_mode",
         ),
         sa.CheckConstraint(

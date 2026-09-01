@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+import secrets
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -27,6 +29,10 @@ from app.domain.terminal_review import (
 )
 from app.models import (
     AuditLog,
+    CollectorAssignment,
+    CollectorPhoto,
+    CollectorRequirement,
+    CollectorTransferTerminal,
     MaterialExportCollectorAllocation,
     MaterialExportJob,
     MaterialExportTerminal,
@@ -51,6 +57,25 @@ class MaterialExportProjectMismatch(MaterialExportError):
 
 class MaterialExportSnapshotChanged(MaterialExportError):
     code = "snapshot_changed"
+
+
+class MaterialExportPoolShortage(MaterialExportError):
+    code = "pool_shortage"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        total_shortage: int,
+        terminal_shortages: Mapping[str, int],
+    ) -> None:
+        super().__init__(message)
+        self.total_shortage = total_shortage
+        self.terminal_shortages = dict(terminal_shortages)
+
+
+class MaterialExportCompletedCannotRelease(MaterialExportError):
+    code = "completed_cannot_release"
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +118,37 @@ class TerminalMaterialExportSummary:
     final_collector_count: int
     active_allocation_count: int = 0
     last_job_status: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialExportShortageSimulation:
+    total_shortage: int
+    terminal_shortages: Mapping[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialExportAllocationResult:
+    allocation_id: str
+    physical_collector_id: str
+    original_collector_no: str | None
+    final_collector_no: str
+    allocation_mode: str
+    is_extra: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialExportTerminalResult:
+    id: str
+    task_id: str
+    terminal_code: str
+    allocations: tuple[MaterialExportAllocationResult, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialExportJobResult:
+    job_id: str
+    total_allocations: int
+    terminals: tuple[MaterialExportTerminalResult, ...]
 
 
 def _setting_count(setting: object | None) -> int:
@@ -526,7 +582,92 @@ class PostgresMaterialExportService:
             evidence=self._load_project_evidence(project_id),
             settings=self._settings(tasks),
         )
-        return self._with_pool_shortages(result, project_id)
+        result = self._with_pool_shortages(result, project_id)
+        inventory_rows = self._inventory_fingerprint_rows(project_id)
+        return replace(
+            result,
+            fingerprint=preflight_fingerprint(
+                ({"preflight": result.fingerprint}, *inventory_rows)
+            ),
+        )
+
+    def _inventory_fingerprint_rows(
+        self, project_id: UUID
+    ) -> tuple[Mapping[str, object], ...]:
+        physical_rows = self.session.execute(
+            select(
+                PhysicalCollector.id,
+                PhysicalCollector.collector_no,
+                PhysicalCollector.pool_status,
+            )
+            .where(
+                PhysicalCollector.team_id == self.team_id,
+                PhysicalCollector.project_id == project_id,
+            )
+            .order_by(PhysicalCollector.id)
+        ).all()
+        allocation_rows = self.session.execute(
+            select(
+                MaterialExportCollectorAllocation.id,
+                MaterialExportCollectorAllocation.physical_collector_id,
+                MaterialExportCollectorAllocation.requirement_key,
+                MaterialExportCollectorAllocation.status,
+            )
+            .where(
+                MaterialExportCollectorAllocation.team_id == self.team_id,
+                MaterialExportCollectorAllocation.project_id == project_id,
+                MaterialExportCollectorAllocation.status.in_(("reserved", "used")),
+            )
+            .order_by(MaterialExportCollectorAllocation.id)
+        ).all()
+        old_assignment_rows = self.session.execute(
+            select(
+                CollectorAssignment.id,
+                CollectorAssignment.physical_collector_id,
+                CollectorAssignment.requirement_id,
+                CollectorAssignment.status,
+            )
+            .join(
+                PhysicalCollector,
+                PhysicalCollector.id == CollectorAssignment.physical_collector_id,
+            )
+            .where(
+                CollectorAssignment.team_id == self.team_id,
+                CollectorAssignment.status.in_(("reserved", "used")),
+                PhysicalCollector.project_id == project_id,
+            )
+            .order_by(CollectorAssignment.id)
+        ).all()
+        rows: list[Mapping[str, object]] = [
+            {
+                "kind": "physical",
+                "id": str(row.id),
+                "collector_no": row.collector_no,
+                "pool_status": row.pool_status,
+            }
+            for row in physical_rows
+        ]
+        rows.extend(
+            {
+                "kind": "active_allocation",
+                "id": str(row.id),
+                "physical_collector_id": str(row.physical_collector_id),
+                "requirement_key": row.requirement_key,
+                "status": row.status,
+            }
+            for row in allocation_rows
+        )
+        rows.extend(
+            {
+                "kind": "active_collector_assignment",
+                "id": str(row.id),
+                "physical_collector_id": str(row.physical_collector_id),
+                "requirement_id": str(row.requirement_id),
+                "status": row.status,
+            }
+            for row in old_assignment_rows
+        )
+        return tuple(rows)
 
     def _with_pool_shortages(
         self, preflight: MaterialExportPreflight, project_id: UUID
@@ -547,9 +688,32 @@ class PostgresMaterialExportService:
             or 0
         )
         rows: dict[str, MaterialExportTerminalPreflight] = {}
+        reusable_rows = self.session.execute(
+            select(
+                MaterialExportTerminal.task_id,
+                func.count(MaterialExportCollectorAllocation.id),
+            )
+            .join(
+                MaterialExportCollectorAllocation,
+                MaterialExportCollectorAllocation.terminal_export_id
+                == MaterialExportTerminal.id,
+            )
+            .where(
+                MaterialExportTerminal.task_id.in_(
+                    [UUID(task_id) for task_id in preflight.terminals]
+                ),
+                MaterialExportCollectorAllocation.status.in_(("reserved", "used")),
+            )
+            .group_by(MaterialExportTerminal.task_id)
+        ).all()
+        reusable_by_task = {str(task_id): int(count) for task_id, count in reusable_rows}
         remaining = available_count
         for task_id, row in sorted(preflight.terminals.items()):
-            needed = row.final_collector_count if row.can_export else 0
+            needed = (
+                max(0, row.final_collector_count - reusable_by_task.get(task_id, 0))
+                if row.can_export
+                else 0
+            )
             satisfied = min(needed, remaining)
             shortage = needed - satisfied
             remaining -= satisfied
@@ -662,3 +826,551 @@ class PostgresMaterialExportService:
         )
         self.session.flush()
         return self.list_terminal_summaries(task_ids=(str(task.id),))[0]
+
+    def _active_export_allocations(
+        self, project_id: UUID
+    ) -> tuple[tuple[MaterialExportCollectorAllocation, MaterialExportTerminal], ...]:
+        return tuple(
+            self.session.execute(
+                select(MaterialExportCollectorAllocation, MaterialExportTerminal)
+                .join(
+                    MaterialExportTerminal,
+                    MaterialExportTerminal.id
+                    == MaterialExportCollectorAllocation.terminal_export_id,
+                )
+                .where(
+                    MaterialExportCollectorAllocation.team_id == self.team_id,
+                    MaterialExportCollectorAllocation.project_id == project_id,
+                    MaterialExportCollectorAllocation.status.in_(("reserved", "used")),
+                )
+                .order_by(MaterialExportCollectorAllocation.id)
+                .with_for_update()
+            ).all()
+        )
+
+    def _active_old_assignments(
+        self, project_id: UUID
+    ) -> dict[UUID, tuple[CollectorAssignment, CollectorRequirement, CollectorTransferTerminal]]:
+        rows = self.session.execute(
+            select(CollectorAssignment, CollectorRequirement, CollectorTransferTerminal)
+            .join(
+                CollectorRequirement,
+                CollectorRequirement.id == CollectorAssignment.requirement_id,
+            )
+            .join(
+                CollectorTransferTerminal,
+                CollectorTransferTerminal.id == CollectorRequirement.terminal_id,
+            )
+            .join(
+                PhysicalCollector,
+                PhysicalCollector.id == CollectorAssignment.physical_collector_id,
+            )
+            .where(
+                CollectorAssignment.team_id == self.team_id,
+                CollectorAssignment.status.in_(("reserved", "used")),
+                PhysicalCollector.project_id == project_id,
+            )
+            .order_by(CollectorAssignment.physical_collector_id)
+            .with_for_update()
+        ).all()
+        return {
+            assignment.physical_collector_id: (assignment, requirement, terminal)
+            for assignment, requirement, terminal in rows
+        }
+
+    def _requirement_rows(
+        self,
+        tasks: Sequence[Task],
+        evidence: ProjectExportEvidence,
+        settings: Mapping[str, TerminalExportSetting],
+    ) -> dict[str, tuple[tuple[str, str | None, bool], ...]]:
+        rows: dict[str, tuple[tuple[str, str | None, bool], ...]] = {}
+        for task in tasks:
+            task_id = str(task.id)
+            meters = tuple(
+                item
+                for item in evidence.meters
+                if item.constructed and item.task_id == task_id
+            )
+            demand = collector_demand(meters, _setting_count(settings.get(task_id)))
+            requirements: list[tuple[str, str | None, bool]] = [
+                (f"collector:{collector_no}", collector_no, False)
+                for collector_no in demand.source_collector_nos
+            ]
+            requirements.extend(
+                (f"extra:{index + 1:04d}", None, True)
+                for index in range(demand.extra_count)
+            )
+            rows[task_id] = tuple(requirements)
+        return rows
+
+    def _collector_photo_map(self, physical_ids: Sequence[UUID]) -> dict[UUID, CollectorPhoto]:
+        if not physical_ids:
+            return {}
+        rows = self.session.scalars(
+            select(CollectorPhoto)
+            .where(
+                CollectorPhoto.team_id == self.team_id,
+                CollectorPhoto.physical_collector_id.in_(physical_ids),
+                CollectorPhoto.is_active.is_(True),
+            )
+            .order_by(CollectorPhoto.created_at, CollectorPhoto.id)
+        ).all()
+        result: dict[UUID, CollectorPhoto] = {}
+        for row in rows:
+            result.setdefault(row.physical_collector_id, row)
+        return result
+
+    @staticmethod
+    def _group_photo_for_requirement(
+        evidence: ProjectExportEvidence, *, task_id: str, original_collector_no: str
+    ) -> UUID | None:
+        matching_groups = sorted(
+            {
+                meter.group_id
+                for meter in evidence.meters
+                if meter.constructed
+                and meter.task_id == task_id
+                and normalize_identifier(meter.collector_no)
+                == normalize_identifier(original_collector_no)
+            }
+        )
+        for group_id in matching_groups:
+            payload = evidence.group_payloads.get(group_id, {})
+            photos = payload.get("photos") if isinstance(payload, Mapping) else None
+            if not isinstance(photos, Sequence):
+                continue
+            for photo in photos:
+                if not isinstance(photo, Mapping):
+                    continue
+                category = normalize_identifier(
+                    photo.get("category") or photo.get("construction_slot")
+                )
+                if category != "collector_barcode":
+                    continue
+                try:
+                    return UUID(str(photo.get("id")))
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    def reserve_job(
+        self,
+        *,
+        preflight_fingerprint: str,
+        task_ids: Sequence[str],
+    ) -> MaterialExportJobResult:
+        tasks = self._owned_tasks(task_ids, lock=True)
+        project_ids = {task.project_id for task in tasks}
+        if len(project_ids) != 1:
+            raise MaterialExportProjectMismatch("一次导出只能选择同一项目的终端")
+        project_id = next(iter(project_ids))
+        current = self.preflight(task_ids=[str(task.id) for task in tasks])
+        if current.fingerprint != preflight_fingerprint:
+            raise MaterialExportSnapshotChanged("资料已变化，请重新预检")
+        exportable = tuple(
+            task for task in tasks if current.terminals[str(task.id)].can_export
+        )
+        if not exportable:
+            raise MaterialExportError("所选终端均存在资料异常，无法导出")
+
+        evidence = self._load_project_evidence(project_id)
+        settings = self._settings(tasks)
+        requirement_rows = self._requirement_rows(exportable, evidence, settings)
+        active_pairs = self._active_export_allocations(project_id)
+        active_by_physical = {
+            allocation.physical_collector_id: (allocation, terminal)
+            for allocation, terminal in active_pairs
+        }
+        reusable: dict[tuple[str, str], MaterialExportCollectorAllocation] = {}
+        selected_task_ids = {task.id for task in exportable}
+        for allocation, terminal in active_pairs:
+            if terminal.task_id in selected_task_ids:
+                reusable[(str(terminal.task_id), allocation.requirement_key)] = allocation
+
+        physical_rows = tuple(
+            self.session.scalars(
+                select(PhysicalCollector)
+                .where(
+                    PhysicalCollector.team_id == self.team_id,
+                    PhysicalCollector.project_id == project_id,
+                )
+                .order_by(PhysicalCollector.id)
+                .with_for_update()
+            ).all()
+        )
+        old_assignments = self._active_old_assignments(project_id)
+        physical_by_id = {row.id: row for row in physical_rows}
+        chosen: set[UUID] = set()
+        planned: dict[
+            str,
+            list[
+                tuple[
+                    str,
+                    str | None,
+                    bool,
+                    PhysicalCollector,
+                    str,
+                    CollectorAssignment | None,
+                ]
+            ],
+        ] = defaultdict(list)
+        shortage_by_task: dict[str, int] = defaultdict(int)
+
+        for task in sorted(exportable, key=lambda item: str(item.id)):
+            task_id = str(task.id)
+            terminal_code = normalize_identifier(task.terminal)
+            for requirement_key, original_no, is_extra in requirement_rows[task_id]:
+                prior = reusable.get((task_id, requirement_key))
+                if prior is not None:
+                    physical = physical_by_id.get(prior.physical_collector_id)
+                    if physical is None:
+                        raise MaterialExportSnapshotChanged("已预留采集器不存在，请重新预检")
+                    chosen.add(physical.id)
+                    planned[task_id].append(
+                        (
+                            requirement_key,
+                            original_no,
+                            is_extra,
+                            physical,
+                            prior.allocation_mode,
+                            None,
+                        )
+                    )
+                    continue
+
+                candidate: PhysicalCollector | None = None
+                source_assignment: CollectorAssignment | None = None
+                mode = "extra_pool" if is_extra else "pool_replacement"
+                if original_no:
+                    for physical in physical_rows:
+                        if physical.id in chosen or physical.id in active_by_physical:
+                            continue
+                        if normalize_identifier(physical.collector_no) != normalize_identifier(
+                            original_no
+                        ):
+                            continue
+                        old = old_assignments.get(physical.id)
+                        if old is not None:
+                            assignment, _requirement, old_terminal = old
+                            if normalize_identifier(old_terminal.terminal_code) != terminal_code:
+                                continue
+                            source_assignment = assignment
+                        elif physical.pool_status not in (
+                            "awaiting_photo",
+                            "direct",
+                            "available",
+                        ):
+                            continue
+                        candidate = physical
+                        mode = "same_number"
+                        break
+                if candidate is None:
+                    pool_candidates = [
+                        physical
+                        for physical in physical_rows
+                        if physical.id not in chosen
+                        and physical.id not in active_by_physical
+                        and physical.id not in old_assignments
+                        and physical.pool_status == "available"
+                    ]
+                    if pool_candidates:
+                        candidate = secrets.choice(pool_candidates)
+                if candidate is None:
+                    shortage_by_task[task_id] += 1
+                    continue
+                chosen.add(candidate.id)
+                planned[task_id].append(
+                    (
+                        requirement_key,
+                        original_no,
+                        is_extra,
+                        candidate,
+                        mode,
+                        source_assignment,
+                    )
+                )
+
+        total_shortage = sum(shortage_by_task.values())
+        if total_shortage:
+            raise MaterialExportPoolShortage(
+                "采集器池库存不足，本批次未开始分配",
+                total_shortage=total_shortage,
+                terminal_shortages=shortage_by_task,
+            )
+
+        job = MaterialExportJob(
+            team_id=self.team_id,
+            project_id=project_id,
+            status="reserved",
+            preflight_fingerprint=current.fingerprint,
+            manifest_sha256=current.fingerprint,
+            created_by_id=self.actor_id,
+            created_by_username=self.actor,
+            stats={"terminal_count": len(exportable)},
+            diagnostics=[],
+        )
+        self.session.add(job)
+        self.session.flush()
+        photo_map = self._collector_photo_map(tuple(chosen))
+        results: list[MaterialExportTerminalResult] = []
+        total_allocations = 0
+        for task in sorted(exportable, key=lambda item: str(item.id)):
+            task_id = str(task.id)
+            row = current.terminals[task_id]
+            terminal_export = MaterialExportTerminal(
+                job_id=job.id,
+                team_id=self.team_id,
+                project_id=project_id,
+                task_id=task.id,
+                terminal_code=task.terminal or "",
+                status="reserved",
+                requested_collector_count=row.requested_collector_count,
+                source_collector_count=row.source_collector_count,
+                final_collector_count=row.final_collector_count,
+                source_revision=row.source_revision,
+                manifest_json={},
+                diagnostics=[],
+            )
+            self.session.add(terminal_export)
+            self.session.flush()
+            allocation_results: list[MaterialExportAllocationResult] = []
+            allocation_ids: list[str] = []
+            for (
+                requirement_key,
+                original_no,
+                is_extra,
+                physical,
+                mode,
+                source_assignment,
+            ) in planned[task_id]:
+                existing = reusable.get((task_id, requirement_key))
+                if existing is not None:
+                    allocation = existing
+                else:
+                    collector_photo = photo_map.get(physical.id)
+                    group_photo_id = None
+                    photo_source_kind = "none"
+                    if collector_photo is not None:
+                        photo_source_kind = (
+                            "inventory_same" if mode == "same_number" else "pool"
+                        )
+                    elif original_no and mode == "same_number":
+                        group_photo_id = self._group_photo_for_requirement(
+                            evidence,
+                            task_id=task_id,
+                            original_collector_no=original_no,
+                        )
+                        if group_photo_id is not None:
+                            photo_source_kind = "terminal_group"
+                    allocation = MaterialExportCollectorAllocation(
+                        job_id=job.id,
+                        terminal_export_id=terminal_export.id,
+                        team_id=self.team_id,
+                        project_id=project_id,
+                        requirement_key=requirement_key,
+                        original_collector_no=original_no,
+                        physical_collector_id=physical.id,
+                        source_assignment_id=(
+                            source_assignment.id if source_assignment is not None else None
+                        ),
+                        collector_photo_id=(
+                            collector_photo.id if collector_photo is not None else None
+                        ),
+                        group_photo_id=group_photo_id,
+                        allocation_mode=mode,
+                        photo_source_kind=photo_source_kind,
+                        prior_pool_status=physical.pool_status,
+                        status="reserved",
+                        created_by_id=self.actor_id,
+                        created_by_username=self.actor,
+                    )
+                    self.session.add(allocation)
+                    physical.pool_status = "reserved"
+                    self.session.flush()
+                output_mode = allocation.allocation_mode
+                allocation_results.append(
+                    MaterialExportAllocationResult(
+                        allocation_id=str(allocation.id),
+                        physical_collector_id=str(physical.id),
+                        original_collector_no=allocation.original_collector_no,
+                        final_collector_no=physical.collector_no,
+                        allocation_mode=output_mode,
+                        is_extra=is_extra,
+                    )
+                )
+                allocation_ids.append(str(allocation.id))
+                total_allocations += 1
+            terminal_export.manifest_json = {"allocation_ids": allocation_ids}
+            results.append(
+                MaterialExportTerminalResult(
+                    id=str(terminal_export.id),
+                    task_id=task_id,
+                    terminal_code=task.terminal or "",
+                    allocations=tuple(allocation_results),
+                )
+            )
+        job.stats = {
+            "terminal_count": len(results),
+            "allocation_count": total_allocations,
+        }
+        self.session.add(
+            AuditLog(
+                team_id=self.team_id,
+                actor_id=self.actor_id,
+                actor_username=self.actor,
+                project_id=project_id,
+                action="material_export.reserved",
+                entity_type="material_export_job",
+                entity_id=job.id,
+                payload={
+                    "task_ids": [str(task.id) for task in exportable],
+                    "allocation_count": total_allocations,
+                },
+            )
+        )
+        self.session.flush()
+        return MaterialExportJobResult(
+            job_id=str(job.id),
+            total_allocations=total_allocations,
+            terminals=tuple(results),
+        )
+
+    def mark_terminal_completed(self, *, job_id: str, terminal_id: str) -> None:
+        terminal = self.session.scalar(
+            select(MaterialExportTerminal)
+            .join(MaterialExportJob, MaterialExportJob.id == MaterialExportTerminal.job_id)
+            .where(
+                MaterialExportTerminal.id == UUID(terminal_id),
+                MaterialExportTerminal.job_id == UUID(job_id),
+                MaterialExportTerminal.team_id == self.team_id,
+            )
+            .with_for_update()
+        )
+        if terminal is None:
+            raise ValueError("导出终端不存在")
+        allocation_ids = [
+            UUID(value) for value in terminal.manifest_json.get("allocation_ids", [])
+        ]
+        allocations = self.session.scalars(
+            select(MaterialExportCollectorAllocation)
+            .where(MaterialExportCollectorAllocation.id.in_(allocation_ids))
+            .with_for_update()
+        ).all() if allocation_ids else []
+        physical_ids = [row.physical_collector_id for row in allocations]
+        physical_rows = self.session.scalars(
+            select(PhysicalCollector)
+            .where(PhysicalCollector.id.in_(physical_ids))
+            .with_for_update()
+        ).all() if physical_ids else []
+        now = datetime.now(UTC)
+        for allocation in allocations:
+            allocation.status = "used"
+            allocation.used_at = now
+        for physical in physical_rows:
+            physical.pool_status = "used"
+        terminal.status = "completed"
+        terminal.completed_at = now
+        pending_count = int(
+            self.session.scalar(
+                select(func.count(MaterialExportTerminal.id)).where(
+                    MaterialExportTerminal.job_id == terminal.job_id,
+                    MaterialExportTerminal.id != terminal.id,
+                    MaterialExportTerminal.status != "completed",
+                )
+            )
+            or 0
+        )
+        if pending_count == 0:
+            job = self.session.get(MaterialExportJob, terminal.job_id)
+            if job is not None:
+                job.status = "completed"
+        self.session.flush()
+
+    def cancel_and_release(
+        self,
+        *,
+        job_id: str,
+        terminal_ids: Sequence[str],
+        reason: str,
+    ) -> None:
+        normalized_reason = normalize_identifier(reason)
+        if not normalized_reason:
+            raise ValueError("取消原因不能为空")
+        ids = [UUID(value) for value in terminal_ids]
+        terminals = self.session.scalars(
+            select(MaterialExportTerminal)
+            .where(
+                MaterialExportTerminal.job_id == UUID(job_id),
+                MaterialExportTerminal.team_id == self.team_id,
+                MaterialExportTerminal.id.in_(ids),
+            )
+            .order_by(MaterialExportTerminal.id)
+            .with_for_update()
+        ).all()
+        if len(terminals) != len(ids):
+            raise ValueError("导出终端不存在")
+        if any(terminal.status == "completed" for terminal in terminals):
+            raise MaterialExportCompletedCannotRelease("已完成终端不能取消释放")
+        now = datetime.now(UTC)
+        allocations = self.session.scalars(
+            select(MaterialExportCollectorAllocation)
+            .where(
+                MaterialExportCollectorAllocation.terminal_export_id.in_(ids),
+                MaterialExportCollectorAllocation.status == "reserved",
+            )
+            .order_by(MaterialExportCollectorAllocation.id)
+            .with_for_update()
+        ).all()
+        for allocation in allocations:
+            allocation.status = "released"
+            allocation.released_by_id = self.actor_id
+            allocation.released_by_username = self.actor
+            allocation.released_at = now
+            has_old_owner = self.session.scalar(
+                select(func.count(CollectorAssignment.id)).where(
+                    CollectorAssignment.physical_collector_id
+                    == allocation.physical_collector_id,
+                    CollectorAssignment.status.in_(("reserved", "used")),
+                )
+            )
+            has_new_owner = self.session.scalar(
+                select(func.count(MaterialExportCollectorAllocation.id)).where(
+                    MaterialExportCollectorAllocation.physical_collector_id
+                    == allocation.physical_collector_id,
+                    MaterialExportCollectorAllocation.status.in_(("reserved", "used")),
+                )
+            )
+            if not has_old_owner and not has_new_owner:
+                physical = self.session.get(
+                    PhysicalCollector,
+                    allocation.physical_collector_id,
+                    with_for_update=True,
+                )
+                if physical is not None:
+                    physical.pool_status = allocation.prior_pool_status
+        for terminal in terminals:
+            terminal.status = "cancelled_released"
+            terminal.released_at = now
+        job = self.session.get(MaterialExportJob, UUID(job_id))
+        if job is not None:
+            job.status = "cancelled"
+        self.session.add(
+            AuditLog(
+                team_id=self.team_id,
+                actor_id=self.actor_id,
+                actor_username=self.actor,
+                project_id=terminals[0].project_id if terminals else None,
+                action="material_export.cancelled_released",
+                entity_type="material_export_job",
+                entity_id=UUID(job_id),
+                payload={
+                    "terminal_ids": [str(value) for value in ids],
+                    "reason": normalized_reason,
+                    "released_collectors": [
+                        str(row.physical_collector_id) for row in allocations
+                    ],
+                },
+            )
+        )
+        self.session.flush()
